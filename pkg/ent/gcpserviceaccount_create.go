@@ -104,6 +104,34 @@ func (_c *GCPServiceAccountCreate) SetNillableVerifiedAt(v *time.Time) *GCPServi
 	return _c
 }
 
+// SetVerificationStatus sets the "verification_status" field.
+func (_c *GCPServiceAccountCreate) SetVerificationStatus(v string) *GCPServiceAccountCreate {
+	_c.mutation.SetVerificationStatus(v)
+	return _c
+}
+
+// SetNillableVerificationStatus sets the "verification_status" field if the given value is not nil.
+func (_c *GCPServiceAccountCreate) SetNillableVerificationStatus(v *string) *GCPServiceAccountCreate {
+	if v != nil {
+		_c.SetVerificationStatus(*v)
+	}
+	return _c
+}
+
+// SetVerificationError sets the "verification_error" field.
+func (_c *GCPServiceAccountCreate) SetVerificationError(v string) *GCPServiceAccountCreate {
+	_c.mutation.SetVerificationError(v)
+	return _c
+}
+
+// SetNillableVerificationError sets the "verification_error" field if the given value is not nil.
+func (_c *GCPServiceAccountCreate) SetNillableVerificationError(v *string) *GCPServiceAccountCreate {
+	if v != nil {
+		_c.SetVerificationError(*v)
+	}
+	return _c
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (_c *GCPServiceAccountCreate) SetCreatedBy(v string) *GCPServiceAccountCreate {
 	_c.mutation.SetCreatedBy(v)
@@ -221,6 +249,14 @@ func (_c *GCPServiceAccountCreate) defaults() {
 		v := gcpserviceaccount.DefaultVerified
 		_c.mutation.SetVerified(v)
 	}
+	if _, ok := _c.mutation.VerificationStatus(); !ok {
+		v := gcpserviceaccount.DefaultVerificationStatus
+		_c.mutation.SetVerificationStatus(v)
+	}
+	if _, ok := _c.mutation.VerificationError(); !ok {
+		v := gcpserviceaccount.DefaultVerificationError
+		_c.mutation.SetVerificationError(v)
+	}
 	if _, ok := _c.mutation.CreatedBy(); !ok {
 		v := gcpserviceaccount.DefaultCreatedBy
 		_c.mutation.SetCreatedBy(v)
@@ -285,6 +321,12 @@ func (_c *GCPServiceAccountCreate) check() error {
 	}
 	if _, ok := _c.mutation.Verified(); !ok {
 		return &ValidationError{Name: "verified", err: errors.New(`ent: missing required field "GCPServiceAccount.verified"`)}
+	}
+	if _, ok := _c.mutation.VerificationStatus(); !ok {
+		return &ValidationError{Name: "verification_status", err: errors.New(`ent: missing required field "GCPServiceAccount.verification_status"`)}
+	}
+	if _, ok := _c.mutation.VerificationError(); !ok {
+		return &ValidationError{Name: "verification_error", err: errors.New(`ent: missing required field "GCPServiceAccount.verification_error"`)}
 	}
 	if _, ok := _c.mutation.CreatedBy(); !ok {
 		return &ValidationError{Name: "created_by", err: errors.New(`ent: missing required field "GCPServiceAccount.created_by"`)}
@@ -365,6 +407,14 @@ func (_c *GCPServiceAccountCreate) createSpec() (*GCPServiceAccount, *sqlgraph.C
 	if value, ok := _c.mutation.VerifiedAt(); ok {
 		_spec.SetField(gcpserviceaccount.FieldVerifiedAt, field.TypeTime, value)
 		_node.VerifiedAt = &value
+	}
+	if value, ok := _c.mutation.VerificationStatus(); ok {
+		_spec.SetField(gcpserviceaccount.FieldVerificationStatus, field.TypeString, value)
+		_node.VerificationStatus = value
+	}
+	if value, ok := _c.mutation.VerificationError(); ok {
+		_spec.SetField(gcpserviceaccount.FieldVerificationError, field.TypeString, value)
+		_node.VerificationError = value
 	}
 	if value, ok := _c.mutation.CreatedBy(); ok {
 		_spec.SetField(gcpserviceaccount.FieldCreatedBy, field.TypeString, value)
@@ -533,6 +583,30 @@ func (u *GCPServiceAccountUpsert) UpdateVerifiedAt() *GCPServiceAccountUpsert {
 // ClearVerifiedAt clears the value of the "verified_at" field.
 func (u *GCPServiceAccountUpsert) ClearVerifiedAt() *GCPServiceAccountUpsert {
 	u.SetNull(gcpserviceaccount.FieldVerifiedAt)
+	return u
+}
+
+// SetVerificationStatus sets the "verification_status" field.
+func (u *GCPServiceAccountUpsert) SetVerificationStatus(v string) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldVerificationStatus, v)
+	return u
+}
+
+// UpdateVerificationStatus sets the "verification_status" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateVerificationStatus() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldVerificationStatus)
+	return u
+}
+
+// SetVerificationError sets the "verification_error" field.
+func (u *GCPServiceAccountUpsert) SetVerificationError(v string) *GCPServiceAccountUpsert {
+	u.Set(gcpserviceaccount.FieldVerificationError, v)
+	return u
+}
+
+// UpdateVerificationError sets the "verification_error" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsert) UpdateVerificationError() *GCPServiceAccountUpsert {
+	u.SetExcluded(gcpserviceaccount.FieldVerificationError)
 	return u
 }
 
@@ -739,6 +813,34 @@ func (u *GCPServiceAccountUpsertOne) UpdateVerifiedAt() *GCPServiceAccountUpsert
 func (u *GCPServiceAccountUpsertOne) ClearVerifiedAt() *GCPServiceAccountUpsertOne {
 	return u.Update(func(s *GCPServiceAccountUpsert) {
 		s.ClearVerifiedAt()
+	})
+}
+
+// SetVerificationStatus sets the "verification_status" field.
+func (u *GCPServiceAccountUpsertOne) SetVerificationStatus(v string) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetVerificationStatus(v)
+	})
+}
+
+// UpdateVerificationStatus sets the "verification_status" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateVerificationStatus() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateVerificationStatus()
+	})
+}
+
+// SetVerificationError sets the "verification_error" field.
+func (u *GCPServiceAccountUpsertOne) SetVerificationError(v string) *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetVerificationError(v)
+	})
+}
+
+// UpdateVerificationError sets the "verification_error" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertOne) UpdateVerificationError() *GCPServiceAccountUpsertOne {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateVerificationError()
 	})
 }
 
@@ -1118,6 +1220,34 @@ func (u *GCPServiceAccountUpsertBulk) UpdateVerifiedAt() *GCPServiceAccountUpser
 func (u *GCPServiceAccountUpsertBulk) ClearVerifiedAt() *GCPServiceAccountUpsertBulk {
 	return u.Update(func(s *GCPServiceAccountUpsert) {
 		s.ClearVerifiedAt()
+	})
+}
+
+// SetVerificationStatus sets the "verification_status" field.
+func (u *GCPServiceAccountUpsertBulk) SetVerificationStatus(v string) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetVerificationStatus(v)
+	})
+}
+
+// UpdateVerificationStatus sets the "verification_status" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateVerificationStatus() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateVerificationStatus()
+	})
+}
+
+// SetVerificationError sets the "verification_error" field.
+func (u *GCPServiceAccountUpsertBulk) SetVerificationError(v string) *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.SetVerificationError(v)
+	})
+}
+
+// UpdateVerificationError sets the "verification_error" field to the value that was provided on create.
+func (u *GCPServiceAccountUpsertBulk) UpdateVerificationError() *GCPServiceAccountUpsertBulk {
+	return u.Update(func(s *GCPServiceAccountUpsert) {
+		s.UpdateVerificationError()
 	})
 }
 

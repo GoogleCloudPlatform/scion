@@ -10759,25 +10759,27 @@ func (m *EnvVarMutation) ResetEdge(name string) error {
 // GCPServiceAccountMutation represents an operation that mutates the GCPServiceAccount nodes in the graph.
 type GCPServiceAccountMutation struct {
 	config
-	op             Op
-	typ            string
-	id             *uuid.UUID
-	scope          *string
-	scope_id       *string
-	email          *string
-	project_id     *string
-	display_name   *string
-	default_scopes *string
-	verified       *bool
-	verified_at    *time.Time
-	created_by     *string
-	managed        *bool
-	managed_by     *string
-	created        *time.Time
-	clearedFields  map[string]struct{}
-	done           bool
-	oldValue       func(context.Context) (*GCPServiceAccount, error)
-	predicates     []predicate.GCPServiceAccount
+	op                  Op
+	typ                 string
+	id                  *uuid.UUID
+	scope               *string
+	scope_id            *string
+	email               *string
+	project_id          *string
+	display_name        *string
+	default_scopes      *string
+	verified            *bool
+	verified_at         *time.Time
+	verification_status *string
+	verification_error  *string
+	created_by          *string
+	managed             *bool
+	managed_by          *string
+	created             *time.Time
+	clearedFields       map[string]struct{}
+	done                bool
+	oldValue            func(context.Context) (*GCPServiceAccount, error)
+	predicates          []predicate.GCPServiceAccount
 }
 
 var _ ent.Mutation = (*GCPServiceAccountMutation)(nil)
@@ -11185,6 +11187,78 @@ func (m *GCPServiceAccountMutation) ResetVerifiedAt() {
 	delete(m.clearedFields, gcpserviceaccount.FieldVerifiedAt)
 }
 
+// SetVerificationStatus sets the "verification_status" field.
+func (m *GCPServiceAccountMutation) SetVerificationStatus(s string) {
+	m.verification_status = &s
+}
+
+// VerificationStatus returns the value of the "verification_status" field in the mutation.
+func (m *GCPServiceAccountMutation) VerificationStatus() (r string, exists bool) {
+	v := m.verification_status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVerificationStatus returns the old "verification_status" field's value of the GCPServiceAccount entity.
+// If the GCPServiceAccount object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GCPServiceAccountMutation) OldVerificationStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVerificationStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVerificationStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVerificationStatus: %w", err)
+	}
+	return oldValue.VerificationStatus, nil
+}
+
+// ResetVerificationStatus resets all changes to the "verification_status" field.
+func (m *GCPServiceAccountMutation) ResetVerificationStatus() {
+	m.verification_status = nil
+}
+
+// SetVerificationError sets the "verification_error" field.
+func (m *GCPServiceAccountMutation) SetVerificationError(s string) {
+	m.verification_error = &s
+}
+
+// VerificationError returns the value of the "verification_error" field in the mutation.
+func (m *GCPServiceAccountMutation) VerificationError() (r string, exists bool) {
+	v := m.verification_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVerificationError returns the old "verification_error" field's value of the GCPServiceAccount entity.
+// If the GCPServiceAccount object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GCPServiceAccountMutation) OldVerificationError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVerificationError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVerificationError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVerificationError: %w", err)
+	}
+	return oldValue.VerificationError, nil
+}
+
+// ResetVerificationError resets all changes to the "verification_error" field.
+func (m *GCPServiceAccountMutation) ResetVerificationError() {
+	m.verification_error = nil
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (m *GCPServiceAccountMutation) SetCreatedBy(s string) {
 	m.created_by = &s
@@ -11363,7 +11437,7 @@ func (m *GCPServiceAccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GCPServiceAccountMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 14)
 	if m.scope != nil {
 		fields = append(fields, gcpserviceaccount.FieldScope)
 	}
@@ -11387,6 +11461,12 @@ func (m *GCPServiceAccountMutation) Fields() []string {
 	}
 	if m.verified_at != nil {
 		fields = append(fields, gcpserviceaccount.FieldVerifiedAt)
+	}
+	if m.verification_status != nil {
+		fields = append(fields, gcpserviceaccount.FieldVerificationStatus)
+	}
+	if m.verification_error != nil {
+		fields = append(fields, gcpserviceaccount.FieldVerificationError)
 	}
 	if m.created_by != nil {
 		fields = append(fields, gcpserviceaccount.FieldCreatedBy)
@@ -11424,6 +11504,10 @@ func (m *GCPServiceAccountMutation) Field(name string) (ent.Value, bool) {
 		return m.Verified()
 	case gcpserviceaccount.FieldVerifiedAt:
 		return m.VerifiedAt()
+	case gcpserviceaccount.FieldVerificationStatus:
+		return m.VerificationStatus()
+	case gcpserviceaccount.FieldVerificationError:
+		return m.VerificationError()
 	case gcpserviceaccount.FieldCreatedBy:
 		return m.CreatedBy()
 	case gcpserviceaccount.FieldManaged:
@@ -11457,6 +11541,10 @@ func (m *GCPServiceAccountMutation) OldField(ctx context.Context, name string) (
 		return m.OldVerified(ctx)
 	case gcpserviceaccount.FieldVerifiedAt:
 		return m.OldVerifiedAt(ctx)
+	case gcpserviceaccount.FieldVerificationStatus:
+		return m.OldVerificationStatus(ctx)
+	case gcpserviceaccount.FieldVerificationError:
+		return m.OldVerificationError(ctx)
 	case gcpserviceaccount.FieldCreatedBy:
 		return m.OldCreatedBy(ctx)
 	case gcpserviceaccount.FieldManaged:
@@ -11529,6 +11617,20 @@ func (m *GCPServiceAccountMutation) SetField(name string, value ent.Value) error
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetVerifiedAt(v)
+		return nil
+	case gcpserviceaccount.FieldVerificationStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVerificationStatus(v)
+		return nil
+	case gcpserviceaccount.FieldVerificationError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVerificationError(v)
 		return nil
 	case gcpserviceaccount.FieldCreatedBy:
 		v, ok := value.(string)
@@ -11639,6 +11741,12 @@ func (m *GCPServiceAccountMutation) ResetField(name string) error {
 		return nil
 	case gcpserviceaccount.FieldVerifiedAt:
 		m.ResetVerifiedAt()
+		return nil
+	case gcpserviceaccount.FieldVerificationStatus:
+		m.ResetVerificationStatus()
+		return nil
+	case gcpserviceaccount.FieldVerificationError:
+		m.ResetVerificationError()
 		return nil
 	case gcpserviceaccount.FieldCreatedBy:
 		m.ResetCreatedBy()

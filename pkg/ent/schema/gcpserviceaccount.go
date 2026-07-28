@@ -59,6 +59,16 @@ func (GCPServiceAccount) Fields() []ent.Field {
 		field.Time("verified_at").
 			Optional().
 			Nillable(),
+		// verification_status is the tri-state outcome of the last impersonation
+		// check: "unverified" (never attempted), "verified", or "failed". It is
+		// not derivable from verified alone — that bool cannot distinguish "never
+		// checked" from "checked and rejected".
+		field.String("verification_status").
+			Default("unverified"),
+		// verification_error carries the diagnostic from the last failed check.
+		// Empty whenever verification_status is not "failed".
+		field.String("verification_error").
+			Default(""),
 		field.String("created_by").
 			Default(""),
 		field.Bool("managed").

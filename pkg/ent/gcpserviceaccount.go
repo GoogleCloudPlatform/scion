@@ -34,6 +34,10 @@ type GCPServiceAccount struct {
 	Verified bool `json:"verified,omitempty"`
 	// VerifiedAt holds the value of the "verified_at" field.
 	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	// VerificationStatus holds the value of the "verification_status" field.
+	VerificationStatus string `json:"verification_status,omitempty"`
+	// VerificationError holds the value of the "verification_error" field.
+	VerificationError string `json:"verification_error,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
 	// Managed holds the value of the "managed" field.
@@ -52,7 +56,7 @@ func (*GCPServiceAccount) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case gcpserviceaccount.FieldVerified, gcpserviceaccount.FieldManaged:
 			values[i] = new(sql.NullBool)
-		case gcpserviceaccount.FieldScope, gcpserviceaccount.FieldScopeID, gcpserviceaccount.FieldEmail, gcpserviceaccount.FieldProjectID, gcpserviceaccount.FieldDisplayName, gcpserviceaccount.FieldDefaultScopes, gcpserviceaccount.FieldCreatedBy, gcpserviceaccount.FieldManagedBy:
+		case gcpserviceaccount.FieldScope, gcpserviceaccount.FieldScopeID, gcpserviceaccount.FieldEmail, gcpserviceaccount.FieldProjectID, gcpserviceaccount.FieldDisplayName, gcpserviceaccount.FieldDefaultScopes, gcpserviceaccount.FieldVerificationStatus, gcpserviceaccount.FieldVerificationError, gcpserviceaccount.FieldCreatedBy, gcpserviceaccount.FieldManagedBy:
 			values[i] = new(sql.NullString)
 		case gcpserviceaccount.FieldVerifiedAt, gcpserviceaccount.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -127,6 +131,18 @@ func (_m *GCPServiceAccount) assignValues(columns []string, values []any) error 
 			} else if value.Valid {
 				_m.VerifiedAt = new(time.Time)
 				*_m.VerifiedAt = value.Time
+			}
+		case gcpserviceaccount.FieldVerificationStatus:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field verification_status", values[i])
+			} else if value.Valid {
+				_m.VerificationStatus = value.String
+			}
+		case gcpserviceaccount.FieldVerificationError:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field verification_error", values[i])
+			} else if value.Valid {
+				_m.VerificationError = value.String
 			}
 		case gcpserviceaccount.FieldCreatedBy:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -213,6 +229,12 @@ func (_m *GCPServiceAccount) String() string {
 		builder.WriteString("verified_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("verification_status=")
+	builder.WriteString(_m.VerificationStatus)
+	builder.WriteString(", ")
+	builder.WriteString("verification_error=")
+	builder.WriteString(_m.VerificationError)
 	builder.WriteString(", ")
 	builder.WriteString("created_by=")
 	builder.WriteString(_m.CreatedBy)

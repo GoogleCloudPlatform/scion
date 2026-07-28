@@ -1158,6 +1158,11 @@ type GCPServiceAccountStore interface {
 
 	// CountGCPServiceAccounts returns the number of GCP service accounts matching the filter.
 	CountGCPServiceAccounts(ctx context.Context, filter GCPServiceAccountFilter) (int, error)
+
+	// BackfillGCPVerificationStatus derives verification_status for rows that
+	// predate the column, from the verified / verified_at pair. Idempotent;
+	// only upgrades rows still sitting at the column default.
+	BackfillGCPVerificationStatus(ctx context.Context) error
 }
 
 // GCPServiceAccountFilter defines criteria for filtering GCP service accounts.

@@ -410,7 +410,7 @@ func validateExecutionIdentity(ctx context.Context, hook *store.LifecycleHook, r
 	var errs []FieldError
 
 	// Must be verified.
-	if !sa.Verified || sa.VerificationStatus != "verified" {
+	if !sa.Verified || sa.VerificationStatus != store.GCPVerificationVerified {
 		errs = append(errs, FieldError{
 			Field:   "executionIdentity",
 			Message: fmt.Sprintf("GCP service account %q is not verified (status: %s)", sa.Email, sa.VerificationStatus),

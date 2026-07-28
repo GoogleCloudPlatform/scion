@@ -95,6 +95,16 @@ func VerifiedAt(v time.Time) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldEQ(FieldVerifiedAt, v))
 }
 
+// VerificationStatus applies equality check predicate on the "verification_status" field. It's identical to VerificationStatusEQ.
+func VerificationStatus(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldEQ(FieldVerificationStatus, v))
+}
+
+// VerificationError applies equality check predicate on the "verification_error" field. It's identical to VerificationErrorEQ.
+func VerificationError(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldEQ(FieldVerificationError, v))
+}
+
 // CreatedBy applies equality check predicate on the "created_by" field. It's identical to CreatedByEQ.
 func CreatedBy(v string) predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldEQ(FieldCreatedBy, v))
@@ -563,6 +573,136 @@ func VerifiedAtIsNil() predicate.GCPServiceAccount {
 // VerifiedAtNotNil applies the NotNil predicate on the "verified_at" field.
 func VerifiedAtNotNil() predicate.GCPServiceAccount {
 	return predicate.GCPServiceAccount(sql.FieldNotNull(FieldVerifiedAt))
+}
+
+// VerificationStatusEQ applies the EQ predicate on the "verification_status" field.
+func VerificationStatusEQ(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldEQ(FieldVerificationStatus, v))
+}
+
+// VerificationStatusNEQ applies the NEQ predicate on the "verification_status" field.
+func VerificationStatusNEQ(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldNEQ(FieldVerificationStatus, v))
+}
+
+// VerificationStatusIn applies the In predicate on the "verification_status" field.
+func VerificationStatusIn(vs ...string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldIn(FieldVerificationStatus, vs...))
+}
+
+// VerificationStatusNotIn applies the NotIn predicate on the "verification_status" field.
+func VerificationStatusNotIn(vs ...string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldNotIn(FieldVerificationStatus, vs...))
+}
+
+// VerificationStatusGT applies the GT predicate on the "verification_status" field.
+func VerificationStatusGT(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldGT(FieldVerificationStatus, v))
+}
+
+// VerificationStatusGTE applies the GTE predicate on the "verification_status" field.
+func VerificationStatusGTE(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldGTE(FieldVerificationStatus, v))
+}
+
+// VerificationStatusLT applies the LT predicate on the "verification_status" field.
+func VerificationStatusLT(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldLT(FieldVerificationStatus, v))
+}
+
+// VerificationStatusLTE applies the LTE predicate on the "verification_status" field.
+func VerificationStatusLTE(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldLTE(FieldVerificationStatus, v))
+}
+
+// VerificationStatusContains applies the Contains predicate on the "verification_status" field.
+func VerificationStatusContains(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldContains(FieldVerificationStatus, v))
+}
+
+// VerificationStatusHasPrefix applies the HasPrefix predicate on the "verification_status" field.
+func VerificationStatusHasPrefix(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldHasPrefix(FieldVerificationStatus, v))
+}
+
+// VerificationStatusHasSuffix applies the HasSuffix predicate on the "verification_status" field.
+func VerificationStatusHasSuffix(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldHasSuffix(FieldVerificationStatus, v))
+}
+
+// VerificationStatusEqualFold applies the EqualFold predicate on the "verification_status" field.
+func VerificationStatusEqualFold(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldEqualFold(FieldVerificationStatus, v))
+}
+
+// VerificationStatusContainsFold applies the ContainsFold predicate on the "verification_status" field.
+func VerificationStatusContainsFold(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldContainsFold(FieldVerificationStatus, v))
+}
+
+// VerificationErrorEQ applies the EQ predicate on the "verification_error" field.
+func VerificationErrorEQ(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldEQ(FieldVerificationError, v))
+}
+
+// VerificationErrorNEQ applies the NEQ predicate on the "verification_error" field.
+func VerificationErrorNEQ(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldNEQ(FieldVerificationError, v))
+}
+
+// VerificationErrorIn applies the In predicate on the "verification_error" field.
+func VerificationErrorIn(vs ...string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldIn(FieldVerificationError, vs...))
+}
+
+// VerificationErrorNotIn applies the NotIn predicate on the "verification_error" field.
+func VerificationErrorNotIn(vs ...string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldNotIn(FieldVerificationError, vs...))
+}
+
+// VerificationErrorGT applies the GT predicate on the "verification_error" field.
+func VerificationErrorGT(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldGT(FieldVerificationError, v))
+}
+
+// VerificationErrorGTE applies the GTE predicate on the "verification_error" field.
+func VerificationErrorGTE(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldGTE(FieldVerificationError, v))
+}
+
+// VerificationErrorLT applies the LT predicate on the "verification_error" field.
+func VerificationErrorLT(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldLT(FieldVerificationError, v))
+}
+
+// VerificationErrorLTE applies the LTE predicate on the "verification_error" field.
+func VerificationErrorLTE(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldLTE(FieldVerificationError, v))
+}
+
+// VerificationErrorContains applies the Contains predicate on the "verification_error" field.
+func VerificationErrorContains(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldContains(FieldVerificationError, v))
+}
+
+// VerificationErrorHasPrefix applies the HasPrefix predicate on the "verification_error" field.
+func VerificationErrorHasPrefix(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldHasPrefix(FieldVerificationError, v))
+}
+
+// VerificationErrorHasSuffix applies the HasSuffix predicate on the "verification_error" field.
+func VerificationErrorHasSuffix(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldHasSuffix(FieldVerificationError, v))
+}
+
+// VerificationErrorEqualFold applies the EqualFold predicate on the "verification_error" field.
+func VerificationErrorEqualFold(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldEqualFold(FieldVerificationError, v))
+}
+
+// VerificationErrorContainsFold applies the ContainsFold predicate on the "verification_error" field.
+func VerificationErrorContainsFold(v string) predicate.GCPServiceAccount {
+	return predicate.GCPServiceAccount(sql.FieldContainsFold(FieldVerificationError, v))
 }
 
 // CreatedByEQ applies the EQ predicate on the "created_by" field.

@@ -344,20 +344,28 @@ func init() {
 	gcpserviceaccountDescVerified := gcpserviceaccountFields[7].Descriptor()
 	// gcpserviceaccount.DefaultVerified holds the default value on creation for the verified field.
 	gcpserviceaccount.DefaultVerified = gcpserviceaccountDescVerified.Default.(bool)
+	// gcpserviceaccountDescVerificationStatus is the schema descriptor for verification_status field.
+	gcpserviceaccountDescVerificationStatus := gcpserviceaccountFields[9].Descriptor()
+	// gcpserviceaccount.DefaultVerificationStatus holds the default value on creation for the verification_status field.
+	gcpserviceaccount.DefaultVerificationStatus = gcpserviceaccountDescVerificationStatus.Default.(string)
+	// gcpserviceaccountDescVerificationError is the schema descriptor for verification_error field.
+	gcpserviceaccountDescVerificationError := gcpserviceaccountFields[10].Descriptor()
+	// gcpserviceaccount.DefaultVerificationError holds the default value on creation for the verification_error field.
+	gcpserviceaccount.DefaultVerificationError = gcpserviceaccountDescVerificationError.Default.(string)
 	// gcpserviceaccountDescCreatedBy is the schema descriptor for created_by field.
-	gcpserviceaccountDescCreatedBy := gcpserviceaccountFields[9].Descriptor()
+	gcpserviceaccountDescCreatedBy := gcpserviceaccountFields[11].Descriptor()
 	// gcpserviceaccount.DefaultCreatedBy holds the default value on creation for the created_by field.
 	gcpserviceaccount.DefaultCreatedBy = gcpserviceaccountDescCreatedBy.Default.(string)
 	// gcpserviceaccountDescManaged is the schema descriptor for managed field.
-	gcpserviceaccountDescManaged := gcpserviceaccountFields[10].Descriptor()
+	gcpserviceaccountDescManaged := gcpserviceaccountFields[12].Descriptor()
 	// gcpserviceaccount.DefaultManaged holds the default value on creation for the managed field.
 	gcpserviceaccount.DefaultManaged = gcpserviceaccountDescManaged.Default.(bool)
 	// gcpserviceaccountDescManagedBy is the schema descriptor for managed_by field.
-	gcpserviceaccountDescManagedBy := gcpserviceaccountFields[11].Descriptor()
+	gcpserviceaccountDescManagedBy := gcpserviceaccountFields[13].Descriptor()
 	// gcpserviceaccount.DefaultManagedBy holds the default value on creation for the managed_by field.
 	gcpserviceaccount.DefaultManagedBy = gcpserviceaccountDescManagedBy.Default.(string)
 	// gcpserviceaccountDescCreated is the schema descriptor for created field.
-	gcpserviceaccountDescCreated := gcpserviceaccountFields[12].Descriptor()
+	gcpserviceaccountDescCreated := gcpserviceaccountFields[14].Descriptor()
 	// gcpserviceaccount.DefaultCreated holds the default value on creation for the created field.
 	gcpserviceaccount.DefaultCreated = gcpserviceaccountDescCreated.Default.(func() time.Time)
 	// gcpserviceaccountDescID is the schema descriptor for id field.

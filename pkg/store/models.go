@@ -1572,6 +1572,17 @@ type GCPIdentityConfig struct {
 	ProjectID           string `json:"projectId,omitempty"`           // Denormalized
 }
 
+// GCPVerificationStatus constants describe the outcome of the Hub's last
+// impersonation check against a service account. The Verified bool cannot
+// distinguish "never checked" from "checked and rejected", so the status is
+// persisted alongside it. Mirrors the GCPVerificationStatus union in
+// web/src/shared/types.ts.
+const (
+	GCPVerificationUnverified = "unverified"
+	GCPVerificationVerified   = "verified"
+	GCPVerificationFailed     = "failed"
+)
+
 // GCPIdentity metadata mode constants.
 const (
 	GCPMetadataModeBlock       = "block"

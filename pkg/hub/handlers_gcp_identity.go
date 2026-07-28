@@ -187,7 +187,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	if s.gcpTokenGenerator != nil {
 		if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
 			sa.Verified = false
-			sa.VerificationStatus = "failed"
+			sa.VerificationStatus = store.GCPVerificationFailed
 			sa.VerificationError = err.Error()
 			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
 			resp.GCPServiceAccount = *sa
@@ -199,7 +199,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		} else {
 			sa.Verified = true
 			sa.VerifiedAt = time.Now()
-			sa.VerificationStatus = "verified"
+			sa.VerificationStatus = store.GCPVerificationVerified
 			sa.VerificationError = ""
 			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
 			resp.GCPServiceAccount = *sa
@@ -425,7 +425,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 
 	sa.Verified = true
 	sa.VerifiedAt = time.Now()
-	sa.VerificationStatus = "verified"
+	sa.VerificationStatus = store.GCPVerificationVerified
 	sa.VerificationError = ""
 
 	if err := s.store.UpdateGCPServiceAccount(r.Context(), sa); err != nil {
@@ -655,7 +655,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		DefaultScopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
 		Verified:           true,
 		VerifiedAt:         time.Now(),
-		VerificationStatus: "verified",
+		VerificationStatus: store.GCPVerificationVerified,
 		CreatedBy:          user.ID(),
 		CreatedAt:          time.Now(),
 		Managed:            true,

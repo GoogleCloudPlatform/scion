@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -50,20 +51,19 @@ func NewExternalStore(client *ent.Client) *ExternalStore {
 // entGCPToStore converts an Ent GCPServiceAccount to the store model.
 func entGCPToStore(e *ent.GCPServiceAccount) *store.GCPServiceAccount {
 	sa := &store.GCPServiceAccount{
-		ID:          e.ID.String(),
-		Scope:       e.Scope,
-		ScopeID:     e.ScopeID,
-		Email:       e.Email,
-		ProjectID:   e.ProjectID,
-		DisplayName: e.DisplayName,
-		Verified:    e.Verified,
-		CreatedBy:   e.CreatedBy,
-		CreatedAt:   e.Created,
-		Managed:     e.Managed,
-		ManagedBy:   e.ManagedBy,
-	}
-	if e.Verified {
-		sa.VerificationStatus = "verified"
+		ID:                 e.ID.String(),
+		Scope:              e.Scope,
+		ScopeID:            e.ScopeID,
+		Email:              e.Email,
+		ProjectID:          e.ProjectID,
+		DisplayName:        e.DisplayName,
+		Verified:           e.Verified,
+		VerificationStatus: e.VerificationStatus,
+		VerificationError:  e.VerificationError,
+		CreatedBy:          e.CreatedBy,
+		CreatedAt:          e.Created,
+		Managed:            e.Managed,
+		ManagedBy:          e.ManagedBy,
 	}
 	// default_scopes is stored as a CSV string for parity with the SQLite store.
 	if e.DefaultScopes != "" {
@@ -75,6 +75,21 @@ func entGCPToStore(e *ent.GCPServiceAccount) *store.GCPServiceAccount {
 	return sa
 }
 
+// normalizeGCPVerificationStatus resolves an unset VerificationStatus. The empty
+// string is not one of the three valid states, so callers that populate only the
+// Verified bool still have to end up with a coherent row. Resolving it here —
+// once, on write — is what lets reads return the stored value verbatim instead
+// of re-deriving it every time.
+func normalizeGCPVerificationStatus(sa *store.GCPServiceAccount) string {
+	if sa.VerificationStatus != "" {
+		return sa.VerificationStatus
+	}
+	if sa.Verified {
+		return store.GCPVerificationVerified
+	}
+	return store.GCPVerificationUnverified
+}
+
 // CreateGCPServiceAccount registers a new GCP service account.
 func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.GCPServiceAccount) error {
 	id, err := parseUUID(sa.ID)
@@ -84,6 +99,9 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 	if sa.CreatedAt.IsZero() {
 		sa.CreatedAt = time.Now()
 	}
+	// Write the resolved status back so the caller's struct — which handlers
+	// return directly in the HTTP response — matches the persisted row.
+	sa.VerificationStatus = normalizeGCPVerificationStatus(sa)
 
 	create := s.client.GCPServiceAccount.Create().
 		SetID(id).
@@ -94,6 +112,8 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 		SetDisplayName(sa.DisplayName).
 		SetDefaultScopes(strings.Join(sa.DefaultScopes, ",")).
 		SetVerified(sa.Verified).
+		SetVerificationStatus(sa.VerificationStatus).
+		SetVerificationError(sa.VerificationError).
 		SetCreatedBy(sa.CreatedBy).
 		SetManaged(sa.Managed).
 		SetManagedBy(sa.ManagedBy).
@@ -128,12 +148,16 @@ func (s *ExternalStore) UpdateGCPServiceAccount(ctx context.Context, sa *store.G
 	if err != nil {
 		return err
 	}
+	sa.VerificationStatus = normalizeGCPVerificationStatus(sa)
+
 	update := s.client.GCPServiceAccount.UpdateOneID(id).
 		SetEmail(sa.Email).
 		SetProjectID(sa.ProjectID).
 		SetDisplayName(sa.DisplayName).
 		SetDefaultScopes(strings.Join(sa.DefaultScopes, ",")).
 		SetVerified(sa.Verified).
+		SetVerificationStatus(sa.VerificationStatus).
+		SetVerificationError(sa.VerificationError).
 		SetManaged(sa.Managed).
 		SetManagedBy(sa.ManagedBy)
 
@@ -158,6 +182,56 @@ func (s *ExternalStore) DeleteGCPServiceAccount(ctx context.Context, id string) 
 	if err := s.client.GCPServiceAccount.DeleteOneID(uid).Exec(ctx); err != nil {
 		return mapError(err)
 	}
+	return nil
+}
+
+// BackfillGCPVerificationStatus derives verification_status for rows written
+// before that column existed. Ent's ADD COLUMN fills them with the column
+// default, "unverified", which is wrong for any account the Hub had actually
+// checked.
+//
+// Two rules, both upgrades from the default:
+//
+//   - verified = true → "verified".
+//   - verified = false and verified_at IS NOT NULL → "failed". verified_at is
+//     only ever set together with verified = true, and UpdateGCPServiceAccount
+//     clears it when the timestamp is zero, so a surviving timestamp means the
+//     account was verified once and no longer is. That is a failure, not an
+//     account nobody ever checked.
+//
+// The second rule is a weak signal — it cannot recover the error text, which is
+// gone, and it misses accounts that failed their very first check (those never
+// had a verified_at to keep). It is still the right label: "unverified" reads as
+// "never set up" and would hide a broken integration, whereas "failed" invites a
+// re-verify, which repopulates the real error. Under-detailed beats wrong.
+//
+// Idempotent, and safe to run on every boot: both rules require the row to still
+// be at the default, so a "failed" status written by the live code path is never
+// overwritten — including the first-check-failure case, where verified_at is
+// NULL and the else-branch of a naive three-way backfill would clobber it back
+// to "unverified".
+func (s *ExternalStore) BackfillGCPVerificationStatus(ctx context.Context) error {
+	if _, err := s.client.GCPServiceAccount.Update().
+		Where(
+			gcpserviceaccount.VerificationStatusEQ(store.GCPVerificationUnverified),
+			gcpserviceaccount.VerifiedEQ(true),
+		).
+		SetVerificationStatus(store.GCPVerificationVerified).
+		Save(ctx); err != nil {
+		return fmt.Errorf("backfill gcp verification status (verified): %w", err)
+	}
+
+	if _, err := s.client.GCPServiceAccount.Update().
+		Where(
+			gcpserviceaccount.VerificationStatusEQ(store.GCPVerificationUnverified),
+			gcpserviceaccount.VerifiedEQ(false),
+			gcpserviceaccount.VerifiedAtNotNil(),
+		).
+		SetVerificationStatus(store.GCPVerificationFailed).
+		Save(ctx); err != nil {
+		return fmt.Errorf("backfill gcp verification status (failed): %w", err)
+	}
+
 	return nil
 }
 

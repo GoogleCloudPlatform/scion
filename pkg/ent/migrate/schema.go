@@ -305,6 +305,8 @@ var (
 		{Name: "default_scopes", Type: field.TypeString, Default: ""},
 		{Name: "verified", Type: field.TypeBool, Default: false},
 		{Name: "verified_at", Type: field.TypeTime, Nullable: true},
+		{Name: "verification_status", Type: field.TypeString, Default: "unverified"},
+		{Name: "verification_error", Type: field.TypeString, Default: ""},
 		{Name: "created_by", Type: field.TypeString, Default: ""},
 		{Name: "managed", Type: field.TypeBool, Default: false},
 		{Name: "managed_by", Type: field.TypeString, Default: ""},

@@ -830,3 +830,85 @@ func TestProjectIDFromServiceAccountEmail(t *testing.T) {
 		assert.Equal(t, tt.want, projectIDFromServiceAccountEmail(tt.email), "email=%q", tt.email)
 	}
 }
+
+// TestGCPServiceAccount_FailedVerificationIsDurable is the end-to-end version of
+// the defect P0.1 fixes. The "failed" status and its error message used to exist
+// only in the response body of the request that produced them: the next read
+// recomputed the status from the verified bool and reported "unverified",
+// dropping the diagnostic entirely.
+func TestGCPServiceAccount_FailedVerificationIsDurable(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := createTestProjectForSA(t, srv, s)
+
+	srv.SetGCPTokenGenerator(&mockGCPTokenGeneratorVerifyFail{
+		email:     "hub@test.iam.gserviceaccount.com",
+		verifyErr: fmt.Errorf("hub service account cannot impersonate agent@my-project.iam.gserviceaccount.com"),
+	})
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID),
+		map[string]string{
+			"email":     "agent@my-project.iam.gserviceaccount.com",
+			"projectId": "my-project",
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var created store.GCPServiceAccount
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	require.Equal(t, store.GCPVerificationFailed, created.VerificationStatus)
+	require.NotEmpty(t, created.VerificationError)
+
+	// Re-read through the store: status and error must both still be there.
+	stored, err := s.GetGCPServiceAccount(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Verified)
+	assert.Equal(t, store.GCPVerificationFailed, stored.VerificationStatus)
+	assert.Equal(t, created.VerificationError, stored.VerificationError,
+		"the diagnostic must survive the round-trip, not just the response")
+
+	// ...and through the list endpoint the UI actually calls.
+	rec = doRequest(t, srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var list ListGCPServiceAccountsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&list))
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, store.GCPVerificationFailed, list.Items[0].VerificationStatus)
+	assert.Equal(t, created.VerificationError, list.Items[0].VerificationError)
+}
+
+// A retry that succeeds must clear the stale error, not leave it alongside a
+// "verified" status.
+func TestGCPServiceAccount_VerifyClearsPreviousFailure(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := createTestProjectForSA(t, srv, s)
+
+	srv.SetGCPTokenGenerator(&mockGCPTokenGeneratorVerifyFail{
+		email:     "hub@test.iam.gserviceaccount.com",
+		verifyErr: fmt.Errorf("IAM policy not yet propagated"),
+	})
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID),
+		map[string]string{
+			"email":     "agent@my-project.iam.gserviceaccount.com",
+			"projectId": "my-project",
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var created store.GCPServiceAccount
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	require.Equal(t, store.GCPVerificationFailed, created.VerificationStatus)
+
+	// The IAM policy propagates; verify now succeeds.
+	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})
+	rec = doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s/verify", projectID, created.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	stored, err := s.GetGCPServiceAccount(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.True(t, stored.Verified)
+	assert.Equal(t, store.GCPVerificationVerified, stored.VerificationStatus)
+	assert.Empty(t, stored.VerificationError, "the stale failure message must not outlive the failure")
+}
