@@ -357,7 +357,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 		inlineCfg.AuthSelectedType = opts.HarnessAuth
 	}
-	agentDir, _, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
+	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err == nil {
 		_ = UpdateAgentConfig(opts.Name, opts.ProjectPath, "created", m.Runtime.Name(), opts.Profile)
 	}
@@ -374,11 +374,12 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	// Called unconditionally: with an empty script the helper removes any
 	// previously staged file, so a hook that no longer applies cannot survive
 	// on a reused agent home.
-	{
-		agentHome := config.GetAgentHomePath(opts.ProjectPath, opts.Name)
-		if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
-			return cfg, fmt.Errorf("stage project pre-start hook: %w", err)
-		}
+	//
+	// Use agentHome from GetAgent (which resolves the project path correctly
+	// for non-git/external projects) rather than recomputing from opts.ProjectPath,
+	// which may be a marker file rather than a directory for such projects.
+	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+		return cfg, fmt.Errorf("stage project pre-start hook: %w", err)
 	}
 
 	// Persist harness auth override to the on-disk config (for sciontool).
