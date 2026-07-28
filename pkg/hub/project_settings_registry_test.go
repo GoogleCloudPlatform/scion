@@ -243,6 +243,19 @@ func scanForStrayProjectSettingConsts(dir string) (strays []string, sourceFileCo
 			"%s is not among the %d .go files in %s; has it been renamed? "+
 				"Update projectSettingsSourceFile", projectSettingsSourceFile, len(goFiles), dir)
 	}
+	// Test files MUST be in the selected set. They are excluded from the
+	// constant check by the _test.go skip in the loop below, not here, and the
+	// difference is not cosmetic: excluding them at selection looks equivalent,
+	// produces an identical result today, and silently shrinks what the checks
+	// above can see. Without this assertion that mistake is invisible — the
+	// suite stays green — so the requirement is stated as an executed check
+	// rather than as a comment asking the next reader to be careful.
+	if !slices.ContainsFunc(goFiles, func(n string) bool { return strings.HasSuffix(n, "_test.go") }) {
+		return nil, 0, fmt.Errorf(
+			"none of the %d .go files selected in %s is a _test.go file; the selection has been "+
+				"narrowed to exclude test files. Select every .go file and let the _test.go skip "+
+				"below do the exempting", len(goFiles), dir)
+	}
 
 	fset := token.NewFileSet()
 	for _, name := range goFiles {
