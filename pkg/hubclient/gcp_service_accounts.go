@@ -96,11 +96,21 @@ func (c *GCPServiceAccountCapabilities) Can(action string) bool {
 
 // GCPServiceAccount represents a registered GCP service account.
 type GCPServiceAccount struct {
-	ID                 string    `json:"id"`
-	Scope              string    `json:"scope"`
-	ScopeID            string    `json:"scopeId"`
-	Email              string    `json:"email"`
-	ProjectID          string    `json:"projectId"` // GCP Project ID
+	ID    string `json:"id"`
+	Scope string `json:"scope"`
+
+	// ScopeID is the SCION project that owns this registration (project scope),
+	// or the hub instance that registered it (hub scope). It is the ID that
+	// appears in the Hub's routes.
+	ScopeID string `json:"scopeId"`
+
+	Email string `json:"email"`
+
+	// ProjectID is the GCP project the service account itself lives in. IT IS
+	// NOT A ROUTE COMPONENT and never belongs in ProjectScopedRef -- see the
+	// GCPServiceAccountRef doc, and use Ref() instead of choosing.
+	ProjectID string `json:"projectId"`
+
 	DisplayName        string    `json:"displayName"`
 	DefaultScopes      []string  `json:"defaultScopes,omitempty"`
 	Verified           bool      `json:"verified"`
@@ -142,27 +152,74 @@ func (sa *GCPServiceAccount) IsHubScoped() bool {
 //   - /api/v1/gcp-service-accounts/{id} -- PARENTLESS accounts, hub and user
 //     scope. A project-scoped account 404s there, deliberately.
 //
-// So ProjectID is not optional decoration: leaving it empty for a
-// project-scoped account produces a 404, and setting it for a hub-scoped
-// account works but routes through a project the account does not belong to.
-// Prefer the constructors below to writing the struct literal, so the choice is
-// made by a name rather than by whether a field happened to be populated.
+// ITS FIELDS ARE UNEXPORTED ON PURPOSE. Build one with Ref(), HubScopedRef or
+// ProjectScopedRef; outside this package the struct literal does not compile.
+// That is not tidiness, it is closing two traps that both surface as a 404
+// reading like a missing record:
+//
+//   - THE ZERO VALUE. A forgotten project and a deliberate hub-scoped ref are
+//     byte-identical structs, so the careless call and the correct one are
+//     indistinguishable to a reader and to the compiler.
+//
+//   - THE POPULATED WRONG VALUE, which is worse because it punishes care rather
+//     than carelessness (sa-arch). GCPServiceAccount carries TWO project-ish
+//     fields: ScopeID, the Scion project that owns the registration, and
+//     ProjectID, the GCP project the service account itself lives in. So
+//
+//     ProjectScopedRef(sa.ProjectID, sa.ID)
+//
+//     compiles, reads correctly, matches the parameter by name -- and puts a
+//     GCP project ID into a Scion route. The field whose name matches is the
+//     wrong one.
+//
+// Both traps disappear on the dominant path, which is "I got this account from
+// a list": call sa.Ref() and pick nothing at all.
 type GCPServiceAccountRef struct {
-	ID string
+	id string
 
-	// ProjectID selects the project-nested address. Empty means the flat,
+	// projectID selects the project-nested address. Empty means the flat,
 	// parentless address.
-	ProjectID string
+	projectID string
+}
+
+// Ref returns the address of this account, chosen from its own scope.
+//
+// THE ONE TO REACH FOR. Every by-id operation on an account that came back from
+// the Hub should route through here, because the account already knows which of
+// the two surfaces serves it and the caller then cannot confuse ScopeID with
+// ProjectID.
+func (sa *GCPServiceAccount) Ref() GCPServiceAccountRef {
+	if sa == nil {
+		return GCPServiceAccountRef{}
+	}
+
+	// ScopeID, never ProjectID: the route names the SCION project that owns the
+	// registration, not the GCP project the service account lives in.
+	if sa.Scope == store.ScopeProject && sa.ScopeID != "" {
+		return ProjectScopedRef(sa.ScopeID, sa.ID)
+	}
+
+	// Hub and user scope are parentless and belong on the flat route.
+	//
+	// So does a project-scoped account with no ScopeID, which is a malformed
+	// record rather than a caller error. It 404s here, and that is the better
+	// of two failures: the nested branch would build /api/v1/projects//gcp-
+	// service-accounts/{id} and ask the Hub to make sense of an empty path
+	// segment.
+	return HubScopedRef(sa.ID)
 }
 
 // HubScopedRef names a hub-scoped account, which has no project.
 func HubScopedRef(id string) GCPServiceAccountRef {
-	return GCPServiceAccountRef{ID: id}
+	return GCPServiceAccountRef{id: id}
 }
 
-// ProjectScopedRef names an account belonging to a specific project.
+// ProjectScopedRef names an account belonging to a specific Scion project.
+//
+// projectID is a SCION project ID, the one in the Hub's route. It is not the
+// GCP project ID carried by GCPServiceAccount.ProjectID; see the type doc.
 func ProjectScopedRef(projectID, id string) GCPServiceAccountRef {
-	return GCPServiceAccountRef{ID: id, ProjectID: projectID}
+	return GCPServiceAccountRef{id: id, projectID: projectID}
 }
 
 // ListGCPServiceAccountsOptions selects which accounts a list call returns.
@@ -190,20 +247,29 @@ func ListHubScoped() *ListGCPServiceAccountsOptions {
 	return &ListGCPServiceAccountsOptions{Scope: store.ScopeHub}
 }
 
-// ListForProject selects one project's own accounts, excluding hub-scoped ones.
+// ListForProject selects the accounts REGISTERED TO one project. Hub-scoped
+// accounts are not members of that set: they are registered to the hub.
 func ListForProject(projectID string) *ListGCPServiceAccountsOptions {
 	return &ListGCPServiceAccountsOptions{Scope: store.ScopeProject, ScopeID: projectID}
 }
 
-// ListForProjectIncludingHubScoped selects one project's accounts together with
-// every hub-scoped account -- the set an agent in that project could actually
-// be assigned.
+// ListForProjectIncludingHubScoped selects the accounts ASSIGNABLE TO an agent
+// in one project: the project's own registrations plus every hub-scoped
+// account, which is assignable from everywhere.
 //
-// Not the same as ListForProject, and the difference is not cosmetic: the
-// project list is the right set for a MANAGEMENT view, which offers edit
-// affordances the caller usually does not hold over a hub-scoped account, while
-// this union is the right set for a PICKER. Choosing by name rather than by
-// flag is what keeps those two from being confused at the call site.
+// TWO CONSTRUCTORS BECAUSE THOSE ARE TWO SETS, not because two kinds of caller
+// want different affordances. The asymmetry that makes the distinction load-
+// bearing runs one way only (sa-arch):
+//
+//   - A PICKER given the narrow set silently under-offers. Hub-scoped accounts
+//     the user is permitted to assign simply do not appear, and their absence
+//     reads as "no such account". Nothing defends this.
+//
+//   - A MANAGEMENT view given the wide set is already defended, by Capabilities
+//     and Can(): rows the caller cannot act on render read-only. It is not the
+//     list's job to re-litigate that.
+//
+// So pick by which set you mean, not by which screen you are drawing.
 func ListForProjectIncludingHubScoped(projectID string) *ListGCPServiceAccountsOptions {
 	return &ListGCPServiceAccountsOptions{
 		Scope:            store.ScopeProject,
@@ -259,10 +325,10 @@ func gcpSANestedPath(projectID string) string {
 // The two surfaces serve disjoint sets, so this is the single place the choice
 // is made; see GCPServiceAccountRef.
 func (r GCPServiceAccountRef) byIDPath() string {
-	if r.ProjectID != "" {
-		return fmt.Sprintf("%s/%s", gcpSANestedPath(r.ProjectID), r.ID)
+	if r.projectID != "" {
+		return fmt.Sprintf("%s/%s", gcpSANestedPath(r.projectID), r.id)
 	}
-	return fmt.Sprintf("%s/%s", gcpSAFlatPath, r.ID)
+	return fmt.Sprintf("%s/%s", gcpSAFlatPath, r.id)
 }
 
 // scopeQuery renders scope selection as the Hub's query parameters.

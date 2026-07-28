@@ -223,10 +223,14 @@ func runSAList(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// ListForProject, not the hub-inclusive variant: this command has always
-	// shown the project's own accounts, and it prints removal instructions
-	// beside them. Widening it to hub-scoped accounts here would list
-	// credentials this caller usually cannot remove.
+	// ListForProject, not the hub-inclusive variant, because this command
+	// answers "what is registered to this project" -- and hub-scoped accounts
+	// are registered to the hub, not here.
+	//
+	// The other set, the ASSIGNABLE one, belongs to a picker: omitting hub scope
+	// there would silently hide accounts the user may assign. This command is
+	// not that, and the root-level `scion service-accounts list --global`
+	// command is where hub-scoped accounts are listed.
 	sas, err := client.GCPServiceAccounts().List(ctx, hubclient.ListForProject(projectID))
 	if err != nil {
 		return fmt.Errorf("failed to list service accounts: %w", err)
@@ -244,8 +248,11 @@ func runSAList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// GCP PROJECT, not the Scion project: sa.ProjectID is where the service
+	// account lives in GCP. Every row here is registered to the Scion project
+	// this command was run in, so printing that would print one repeated value.
 	fmt.Printf("GCP Service Accounts (%d):\n", len(sas))
-	fmt.Printf("%-36s  %-45s  %-20s  %s\n", "ID", "EMAIL", "PROJECT", "VERIFIED")
+	fmt.Printf("%-36s  %-45s  %-20s  %s\n", "ID", "EMAIL", "GCP PROJECT", "VERIFIED")
 	fmt.Printf("%-36s  %-45s  %-20s  %s\n",
 		"------------------------------------",
 		"---------------------------------------------",

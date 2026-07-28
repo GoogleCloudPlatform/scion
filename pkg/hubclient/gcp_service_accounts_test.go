@@ -17,12 +17,15 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -424,6 +427,76 @@ func TestGCPServiceAccounts_RefChoosesFlatOrNestedAddress(t *testing.T) {
 	}
 }
 
+// REF() IS THE ADDRESS THE ACCOUNT ALREADY KNOWS.
+//
+// The trap this closes is not carelessness, it is care (sa-arch). A
+// GCPServiceAccount carries two project-ish fields -- ScopeID, the Scion
+// project in the route, and ProjectID, the GCP project the account lives in --
+// so ProjectScopedRef(sa.ProjectID, sa.ID) compiles, reads correctly, matches
+// the parameter by NAME, and routes to a project that does not exist in Scion.
+//
+// Pinned as ONE test asserting Ref() and the ProjectID spelling DISAGREE, not
+// as two tests each pinning one address: two such tests both stay green if
+// someone "simplifies" Ref() to use ProjectID, since each would still describe
+// a real address.
+func TestGCPServiceAccount_Ref_UsesScopeIDNotTheGCPProject(t *testing.T) {
+	sa := &GCPServiceAccount{
+		ID:        "sa-1",
+		Scope:     store.ScopeProject,
+		ScopeID:   "scion-proj",  // the Scion project: belongs in the route
+		ProjectID: "my-gcp-proj", // the GCP project: does not
+	}
+
+	fromScope := sa.Ref().byIDPath()
+	fromGCPProject := ProjectScopedRef(sa.ProjectID, sa.ID).byIDPath()
+
+	if fromScope == fromGCPProject {
+		t.Fatalf("the two project-ish fields must not address the same route, both got %s", fromScope)
+	}
+	if want := "/api/v1/projects/scion-proj/gcp-service-accounts/sa-1"; fromScope != want {
+		t.Errorf("Ref() must route by ScopeID: expected %s, got %s", want, fromScope)
+	}
+}
+
+func TestGCPServiceAccount_Ref_ParentlessScopesGoFlat(t *testing.T) {
+	const flat = "/api/v1/gcp-service-accounts/sa-1"
+
+	for _, scope := range []string{store.ScopeHub, store.ScopeUser} {
+		sa := &GCPServiceAccount{ID: "sa-1", Scope: scope, ScopeID: "whatever", ProjectID: "gcp-proj"}
+		if got := sa.Ref().byIDPath(); got != flat {
+			t.Errorf("%s scope is parentless and belongs on the flat route: got %s", scope, got)
+		}
+	}
+
+	// A project-scoped account with no ScopeID is a malformed record, not a
+	// caller error. It goes flat and 404s, which beats asking the Hub to parse
+	// /api/v1/projects//gcp-service-accounts/sa-1.
+	malformed := &GCPServiceAccount{ID: "sa-1", Scope: store.ScopeProject, ProjectID: "gcp-proj"}
+	if got := malformed.Ref().byIDPath(); got != flat {
+		t.Errorf("a project-scoped account with no ScopeID must not build an empty path segment: got %s", got)
+	}
+}
+
+// THE CONSTRUCTORS ARE THE ONLY WAY IN, and that is enforced by the compiler
+// rather than by the doc comment above them.
+//
+// An optional lever is a comment (sa-arch). With unexported fields,
+// GCPServiceAccountRef{ID: x} outside this package does not compile, so the
+// zero-value trap -- a forgotten project and a deliberate hub-scoped ref being
+// byte-identical structs -- cannot be written by accident.
+//
+// A compile failure in another package is not something a test in this one can
+// observe, so this asserts the property that produces it.
+func TestGCPServiceAccountRef_HasNoExportedFields(t *testing.T) {
+	rt := reflect.TypeOf(GCPServiceAccountRef{})
+	for i := 0; i < rt.NumField(); i++ {
+		if f := rt.Field(i); f.IsExported() {
+			t.Errorf("GCPServiceAccountRef.%s is exported: external callers can now build a ref "+
+				"by field assignment, and the named constructors stop being the only way in", f.Name)
+		}
+	}
+}
+
 func TestGCPServiceAccounts_Get_HubScopedUsesFlatRoute(t *testing.T) {
 	var path string
 	c, done := saTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -556,8 +629,6 @@ func TestGCPServiceAccounts_Create_HubScopeReachesTheServersRefusal(t *testing.T
 		reached = true
 		seenScope = r.URL.Query().Get("scope")
 		w.Header().Set("Content-Type", "application/json")
-		// Verbatim from pkg/hub/handlers_gcp_identity_scoped.go:504 -- the
-		// server-side hold this client must not duplicate.
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":{"code":"invalid_request",` +
 			`"message":"hub-scoped service account creation is not enabled on this hub"}}`))
@@ -578,8 +649,29 @@ func TestGCPServiceAccounts_Create_HubScopeReachesTheServersRefusal(t *testing.T
 	if seenScope != store.ScopeHub {
 		t.Errorf("expected scope=%q on the wire, got %q", store.ScopeHub, seenScope)
 	}
-	if !strings.Contains(err.Error(), "not enabled on this hub") {
-		t.Errorf("the caller should see the Hub's own reason, got: %v", err)
+	// STATUS AND CODE, NOT PROSE.
+	//
+	// I originally pinned the Hub's exact 400 text here so the test would break
+	// if it changed. sa-arch: it will change, and the break would not be
+	// informative -- a hub dev rewording that string sees a test fail in another
+	// module and repairs it by pasting the new string, restoring green having
+	// verified nothing. THE EVENT WORTH CATCHING IS THE HOLD BEING LIFTED, and
+	// that arrives as a 2xx where a 400 was expected. Status and code catch it
+	// exactly. Pin prose only where the prose IS the contract; here the HOLD is
+	// the contract and the wording is not.
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected an *apiclient.APIError so callers can branch on it, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 while the hold stands, got %d", apiErr.StatusCode)
+	}
+	if apiErr.Code != "invalid_request" {
+		t.Errorf("expected code invalid_request, got %q", apiErr.Code)
+	}
+	// A refusal the caller cannot print is a refusal the user cannot act on.
+	if apiErr.Message == "" {
+		t.Error("the Hub's refusal must carry a message, whatever it says")
 	}
 }
 
