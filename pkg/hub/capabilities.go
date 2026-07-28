@@ -37,7 +37,7 @@ var ResourceActions = map[string][]Action{
 	"user":                {ActionRead, ActionUpdate},
 	"policy":              {ActionRead, ActionUpdate, ActionDelete},
 	"broker":              {ActionRead, ActionUpdate, ActionDelete, ActionDispatch},
-	"gcp_service_account": {ActionRead, ActionDelete, ActionVerify},
+	"gcp_service_account": {ActionRead, ActionDelete, ActionVerify, ActionAssign},
 }
 
 // ScopeActions maps resource types to scope-level actions (e.g., create, list).

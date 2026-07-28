@@ -46,6 +46,11 @@ const (
 	ActionStopAll      Action = "stop_all"
 	ActionVerify       Action = "verify"
 	ActionMint         Action = "mint"
+	// ActionAssign covers binding a resource to a principal that will act with
+	// it — currently attaching a GCP service account to an agent. Declared here
+	// so policies can be written against it; the assignment call sites still
+	// check ActionRead and are converted separately.
+	ActionAssign Action = "assign"
 )
 
 // Resource represents the target of an authorization check.
