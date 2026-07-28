@@ -403,7 +403,7 @@ func TestBypassAgents_Denials(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, rec.Code,
 			"agent must not assign a service account scoped to another project; got: %s",
 			rec.Body.String())
-		assert.Contains(t, rec.Body.String(), "does not belong to this project")
+		assert.Contains(t, rec.Body.String(), msgSANotAvailableInProject)
 	})
 
 	t.Run("assigning an unverified GCP service account is rejected", func(t *testing.T) {
@@ -484,7 +484,7 @@ func TestBypassAgents_UpdateAgentServiceAccountChecks(t *testing.T) {
 		rec := patchSA(t, f, a.ID, sa.ID)
 		require.Equal(t, http.StatusBadRequest, rec.Code,
 			"PATCH must apply the same project confinement as create; got: %s", rec.Body.String())
-		assert.Contains(t, rec.Body.String(), "does not belong to this project")
+		assert.Contains(t, rec.Body.String(), msgSANotAvailableInProject)
 
 		got, err := f.store.GetAgent(context.Background(), a.ID)
 		require.NoError(t, err)

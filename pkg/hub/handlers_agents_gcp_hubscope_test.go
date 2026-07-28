@@ -258,8 +258,7 @@ func TestAgentCreate_HubScopedSA_PlainHubMemberDenied(t *testing.T) {
 	})
 	require.Equal(t, http.StatusForbidden, rec.Code,
 		"hub membership alone must not confer assignment of a hub-scoped SA; got: %s", rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), "does not belong to this project",
-		"the denial must come from authorization, not from the scope predicate")
+	assertDeniedByAuthzNotByScope(t, rec)
 }
 
 // The same request from a caller who is not a hub member at all is refused
@@ -280,7 +279,30 @@ func TestAgentCreate_HubScopedSA_NonHubMemberDenied(t *testing.T) {
 	})
 	require.Equal(t, http.StatusForbidden, rec.Code,
 		"a caller with no hub-scoped read must not assign a hub-scoped SA; got: %s", rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), "does not belong to this project",
+	assertDeniedByAuthzNotByScope(t, rec)
+}
+
+// assertDeniedByAuthzNotByScope pins WHICH branch produced a denial, for the
+// two tests above that need a 403 from Hub policy and not a 400 from the scope
+// predicate rejecting a hub-scoped account (item F stopped it doing that).
+//
+// ⚠️ IT REPLACES A CHECK THAT COULD NO LONGER FAIL. Both call sites previously
+// asserted NotContains "does not belong to this project". #48 collapsed that
+// message into msgSANotAvailableInProject, so no branch emits the old string
+// any more and the assertion passed unconditionally — including, had the
+// regression it guards against actually occurred, against the scope denial it
+// was written to catch. A NotContains on a string the code cannot produce is
+// rule 15 inside the test suite: invariant over the whole behaviour range, so
+// it tells you nothing about whether the thing it names is on the path.
+//
+// So it now names the string the scope branch really does emit, and adds the
+// positive half: the body must carry the authorization message. Negative alone
+// would still pass on an empty body or an unrelated 403.
+func assertDeniedByAuthzNotByScope(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	assert.Contains(t, rec.Body.String(), "You don't have permission to assign this GCP service account",
+		"the denial must be the Hub-policy assignment refusal")
+	assert.NotContains(t, rec.Body.String(), msgSANotAvailableInProject,
 		"the denial must come from authorization, not from the scope predicate")
 }
 
@@ -357,7 +379,7 @@ func TestAgentCreate_OtherProjectSA_StillRejected(t *testing.T) {
 	})
 	require.Equal(t, http.StatusBadRequest, rec.Code,
 		"another project's SA must still be rejected; got: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "does not belong to this project")
+	assert.Contains(t, rec.Body.String(), msgSANotAvailableInProject)
 }
 
 // A user-scoped account must not become assignable. It was excluded before by
@@ -391,7 +413,7 @@ func TestAgentCreate_UserScopedSA_RejectedEvenWhenScopeIDMatches(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code,
 		"a user-scoped SA must not be assignable even when its ScopeID equals the project ID; got: %s",
 		rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "does not belong to this project")
+	assert.Contains(t, rec.Body.String(), msgSANotAvailableInProject)
 }
 
 // ============================================================================

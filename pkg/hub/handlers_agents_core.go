@@ -40,6 +40,31 @@ import (
 
 var tracer = otel.Tracer("scion-hub")
 
+// msgSANotAvailableInProject is the ONE answer given for both "this service
+// account does not exist" and "it exists but is not reachable from this
+// project", everywhere a caller names a service account by ID.
+//
+// THE WHOLE POINT IS THAT THE TWO CASES ARE INDISTINGUISHABLE. Answering
+// them differently — by message OR by status code — makes the endpoint an
+// existence oracle: a caller who may create agents in their own project can
+// enumerate other projects' service account IDs by watching which ones fail
+// differently. "Does not exist" and "exists but is not yours" are one answer.
+// Both branches must also use the same helper, since the response's `code`
+// field distinguishes ValidationError from BadRequest just as visibly as the
+// message does.
+//
+// The rationale was already written down at the project-settings default-SA
+// path, which has collapsed the two cases since it was written; the agent
+// create and PATCH paths did not follow it. This const exists so the three
+// sites cannot drift back apart: a future edit to one message is now an edit
+// to all three, which is the only version of this that stays true.
+//
+// It is deliberately vaguer than the messages around it. Once the account IS
+// reachable from the caller's project, being specific discloses nothing they
+// could not already read, so the "not verified" message that follows each of
+// these checks stays specific on purpose.
+const msgSANotAvailableInProject = "GCP service account not available in this project"
+
 // parseLabelFilters parses label=key=value query parameters into a map and
 // validates the resulting labels against constraint rules.
 func parseLabelFilters(params []string) (map[string]string, error) {
@@ -640,8 +665,13 @@ func (s *Server) createAgentInProject(
 	if req.GCPIdentity != nil && req.GCPIdentity.MetadataMode == store.GCPMetadataModeAssign {
 		sa, err := s.store.GetGCPServiceAccount(ctx, req.GCPIdentity.ServiceAccountID)
 		if err != nil {
-			if err == store.ErrNotFound {
-				ValidationError(w, "GCP service account not found", nil)
+			// errors.Is, not ==, and that is load-bearing rather than style. A
+			// wrapped ErrNotFound would miss a == comparison and fall through to
+			// writeErrorFromErr, which answers ErrNotFound with 404 — reopening
+			// the existence oracle this branch exists to close, silently and from
+			// a change in another package. See msgSANotAvailableInProject.
+			if errors.Is(err, store.ErrNotFound) {
+				ValidationError(w, msgSANotAvailableInProject, nil)
 				return
 			}
 			writeErrorFromErr(w, err, "")
@@ -654,7 +684,7 @@ func (s *Server) createAgentInProject(
 		// to their own project and admits hub-scoped ones from anywhere, which is
 		// what makes a hub-wide account assignable.
 		if !sa.ReachableFromProject(projectID) {
-			ValidationError(w, "GCP service account does not belong to this project", nil)
+			ValidationError(w, msgSANotAvailableInProject, nil)
 			return
 		}
 		if !sa.Verified {
@@ -2025,7 +2055,20 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			}
 			sa, err := s.store.GetGCPServiceAccount(ctx, updates.GCPIdentity.ServiceAccountID)
 			if err != nil {
-				writeErrorFromErr(w, err, "GCP service account not found")
+				// Was writeErrorFromErr(w, err, "GCP service account not found"),
+				// which was wrong twice over. That third parameter is requestID,
+				// not a message, so the string shipped in the response's requestId
+				// field while the message read "Resource not found" — and the
+				// status was 404, against 400 for the not-reachable branch twelve
+				// lines down. Existence and reachability were distinguishable here
+				// by status code even more plainly than by wording.
+				//
+				// errors.Is, not ==: see the create path.
+				if errors.Is(err, store.ErrNotFound) {
+					ValidationError(w, msgSANotAvailableInProject, nil)
+					return
+				}
+				writeErrorFromErr(w, err, "")
 				return
 			}
 			// These two checks mirror the create path (see the assign branch of
@@ -2040,7 +2083,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			// was found by grepping for the create path's shape. The property is
 			// worth preserving — keep these greppably identical to the create path.
 			if !sa.ReachableFromProject(agent.ProjectID) {
-				ValidationError(w, "GCP service account does not belong to this project", nil)
+				ValidationError(w, msgSANotAvailableInProject, nil)
 				return
 			}
 			if !sa.Verified {

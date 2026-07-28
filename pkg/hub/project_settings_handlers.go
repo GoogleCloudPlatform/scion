@@ -275,7 +275,12 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// them would make this endpoint an existence oracle: a project owner could
 	// enumerate other projects' service account IDs by watching which ones fail
 	// differently. "Does not exist" and "exists but is not yours" are one answer.
-	const notAvailable = "GCP service account not available in this project"
+	//
+	// The literal moved to msgSANotAvailableInProject — same string, no wire
+	// change here — because the agent create and PATCH paths had NOT followed
+	// this rule and now do. Three copies of a string whose entire value is that
+	// they match is three chances to stop matching.
+	const notAvailable = msgSANotAvailableInProject
 
 	sa, err := s.store.GetGCPServiceAccount(ctx, req.DefaultGCPIdentityServiceAccountID)
 	if err != nil {

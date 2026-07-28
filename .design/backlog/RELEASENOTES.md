@@ -19,6 +19,13 @@
   type, per-request `auth_success`, now logs at DEBUG and so stays out of normal operation; that
   was the volume problem behind the original silencing, and it is fixed at the level of the one
   noisy type rather than by muting the other eight. Downstream consumers have not been surveyed.
+- **`PATCH /agents/{id}` with a non-existent service account ID now returns 400 instead of 404.** The
+  prior 404 distinguished existence from reachability, making the endpoint an existence oracle for
+  SA IDs. Agent create already returned 400 for both cases but distinguished them by message; both
+  paths now give the single answer `GCP service account not available in this project`, matching the
+  project-default settings path, which has behaved this way since it was written. **Anything that
+  branches on 404 from this endpoint to mean "no such service account" will need updating** — it
+  now sees 400, the same as every other rejected assignment.
 - **Service-account assignment decisions are now audited.** Assigning a GCP service account to an
   agent (create, PATCH, project default) or to a lifecycle hook's execution identity emits a record
   on **both allow and deny**. While the `actAs` check is inert (see below), allow records carry
