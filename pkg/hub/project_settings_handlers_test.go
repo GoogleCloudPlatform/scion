@@ -761,12 +761,25 @@ func TestProjectSettings_HubScopedDefaultIsAcceptedAndConsumed(t *testing.T) {
 // What changed: before step 4, an early item A was merely broken. The assign
 // sites compared sa.ScopeID against the project ID, so a hub-scoped SA was
 // refused with a fail-closed 400. Step 4 removed that 400 by design. What now
-// stands between a hub-scoped SA and assignment is the ActionRead check alone —
-// and hub-member-read-all matches every hub-scoped SA for every hub member,
-// because the SA resource is parentless and that policy is hub-scoped.
+// stands between a hub-scoped SA and assignment is the ActionRead check alone.
 //
-// So landing item A before step 2 does not produce a feature that half-works. It
-// produces hub-scoped credentials assignable by any member of any project: the
+// FOR A HUMAN CALLER that check passes for every hub member: the SA resource is
+// parentless, so the project-owner bypass is skipped, and hub-member-read-all
+// ("*", read+list) matches it because matchesResource has no arm for a "hub"
+// ScopeType and falls through to true; every user is put in hub-members on
+// login. FOR AN AGENT CALLER it DENIES — principals come from the agent's own
+// groups, which never include hub-members, so the wildcard policy is never
+// fetched, and the read baseline then requires a non-empty project ID that a
+// parentless resource cannot supply.
+//
+// State the caller. Hub scope REMOVES confinement for humans and ADDS it for
+// agents, so any unqualified sentence about "the gate" here is half wrong —
+// including the one this paragraph replaced, which said "every hub member" flat
+// (corrected by sa-arch at 9427fa19 after aid-em caught it).
+//
+// The hold does not weaken: the human path alone is the exposure. Landing item A
+// before step 2 does not produce a feature that half-works. It produces
+// hub-scoped credentials assignable by any HUMAN member of any project: the
 // cross-project exposure of design 8.2, live. Step 2 is what closes it, because
 // the ActionAssign arm is project-scoped and a project-scoped policy cannot match
 // a parentless resource.
