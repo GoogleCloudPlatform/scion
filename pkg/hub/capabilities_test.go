@@ -416,6 +416,41 @@ func TestResourceBuilders(t *testing.T) {
 		assert.Equal(t, "u1", r.ID)
 	})
 
+	t.Run("gcpServiceAccountResource project-scoped", func(t *testing.T) {
+		sa := &store.GCPServiceAccount{ID: "sa1", CreatedBy: "u1", Scope: store.ScopeProject, ScopeID: tid("p1")}
+		r := gcpServiceAccountResource(sa)
+		assert.Equal(t, "gcp_service_account", r.Type)
+		assert.Equal(t, "sa1", r.ID)
+		assert.Equal(t, "u1", r.OwnerID)
+		assert.Equal(t, "project", r.ParentType)
+		assert.Equal(t, tid("p1"), r.ParentID)
+	})
+
+	t.Run("gcpServiceAccountResource hub-scoped has no parent", func(t *testing.T) {
+		sa := &store.GCPServiceAccount{ID: "sa2", CreatedBy: "u1", Scope: store.ScopeHub, ScopeID: "hub-instance-1"}
+		r := gcpServiceAccountResource(sa)
+		assert.Equal(t, "gcp_service_account", r.Type)
+		assert.Empty(t, r.ParentType, "hub-scoped SA must not claim a project parent")
+		assert.Empty(t, r.ParentID)
+	})
+
+	t.Run("gcpServiceAccountResource user-scoped has no parent", func(t *testing.T) {
+		sa := &store.GCPServiceAccount{ID: "sa3", CreatedBy: "u1", Scope: store.ScopeUser, ScopeID: "u1"}
+		r := gcpServiceAccountResource(sa)
+		assert.Empty(t, r.ParentType, "user-scoped SA must not claim a project parent")
+		assert.Empty(t, r.ParentID)
+	})
+
+	t.Run("gcpServiceAccountResource project-scoped with empty scope ID", func(t *testing.T) {
+		sa := &store.GCPServiceAccount{ID: "sa4", CreatedBy: "u1", Scope: store.ScopeProject}
+		r := gcpServiceAccountResource(sa)
+		assert.Empty(t, r.ParentType, "an empty ScopeID must not become a parent ID")
+	})
+
+	t.Run("gcpServiceAccountResource nil", func(t *testing.T) {
+		assert.Equal(t, Resource{}, gcpServiceAccountResource(nil))
+	})
+
 	t.Run("policyResource", func(t *testing.T) {
 		p := &store.Policy{ID: "p1", Labels: map[string]string{"team": "backend"}}
 		r := policyResource(p)

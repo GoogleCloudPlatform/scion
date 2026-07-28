@@ -155,13 +155,24 @@ func brokerResource(b *store.RuntimeBroker) Resource {
 
 // gcpServiceAccountResource constructs a Resource from a store.GCPServiceAccount for capability computation.
 func gcpServiceAccountResource(sa *store.GCPServiceAccount) Resource {
-	return Resource{
-		Type:       "gcp_service_account",
-		ID:         sa.ID,
-		OwnerID:    sa.CreatedBy,
-		ParentType: "project",
-		ParentID:   sa.ScopeID,
+	if sa == nil {
+		return Resource{}
 	}
+	r := Resource{
+		Type:    "gcp_service_account",
+		ID:      sa.ID,
+		OwnerID: sa.CreatedBy,
+	}
+	// Only project-scoped service accounts are children of a project, so the
+	// project owner/admin bypass applies to them alone (mirrors
+	// harnessConfigResource). For hub- and user-scoped accounts ScopeID is a hub
+	// or user ID, not a project ID: claiming a project parent there would hand
+	// the bypass to the owner of whatever project happened to share that ID.
+	if sa.Scope == store.ScopeProject && sa.ScopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = sa.ScopeID
+	}
+	return r
 }
 
 // ComputeCapabilities evaluates which actions the identity can perform on a single resource.
