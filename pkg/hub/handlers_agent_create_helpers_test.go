@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -537,6 +538,97 @@ func TestPopulateAgentConfig_PreStartHook_ArchivedProjectHookFallsBackToHub(t *t
 
 	assert.Equal(t, hubHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho hub\n", agent.AppliedConfig.ProjectPreStartHookScript)
+}
+
+// failingProjectHookStore wraps a store and makes the project-scoped active
+// hook lookup fail with a non-ErrNotFound error, simulating a DB blip or a
+// duplicate-row `.Only()` failure.
+type failingProjectHookStore struct {
+	store.Store
+	err error
+}
+
+func (f *failingProjectHookStore) GetActiveProjectPreStartHook(context.Context, string) (*store.ProjectPreStartHook, error) {
+	return nil, f.err
+}
+
+// A project hook lookup that fails for a reason other than "not found" is
+// ambiguous — the project may have an override we simply could not read. In
+// that case nothing is staged; falling back to the hub hook would run the wrong
+// script in a project that deliberately overrode it.
+func TestPopulateAgentConfig_PreStartHook_ProjectLookupErrorStagesNothing(t *testing.T) {
+	srv, s, project := setupPreStartHookStampingTest(t)
+
+	_, err := s.CreateHubPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		Scope:  store.PreStartHookScopeHub,
+		Name:   "Hub baseline",
+		Slug:   "hub-baseline",
+		Script: "#!/bin/sh\necho hub\n",
+	})
+	require.NoError(t, err)
+
+	srv.store = &failingProjectHookStore{Store: s, err: errors.New("database is locked")}
+
+	agent := newStampingAgent()
+	srv.populateAgentConfig(t.Context(), agent, project, nil)
+
+	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookID,
+		"an ambiguous project lookup error must not fall back to the hub hook")
+	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookScript)
+}
+
+// AC8: creating a second project hook archives the first, and once the project
+// has no hooks left the hub fallback resumes. The archived hook must never be
+// staged at any point.
+func TestPopulateAgentConfig_ProjectHookArchivedBySecondCreate_FallsBackToHub(t *testing.T) {
+	srv, s, project := setupPreStartHookStampingTest(t)
+
+	hubHook, err := s.CreateHubPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		Scope:  store.PreStartHookScopeHub,
+		Name:   "Hub baseline",
+		Slug:   "hub-baseline",
+		Script: "#!/bin/sh\necho hub\n",
+	})
+	require.NoError(t, err)
+
+	first, err := s.CreateProjectPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		ProjectID: project.ID,
+		Name:      "First project hook",
+		Slug:      "first-project-hook",
+		Script:    "#!/bin/sh\necho first\n",
+	})
+	require.NoError(t, err)
+
+	// Creating a second hook implicitly archives the first.
+	second, err := s.CreateProjectPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		ProjectID: project.ID,
+		Name:      "Second project hook",
+		Slug:      "second-project-hook",
+		Script:    "#!/bin/sh\necho second\n",
+	})
+	require.NoError(t, err)
+
+	reloadedFirst, err := s.GetProjectPreStartHook(t.Context(), first.ID, project.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.ProjectPreStartHookStatusArchived, reloadedFirst.Status)
+
+	// The live project hook wins; the archived one is never staged.
+	agent := newStampingAgent()
+	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	assert.Equal(t, second.ID, agent.AppliedConfig.ProjectPreStartHookID)
+	assert.Equal(t, "#!/bin/sh\necho second\n", agent.AppliedConfig.ProjectPreStartHookScript)
+
+	// Remove the project's hooks entirely: the archived one first, then the
+	// active one (allowed once it is the last hook in the project scope).
+	require.NoError(t, s.DeleteProjectPreStartHook(t.Context(), first.ID, project.ID))
+	require.NoError(t, s.DeleteProjectPreStartHook(t.Context(), second.ID, project.ID))
+
+	// With no project hook left, the hub fallback resumes.
+	next := newStampingAgent()
+	srv.populateAgentConfig(t.Context(), next, project, nil)
+	assert.Equal(t, hubHook.ID, next.AppliedConfig.ProjectPreStartHookID)
+	assert.Equal(t, "#!/bin/sh\necho hub\n", next.AppliedConfig.ProjectPreStartHookScript)
+	assert.NotContains(t, next.AppliedConfig.ProjectPreStartHookScript, "echo first")
 }
 
 // An explicitly pre-stamped hook ID is never overwritten by either scope.

@@ -17,6 +17,7 @@ package hub
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -28,17 +29,70 @@ const hubPreStartHookBasePath = "/api/v1/pre-start-hooks/"
 
 // Authorization model for hub-scoped pre-start hooks:
 //
-//   - Read (GET list, GET detail): any authenticated identity. Project owners
+//   - Read (GET list, GET detail): any authenticated *user*. Project owners
 //     who are not hub admins need this to render the "Inherited from hub"
-//     indicator on the project settings page. This mirrors the harness-config
-//     GET authorization model.
-//   - Mutations (POST, PUT, DELETE, POST .../activate): hub admin only. A hub
-//     hook runs on every agent whose project has no project-scoped hook, so
-//     changing it is a hub-admin concern.
+//     indicator on the project settings page. Agent identities are rejected —
+//     an agent has no reason to enumerate hub-wide hook policy. Non-admin
+//     callers get the hook metadata with the script body stripped from list
+//     responses (hub scripts can carry infrastructure secrets).
+//   - Mutations (POST, PUT, DELETE, POST .../activate): hub admin only, and
+//     never via a project-scoped User Access Token. A hub hook runs as root on
+//     every agent whose project has no project-scoped hook, so changing it is a
+//     hub-admin concern. See requireHubAdmin.
 //
 // Request/response shapes are shared with the project-scoped handlers
 // (CreateProjectPreStartHookRequest, UpdateProjectPreStartHookRequest,
 // ListProjectPreStartHooksResponse) — the payloads are identical.
+
+// requireHubAdmin authorizes a hub-wide mutation. It is stricter than
+// requireAdmin: in addition to demanding the admin role it rejects
+// ScopedUserIdentity (a User Access Token). A UAT embeds the minting user's
+// role, so an admin-minted project-scoped CI token would otherwise pass a plain
+// role check and be able to install a hub-wide hook script that executes as
+// root inside every agent container. UATs are confined to a single project and
+// must never affect hub-wide policy.
+func (s *Server) requireHubAdmin(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
+	identity := GetUserIdentityFromContext(r.Context())
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return nil, false
+	}
+	if identity.Role() != store.UserRoleAdmin {
+		Forbidden(w)
+		return nil, false
+	}
+	if _, scoped := identity.(*ScopedUserIdentity); scoped {
+		Forbidden(w)
+		return nil, false
+	}
+	return identity, true
+}
+
+// requireHubHookReader authorizes a hub hook read. Any authenticated user
+// identity qualifies (including UAT-scoped ones — reading hub hook metadata is
+// needed to render the inherited-hook banner); agent identities do not.
+// The second return value reports whether the caller is a full hub admin,
+// which controls whether script bodies are included in list responses.
+func (s *Server) requireHubHookReader(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
+	identity := GetUserIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return nil, false
+	}
+	return identity, true
+}
+
+// isHubAdminIdentity reports whether the identity may see hub hook script
+// bodies in list responses.
+func isHubAdminIdentity(identity UserIdentity) bool {
+	if identity == nil {
+		return false
+	}
+	if _, scoped := identity.(*ScopedUserIdentity); scoped {
+		return false
+	}
+	return identity.Role() == store.UserRoleAdmin
+}
 
 // handleHubPreStartHooks handles GET (list) and POST (create) on
 // /api/v1/pre-start-hooks.
@@ -47,23 +101,72 @@ func (s *Server) handleHubPreStartHooks(w http.ResponseWriter, r *http.Request) 
 
 	switch r.Method {
 	case http.MethodGet:
-		if GetIdentityFromContext(ctx) == nil {
-			Unauthorized(w)
-			return
-		}
-
-		hooks, err := s.store.ListHubPreStartHooks(ctx)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		writeJSON(w, http.StatusOK, &ListProjectPreStartHooksResponse{Hooks: hooks})
-
-	case http.MethodPost:
-		identity, ok := s.requireAdmin(w, r)
+		identity, ok := s.requireHubHookReader(w, r)
 		if !ok {
 			return
 		}
+
+		query := r.URL.Query()
+
+		var hooks []*store.ProjectPreStartHook
+		if query.Get("status") == store.ProjectPreStartHookStatusActive {
+			// The project settings page asks for ?status=active&limit=1 to
+			// render the inherited-hook banner. Serve that from the dedicated
+			// single-row lookup; "no active hub hook" is an empty list, not 404.
+			hook, err := s.store.GetActiveHubPreStartHook(ctx)
+			switch {
+			case err == nil:
+				hooks = []*store.ProjectPreStartHook{hook}
+			case errors.Is(err, store.ErrNotFound):
+				hooks = nil
+			default:
+				writeErrorFromErr(w, err, "")
+				return
+			}
+		} else {
+			var err error
+			hooks, err = s.store.ListHubPreStartHooks(ctx)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+		}
+
+		if raw := query.Get("limit"); raw != "" {
+			limit, err := strconv.Atoi(raw)
+			if err != nil || limit < 0 {
+				BadRequest(w, "limit must be a non-negative integer")
+				return
+			}
+			if limit < len(hooks) {
+				hooks = hooks[:limit]
+			}
+		}
+
+		// Hub hook scripts may embed infrastructure secrets. Non-admin callers
+		// only need {id, name, slug, status, scope} for the inherited banner.
+		if !isHubAdminIdentity(identity) {
+			redacted := make([]*store.ProjectPreStartHook, 0, len(hooks))
+			for _, h := range hooks {
+				if h == nil {
+					continue
+				}
+				copied := *h
+				copied.Script = ""
+				redacted = append(redacted, &copied)
+			}
+			hooks = redacted
+		}
+
+		writeJSON(w, http.StatusOK, &ListProjectPreStartHooksResponse{Hooks: hooks})
+
+	case http.MethodPost:
+		identity, ok := s.requireHubAdmin(w, r)
+		if !ok {
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, projectPreStartHookScriptMaxBytes+4096)
 
 		var req CreateProjectPreStartHookRequest
 		if err := readJSON(r, &req); err != nil {
@@ -154,7 +257,7 @@ func (s *Server) handleHubPreStartHookByID(w http.ResponseWriter, r *http.Reques
 			MethodNotAllowed(w)
 			return
 		}
-		if _, ok := s.requireAdmin(w, r); !ok {
+		if _, ok := s.requireHubAdmin(w, r); !ok {
 			return
 		}
 
@@ -176,8 +279,7 @@ func (s *Server) handleHubPreStartHookByID(w http.ResponseWriter, r *http.Reques
 
 	switch r.Method {
 	case http.MethodGet:
-		if GetIdentityFromContext(ctx) == nil {
-			Unauthorized(w)
+		if _, ok := s.requireHubHookReader(w, r); !ok {
 			return
 		}
 
@@ -193,10 +295,12 @@ func (s *Server) handleHubPreStartHookByID(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, hook)
 
 	case http.MethodPut:
-		identity, ok := s.requireAdmin(w, r)
+		identity, ok := s.requireHubAdmin(w, r)
 		if !ok {
 			return
 		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, projectPreStartHookScriptMaxBytes+4096)
 
 		var req UpdateProjectPreStartHookRequest
 		if err := readJSON(r, &req); err != nil {
@@ -257,7 +361,7 @@ func (s *Server) handleHubPreStartHookByID(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, hook)
 
 	case http.MethodDelete:
-		if _, ok := s.requireAdmin(w, r); !ok {
+		if _, ok := s.requireHubAdmin(w, r); !ok {
 			return
 		}
 
