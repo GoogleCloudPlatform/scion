@@ -148,7 +148,7 @@ func ghResolveCommitSHA(ctx context.Context, apiBase, owner, repo, ref, token st
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve commit SHA for %s@%s: %w", repo, ref, err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
@@ -187,7 +187,7 @@ func ghListContents(ctx context.Context, apiBase, owner, repo, path, commitSHA, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to list contents for %s/%s at %s: %w", owner, repo, path, err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))

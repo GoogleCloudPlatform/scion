@@ -29,7 +29,7 @@ import (
 func TestGitHubResolutionStore_GetPut(t *testing.T) {
 	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
 	require.NoError(t, err)
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 
 	ctx := context.Background()
 	err = client.Schema.Create(ctx)
@@ -71,7 +71,7 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 func TestGitHubResolutionStore_Expiration(t *testing.T) {
 	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
 	require.NoError(t, err)
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 
 	ctx := context.Background()
 	err = client.Schema.Create(ctx)
@@ -103,7 +103,7 @@ func TestGitHubResolutionStore_Expiration(t *testing.T) {
 func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
 	require.NoError(t, err)
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 
 	ctx := context.Background()
 	err = client.Schema.Create(ctx)
@@ -169,8 +169,8 @@ func TestComputeCacheKey(t *testing.T) {
 func TestIsFullCommitSHA(t *testing.T) {
 	require.True(t, isFullCommitSHA("abcdef1234567890abcdef1234567890abcdef12"))
 	require.True(t, isFullCommitSHA("0000000000000000000000000000000000000000"))
-	require.False(t, isFullCommitSHA("abcdef123456")) // Too short
+	require.False(t, isFullCommitSHA("abcdef123456"))                             // Too short
 	require.False(t, isFullCommitSHA("ABCDEF1234567890ABCDEF1234567890ABCDEF12")) // Uppercase
-	require.False(t, isFullCommitSHA("main")) // Not a SHA
-	require.False(t, isFullCommitSHA("")) // Empty
+	require.False(t, isFullCommitSHA("main"))                                     // Not a SHA
+	require.False(t, isFullCommitSHA(""))                                         // Empty
 }
