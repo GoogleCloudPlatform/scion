@@ -88,7 +88,7 @@ func TestUpdateAgent_RejectsUnsupportedMaxModelCallsForGeneric(t *testing.T) {
 
 func TestUpdateAgent_AllowsGeminiMaxModelCalls(t *testing.T) {
 	srv, s := testServer(t)
-	agent := seedCreatedAgentForHarnessTest(t, s, "gemini-update", "gemini")
+	agent := seedCreatedAgentForHarnessTest(t, s, "gemini-update", "gemini-cli")
 
 	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{

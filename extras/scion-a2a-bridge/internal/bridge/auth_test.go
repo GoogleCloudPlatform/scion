@@ -292,7 +292,7 @@ func TestAuthMiddleware_PublicEndpoints(t *testing.T) {
 		"/healthz",
 		"/readyz",
 		"/projects/test/agents/agent/.well-known/agent-card.json",
-		"/groves/test/agents/agent/.well-known/agent-card.json",
+		"/projects/test/agents/agent/.well-known/agent-card.json",
 	}
 
 	for _, path := range paths {
