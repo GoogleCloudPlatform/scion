@@ -196,10 +196,20 @@ func (s *Settings) ResolveHarness(profileName, harnessName string) (HarnessConfi
 
 	result := baseHarness
 
-	// Merge profile-level env
-	if profile.Env != nil {
-		result.Env = mergeMaps(result.Env, profile.Env)
-	}
+	// profiles.<name>.env is deliberately NOT merged here — removed by G3-full,
+	// the same breaking change that removed it from the versioned resolver in
+	// ResolveHarnessConfig (settings_v1.go). See the rationale recorded there.
+	//
+	// This is the pre-v1 mirror of that path. It had no non-test callers when it
+	// was removed, so deleting it changed no shipped behaviour — it was removed
+	// anyway because a live merge in a resolver that merely has no callers TODAY
+	// is the kind of thing that grows one, and G3-full exists to reduce the
+	// number of env injection points rather than to leave dormant ones in place.
+	//
+	// Keeping this in step with ResolveHarnessConfig is what lets
+	// TestLegacyAndVersionedResolution_SameResult keep asserting that legacy and
+	// versioned resolution agree. If you restore one merge you must restore both
+	// or that test will fail, and the failure will be correct.
 
 	// Merge profile-level volumes
 	if profile.Volumes != nil {
@@ -217,6 +227,9 @@ func (s *Settings) ResolveHarness(profileName, harnessName string) (HarnessConfi
 			if override.AuthSelectedType != "" {
 				result.AuthSelectedType = override.AuthSelectedType
 			}
+			// Survives G3-full, matching ResolveHarnessConfig (settings_v1.go).
+			// These two must stay in step: TestLegacyAndVersionedResolution_SameResult
+			// asserts the resolvers agree, so deleting either merge alone fails it.
 			if override.Env != nil {
 				result.Env = mergeMaps(result.Env, override.Env)
 			}

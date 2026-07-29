@@ -1110,8 +1110,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if settings.Telemetry != nil {
 				settingsCfg.Telemetry = config.ConvertV1TelemetryToAPI(settings.Telemetry)
 			}
-			// Template has highest priority, so it should override settings.
-			// We construct a config with ONLY the settings env, then merge finalScionCfg over it.
+			// Template has highest priority IN THIS MERGE, so it overrides
+			// settings here. We construct a config with ONLY the settings env,
+			// then merge finalScionCfg over it.
+			//
+			// This is no longer the whole story for the CONTAINER env. In
+			// broker mode, harness-config env is separately injected into
+			// opts.Env by resolveAuthEnvOverlay (run.go), and opts.Env is
+			// passed as extraEnv to buildAgentEnv (run.go), where it overrides
+			// finalScionCfg.Env. So for a key declared by both the template and
+			// the harness config, the harness-config value is what reaches the
+			// container, even though the template wins the merge below.
+			// Pinned by TestBrokerMode_HarnessConfigEnvOutranksTemplateEnv.
 			finalScionCfg = config.MergeScionConfig(settingsCfg, finalScionCfg)
 		}
 

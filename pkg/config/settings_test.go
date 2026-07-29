@@ -216,10 +216,27 @@ func TestEnvMerging(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// G3-full removed the profile-root env rank from this resolver. The fixture is
+	// deliberately left intact — profiles.dev.env still SETS H2 and P1 — so that
+	// this test keeps measuring that those values no longer arrive. Do not delete
+	// the profile env from the fixture above: it is the injected value whose
+	// absence is the assertion.
 	expected := map[string]string{
-		"H1": "V1",  // From harness base
-		"H2": "P2",  // Harness base, overridden by profile root
-		"P1": "PH1", // Profile root, overridden by harness override
+		"H1": "V1", // From harness base
+		// H2 was "P2" before G3-full: profile root outranked the harness base.
+		// That rank is deleted, so the harness base value now survives. This is a
+		// breaking change, not a correction — the profile no longer participates.
+		"H2": "V2",
+		// P1 is still "PH1", but note WHY: it now comes from the harness override
+		// alone rather than from the override outranking the profile root. The
+		// observed value is unchanged and the mechanism behind it is not, which is
+		// why H2 rather than P1 is the key that can see this deletion.
+		// P1 and O1 both come from the harness_overrides env merge, which SURVIVES
+		// G3-full. P1's value is unchanged, but note the mechanism changed: it used
+		// to be the override outranking the profile root, and is now the override
+		// over the base alone. The observed value hides that, which is why H2 rather
+		// than P1 is the key that can see this deletion.
+		"P1": "PH1",
 		"O1": "OV1", // From harness override
 	}
 
