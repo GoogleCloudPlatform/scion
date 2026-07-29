@@ -2505,9 +2505,20 @@ func TestProfileEnvVisibleInAuthOverlay(t *testing.T) {
 }
 
 func TestStartInjectsProfileEnvForAuth(t *testing.T) {
-	// When a profile defines env vars like GOOGLE_CLOUD_PROJECT and
-	// GOOGLE_CLOUD_REGION, Start() should inject them into opts.Env so that
+	// When the resolved harness config defines env vars like GOOGLE_CLOUD_PROJECT
+	// and GOOGLE_CLOUD_REGION, Start() should inject them into opts.Env so that
 	// GatherAuthWithEnv can see them during local (non-broker) auth resolution.
+	//
+	// NOTE ON THE NAME: this test is still called ...ProfileEnvForAuth, but its
+	// fixture declares the env under harness_configs.<hc>.env, NOT under
+	// profiles.<p>.env. G3-full retired profiles.<p>.env as an injection point
+	// into harness-config resolution, so the old fixture could no longer reach
+	// opts.Env at all. The fixture was migrated to the documented migration path
+	// and EVERY ASSERTION BELOW IS BYTE-IDENTICAL to the pre-G3-full version --
+	// that is the point: the injection behaviour under test did not change, only
+	// the key you declare the env under. The name is left alone deliberately so
+	// that this commit does not rename a test other agents are tracking by name;
+	// renaming it is a follow-up, not a silent drive-by.
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
@@ -2538,12 +2549,22 @@ func TestStartInjectsProfileEnvForAuth(t *testing.T) {
 	_ = os.MkdirAll(tplDir, 0755)
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude-cfg"}`), 0644)
 
-	// Global versioned settings with a profile that has env vars
+	// Global versioned settings. The auth env vars are declared under
+	// harness_configs.claude-cfg.env; they were under profiles.vertex.env until
+	// G3-full removed profiles.<p>.env as an injection point.
+	//
+	// The assertions are unchanged across the migration. The property this test
+	// exists for — settings-declared auth env reaches GatherAuthWithEnv during
+	// local, non-broker auth resolution — survives G3-full; only the key it is
+	// spelled with moved. harness_overrides is deliberately not used.
 	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: vertex
 profiles:
   vertex:
     runtime: docker
+harness_configs:
+  claude-cfg:
+    harness: claude
     env:
       GOOGLE_CLOUD_PROJECT: my-gcp-project
       GOOGLE_CLOUD_REGION: us-central1
@@ -2759,10 +2780,15 @@ func TestStart_BrokerMode_HubEnvNotClobberedByHarnessConfigEnv(t *testing.T) {
 
 // TestResolveAuthEnvOverlay_ProfileEnvAloneNotInjectedWithoutHarnessConfig
 // locks in the G3-narrow branch delete: with no harness config named, nothing
-// is injected. NOTE this does NOT retire profile env — when a harness config
-// IS named (the common case) ResolveHarnessConfig still merges profile.Env in
-// at settings_v1.go:54-55, and provision.go:1098 feeds it to the container
-// regardless. See design §0.3.
+// is injected.
+//
+// This comment used to add that profile env was NOT thereby retired, because
+// ResolveHarnessConfig still merged it when a harness config WAS named. G3-full
+// has since deleted that merge, so the qualification is now vacuous rather than
+// wrong — there is no remaining path for it to describe. Its citation of
+// settings_v1.go:54-55 was correct and unambiguous when written; those lines are
+// deleted, so it is replaced by a symbol reference rather than corrected.
+// See ResolveHarnessConfig in pkg/config/settings_v1.go and design §0.3.
 func TestResolveAuthEnvOverlay_ProfileEnvAloneNotInjectedWithoutHarnessConfig(t *testing.T) {
 	settings := g3TestSettings(nil, map[string]string{"PROFILE_ONLY": "profile-value"})
 
@@ -2777,20 +2803,44 @@ func TestResolveAuthEnvOverlay_ProfileEnvAloneNotInjectedWithoutHarnessConfig(t 
 }
 
 // TestResolveAuthEnvOverlay_ProfileEnvStillArrivesViaHarnessConfig is the
-// polarity control for the test above, and the executable statement of why
-// this commit is G3-narrow: profile env keeps flowing whenever a harness
-// config is named, because ResolveHarnessConfig merges it in.
-func TestResolveAuthEnvOverlay_ProfileEnvStillArrivesViaHarnessConfig(t *testing.T) {
-	settings := g3TestSettings(nil, map[string]string{"PROFILE_ONLY": "profile-value"})
+// pkg/agent-side pin for the G3-full removal: naming a harness config no longer
+// carries profile env into the auth overlay.
+//
+// This test is the INVERSION of one I added in the G3-narrow commit, which was
+// then called TestResolveAuthEnvOverlay_ProfileEnvStillArrivesViaHarnessConfig
+// and asserted the opposite. Its contract was "profile env keeps flowing
+// whenever a harness config is named" — precisely the behaviour G3-full removes,
+// so the test could not survive the change. It is renamed rather than deleted so
+// the reversal stays visible in history.
+//
+// The fixture supplies profile env and NO harness_overrides for the key, which
+// matters: G3-full removes a rank that is not the top of its ladder, and a
+// middle-rank removal is invisible whenever a higher rank is populated. Setting
+// harness_overrides here would make this pass before and after while measuring
+// nothing.
+//
+// Existence control: the harness-config env key must still arrive. Without it,
+// an absent PROFILE_ONLY is equally consistent with the overlay never having
+// been populated at all.
+func TestResolveAuthEnvOverlay_ProfileEnvNoLongerArrivesViaHarnessConfig(t *testing.T) {
+	settings := g3TestSettings(
+		map[string]string{"HC_ONLY": "hc-value"},
+		map[string]string{"PROFILE_ONLY": "profile-value"},
+	)
 
 	opts := api.StartOptions{Name: "test-agent", BrokerMode: true}
 
 	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
-	if got := overlay["PROFILE_ONLY"]; got != "profile-value" {
-		t.Errorf("auth overlay PROFILE_ONLY = %q, want %q "+
-			"(profile env still merges via ResolveHarnessConfig — this commit is G3-narrow)",
-			got, "profile-value")
+	if got := overlay["HC_ONLY"]; got != "hc-value" {
+		t.Fatalf("existence control failed: auth overlay HC_ONLY = %q, want %q — "+
+			"the harness config was not resolved, so the assertion below would be vacuous",
+			got, "hc-value")
+	}
+
+	if got, ok := overlay["PROFILE_ONLY"]; ok {
+		t.Errorf("auth overlay PROFILE_ONLY = %q, want absent "+
+			"(G3-full: ResolveHarnessConfig no longer merges profiles.<p>.env)", got)
 	}
 }
 

@@ -94,10 +94,23 @@ harness_configs:
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	_ = os.MkdirAll(projectScionDir, 0755)
+	// Project-scoped env is declared under harness_configs, NOT under
+	// profiles.test-profile.env. It was the latter until G3-full removed
+	// profiles.<p>.env as an injection point.
+	//
+	// The assertions below are UNCHANGED across that migration, deliberately: the
+	// Global -> Project -> Template ordering they pin is a user-requested property
+	// and it survives G3-full intact. Only the key it is spelled with moved. This
+	// fixture is therefore also the executable form of the CHANGELOG's migration
+	// note — move the keys to harness_configs.<hc>.env in the same settings file
+	// and both the values and their precedence are preserved.
 	projectSettings := `schema_version: "1"
 profiles:
   test-profile:
     runtime: docker
+harness_configs:
+  test-harness:
+    harness: test-harness
     env:
       PROJECT_VAR: project-val
       OVERRIDE_VAR: project-override
