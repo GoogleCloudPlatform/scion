@@ -310,7 +310,10 @@ harness_configs:
 // caller's *api.HubAgentDefaults unmodified.
 //
 // The actual guard on the copy is TestMergeResourceSpec_ReturnsBaseWhenOverrideNil
-// below, which fails when the REASON for the copy disappears.
+// in pkg/config, which fails when the REASON for the copy disappears. It lives
+// there rather than here on purpose: identity cannot be asserted from anywhere
+// downstream of ProvisionAgent's reload, so a copy of it in this package would
+// be another test that cannot fail. Do not move it back.
 func TestProvision_HubAgentDefaults_ContextValueSurvivesProvisioning(t *testing.T) {
 	const settingsYAML = `schema_version: "1"
 default_harness_config: test-harness
@@ -339,30 +342,6 @@ harness_configs:
 	}
 	if hub.Resources.Limits.CPU != "3" {
 		t.Errorf("provisioning modified the caller's hub defaults: got %q", hub.Resources.Limits.CPU)
-	}
-}
-
-// TestMergeResourceSpec_ReturnsBaseWhenOverrideNil is the real guard on the
-// defensive copy at provision.go:1173, and it works by inverting the usual
-// direction: it does not test that the copy is present, it tests that the copy
-// is still NECESSARY.
-//
-// The hazard is that config.MergeResourceSpec returns its base argument itself
-// — the same pointer, not a clone — when the override is nil. Passing the
-// context's *api.ResourceSpec straight in as base would therefore publish that
-// pointer into the agent's config. Today nothing downstream mutates it in place,
-// which is exactly why the end-to-end test above cannot see the difference.
-//
-// This test fails the moment MergeResourceSpec stops returning base, which is
-// the only condition under which someone should be deleting the copy. It turns
-// "why is this copy here?" from an invitation into a failing test with an
-// answer in it.
-func TestMergeResourceSpec_ReturnsBaseWhenOverrideNil(t *testing.T) {
-	base := &api.ResourceSpec{Limits: api.ResourceList{CPU: "3"}}
-	if got := config.MergeResourceSpec(base, nil); got != base {
-		t.Fatal("MergeResourceSpec no longer returns its base argument when override is nil. " +
-			"The defensive copy at provision.go:1173 exists solely because it did; " +
-			"re-derive whether it is still needed before removing it.")
 	}
 }
 
