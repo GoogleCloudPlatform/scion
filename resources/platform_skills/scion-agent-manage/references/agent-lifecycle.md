@@ -6,8 +6,8 @@ When to delete an agent, when to stop one, and who may authorize it.
 
 `scion delete <name> --non-interactive` frees the broker slot. `scion list` silently
 truncates at 50 agents — stopped agents count against that ceiling. **Delete is the
-default disposition for a completed agent.** Use `--preserve-branch` when the agent's
-branch may still need review.
+default disposition for a completed agent.** Add `--preserve-branch` to keep the branch
+for later review — but the flag does not push; confirm the branch is on the remote first.
 
 `scion stop` is justified only when you need the agent's terminal state within the
 current work phase — for example, to inspect logs before deciding whether output was

@@ -37,7 +37,7 @@ The best and most current reference for the CLI commands is available from `scio
 
 5. **Interrupt carefully**: The `--interrupt` flag on messages stops current work - use only when necessary.
 
-6. **Preserve branches**: When deleting agents whose work might need review, use `--preserve-branch`.
+6. **Preserve branches**: Use `--preserve-branch` to keep the branch after deletion for later review. The flag does not push — confirm the branch is on the remote first.
 
 ## Briefing
 
