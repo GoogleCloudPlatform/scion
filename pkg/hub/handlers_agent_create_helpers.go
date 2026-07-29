@@ -259,6 +259,20 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 						"agent_id", agent.ID, "harness", hc.Harness)
 				}
 			}
+		} else {
+			// Not-found is not an error here — the broker may still resolve the
+			// name from its own search path — but it must not be silent. A
+			// project's scion.io/default-harness-config annotation now outranks
+			// the template, so a stale or misspelled annotation displaces a
+			// known-good template value and the agent dispatches with no ID or
+			// hash for the broker to hydrate from Hub storage.
+			projectID := ""
+			if project != nil {
+				projectID = project.ID
+			}
+			s.agentLifecycleLog.Warn("harness config not found in project or global scope; "+
+				"agent will be dispatched without a config ID/hash and the broker must resolve it locally",
+				"slug", hcName, "agent_id", agent.ID, "project_id", projectID)
 		}
 	}
 
