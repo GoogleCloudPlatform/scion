@@ -175,12 +175,16 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 		errored[e.URI] = true
 	}
 
+	// Include every ref whose URI errored — the same URI may appear multiple
+	// times under different As aliases, and each alias needs its own resolved
+	// skill back from the fallback. Deduplicating by URI here would silently
+	// drop all but the first alias.
 	retryRefs := make([]api.SkillReference, 0, len(sr.Errors))
-	retried := make(map[string]bool, len(sr.Errors))
+	retriedURIs := make(map[string]bool, len(sr.Errors))
 	for _, ref := range schemeRefs {
-		if errored[ref.URI] && !retried[ref.URI] {
+		if errored[ref.URI] {
 			retryRefs = append(retryRefs, ref)
-			retried[ref.URI] = true
+			retriedURIs[ref.URI] = true
 		}
 	}
 	if len(retryRefs) == 0 {
@@ -204,7 +208,10 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 
 	merged := &ResolveResult{Resolved: sr.Resolved}
 	for _, e := range sr.Errors {
-		if !retried[e.URI] {
+		// Every alias of a retried URI went to the fallback, so the fallback's
+		// outcome fully supersedes the primary's error. Errors for URIs that had
+		// no matching ref (and so were never retried) are preserved.
+		if !retriedURIs[e.URI] {
 			merged.Errors = append(merged.Errors, e)
 		}
 	}

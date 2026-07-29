@@ -534,3 +534,85 @@ func TestRoutingSkillResolver_GitHubFullURL(t *testing.T) {
 		t.Errorf("hub received %d refs, want 0", len(hub.called))
 	}
 }
+
+// echoResolver resolves each ref it is given into its own ResolvedSkill,
+// preserving the ref's As alias. This makes it possible to assert that every
+// alias of a URI — not just the first — reached the fallback.
+type echoResolver struct {
+	name   string
+	called []api.SkillReference
+}
+
+func (m *echoResolver) ResolverName() string { return m.name }
+func (m *echoResolver) Resolve(_ context.Context, refs []api.SkillReference, _ ResolveOpts) (*ResolveResult, error) {
+	m.called = append(m.called, refs...)
+	result := &ResolveResult{}
+	for _, ref := range refs {
+		result.Resolved = append(result.Resolved, ResolvedSkill{
+			Name: "skill",
+			URI:  ref.URI,
+			As:   ref.As,
+		})
+	}
+	return result, nil
+}
+
+// TestRoutingSkillResolver_RegisterFallback_SameURIDifferentAliases guards
+// against dropping aliases when the same URI is imported under two names. The
+// retry set is keyed by ref, not by URI, so both aliases must reach the
+// fallback and both must come back resolved.
+func TestRoutingSkillResolver_RegisterFallback_SameURIDifferentAliases(t *testing.T) {
+	const uri = "gh://owner/repo/skill"
+
+	hub := &mockSchemeResolver{
+		name: "hub",
+		errors: []ResolveError{
+			{URI: uri, Code: "resolve_failed", Message: "hub could not resolve"},
+		},
+	}
+	local := &echoResolver{name: "github"}
+	router := NewRoutingSkillResolver(hub)
+	router.RegisterFallback("gh", local)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: uri, As: "first"},
+		{URI: uri, As: "second"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Both aliases must be handed to the fallback.
+	if len(local.called) != 2 {
+		t.Fatalf("fallback received %d refs, want 2 (one per alias): %+v", len(local.called), local.called)
+	}
+	gotCalled := map[string]bool{}
+	for _, ref := range local.called {
+		gotCalled[ref.As] = true
+	}
+	for _, want := range []string{"first", "second"} {
+		if !gotCalled[want] {
+			t.Errorf("fallback was not asked about alias %q; got %+v", want, local.called)
+		}
+	}
+
+	// Both aliases must come back resolved.
+	if len(result.Resolved) != 2 {
+		t.Fatalf("got %d resolved, want 2 (one per alias): %+v", len(result.Resolved), result.Resolved)
+	}
+	gotResolved := map[string]bool{}
+	for _, rs := range result.Resolved {
+		gotResolved[rs.As] = true
+	}
+	for _, want := range []string{"first", "second"} {
+		if !gotResolved[want] {
+			t.Errorf("alias %q missing from resolved set; got %+v", want, result.Resolved)
+		}
+	}
+
+	// The hub error was fully superseded by the fallback.
+	if len(result.Errors) != 0 {
+		t.Errorf("expected no errors after successful fallback, got %+v", result.Errors)
+	}
+}
