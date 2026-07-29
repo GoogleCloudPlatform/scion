@@ -295,12 +295,12 @@ func TestSkillsResolve_GHRefDedup(t *testing.T) {
 
 	// Three URIs in the same (owner, repo) with the same implicit ref (HEAD)
 	// but different skill paths — the common case for a skill bundle.
-	const n = 3
 	skills := []ResolveSkillRef{
 		{URI: "gh://" + owner + "/" + repo + "/skill-a"},
 		{URI: "gh://" + owner + "/" + repo + "/skill-b"},
 		{URI: "gh://" + owner + "/" + repo + "/skill-c"},
 	}
+	n := len(skills) // derived so assertions stay in sync if the slice grows
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
 		ResolveSkillsRequest{Skills: skills, ProjectID: project.ID})

@@ -1656,6 +1656,10 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 
 	// Resolve ref → commit SHA, reusing a prior lookup if this (owner, repo,
 	// ref, tokenScope) tuple was already resolved within this request.
+	// The separators "/" "@" ":" are safe for GitHub names: owner/repo names
+	// cannot contain "@" or ":", and Git ref names cannot contain ":". The
+	// installID suffix is the same for every URI in one request (shared
+	// projectID → shared installation) but is included for forward-safety.
 	memoKey := ghRef.Owner + "/" + ghRef.Repo + "@" + ghRef.Ref + ":" + installID
 	commitSHA, seen := "", false
 	if refSHAMemo != nil {
