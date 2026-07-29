@@ -27,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"crypto/sha256"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -510,7 +509,7 @@ func hashBytesAs(data []byte, expected string) string {
 	if transfer.IsGitBlobHash(expected) {
 		return transfer.GitBlobHashBytes(data)
 	}
-	return fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+	return transfer.HashBytes(data)
 }
 
 // validateFilePath checks that a relative path is safe for extraction.
