@@ -167,11 +167,25 @@ Templates reference abstract sizes; the alias resolves to a concrete model at
 provision time (available to your script via the manifest's
 `model_resolution`). Provide all four conventional aliases.
 
+Apply the model in `provision.py`: read `ctx.model_resolution["resolved_model"]`,
+fall back to the `SCION_MODEL` env var, resolve it against
+`ctx.harness_config["model_aliases"]` (a raw tier name can still reach the
+container), then write it to the tool's native settings file and/or the env
+overlay. Do **not** pin the tool's model env var in the `env` block below —
+see the precedence note there.
+
 ### Environment
 
 - `env`: static env vars set in the container.
 - `env_template`: values with placeholder expansion — `{{ .AgentName }}`,
   `{{ .AgentHome }}`, `{{ .UnixUsername }}` (only these three).
+
+Precedence: container env (`env`, `env_template`, template/CLI env) beats the
+`env.json` overlay your provisioner writes — the overlay only adds keys that
+are not already set, so a runtime value can never be masked by a harness
+script. That makes the `env` block the wrong place for anything the
+provisioner needs to compute at start time (the selected model, auth-mode
+dependent vars); put the default in `provision.py` instead.
 
 ### Interrupts
 

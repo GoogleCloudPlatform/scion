@@ -37,9 +37,13 @@ This script's job:
   3. Update .claude.json project paths to point at the container workspace.
   4. Translate universal MCP servers into Claude Code's native mcpServers
      format in .claude.json.
-  5. Write outputs/resolved-auth.json describing the chosen method.
-  6. Write outputs/env.json with env vars to project into the harness process
-     (e.g. ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or Vertex AI vars).
+  5. Resolve the requested model (SCION_MODEL / manifest model_resolution),
+     mapping size aliases (small/medium/large/extra-large) through config.yaml's
+     model_aliases, and apply it via ANTHROPIC_MODEL plus ~/.claude/settings.json.
+  6. Write outputs/resolved-auth.json describing the chosen method.
+  7. Write outputs/env.json with env vars to project into the harness process
+     (e.g. ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_MODEL, or
+     Vertex AI vars).
 
 The script is intentionally stdlib-only so it works on any container image
 that ships python3 (declared in config.yaml's required_image_tools).
@@ -65,6 +69,26 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
 
 CLAUDE_JSON_FILE = "~/.claude.json"
 CLAUDE_AUTH_FILE = "~/.claude/.credentials.json"
+CLAUDE_SETTINGS_FILE = "~/.claude/settings.json"
+
+# Model used when the agent config does not request one. This preserves the
+# historical default that used to live in config.yaml's env block
+# (ANTHROPIC_MODEL: "opus"); it now lives here because a static env entry in
+# config.yaml lands in the container environment, and the container
+# environment always wins over the provisioner's env overlay — which made the
+# requested model impossible to apply.
+DEFAULT_MODEL = "opus"
+
+# Single-letter / shorthand spellings accepted for the size aliases declared
+# in config.yaml's model_aliases map.
+MODEL_ALIAS_SHORTHAND = {
+    "s": "small",
+    "m": "medium",
+    "l": "large",
+    "xl": "extra-large",
+    "extra_large": "extra-large",
+    "xlarge": "extra-large",
+}
 
 AUTH = scion_harness.AuthSpec(
     harness="claude",
@@ -212,6 +236,98 @@ def _update_project_paths(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.atomic_write_json(claude_json_path, cfg)
 
 
+def _requested_model(ctx: scion_harness.ProvisionContext) -> str:
+    """Return the model requested for this agent, before alias resolution.
+
+    Prefers the manifest's model_resolution block and falls back to the
+    SCION_MODEL env var that Scion injects into every agent container.
+    """
+    model = str(ctx.model_resolution.get("resolved_model") or "").strip()
+    if model:
+        return model
+    return os.environ.get("SCION_MODEL", "").strip()
+
+
+def _resolve_model_alias(ctx: scion_harness.ProvisionContext, raw_model: str) -> str:
+    """Resolve a size alias (e.g. 'medium') to a concrete Claude model name.
+
+    The mapping comes from config.yaml's model_aliases block, so operators can
+    re-point the tiers without touching this script. A value that is not a
+    known alias (e.g. 'sonnet' or 'claude-sonnet-4-5') is returned unchanged.
+    """
+    if not raw_model:
+        return ""
+
+    aliases = ctx.harness_config.get("model_aliases") or {}
+    if not isinstance(aliases, dict) or not aliases:
+        return raw_model
+
+    normalized = raw_model.strip().lower()
+    normalized = MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
+
+    concrete = aliases.get(normalized)
+    if not concrete or concrete == raw_model:
+        return raw_model
+
+    ctx.info(f"resolved model alias {raw_model!r} → {concrete!r}")
+    return str(concrete)
+
+
+def _apply_model_setting(ctx: scion_harness.ProvisionContext, model: str) -> None:
+    """Write the resolved model into ~/.claude/settings.json.
+
+    ANTHROPIC_MODEL (set via the env overlay) outranks this setting for the
+    supervised session, but the settings file also covers sessions launched by
+    hand inside the container (e.g. the drop-to-shell flow), where the overlay
+    is not applied.
+    """
+    if not model:
+        return
+
+    settings_path = scion_harness.expand_path(CLAUDE_SETTINGS_FILE)
+    settings: dict[str, Any] = {}
+    if os.path.isfile(settings_path):
+        try:
+            settings = scion_harness.load_json(settings_path) or {}
+        except (OSError, json.JSONDecodeError):
+            settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
+
+    if settings.get("model") == model:
+        return
+
+    settings["model"] = model
+    scion_harness.atomic_write_json(settings_path, settings)
+
+
+def _apply_model(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> str:
+    """Resolve the requested model and project it into env + settings.json.
+
+    Returns the concrete model name that was applied.
+    """
+    requested = _requested_model(ctx)
+    model = _resolve_model_alias(ctx, requested) or DEFAULT_MODEL
+
+    preset = os.environ.get("ANTHROPIC_MODEL", "").strip()
+    if requested and preset and preset != model:
+        ctx.warn(
+            f"ANTHROPIC_MODEL is already set to {preset!r} in the container "
+            f"environment and takes precedence over the requested model "
+            f"{model!r}; unset it (or re-run `scion harness-config update claude` "
+            "if it comes from a stale harness-config) to use the requested model"
+        )
+
+    env["ANTHROPIC_MODEL"] = model
+
+    try:
+        _apply_model_setting(ctx, model)
+    except OSError as exc:
+        ctx.warn(f"failed to write model setting: {exc}")
+
+    return model
+
+
 def _build_env_overlay(ctx: scion_harness.ProvisionContext, auth: scion_harness.ResolvedAuth) -> dict[str, str]:
     """Build the env vars overlay for outputs/env.json."""
     if auth.method == "api-key" and auth.env_key:
@@ -245,10 +361,12 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
                 ctx.warn(f"failed to write API key approval: {exc}")
 
     env = _build_env_overlay(ctx, auth)
+    model = _apply_model(ctx, env)
     extra: dict[str, Any] | None = None
     if auth.method == "vertex-ai":
         extra = {"vertex_ai": True}
     ctx.write_outputs(auth, env=env, extra=extra)
+    ctx.info(f"method={auth.method} model={model}")
 
     mcp_mapping = dict(CLAUDE_MCP_MAPPING)
     mcp_mapping["project_config_path"] = f"projects.{ctx.workspace}.mcpServers"
