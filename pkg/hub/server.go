@@ -537,6 +537,34 @@ type RemoteAgentConfig struct {
 	// inlined at agent-create time. The broker writes it to
 	// pre-start.d/30-project-custom before the agent starts.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
+
+	// HubAgentDefaults carries the hub's operational agent_defaults for
+	// application at the broker's LOW-precedence defaults tier — deliberately
+	// not folded into InlineConfig, which is a top-of-chain slot.
+	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+}
+
+// RemoteHubAgentDefaults carries the four limit/resource operational
+// agent_defaults from the hub to a runtime broker.
+//
+// Only the fields that need no hub-side resolution travel here.
+// default_template and default_harness_config are absent by design: the hub
+// must resolve those itself so it can stamp TemplateID/TemplateHash and
+// HarnessConfigID/HarnessConfigHash, and they therefore ride the existing
+// AppliedConfig ladder instead.
+//
+// Version skew is safe by construction: a broker that predates this field
+// ignores the unknown JSON key, so hub defaults simply do not apply — which is
+// exactly today's behaviour. No capability negotiation is needed.
+//
+// Field-for-field JSON-compatible with api.HubAgentDefaults, which is the type
+// the broker decodes into; TestRemoteHubAgentDefaults_WireCompatibleWithBroker
+// pins that.
+type RemoteHubAgentDefaults struct {
+	MaxTurns      int               `json:"maxTurns,omitempty"`
+	MaxModelCalls int               `json:"maxModelCalls,omitempty"`
+	MaxDuration   string            `json:"maxDuration,omitempty"`
+	Resources     *api.ResourceSpec `json:"resources,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -1961,6 +1989,12 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// manifests when the shared GCS bucket was updated by another hub.
 	dispatcher.SetHarnessConfigRepairer(s.syncHarnessConfigFromStorage)
 	dispatcher.SetTemplateRepairer(s.syncTemplateFromStorage)
+
+	// Wire the hub's operational agent_defaults so dispatch can carry the
+	// limit/resource ones to the broker's low-precedence tier. The accessor
+	// takes s.mu; it returns the zero value in file mode, where the wire field
+	// is then omitted and broker behaviour is unchanged.
+	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
 
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())

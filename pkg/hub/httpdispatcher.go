@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -162,6 +163,13 @@ type HTTPAgentDispatcher struct {
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
 	harnessConfigRepairer func(ctx context.Context, name string) error
 	templateRepairer      func(ctx context.Context, ref string) error
+
+	// hubAgentDefaultsProvider returns the hub's operational agent_defaults at
+	// dispatch time. A callback rather than a snapshot because the settings
+	// propagation goroutine rewrites them while the hub runs; the Server's
+	// accessor reads under its lock. Nil = no hub defaults (local dispatcher,
+	// tests) and the wire field is omitted.
+	hubAgentDefaultsProvider func() opsettings.AgentDefaultsSettings
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -247,6 +255,13 @@ func (d *HTTPAgentDispatcher) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
 // DB manifest from storage when a hash mismatch is detected during dispatch.
 func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Context, name string) error) {
 	d.harnessConfigRepairer = fn
+}
+
+// SetHubAgentDefaultsProvider registers the accessor for the hub's operational
+// agent_defaults, read on every dispatch so a settings change takes effect
+// without a restart. Mirrors SetHarnessConfigRepairer.
+func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.AgentDefaultsSettings) {
+	d.hubAgentDefaultsProvider = fn
 }
 
 // SetImageRegistry sets the image registry prefix for rewriting bare image
@@ -467,6 +482,17 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			GCPIdentity:               remoteGCPIdentity,
 			ProjectPreStartHookScript: agent.AppliedConfig.ProjectPreStartHookScript,
 		}
+
+		// Hub operational agent_defaults (limits/resources only) travel in
+		// their own low-rank slot, NOT in InlineConfig: InlineConfig lands in
+		// the override position at provision.go's merge and would let a
+		// hub-wide floor outrank a template's explicit max_turns. The broker
+		// applies these below the template and above its own settings.yaml
+		// defaults. Nil in file mode — see remoteHubAgentDefaults.
+		if d.hubAgentDefaultsProvider != nil {
+			req.Config.HubAgentDefaults = remoteHubAgentDefaults(d.hubAgentDefaultsProvider())
+		}
+
 		req.ResolvedEnv = agent.AppliedConfig.Env
 
 		// Thread through the full inline ScionConfig for broker-side provisioning
