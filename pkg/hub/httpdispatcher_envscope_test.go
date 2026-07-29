@@ -155,6 +155,220 @@ func TestEnvScopeSourceLabel(t *testing.T) {
 	}
 }
 
+// ladderTodayAtPhase9 and ladder4Biii are written out in full rather than read
+// from envScopePrecedence, so the collision tests below assert against a ladder
+// they control. A test that took its input AND its expectation from the same
+// global would pass under any ordering, which is the one thing these must not
+// do: the warning they cover exists precisely because the ordering moved.
+var (
+	ladderTodayAtPhase9 = []string{store.ScopeHub, store.ScopeProject, store.ScopeUser, store.ScopeRuntimeBroker}
+	ladder4Biii         = []string{store.ScopeRuntimeBroker, store.ScopeHub, store.ScopeProject, store.ScopeUser}
+)
+
+// TestEnvScopesOutranking covers the helper that decides who beats whom,
+// including the two empty results that mean different things: nil for "this
+// scope is not on the ladder at all" and an empty-but-non-nil slice for "this
+// scope is the top of the ladder". Collapsing those two would make an unknown
+// scope look like the highest-precedence one.
+func TestEnvScopesOutranking(t *testing.T) {
+	t.Run("mid ladder", func(t *testing.T) {
+		got := envScopesOutranking(ladderTodayAtPhase9, store.ScopeProject)
+		want := []string{store.ScopeUser, store.ScopeRuntimeBroker}
+		if len(got) != len(want) {
+			t.Fatalf("envScopesOutranking(project) = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("top of ladder is empty but not nil", func(t *testing.T) {
+		got := envScopesOutranking(ladderTodayAtPhase9, store.ScopeRuntimeBroker)
+		if got == nil {
+			t.Fatal("envScopesOutranking returned nil for the top scope, want empty non-nil")
+		}
+		if len(got) != 0 {
+			t.Errorf("envScopesOutranking(runtime_broker) = %v, want empty", got)
+		}
+	})
+
+	t.Run("bottom of 4-B(iii) ladder is outranked by everything", func(t *testing.T) {
+		got := envScopesOutranking(ladder4Biii, store.ScopeRuntimeBroker)
+		want := []string{store.ScopeHub, store.ScopeProject, store.ScopeUser}
+		if len(got) != len(want) {
+			t.Fatalf("envScopesOutranking(runtime_broker) = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("scope absent from ladder is nil", func(t *testing.T) {
+		if got := envScopesOutranking(ladderTodayAtPhase9, "not-a-scope"); got != nil {
+			t.Errorf("envScopesOutranking(absent) = %v, want nil", got)
+		}
+	})
+}
+
+// TestEnvScopeCollisions covers the pure core of the startup shadow warning.
+//
+// The first subtest is the load-bearing one and it is a NEGATIVE CONTROL for
+// the rest: under a ladder where nothing outranks runtime_broker, a key defined
+// in every scope must produce NO collisions. Without it, a function that simply
+// reported every duplicated key would pass all the positive cases below.
+func TestEnvScopeCollisions(t *testing.T) {
+	brokerVar := func(key, id string) store.EnvVar {
+		return store.EnvVar{Key: key, Value: "v", Scope: store.ScopeRuntimeBroker, ScopeID: id}
+	}
+
+	t.Run("nothing outranks broker: no collisions even when every scope defines the key", func(t *testing.T) {
+		vars := []store.EnvVar{
+			brokerVar("SHARED_KEY", "broker-1"),
+			{Key: "SHARED_KEY", Value: "v", Scope: store.ScopeHub, ScopeID: "hub-1"},
+			{Key: "SHARED_KEY", Value: "v", Scope: store.ScopeProject, ScopeID: "project-1"},
+			{Key: "SHARED_KEY", Value: "v", Scope: store.ScopeUser, ScopeID: "user-1"},
+		}
+		if got := envScopeCollisions(ladderTodayAtPhase9, store.ScopeRuntimeBroker, vars); len(got) != 0 {
+			t.Errorf("envScopeCollisions = %+v, want none (broker is top of this ladder)", got)
+		}
+	})
+
+	t.Run("same input under 4-B(iii) reports the key", func(t *testing.T) {
+		vars := []store.EnvVar{
+			brokerVar("SHARED_KEY", "broker-1"),
+			{Key: "SHARED_KEY", Value: "v", Scope: store.ScopeHub, ScopeID: "hub-1"},
+			{Key: "SHARED_KEY", Value: "v", Scope: store.ScopeUser, ScopeID: "user-1"},
+		}
+		got := envScopeCollisions(ladder4Biii, store.ScopeRuntimeBroker, vars)
+		if len(got) != 1 {
+			t.Fatalf("envScopeCollisions returned %d collisions (%+v), want 1", len(got), got)
+		}
+		if got[0].Key != "SHARED_KEY" {
+			t.Errorf("Key = %q, want SHARED_KEY", got[0].Key)
+		}
+		if len(got[0].ScopeIDs) != 1 || got[0].ScopeIDs[0] != "broker-1" {
+			t.Errorf("ScopeIDs = %v, want [broker-1]", got[0].ScopeIDs)
+		}
+		// Reported in ladder order, not alphabetical: hub before user.
+		want := []string{store.ScopeHub, store.ScopeUser}
+		if len(got[0].OutrankedBy) != len(want) {
+			t.Fatalf("OutrankedBy = %v, want %v", got[0].OutrankedBy, want)
+		}
+		for i := range want {
+			if got[0].OutrankedBy[i] != want[i] {
+				t.Errorf("OutrankedBy[%d] = %q, want %q", i, got[0].OutrankedBy[i], want[i])
+			}
+		}
+	})
+
+	t.Run("broker-only key is not a collision", func(t *testing.T) {
+		vars := []store.EnvVar{brokerVar("BROKER_ONLY_KEY", "broker-1")}
+		if got := envScopeCollisions(ladder4Biii, store.ScopeRuntimeBroker, vars); len(got) != 0 {
+			t.Errorf("envScopeCollisions = %+v, want none", got)
+		}
+	})
+
+	t.Run("higher-scope-only key is not a collision", func(t *testing.T) {
+		vars := []store.EnvVar{{Key: "USER_ONLY_KEY", Value: "v", Scope: store.ScopeUser, ScopeID: "user-1"}}
+		if got := envScopeCollisions(ladder4Biii, store.ScopeRuntimeBroker, vars); len(got) != 0 {
+			t.Errorf("envScopeCollisions = %+v, want none", got)
+		}
+	})
+
+	t.Run("multiple brokers and deterministic key order", func(t *testing.T) {
+		vars := []store.EnvVar{
+			brokerVar("ZEBRA_KEY", "broker-2"),
+			brokerVar("ZEBRA_KEY", "broker-1"),
+			brokerVar("ALPHA_KEY", "broker-1"),
+			{Key: "ZEBRA_KEY", Value: "v", Scope: store.ScopeProject, ScopeID: "project-1"},
+			{Key: "ALPHA_KEY", Value: "v", Scope: store.ScopeProject, ScopeID: "project-1"},
+		}
+		got := envScopeCollisions(ladder4Biii, store.ScopeRuntimeBroker, vars)
+		if len(got) != 2 {
+			t.Fatalf("envScopeCollisions returned %d collisions (%+v), want 2", len(got), got)
+		}
+		if got[0].Key != "ALPHA_KEY" || got[1].Key != "ZEBRA_KEY" {
+			t.Errorf("keys = %q, %q; want ALPHA_KEY, ZEBRA_KEY (sorted)", got[0].Key, got[1].Key)
+		}
+		if len(got[1].ScopeIDs) != 2 || got[1].ScopeIDs[0] != "broker-1" || got[1].ScopeIDs[1] != "broker-2" {
+			t.Errorf("ZEBRA_KEY ScopeIDs = %v, want [broker-1 broker-2] sorted", got[1].ScopeIDs)
+		}
+	})
+
+	t.Run("identical values still collide: over-reporting is deliberate", func(t *testing.T) {
+		vars := []store.EnvVar{
+			{Key: "SAME", Value: "identical", Scope: store.ScopeRuntimeBroker, ScopeID: "broker-1"},
+			{Key: "SAME", Value: "identical", Scope: store.ScopeUser, ScopeID: "user-1"},
+		}
+		if got := envScopeCollisions(ladder4Biii, store.ScopeRuntimeBroker, vars); len(got) != 1 {
+			t.Errorf("envScopeCollisions = %+v, want 1; matching on key alone is intended", got)
+		}
+	})
+}
+
+// TestListEnvVars_EmptyScopeIDReturnsEveryID pins the store behaviour that
+// WarnOutrankedBrokerEnvKeys depends on: one query per scope, with ScopeID left
+// empty, must return that scope's vars across every scope ID. If the store ever
+// started treating an empty ScopeID as "match the empty ID", the warning would
+// go silent with no error — a false green of exactly the kind this workstream
+// keeps finding.
+func TestListEnvVars_EmptyScopeIDReturnsEveryID(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	for _, brokerID := range []string{"broker-a", "broker-b"} {
+		if _, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
+			ID: api.NewUUID(), Key: "SHARED_KEY", Value: "v",
+			Scope: store.ScopeRuntimeBroker, ScopeID: brokerID,
+		}); err != nil {
+			t.Fatalf("seeding %s: %v", brokerID, err)
+		}
+	}
+	// A var in a different scope, to prove the Scope filter is still applied.
+	if _, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
+		ID: api.NewUUID(), Key: "SHARED_KEY", Value: "v",
+		Scope: store.ScopeUser, ScopeID: "user-1",
+	}); err != nil {
+		t.Fatalf("seeding user scope: %v", err)
+	}
+
+	got, err := memStore.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeRuntimeBroker})
+	if err != nil {
+		t.Fatalf("ListEnvVars: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListEnvVars(scope=runtime_broker, no ID) returned %d vars (%+v), want 2", len(got), got)
+	}
+	for _, v := range got {
+		if v.Scope != store.ScopeRuntimeBroker {
+			t.Errorf("got a %s-scoped var back from a runtime_broker query: %+v", v.Scope, v)
+		}
+	}
+}
+
+// TestWarnOutrankedBrokerEnvKeys_RunsAgainstTheCompiledLadder exercises the
+// exported entry point end to end against real storage. It asserts only that it
+// completes without error, because whether it finds anything is a property of
+// envScopePrecedence: the per-ladder behaviour is pinned by
+// TestEnvScopeCollisions, which controls its own ladder.
+func TestWarnOutrankedBrokerEnvKeys_RunsAgainstTheCompiledLadder(t *testing.T) {
+	ctx := context.Background()
+	d, _ := newEnvScopeDispatcher(t, "SHARED_KEY", map[string]string{
+		store.ScopeHub:           "from-hub",
+		store.ScopeProject:       "from-project",
+		store.ScopeUser:          "from-user",
+		store.ScopeRuntimeBroker: "from-broker",
+	})
+
+	if err := d.WarnOutrankedBrokerEnvKeys(ctx); err != nil {
+		t.Errorf("WarnOutrankedBrokerEnvKeys: %v", err)
+	}
+}
+
 // TestResolveEnvFromStorage_ScopePrecedence is the executable statement of the
 // hub env-var scope precedence contract: one key defined in all four scopes,
 // asserting which scope wins.
@@ -184,22 +398,38 @@ func TestResolveEnvFromStorage_ScopePrecedence(t *testing.T) {
 	}
 }
 
-// TestResolveEnvFromStorage_PairwisePrecedence pins each adjacent rung of the
-// precedence ladder independently, so a reordering cannot be masked by the
-// all-four-scopes case alone.
+// TestResolveEnvFromStorage_PairwisePrecedence is acceptance criterion 18, and
+// it seeds ONLY the two scopes named in each case, so every pair is
+// discriminated DIRECTLY rather than held up by transitivity through the rest
+// of the ladder. Four scopes, six unordered pairs, all six present.
+//
+// Why pairwise and not the all-four case: `sp-rev2` mutated the implementation
+// and showed that "a key defined in all four scopes resolves to the scope the
+// doc comment names" survives BOTH swapping user with project AND deleting user
+// from the ladder outright. The all-four case pins the WINNER, not the ORDER —
+// everything below the top scope is unconstrained by it. Only a two-scope
+// fixture can fail when two scopes swap.
+//
+// The pairs are deliberately not limited to adjacent rungs. Transitivity is
+// free only while the implementation is a total-order ladder, which
+// envScopePrecedence is today; the criterion has to outlive that shape.
 func TestResolveEnvFromStorage_PairwisePrecedence(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
-		name   string
-		values map[string]string
-		want   string
+		name string
+		// changesUnder4B marks the pairs that invert when runtime_broker is
+		// demoted (design §3.4 variant 4-B, target (iii)). They are the
+		// red-before/green-after set for that change; the others must not move.
+		changesUnder4B bool
+		values         map[string]string
+		want           string
 	}{
-		{"project beats hub", map[string]string{store.ScopeHub: "from-hub", store.ScopeProject: "from-project"}, "from-project"},
-		{"user beats project", map[string]string{store.ScopeProject: "from-project", store.ScopeUser: "from-user"}, "from-user"},
-		{"broker beats user", map[string]string{store.ScopeUser: "from-user", store.ScopeRuntimeBroker: "from-broker"}, "from-broker"},
-		{"broker beats hub", map[string]string{store.ScopeHub: "from-hub", store.ScopeRuntimeBroker: "from-broker"}, "from-broker"},
-		{"user beats hub", map[string]string{store.ScopeHub: "from-hub", store.ScopeUser: "from-user"}, "from-user"},
-		{"broker beats project", map[string]string{store.ScopeProject: "from-project", store.ScopeRuntimeBroker: "from-broker"}, "from-broker"},
+		{"project beats hub", false, map[string]string{store.ScopeHub: "from-hub", store.ScopeProject: "from-project"}, "from-project"},
+		{"user beats hub", false, map[string]string{store.ScopeHub: "from-hub", store.ScopeUser: "from-user"}, "from-user"},
+		{"user beats project", false, map[string]string{store.ScopeProject: "from-project", store.ScopeUser: "from-user"}, "from-user"},
+		{"broker vs hub", true, map[string]string{store.ScopeHub: "from-hub", store.ScopeRuntimeBroker: "from-broker"}, "from-broker"},
+		{"broker vs project", true, map[string]string{store.ScopeProject: "from-project", store.ScopeRuntimeBroker: "from-broker"}, "from-broker"},
+		{"broker vs user", true, map[string]string{store.ScopeUser: "from-user", store.ScopeRuntimeBroker: "from-broker"}, "from-broker"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -239,13 +469,27 @@ func TestBuildEnvSources_ReportsBrokerScope(t *testing.T) {
 	}
 }
 
-// TestEnvSources_AgreesWithResolver is the anti-drift test: for every subset of
-// scopes that may define a key, the source reported by buildEnvSources must be
-// the scope the winning value actually came from in resolveEnvFromStorage.
+// TestEnvSources_AgreesWithResolver is a DRIFT GUARD. IT IS NOT A CORRECTNESS
+// CHECK, AND IT MUST NEVER BE COUNTED AS ONE.
 //
-// It derives the expected source from the resolved VALUE rather than from a
-// hard-coded ordering, so it keeps holding if the ordering is deliberately
-// changed — the two functions are required to agree, whatever the order is.
+// For every subset of scopes that may define a key, the source reported by
+// buildEnvSources must be the scope the winning value actually came from in
+// resolveEnvFromStorage. But it derives its expectation FROM the resolved
+// value, so resolver and reporter stay in agreement even when both are wrong
+// together — design Class F. `sp-rev2` confirmed this by mutation: all fifteen
+// subsets survived an ordering change that a correctness test must catch.
+//
+// It guards even LESS since the ordering was extracted into
+// envScopesInPrecedenceOrder, because both sides now range over the same list:
+// the drift it was written to detect is close to structurally impossible. That
+// is a reason to keep it cheap and to be honest about what it buys, not a
+// reason to delete it — it still catches a reporter that stops consulting the
+// shared helper, mislabels a scope, or applies the config rung in the wrong
+// place, none of which the ordering extraction prevents.
+//
+// The correctness of the ORDER is TestResolveEnvFromStorage_PairwisePrecedence
+// (criterion 18). If you are looking for the test that would fail if the ladder
+// were wrong, it is that one, not this one.
 func TestEnvSources_AgreesWithResolver(t *testing.T) {
 	ctx := context.Background()
 
