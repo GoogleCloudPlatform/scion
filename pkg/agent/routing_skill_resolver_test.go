@@ -616,3 +616,140 @@ func TestRoutingSkillResolver_RegisterFallback_SameURIDifferentAliases(t *testin
 		t.Errorf("expected no errors after successful fallback, got %+v", result.Errors)
 	}
 }
+
+// TestRoutingSkillResolver_RegisterFallback_SilentDrop covers a primary
+// resolver that returns fewer skills than it was asked for *without* reporting
+// any per-URI error. Gating the fallback retry on len(sr.Errors) > 0 would miss
+// this entirely and hand back a short result; gating on
+// len(sr.Resolved) < len(schemeRefs) catches it.
+//
+// Two shapes of silent drop are exercised:
+//   - a URI omitted outright, with no matching error
+//   - a URI returned under only one of its two As aliases
+func TestRoutingSkillResolver_RegisterFallback_SilentDrop(t *testing.T) {
+	t.Run("ref omitted with no error", func(t *testing.T) {
+		const kept = "gh://owner/repo/kept"
+		const dropped = "gh://owner/repo/dropped"
+
+		// Hub resolves one ref and silently forgets the other — no error at all.
+		hub := &mockSchemeResolver{
+			name: "hub",
+			resolved: []ResolvedSkill{
+				{Name: "kept", URI: kept},
+			},
+		}
+		local := &echoResolver{name: "github"}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		result, err := router.Resolve(context.Background(), []api.SkillReference{
+			{URI: kept},
+			{URI: dropped},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Only the dropped ref should be retried — the resolved one must not be
+		// re-fetched from the fallback.
+		if len(local.called) != 1 {
+			t.Fatalf("fallback received %d refs, want 1: %+v", len(local.called), local.called)
+		}
+		if local.called[0].URI != dropped {
+			t.Errorf("fallback asked about %q, want %q", local.called[0].URI, dropped)
+		}
+
+		if len(result.Resolved) != 2 {
+			t.Fatalf("got %d resolved, want 2: %+v", len(result.Resolved), result.Resolved)
+		}
+		gotURIs := map[string]bool{}
+		for _, rs := range result.Resolved {
+			gotURIs[rs.URI] = true
+		}
+		for _, want := range []string{kept, dropped} {
+			if !gotURIs[want] {
+				t.Errorf("URI %q missing from resolved set; got %+v", want, result.Resolved)
+			}
+		}
+		if len(result.Errors) != 0 {
+			t.Errorf("expected no errors, got %+v", result.Errors)
+		}
+	})
+
+	t.Run("alias omitted with no error", func(t *testing.T) {
+		const uri = "gh://owner/repo/skill"
+
+		// Hub collapses two aliases of the same URI into a single entry and
+		// reports no error for the alias it dropped.
+		hub := &mockSchemeResolver{
+			name: "hub",
+			resolved: []ResolvedSkill{
+				{Name: "skill", URI: uri, As: "first"},
+			},
+		}
+		local := &echoResolver{name: "github"}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		result, err := router.Resolve(context.Background(), []api.SkillReference{
+			{URI: uri, As: "first"},
+			{URI: uri, As: "second"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// The alias hub already resolved must not be retried; the missing one must.
+		if len(local.called) != 1 {
+			t.Fatalf("fallback received %d refs, want 1 (only the dropped alias): %+v", len(local.called), local.called)
+		}
+		if local.called[0].As != "second" {
+			t.Errorf("fallback asked about alias %q, want %q", local.called[0].As, "second")
+		}
+
+		if len(result.Resolved) != 2 {
+			t.Fatalf("got %d resolved, want 2 (one per alias): %+v", len(result.Resolved), result.Resolved)
+		}
+		gotAliases := map[string]bool{}
+		for _, rs := range result.Resolved {
+			gotAliases[rs.As] = true
+		}
+		for _, want := range []string{"first", "second"} {
+			if !gotAliases[want] {
+				t.Errorf("alias %q missing from resolved set; got %+v", want, result.Resolved)
+			}
+		}
+		if len(result.Errors) != 0 {
+			t.Errorf("expected no errors, got %+v", result.Errors)
+		}
+	})
+
+	t.Run("no retry when every ref is accounted for", func(t *testing.T) {
+		const uri = "gh://owner/repo/skill"
+
+		hub := &mockSchemeResolver{
+			name: "hub",
+			resolved: []ResolvedSkill{
+				{Name: "skill", URI: uri, As: "first"},
+				{Name: "skill", URI: uri, As: "second"},
+			},
+		}
+		local := &echoResolver{name: "github"}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		result, err := router.Resolve(context.Background(), []api.SkillReference{
+			{URI: uri, As: "first"},
+			{URI: uri, As: "second"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(local.called) != 0 {
+			t.Errorf("fallback should not have been called, got %+v", local.called)
+		}
+		if len(result.Resolved) != 2 {
+			t.Errorf("got %d resolved, want 2: %+v", len(result.Resolved), result.Resolved)
+		}
+	})
+}

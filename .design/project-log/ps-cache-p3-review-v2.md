@@ -65,3 +65,71 @@ Before `router.Register("gh", ...)` → `router.RegisterFallback("gh", ...)` is 
 3. `ctx` timeout issue (I-4) addressed
 4. Broker integration test: Hub success path for `gh://` (currently zero coverage of handlers.go:760)
 5. Hub integration test: two sequential resolve calls → 1 GitHub API call (Phase 2 acceptance criterion)
+
+---
+
+## Gemini PR feedback fixes
+
+Applied to `pkg/agent/routing_skill_resolver.go` (branch `scion/ps-cache-p3`).
+
+### 1. Silently omitted refs now trigger the fallback retry (closes I-6)
+
+The fallback retry was gated on `len(sr.Errors) > 0`. If Hub returned a short
+result with no matching error entry — a URI dropped outright, or two `As`
+aliases of one URI collapsed into a single `ResolvedSkill` — the router
+accepted the truncated result and the ref vanished from the install set with no
+error surfaced to the caller.
+
+Gate is now `len(sr.Resolved) < len(schemeRefs)`: any shortfall between refs
+requested and skills returned triggers the retry, whether or not the primary
+bothered to explain itself.
+
+### 2. Retry set keyed by (URI, As), not by URI
+
+`retryErrorsWithFallback` built an `errored map[string]bool` from `sr.Errors`
+and retried refs whose URI appeared in it. That could only ever retry refs the
+primary explicitly errored on, and treated all aliases of a URI as a unit.
+
+Replaced with a `resolvedRefs map[string]int` built from `sr.Resolved`, keyed by
+`refKey(uri, as)` = `uri + "\x00" + as`. Each ref in `schemeRefs` consumes one
+matching resolved slot; refs with no slot left are retried. Consequences:
+
+- An alias the primary omitted is retried even when its sibling alias resolved.
+- An alias the primary *did* resolve is **not** re-fetched from the fallback
+  (avoids the duplicate-work half of I-2/NB-1).
+- Counts rather than booleans, so a genuinely duplicated `(URI, As)` pair in the
+  request is matched one-for-one instead of collapsing.
+
+Error merging is unchanged in shape: primary errors for URIs that were retried
+are superseded by the fallback's outcome; errors for URIs never retried are
+preserved. `\x00` cannot occur in a URI or a skill alias, so the key is
+unambiguous.
+
+### 3. Log message corrected
+
+`"primary skill resolver reported errors, retrying..."` →
+`"primary skill resolver did not resolve all refs, retrying..."`, since the
+retry no longer implies the primary reported anything.
+
+### Test coverage
+
+Added `TestRoutingSkillResolver_RegisterFallback_SilentDrop` with three subtests:
+
+| Subtest | Scenario | Asserts |
+|---|---|---|
+| `ref omitted with no error` | Hub returns 1 of 2 refs, no errors | Only the dropped URI is retried; both come back resolved; no errors |
+| `alias omitted with no error` | Hub returns `As:"first"` only, no errors | Only `As:"second"` is retried; both aliases resolved |
+| `no retry when every ref is accounted for` | Hub returns both aliases | Fallback never called |
+
+The second subtest is the direct regression guard for the old gate — under
+`len(sr.Errors) > 0` the fallback is never invoked and the result is short by
+one alias.
+
+Existing tests unchanged and passing, including
+`TestRoutingSkillResolver_RegisterFallback_SameURIDifferentAliases` (both
+aliases still reach the fallback when Hub errors on the URI).
+
+**Status:** `go vet ./pkg/agent/...` clean; `go test ./pkg/agent/...` fully green.
+
+**Note:** I-4 (shared `ctx` between Hub call and fallback) is *not* addressed
+here and remains an open entry-criterion item.

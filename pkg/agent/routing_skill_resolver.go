@@ -147,7 +147,10 @@ func (r *RoutingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 			if err != nil {
 				return nil, fmt.Errorf("fallback resolver for scheme %q failed: %w", scheme, err)
 			}
-		} else if fb != nil && len(sr.Errors) > 0 {
+		} else if fb != nil && len(sr.Resolved) < len(schemeRefs) {
+			// Fewer resolved skills than refs means the primary either reported
+			// per-URI errors or silently omitted refs (e.g. dropped a duplicate
+			// URI carrying a distinct As alias). Both cases need a fallback retry.
 			sr = r.retryErrorsWithFallback(ctx, scheme, resolver, fb, schemeRefs, sr, opts)
 		}
 		result.Resolved = append(result.Resolved, sr.Resolved...)
@@ -157,11 +160,16 @@ func (r *RoutingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 	return result, nil
 }
 
-// retryErrorsWithFallback re-resolves the URIs that the primary resolver
-// reported per-URI errors for, using the scheme's fallback resolver. Errors for
-// retried URIs are replaced by the fallback's outcome; errors for URIs the
-// fallback was not asked about are preserved. If the fallback itself fails, the
-// primary's result is returned unchanged.
+// retryErrorsWithFallback re-resolves every ref the primary resolver did not
+// account for, using the scheme's fallback resolver. A ref is considered
+// unaccounted for when the primary returned no ResolvedSkill matching its
+// (URI, As) pair — whether because the primary reported an explicit per-URI
+// error, or because it silently omitted the ref from its result (for example
+// by collapsing two aliases of the same URI into a single entry).
+//
+// Errors for retried URIs are replaced by the fallback's outcome; errors for
+// URIs the fallback was not asked about are preserved. If the fallback itself
+// fails, the primary's result is returned unchanged.
 func (r *RoutingSkillResolver) retryErrorsWithFallback(
 	ctx context.Context,
 	scheme string,
@@ -170,28 +178,31 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 	sr *ResolveResult,
 	opts ResolveOpts,
 ) *ResolveResult {
-	errored := make(map[string]bool, len(sr.Errors))
-	for _, e := range sr.Errors {
-		errored[e.URI] = true
+	// Key resolved skills by (URI, As) so that two aliases of the same URI are
+	// tracked independently: resolving one alias must not mask the other's
+	// absence. Counts handle the case where the same (URI, As) pair legitimately
+	// appears more than once in the request.
+	resolvedRefs := make(map[string]int, len(sr.Resolved))
+	for _, rs := range sr.Resolved {
+		resolvedRefs[refKey(rs.URI, rs.As)]++
 	}
 
-	// Include every ref whose URI errored — the same URI may appear multiple
-	// times under different As aliases, and each alias needs its own resolved
-	// skill back from the fallback. Deduplicating by URI here would silently
-	// drop all but the first alias.
-	retryRefs := make([]api.SkillReference, 0, len(sr.Errors))
-	retriedURIs := make(map[string]bool, len(sr.Errors))
+	retryRefs := make([]api.SkillReference, 0, len(schemeRefs)-len(sr.Resolved))
+	retriedURIs := make(map[string]bool, len(schemeRefs))
 	for _, ref := range schemeRefs {
-		if errored[ref.URI] {
-			retryRefs = append(retryRefs, ref)
-			retriedURIs[ref.URI] = true
+		key := refKey(ref.URI, ref.As)
+		if resolvedRefs[key] > 0 {
+			resolvedRefs[key]--
+			continue
 		}
+		retryRefs = append(retryRefs, ref)
+		retriedURIs[ref.URI] = true
 	}
 	if len(retryRefs) == 0 {
 		return sr
 	}
 
-	slog.Info("primary skill resolver reported errors, retrying with fallback resolver",
+	slog.Info("primary skill resolver did not resolve all refs, retrying with fallback resolver",
 		"scheme", scheme,
 		"primary", resolverNameOf(primary),
 		"fallback", resolverNameOf(fb),
@@ -208,9 +219,9 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 
 	merged := &ResolveResult{Resolved: sr.Resolved}
 	for _, e := range sr.Errors {
-		// Every alias of a retried URI went to the fallback, so the fallback's
-		// outcome fully supersedes the primary's error. Errors for URIs that had
-		// no matching ref (and so were never retried) are preserved.
+		// Every unresolved alias of a retried URI went to the fallback, so the
+		// fallback's outcome supersedes the primary's error. Errors for URIs that
+		// had no matching ref (and so were never retried) are preserved.
 		if !retriedURIs[e.URI] {
 			merged.Errors = append(merged.Errors, e)
 		}
@@ -218,6 +229,12 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 	merged.Resolved = append(merged.Resolved, fr.Resolved...)
 	merged.Errors = append(merged.Errors, fr.Errors...)
 	return merged
+}
+
+// refKey builds a map key identifying a skill reference by URI and alias. The
+// NUL separator cannot appear in either component, so the key is unambiguous.
+func refKey(uri, as string) string {
+	return uri + "\x00" + as
 }
 
 // resolverNameOf returns a resolver's name for logging. SkillResolver does not
