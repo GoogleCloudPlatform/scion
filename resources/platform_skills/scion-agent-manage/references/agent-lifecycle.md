@@ -6,15 +6,16 @@ When to delete an agent, when to stop one, and who may authorize it.
 
 `scion delete <name> --non-interactive` frees the broker slot. `scion list` silently
 truncates at 50 agents — stopped agents count against that ceiling. **Delete is the
-default disposition for a completed agent.** Use `--preserve-branch` when the agent's
-branch may still need review.
+default disposition for a completed agent.** Add `--preserve-branch` to keep the branch
+for later review — but the flag does not push; confirm the branch is on the remote first.
 
 `scion stop` is justified only when you need the agent's terminal state within the
 current work phase — for example, to inspect logs before deciding whether output was
 accepted. Time-box it; do not leave agents stopped indefinitely.
 
 > **Deleting an agent is safe because its deliverable is an artifact** — commits pushed
-> to the remote, files written to the scratchpad, PRs opened. These survive deletion.
+> to the remote, files written to a shared volume the container's deletion cannot reach,
+> PRs opened. These survive deletion.
 > A commit that was never pushed is local to the container and dies with it — committed
 > is not the same as pushed. Terminal logs do not survive either, and should not need
 > to — they are not the audit trail.
@@ -67,4 +68,4 @@ accepted. Time-box it; do not leave agents stopped indefinitely.
 - **Leaving agents stopped for audit trail.** Commit findings to files instead. Stopped
   agents consume broker slots and count against the 50-agent list ceiling.
 - **Deleting an agent with unpushed work.** Always verify work is pushed to the
-  remote (not just committed locally) or written to the scratchpad before deletion.
+  remote (not just committed locally) or written to a shared volume before deletion.
