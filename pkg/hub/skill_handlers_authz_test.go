@@ -275,7 +275,7 @@ func TestSkillAuthz_Resolve_GH_BrokerAllowed(t *testing.T) {
 	}))
 
 	body, err := json.Marshal(ResolveSkillsRequest{
-		Skills:    []ResolveSkillRef{{URI: "gh://acme/private-repo/skills/secret"}},
+		Skills:    []ResolveSkillRef{{URI: "gh://acme/private-repo/secret"}},
 		ProjectID: project.ID,
 	})
 	require.NoError(t, err)
@@ -294,8 +294,10 @@ func TestSkillAuthz_Resolve_GH_BrokerAllowed(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	// The broker must clear the authz gate. Resolution itself still fails in
-	// this test (no GitHub App is configured), so assert on the error *code*:
-	// anything but "forbidden" means the authz check let the broker through.
+	// this test (no GitHub App is configured; ghServer returns 404), so assert
+	// on the error *code*: anything but "forbidden" means the authz check let
+	// the broker through.
+	require.NotEmpty(t, resp.Errors, "resolution must fail in test (no GitHub App configured)")
 	for _, e := range resp.Errors {
 		assert.NotEqual(t, "forbidden", e.Code,
 			"broker identity must pass canUseProjectGitHubToken; got forbidden: %s", e.Message)
@@ -311,7 +313,7 @@ func TestSkillAuthz_Resolve_GH_BrokerDenied(t *testing.T) {
 	srv, _, _, _, project := setupSkillAuthzTest(t)
 
 	body, err := json.Marshal(ResolveSkillsRequest{
-		Skills:    []ResolveSkillRef{{URI: "gh://acme/private-repo/skills/secret"}},
+		Skills:    []ResolveSkillRef{{URI: "gh://acme/private-repo/secret"}},
 		ProjectID: project.ID,
 	})
 	require.NoError(t, err)
