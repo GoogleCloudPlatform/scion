@@ -753,3 +753,112 @@ func TestRoutingSkillResolver_RegisterFallback_SilentDrop(t *testing.T) {
 		}
 	})
 }
+
+// ctxProbeResolver records the cancellation state of the context it is called
+// with, so tests can assert that the fallback is invoked with a context that
+// survived the primary's deadline.
+type ctxProbeResolver struct {
+	name     string
+	resolved []ResolvedSkill
+	errors   []ResolveError
+
+	called    []api.SkillReference
+	callCtxOK bool   // ctx.Err() == nil at call time
+	sawValue  string // value carried over from the caller's context
+}
+
+type ctxProbeKey struct{}
+
+func (m *ctxProbeResolver) ResolverName() string { return m.name }
+func (m *ctxProbeResolver) Resolve(ctx context.Context, refs []api.SkillReference, _ ResolveOpts) (*ResolveResult, error) {
+	m.called = append(m.called, refs...)
+	m.callCtxOK = ctx.Err() == nil
+	if v, ok := ctx.Value(ctxProbeKey{}).(string); ok {
+		m.sawValue = v
+	}
+	if !m.callCtxOK {
+		return nil, ctx.Err()
+	}
+	return &ResolveResult{Resolved: m.resolved, Errors: m.errors}, nil
+}
+
+// TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext covers I-4:
+// the fallback must not inherit the primary's cancellation. If a tight caller
+// deadline is consumed by the Hub call, passing the same context straight to
+// the fallback makes the fallback fail instantly and defeats its purpose.
+// context.WithoutCancel detaches the cancellation while keeping values.
+func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testing.T) {
+	t.Run("transport error with exhausted context", func(t *testing.T) {
+		// The primary "times out": it fails, and the caller's context is dead
+		// by the time the router reaches for the fallback.
+		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), ctxProbeKey{}, "trace-abc"))
+		hub := &mockSchemeResolver{name: "hub", hardErr: context.DeadlineExceeded}
+		local := &ctxProbeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "gh-skill", URI: "gh://owner/repo/skill"}},
+		}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		cancel() // caller's deadline is gone before the fallback runs
+
+		result, err := router.Resolve(ctx, []api.SkillReference{
+			{URI: "gh://owner/repo/skill"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(local.called) != 1 {
+			t.Fatalf("fallback received %d refs, want 1", len(local.called))
+		}
+		if !local.callCtxOK {
+			t.Error("fallback was called with an already-cancelled context; want WithoutCancel")
+		}
+		if local.sawValue != "trace-abc" {
+			t.Errorf("fallback context lost caller values: got %q, want %q", local.sawValue, "trace-abc")
+		}
+		if len(result.Resolved) != 1 || result.Resolved[0].Name != "gh-skill" {
+			t.Errorf("unexpected resolved result: %+v", result.Resolved)
+		}
+	})
+
+	t.Run("per-URI retry with exhausted context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), ctxProbeKey{}, "trace-xyz"))
+		hub := &mockSchemeResolver{
+			name: "hub",
+			errors: []ResolveError{
+				{URI: "gh://owner/repo/bad", Code: "resolve_failed", Message: "hub could not resolve"},
+			},
+		}
+		local := &ctxProbeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "bad", URI: "gh://owner/repo/bad"}},
+		}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		cancel()
+
+		result, err := router.Resolve(ctx, []api.SkillReference{
+			{URI: "gh://owner/repo/bad"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(local.called) != 1 {
+			t.Fatalf("fallback received %d refs, want 1", len(local.called))
+		}
+		if !local.callCtxOK {
+			t.Error("fallback retry was called with an already-cancelled context; want WithoutCancel")
+		}
+		if local.sawValue != "trace-xyz" {
+			t.Errorf("fallback context lost caller values: got %q, want %q", local.sawValue, "trace-xyz")
+		}
+		if len(result.Resolved) != 1 {
+			t.Fatalf("got %d resolved, want 1: %+v", len(result.Resolved), result.Resolved)
+		}
+		if len(result.Errors) != 0 {
+			t.Errorf("expected hub error to be superseded by fallback, got %+v", result.Errors)
+		}
+	})
+}

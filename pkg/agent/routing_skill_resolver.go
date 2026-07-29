@@ -143,7 +143,11 @@ func (r *RoutingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 				"fallback", resolverNameOf(fb),
 				"refs", len(schemeRefs),
 				"error", err)
-			sr, err = fb.Resolve(ctx, schemeRefs, opts)
+			// Use WithoutCancel so a Hub timeout or deadline expiry on the
+			// primary call does not immediately cancel the fallback. The
+			// caller's semantic intent is "resolve this skill", not "resolve
+			// it only if the Hub responds in time".
+			sr, err = fb.Resolve(context.WithoutCancel(ctx), schemeRefs, opts)
 			if err != nil {
 				return nil, fmt.Errorf("fallback resolver for scheme %q failed: %w", scheme, err)
 			}
@@ -208,7 +212,9 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 		"fallback", resolverNameOf(fb),
 		"refs", len(retryRefs))
 
-	fr, err := fb.Resolve(ctx, retryRefs, opts)
+	// WithoutCancel for the same reason as the transport-level retry above: a
+	// Hub deadline that has already expired must not pre-empt the fallback.
+	fr, err := fb.Resolve(context.WithoutCancel(ctx), retryRefs, opts)
 	if err != nil {
 		slog.Warn("fallback skill resolver failed, keeping primary errors",
 			"scheme", scheme,
