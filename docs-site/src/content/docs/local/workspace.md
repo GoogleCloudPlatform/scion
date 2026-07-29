@@ -192,6 +192,94 @@ Each shared directory's mount location depends on its `in_workspace` setting:
 
 A shared directory is mounted at one of these locations, not both.
 
+### Common Patterns
+
+Shared directories are most useful when several agents in a project need to exchange data outside of version control. The patterns below show typical setups.
+
+#### Shared Build Caches
+
+Agents working on the same project can reuse a compilation cache instead of rebuilding from scratch, dramatically speeding up warm builds.
+
+```bash
+# Create a shared cache, mounted outside the workspace (default)
+scion shared-dir create build-cache
+```
+
+Point the toolchain's cache at the mount. For a Go project, set `GOCACHE` to the shared path in each agent (for example, in the agent's shell profile or start command):
+
+```bash
+export GOCACHE=/scion-volumes/build-cache
+```
+
+The same approach works for other caches — for example a Bazel `--output_base=/scion-volumes/build-cache`, or a `node_modules/.cache` symlinked into the mount. All agents read from and write to the same cache, so the first agent to compile a target populates it for the rest.
+
+#### Shared Artifacts (Producer/Consumer)
+
+One agent produces build artifacts or data files that another consumes — a build/test or build/deploy split.
+
+```bash
+scion shared-dir create artifacts
+```
+
+The **producer** agent writes its output to the mount:
+
+```bash
+go build -o /scion-volumes/artifacts/myservice ./cmd/myservice
+```
+
+The **consumer** agent picks the artifact up from the same path for testing or deployment:
+
+```bash
+/scion-volumes/artifacts/myservice --run-tests
+```
+
+Because the mount is a plain directory, no Hub round-trip or git commit is needed to hand data between agents.
+
+#### Shared Context / Knowledge Base
+
+A directory of reference material — design docs, research findings, or generated context — that every agent can read, and selected agents can write to.
+
+```bash
+# Read/write for agents that curate the knowledge base
+scion shared-dir create knowledge --in-workspace
+```
+
+With `--in-workspace`, the directory mounts at `/workspace/.scion-volumes/knowledge`, keeping reference material alongside the code an agent is editing. A research agent writes its findings:
+
+```bash
+echo "## API rate limits: 100 req/s per token" >> /workspace/.scion-volumes/knowledge/notes.md
+```
+
+A developer agent reads them while working. To make a knowledge base read-only for consumers so they cannot accidentally overwrite curated content, create it with `--read-only`:
+
+```bash
+scion shared-dir create knowledge --read-only
+```
+
+#### Coordination Files
+
+Lightweight, file-based signalling between agents — status markers, lock files, or simple message passing — without a message broker.
+
+```bash
+scion shared-dir create coordination
+```
+
+For example, a build agent signals that a phase is complete by writing a marker file:
+
+```bash
+# Producer signals completion
+touch /scion-volumes/coordination/build.done
+```
+
+A downstream agent waits for the marker before starting its work:
+
+```bash
+# Consumer waits for the signal
+until [ -f /scion-volumes/coordination/build.done ]; do sleep 5; done
+```
+
+The same pattern supports simple lock files (create a file to claim a resource, remove it to release) or drop-box message passing (write a request file, poll for a response file). Keep coordination files small and treat them as ephemeral signals rather than durable state.
+
 ### Web Dashboard File Viewer
 
 You can browse the contents of Shared Directories and view file previews directly from the Hub's Web Dashboard. In the project view, navigate to the Shared Directories tab to inspect files, view sizes, and review content previews without needing to attach to an agent.
