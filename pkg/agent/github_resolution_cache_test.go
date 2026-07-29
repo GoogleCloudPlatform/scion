@@ -126,6 +126,98 @@ func TestGitHubResolutionCache_PersistAndReload(t *testing.T) {
 	}
 }
 
+// TestGitHubResolutionCache_CredentialEntryNotPersistedToDisk verifies that
+// credential-bearing cache keys (those with a "#<tokenhash>" suffix, produced
+// by resolutionCacheKey when a GitHub token is present) are kept in-memory
+// only and never written to disk.
+//
+// This prevents the stale-404 bug from issue #565: ResolvedFile.Content is
+// json:"-" and is stripped on serialisation. A disk-loaded entry would have
+// Content == nil, causing installOneSkill to re-download using the wrong token
+// (the broker's default, not the per-URI named credential) and 404 on private
+// repos. Memory-only entries retain Content for the full TTL window.
+func TestGitHubResolutionCache_CredentialEntryNotPersistedToDisk(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	// A key with a token-hash suffix (simulating a ?token= private-repo URI).
+	credKey := "gh://owner/repo/my-skill@main#deadbeef12345678"
+	skill := ResolvedSkill{
+		Name:    "private-skill",
+		URI:     "gh://owner/repo/my-skill@main",
+		Version: "abc123def456",
+		Hash:    "sha256:private",
+		Files: []ResolvedFile{
+			{Path: "SKILL.md", Content: []byte("private content")},
+		},
+	}
+	cache.Put(credKey, skill)
+
+	// In-memory Get must hit.
+	got, ok := cache.Get(credKey)
+	if !ok {
+		t.Fatal("expected in-memory cache hit for credential entry, got miss")
+	}
+	if got.Name != "private-skill" {
+		t.Errorf("expected name private-skill, got %s", got.Name)
+	}
+
+	// The cache file must not exist (credential entries are never written to disk).
+	cacheFile := filepath.Join(dir, resolutionCacheFileName)
+	if _, err := os.Stat(cacheFile); err == nil {
+		t.Error("credential-bearing entry was persisted to disk; expected memory-only")
+	}
+
+	// A new cache instance loading from the same dir must NOT see the credential entry.
+	cache2, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache (reload): %v", err)
+	}
+	if _, ok := cache2.Get(credKey); ok {
+		t.Error("credential entry should not be loadable from disk after restart")
+	}
+}
+
+// TestGitHubResolutionCache_MixedPublicAndCredential verifies that a cache
+// containing both public-repo and credential-bearing entries persists only
+// the public-repo entries to disk.
+func TestGitHubResolutionCache_MixedPublicAndCredential(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+
+	publicKey := "gh://owner/repo/pub-skill@main"
+	credKey := "gh://owner/repo/priv-skill@main#deadbeef12345678"
+
+	cache.Put(publicKey, ResolvedSkill{Name: "pub-skill", URI: publicKey})
+	cache.Put(credKey, ResolvedSkill{Name: "priv-skill", URI: "gh://owner/repo/priv-skill@main"})
+
+	// Both accessible in-memory.
+	if _, ok := cache.Get(publicKey); !ok {
+		t.Error("public entry: expected in-memory hit")
+	}
+	if _, ok := cache.Get(credKey); !ok {
+		t.Error("credential entry: expected in-memory hit")
+	}
+
+	// After reload, only public entry survives.
+	cache2, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache (reload): %v", err)
+	}
+	if _, ok := cache2.Get(publicKey); !ok {
+		t.Error("public entry: expected disk hit after reload")
+	}
+	if _, ok := cache2.Get(credKey); ok {
+		t.Error("credential entry: must not survive reload (should be memory-only)")
+	}
+}
+
 func TestGitHubResolutionCache_ExpiredNotLoaded(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := NewGitHubResolutionCache(dir, 1*time.Millisecond)

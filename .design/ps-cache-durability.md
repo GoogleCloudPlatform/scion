@@ -67,7 +67,7 @@ by design — each layer is gated by a different trigger:
 
 | Layer | Cache | Serves which path | When it populates |
 |---|---|---|---|
-| 1 | Broker disk — resolution cache (`github-resolution-cache.json`) | `?token=SECRET_NAME` URIs only — broker-local resolution, not Hub-mediated | Only when broker resolves a `gh://` URI that carries a named `?token=` query parameter referencing a broker-known secret. The common public/App-token path resolves Hub-side and never touches this layer. |
+| 1 | Broker disk — resolution cache (`github-resolution-cache.json`) | `?token=SECRET_NAME` URIs only — broker-local resolution, not Hub-mediated | Only when broker resolves a `gh://` URI that carries a named `?token=` query parameter referencing a broker-known secret. The common public/App-token path resolves Hub-side and never touches this layer. **Note:** credential-bearing entries (those with a token-hash suffix in the cache key) are intentionally kept in-memory only and never written to disk — see [#565 fix](#layer-1-stale-404-fix) below. |
 | 2 | Broker disk — content cache (`cache/skills/`) | All paths — but only during workspace materialisation | Populated when an agent actually **starts** and its workspace is materialized (file bytes downloaded). `scion create` (provision-only, no task) resolves the ref and file list but does not download bytes, so this layer stays empty on provision-only runs. |
 | 3 | Hub DB — resolution cache (`github_resolution_cache` table) | Public repos + GitHub App installation token path (Hub-mediated) | Populated on any `gh://` resolution routed through the Hub, including cold provisioning. This is the common path for the `developer` template and all public/App-token skills. |
 
@@ -81,6 +81,25 @@ layer 3. Layers 1 and 2 require different triggers:
 
 Any runbook that says "clear all three, provision agents, confirm all three fill" is incorrect
 for layers 1 and 2 and will produce false "cache not populating" alarms.
+
+### Layer 1 Stale-404 Fix {#layer-1-stale-404-fix}
+
+Issue #565 identified that the broker disk resolution cache caused 404s on private-repo skills
+after broker restart. Root cause: `ResolvedFile.Content` is tagged `json:"-"` and is stripped
+during serialisation. After restart, a disk cache hit returns entries with `Content == nil`,
+causing `installOneSkill` to fall through to `downloadSkillFile`. For `?token=` private-repo
+skills, that download uses the broker's default GitHub token (not the named per-URI credential),
+so it 404s on private repos.
+
+**Fix (implemented):** Credential-bearing cache entries — those whose key contains a `#<tokenhash>`
+suffix (appended by `resolutionCacheKey` when a GitHub token is present) — are kept in-memory
+only and never written to disk. Within the same broker process the entry retains its `Content`
+bytes for the full TTL window. After a broker restart, there is no stale entry to load, so the
+broker re-resolves the skill fresh (with the correct credential), populating `Content` again.
+
+Public-repo entries (keys without a `#` suffix, resolved without a per-URI token) continue to be
+persisted to disk as before. Their downloads use the broker's default token (or no token for truly
+public repos), which is available on restart, so the disk cache hit is safe for them.
 
 ---
 
