@@ -33,6 +33,6 @@ Always `scion look <agent>` first to verify screen state before sending raw inpu
 
 ## Anti-Patterns
 
-- **Recreating on first sign of trouble.** Most stuck states recover with `scion message <agent> "continue"`. Recreation destroys uncommitted work and in-memory state.
+- **Recreating on first sign of trouble.** Most stuck states recover with `scion message <agent> "continue"`. Recreation destroys unpushed work and in-memory state.
 - **Sending raw input blind.** Always `scion look` first — raw keystrokes go to whatever is on screen.
 - **Treating all 401s the same.** Hub token 401 (agent state) and GitHub token 401 (API auth) have different recovery paths.

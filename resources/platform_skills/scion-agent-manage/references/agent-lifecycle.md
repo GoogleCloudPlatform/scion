@@ -13,10 +13,11 @@ branch may still need review.
 current work phase — for example, to inspect logs before deciding whether output was
 accepted. Time-box it; do not leave agents stopped indefinitely.
 
-> **Deleting an agent is safe because its deliverable is an artifact** — files committed
-> to the repo, designs written to the scratchpad, findings in a shared document. These
-> survive deletion. Terminal logs do not, and should not need to — they are not the
-> audit trail.
+> **Deleting an agent is safe because its deliverable is an artifact** — commits pushed
+> to the remote, files written to the scratchpad, PRs opened. These survive deletion.
+> A commit that was never pushed is local to the container and dies with it — committed
+> is not the same as pushed. Terminal logs do not survive either, and should not need
+> to — they are not the audit trail.
 
 ## Who may authorize deletion
 
@@ -65,5 +66,5 @@ accepted. Time-box it; do not leave agents stopped indefinitely.
   human names the specific workstream being closed.
 - **Leaving agents stopped for audit trail.** Commit findings to files instead. Stopped
   agents consume broker slots and count against the 50-agent list ceiling.
-- **Deleting an agent with uncommitted work.** Always verify work is committed or
-  preserved before deletion.
+- **Deleting an agent with unpushed work.** Always verify work is pushed to the
+  remote (not just committed locally) or written to the scratchpad before deletion.
