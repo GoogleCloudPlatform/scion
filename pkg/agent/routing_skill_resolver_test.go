@@ -828,7 +828,7 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		// own deadline so a wedged fallback cannot run forever.
 		if !local.callHasDL {
 			t.Error("detached fallback context has no deadline; want a bounded budget")
-		} else if d := time.Until(local.callDeadline); d <= 0 || d > fallbackTimeout+time.Minute {
+		} else if d := time.Until(local.callDeadline); d <= 0 || d > fallbackTimeout {
 			t.Errorf("detached fallback budget = %v, want (0, %v]", d, fallbackTimeout)
 		}
 		if local.sawValue != "trace-abc" {
@@ -870,7 +870,7 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 		if !local.callHasDL {
 			t.Error("detached fallback context has no deadline; want a bounded budget")
-		} else if d := time.Until(local.callDeadline); d <= 0 || d > fallbackTimeout+time.Minute {
+		} else if d := time.Until(local.callDeadline); d <= 0 || d > fallbackTimeout {
 			t.Errorf("detached fallback budget = %v, want (0, %v]", d, fallbackTimeout)
 		}
 		if local.sawValue != "trace-xyz" {
@@ -982,6 +982,34 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 		if len(result.Resolved) != 1 {
 			t.Errorf("got %d resolved, want 1", len(result.Resolved))
+		}
+	})
+
+	// A context with a sliver of time left is not "healthy" in any useful sense:
+	// it passes ctx.Err() == nil but the fallback cannot possibly finish inside
+	// it. fallbackMinBudget makes that case behave like a fully-spent context.
+	t.Run("nearly spent context is detached rather than inherited", func(t *testing.T) {
+		nearlySpent := time.Now().Add(fallbackMinBudget - time.Second)
+		ctx, cancel := context.WithDeadline(
+			context.WithValue(context.Background(), ctxProbeKey{}, "trace-sliver"), nearlySpent)
+		defer cancel()
+
+		fbCtx, fbCancel := fallbackContext(ctx)
+		defer fbCancel()
+
+		if err := fbCtx.Err(); err != nil {
+			t.Fatalf("fallback context is already dead: %v", err)
+		}
+		dl, ok := fbCtx.Deadline()
+		if !ok {
+			t.Fatal("detached fallback context has no deadline; want a bounded budget")
+		}
+		if d := time.Until(dl); d < fallbackTimeout/2 || d > fallbackTimeout {
+			t.Errorf("fallback budget = %v, want a fresh budget in [%v, %v] rather than the caller's %v",
+				d, fallbackTimeout/2, fallbackTimeout, time.Until(nearlySpent))
+		}
+		if v, _ := fbCtx.Value(ctxProbeKey{}).(string); v != "trace-sliver" {
+			t.Errorf("detached fallback context lost caller values: got %q", v)
 		}
 	})
 }

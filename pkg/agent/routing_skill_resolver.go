@@ -24,24 +24,39 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
-// fallbackTimeout bounds a fallback resolve that had to be detached from an
-// already-spent caller context. The local GitHub resolver uses a 30s HTTP
-// timeout and makes at most two calls per skill URI, so two minutes is
-// generous without being unbounded.
+// fallbackTimeout is the budget for a detached fallback call. The local GitHub
+// resolver makes two metadata API calls plus one raw download per file in each
+// skill; a 15-file skill is ~17 HTTP requests, all with a 30s per-request
+// timeout. The fallback receives the whole retry set (up to 50 skills) in a
+// single call, so the budget must cover the batch. Two minutes is generous for
+// small batches; larger batches may hit the ceiling, in which case the budget
+// should be scaled by the number of refs being retried rather than raised
+// wholesale.
 const fallbackTimeout = 2 * time.Minute
 
+// fallbackMinBudget is the minimum remaining lifetime a caller context must have
+// to be worth inheriting. A context with less than this is treated as effectively
+// spent: the fallback is detached from it and given a fresh fallbackTimeout budget
+// instead. This prevents a Hub that is merely slow (rather than fully blocking)
+// from leaving the fallback with an unserviceable sliver of time.
+const fallbackMinBudget = 10 * time.Second
+
 // fallbackContext returns a context for the fallback resolver. If the primary
-// ctx is still healthy it is used as-is, so the caller's cancellation and
-// deadline are preserved. If it is already cancelled or expired (e.g. the Hub
-// call consumed the caller's budget), the context is detached from the
-// cancellation signal and given a bounded budget so the fallback can still
-// complete. Values (logging, tracing) are preserved either way.
+// ctx is still healthy and has a usable budget left it is used as-is, so the
+// caller's cancellation and deadline are preserved. If it is already cancelled
+// or expired — or so close to its deadline that the fallback could not finish
+// (e.g. the Hub call consumed nearly all of the caller's budget) — the context
+// is detached from the cancellation signal and given a bounded budget so the
+// fallback can still complete. Values (logging, tracing) are preserved either
+// way.
 func fallbackContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx.Err() == nil {
-		// Healthy — inherit the caller context, deadline and cancellation intact.
-		return ctx, func() {}
+		if dl, ok := ctx.Deadline(); !ok || time.Until(dl) >= fallbackMinBudget {
+			// Healthy with a usable budget — inherit deadline and cancellation.
+			return ctx, func() {}
+		}
 	}
-	// Already spent — detach so the fallback can run with a fresh, bounded budget.
+	// Spent, or too little budget left — detach with a bounded budget.
 	return context.WithTimeout(context.WithoutCancel(ctx), fallbackTimeout)
 }
 

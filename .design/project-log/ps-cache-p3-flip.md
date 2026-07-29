@@ -125,6 +125,51 @@ the branch passes CI; it is one line of whitespace and touches nothing else.
 
 ---
 
+## Post-review amendments
+
+Two reviewers looked at the branch after the sections above were written. Their
+findings changed the shape of the I-4 fix and surfaced a diagnosability gap in
+I-3. Both are recorded here so the narrative above is not read as current.
+
+**I-4 has moved on — `WithoutCancel` is no longer unconditional.** Commit
+`d236e899` reworked the fix into a `fallbackContext(ctx)` helper and added the
+H-1 guard (the Hub declines `?token=` URIs, so they route to the local resolver
+that can actually read the named broker secret). The helper detaches only a
+context that is *spent* — already cancelled/expired, or with less than
+`fallbackMinBudget` (10s) left before its deadline. A healthy context with a
+usable budget is inherited unchanged, so the caller's deadline still applies and
+a client disconnect mid-fallback still stops the work. The min-budget floor was
+added in the polish pass: a context with 5ms left passes `ctx.Err() == nil` but
+leaves the fallback an unserviceable sliver, which is the same failure mode as a
+spent context one moment earlier.
+
+The statement in section 1 that "a fallback call is no longer bounded by the
+caller's deadline" therefore applies **only to the detached path**, and even
+there the call is bounded — by `fallbackTimeout` (2 minutes), not just by the
+HTTP client's per-request timeouts.
+
+The `fallbackTimeout` comment was also corrected. It previously claimed the
+local GitHub resolver makes "at most two calls per skill URI"; in fact
+`resolveOne` makes two metadata API calls *plus one raw download per file*, so a
+15-file skill is ~17 HTTP requests — and the budget covers the entire retry
+batch (up to 50 refs) in a single call, not one URI. Two minutes remains
+generous for small batches; large batches could hit the ceiling, and the fix if
+that ever bites is to scale the budget by retry-set size rather than raise the
+constant.
+
+**I-3 — private-repo credential mismatch is a diagnosability gap.** Post-flip,
+a private repo that the project's GitHub App can read but the broker's
+`GITHUB_TOKEN` cannot will *resolve* successfully at the Hub and then fail at
+install time with a bare 404 on the download, because the raw URLs the Hub
+returns are fetched with the broker's credential. The resolve/install split
+makes this hard to diagnose: the failure surfaces far from its cause and looks
+like a missing file rather than a missing permission. Not a correctness
+regression — the request was always going to fail — but the error should say so.
+Future work: emit a named-credential hint in the download 404 message,
+identifying which credential was used and suggesting the mismatch.
+
+---
+
 ## Verification
 
 ```
