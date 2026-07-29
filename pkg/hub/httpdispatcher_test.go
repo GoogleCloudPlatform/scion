@@ -3853,3 +3853,67 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_InjectsWorkspaceMode(t *testin
 		})
 	}
 }
+
+// TestInjectThinkingLevelEnv covers the hub-side SCION_THINKING_LEVEL
+// injector (Gap 1A). The injector is the only channel that carries a
+// project-annotation thinking level to the harness: the annotation lands in
+// AppliedConfig.ThinkingLevel but has no wire field, and pkg/agent/run.go
+// reads the value from the environment.
+func TestInjectThinkingLevelEnv(t *testing.T) {
+	level := func(i int) *int { return &i }
+
+	tests := []struct {
+		name string
+		env  map[string]string
+		cfg  *store.AgentAppliedConfig
+		want map[string]string
+	}{
+		{
+			name: "set from applied config",
+			env:  map[string]string{},
+			cfg:  &store.AgentAppliedConfig{ThinkingLevel: level(7)},
+			want: map[string]string{"SCION_THINKING_LEVEL": "7"},
+		},
+		{
+			name: "zero is a real value, not unset",
+			env:  map[string]string{},
+			cfg:  &store.AgentAppliedConfig{ThinkingLevel: level(0)},
+			want: map[string]string{"SCION_THINKING_LEVEL": "0"},
+		},
+		{
+			name: "nil config is a no-op",
+			env:  map[string]string{},
+			cfg:  nil,
+			want: map[string]string{},
+		},
+		{
+			name: "nil thinking level is a no-op",
+			env:  map[string]string{},
+			cfg:  &store.AgentAppliedConfig{},
+			want: map[string]string{},
+		},
+		{
+			// An explicit env entry outranks the applied config, matching
+			// injectModelEnv and the guard in pkg/agent/run.go.
+			name: "already present in env is not overwritten",
+			env:  map[string]string{"SCION_THINKING_LEVEL": "3"},
+			cfg:  &store.AgentAppliedConfig{ThinkingLevel: level(7)},
+			want: map[string]string{"SCION_THINKING_LEVEL": "3"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			injectThinkingLevelEnv(tt.env, tt.cfg)
+
+			if len(tt.env) != len(tt.want) {
+				t.Fatalf("env = %v, want %v", tt.env, tt.want)
+			}
+			for k, want := range tt.want {
+				if got := tt.env[k]; got != want {
+					t.Errorf("env[%q] = %q, want %q", k, got, want)
+				}
+			}
+		})
+	}
+}
