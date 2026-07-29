@@ -2804,3 +2804,218 @@ func TestResolveAuthEnvOverlay_NilSettings(t *testing.T) {
 		t.Errorf("auth overlay A = %q, want %q", got, "1")
 	}
 }
+
+// --- Gap 3 follow-up: the RANK limb -----------------------------------------
+//
+// Design §0.2 item 2: Gap 3 has a rank limb as well as a presence limb. The
+// presence limb (harness-config env becomes VISIBLE to the auth overlay in
+// broker mode) is pinned by the tests above. The rank limb is pinned here.
+//
+// Mechanism: resolveAuthEnvOverlay injects harness-config env into opts.Env
+// through the *api.StartOptions pointer, and Start later calls
+// buildAgentEnv(finalScionCfg, opts.Env) at run.go:807 — where opts.Env is
+// extraEnv and OVERRIDES scionCfg.Env. Template env lives in finalScionCfg.Env.
+// So in broker mode harness-config env now outranks template env in the
+// container, where before the !opts.BrokerMode conjunct it lost.
+
+// rankProbeFixture stands up a tmp HOME in which the SAME key is declared by
+// both the template (RANK_PROBE=from-template, inside finalScionCfg.Env) and
+// the settings harness config (RANK_PROBE=from-harness-config, which reaches
+// opts.Env only via resolveAuthEnvOverlay). Returns the project .scion path.
+func rankProbeFixture(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	_ = os.Chdir(tmpDir)
+
+	originalHome := os.Getenv("HOME")
+	t.Cleanup(func() { _ = os.Setenv("HOME", originalHome) })
+	_ = os.Setenv("HOME", tmpDir)
+
+	if old, ok := os.LookupEnv("RANK_PROBE"); ok {
+		t.Cleanup(func() { _ = os.Setenv("RANK_PROBE", old) })
+		_ = os.Unsetenv("RANK_PROBE")
+	}
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "claude-cfg")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"),
+		[]byte("harness: claude\nuser: scion\nimage: test-image:latest\n"), 0644)
+
+	// Template declares RANK_PROBE — this lands in finalScionCfg.Env, the BASE
+	// map for buildAgentEnv.
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"),
+		[]byte(`{"default_harness_config": "claude-cfg", "env": {"RANK_PROBE": "from-template"}}`), 0644)
+
+	// Settings harness config declares the SAME key with a different value.
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: vertex
+profiles:
+  vertex:
+    runtime: docker
+harness_configs:
+  claude-cfg:
+    harness: claude
+    env:
+      RANK_PROBE: from-harness-config
+runtimes:
+  docker:
+    type: docker
+`), 0644)
+
+	projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	return projectScionDir
+}
+
+// rankProbeRunStart runs Start against a mock runtime and returns the CONTAINER
+// env as a map. It deliberately reads runtime.RunConfig.Env — the container
+// path — and not opts.Env: opts.Env is the thing being written, so asserting
+// there would pass trivially. This is the mistake the abandoned §3.3.1 filter
+// made (it satisfied an opts.Env assertion while the container still received
+// the capability), and AC16a was rewritten because of it.
+func rankProbeRunStart(t *testing.T, projectScionDir string, brokerMode bool) map[string]string {
+	t.Helper()
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			capturedConfig = cfg
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "rank-probe-agent",
+		Template:    "default",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		BrokerMode:  brokerMode,
+	})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	envMap := make(map[string]string)
+	for _, e := range capturedConfig.Env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			envMap[parts[0]] = parts[1]
+		}
+	}
+	return envMap
+}
+
+// TestBrokerMode_HarnessConfigEnvOutranksTemplateEnv pins the RANK limb of
+// Gap 3 (design §0.2 item 2).
+//
+// 🔴 IF YOU ARE ABOUT TO PUT THE INJECTION IN resolveAuthEnvOverlay BACK BEHIND
+// A MODE CHECK, THIS TEST IS WHY YOU MAY NOT. The rank shift is an intended
+// deliverable, not an accident of the presence fix. Restoring a
+// `!opts.BrokerMode` conjunct flips this assertion back to "from-template".
+func TestBrokerMode_HarnessConfigEnvOutranksTemplateEnv(t *testing.T) {
+	projectScionDir := rankProbeFixture(t)
+
+	envMap := rankProbeRunStart(t, projectScionDir, true /* brokerMode */)
+
+	if got := envMap["RANK_PROBE"]; got != "from-harness-config" {
+		t.Errorf("container env RANK_PROBE = %q, want %q\n"+
+			"harness-config env must OUTRANK template env in broker mode: it is injected "+
+			"into opts.Env, which is extraEnv at buildAgentEnv (run.go:807) and overrides "+
+			"finalScionCfg.Env. Getting %q back means the injection is gated by mode again.",
+			got, "from-harness-config", got)
+	}
+}
+
+// TestLocalMode_HarnessConfigEnvOutranksTemplateEnv is the polarity control.
+//
+// NOTE: local mode is UNCHANGED by this commit — injection always ran here, so
+// harness-config env already outranked template env before the fix. This test
+// therefore asserts continuity, not a change. Its value is that it fails if a
+// future "fix" inverts the precedence globally instead of only for broker mode,
+// which the broker-mode test alone could not distinguish.
+func TestLocalMode_HarnessConfigEnvOutranksTemplateEnv(t *testing.T) {
+	projectScionDir := rankProbeFixture(t)
+
+	envMap := rankProbeRunStart(t, projectScionDir, false /* local mode */)
+
+	if got := envMap["RANK_PROBE"]; got != "from-harness-config" {
+		t.Errorf("container env RANK_PROBE = %q, want %q (local mode precedence is unchanged)",
+			got, "from-harness-config")
+	}
+}
+
+// TestResolveAuthEnvOverlay_MutatesCallerOptsEnv closes I-4.
+//
+// resolveAuthEnvOverlay has a TWO-PART contract: it returns the auth overlay,
+// AND it mutates opts.Env through the *api.StartOptions pointer. The second
+// half is what feeds the container (buildAgentEnv's extraEnv), and it is what
+// makes the rank limb above work. Every other test in this file asserts on the
+// RETURNED overlay, so the reviewer was able to change the signature to a value
+// receiver with the entire pkg/agent suite still green.
+//
+// 🔴 MEASURED, NOT ASSUMED — and the result is counter-intuitive. Flipping the
+// signature to a value receiver fails ONLY the nil-map subtest below. The
+// pre-existing-map subtest still PASSES, because Go maps are reference types:
+// the copied StartOptions carries the same underlying map, so opts.Env[k] = v
+// on the copy is still visible to the caller. The pointer is load-bearing for
+// exactly one thing — the `opts.Env = make(...)` allocation on the nil path,
+// which assigns to a FIELD and is lost on a copy.
+//
+// So the nil-map subtest is the one that closes I-4. Keep it. An I-4 test
+// written only against a pre-populated map would be green under the very
+// regression it is meant to catch.
+func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
+	settings := g3TestSettings(map[string]string{
+		"GOOGLE_CLOUD_PROJECT": "hc-project",
+	}, nil)
+
+	// Pins the injection contract. NOTE this subtest does NOT detect a value
+	// receiver — see the comment above. It is here for the contract, not as
+	// the I-4 guard.
+	t.Run("injects into a pre-existing caller map", func(t *testing.T) {
+		opts := api.StartOptions{
+			Name:       "test-agent",
+			BrokerMode: true,
+			Env:        map[string]string{"EXISTING": "val"},
+		}
+
+		_ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+
+		if got := opts.Env["GOOGLE_CLOUD_PROJECT"]; got != "hc-project" {
+			t.Errorf("CALLER's opts.Env[GOOGLE_CLOUD_PROJECT] = %q, want %q — the pointer "+
+				"receiver is load-bearing: opts.Env is projected into the container via "+
+				"buildAgentEnv(finalScionCfg, opts.Env). A value receiver compiles and "+
+				"returns the right overlay, but the container gets nothing.", got, "hc-project")
+		}
+	})
+
+	// 🔴 THIS is the I-4 guard. It is the only subtest that goes red on a value
+	// receiver. Do not "simplify" it into the case above.
+	t.Run("allocates a nil caller map", func(t *testing.T) {
+		// opts.Env = make(...) inside the function assigns to a field, so it
+		// reaches the caller only through the pointer. This is also the shape
+		// Start actually uses: a hub-dispatched agent with no ResolvedEnv
+		// arrives with opts.Env == nil.
+		opts := api.StartOptions{Name: "test-agent", BrokerMode: true, Env: nil}
+
+		_ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+
+		if opts.Env == nil {
+			t.Fatal("CALLER's opts.Env is still nil — the allocation inside " +
+				"resolveAuthEnvOverlay did not reach the caller")
+		}
+		if got := opts.Env["GOOGLE_CLOUD_PROJECT"]; got != "hc-project" {
+			t.Errorf("CALLER's opts.Env[GOOGLE_CLOUD_PROJECT] = %q, want %q", got, "hc-project")
+		}
+	})
+}
