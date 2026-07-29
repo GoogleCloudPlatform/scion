@@ -1660,7 +1660,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	// cannot contain "@" or ":", and Git ref names cannot contain ":". The
 	// installID suffix is the same for every URI in one request (shared
 	// projectID → shared installation) but is included for forward-safety.
-	memoKey := ghRef.Owner + "/" + ghRef.Repo + "@" + ghRef.Ref + ":" + installID
+	memoKey := strings.ToLower(ghRef.Owner) + "/" + strings.ToLower(ghRef.Repo) + "@" + ghRef.Ref + ":" + installID
 	commitSHA, seen := "", false
 	if refSHAMemo != nil {
 		commitSHA, seen = refSHAMemo[memoKey]
