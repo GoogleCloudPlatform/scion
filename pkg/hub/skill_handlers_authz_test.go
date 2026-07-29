@@ -245,6 +245,43 @@ func TestSkillAuthz_Resolve_GH_ForbiddenProject(t *testing.T) {
 		"expected forbidden (not resolve_failed): the authz check must fire before GitHub is contacted")
 }
 
+// TestSkillAuthz_Resolve_GH_BrokerAllowed is the ALLOW counterpart to
+// TestSkillAuthz_Resolve_GH_ForbiddenProject. The production Runtime Broker
+// authenticates to the Hub over HMAC, which populates BrokerIdentity — not
+// AgentIdentity or UserIdentity. If canUseProjectGitHubToken does not honour
+// BrokerIdentity, every broker gh:// resolution fails closed with "forbidden",
+// breaking the only production caller. This test pins that behaviour.
+func TestSkillAuthz_Resolve_GH_BrokerAllowed(t *testing.T) {
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+
+	body, err := json.Marshal(ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: "gh://acme/private-repo/skills/secret"}},
+		ProjectID: project.ID,
+	})
+	require.NoError(t, err)
+
+	// Bypass the auth middleware (which expects HMAC) and inject a broker
+	// identity directly, mirroring what brokerauth does on a real request.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity(tid("skill-broker"))))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// The broker must clear the authz gate. Resolution itself still fails in
+	// this test (no GitHub App is configured), so assert on the error *code*:
+	// anything but "forbidden" means the authz check let the broker through.
+	for _, e := range resp.Errors {
+		assert.NotEqual(t, "forbidden", e.Code,
+			"broker identity must pass canUseProjectGitHubToken; got forbidden: %s", e.Message)
+	}
+}
+
 func TestSkillAuthz_Resolve_PublicSkillAllowed(t *testing.T) {
 	srv, s, alice, bob, _ := setupSkillAuthzTest(t)
 	skill := createTestSkill(t, s, "public-skill", store.SkillScopeGlobal, "", alice.ID)

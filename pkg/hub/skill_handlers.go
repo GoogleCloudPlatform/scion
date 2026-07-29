@@ -1522,10 +1522,17 @@ func hasGitHubSkillRef(refs []ResolveSkillRef) bool {
 }
 
 // canUseProjectGitHubToken reports whether the caller in ctx is permitted to have
-// the Hub mint projectID's GitHub App token on their behalf. Agents are confined
-// to their own project; users must hold read access on the project's skills.
+// the Hub mint projectID's GitHub App token on their behalf. Brokers are trusted
+// Hub clients and are always allowed; agents are confined to their own project;
+// users must hold read access on the project's skills.
 // Unauthenticated callers are always denied.
 func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string) bool {
+	// Brokers are authenticated Hub clients serving project agents; they are
+	// trusted to request tokens for the projects they serve. This mirrors the
+	// broker handling in handlers_env_secrets.go and admin_mode.go.
+	if GetBrokerIdentityFromContext(ctx) != nil {
+		return true
+	}
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		return agentIdent.ProjectID() == projectID
 	}

@@ -53,8 +53,9 @@ func IsGitBlobHash(s string) bool {
 // general-purpose integrity primitive — prefer HashBytes/HashFile for that.
 func GitBlobHashBytes(data []byte) string {
 	h := sha1.New() //nolint:gosec // Git object IDs are SHA-1 by definition.
-	fmt.Fprintf(h, "blob %d\x00", len(data))
-	h.Write(data)
+	// hash.Hash writes never return an error, but errcheck cannot know that.
+	_, _ = fmt.Fprintf(h, "blob %d\x00", len(data))
+	_, _ = h.Write(data)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -73,7 +74,8 @@ func GitBlobHashFile(path string) (string, error) {
 	}
 
 	h := sha1.New() //nolint:gosec // Git object IDs are SHA-1 by definition.
-	fmt.Fprintf(h, "blob %d\x00", info.Size())
+	// hash.Hash writes never return an error, but errcheck cannot know that.
+	_, _ = fmt.Fprintf(h, "blob %d\x00", info.Size())
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}
