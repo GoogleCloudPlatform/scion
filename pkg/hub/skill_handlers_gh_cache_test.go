@@ -35,7 +35,8 @@ import (
 // cache hit reaches no further than the DB.
 type fakeGitHub struct {
 	*httptest.Server
-	calls atomic.Int64
+	calls       atomic.Int64 // total calls (commits + contents)
+	commitCalls atomic.Int64 // commits/{ref} calls only
 }
 
 // newFakeGitHub serves the commits and contents endpoints for owner/repo,
@@ -51,6 +52,7 @@ func newFakeGitHub(t *testing.T, owner, repo, skillPath, commitSHA string) *fake
 		f.calls.Add(1)
 		switch {
 		case strings.HasPrefix(r.URL.Path, commitsPrefix):
+			f.commitCalls.Add(1)
 			// Accept: application/vnd.github.v3.sha — a bare SHA, not JSON.
 			_, _ = w.Write([]byte(commitSHA))
 		case strings.HasPrefix(r.URL.Path, contentsPrefix):
@@ -268,4 +270,55 @@ func TestSkillsResolve_GHDeclinesTokenSecretURI(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&plainResp))
 	assert.Empty(t, plainResp.Errors, "the same skill without ?token= must still resolve")
 	assert.Len(t, plainResp.Resolved, 1)
+}
+
+// TestSkillsResolve_GHRefDedup asserts that a batch request containing N URIs
+// sharing the same (owner, repo, ref) performs only one ref→SHA lookup via
+// commits/{ref}, not one per URI. Each URI still triggers its own contents
+// lookup — dedup applies only to the SHA resolution step.
+//
+// This is the acceptance test for the issue-1 performance fix: 19 same-repo
+// URIs should cost 1 + 19 = 20 GitHub API calls, not 19 × 2 = 38.
+func TestSkillsResolve_GHRefDedup(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "bundle-repo"
+		commitSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	gh := newFakeGitHub(t, owner, repo, "skills/any", commitSHA)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	// Three URIs in the same (owner, repo) with the same implicit ref (HEAD)
+	// but different skill paths — the common case for a skill bundle.
+	const n = 3
+	skills := []ResolveSkillRef{
+		{URI: "gh://" + owner + "/" + repo + "/skill-a"},
+		{URI: "gh://" + owner + "/" + repo + "/skill-b"},
+		{URI: "gh://" + owner + "/" + repo + "/skill-c"},
+	}
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
+		ResolveSkillsRequest{Skills: skills, ProjectID: project.ID})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Empty(t, resp.Errors, "all %d URIs must resolve successfully", n)
+	require.Len(t, resp.Resolved, n, "all %d skills must be present in the response", n)
+
+	// The key assertion: only 1 commits/{ref} call for N URIs sharing the same
+	// (owner, repo, ref). Before the fix this would be N.
+	assert.Equal(t, int64(1), gh.commitCalls.Load(),
+		"ref→SHA resolution must be deduplicated: %d URIs, same repo+ref → 1 commit lookup (got %d)",
+		n, gh.commitCalls.Load())
+
+	// Sanity: each URI's contents lookup must still happen independently.
+	contentsCalls := gh.calls.Load() - gh.commitCalls.Load()
+	assert.Equal(t, int64(n), contentsCalls,
+		"each URI must still trigger its own contents lookup: expected %d, got %d", n, contentsCalls)
 }

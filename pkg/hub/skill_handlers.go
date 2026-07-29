@@ -1314,6 +1314,11 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
 	}
 
+	// Per-request memo for (owner,repo,ref,tokenScope) → commitSHA.
+	// URIs sharing the same tuple — the common case for a skill bundle in one
+	// repo — perform a single ref→SHA lookup instead of one per URI.
+	refSHAMemo := make(map[string]string)
+
 	for _, skillRef := range req.Skills {
 		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
 		if strings.HasPrefix(skillRef.URI, "gh://") {
@@ -1324,7 +1329,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 				})
 				continue
 			}
-			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID)
+			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
 			if err != nil {
 				resolveErrors = append(resolveErrors, ResolveSkillError{
 					URI: skillRef.URI, Code: "resolve_failed", Message: err.Error(),
@@ -1588,7 +1593,12 @@ func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (inst
 // 3. Checks the DB-backed resolution cache
 // 4. On cache miss, calls GitHub API to resolve commit SHA and file list
 // 5. Stores the result in the cache and returns it
-func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID string) (*ResolvedSkillResponse, error) {
+//
+// refSHAMemo is a per-request memo map keyed by "(owner)/(repo)@(ref):(tokenScope)"
+// that is shared across all URIs in one handleSkillsResolve call. It prevents
+// redundant commits/{ref} API lookups for URIs that share the same tuple. Pass a
+// non-nil map to enable memoisation; nil disables it (treated as always-miss).
+func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID string, refSHAMemo map[string]string) (*ResolvedSkillResponse, error) {
 	// 1. Parse gh:// URI
 	ghRef, err := agent.ParseGitHubSkillURI(rawURI)
 	if err != nil {
@@ -1644,9 +1654,22 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		rawBase = s.config.GitHubAppConfig.RawBaseURL
 	}
 
-	commitSHA, err := ghResolveCommitSHA(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
+	// Resolve ref → commit SHA, reusing a prior lookup if this (owner, repo,
+	// ref, tokenScope) tuple was already resolved within this request.
+	memoKey := ghRef.Owner + "/" + ghRef.Repo + "@" + ghRef.Ref + ":" + installID
+	commitSHA, seen := "", false
+	if refSHAMemo != nil {
+		commitSHA, seen = refSHAMemo[memoKey]
+	}
+	if !seen {
+		var err error
+		commitSHA, err = ghResolveCommitSHA(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
+		}
+		if refSHAMemo != nil {
+			refSHAMemo[memoKey] = commitSHA
+		}
 	}
 
 	fileEntries, err := ghListContents(ctx, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
