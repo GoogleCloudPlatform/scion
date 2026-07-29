@@ -163,15 +163,40 @@ model_aliases:
   extra-large: gpt-5.5
 ```
 
-Templates reference abstract sizes; the alias resolves to a concrete model at
-provision time (available to your script via the manifest's
-`model_resolution`). Provide all four conventional aliases.
+Templates reference abstract sizes. Provide all four conventional aliases.
+
+Scion delivers the agent's model to the container in the `SCION_MODEL` env
+var — that is the only live channel. (`ctx.model_resolution` reads a manifest
+key that the Go side never writes; see changelog 2026-07-20. Don't build on
+it.) `SCION_MODEL` may still carry a raw tier name, so resolve it in
+`provision.py`:
+
+```python
+raw = os.environ.get("SCION_MODEL", "").strip()
+aliases = ctx.harness_config.get("model_aliases") or {}
+model = aliases.get(raw.lower(), raw) or "<your default>"
+```
+
+Mirror `config.NormalizeModelAlias` / `config.ResolveModelAlias`
+(`pkg/config/templates.go`) when you normalize: Scion also passes
+`--model <resolved>` on the CLI command line when the agent has a model
+configured, and a harness-side spelling the Go side does not accept would
+make the two disagree. Then write the result to the tool's native settings
+file or the env overlay. Do **not** pin the tool's model env var in the `env`
+block below — see the precedence note there.
 
 ### Environment
 
 - `env`: static env vars set in the container.
 - `env_template`: values with placeholder expansion — `{{ .AgentName }}`,
   `{{ .AgentHome }}`, `{{ .UnixUsername }}` (only these three).
+
+Precedence: container env (`env`, `env_template`, template/CLI env) beats the
+`env.json` overlay your provisioner writes — the overlay only adds keys that
+are not already set, so a runtime value can never be masked by a harness
+script. That makes the `env` block the wrong place for anything the
+provisioner needs to compute at start time (the selected model, auth-mode
+dependent vars); put the default in `provision.py` instead.
 
 ### Interrupts
 
@@ -357,7 +382,9 @@ helpers), never from `os.environ`.
 `agent_name`, `agent_home`, `agent_workspace`, `harness_bundle_dir`,
 `harness_config` (your parsed config.yaml — read `instructions_file`,
 `system_prompt_mode`, etc. from here rather than hardcoding), `inputs` /
-`outputs` paths, `model_resolution`, and `platform`.
+`outputs` paths, and `platform`. (`ProvisionContext.model_resolution` reads a
+`model_resolution` key that `ProvisionManifest` does not emit — it is always
+empty; use `SCION_MODEL` instead.)
 
 ### What provision.py must do
 
@@ -429,7 +456,8 @@ Key API surface:
 - **`ProvisionContext`** — properties: `bundle_dir`, `inputs_dir`, `home`,
   `workspace`, `harness_config`, `candidates`, `explicit_type`, `env_keys`,
   `file_paths`, `env_secret_files`, `file_secret_files`, `telemetry`,
-  `model_resolution`. Methods: `read_secret(name)` / `read_file_secret(name)`
+  `model_resolution` (always empty — see above). Methods:
+  `read_secret(name)` / `read_file_secret(name)`
   (staged secret values, trailing newline stripped), `read_input_text(name)`,
   `select_auth(spec)`, `write_outputs(resolved, env=, extra=)`,
   `info()` / `warn()` (stderr).

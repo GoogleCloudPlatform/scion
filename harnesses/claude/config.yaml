@@ -46,7 +46,15 @@ model_aliases:
   large: opus
   extra-large: fable
 env:
-  ANTHROPIC_MODEL: "opus"
+  # ANTHROPIC_MODEL is intentionally NOT set here. Entries in this block land
+  # in the container environment, and the container environment always wins
+  # over the provisioner's env overlay, which made the agent's requested model
+  # (SCION_MODEL) impossible to apply. provision.py now owns ANTHROPIC_MODEL:
+  # it resolves SCION_MODEL through model_aliases above and falls back to
+  # "opus" when no model is requested. Setting ANTHROPIC_MODEL here (or in a
+  # template's env block) still works as an explicit, non-overridable pin.
+  # Consequence: ANTHROPIC_MODEL now reaches the supervised harness process
+  # (and what it spawns) rather than every process in the container.
   ANTHROPIC_DEFAULT_HAIKU_MODEL: "haiku-4-5"
 command:
   base: ["claude", "--no-chrome", "--dangerously-skip-permissions"]
