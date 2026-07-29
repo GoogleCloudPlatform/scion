@@ -27,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"crypto/sha256"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -170,6 +169,29 @@ func ResolveUserIDFromContext(ctx context.Context) string {
 	return v
 }
 
+type gitHubTokenKey struct{}
+
+// ContextWithGitHubToken returns a context carrying a GitHub token for the
+// install phase.
+//
+// When the Hub resolves a gh:// skill it returns raw.githubusercontent.com
+// URLs but, deliberately, not the credential behind them — a Hub-minted App
+// token must not travel in an API response body or be persisted to the
+// broker's on-disk resolution cache. The broker therefore supplies its own
+// GITHUB_TOKEN here, which downloadSkillFile presents when fetching from
+// GitHub. Public repos need no token; private repos require one that can read
+// the repo in question.
+func ContextWithGitHubToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, gitHubTokenKey{}, token)
+}
+
+// GitHubTokenFromContext retrieves the GitHub token for the install phase,
+// or "" if none was set.
+func GitHubTokenFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(gitHubTokenKey{}).(string)
+	return v
+}
+
 // --- Resolution record types ---
 
 // SkillResolutionRecord is written to agentHome/.scion/resolved-skills.json
@@ -297,6 +319,11 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		return nil, fmt.Errorf("failed to create skill staging dir: %w", err)
 	}
 
+	// Credential for raw.githubusercontent.com downloads of gh:// skills that
+	// the Hub resolved on our behalf. Empty for public repos and for skills
+	// that carry pre-fetched content.
+	ghToken := GitHubTokenFromContext(ctx)
+
 	var fileEntries []FileEntry
 
 	for _, f := range skill.Files {
@@ -329,16 +356,16 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 			if err := writeSkillFileContent(f.Content, destPath); err != nil {
 				return nil, fmt.Errorf("failed to write %s: %w", f.Path, err)
 			}
-		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize); err != nil {
+		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize, ghToken); err != nil {
 			return nil, fmt.Errorf("failed to download %s: %w", f.Path, err)
 		}
 
-		// S2: Verify per-file hash
-		actualHash, err := transfer.HashFile(destPath)
+		// S2: Verify per-file hash, in whichever format the resolver supplied.
+		actualHash, err := hashFileAs(destPath, f.Hash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to hash %s: %w", f.Path, err)
 		}
-		if actualHash != f.Hash {
+		if f.Hash != "" && actualHash != f.Hash {
 			return nil, fmt.Errorf(
 				"hash mismatch for file %q in skill %q: expected %s, got %s",
 				f.Path, skill.URI, f.Hash, actualHash)
@@ -445,12 +472,44 @@ func verifyInstalledSkillHash(dir string, skill ResolvedSkill) error {
 		if err != nil {
 			return fmt.Errorf("missing file %s: %w", f.Path, err)
 		}
-		computed := fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+		if f.Hash == "" {
+			continue
+		}
+		computed := hashBytesAs(data, f.Hash)
 		if computed != f.Hash {
 			return fmt.Errorf("hash mismatch for %s: expected %s, got %s", f.Path, f.Hash, computed)
 		}
 	}
 	return nil
+}
+
+// hashFileAs hashes the file at path using the same algorithm as the expected
+// hash, so the two are directly comparable.
+//
+// Two formats reach the install phase:
+//
+//   - "sha256:<hex64>" — produced by the Hub's registry storage and by the
+//     local GitHubSkillResolver, which downloads content during resolution.
+//   - a bare git blob object ID (40 hex chars) — produced by the Hub's gh://
+//     resolution cache, which copies the "sha" field straight out of GitHub's
+//     Contents API and so never sees the file bytes.
+//
+// An empty expected hash means the resolver published no per-file digest; the
+// file is still hashed as sha256 so the resolution record has a usable value,
+// and the caller skips comparison.
+func hashFileAs(path, expected string) (string, error) {
+	if transfer.IsGitBlobHash(expected) {
+		return transfer.GitBlobHashFile(path)
+	}
+	return transfer.HashFile(path)
+}
+
+// hashBytesAs is the in-memory counterpart to hashFileAs.
+func hashBytesAs(data []byte, expected string) string {
+	if transfer.IsGitBlobHash(expected) {
+		return transfer.GitBlobHashBytes(data)
+	}
+	return transfer.HashBytes(data)
 }
 
 // validateFilePath checks that a relative path is safe for extraction.
@@ -502,8 +561,22 @@ func validateFilePath(path string) error {
 	return nil
 }
 
+// isGitHubHost reports whether host belongs to GitHub, and is therefore a
+// permitted recipient of a GitHub token.
+func isGitHubHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "github.com" ||
+		strings.HasSuffix(host, ".github.com") ||
+		strings.HasSuffix(host, ".githubusercontent.com")
+}
+
 // downloadSkillFile downloads a single file from a URL to a local path.
-func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize int64) error {
+//
+// ghToken, when non-empty, is sent as a bearer credential — but only to
+// GitHub hosts. Registry skills are served from signed object-store URLs that
+// have no business seeing a GitHub token, so the host check is what keeps the
+// credential from leaking to an unrelated origin named in a Hub response.
+func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize int64, ghToken string) error {
 	parsed, err := url.Parse(fileURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -536,6 +609,9 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
+	}
+	if ghToken != "" && isGitHubHost(parsed.Hostname()) {
+		req.Header.Set("Authorization", "Bearer "+ghToken)
 	}
 
 	resp, err := client.Do(req)

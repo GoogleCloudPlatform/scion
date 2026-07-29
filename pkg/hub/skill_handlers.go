@@ -38,6 +38,7 @@ import (
 
 const (
 	githubAPIBase = "https://api.github.com"
+	githubRawBase = "https://raw.githubusercontent.com"
 )
 
 // CreateSkillRequest is the request body for creating a skill.
@@ -1302,9 +1303,27 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	var resolved []ResolvedSkillResponse
 	var resolveErrors []ResolveSkillError
 
+	// Resolving a gh:// URI with a non-empty ProjectID makes the Hub mint that
+	// project's GitHub App token, so the caller must be authorized for the
+	// project — otherwise anyone could borrow another project's installation to
+	// read its private repositories. An empty ProjectID resolves anonymously
+	// (no token minted) and needs no check. Evaluated once, up front, and only
+	// when the request actually contains a gh:// URI.
+	ghProjectAllowed := true
+	if req.ProjectID != "" && hasGitHubSkillRef(req.Skills) {
+		ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
+	}
+
 	for _, skillRef := range req.Skills {
 		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
 		if strings.HasPrefix(skillRef.URI, "gh://") {
+			if !ghProjectAllowed {
+				resolveErrors = append(resolveErrors, ResolveSkillError{
+					URI: skillRef.URI, Code: "forbidden",
+					Message: "you do not have permission to resolve GitHub skills for this project",
+				})
+				continue
+			}
 			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID)
 			if err != nil {
 				resolveErrors = append(resolveErrors, ResolveSkillError{
@@ -1492,6 +1511,46 @@ func skillResource(s *store.Skill) Resource {
 	return r
 }
 
+// hasGitHubSkillRef reports whether any reference in the batch is a gh:// URI.
+func hasGitHubSkillRef(refs []ResolveSkillRef) bool {
+	for _, ref := range refs {
+		if strings.HasPrefix(ref.URI, "gh://") {
+			return true
+		}
+	}
+	return false
+}
+
+// canUseProjectGitHubToken reports whether the caller in ctx is permitted to have
+// the Hub mint projectID's GitHub App token on their behalf. Agents are confined
+// to their own project; users must hold read access on the project's skills;
+// brokers must be registered as a provider for the project.
+// Unauthenticated callers are always denied.
+func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string) bool {
+	// A BrokerIdentity is NOT a global privilege: broker join is unauthenticated,
+	// so anyone can mint one. A broker may only borrow the token of a project it
+	// is registered to serve, which GetProjectProvider confirms.
+	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil {
+		if s.store == nil {
+			return false
+		}
+		_, err := s.store.GetProjectProvider(ctx, projectID, brokerIdent.BrokerID())
+		return err == nil
+	}
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		return agentIdent.ProjectID() == projectID
+	}
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		if s.authzService == nil {
+			return false
+		}
+		return s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type: "skill", ParentType: "project", ParentID: projectID,
+		}, ActionRead).Allowed
+	}
+	return false
+}
+
 // resolveGitHubToken determines the GitHub token scope and mints a token if needed.
 // Returns (installID, token, error).
 // - installID is the GitHub App installation ID (as string) or "public" for unauthenticated.
@@ -1536,6 +1595,14 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		return nil, fmt.Errorf("invalid gh:// URI: %w", err)
 	}
 
+	// Default an omitted ref to HEAD, matching the local resolver
+	// (github_skill_resolver.go resolveCommitSHA). Doing this before the cache
+	// key is computed also means gh://o/r/p and gh://o/r/p@HEAD share one
+	// entry rather than each missing the other's.
+	if ghRef.Ref == "" {
+		ghRef.Ref = "HEAD"
+	}
+
 	// 2. Determine token scope
 	installID, token, err := s.resolveGitHubToken(ctx, projectID)
 	if err != nil {
@@ -1563,13 +1630,17 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	if s.config.GitHubAppConfig.APIBaseURL != "" {
 		apiBase = s.config.GitHubAppConfig.APIBaseURL
 	}
+	rawBase := githubRawBase
+	if s.config.GitHubAppConfig.RawBaseURL != "" {
+		rawBase = s.config.GitHubAppConfig.RawBaseURL
+	}
 
 	commitSHA, err := ghResolveCommitSHA(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
 	}
 
-	fileEntries, err := ghListContents(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
+	fileEntries, err := ghListContents(ctx, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list contents: %w", err)
 	}
@@ -1613,6 +1684,13 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 }
 
 // buildResolvedSkillResponse constructs a ResolvedSkillResponse from a cache entry.
+//
+// Hash values here are git blob object IDs (bare 40-char hex), not the
+// "sha256:<hex>" digests used elsewhere in the API: the Hub resolves gh://
+// skills from GitHub metadata alone and never downloads the bytes, so a
+// sha256 digest is not available to it. The client recognises the format and
+// verifies accordingly (see hashFileAs in pkg/agent/skill_resolver.go).
+// ContentHash is likewise a digest over the git blob IDs.
 func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheEntry) *ResolvedSkillResponse {
 	files := make([]DownloadURLInfo, len(entry.FileEntries))
 	for i, f := range entry.FileEntries {

@@ -15,15 +15,73 @@
 package transfer
 
 import (
+	"crypto/sha1" //nolint:gosec // Git object IDs are SHA-1 by definition; see GitBlobHashFile.
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 )
 
 // HashPrefix is the prefix for SHA-256 hashes.
 const HashPrefix = "sha256:"
+
+// gitBlobHashPattern matches a bare git object ID: 40 lowercase hex characters.
+var gitBlobHashPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// IsGitBlobHash reports whether s is formatted as a git blob object ID
+// (40 lowercase hex characters, no algorithm prefix).
+//
+// It is used to tell apart the two hash formats that flow through skill
+// resolution: "sha256:<hex64>" digests produced by this package, and bare git
+// blob object IDs supplied verbatim by GitHub's Contents API.
+func IsGitBlobHash(s string) bool {
+	return gitBlobHashPattern.MatchString(s)
+}
+
+// GitBlobHashBytes computes the git blob object ID of data, i.e.
+// SHA-1("blob <len>\x00" + data), returned as bare lowercase hex.
+//
+// This is the value GitHub's Contents API reports in the "sha" field of a
+// file entry. Computing it locally lets a caller verify content fetched from
+// GitHub against metadata GitHub already published, without the metadata
+// producer having to download the content itself.
+//
+// SHA-1 is used because git's object model mandates it. This is not a
+// general-purpose integrity primitive — prefer HashBytes/HashFile for that.
+func GitBlobHashBytes(data []byte) string {
+	h := sha1.New() //nolint:gosec // Git object IDs are SHA-1 by definition.
+	// hash.Hash writes never return an error, but errcheck cannot know that.
+	_, _ = fmt.Fprintf(h, "blob %d\x00", len(data))
+	_, _ = h.Write(data)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// GitBlobHashFile computes the git blob object ID of a file's contents.
+// See GitBlobHashBytes for the format and the rationale for SHA-1.
+func GitBlobHashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+
+	h := sha1.New() //nolint:gosec // Git object IDs are SHA-1 by definition.
+	// hash.Hash writes never return an error, but errcheck cannot know that.
+	_, _ = fmt.Fprintf(h, "blob %d\x00", info.Size())
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
 
 // HashFile computes the SHA-256 hash of a file.
 // Returns the hash in format "sha256:<hex>".

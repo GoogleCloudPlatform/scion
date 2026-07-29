@@ -220,11 +220,15 @@ type MaintenanceConfig struct {
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.
 type GitHubAppServerConfig struct {
-	AppID           int64
-	PrivateKeyPath  string
-	PrivateKey      string
-	WebhookSecret   string
-	APIBaseURL      string
+	AppID          int64
+	PrivateKeyPath string
+	PrivateKey     string
+	WebhookSecret  string
+	APIBaseURL     string
+	// RawBaseURL overrides the origin used to build raw file-content URLs
+	// (default https://raw.githubusercontent.com). Set alongside APIBaseURL
+	// for GitHub Enterprise or for tests that serve fixture content.
+	RawBaseURL      string
 	WebhooksEnabled bool
 	InstallationURL string
 }

@@ -122,3 +122,81 @@ func TestComputeContentHash_Deterministic(t *testing.T) {
 		t.Errorf("content hash should be deterministic: %s != %s", hash1, hash2)
 	}
 }
+
+// TestGitBlobHashBytes checks the implementation against object IDs produced
+// by git itself (`git hash-object`), which is the authority for this format.
+func TestGitBlobHashBytes(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		// printf '' | git hash-object --stdin
+		{"empty", "", "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"},
+		// printf 'hello\n' | git hash-object --stdin
+		{"hello newline", "hello\n", "ce013625030ba8dba906f756967f9e9ca394464a"},
+		// printf 'hello world' | git hash-object --stdin
+		{"hello world", "hello world", "95d09f2b10159347eece71399a7e2e907ea3df4f"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := GitBlobHashBytes([]byte(tc.content)); got != tc.want {
+				t.Errorf("GitBlobHashBytes(%q) = %s, want %s", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGitBlobHashFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "blob.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	got, err := GitBlobHashFile(path)
+	if err != nil {
+		t.Fatalf("GitBlobHashFile: %v", err)
+	}
+	const want = "ce013625030ba8dba906f756967f9e9ca394464a"
+	if got != want {
+		t.Errorf("GitBlobHashFile = %s, want %s", got, want)
+	}
+
+	// Must agree with the in-memory variant.
+	if mem := GitBlobHashBytes([]byte("hello\n")); mem != got {
+		t.Errorf("GitBlobHashFile (%s) disagrees with GitBlobHashBytes (%s)", got, mem)
+	}
+}
+
+func TestGitBlobHashFile_Missing(t *testing.T) {
+	if _, err := GitBlobHashFile(filepath.Join(t.TempDir(), "nope.txt")); err == nil {
+		t.Error("expected an error for a missing file")
+	}
+}
+
+func TestIsGitBlobHash(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"ce013625030ba8dba906f756967f9e9ca394464a", true},
+		{"", false},
+		// A sha256 digest must not be mistaken for a git object ID.
+		{"sha256:ce013625030ba8dba906f756967f9e9ca394464a", false},
+		{HashBytes([]byte("hello")), false},
+		// Wrong length.
+		{"ce013625030ba8dba906f756967f9e9ca394464", false},
+		{"ce013625030ba8dba906f756967f9e9ca394464ab", false},
+		// Uppercase hex is not the canonical git form.
+		{"CE013625030BA8DBA906F756967F9E9CA394464A", false},
+		// Non-hex.
+		{"ze013625030ba8dba906f756967f9e9ca394464a", false},
+	}
+
+	for _, tc := range cases {
+		if got := IsGitBlobHash(tc.in); got != tc.want {
+			t.Errorf("IsGitBlobHash(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
