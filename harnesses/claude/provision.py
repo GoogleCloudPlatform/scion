@@ -37,9 +37,9 @@ This script's job:
   3. Update .claude.json project paths to point at the container workspace.
   4. Translate universal MCP servers into Claude Code's native mcpServers
      format in .claude.json.
-  5. Resolve the requested model (SCION_MODEL / manifest model_resolution),
-     mapping size aliases (small/medium/large/extra-large) through config.yaml's
-     model_aliases, and apply it via ANTHROPIC_MODEL plus ~/.claude/settings.json.
+  5. Resolve the requested model (the SCION_MODEL env var), mapping size
+     aliases (small/medium/large/extra-large) through config.yaml's
+     model_aliases, and publish it as ANTHROPIC_MODEL in the env overlay.
   6. Write outputs/resolved-auth.json describing the chosen method.
   7. Write outputs/env.json with env vars to project into the harness process
      (e.g. ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_MODEL, or
@@ -69,7 +69,6 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
 
 CLAUDE_JSON_FILE = "~/.claude.json"
 CLAUDE_AUTH_FILE = "~/.claude/.credentials.json"
-CLAUDE_SETTINGS_FILE = "~/.claude/settings.json"
 
 # Model used when the agent config does not request one. This preserves the
 # historical default that used to live in config.yaml's env block
@@ -79,15 +78,20 @@ CLAUDE_SETTINGS_FILE = "~/.claude/settings.json"
 # requested model impossible to apply.
 DEFAULT_MODEL = "opus"
 
-# Single-letter / shorthand spellings accepted for the size aliases declared
-# in config.yaml's model_aliases map.
+# The canonical size aliases, mirroring config.KnownModelAliases
+# (pkg/config/templates.go). Only these four resolve through config.yaml's
+# model_aliases map; anything else is treated as a concrete model name.
+KNOWN_MODEL_ALIASES = frozenset({"small", "medium", "large", "extra-large"})
+
+# Shorthand spellings for those aliases, mirroring config.NormalizeModelAlias
+# (pkg/config/templates.go). Deliberately no extra spellings: a form accepted
+# here but not there would make ANTHROPIC_MODEL disagree with the --model flag
+# the Go side computes from the same request.
 MODEL_ALIAS_SHORTHAND = {
     "s": "small",
     "m": "medium",
     "l": "large",
     "xl": "extra-large",
-    "extra_large": "extra-large",
-    "xlarge": "extra-large",
 }
 
 AUTH = scion_harness.AuthSpec(
@@ -236,95 +240,78 @@ def _update_project_paths(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.atomic_write_json(claude_json_path, cfg)
 
 
-def _requested_model(ctx: scion_harness.ProvisionContext) -> str:
-    """Return the model requested for this agent, before alias resolution.
+def _normalize_model_alias(model: str) -> str:
+    """Lower-case a model string and expand the single-letter shorthands.
 
-    Prefers the manifest's model_resolution block and falls back to the
-    SCION_MODEL env var that Scion injects into every agent container.
+    Mirrors config.NormalizeModelAlias (pkg/config/templates.go) exactly so the
+    model this script derives cannot disagree with the one the Go side derives
+    for --model / SCION_MODEL. Keep the two in sync.
     """
-    model = str(ctx.model_resolution.get("resolved_model") or "").strip()
-    if model:
-        return model
-    return os.environ.get("SCION_MODEL", "").strip()
+    normalized = model.strip().lower()
+    return MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
 
 
 def _resolve_model_alias(ctx: scion_harness.ProvisionContext, raw_model: str) -> str:
     """Resolve a size alias (e.g. 'medium') to a concrete Claude model name.
 
-    The mapping comes from config.yaml's model_aliases block, so operators can
-    re-point the tiers without touching this script. A value that is not a
-    known alias (e.g. 'sonnet' or 'claude-sonnet-4-5') is returned unchanged.
+    Mirrors config.ResolveModelAlias (pkg/config/templates.go): only the four
+    canonical tiers are treated as aliases, and the concrete name they map to
+    comes from config.yaml's model_aliases block so operators can re-point the
+    tiers without touching this script. Anything else (e.g. 'sonnet' or
+    'claude-sonnet-4-5') is a concrete model name and passes through.
     """
     if not raw_model:
         return ""
 
-    aliases = ctx.harness_config.get("model_aliases") or {}
-    if not isinstance(aliases, dict) or not aliases:
-        return raw_model
+    normalized = _normalize_model_alias(raw_model)
+    if normalized not in KNOWN_MODEL_ALIASES:
+        return normalized
 
-    normalized = raw_model.strip().lower()
-    normalized = MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
+    aliases = ctx.harness_config.get("model_aliases") or {}
+    if not isinstance(aliases, dict):
+        return normalized
 
     concrete = aliases.get(normalized)
-    if not concrete or concrete == raw_model:
-        return raw_model
+    if not concrete:
+        return normalized
 
-    ctx.info(f"resolved model alias {raw_model!r} → {concrete!r}")
+    if str(concrete) != raw_model:
+        ctx.info(f"resolved model alias {raw_model!r} → {concrete!r}")
     return str(concrete)
 
 
-def _apply_model_setting(ctx: scion_harness.ProvisionContext, model: str) -> None:
-    """Write the resolved model into ~/.claude/settings.json.
-
-    ANTHROPIC_MODEL (set via the env overlay) outranks this setting for the
-    supervised session, but the settings file also covers sessions launched by
-    hand inside the container (e.g. the drop-to-shell flow), where the overlay
-    is not applied.
-    """
-    if not model:
-        return
-
-    settings_path = scion_harness.expand_path(CLAUDE_SETTINGS_FILE)
-    settings: dict[str, Any] = {}
-    if os.path.isfile(settings_path):
-        try:
-            settings = scion_harness.load_json(settings_path) or {}
-        except (OSError, json.JSONDecodeError):
-            settings = {}
-    if not isinstance(settings, dict):
-        settings = {}
-
-    if settings.get("model") == model:
-        return
-
-    settings["model"] = model
-    scion_harness.atomic_write_json(settings_path, settings)
-
-
 def _apply_model(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> str:
-    """Resolve the requested model and project it into env + settings.json.
+    """Resolve the requested model and publish it as ANTHROPIC_MODEL.
+
+    The request arrives as the SCION_MODEL env var, which Scion injects into
+    every agent container from the agent's applied config. (The manifest has no
+    model_resolution field — see changelog 2026-07-20 — so SCION_MODEL is the
+    only live channel, and it can still carry a raw tier name: an agent started
+    with `--model medium` reaches the container as SCION_MODEL=medium.)
+
+    Where this sits in Claude Code's precedence chain
+    (--model > ANTHROPIC_MODEL > settings.json `model`): when the agent has a
+    model configured, pkg/agent/run.go also prepends `--model <resolved>` to
+    the CLI args, and that outranks ANTHROPIC_MODEL. ANTHROPIC_MODEL is what
+    covers the rest — the default when nothing is requested, subprocesses the
+    harness spawns, and any consumer reading the env var directly — and this
+    keeps it agreeing with the flag instead of contradicting it.
 
     Returns the concrete model name that was applied.
     """
-    requested = _requested_model(ctx)
+    requested = os.environ.get("SCION_MODEL", "").strip()
     model = _resolve_model_alias(ctx, requested) or DEFAULT_MODEL
 
     preset = os.environ.get("ANTHROPIC_MODEL", "").strip()
     if requested and preset and preset != model:
         ctx.warn(
-            f"ANTHROPIC_MODEL is already set to {preset!r} in the container "
-            f"environment and takes precedence over the requested model "
-            f"{model!r}; unset it (or re-run `scion harness-config update claude` "
-            "if it comes from a stale harness-config) to use the requested model"
+            f"ANTHROPIC_MODEL={preset!r} is set in the container environment and "
+            f"takes precedence over the requested model {model!r}. This usually "
+            "comes from an `env:` entry in your template or harness-config; "
+            "remove it there to let the agent's model setting apply."
         )
 
     env["ANTHROPIC_MODEL"] = model
-
-    try:
-        _apply_model_setting(ctx, model)
-    except OSError as exc:
-        ctx.warn(f"failed to write model setting: {exc}")
-
     return model
 
 

@@ -75,7 +75,7 @@ def env_vars(**values: str | None):
                 os.environ[key] = val
 
 
-def make_ctx(home: str, *, model_resolution: dict | None = None):
+def make_ctx(home: str):
     manifest = {
         "harness_bundle_dir": os.path.join(home, ".scion", "harness"),
         "harness_config": {
@@ -83,8 +83,6 @@ def make_ctx(home: str, *, model_resolution: dict | None = None):
             "instructions_file": ".claude/CLAUDE.md",
         },
     }
-    if model_resolution is not None:
-        manifest["model_resolution"] = model_resolution
     return scion_harness.ProvisionContext("claude", manifest)
 
 
@@ -105,12 +103,59 @@ class ModelResolutionTest(unittest.TestCase):
             "L": "opus",
             "XL": "fable",
             "SMALL": "haiku",
+            "extra-large": "fable",
         }
         for raw, want in cases.items():
             with self.subTest(raw=raw):
                 with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
                     ctx = make_ctx(tmp)
                     self.assertEqual(provision._resolve_model_alias(ctx, raw), want)
+
+    def test_shorthand_set_matches_go_normalize_model_alias(self) -> None:
+        """Python must not accept spellings the Go --model path rejects.
+
+        config.NormalizeModelAlias (pkg/config/templates.go) handles only
+        s/m/l/xl plus lower-casing, and config.ResolveModelAlias gates the
+        map lookup on config.KnownModelAliases. A spelling accepted only here
+        would make ANTHROPIC_MODEL disagree with the higher-precedence
+        --model flag.
+        """
+        self.assertEqual(
+            provision.MODEL_ALIAS_SHORTHAND,
+            {"s": "small", "m": "medium", "l": "large", "xl": "extra-large"},
+        )
+        self.assertEqual(
+            provision.KNOWN_MODEL_ALIASES,
+            frozenset({"small", "medium", "large", "extra-large"}),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp)
+            # Spellings Go does not normalize stay concrete (lower-cased),
+            # exactly as `config.ResolveModelAlias` would leave them.
+            for raw in ("xlarge", "extra_large"):
+                with self.subTest(raw=raw):
+                    self.assertEqual(provision._resolve_model_alias(ctx, raw), raw)
+
+    def test_unmapped_alias_falls_back_to_the_tier_name(self) -> None:
+        """Matches config.ResolveModelAlias: unmapped alias passes through."""
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            manifest = {
+                "harness_bundle_dir": os.path.join(tmp, ".scion", "harness"),
+                "harness_config": {"model_aliases": {"small": "haiku"}},
+            }
+            ctx = scion_harness.ProvisionContext("claude", manifest)
+            self.assertEqual(provision._resolve_model_alias(ctx, "large"), "large")
+
+    def test_custom_non_tier_alias_keys_are_ignored(self) -> None:
+        """Only the four canonical tiers resolve, as on the Go side."""
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            manifest = {
+                "harness_bundle_dir": os.path.join(tmp, ".scion", "harness"),
+                "harness_config": {"model_aliases": {"fast": "haiku"}},
+            }
+            ctx = scion_harness.ProvisionContext("claude", manifest)
+            self.assertEqual(provision._resolve_model_alias(ctx, "fast"), "fast")
 
     def test_concrete_model_passes_through_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -122,15 +167,6 @@ class ModelResolutionTest(unittest.TestCase):
         self.assertEqual(model, "claude-sonnet-4-5")
         self.assertEqual(env["ANTHROPIC_MODEL"], "claude-sonnet-4-5")
 
-    def test_manifest_model_resolution_wins_over_scion_model_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
-            ctx = make_ctx(tmp, model_resolution={"resolved_model": "haiku"})
-            with env_vars(SCION_MODEL="large", ANTHROPIC_MODEL=None):
-                env: dict[str, str] = {}
-                model = provision._apply_model(ctx, env)
-
-        self.assertEqual(model, "haiku")
-
     def test_no_requested_model_falls_back_to_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp)
@@ -141,23 +177,38 @@ class ModelResolutionTest(unittest.TestCase):
         self.assertEqual(model, provision.DEFAULT_MODEL)
         self.assertEqual(env["ANTHROPIC_MODEL"], provision.DEFAULT_MODEL)
 
-    def test_resolved_model_written_to_claude_settings(self) -> None:
+    def test_claude_settings_json_is_left_untouched(self) -> None:
+        """The provisioner must not rewrite the file that holds the deny list.
+
+        ~/.claude/settings.json carries the agent's permissions.deny list,
+        the disable* flags and the sciontool hooks. Model selection goes
+        through ANTHROPIC_MODEL, which outranks the settings `model` key
+        anyway, so there is no reason for this script to touch the file.
+        """
+        seed = os.path.join(
+            os.path.dirname(__file__), "home", ".claude", "settings.json"
+        )
+        with open(seed, "rb") as f:
+            original = f.read()
+
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             settings_path = os.path.join(tmp, ".claude", "settings.json")
             os.makedirs(os.path.dirname(settings_path))
-            with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump({"includeCoAuthoredBy": False}, f)
+            with open(settings_path, "wb") as f:
+                f.write(original)
 
             ctx = make_ctx(tmp)
             with env_vars(SCION_MODEL="medium", ANTHROPIC_MODEL=None):
                 provision._apply_model(ctx, {})
 
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
+            with open(settings_path, "rb") as f:
+                after = f.read()
 
-        self.assertEqual(settings["model"], "sonnet")
-        # Existing keys are preserved.
-        self.assertIs(settings["includeCoAuthoredBy"], False)
+        self.assertEqual(after, original)
+        # Sanity-check the fixture really is the containment-bearing file.
+        settings = json.loads(original)
+        self.assertIn("EnterPlanMode", settings["permissions"]["deny"])
+        self.assertIs(settings["disableBundledSkills"], True)
 
     def test_preset_anthropic_model_is_reported_but_not_overwritten(self) -> None:
         """A container env ANTHROPIC_MODEL outranks the overlay — warn about it."""

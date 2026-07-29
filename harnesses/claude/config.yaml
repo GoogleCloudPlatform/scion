@@ -53,6 +53,8 @@ env:
   # it resolves SCION_MODEL through model_aliases above and falls back to
   # "opus" when no model is requested. Setting ANTHROPIC_MODEL here (or in a
   # template's env block) still works as an explicit, non-overridable pin.
+  # Consequence: ANTHROPIC_MODEL now reaches the supervised harness process
+  # (and what it spawns) rather than every process in the container.
   ANTHROPIC_DEFAULT_HAIKU_MODEL: "haiku-4-5"
 command:
   base: ["claude", "--no-chrome", "--dangerously-skip-permissions"]
