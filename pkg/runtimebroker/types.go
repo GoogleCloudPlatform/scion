@@ -435,6 +435,14 @@ type CreateAgentConfig struct {
 	// inlined at agent-create time. The broker writes it to
 	// pre-start.d/30-project-custom before the agent container starts.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
+
+	// HubAgentDefaults carries the hub's operational agent_defaults
+	// (limits/resources). Applied during provisioning at a tier BELOW the
+	// template and inline config and ABOVE this broker's own settings.yaml
+	// defaults — deliberately not merged into InlineConfig, which is a
+	// top-of-chain slot. Nil when the hub sent none: local dispatch, a
+	// file-mode hub, or a hub that predates the field. See design §3.2.3.
+	HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 }
 
 // GCPIdentityConfig holds GCP identity configuration passed from Hub to Broker.
