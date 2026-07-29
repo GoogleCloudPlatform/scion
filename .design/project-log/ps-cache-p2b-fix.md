@@ -185,3 +185,97 @@ clean runs. Worth flagging to infra — it is not specific to this branch.
    revisited alongside follow-up 1.
 3. **Phase 3 can proceed**: routing `gh://` to the Hub resolver is a one-line
    change in `pkg/runtimebroker/handlers.go`, deliberately not made here.
+
+---
+
+## Addendum: cross-project authorization gap in `handleSkillsResolve`
+
+**Date:** 2026-07-29
+**Agent:** ps-cache-p2b-authz
+**Commit:** one commit on top of the four fixes above.
+
+A fifth defect, found in review of this branch. Unlike the other four it is a
+security defect rather than a correctness one, so it is worth calling out
+separately.
+
+### The gap
+
+In `handleSkillsResolve`, the `gh://` branch ran at the top of the per-skill
+loop, *before* any identity or access check:
+
+```go
+for _, skillRef := range req.Skills {
+    if strings.HasPrefix(skillRef.URI, "gh://") {
+        ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID)
+        ...
+        continue
+    }
+    // registry path — access-checked further down
+```
+
+`resolveGitHubSkill` calls `resolveGitHubToken(ctx, req.ProjectID)`, which
+loads that project and mints its GitHub App token. `req.ProjectID` is
+caller-supplied and was never validated against the caller's identity, so any
+authenticated principal could name *any* project and have the Hub mint that
+project's installation token — then use the resulting resolution to read files
+from repositories that installation can reach. The registry path immediately
+below has always checked access; the `gh://` path simply bypassed it by
+`continue`-ing first.
+
+This was latent rather than exploitable in production today, because Phase 2
+left `gh://` routed to the local resolver and nothing calls the Hub endpoint
+with a `gh://` URI yet. Phase 3 flips exactly that switch, so it had to be
+closed before the flip, not after.
+
+### The fix
+
+Authorize the caller against `req.ProjectID` before any `gh://` resolution,
+mirroring the check already used for project-scoped skill creation:
+
+- **Agent identity** — `agentIdent.ProjectID() == req.ProjectID`, the same
+  confinement agents get everywhere else.
+- **User identity** — `CheckAccess(userIdent, Resource{Type: "skill",
+  ParentType: "project", ParentID: req.ProjectID}, ActionRead)`. `ActionRead`
+  rather than `ActionCreate`: resolving reads a skill, it does not publish one.
+- **No identity** — denied.
+
+A failed check appends `ResolveSkillError{Code: "forbidden"}` and skips the
+entry, matching how the registry path reports a denial. The endpoint stays
+`200` with per-URI errors; one forbidden reference does not fail the batch.
+
+Two deliberate scoping choices:
+
+- **Only when `req.ProjectID != ""`.** An empty project ID makes
+  `resolveGitHubToken` return the `"public"` scope with no token, so there is
+  no credential to borrow and nothing to authorize. Checking anyway would break
+  anonymous resolution of public repos for no security gain.
+- **Evaluated once per request, not per URI**, and only when the batch actually
+  contains a `gh://` reference (`hasGitHubSkillRef`). The decision cannot vary
+  between URIs in a batch — same caller, same project — so a 50-item batch
+  should not cost 50 identical `CheckAccess` calls, and a batch with no `gh://`
+  references should cost none.
+
+### Files changed
+
+**`pkg/hub/skill_handlers.go`** — `hasGitHubSkillRef` and
+`Server.canUseProjectGitHubToken` helpers; the guard in `handleSkillsResolve`.
+
+### Test
+
+`TestSkillAuthz_Resolve_GH_ForbiddenProject` in
+`pkg/hub/skill_handlers_authz_test.go`, alongside the existing
+`TestSkillAuthz_Resolve_ForbiddenSkill`. Bob (not a member of Alice's project)
+POSTs a `gh://` URI with Alice's `ProjectID` and must get
+`Code: "forbidden"`.
+
+The test needs no GitHub mock, and that is the point: the assertion is
+specifically `forbidden` and not `resolve_failed`. Reverting the guard turns it
+into `resolve_failed` — the request reaches the GitHub API before failing — so
+the test distinguishes "denied" from "attempted and happened to fail", and
+would not pass on a fix that merely made the GitHub call fail. Verified by
+temporarily disabling the check and confirming that exact transition.
+
+```
+go test ./pkg/hub/... -run TestSkillAuthz    ok  1.4s
+gofmt -l                                     clean
+```

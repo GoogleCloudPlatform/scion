@@ -1303,9 +1303,27 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	var resolved []ResolvedSkillResponse
 	var resolveErrors []ResolveSkillError
 
+	// Resolving a gh:// URI with a non-empty ProjectID makes the Hub mint that
+	// project's GitHub App token, so the caller must be authorized for the
+	// project — otherwise anyone could borrow another project's installation to
+	// read its private repositories. An empty ProjectID resolves anonymously
+	// (no token minted) and needs no check. Evaluated once, up front, and only
+	// when the request actually contains a gh:// URI.
+	ghProjectAllowed := true
+	if req.ProjectID != "" && hasGitHubSkillRef(req.Skills) {
+		ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
+	}
+
 	for _, skillRef := range req.Skills {
 		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
 		if strings.HasPrefix(skillRef.URI, "gh://") {
+			if !ghProjectAllowed {
+				resolveErrors = append(resolveErrors, ResolveSkillError{
+					URI: skillRef.URI, Code: "forbidden",
+					Message: "you do not have permission to resolve GitHub skills for this project",
+				})
+				continue
+			}
 			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID)
 			if err != nil {
 				resolveErrors = append(resolveErrors, ResolveSkillError{
@@ -1491,6 +1509,35 @@ func skillResource(s *store.Skill) Resource {
 		r.ParentID = s.ScopeID
 	}
 	return r
+}
+
+// hasGitHubSkillRef reports whether any reference in the batch is a gh:// URI.
+func hasGitHubSkillRef(refs []ResolveSkillRef) bool {
+	for _, ref := range refs {
+		if strings.HasPrefix(ref.URI, "gh://") {
+			return true
+		}
+	}
+	return false
+}
+
+// canUseProjectGitHubToken reports whether the caller in ctx is permitted to have
+// the Hub mint projectID's GitHub App token on their behalf. Agents are confined
+// to their own project; users must hold read access on the project's skills.
+// Unauthenticated callers are always denied.
+func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string) bool {
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		return agentIdent.ProjectID() == projectID
+	}
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		if s.authzService == nil {
+			return false
+		}
+		return s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type: "skill", ParentType: "project", ParentID: projectID,
+		}, ActionRead).Allowed
+	}
+	return false
 }
 
 // resolveGitHubToken determines the GitHub token scope and mints a token if needed.

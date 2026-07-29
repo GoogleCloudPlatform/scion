@@ -222,6 +222,29 @@ func TestSkillAuthz_Resolve_ForbiddenSkill(t *testing.T) {
 	assert.Equal(t, "forbidden", resp.Errors[0].Code)
 }
 
+// TestSkillAuthz_Resolve_GH_ForbiddenProject guards the cross-project token-borrowing
+// gap: resolving a gh:// URI with a ProjectID makes the Hub mint that project's GitHub
+// App token, so a caller with no access to the project must be rejected. The authz
+// check short-circuits before any GitHub API call, so no GitHub mock is needed.
+func TestSkillAuthz_Resolve_GH_ForbiddenProject(t *testing.T) {
+	srv, _, _, bob, project := setupSkillAuthzTest(t)
+
+	// Bob is not a member of Alice's project.
+	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: "gh://acme/private-repo/skills/secret"}},
+		ProjectID: project.ID,
+	})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Empty(t, resp.Resolved, "gh:// skill must not resolve for a non-member of the project")
+	require.NotEmpty(t, resp.Errors, "gh:// resolve against another project should error")
+	assert.Equal(t, "forbidden", resp.Errors[0].Code,
+		"expected forbidden (not resolve_failed): the authz check must fire before GitHub is contacted")
+}
+
 func TestSkillAuthz_Resolve_PublicSkillAllowed(t *testing.T) {
 	srv, s, alice, bob, _ := setupSkillAuthzTest(t)
 	skill := createTestSkill(t, s, "public-skill", store.SkillScopeGlobal, "", alice.ID)
