@@ -143,7 +143,7 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		if hubErr == nil && hctx != nil && hctx.Client != nil {
 			hubResolver := agent.NewHubSkillResolver(hctx.Client.Skills())
 			resolver := agent.NewRoutingSkillResolver(hubResolver)
-			ghResolver := agent.NewGitHubSkillResolverWithCredentials(os.Getenv("GITHUB_TOKEN"), nil)
+			ghResolver := agent.NewGitHubSkillResolverWithCredentials(os.Getenv("GITHUB_TOKEN"), nil, nil)
 			resolver.Register("gh", ghResolver)
 
 			registrySvc := hctx.Client.SkillRegistries()

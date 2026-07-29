@@ -710,6 +710,9 @@ type Server struct {
 	// updateTracker manages pending HA update timeouts and reconnect-based
 	// completion detection.
 	updateTracker *pendingUpdateTracker
+
+	// ghResolutionStore is the DB-backed GitHub skill resolution cache (nil when entClient is nil).
+	ghResolutionStore *GitHubResolutionStore
 }
 
 func newInstanceID() string {
@@ -959,6 +962,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Runs on every startup so that the system list is always in sync with the binary.
 	if err := srv.seedPlatformSkillInsertions(ctx); err != nil {
 		slog.Warn("Failed to seed platform skill insertions", "error", err)
+	}
+
+	// Seed GitHub resolution cache settings into hub_settings["github_resolution_cache"] (idempotent).
+	if err := srv.seedGitHubResolutionCacheSettings(ctx); err != nil {
+		slog.Warn("Failed to seed github_resolution_cache settings", "error", err)
 	}
 
 	// Abort any maintenance operations/migrations left in "running" state from
@@ -1512,6 +1520,11 @@ func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn strin
 	s.dbDriver = dbDriver
 	s.entClient = client
 	s.databaseDSN = dsn
+
+	// Initialize GitHub resolution store when ent client is available
+	if client != nil {
+		s.ghResolutionStore = NewGitHubResolutionStore(client)
+	}
 
 	s.mu.Unlock()
 
@@ -2476,6 +2489,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 5, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
 
+	// Register GitHub resolution cache TTL eviction (every 10 minutes)
+	if s.ghResolutionStore != nil {
+		s.scheduler.RegisterRecurringSingleton("github-resolution-cache-eviction", 10, store.LockGitHubResolutionCacheEviction, s.githubResolutionCacheEvictionHandler())
+	}
+
 	// Register GitHub App health check if the app is configured
 	s.mu.RLock()
 	ghAppConfigured := s.config.GitHubAppConfig.AppID != 0
@@ -3222,4 +3240,58 @@ func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.ToLower(r.Header.Get("Upgrade")) == "websocket" &&
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+// githubResolutionCacheEvictionHandler returns a recurring handler function that
+// purges expired GitHub skill resolution cache entries. This prevents the cache
+// table from growing unbounded and keeps queries fast.
+func (s *Server) githubResolutionCacheEvictionHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		if s.ghResolutionStore == nil {
+			return
+		}
+
+		if err := s.ghResolutionStore.PurgeExpired(ctx); err != nil {
+			slog.Error("Scheduler: github resolution cache eviction failed", "error", err)
+		}
+	}
+}
+
+// seedGitHubResolutionCacheSettings seeds the github_resolution_cache section
+// in hub_settings with default TTL values. This runs on every startup so operators
+// can see and adjust the cache behavior via the settings UI.
+// Idempotent: calling more than once produces the same result.
+func (s *Server) seedGitHubResolutionCacheSettings(ctx context.Context) error {
+	settingValue := map[string]interface{}{
+		"branch_ref_ttl_minutes": 30,
+		"sha_ref_ttl_hours":      24,
+		"enabled":                true,
+	}
+
+	value, err := json.Marshal(settingValue)
+	if err != nil {
+		return fmt.Errorf("seedGitHubResolutionCacheSettings: marshal: %w", err)
+	}
+
+	// Check if the setting already exists to avoid spurious revision bumps
+	_, getErr := s.store.GetHubSetting(ctx, "github_resolution_cache")
+	if getErr == nil {
+		// Setting exists; skip upsert to avoid revision churn
+		slog.Debug("seedGitHubResolutionCacheSettings: setting already exists; skipping")
+		return nil
+	}
+	if !errors.Is(getErr, store.ErrNotFound) {
+		return fmt.Errorf("seedGitHubResolutionCacheSettings: read existing setting: %w", getErr)
+	}
+
+	// Setting doesn't exist; create it with expectedRevision=-1 (upsert pattern)
+	if _, upsertErr := s.store.UpsertHubSetting(ctx, "github_resolution_cache", value, "seed", -1, "seeded"); upsertErr != nil {
+		return fmt.Errorf("seedGitHubResolutionCacheSettings: upsert: %w", upsertErr)
+	}
+
+	slog.Info("Seeded github_resolution_cache settings into hub_settings")
+	return nil
 }

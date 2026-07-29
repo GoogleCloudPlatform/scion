@@ -63,7 +63,7 @@ type GitHubSkillResolver struct {
 // are reused to avoid redundant GitHub API calls.
 func NewGitHubSkillResolver() *GitHubSkillResolver {
 	var cache *GitHubResolutionCache
-	cacheDir, cacheDirErr := githubResolutionCacheDir()
+	cacheDir, cacheDirErr := GitHubResolutionCacheDir()
 	if cacheDirErr != nil {
 		// Print to stderr unconditionally: without a cache every request hits the
 		// GitHub API fresh, directly contributing to rate-limit exhaustion.
@@ -95,7 +95,10 @@ func NewGitHubSkillResolver() *GitHubSkillResolver {
 //  4. No token — unauthenticated calls, subject to GitHub's 60 req/hr per-IP limit.
 //
 // provisionCredentials maps secret name → value; may be nil.
-func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredentials map[string]string) *GitHubSkillResolver {
+// If cache is non-nil, it is used as the singleton resolution cache (e.g., from
+// the broker server struct) instead of the per-resolver cache created by
+// NewGitHubSkillResolver. Pass nil to get the default per-resolver cache behavior.
+func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredentials map[string]string, cache *GitHubResolutionCache) *GitHubSkillResolver {
 	r := NewGitHubSkillResolver()
 	if defaultToken != "" {
 		r.token = defaultToken
@@ -109,6 +112,11 @@ func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredent
 		}
 	}
 	r.provisionCredentials = provisionCredentials
+	// If a singleton cache is provided (e.g., from the broker server struct),
+	// use it instead of the per-resolver cache created by NewGitHubSkillResolver.
+	if cache != nil {
+		r.resolutionCache = cache
+	}
 	return r
 }
 

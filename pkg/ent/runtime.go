@@ -15,6 +15,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
@@ -316,6 +317,36 @@ func init() {
 	gcpserviceaccountDescID := gcpserviceaccountFields[0].Descriptor()
 	// gcpserviceaccount.DefaultID holds the default value on creation for the id field.
 	gcpserviceaccount.DefaultID = gcpserviceaccountDescID.Default.(func() uuid.UUID)
+	githubresolutioncacheFields := schema.GitHubResolutionCache{}.Fields()
+	_ = githubresolutioncacheFields
+	// githubresolutioncacheDescCacheKey is the schema descriptor for cache_key field.
+	githubresolutioncacheDescCacheKey := githubresolutioncacheFields[1].Descriptor()
+	// githubresolutioncache.CacheKeyValidator is a validator for the "cache_key" field. It is called by the builders before save.
+	githubresolutioncache.CacheKeyValidator = githubresolutioncacheDescCacheKey.Validators[0].(func(string) error)
+	// githubresolutioncacheDescOriginalURI is the schema descriptor for original_uri field.
+	githubresolutioncacheDescOriginalURI := githubresolutioncacheFields[2].Descriptor()
+	// githubresolutioncache.OriginalURIValidator is a validator for the "original_uri" field. It is called by the builders before save.
+	githubresolutioncache.OriginalURIValidator = githubresolutioncacheDescOriginalURI.Validators[0].(func(string) error)
+	// githubresolutioncacheDescCommitSha is the schema descriptor for commit_sha field.
+	githubresolutioncacheDescCommitSha := githubresolutioncacheFields[3].Descriptor()
+	// githubresolutioncache.CommitShaValidator is a validator for the "commit_sha" field. It is called by the builders before save.
+	githubresolutioncache.CommitShaValidator = githubresolutioncacheDescCommitSha.Validators[0].(func(string) error)
+	// githubresolutioncacheDescBundleHash is the schema descriptor for bundle_hash field.
+	githubresolutioncacheDescBundleHash := githubresolutioncacheFields[5].Descriptor()
+	// githubresolutioncache.BundleHashValidator is a validator for the "bundle_hash" field. It is called by the builders before save.
+	githubresolutioncache.BundleHashValidator = githubresolutioncacheDescBundleHash.Validators[0].(func(string) error)
+	// githubresolutioncacheDescTokenScope is the schema descriptor for token_scope field.
+	githubresolutioncacheDescTokenScope := githubresolutioncacheFields[6].Descriptor()
+	// githubresolutioncache.DefaultTokenScope holds the default value on creation for the token_scope field.
+	githubresolutioncache.DefaultTokenScope = githubresolutioncacheDescTokenScope.Default.(string)
+	// githubresolutioncacheDescCreateTime is the schema descriptor for create_time field.
+	githubresolutioncacheDescCreateTime := githubresolutioncacheFields[8].Descriptor()
+	// githubresolutioncache.DefaultCreateTime holds the default value on creation for the create_time field.
+	githubresolutioncache.DefaultCreateTime = githubresolutioncacheDescCreateTime.Default.(func() time.Time)
+	// githubresolutioncacheDescID is the schema descriptor for id field.
+	githubresolutioncacheDescID := githubresolutioncacheFields[0].Descriptor()
+	// githubresolutioncache.DefaultID holds the default value on creation for the id field.
+	githubresolutioncache.DefaultID = githubresolutioncacheDescID.Default.(func() uuid.UUID)
 	githubinstallationFields := schema.GithubInstallation{}.Fields()
 	_ = githubinstallationFields
 	// githubinstallationDescAccountLogin is the schema descriptor for account_login field.

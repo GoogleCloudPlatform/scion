@@ -22,6 +22,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
@@ -76,6 +77,7 @@ const (
 	TypeBrokerSecret             = "BrokerSecret"
 	TypeEnvVar                   = "EnvVar"
 	TypeGCPServiceAccount        = "GCPServiceAccount"
+	TypeGitHubResolutionCache    = "GitHubResolutionCache"
 	TypeGithubInstallation       = "GithubInstallation"
 	TypeGroup                    = "Group"
 	TypeGroupMembership          = "GroupMembership"
@@ -10155,6 +10157,732 @@ func (m *GCPServiceAccountMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *GCPServiceAccountMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown GCPServiceAccount edge %s", name)
+}
+
+// GitHubResolutionCacheMutation represents an operation that mutates the GitHubResolutionCache nodes in the graph.
+type GitHubResolutionCacheMutation struct {
+	config
+	op                 Op
+	typ                string
+	id                 *uuid.UUID
+	cache_key          *string
+	original_uri       *string
+	commit_sha         *string
+	file_entries       *[]schema.GitHubFileEntry
+	appendfile_entries []schema.GitHubFileEntry
+	bundle_hash        *string
+	token_scope        *string
+	expires_at         *time.Time
+	create_time        *time.Time
+	clearedFields      map[string]struct{}
+	done               bool
+	oldValue           func(context.Context) (*GitHubResolutionCache, error)
+	predicates         []predicate.GitHubResolutionCache
+}
+
+var _ ent.Mutation = (*GitHubResolutionCacheMutation)(nil)
+
+// githubresolutioncacheOption allows management of the mutation configuration using functional options.
+type githubresolutioncacheOption func(*GitHubResolutionCacheMutation)
+
+// newGitHubResolutionCacheMutation creates new mutation for the GitHubResolutionCache entity.
+func newGitHubResolutionCacheMutation(c config, op Op, opts ...githubresolutioncacheOption) *GitHubResolutionCacheMutation {
+	m := &GitHubResolutionCacheMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeGitHubResolutionCache,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withGitHubResolutionCacheID sets the ID field of the mutation.
+func withGitHubResolutionCacheID(id uuid.UUID) githubresolutioncacheOption {
+	return func(m *GitHubResolutionCacheMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *GitHubResolutionCache
+		)
+		m.oldValue = func(ctx context.Context) (*GitHubResolutionCache, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().GitHubResolutionCache.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withGitHubResolutionCache sets the old GitHubResolutionCache of the mutation.
+func withGitHubResolutionCache(node *GitHubResolutionCache) githubresolutioncacheOption {
+	return func(m *GitHubResolutionCacheMutation) {
+		m.oldValue = func(context.Context) (*GitHubResolutionCache, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m GitHubResolutionCacheMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m GitHubResolutionCacheMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of GitHubResolutionCache entities.
+func (m *GitHubResolutionCacheMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *GitHubResolutionCacheMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *GitHubResolutionCacheMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().GitHubResolutionCache.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetCacheKey sets the "cache_key" field.
+func (m *GitHubResolutionCacheMutation) SetCacheKey(s string) {
+	m.cache_key = &s
+}
+
+// CacheKey returns the value of the "cache_key" field in the mutation.
+func (m *GitHubResolutionCacheMutation) CacheKey() (r string, exists bool) {
+	v := m.cache_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCacheKey returns the old "cache_key" field's value of the GitHubResolutionCache entity.
+// If the GitHubResolutionCache object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GitHubResolutionCacheMutation) OldCacheKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCacheKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCacheKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCacheKey: %w", err)
+	}
+	return oldValue.CacheKey, nil
+}
+
+// ResetCacheKey resets all changes to the "cache_key" field.
+func (m *GitHubResolutionCacheMutation) ResetCacheKey() {
+	m.cache_key = nil
+}
+
+// SetOriginalURI sets the "original_uri" field.
+func (m *GitHubResolutionCacheMutation) SetOriginalURI(s string) {
+	m.original_uri = &s
+}
+
+// OriginalURI returns the value of the "original_uri" field in the mutation.
+func (m *GitHubResolutionCacheMutation) OriginalURI() (r string, exists bool) {
+	v := m.original_uri
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOriginalURI returns the old "original_uri" field's value of the GitHubResolutionCache entity.
+// If the GitHubResolutionCache object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GitHubResolutionCacheMutation) OldOriginalURI(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOriginalURI is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOriginalURI requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOriginalURI: %w", err)
+	}
+	return oldValue.OriginalURI, nil
+}
+
+// ResetOriginalURI resets all changes to the "original_uri" field.
+func (m *GitHubResolutionCacheMutation) ResetOriginalURI() {
+	m.original_uri = nil
+}
+
+// SetCommitSha sets the "commit_sha" field.
+func (m *GitHubResolutionCacheMutation) SetCommitSha(s string) {
+	m.commit_sha = &s
+}
+
+// CommitSha returns the value of the "commit_sha" field in the mutation.
+func (m *GitHubResolutionCacheMutation) CommitSha() (r string, exists bool) {
+	v := m.commit_sha
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCommitSha returns the old "commit_sha" field's value of the GitHubResolutionCache entity.
+// If the GitHubResolutionCache object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GitHubResolutionCacheMutation) OldCommitSha(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCommitSha is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCommitSha requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCommitSha: %w", err)
+	}
+	return oldValue.CommitSha, nil
+}
+
+// ResetCommitSha resets all changes to the "commit_sha" field.
+func (m *GitHubResolutionCacheMutation) ResetCommitSha() {
+	m.commit_sha = nil
+}
+
+// SetFileEntries sets the "file_entries" field.
+func (m *GitHubResolutionCacheMutation) SetFileEntries(shfe []schema.GitHubFileEntry) {
+	m.file_entries = &shfe
+	m.appendfile_entries = nil
+}
+
+// FileEntries returns the value of the "file_entries" field in the mutation.
+func (m *GitHubResolutionCacheMutation) FileEntries() (r []schema.GitHubFileEntry, exists bool) {
+	v := m.file_entries
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFileEntries returns the old "file_entries" field's value of the GitHubResolutionCache entity.
+// If the GitHubResolutionCache object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GitHubResolutionCacheMutation) OldFileEntries(ctx context.Context) (v []schema.GitHubFileEntry, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFileEntries is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFileEntries requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFileEntries: %w", err)
+	}
+	return oldValue.FileEntries, nil
+}
+
+// AppendFileEntries adds shfe to the "file_entries" field.
+func (m *GitHubResolutionCacheMutation) AppendFileEntries(shfe []schema.GitHubFileEntry) {
+	m.appendfile_entries = append(m.appendfile_entries, shfe...)
+}
+
+// AppendedFileEntries returns the list of values that were appended to the "file_entries" field in this mutation.
+func (m *GitHubResolutionCacheMutation) AppendedFileEntries() ([]schema.GitHubFileEntry, bool) {
+	if len(m.appendfile_entries) == 0 {
+		return nil, false
+	}
+	return m.appendfile_entries, true
+}
+
+// ResetFileEntries resets all changes to the "file_entries" field.
+func (m *GitHubResolutionCacheMutation) ResetFileEntries() {
+	m.file_entries = nil
+	m.appendfile_entries = nil
+}
+
+// SetBundleHash sets the "bundle_hash" field.
+func (m *GitHubResolutionCacheMutation) SetBundleHash(s string) {
+	m.bundle_hash = &s
+}
+
+// BundleHash returns the value of the "bundle_hash" field in the mutation.
+func (m *GitHubResolutionCacheMutation) BundleHash() (r string, exists bool) {
+	v := m.bundle_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBundleHash returns the old "bundle_hash" field's value of the GitHubResolutionCache entity.
+// If the GitHubResolutionCache object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GitHubResolutionCacheMutation) OldBundleHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBundleHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBundleHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBundleHash: %w", err)
+	}
+	return oldValue.BundleHash, nil
+}
+
+// ResetBundleHash resets all changes to the "bundle_hash" field.
+func (m *GitHubResolutionCacheMutation) ResetBundleHash() {
+	m.bundle_hash = nil
+}
+
+// SetTokenScope sets the "token_scope" field.
+func (m *GitHubResolutionCacheMutation) SetTokenScope(s string) {
+	m.token_scope = &s
+}
+
+// TokenScope returns the value of the "token_scope" field in the mutation.
+func (m *GitHubResolutionCacheMutation) TokenScope() (r string, exists bool) {
+	v := m.token_scope
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTokenScope returns the old "token_scope" field's value of the GitHubResolutionCache entity.
+// If the GitHubResolutionCache object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GitHubResolutionCacheMutation) OldTokenScope(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTokenScope is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTokenScope requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTokenScope: %w", err)
+	}
+	return oldValue.TokenScope, nil
+}
+
+// ResetTokenScope resets all changes to the "token_scope" field.
+func (m *GitHubResolutionCacheMutation) ResetTokenScope() {
+	m.token_scope = nil
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *GitHubResolutionCacheMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *GitHubResolutionCacheMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the GitHubResolutionCache entity.
+// If the GitHubResolutionCache object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GitHubResolutionCacheMutation) OldExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *GitHubResolutionCacheMutation) ResetExpiresAt() {
+	m.expires_at = nil
+}
+
+// SetCreateTime sets the "create_time" field.
+func (m *GitHubResolutionCacheMutation) SetCreateTime(t time.Time) {
+	m.create_time = &t
+}
+
+// CreateTime returns the value of the "create_time" field in the mutation.
+func (m *GitHubResolutionCacheMutation) CreateTime() (r time.Time, exists bool) {
+	v := m.create_time
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreateTime returns the old "create_time" field's value of the GitHubResolutionCache entity.
+// If the GitHubResolutionCache object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GitHubResolutionCacheMutation) OldCreateTime(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreateTime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreateTime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreateTime: %w", err)
+	}
+	return oldValue.CreateTime, nil
+}
+
+// ResetCreateTime resets all changes to the "create_time" field.
+func (m *GitHubResolutionCacheMutation) ResetCreateTime() {
+	m.create_time = nil
+}
+
+// Where appends a list predicates to the GitHubResolutionCacheMutation builder.
+func (m *GitHubResolutionCacheMutation) Where(ps ...predicate.GitHubResolutionCache) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the GitHubResolutionCacheMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *GitHubResolutionCacheMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.GitHubResolutionCache, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *GitHubResolutionCacheMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *GitHubResolutionCacheMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (GitHubResolutionCache).
+func (m *GitHubResolutionCacheMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *GitHubResolutionCacheMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.cache_key != nil {
+		fields = append(fields, githubresolutioncache.FieldCacheKey)
+	}
+	if m.original_uri != nil {
+		fields = append(fields, githubresolutioncache.FieldOriginalURI)
+	}
+	if m.commit_sha != nil {
+		fields = append(fields, githubresolutioncache.FieldCommitSha)
+	}
+	if m.file_entries != nil {
+		fields = append(fields, githubresolutioncache.FieldFileEntries)
+	}
+	if m.bundle_hash != nil {
+		fields = append(fields, githubresolutioncache.FieldBundleHash)
+	}
+	if m.token_scope != nil {
+		fields = append(fields, githubresolutioncache.FieldTokenScope)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, githubresolutioncache.FieldExpiresAt)
+	}
+	if m.create_time != nil {
+		fields = append(fields, githubresolutioncache.FieldCreateTime)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *GitHubResolutionCacheMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case githubresolutioncache.FieldCacheKey:
+		return m.CacheKey()
+	case githubresolutioncache.FieldOriginalURI:
+		return m.OriginalURI()
+	case githubresolutioncache.FieldCommitSha:
+		return m.CommitSha()
+	case githubresolutioncache.FieldFileEntries:
+		return m.FileEntries()
+	case githubresolutioncache.FieldBundleHash:
+		return m.BundleHash()
+	case githubresolutioncache.FieldTokenScope:
+		return m.TokenScope()
+	case githubresolutioncache.FieldExpiresAt:
+		return m.ExpiresAt()
+	case githubresolutioncache.FieldCreateTime:
+		return m.CreateTime()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *GitHubResolutionCacheMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case githubresolutioncache.FieldCacheKey:
+		return m.OldCacheKey(ctx)
+	case githubresolutioncache.FieldOriginalURI:
+		return m.OldOriginalURI(ctx)
+	case githubresolutioncache.FieldCommitSha:
+		return m.OldCommitSha(ctx)
+	case githubresolutioncache.FieldFileEntries:
+		return m.OldFileEntries(ctx)
+	case githubresolutioncache.FieldBundleHash:
+		return m.OldBundleHash(ctx)
+	case githubresolutioncache.FieldTokenScope:
+		return m.OldTokenScope(ctx)
+	case githubresolutioncache.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case githubresolutioncache.FieldCreateTime:
+		return m.OldCreateTime(ctx)
+	}
+	return nil, fmt.Errorf("unknown GitHubResolutionCache field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *GitHubResolutionCacheMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case githubresolutioncache.FieldCacheKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCacheKey(v)
+		return nil
+	case githubresolutioncache.FieldOriginalURI:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOriginalURI(v)
+		return nil
+	case githubresolutioncache.FieldCommitSha:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCommitSha(v)
+		return nil
+	case githubresolutioncache.FieldFileEntries:
+		v, ok := value.([]schema.GitHubFileEntry)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFileEntries(v)
+		return nil
+	case githubresolutioncache.FieldBundleHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBundleHash(v)
+		return nil
+	case githubresolutioncache.FieldTokenScope:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTokenScope(v)
+		return nil
+	case githubresolutioncache.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case githubresolutioncache.FieldCreateTime:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreateTime(v)
+		return nil
+	}
+	return fmt.Errorf("unknown GitHubResolutionCache field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *GitHubResolutionCacheMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *GitHubResolutionCacheMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *GitHubResolutionCacheMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown GitHubResolutionCache numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *GitHubResolutionCacheMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *GitHubResolutionCacheMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *GitHubResolutionCacheMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown GitHubResolutionCache nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *GitHubResolutionCacheMutation) ResetField(name string) error {
+	switch name {
+	case githubresolutioncache.FieldCacheKey:
+		m.ResetCacheKey()
+		return nil
+	case githubresolutioncache.FieldOriginalURI:
+		m.ResetOriginalURI()
+		return nil
+	case githubresolutioncache.FieldCommitSha:
+		m.ResetCommitSha()
+		return nil
+	case githubresolutioncache.FieldFileEntries:
+		m.ResetFileEntries()
+		return nil
+	case githubresolutioncache.FieldBundleHash:
+		m.ResetBundleHash()
+		return nil
+	case githubresolutioncache.FieldTokenScope:
+		m.ResetTokenScope()
+		return nil
+	case githubresolutioncache.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case githubresolutioncache.FieldCreateTime:
+		m.ResetCreateTime()
+		return nil
+	}
+	return fmt.Errorf("unknown GitHubResolutionCache field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *GitHubResolutionCacheMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *GitHubResolutionCacheMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *GitHubResolutionCacheMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *GitHubResolutionCacheMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *GitHubResolutionCacheMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *GitHubResolutionCacheMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *GitHubResolutionCacheMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown GitHubResolutionCache unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *GitHubResolutionCacheMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown GitHubResolutionCache edge %s", name)
 }
 
 // GithubInstallationMutation represents an operation that mutates the GithubInstallation nodes in the graph.

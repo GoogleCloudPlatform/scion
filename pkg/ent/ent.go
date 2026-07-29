@@ -22,6 +22,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
@@ -122,6 +123,7 @@ func checkColumn(t, c string) error {
 			brokersecret.Table:             brokersecret.ValidColumn,
 			envvar.Table:                   envvar.ValidColumn,
 			gcpserviceaccount.Table:        gcpserviceaccount.ValidColumn,
+			githubresolutioncache.Table:    githubresolutioncache.ValidColumn,
 			githubinstallation.Table:       githubinstallation.ValidColumn,
 			group.Table:                    group.ValidColumn,
 			groupmembership.Table:          groupmembership.ValidColumn,

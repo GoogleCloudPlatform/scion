@@ -278,6 +278,36 @@ var (
 			},
 		},
 	}
+	// GithubResolutionCacheColumns holds the columns for the "github_resolution_cache" table.
+	GithubResolutionCacheColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "cache_key", Type: field.TypeString, Unique: true},
+		{Name: "original_uri", Type: field.TypeString},
+		{Name: "commit_sha", Type: field.TypeString},
+		{Name: "file_entries", Type: field.TypeJSON},
+		{Name: "bundle_hash", Type: field.TypeString},
+		{Name: "token_scope", Type: field.TypeString, Default: "public"},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "create_time", Type: field.TypeTime},
+	}
+	// GithubResolutionCacheTable holds the schema information for the "github_resolution_cache" table.
+	GithubResolutionCacheTable = &schema.Table{
+		Name:       "github_resolution_cache",
+		Columns:    GithubResolutionCacheColumns,
+		PrimaryKey: []*schema.Column{GithubResolutionCacheColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "githubresolutioncache_cache_key",
+				Unique:  true,
+				Columns: []*schema.Column{GithubResolutionCacheColumns[1]},
+			},
+			{
+				Name:    "githubresolutioncache_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{GithubResolutionCacheColumns[7]},
+			},
+		},
+	}
 	// GithubInstallationsColumns holds the columns for the "github_installations" table.
 	GithubInstallationsColumns = []*schema.Column{
 		{Name: "installation_id", Type: field.TypeInt64, Increment: true},
@@ -1360,6 +1390,7 @@ var (
 		BrokerSecretsTable,
 		EnvVarsTable,
 		GcpServiceAccountsTable,
+		GithubResolutionCacheTable,
 		GithubInstallationsTable,
 		GroupsTable,
 		GroupMembershipsTable,
@@ -1418,6 +1449,9 @@ func init() {
 	}
 	GcpServiceAccountsTable.Annotation = &entsql.Annotation{
 		Table: "gcp_service_accounts",
+	}
+	GithubResolutionCacheTable.Annotation = &entsql.Annotation{
+		Table: "github_resolution_cache",
 	}
 	GithubInstallationsTable.Annotation = &entsql.Annotation{
 		Table: "github_installations",

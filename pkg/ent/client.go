@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
@@ -82,6 +83,8 @@ type Client struct {
 	EnvVar *EnvVarClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
 	GCPServiceAccount *GCPServiceAccountClient
+	// GitHubResolutionCache is the client for interacting with the GitHubResolutionCache builders.
+	GitHubResolutionCache *GitHubResolutionCacheClient
 	// GithubInstallation is the client for interacting with the GithubInstallation builders.
 	GithubInstallation *GithubInstallationClient
 	// Group is the client for interacting with the Group builders.
@@ -166,6 +169,7 @@ func (c *Client) init() {
 	c.BrokerSecret = NewBrokerSecretClient(c.config)
 	c.EnvVar = NewEnvVarClient(c.config)
 	c.GCPServiceAccount = NewGCPServiceAccountClient(c.config)
+	c.GitHubResolutionCache = NewGitHubResolutionCacheClient(c.config)
 	c.GithubInstallation = NewGithubInstallationClient(c.config)
 	c.Group = NewGroupClient(c.config)
 	c.GroupMembership = NewGroupMembershipClient(c.config)
@@ -299,6 +303,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		BrokerSecret:             NewBrokerSecretClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
 		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
+		GitHubResolutionCache:    NewGitHubResolutionCacheClient(cfg),
 		GithubInstallation:       NewGithubInstallationClient(cfg),
 		Group:                    NewGroupClient(cfg),
 		GroupMembership:          NewGroupMembershipClient(cfg),
@@ -359,6 +364,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		BrokerSecret:             NewBrokerSecretClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
 		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
+		GitHubResolutionCache:    NewGitHubResolutionCacheClient(cfg),
 		GithubInstallation:       NewGithubInstallationClient(cfg),
 		Group:                    NewGroupClient(cfg),
 		GroupMembership:          NewGroupMembershipClient(cfg),
@@ -422,10 +428,10 @@ func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
 		c.BrokerJoinToken, c.BrokerSecret, c.EnvVar, c.GCPServiceAccount,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.Message, c.Notification,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RuntimeBroker, c.Schedule,
 		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
@@ -441,10 +447,10 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
 		c.BrokerJoinToken, c.BrokerSecret, c.EnvVar, c.GCPServiceAccount,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.Message, c.Notification,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RuntimeBroker, c.Schedule,
 		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
@@ -475,6 +481,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.EnvVar.mutate(ctx, m)
 	case *GCPServiceAccountMutation:
 		return c.GCPServiceAccount.mutate(ctx, m)
+	case *GitHubResolutionCacheMutation:
+		return c.GitHubResolutionCache.mutate(ctx, m)
 	case *GithubInstallationMutation:
 		return c.GithubInstallation.mutate(ctx, m)
 	case *GroupMutation:
@@ -1802,6 +1810,139 @@ func (c *GCPServiceAccountClient) mutate(ctx context.Context, m *GCPServiceAccou
 		return (&GCPServiceAccountDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown GCPServiceAccount mutation op: %q", m.Op())
+	}
+}
+
+// GitHubResolutionCacheClient is a client for the GitHubResolutionCache schema.
+type GitHubResolutionCacheClient struct {
+	config
+}
+
+// NewGitHubResolutionCacheClient returns a client for the GitHubResolutionCache from the given config.
+func NewGitHubResolutionCacheClient(c config) *GitHubResolutionCacheClient {
+	return &GitHubResolutionCacheClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `githubresolutioncache.Hooks(f(g(h())))`.
+func (c *GitHubResolutionCacheClient) Use(hooks ...Hook) {
+	c.hooks.GitHubResolutionCache = append(c.hooks.GitHubResolutionCache, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `githubresolutioncache.Intercept(f(g(h())))`.
+func (c *GitHubResolutionCacheClient) Intercept(interceptors ...Interceptor) {
+	c.inters.GitHubResolutionCache = append(c.inters.GitHubResolutionCache, interceptors...)
+}
+
+// Create returns a builder for creating a GitHubResolutionCache entity.
+func (c *GitHubResolutionCacheClient) Create() *GitHubResolutionCacheCreate {
+	mutation := newGitHubResolutionCacheMutation(c.config, OpCreate)
+	return &GitHubResolutionCacheCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of GitHubResolutionCache entities.
+func (c *GitHubResolutionCacheClient) CreateBulk(builders ...*GitHubResolutionCacheCreate) *GitHubResolutionCacheCreateBulk {
+	return &GitHubResolutionCacheCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *GitHubResolutionCacheClient) MapCreateBulk(slice any, setFunc func(*GitHubResolutionCacheCreate, int)) *GitHubResolutionCacheCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &GitHubResolutionCacheCreateBulk{err: fmt.Errorf("calling to GitHubResolutionCacheClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*GitHubResolutionCacheCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &GitHubResolutionCacheCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for GitHubResolutionCache.
+func (c *GitHubResolutionCacheClient) Update() *GitHubResolutionCacheUpdate {
+	mutation := newGitHubResolutionCacheMutation(c.config, OpUpdate)
+	return &GitHubResolutionCacheUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *GitHubResolutionCacheClient) UpdateOne(_m *GitHubResolutionCache) *GitHubResolutionCacheUpdateOne {
+	mutation := newGitHubResolutionCacheMutation(c.config, OpUpdateOne, withGitHubResolutionCache(_m))
+	return &GitHubResolutionCacheUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *GitHubResolutionCacheClient) UpdateOneID(id uuid.UUID) *GitHubResolutionCacheUpdateOne {
+	mutation := newGitHubResolutionCacheMutation(c.config, OpUpdateOne, withGitHubResolutionCacheID(id))
+	return &GitHubResolutionCacheUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for GitHubResolutionCache.
+func (c *GitHubResolutionCacheClient) Delete() *GitHubResolutionCacheDelete {
+	mutation := newGitHubResolutionCacheMutation(c.config, OpDelete)
+	return &GitHubResolutionCacheDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *GitHubResolutionCacheClient) DeleteOne(_m *GitHubResolutionCache) *GitHubResolutionCacheDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *GitHubResolutionCacheClient) DeleteOneID(id uuid.UUID) *GitHubResolutionCacheDeleteOne {
+	builder := c.Delete().Where(githubresolutioncache.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &GitHubResolutionCacheDeleteOne{builder}
+}
+
+// Query returns a query builder for GitHubResolutionCache.
+func (c *GitHubResolutionCacheClient) Query() *GitHubResolutionCacheQuery {
+	return &GitHubResolutionCacheQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeGitHubResolutionCache},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a GitHubResolutionCache entity by its id.
+func (c *GitHubResolutionCacheClient) Get(ctx context.Context, id uuid.UUID) (*GitHubResolutionCache, error) {
+	return c.Query().Where(githubresolutioncache.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *GitHubResolutionCacheClient) GetX(ctx context.Context, id uuid.UUID) *GitHubResolutionCache {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *GitHubResolutionCacheClient) Hooks() []Hook {
+	return c.hooks.GitHubResolutionCache
+}
+
+// Interceptors returns the client interceptors.
+func (c *GitHubResolutionCacheClient) Interceptors() []Interceptor {
+	return c.inters.GitHubResolutionCache
+}
+
+func (c *GitHubResolutionCacheClient) mutate(ctx context.Context, m *GitHubResolutionCacheMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&GitHubResolutionCacheCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&GitHubResolutionCacheUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&GitHubResolutionCacheUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&GitHubResolutionCacheDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown GitHubResolutionCache mutation op: %q", m.Op())
 	}
 }
 
@@ -6321,23 +6462,25 @@ func (c *UserAccessTokenClient) mutate(ctx context.Context, m *UserAccessTokenMu
 type (
 	hooks struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerSecret, EnvVar, GCPServiceAccount, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
-		MaintenanceOperation, MaintenanceOperationRun, Message, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectPreStartHook, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		BrokerSecret, EnvVar, GCPServiceAccount, GitHubResolutionCache,
+		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
+		Message, Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RuntimeBroker,
+		Schedule, ScheduledEvent,
 		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, Template, User, UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerSecret, EnvVar, GCPServiceAccount, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
-		MaintenanceOperation, MaintenanceOperationRun, Message, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectPreStartHook, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		BrokerSecret, EnvVar, GCPServiceAccount, GitHubResolutionCache,
+		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
+		Message, Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RuntimeBroker,
+		Schedule, ScheduledEvent,
 		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, Template, User, UserAccessToken []ent.Interceptor
 	}

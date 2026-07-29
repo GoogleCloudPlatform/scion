@@ -204,6 +204,10 @@ type Server struct {
 	// harness-configs so skill eviction doesn't affect other resource kinds.
 	skCache *templatecache.Cache
 
+	// Shared GitHub resolution cache (singleton per broker instance).
+	// Caches GitHub API resolution results to avoid redundant API calls.
+	ghResolutionCache *agent.GitHubResolutionCache
+
 	// Multi-key auth middleware
 	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
 
@@ -400,6 +404,22 @@ func (s *Server) initHubIntegration() error {
 		return fmt.Errorf("failed to initialize skill cache: %w", err)
 	}
 	s.skCache = skCache
+
+	// 1d. Initialize the GitHub resolution cache for broker-side caching of
+	// GitHub skill resolution metadata (not file content).
+	ghResDir, err := agent.GitHubResolutionCacheDir()
+	if err != nil {
+		slog.Warn("github resolution cache: cannot determine cache dir", "error", err)
+	} else {
+		ghCache, err := agent.NewGitHubResolutionCache(ghResDir, agent.DefaultResolutionCacheTTL)
+		if err != nil {
+			slog.Warn("github resolution cache: init failed (running uncached)", "error", err)
+			// nil cache is safe — resolver falls through to API call
+		} else {
+			s.ghResolutionCache = ghCache
+			slog.Info("GitHub resolution cache initialized", "dir", ghResDir, "ttl", agent.DefaultResolutionCacheTTL)
+		}
+	}
 
 	// 2. Initialize hub connections map (already done in New)
 
