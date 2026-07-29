@@ -511,6 +511,17 @@ func (m *mockScheduledEventStore) GetTemplateBySlug(_ context.Context, _, _, _ s
 // no_auth.behavior=drop-to-shell, populateAgentConfig calls
 // hasRequiredAuthCredentials, which reaches all three.
 //
+// COVERAGE, precisely — only GetHarnessConfigBySlug is enforced by a test.
+// TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic segfaults if
+// that stub is removed, but stays green if the other three are removed
+// together. Reaching them additionally requires a *resolved* harness config
+// declaring no_auth.behavior=drop-to-shell, and this mock's
+// GetHarnessConfigBySlug returns ErrNotFound, so hc is nil and that branch
+// never fires. The three are defensive: correct to have, on the same path, and
+// the next fixture change reaches them — but do not read their presence as
+// tested. Measured, not assumed; an earlier version of this comment and of
+// a5b1816c's message claimed all five were enforced, which was false.
+//
 // All five return the empty answer rather than panicking. ErrNotFound and
 // empty slices are what the production stores return for "nothing configured",
 // which is the correct state for these tests.
@@ -1413,8 +1424,12 @@ func (r *resolvingTemplateStore) GetTemplateBySlug(_ context.Context, slug, _, _
 // The mock passed only because its template getters returned ErrNotFound, so
 // the harness-config branch was never entered. That is an accident of test
 // fixtures, not a property of the mock, and it would have been spent by the
-// first person to write a dispatch test with a working template. This test
-// makes the mock's completeness an enforced invariant instead.
+// first person to write a dispatch test with a working template.
+//
+// Scope of what this enforces: the GetHarnessConfigBySlug stub, and that one
+// only. The other three stubs can be removed with this test still green — see
+// the COVERAGE note above the stubs. This is a trap for the specific detonator
+// it reproduces, not a completeness check on the mock.
 func TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
