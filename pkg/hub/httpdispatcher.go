@@ -1087,7 +1087,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 
 	// Query project-scoped env vars
 	if agent.ProjectID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "project", ScopeID: agent.ProjectID})
+		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: agent.ProjectID})
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to list project env vars", "error", err)
@@ -1110,7 +1110,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 
 	// Query user-scoped env vars (higher precedence)
 	if agent.OwnerID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "user", ScopeID: agent.OwnerID})
+		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser, ScopeID: agent.OwnerID})
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to list user env vars", "error", err)
@@ -1133,7 +1133,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 
 	// Query runtime_broker-scoped env vars (if applicable)
 	if agent.RuntimeBrokerID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "runtime_broker", ScopeID: agent.RuntimeBrokerID})
+		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeRuntimeBroker, ScopeID: agent.RuntimeBrokerID})
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to list broker env vars", "error", err)
@@ -1173,7 +1173,7 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 
 	// Check project scope
 	if agent.ProjectID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "project", ScopeID: agent.ProjectID})
+		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: agent.ProjectID})
 		if err == nil {
 			for _, v := range vars {
 				if _, inResolved := resolvedEnv[v.Key]; inResolved {
@@ -1185,7 +1185,7 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 
 	// Check user scope (overrides project)
 	if agent.OwnerID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "user", ScopeID: agent.OwnerID})
+		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser, ScopeID: agent.OwnerID})
 		if err == nil {
 			for _, v := range vars {
 				if _, inResolved := resolvedEnv[v.Key]; inResolved {

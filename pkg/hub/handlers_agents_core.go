@@ -532,9 +532,28 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	// Resolve harness config: prefer the user's explicit choice, then template default.
+	// Resolve harness config: prefer the user's explicit choice, then the
+	// project-level default annotation, then the template default. The project
+	// annotation deliberately outranks the template so that harness_config
+	// follows the same precedence as every other project setting
+	// (request > project > template).
 	// Do NOT use req.Template as fallback since it may contain a UUID.
+	//
+	// MECHANISM NOTE — this path and the scheduler-dispatch path in
+	// server.go (dispatchAgentEventHandler) enforce the same rule by
+	// different means. Here the annotation is read inline, so by the time
+	// applyProjectDefaults runs below, AppliedConfig.HarnessConfig is
+	// already set and that function's harness-config branch cannot fire on
+	// this path. The scheduler path instead reads the annotation only to
+	// decide *not* to stamp the template, and lets applyProjectDefaults
+	// apply the project value. The asymmetry is forced: the scheduler needs
+	// tmpl.Slug for agent.Template even when it skips the harness stamp.
+	// Behaviourally identical today — keep the two in sync, and if you
+	// change applyProjectDefaults' harness handling, check BOTH paths.
 	harnessConfig := req.HarnessConfig
+	if harnessConfig == "" && project != nil && project.Annotations != nil {
+		harnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+	}
 	if harnessConfig == "" {
 		harnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
 	}

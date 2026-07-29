@@ -2329,9 +2329,28 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				if tmpl.Slug != "" {
 					agent.Template = tmpl.Slug
 				}
-				harnessConfig := s.getHarnessConfigFromTemplate(tmpl, "")
-				if harnessConfig != "" {
-					agent.AppliedConfig.HarnessConfig = harnessConfig
+				// Only fall back to the template's harness config when the
+				// project has no default-harness-config annotation — the
+				// project setting outranks the template, matching the
+				// default-template block above and the agent-create path.
+				//
+				// MECHANISM NOTE — leaving AppliedConfig.HarnessConfig empty
+				// when the annotation is present is deliberate:
+				// applyProjectDefaults below is what actually applies the
+				// project value on this path. The agent-create path in
+				// handlers_agents_core.go reads the same annotation inline
+				// instead, which makes applyProjectDefaults' harness-config
+				// branch unreachable there. Behaviourally identical today —
+				// keep the two in sync, and if you change
+				// applyProjectDefaults' harness handling, check BOTH paths.
+				projectHarnessConfig := ""
+				if project != nil && project.Annotations != nil {
+					projectHarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+				}
+				if projectHarnessConfig == "" {
+					if harnessConfig := s.getHarnessConfigFromTemplate(tmpl, ""); harnessConfig != "" {
+						agent.AppliedConfig.HarnessConfig = harnessConfig
+					}
 				}
 			}
 		}

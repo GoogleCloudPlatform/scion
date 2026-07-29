@@ -218,6 +218,13 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// by slug (project scope first, then global) and stamp its ID and content
 	// hash so the broker can fetch it from Hub storage.
 	hcName := agent.AppliedConfig.HarnessConfig
+	// Record where the name came from, for the not-found log level below. A
+	// name that arrived from the project's default-harness-config annotation
+	// is operator-supplied and displaced the template, so failing to resolve
+	// it is worth a warning. Anything else — most often the template's bare
+	// Harness type — is the pre-existing normal case.
+	hcFromProjectAnnotation := hcName != "" && project != nil && project.Annotations != nil &&
+		project.Annotations[projectSettingDefaultHarnessConfig] == hcName
 	if hcName == "" && resolvedTemplate != nil {
 		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
 	}
@@ -259,6 +266,40 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 						"agent_id", agent.ID, "harness", hc.Harness)
 				}
 			}
+		} else {
+			// Not-found is not an error here — the broker may still resolve the
+			// name from its own search path — but it should not be entirely
+			// silent either. The level tracks provenance:
+			//
+			//   WARN  — the name came from the project's
+			//           scion.io/default-harness-config annotation. That
+			//           annotation now outranks the template, so a stale or
+			//           misspelled value displaced a known-good template value
+			//           and the agent dispatches with no ID or hash for the
+			//           broker to hydrate from Hub storage. An operator can fix
+			//           it, so say so loudly.
+			//
+			//   DEBUG — anything else. Most often hcName is the template's bare
+			//           Harness type ("claude") rather than a stored
+			//           harness-config slug, via getHarnessConfigFromTemplate's
+			//           second branch. Harness configs are created through the
+			//           API rather than seeded, so "no HarnessConfig row whose
+			//           slug matches the harness type" is the default state of a
+			//           fresh deployment. Warning there would fire on every
+			//           single agent create and train operators to ignore it.
+			projectID := ""
+			if project != nil {
+				projectID = project.ID
+			}
+			level := slog.LevelDebug
+			if hcFromProjectAnnotation {
+				level = slog.LevelWarn
+			}
+			s.agentLifecycleLog.Log(ctx, level,
+				"harness config not found in project or global scope; "+
+					"agent will be dispatched without a config ID/hash and the broker must resolve it locally",
+				"slug", hcName, "agent_id", agent.ID, "project_id", projectID,
+				"from_project_annotation", hcFromProjectAnnotation)
 		}
 	}
 
