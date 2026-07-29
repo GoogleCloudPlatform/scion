@@ -183,9 +183,32 @@ harness_configs:
 // merges per-field rather than winning or losing whole. Hub defaults go in as
 // MergeResourceSpec's BASE, so a field only the hub sets survives and a field
 // the template also sets goes to the template.
+//
+// All THREE tiers are live here on purpose — template, hub, and the broker's own
+// settings.yaml default_resources — so the fixture asserts a three-tier rank and
+// not merely the (template, hub) pair. See the load-bearing note on settingsYAML.
 func TestProvision_HubAgentDefaults_Resources(t *testing.T) {
+	// LOAD-BEARING: default_resources must stay here, and must keep setting
+	// fields the hub below also sets. It is the ONLY broker-tier resources value
+	// anywhere in this file that runs alongside a hub value, and it is what makes
+	// the (hub, broker) rank observable for Resources.
+	//
+	// Without it this test passes even when the hub tier is moved BELOW the
+	// settings.yaml tier in provision.go — the exact refactor the comment at that
+	// insertion point warns against. That reordering was mutation-probed and this
+	// test survived it, because a fixture that declares no broker value cannot
+	// tell you which of the two tiers won. Deleting these four lines as
+	// "unused fixture noise" silently restores that blind spot.
+	//
+	// cpu "7" and disk "5Gi" are arbitrary but must differ from every other tier:
+	// not the hub's "3"/"20Gi", not the template's memory, and not the "2" that
+	// config.BuiltinDefaultResources() supplies at the bottom.
 	const settingsYAML = `schema_version: "1"
 default_harness_config: test-harness
+default_resources:
+  limits:
+    cpu: "7"
+  disk: "5Gi"
 harness_configs:
   test-harness:
     harness: test-harness
@@ -221,14 +244,22 @@ harness_configs:
 	if cfg.Resources == nil {
 		t.Fatal("Resources is nil; the hub's CPU-only default did not survive")
 	}
+	// CPU and Disk are the (hub, broker) rank: both tiers set them, the hub must
+	// win. Getting "7" or "5Gi" here means the hub tier now runs BELOW
+	// settings.yaml — a rank inversion, not a value change.
 	if cfg.Resources.Limits.CPU != "3" {
-		t.Errorf("Limits.CPU: want 3 from the hub default, got %q", cfg.Resources.Limits.CPU)
-	}
-	if cfg.Resources.Limits.Memory != "8Gi" {
-		t.Errorf("Limits.Memory: want 8Gi from the template, got %q", cfg.Resources.Limits.Memory)
+		t.Errorf("Limits.CPU: want 3 from the hub default, got %q "+
+			"(%q is the broker settings.yaml default, which the hub tier must outrank)",
+			cfg.Resources.Limits.CPU, "7")
 	}
 	if cfg.Resources.Disk != "20Gi" {
-		t.Errorf("Disk: want 20Gi from the hub default, got %q", cfg.Resources.Disk)
+		t.Errorf("Disk: want 20Gi from the hub default, got %q "+
+			"(%q is the broker settings.yaml default, which the hub tier must outrank)",
+			cfg.Resources.Disk, "5Gi")
+	}
+	// Memory is the (template, hub) rank in the other direction.
+	if cfg.Resources.Limits.Memory != "8Gi" {
+		t.Errorf("Limits.Memory: want 8Gi from the template, got %q", cfg.Resources.Limits.Memory)
 	}
 }
 
