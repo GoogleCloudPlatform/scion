@@ -1065,24 +1065,41 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 }
 
 // envScopePrecedence is the single, authoritative statement of the order in
-// which Hub env var storage scopes are applied, LOWEST PRECEDENCE FIRST:
+// which Hub env var STORAGE scopes are applied, LOWEST PRECEDENCE FIRST:
 //
-//	hub  <  project  <  user  <  runtime_broker
+//	runtime_broker  <  hub  <  project  <  user
 //
-// Explicit agent config outranks all four: buildCreateRequest seeds
-// ResolvedEnv from AppliedConfig.Env and storage values only fill keys the
-// config left unset or empty.
+// runtime_broker is deliberately LAST. It was highest until this changed, and
+// that was an accident of the order four near-identical blocks happened to
+// appear in — not a decision. Broker-scoped env is the most infrastructural and
+// least specific of the four, so it is the weakest default rather than an
+// override nobody can escape. The scope may be removed entirely in a future
+// release; bottom-ranking it is a step in that direction.
+//
+// THIS IS ONLY THE STORAGE-SCOPE LADDER. It is not the whole settings
+// precedence chain — templates, harness overrides, profiles and project
+// annotations all sit between these scopes and the final agent config, and they
+// are resolved elsewhere. See the settings-precedence reference doc for the
+// full stack; do not read the four names above as a complete ordering.
+//
+// Where explicit agent config sits, precisely, because the relation is NOT a
+// plain inequality: buildCreateRequest seeds ResolvedEnv from
+// AppliedConfig.Env, then storage fills only the keys config left ABSENT or set
+// to the EMPTY STRING. So a non-empty config value outranks all four scopes,
+// while an empty one is a passthrough marker that deliberately yields to
+// storage.
 //
 // Every consumer of env var storage derives its order from this list — the
-// resolver (resolveEnvFromStorage) and the provenance reporter that tells the
-// CLI where a value came from (buildEnvSources). Changing the order here is
-// the ONLY edit required to change it everywhere, and is a user-visible
-// behaviour change for any deployment that defines the same key in two scopes.
+// resolver (resolveEnvFromStorage), the provenance reporter that tells the CLI
+// where a value came from (buildEnvSources), and the startup shadow warning
+// (WarnOutrankedBrokerEnvKeys). Changing the order here is the ONLY edit
+// required to change it everywhere, and is a user-visible behaviour change for
+// any deployment that defines the same key in two scopes.
 var envScopePrecedence = []string{
+	store.ScopeRuntimeBroker,
 	store.ScopeHub,
 	store.ScopeProject,
 	store.ScopeUser,
-	store.ScopeRuntimeBroker,
 }
 
 // envScopeID returns the ID the given scope is keyed by for this agent, or ""
@@ -2076,7 +2093,29 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them
-// into a flat list. Higher scopes override lower: user < project < runtime_broker.
+// into a flat list. Higher scopes override lower:
+//
+//	hub  <  user  <  project  <  runtime_broker
+//
+// 🔴 SECRETS AND ENV VARS DO NOT USE THE SAME ORDER. Compare
+// envScopePrecedence above: env vars rank runtime_broker LOWEST and user
+// HIGHEST; secrets rank them the other way round, on both axes.
+//
+// DO NOT READ THIS COMMENT AS DOCUMENTING A DESIGNED DIFFERENCE. NOBODY HAS
+// ESTABLISHED THAT THE DIVERGENCE IS INTENTIONAL. It is FILED, as issue #624,
+// and open. What this comment records is only what the code does today: the
+// secret order is implemented independently in pkg/secret (both backends build
+// the scope list in this order and merge last-wins, and scopePrecedence ranks
+// it numerically). So editing this comment to match the env one would make it
+// describe code that does not exist — the divergence has to be closed in
+// pkg/secret, under #624, or not at all.
+//
+// Phase 10 widened the gap rather than creating it: demoting runtime_broker for
+// env vars added the second axis. That makes the pull toward "harmonising" the
+// two stronger, and it is exactly the change that must not be made here.
+//
+// The hub rung was missing from this comment before Phase 10; both backends
+// have always queried it as the lowest scope.
 func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.Agent) ([]ResolvedSecret, error) {
 	if d.secretBackend == nil {
 		if d.debug {
