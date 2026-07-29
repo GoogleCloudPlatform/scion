@@ -2665,3 +2665,142 @@ profiles:
 			want, capturedConfig.Image)
 	}
 }
+
+// --- Gap 3 / Phase 5: harness-config env and the BrokerMode gate ---------
+//
+// These tests exercise resolveAuthEnvOverlay, the extracted
+// injection-then-overlay sequence that Start runs immediately before
+// GatherAuthWithEnv. They deliberately assert on the AUTH OVERLAY and not on
+// the container environment: harness-config env already reaches the container
+// in broker mode via provision.go's ungated finalScionCfg merge, so a
+// container-env assertion is green before the fix and discriminates nothing.
+// See design §0.2.
+
+// g3TestSettings builds settings with one harness config and one profile,
+// each declaring env, so tests can tell the two sources apart.
+func g3TestSettings(hcEnv, profileEnv map[string]string) *config.VersionedSettings {
+	return &config.VersionedSettings{
+		SchemaVersion: "1",
+		ActiveProfile: "vertex",
+		HarnessConfigs: map[string]config.HarnessConfigEntry{
+			"claude-cfg": {Harness: "claude", Env: hcEnv},
+		},
+		Profiles: map[string]config.V1ProfileConfig{
+			"vertex": {Runtime: "docker", Env: profileEnv},
+		},
+	}
+}
+
+// TestStart_BrokerMode_HarnessConfigEnv_VisibleToAuthOverlay is the
+// discriminating test for Gap 3. Before the fix the !opts.BrokerMode gate
+// skipped injection entirely for hub-dispatched agents, so credentials the
+// harness config declares were invisible to GatherAuthWithEnv.
+func TestStart_BrokerMode_HarnessConfigEnv_VisibleToAuthOverlay(t *testing.T) {
+	settings := g3TestSettings(map[string]string{
+		"GOOGLE_CLOUD_PROJECT": "hc-project",
+		"GOOGLE_CLOUD_REGION":  "us-central1",
+	}, nil)
+
+	opts := api.StartOptions{
+		Name:       "test-agent",
+		BrokerMode: true, // hub-dispatched: every agent in a hub deployment
+		Env:        map[string]string{"EXISTING": "val"},
+	}
+
+	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+
+	if got := overlay["GOOGLE_CLOUD_PROJECT"]; got != "hc-project" {
+		t.Errorf("auth overlay GOOGLE_CLOUD_PROJECT = %q, want %q "+
+			"(harness-config env must be visible to GatherAuthWithEnv in broker mode)",
+			got, "hc-project")
+	}
+	if got := overlay["GOOGLE_CLOUD_REGION"]; got != "us-central1" {
+		t.Errorf("auth overlay GOOGLE_CLOUD_REGION = %q, want %q", got, "us-central1")
+	}
+	if got := overlay["EXISTING"]; got != "val" {
+		t.Errorf("auth overlay EXISTING = %q, want %q (pre-existing keys must survive)", got, "val")
+	}
+}
+
+// TestStart_BrokerMode_HubEnvNotClobberedByHarnessConfigEnv guards the
+// only-if-absent guard: hub-resolved env is already in opts.Env by the time
+// injection runs, and it must win over the harness config's value.
+func TestStart_BrokerMode_HubEnvNotClobberedByHarnessConfigEnv(t *testing.T) {
+	settings := g3TestSettings(map[string]string{
+		"GOOGLE_CLOUD_PROJECT": "hc-project",
+		"HC_ONLY":              "hc-value",
+	}, nil)
+
+	opts := api.StartOptions{
+		Name:       "test-agent",
+		BrokerMode: true,
+		// Hub-supplied value, placed in opts.Env by start_context.go.
+		Env: map[string]string{"GOOGLE_CLOUD_PROJECT": "hub-project"},
+	}
+
+	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+
+	if got := overlay["GOOGLE_CLOUD_PROJECT"]; got != "hub-project" {
+		t.Errorf("auth overlay GOOGLE_CLOUD_PROJECT = %q, want %q (hub value must win)",
+			got, "hub-project")
+	}
+	// opts.Env is what is later projected into the container, so assert there
+	// too: acceptance criterion 15 is about the value that reaches the agent.
+	if got := opts.Env["GOOGLE_CLOUD_PROJECT"]; got != "hub-project" {
+		t.Errorf("opts.Env GOOGLE_CLOUD_PROJECT = %q, want %q (hub value must reach the container)",
+			got, "hub-project")
+	}
+	// Polarity control: the non-colliding key still gets injected, proving the
+	// guard is per-key and not an all-or-nothing bail-out.
+	if got := overlay["HC_ONLY"]; got != "hc-value" {
+		t.Errorf("auth overlay HC_ONLY = %q, want %q", got, "hc-value")
+	}
+}
+
+// TestResolveAuthEnvOverlay_ProfileEnvAloneNotInjectedWithoutHarnessConfig
+// locks in the G3-narrow branch delete: with no harness config named, nothing
+// is injected. NOTE this does NOT retire profile env — when a harness config
+// IS named (the common case) ResolveHarnessConfig still merges profile.Env in
+// at settings_v1.go:54-55, and provision.go:1098 feeds it to the container
+// regardless. See design §0.3.
+func TestResolveAuthEnvOverlay_ProfileEnvAloneNotInjectedWithoutHarnessConfig(t *testing.T) {
+	settings := g3TestSettings(nil, map[string]string{"PROFILE_ONLY": "profile-value"})
+
+	opts := api.StartOptions{Name: "test-agent", BrokerMode: true}
+
+	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "" /* no harness config */)
+
+	if got, ok := overlay["PROFILE_ONLY"]; ok {
+		t.Errorf("auth overlay PROFILE_ONLY = %q, want absent "+
+			"(profile env is no longer a direct source)", got)
+	}
+}
+
+// TestResolveAuthEnvOverlay_ProfileEnvStillArrivesViaHarnessConfig is the
+// polarity control for the test above, and the executable statement of why
+// this commit is G3-narrow: profile env keeps flowing whenever a harness
+// config is named, because ResolveHarnessConfig merges it in.
+func TestResolveAuthEnvOverlay_ProfileEnvStillArrivesViaHarnessConfig(t *testing.T) {
+	settings := g3TestSettings(nil, map[string]string{"PROFILE_ONLY": "profile-value"})
+
+	opts := api.StartOptions{Name: "test-agent", BrokerMode: true}
+
+	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+
+	if got := overlay["PROFILE_ONLY"]; got != "profile-value" {
+		t.Errorf("auth overlay PROFILE_ONLY = %q, want %q "+
+			"(profile env still merges via ResolveHarnessConfig — this commit is G3-narrow)",
+			got, "profile-value")
+	}
+}
+
+// TestResolveAuthEnvOverlay_NilSettings guards the nil path.
+func TestResolveAuthEnvOverlay_NilSettings(t *testing.T) {
+	opts := api.StartOptions{Name: "test-agent", BrokerMode: true, Env: map[string]string{"A": "1"}}
+
+	overlay := resolveAuthEnvOverlay(&opts, nil, "vertex", "claude-cfg")
+
+	if got := overlay["A"]; got != "1" {
+		t.Errorf("auth overlay A = %q, want %q", got, "1")
+	}
+}
