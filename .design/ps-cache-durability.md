@@ -59,6 +59,29 @@ Understanding what each cache does is essential — the investigator's findings 
 
 **What Track B needs to cache:** Only the resolution metadata (commitSHA, file list, URLs, bundle hash) — less than 1 KB per skill. File delivery to containers is unchanged.
 
+### Which Layer Serves Which Path
+
+Stress testing (2026-07-29, build `b03a09ac`) confirmed that of the three documented layers, only
+the Hub DB layer (layer 3) populates during normal `developer`-template provisioning. This is
+by design — each layer is gated by a different trigger:
+
+| Layer | Cache | Serves which path | When it populates |
+|---|---|---|---|
+| 1 | Broker disk — resolution cache (`github-resolution-cache.json`) | `?token=SECRET_NAME` URIs only — broker-local resolution, not Hub-mediated | Only when broker resolves a `gh://` URI that carries a named `?token=` query parameter referencing a broker-known secret. The common public/App-token path resolves Hub-side and never touches this layer. |
+| 2 | Broker disk — content cache (`cache/skills/`) | All paths — but only during workspace materialisation | Populated when an agent actually **starts** and its workspace is materialized (file bytes downloaded). `scion create` (provision-only, no task) resolves the ref and file list but does not download bytes, so this layer stays empty on provision-only runs. |
+| 3 | Hub DB — resolution cache (`github_resolution_cache` table) | Public repos + GitHub App installation token path (Hub-mediated) | Populated on any `gh://` resolution routed through the Hub, including cold provisioning. This is the common path for the `developer` template and all public/App-token skills. |
+
+**Implication for validation:** Provision-only agents (`scion create`, no task) exercise only
+layer 3. Layers 1 and 2 require different triggers:
+
+- To exercise layer 1: use a `gh://` skill URI with a `?token=SECRET_NAME` query parameter
+  naming a broker secret.
+- To exercise layer 2: start an agent (not just provision), so that workspace materialization
+  actually downloads skill file bytes.
+
+Any runbook that says "clear all three, provision agents, confirm all three fill" is incorrect
+for layers 1 and 2 and will produce false "cache not populating" alarms.
+
 ---
 
 ## Proposed Design
