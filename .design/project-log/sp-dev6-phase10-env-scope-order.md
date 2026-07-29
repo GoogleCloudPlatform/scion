@@ -230,3 +230,64 @@ early is true in every relation it states and false in what it implies by stoppi
   for limits, but the broker's own `settings.yaml` contributes to Resources at three ranks, two
   of them above hub (`sp-rev-p8`'s measurement). These are two different precedence systems and
   the reference doc must not join them.
+
+## Phase 10d — review fixes from `sp-rev-p10` (CHANGES REQUESTED on `ce23801a..14883cbf`)
+
+Four edits, three of them text and one a regex. No behaviour change: the ladder,
+the resolver, the reporter and the boot wiring are all untouched. New commit on
+top of `14883cbf` — `14883cbf` is merged into `scion/sp-integration @ d2989488`
+and must not move.
+
+**F-1 — `httpdispatcher.go`, the inertness paragraph on `WarnOutrankedBrokerEnvKeys`.**
+The comment said the check is inert "which is the case for the ladder currently
+in `envScopePrecedence`". That was true when 10a wrote it and 10b inverted the
+ladder underneath it without updating the prose. Under the shipped ladder
+`runtime_broker` is weakest, `envScopesOutranking` returns hub/project/user, and
+the check is LIVE. Rewritten to say so, and to say what *would* make it inert.
+This is the comment a maintainer reads before deciding whether the 10c call site
+is load-bearing, and it was telling them it was a no-op.
+
+**F-2 — `cmd/server_foreground_brokerenv_test.go`, the boot drift guard.**
+`strings.Contains` is satisfied by a commented-out call site, so the guard's
+label "it only fails when the line disappears" was an overstatement in the
+direction that matters. Replaced with an anchored `(?m)` pattern requiring
+statement position, and the declared-gaps list now records what the guard still
+cannot see (a call present at statement position but unreachable). Demonstrated
+by mutation rather than asserted — see the table below.
+
+**F-3 (sentence only) — `httpdispatcher.go:1092`.** The claim that changing the
+order here "is the ONLY edit required to change it everywhere" is false:
+`Server.buildEnvGatherResponse` in `handlers_agents_core.go` answers the same
+provenance question from its own hardcoded chain, defaults the reported scope to
+`hub`, and never consults `runtime_broker`, so a broker-only key is reported
+there as `hub`. Verified read-only before writing the claim down (`runtime_broker`
+occurrences in that function: 0; `envScopePrecedence` references: 0). Per
+`sp-em`'s scope ruling the *sentence* is fixed and the *gap* is not — that
+reporter is a tracked follow-up and this phase does not touch its file.
+
+**N-1 — `httpdispatcher.go:1072`.** "runtime_broker is deliberately LAST" sat
+above a lowest-first slice in which `runtime_broker` is element 0. The word was
+true of precedence and false of the literal. Replaced with the spelled-out
+sequence, per design §3.4's "a literal sequence, not a word".
+
+### F-2 mutation evidence
+
+A fix to a mutation-detection gap is only demonstrated by the mutation, so all
+four arms were run, serially, with `df` checked before and after (96% both ends,
+no threshold crossed):
+
+| arm | mutation | result |
+|---|---|---|
+| baseline | none | 4/4 green, `rc=0` — also the positive control that the new pattern matches at all |
+| **M7** | prefix the call site with `// ` | **RED**, `rc=1`, exactly one failure |
+| M4 | delete the line | RED, `rc=1`, exactly one failure |
+| restore | none | 4/4 green, file byte-identical to `HEAD` |
+
+M7 previously passed; that is the whole point of the change. The failure was
+read as a *body*, not a count — the assertion text is
+`boot path no longer calls warnShadowedBrokerEnv(ctx, dispatcher) at statement
+position — deleted, or commented out`, which distinguishes the guard firing from
+a build failure. `anchored-FAILs=1` alone would not have.
+
+Envscope suite re-run under `-race`: 14/14, `ok 92.082s`. Build and vet clean.
+File set is exactly two files; `handlers_agents_core.go` is untouched.

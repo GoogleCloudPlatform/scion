@@ -1069,7 +1069,14 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 //
 //	runtime_broker  <  hub  <  project  <  user
 //
-// runtime_broker is deliberately LAST. It was highest until this changed, and
+// The slice below is written LOWEST FIRST, so read the sequence rather than a
+// word: runtime_broker, then hub, then project, then user. runtime_broker is
+// therefore the WEAKEST of the four in precedence and the FIRST element in the
+// slice; user is the strongest and the last element. Saying "runtime_broker is
+// last" is true of precedence and false of the literal, which is why the
+// sequence is spelled out instead.
+//
+// It was the strongest until this changed, and
 // that was an accident of the order four near-identical blocks happened to
 // appear in — not a decision. Broker-scoped env is the most infrastructural and
 // least specific of the four, so it is the weakest default rather than an
@@ -1089,12 +1096,24 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 // while an empty one is a passthrough marker that deliberately yields to
 // storage.
 //
-// Every consumer of env var storage derives its order from this list — the
+// The three consumers in THIS file derive their order from this list — the
 // resolver (resolveEnvFromStorage), the provenance reporter that tells the CLI
 // where a value came from (buildEnvSources), and the startup shadow warning
-// (WarnOutrankedBrokerEnvKeys). Changing the order here is the ONLY edit
-// required to change it everywhere, and is a user-visible behaviour change for
-// any deployment that defines the same key in two scopes.
+// (WarnOutrankedBrokerEnvKeys). For those three, changing the order here is the
+// only edit required, and it is a user-visible behaviour change for any
+// deployment that defines the same key in two scopes.
+//
+// THAT IS NOT THE SAME AS "everywhere", AND THE DIFFERENCE IS LOAD-BEARING.
+// Server.buildEnvGatherResponse in handlers_agents_core.go answers the same
+// "where did this value come from" question for the env-gather path from its
+// own hardcoded chain: it defaults the reported scope to hub, then checks user,
+// project, config and secret, and never consults runtime_broker at all — so a
+// broker-only key is reported there as "hub". It does not reference this list,
+// and its user-before-project order agrees with this one by coincidence rather
+// than by construction. Reordering here does not reach it. That reporter is
+// tracked as a separate follow-up and is deliberately not changed by phase 10;
+// what matters here is that you must not read this list as the only place a
+// scope order is written down.
 var envScopePrecedence = []string{
 	store.ScopeRuntimeBroker,
 	store.ScopeHub,
@@ -1262,11 +1281,17 @@ func envScopeCollisions(order []string, target string, vars []store.EnvVar) []en
 // cannot fix them and must not try. Naming the affected keys at boot is the
 // only warning that can be offered, and it is one query per scope.
 //
-// It is inert whenever nothing outranks runtime_broker, which is the case for
-// the ladder currently in envScopePrecedence: envScopesOutranking returns empty
-// and this returns without querying anything. Reordering the list is what turns
-// it on, deliberately — the warning and the change it warns about are driven by
-// the same one line.
+// Whether it does anything at all is decided by envScopePrecedence and nothing
+// else. UNDER THE LADDER THAT SHIPPED IN PHASE 10b, runtime_broker is the
+// weakest scope, so hub, project and user all outrank it, envScopesOutranking
+// returns those three, and THIS CHECK IS LIVE: it issues one query per
+// outranking scope and warns on every shadowed key. Do not read the call site
+// added at boot as a no-op.
+//
+// It goes inert only if runtime_broker is moved back to the top of that list,
+// at which point envScopesOutranking returns empty and this returns before
+// issuing a single query. The warning and the change it warns about are driven
+// by the same one line, in both directions.
 func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) error {
 	higher := envScopesOutranking(envScopePrecedence, store.ScopeRuntimeBroker)
 	if len(higher) == 0 {

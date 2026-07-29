@@ -20,6 +20,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -116,16 +117,30 @@ func TestWarnShadowedBrokerEnv_SuccessLogsNothing(t *testing.T) {
 //
 // What it does NOT cover: that step 14 executes, that enableHub is true, that
 // the dispatcher passed is the live one, or that the store behind it is
-// reachable. It only fails when the line disappears.
+// reachable. Nor can it tell a live call from one that is present at statement
+// position but unreachable — inside an if false, a disabled branch, or a
+// build-tagged file. The text being there, in statement position, is the whole
+// of what it establishes.
+//
+// It fails when the line is deleted AND when it is commented out. An earlier
+// version of this guard used strings.Contains and claimed "it only fails when
+// the line disappears"; that claim was too generous in one direction and too
+// modest in the other. strings.Contains is satisfied by a leading "// ", so
+// commenting the call out left the whole suite green — and commenting out is
+// the commonest way a call gets disabled and is indistinguishable from
+// deletion in a diff. The pattern below is anchored to statement position
+// precisely to close that case.
+var bootCallSite = regexp.MustCompile(`(?m)^[\t ]*warnShadowedBrokerEnv\(ctx, dispatcher\)[\t ]*$`)
+
 func TestBootPathCallsWarnShadowedBrokerEnv(t *testing.T) {
 	src, err := os.ReadFile("server_foreground.go")
 	if err != nil {
 		t.Fatalf("reading boot source: %v", err)
 	}
-	const call = "warnShadowedBrokerEnv(ctx, dispatcher)"
-	if !strings.Contains(string(src), call) {
-		t.Fatalf("boot path no longer contains %q. The broker env shadow warning is required; "+
-			"without this call it is dead code that a diff still makes look shipped.", call)
+	if !bootCallSite.Match(src) {
+		t.Fatal("boot path no longer calls warnShadowedBrokerEnv(ctx, dispatcher) at statement " +
+			"position — deleted, or commented out. The broker env shadow warning is required; " +
+			"without this call it is dead code that a diff still makes look shipped.")
 	}
 }
 
