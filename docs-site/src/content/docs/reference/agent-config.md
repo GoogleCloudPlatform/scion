@@ -162,3 +162,58 @@ When an agent starts:
 2.  **Harness Resolution**: It resolves the `harness_config` against the active profile's `harness_configs` map in `settings.yaml`.
 3.  **Overrides**: CLI flags (e.g., `--image`, `--env`) override values in `scion-agent.yaml`.
 4.  **Final Config**: The resolved configuration is written to the agent's runtime directory.
+
+### Project settings precedence
+
+Agents created inside a hub project have one more source of values: the
+project's own defaults, set in Project Settings and stored as `scion.io/*`
+annotations on the project. For these fields the ordering is, highest priority
+first:
+
+1.  **The agent-create request** — the value passed to `scion agent create`, the
+    API, or the web form.
+2.  **The project setting** — the project default.
+3.  **The template** — the value in the selected template's `scion-agent.yaml`.
+
+| Field | Project setting |
+| --- | --- |
+| `harness_config` | `scion.io/default-harness-config` |
+| `model` | `scion.io/default-model` |
+| Active profile | `scion.io/active-profile` |
+| `max_turns` | `scion.io/default-max-turns` |
+| `max_model_calls` | `scion.io/default-max-model-calls` |
+| `max_duration` | `scion.io/default-max-duration` |
+| `resources` | `scion.io/default-resources-cpu-request`, `-memory-request`, `-cpu-limit`, `-memory-limit`, `-disk` |
+
+A project setting is an *override*: it takes precedence over the template the
+project uses. Leave it blank to let the template — and then the rest of the
+chain — decide.
+
+`resources` merges **field by field** rather than as a whole block. A template
+that sets only a memory limit keeps that limit and still picks up the project's
+CPU and disk defaults. The same is true of the three limit fields.
+
+:::caution[Behaviour change]
+Before this was corrected, three project settings were accepted and persisted
+but never reached the agent:
+
+-   **`scion.io/default-harness-config`** was silently outranked by the
+    template's `harness_config`, on both the interactive and scheduled
+    agent-create paths.
+-   **`scion.io/active-profile`** was never applied at all. Agents ran under the
+    broker's own active profile instead. This one has the widest reach — the
+    profile selects the runtime and manager, and is also consulted when
+    resolving harness configs and extracting the agent's env vars and secrets.
+-   **Project `resources`** were discarded in full whenever the template set any
+    single resource field.
+
+If you had set any of these on a project and worked around them being ignored —
+for example by pinning the value in the template instead — that workaround now
+competes with the project setting, and the project setting wins. Review your
+project defaults before upgrading.
+:::
+
+Values resolved above are stamped onto the agent by the hub before dispatch, so
+they outrank anything the broker would otherwise supply from its local
+`settings.yaml`. That is intended: hub configuration should win for a
+hub-created agent.
