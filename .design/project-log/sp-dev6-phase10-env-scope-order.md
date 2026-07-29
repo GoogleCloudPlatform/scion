@@ -291,3 +291,42 @@ a build failure. `anchored-FAILs=1` alone would not have.
 
 Envscope suite re-run under `-race`: 14/14, `ok 92.082s`. Build and vet clean.
 File set is exactly two files; `handlers_agents_core.go` is untouched.
+
+## Phase 10e — the second unscoped claim (`29f5279d`)
+
+`e2514675` fixed finding F-3 at the `envScopePrecedence` doc block and left the same claim standing
+at `envScopesOutranking`, ~60 lines below: *"changes who outranks whom everywhere at once — the same
+property that makes the resolver and the provenance reporter unable to drift apart."* The file
+therefore shipped a scoped and an unscoped statement of one property, with the unscoped one attached
+to the function that computes the answer.
+
+`buildEnvGatherResponse` is a provenance reporter, does not read `envScopePrecedence`, and can
+drift. Verified read-only before the claim was written: `runtime_broker` occurrences inside it are
+0, `envScopePrecedence` references are 0, and `envScopeSourceLabel` maps `store.ScopeRuntimeBroker`
+to `"broker"` — so the two reporters disagree about the same key today.
+
+`29f5279d` scopes the comment to the three consumers in this file and states explicitly that it
+covers no reporter which does not read the list. Comments only, one file, fast-forward from
+`e2514675` (which is merged and did not move).
+
+**Method notes worth keeping.**
+
+- *Comments-only was proven, not asserted*, with a live negative control: the filter returns 0 on
+  this diff and **84** on `ce23801a..14883cbf`. A filter must be bounded on both sides by its own
+  universe — one returning 0 and one returning everything are both broken and neither announces
+  itself.
+- *A line-oriented grep cannot see a wrapped phrase.* The phrase spanned lines 1189–1190, so a
+  phrase count was **equal** at both revs and read as "nothing changed". The count was arithmetically
+  right about a quantity nobody meant. Normalise whitespace, or match a fragment short enough not to
+  wrap.
+- *The SKIP fence broke on first use, fail-closed.* Widening the RUN pattern to add a SKIP limb lost
+  the end-of-line anchor, so subtest `=== RUN` lines counted against a source-derived WANT (45 vs 14,
+  6 vs 4). Count top-level RUN only, anchored; require `SKIP == 0`; require the `ok` line. Add one
+  limb per edit and control it before adding the next.
+- *A green under disk pressure needs the run count.* `t.TempDir` succeeding and a later write hitting
+  ENOSPC under a `t.Skipf` handler yields a green manufactured by disk exhaustion. Both suites here
+  are structurally immune: `t.Skip` count 0 and `t.TempDir` count 0.
+- *Gap-4 counts are scoped.* 7/0 before and 0/2 after are claims about `pkg/hub/httpdispatcher.go`.
+  Package-wide the hardcoded limb is **4**, all in `handlers_agents_core.go`, unchanged across
+  `b03a09ac`, `f0093316` and `d2989488`. A three-limb gate run without that pathspec red-lights the
+  correct tree.
