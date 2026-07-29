@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -99,6 +100,18 @@ func (c *GitHubResolutionCache) Get(uri string) (ResolvedSkill, bool) {
 }
 
 // Put stores a resolved skill in the cache.
+//
+// Credential-bearing entries — those whose URI key contains a token-hash
+// suffix (the "#<hex>" appended by resolutionCacheKey when a GitHub token is
+// present) — are kept in-memory only and never written to disk. This prevents
+// the stale-404 class of bug described in issue #565: ResolvedFile.Content is
+// tagged json:"-" and is not preserved through serialisation, so a disk-cache
+// hit after a broker restart returns Content == nil. installOneSkill then
+// falls back to downloadSkillFile using the broker's default GitHub token —
+// not the per-URI named credential — causing a 404 on private repos. By
+// keeping credential entries in-memory only, Content survives for the full
+// TTL window within the same process, and there is no stale entry to load
+// after a restart.
 func (c *GitHubResolutionCache) Put(uri string, skill ResolvedSkill) {
 	c.mu.Lock()
 	now := time.Now()
@@ -108,9 +121,21 @@ func (c *GitHubResolutionCache) Put(uri string, skill ResolvedSkill) {
 		ExpiresAt: now.Add(c.ttl),
 	}
 	c.evictExpired()
+
+	// Credential-bearing URI keys contain a "#<tokenhash>" suffix.
+	// Keep them in-memory only — do not persist to disk.
+	if strings.Contains(uri, "#") {
+		c.mu.Unlock()
+		return
+	}
+
+	// For public-repo entries, persist to disk. Exclude any credential
+	// entries that may be present in the map from earlier Puts.
 	snapshot := make(map[string]*resolutionCacheEntry, len(c.entries))
 	for k, v := range c.entries {
-		snapshot[k] = v
+		if !strings.Contains(k, "#") {
+			snapshot[k] = v
+		}
 	}
 	c.mu.Unlock()
 

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -296,10 +297,20 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 					_ = os.RemoveAll(finalDest)
 				} else {
 					util.Debugf("provision: skill installed from cache: %s@%s", skill.Name, skill.Version)
+					slog.InfoContext(ctx, "skill_content_cache: cache hit",
+						"skill", skill.Name, "version", skill.Version,
+						"hash", truncHash(skill.Hash), "cache_hit", true)
 					return buildSkillEntry(skill, dest, skillsDest)
 				}
 			}
-			// Cache copy failed — fall through to download
+			// Cache entry unusable (copy or hash verification failed) — re-downloading.
+			slog.InfoContext(ctx, "skill_content_cache: cache error, re-downloading",
+				"skill", skill.Name, "version", skill.Version,
+				"hash", truncHash(skill.Hash), "cache_hit", false)
+		} else {
+			slog.InfoContext(ctx, "skill_content_cache: cache miss, will download",
+				"skill", skill.Name, "version", skill.Version,
+				"hash", truncHash(skill.Hash), "cache_hit", false)
 		}
 	}
 
