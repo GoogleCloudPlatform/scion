@@ -262,12 +262,25 @@ harness_configs:
 	}
 }
 
-// TestProvision_HubAgentDefaults_DoesNotAliasContextValue guards the persisted
-// config against sharing a ResourceSpec pointer with the context value.
-// MergeResourceSpec returns its base argument unchanged when the override is
-// nil, so a naive call would hand the agent's config the very pointer the
-// request decoded — and scion-agent.json is written from it.
-func TestProvision_HubAgentDefaults_DoesNotAliasContextValue(t *testing.T) {
+// TestProvision_HubAgentDefaults_ContextValueSurvivesProvisioning is a SMOKE
+// TEST, NOT A PIN. Read this before trusting it.
+//
+// It does not — and structurally cannot — pin the defensive copy at
+// provision.go:1173. Review proved that by deleting the copy and watching this
+// stay green. The reason is provision.go:1334-1338: ProvisionAgent reloads
+// finalScionCfg from disk before returning, so the pointer this test inspects
+// can never be the aliased one no matter what the merge did. Asserting on the
+// written scion-agent.json does not help either — that file is marshalled from
+// the config and re-read, which launders the aliasing the same way. Anything
+// downstream of the reload is incapable of failing on this property.
+//
+// What it DOES check, which is still worth having: provisioning with hub
+// resources on the context completes, produces a usable spec, and leaves the
+// caller's *api.HubAgentDefaults unmodified.
+//
+// The actual guard on the copy is TestMergeResourceSpec_ReturnsBaseWhenOverrideNil
+// below, which fails when the REASON for the copy disappears.
+func TestProvision_HubAgentDefaults_ContextValueSurvivesProvisioning(t *testing.T) {
 	const settingsYAML = `schema_version: "1"
 default_harness_config: test-harness
 harness_configs:
@@ -287,12 +300,38 @@ harness_configs:
 	if cfg.Resources == nil {
 		t.Fatal("Resources is nil")
 	}
+	// Both of the following pass with the defensive copy removed, because of the
+	// disk reload described above. They are kept as smoke coverage of the path,
+	// not as evidence about aliasing.
 	if cfg.Resources == hub.Resources {
 		t.Fatal("provisioned config aliases the context's ResourceSpec")
 	}
-	cfg.Resources.Limits.CPU = "999"
 	if hub.Resources.Limits.CPU != "3" {
-		t.Errorf("mutating the provisioned config changed the context value: got %q", hub.Resources.Limits.CPU)
+		t.Errorf("provisioning modified the caller's hub defaults: got %q", hub.Resources.Limits.CPU)
+	}
+}
+
+// TestMergeResourceSpec_ReturnsBaseWhenOverrideNil is the real guard on the
+// defensive copy at provision.go:1173, and it works by inverting the usual
+// direction: it does not test that the copy is present, it tests that the copy
+// is still NECESSARY.
+//
+// The hazard is that config.MergeResourceSpec returns its base argument itself
+// — the same pointer, not a clone — when the override is nil. Passing the
+// context's *api.ResourceSpec straight in as base would therefore publish that
+// pointer into the agent's config. Today nothing downstream mutates it in place,
+// which is exactly why the end-to-end test above cannot see the difference.
+//
+// This test fails the moment MergeResourceSpec stops returning base, which is
+// the only condition under which someone should be deleting the copy. It turns
+// "why is this copy here?" from an invitation into a failing test with an
+// answer in it.
+func TestMergeResourceSpec_ReturnsBaseWhenOverrideNil(t *testing.T) {
+	base := &api.ResourceSpec{Limits: api.ResourceList{CPU: "3"}}
+	if got := config.MergeResourceSpec(base, nil); got != base {
+		t.Fatal("MergeResourceSpec no longer returns its base argument when override is nil. " +
+			"The defensive copy at provision.go:1173 exists solely because it did; " +
+			"re-derive whether it is still needed before removing it.")
 	}
 }
 

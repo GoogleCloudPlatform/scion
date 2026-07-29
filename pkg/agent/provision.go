@@ -1155,6 +1155,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// The rank of hub agent_defaults is therefore mode-dependent — bottom of
 	// the broker chain in file mode, just above broker settings in Postgres
 	// mode. That is deliberate; see design §3.2.4 and alternative A7.
+	//
+	// Note the asymmetry for Resources: "above this broker's own settings.yaml
+	// defaults" means default_resources ONLY. Broker profile resources and
+	// harness overrides live in that same file but are merged in step 2e ABOVE,
+	// so they win per-field over the hub default_resources applied here — while
+	// broker default_max_turns loses to hub default_max_turns. The hub tier
+	// therefore sits in a different place for Resources than for the three
+	// scalars. That falls out of the insertion point the design specifies and is
+	// the conservative direction (§3.2.4 explicitly does not want hub defaults
+	// silently overriding broker profile resources).
 	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil && finalScionCfg != nil {
 		if finalScionCfg.MaxTurns == 0 && hd.MaxTurns > 0 {
 			finalScionCfg.MaxTurns = hd.MaxTurns

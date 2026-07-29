@@ -77,7 +77,22 @@ func TestDispatch_HubAgentDefaults_OnWire(t *testing.T) {
 			DefaultResources:     &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}, Disk: "10Gi"},
 		})
 
-		req, err := hubDefaultsDispatcher(t, srv).buildCreateRequest(ctx, hubDefaultsDispatchAgent(), "test")
+		// Give this agent a non-nil InlineConfig whose four limit/resource fields
+		// are all zero. Without it req.InlineConfig is nil, the A5-leak guard at
+		// the bottom of this subtest short-circuits on its own nil check, and the
+		// assertion that reads as a second line of defence evaluates nothing.
+		//
+		// Zero limits specifically: the guard detects a leak by finding any of the
+		// four fields set, so the fixture must not set them itself. Harness is an
+		// unrelated field and just makes the object non-empty.
+		//
+		// Deliberately not folded into hubDefaultsDispatchAgent(): the file-mode
+		// golden below is the whole serialized request, so changing the shared
+		// fixture would change the captured bytes and break criterion 12.
+		ag := hubDefaultsDispatchAgent()
+		ag.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude"}
+
+		req, err := hubDefaultsDispatcher(t, srv).buildCreateRequest(ctx, ag, "test")
 		if err != nil {
 			t.Fatalf("buildCreateRequest: %v", err)
 		}
@@ -117,8 +132,16 @@ func TestDispatch_HubAgentDefaults_OnWire(t *testing.T) {
 		// the OVERRIDE position broker-side and would beat a template's explicit
 		// max_turns — rejected alternative A5, the inversion this phase exists
 		// to avoid.
-		if req.InlineConfig != nil && (req.InlineConfig.MaxTurns != 0 || req.InlineConfig.MaxModelCalls != 0 ||
-			req.InlineConfig.MaxDuration != "" || req.InlineConfig.Resources != nil) {
+		//
+		// The nil check is a guard on the guard: if a future edit stops the
+		// fixture producing an InlineConfig, this fails loudly instead of letting
+		// the leak assertion below quietly become a no-op again.
+		if req.InlineConfig == nil {
+			t.Fatal("fixture no longer yields a non-nil InlineConfig, so the A5-leak assertion " +
+				"below would evaluate nothing; restore it rather than deleting this check")
+		}
+		if req.InlineConfig.MaxTurns != 0 || req.InlineConfig.MaxModelCalls != 0 ||
+			req.InlineConfig.MaxDuration != "" || req.InlineConfig.Resources != nil {
 			t.Errorf("hub defaults leaked into InlineConfig (alternative A5): %+v", req.InlineConfig)
 		}
 	})
@@ -164,6 +187,58 @@ func TestDispatch_HubAgentDefaults_OnWire(t *testing.T) {
 			t.Errorf("want nil with no provider, got %+v", req.Config.HubAgentDefaults)
 		}
 	})
+}
+
+// TestDispatch_HubAgentDefaults_ProviderInstalledByServer pins the production
+// wiring line in server.go that installs the provider on the dispatcher.
+//
+// The name starts with TestDispatch_ deliberately: the accepted probe for this
+// finding is an alternation of TestDispatch_ / TestRemoteHubAgentDefaults_ /
+// TestBuildCreateRequest_, and a test that does not match it would leave the
+// probe green while believing itself to be the pin.
+//
+// WHY THIS EXISTS: review deleted that line and the whole pkg/hub dispatch suite
+// stayed green, because every other test in this file installs the provider
+// itself via hubDefaultsDispatcher. The wire format was pinned, the conversion
+// was pinned, the broker side was pinned — and the feature was still inert in
+// production. Nothing tested that anything ever calls the setter.
+//
+// So this test must NOT construct the dispatcher itself. It goes through
+// CreateAuthenticatedDispatcher, the same factory the running hub uses, and then
+// asserts end to end: provider installed, and a dispatch built by that
+// dispatcher actually carries the values.
+//
+// The end-to-end assertion is the load-bearing one. Checking only that the field
+// is non-nil would pass if someone wired a provider that returns the zero value.
+func TestDispatch_HubAgentDefaults_ProviderInstalledByServer(t *testing.T) {
+	srv := &Server{store: createTestStore(t), maintenance: NewMaintenanceState(false, "")}
+	ApplySnapshot(srv, Layer1Snapshot{
+		DefaultMaxTurns:      50,
+		DefaultMaxModelCalls: 200,
+		DefaultMaxDuration:   "2h",
+		DefaultResources:     &api.ResourceSpec{Limits: api.ResourceList{CPU: "3"}, Disk: "20Gi"},
+	})
+
+	d := srv.CreateAuthenticatedDispatcher()
+	if d.hubAgentDefaultsProvider == nil {
+		t.Fatal("CreateAuthenticatedDispatcher did not install the hub agent_defaults provider: " +
+			"every dispatch from a real hub will omit the wire field and the feature is inert")
+	}
+
+	req, err := d.buildCreateRequest(context.Background(), hubDefaultsDispatchAgent(), "test")
+	if err != nil {
+		t.Fatalf("buildCreateRequest: %v", err)
+	}
+	if req.Config == nil || req.Config.HubAgentDefaults == nil {
+		t.Fatalf("a dispatch from the production dispatcher carried no hub defaults: %+v", req.Config)
+	}
+	hd := req.Config.HubAgentDefaults
+	if hd.MaxTurns != 50 || hd.MaxModelCalls != 200 || hd.MaxDuration != "2h" {
+		t.Errorf("limits: want 50/200/2h, got %d/%d/%q", hd.MaxTurns, hd.MaxModelCalls, hd.MaxDuration)
+	}
+	if hd.Resources == nil || hd.Resources.Limits.CPU != "3" || hd.Resources.Disk != "20Gi" {
+		t.Errorf("resources: want cpu=3 disk=20Gi, got %+v", hd.Resources)
+	}
 }
 
 // TestDispatch_FileMode_RequestJSONUnchanged is acceptance criterion 12's
