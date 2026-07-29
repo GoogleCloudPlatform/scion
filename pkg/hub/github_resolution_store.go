@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -169,8 +170,16 @@ func ghResolveCommitSHA(ctx context.Context, apiBase, owner, repo, ref, token st
 }
 
 // ghListContents calls GET /repos/{owner}/{repo}/contents/{path}?ref={sha}
-// and returns a list of file entries with their raw CDN download URLs and git blob SHAs.
-func ghListContents(ctx context.Context, apiBase, owner, repo, path, commitSHA, token string) ([]GitHubFileEntry, error) {
+// and returns a list of file entries with permanent raw content URLs and git
+// blob SHAs.
+//
+// rawBase is the origin for raw content URLs (githubRawBase in production;
+// overridden by tests). It is deliberately not the download_url the Contents
+// API returns: for private repos that field is a CDN link carrying a
+// short-lived signed token, which would be dead long before this entry's
+// cache TTL expires. A URL built from the resolved commit SHA is permanent,
+// and the caller authenticates it with its own credential.
+func ghListContents(ctx context.Context, apiBase, rawBase, owner, repo, path, commitSHA, token string) ([]GitHubFileEntry, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", apiBase, owner, repo, path, commitSHA)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -219,13 +228,32 @@ func ghListContents(ctx context.Context, apiBase, owner, repo, path, commitSHA, 
 		}
 		entries = append(entries, GitHubFileEntry{
 			Path: relPath,
-			URL:  item.DownloadURL,
-			Hash: item.SHA, // Git blob SHA for content addressing
+			URL:  ghRawContentURL(rawBase, owner, repo, commitSHA, item.Path),
+			Hash: item.SHA, // Git blob SHA; verified by the broker after download.
 			Size: item.Size,
 		})
 	}
 
 	return entries, nil
+}
+
+// ghRawContentURL builds a permanent raw content URL for a file at a pinned
+// commit SHA. Because the commit SHA is immutable, the URL stays valid for as
+// long as the commit is reachable — unlike the Contents API's download_url,
+// which expires within minutes for private repos.
+func ghRawContentURL(rawBase, owner, repo, commitSHA, filePath string) string {
+	return fmt.Sprintf("%s/%s/%s/%s/%s",
+		strings.TrimSuffix(rawBase, "/"), owner, repo, commitSHA, ghEscapePathSegments(filePath))
+}
+
+// ghEscapePathSegments percent-encodes each path segment while leaving the
+// separators intact.
+func ghEscapePathSegments(p string) string {
+	segments := strings.Split(p, "/")
+	for i, s := range segments {
+		segments[i] = url.PathEscape(s)
+	}
+	return strings.Join(segments, "/")
 }
 
 // isFullCommitSHA reports whether s is a complete 40-character lowercase hexadecimal SHA.

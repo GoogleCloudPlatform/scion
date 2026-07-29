@@ -783,6 +783,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			resolver = agent.NewCachingSkillResolver(resolver, s.skCache)
 		}
 		ctx = agent.ContextWithSkillResolver(ctx, resolver)
+		// Credential for install-phase downloads of gh:// skills resolved by
+		// the Hub, which returns raw.githubusercontent.com URLs but not the
+		// token behind them. Only ever sent to GitHub hosts.
+		if defaultGHToken != "" {
+			ctx = agent.ContextWithGitHubToken(ctx, defaultGHToken)
+		}
 		if req.ProjectID != "" {
 			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)
 		}

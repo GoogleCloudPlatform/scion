@@ -38,6 +38,7 @@ import (
 
 const (
 	githubAPIBase = "https://api.github.com"
+	githubRawBase = "https://raw.githubusercontent.com"
 )
 
 // CreateSkillRequest is the request body for creating a skill.
@@ -1536,6 +1537,14 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		return nil, fmt.Errorf("invalid gh:// URI: %w", err)
 	}
 
+	// Default an omitted ref to HEAD, matching the local resolver
+	// (github_skill_resolver.go resolveCommitSHA). Doing this before the cache
+	// key is computed also means gh://o/r/p and gh://o/r/p@HEAD share one
+	// entry rather than each missing the other's.
+	if ghRef.Ref == "" {
+		ghRef.Ref = "HEAD"
+	}
+
 	// 2. Determine token scope
 	installID, token, err := s.resolveGitHubToken(ctx, projectID)
 	if err != nil {
@@ -1563,13 +1572,17 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	if s.config.GitHubAppConfig.APIBaseURL != "" {
 		apiBase = s.config.GitHubAppConfig.APIBaseURL
 	}
+	rawBase := githubRawBase
+	if s.config.GitHubAppConfig.RawBaseURL != "" {
+		rawBase = s.config.GitHubAppConfig.RawBaseURL
+	}
 
 	commitSHA, err := ghResolveCommitSHA(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
 	}
 
-	fileEntries, err := ghListContents(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
+	fileEntries, err := ghListContents(ctx, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list contents: %w", err)
 	}
@@ -1613,6 +1626,13 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 }
 
 // buildResolvedSkillResponse constructs a ResolvedSkillResponse from a cache entry.
+//
+// Hash values here are git blob object IDs (bare 40-char hex), not the
+// "sha256:<hex>" digests used elsewhere in the API: the Hub resolves gh://
+// skills from GitHub metadata alone and never downloads the bytes, so a
+// sha256 digest is not available to it. The client recognises the format and
+// verifies accordingly (see hashFileAs in pkg/agent/skill_resolver.go).
+// ContentHash is likewise a digest over the git blob IDs.
 func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheEntry) *ResolvedSkillResponse {
 	files := make([]DownloadURLInfo, len(entry.FileEntries))
 	for i, f := range entry.FileEntries {

@@ -303,14 +303,14 @@ func TestDownloadSkillFile_HTTPSOnly(t *testing.T) {
 	// The httptest server uses HTTP, not HTTPS, and is not localhost from URL perspective
 	// but the URL will be http://127.0.0.1:PORT which is localhost
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize)
+	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, "")
 	// 127.0.0.1 is localhost, so HTTP is allowed
 	if err != nil {
 		t.Errorf("expected HTTP to localhost to be allowed, got: %v", err)
 	}
 
 	// Non-localhost HTTP should fail
-	err = downloadSkillFile(context.Background(), "http://example.com/file", dest, defaultMaxFileSize)
+	err = downloadSkillFile(context.Background(), "http://example.com/file", dest, defaultMaxFileSize, "")
 	if err == nil {
 		t.Fatal("expected error for non-HTTPS non-localhost URL")
 	}
@@ -332,7 +332,7 @@ func TestDownloadSkillFile_SizeLimit(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, 50) // 50 byte limit
+	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, 50, "") // 50 byte limit
 	if err == nil {
 		t.Fatal("expected error for oversized file")
 	}
@@ -358,7 +358,7 @@ func TestDownloadSkillFile_CrossHostRedirect(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize)
+	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, "")
 	if err == nil {
 		t.Fatal("expected error for cross-host redirect")
 	}
@@ -706,5 +706,196 @@ func TestInstallResolvedSkills_EmptySkillsList(t *testing.T) {
 	}
 	if len(record.Skills) != 0 {
 		t.Errorf("expected empty skills in record, got %d", len(record.Skills))
+	}
+}
+
+// TestInstallOneSkill_GitBlobHashes covers the shape of a gh:// skill resolved
+// by the Hub: the Hub never downloads file bytes, so it publishes git blob
+// object IDs rather than sha256 digests, and the bundle hash is a digest over
+// those. Both the per-file and the bundle check must succeed.
+func TestInstallOneSkill_GitBlobHashes(t *testing.T) {
+	const body = "hello\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	blobHash := transfer.GitBlobHashBytes([]byte(body))
+	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+		{Path: "SKILL.md", Hash: blobHash},
+	})
+
+	skill := ResolvedSkill{
+		Name:    "gh-skill",
+		URI:     "gh://owner/repo/skills/gh-skill",
+		Version: "abc123def456",
+		Hash:    bundleHash,
+		Files: []ResolvedFile{
+			{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: blobHash},
+		},
+	}
+
+	skillsDest := t.TempDir()
+	entry, err := installOneSkill(context.Background(), skill, "gh-skill", skillsDest)
+	if err != nil {
+		t.Fatalf("installOneSkill: %v", err)
+	}
+
+	installed := filepath.Join(skillsDest, "gh-skill", "SKILL.md")
+	got, err := os.ReadFile(installed)
+	if err != nil {
+		t.Fatalf("reading installed file: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("installed content = %q, want %q", got, body)
+	}
+
+	// The recorded hash stays in the format the resolver published, so the
+	// bundle hash recomputed from it still matches what the Hub sent.
+	if len(entry.Files) != 1 || entry.Files[0].Hash != blobHash {
+		t.Errorf("expected recorded hash %s, got %+v", blobHash, entry.Files)
+	}
+}
+
+// TestInstallOneSkill_GitBlobHashMismatch verifies that git-blob-format hashes
+// are actually enforced, not merely tolerated.
+func TestInstallOneSkill_GitBlobHashMismatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("tampered content"))
+	}))
+	defer srv.Close()
+
+	skill := ResolvedSkill{
+		Name: "gh-skill",
+		URI:  "gh://owner/repo/skills/gh-skill",
+		Files: []ResolvedFile{
+			// Git blob ID of "hello\n", which is not what the server serves.
+			{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: "ce013625030ba8dba906f756967f9e9ca394464a"},
+		},
+	}
+
+	_, err := installOneSkill(context.Background(), skill, "gh-skill", t.TempDir())
+	if err == nil {
+		t.Fatal("expected a hash mismatch error")
+	}
+	if !strings.Contains(err.Error(), "hash mismatch") {
+		t.Errorf("error should mention hash mismatch, got: %v", err)
+	}
+}
+
+// TestInstallOneSkill_EmptyHashSkipsVerification documents that a resolver may
+// omit a per-file hash; the file installs and is recorded with a sha256 digest.
+func TestInstallOneSkill_EmptyHashSkipsVerification(t *testing.T) {
+	const body = "no hash published"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	skill := ResolvedSkill{
+		Name:  "loose-skill",
+		URI:   "gh://owner/repo/skills/loose-skill",
+		Files: []ResolvedFile{{Path: "SKILL.md", URL: srv.URL + "/SKILL.md"}},
+	}
+
+	skillsDest := t.TempDir()
+	if _, err := installOneSkill(context.Background(), skill, "loose-skill", skillsDest); err != nil {
+		t.Fatalf("installOneSkill: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(skillsDest, "loose-skill", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("reading installed file: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("installed content = %q, want %q", got, body)
+	}
+}
+
+func TestHashFileAs(t *testing.T) {
+	const body = "hello\n"
+	path := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	gitID := transfer.GitBlobHashBytes([]byte(body))
+	sha := transfer.HashBytes([]byte(body))
+
+	// A git-blob expectation selects git-blob hashing.
+	got, err := hashFileAs(path, gitID)
+	if err != nil {
+		t.Fatalf("hashFileAs: %v", err)
+	}
+	if got != gitID {
+		t.Errorf("hashFileAs with git blob expectation = %s, want %s", got, gitID)
+	}
+
+	// A sha256 expectation, and an absent expectation, both select sha256.
+	for _, expected := range []string{sha, ""} {
+		got, err := hashFileAs(path, expected)
+		if err != nil {
+			t.Fatalf("hashFileAs(%q): %v", expected, err)
+		}
+		if got != sha {
+			t.Errorf("hashFileAs(%q) = %s, want %s", expected, got, sha)
+		}
+	}
+}
+
+func TestIsGitHubHost(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"github.com", true},
+		{"api.github.com", true},
+		{"raw.githubusercontent.com", true},
+		{"objects.githubusercontent.com", true},
+		{"GitHub.com", true},
+		{"storage.googleapis.com", false},
+		{"example.com", false},
+		{"", false},
+		// Look-alikes must not match: the suffix check is on a dotted
+		// boundary, so these are rejected.
+		{"github.com.evil.test", false},
+		{"notgithub.com", false},
+		{"evilgithubusercontent.com", false},
+	}
+
+	for _, tc := range cases {
+		if got := isGitHubHost(tc.host); got != tc.want {
+			t.Errorf("isGitHubHost(%q) = %v, want %v", tc.host, got, tc.want)
+		}
+	}
+}
+
+// TestDownloadSkillFile_TokenNotSentToNonGitHubHost guards the credential
+// boundary: a Hub response naming an arbitrary host must not cause the
+// broker's GitHub token to be handed to that host.
+func TestDownloadSkillFile_TokenNotSentToNonGitHubHost(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte("content"))
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "test.txt")
+	if err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, "secret-token"); err != nil {
+		t.Fatalf("downloadSkillFile: %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("token leaked to non-GitHub host: Authorization = %q", gotAuth)
+	}
+}
+
+func TestGitHubTokenFromContext(t *testing.T) {
+	if got := GitHubTokenFromContext(context.Background()); got != "" {
+		t.Errorf("expected no token on a bare context, got %q", got)
+	}
+	ctx := ContextWithGitHubToken(context.Background(), "ghp_example")
+	if got := GitHubTokenFromContext(ctx); got != "ghp_example" {
+		t.Errorf("GitHubTokenFromContext = %q, want %q", got, "ghp_example")
 	}
 }

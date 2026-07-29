@@ -225,6 +225,10 @@ type GitHubAppServerConfig struct {
 	PrivateKey      string
 	WebhookSecret   string
 	APIBaseURL      string
+	// RawBaseURL overrides the origin used to build raw file-content URLs
+	// (default https://raw.githubusercontent.com). Set alongside APIBaseURL
+	// for GitHub Enterprise or for tests that serve fixture content.
+	RawBaseURL      string
 	WebhooksEnabled bool
 	InstallationURL string
 }
