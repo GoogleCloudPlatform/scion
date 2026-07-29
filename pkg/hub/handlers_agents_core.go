@@ -495,16 +495,51 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
+	// Hub operational default template — lowest tier. Below the request and
+	// below the project annotation, both of which have already had their chance
+	// above. In file mode hubAgentDefaults() is always the zero value, so this
+	// rung never fires there and file-mode dispatch is unchanged (design
+	// §3.2.4). The scheduler-dispatch path in server.go carries the identical
+	// rung; design §5.2 risk (d) is the two paths diverging again.
+	templateFromHubDefault := false
+	if req.Template == "" {
+		if d := s.hubAgentDefaults(); d.DefaultTemplate != "" {
+			req.Template = d.DefaultTemplate
+			templateFromHubDefault = true
+		}
+	}
+
 	// Resolve template if specified - the client may pass either a template ID or name
+	//
+	// DEGRADATION RULE (design §3.2.2) — when, and only when, the name came
+	// from the hub operational default, an unusable template must log a warning
+	// and continue with no template instead of failing the create. A hub-wide
+	// default naming a template that has since been deleted would otherwise
+	// mean "nobody in this deployment can create an agent" — an operational
+	// setting turned into an outage. Provenance comes from the
+	// templateFromHubDefault flag set above and is never inferred by re-reading
+	// the setting, which cannot distinguish a hub default from a user who
+	// happened to name the same template.
+	//
+	// All three unusable-template exits below degrade, not just the 404: a
+	// stale hub default pointing at a file-less (still-pending) template has
+	// exactly the same deployment-wide blast radius as one pointing at a
+	// deleted template.
 	var resolvedTemplate *store.Template
 	if req.Template != "" {
 		resolvedTemplate, err = s.resolveTemplate(ctx, req.Template, projectID)
-		if err != nil && err != store.ErrNotFound {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		// If template was requested but not found, check if the broker has local access
-		if resolvedTemplate == nil {
+		switch {
+		case err != nil && err != store.ErrNotFound:
+			if !templateFromHubDefault {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			s.warnHubDefaultTemplateUnusable(ctx, req.Template, projectID, "lookup failed: "+err.Error())
+			req.Template, resolvedTemplate = "", nil
+
+		case resolvedTemplate == nil:
+			// Template was requested but not found — check if the broker has
+			// local access and can resolve it from its own filesystem.
 			brokerHasLocal := false
 			if runtimeBrokerID != "" {
 				provider, err := s.store.GetProjectProvider(ctx, projectID, runtimeBrokerID)
@@ -512,23 +547,32 @@ func (s *Server) createAgentInProject(
 					brokerHasLocal = true
 				}
 			}
-			if !brokerHasLocal {
+			switch {
+			case brokerHasLocal:
+				// Template will be resolved locally by the broker
+			case templateFromHubDefault:
+				s.warnHubDefaultTemplateUnusable(ctx, req.Template, projectID, "not found")
+				req.Template = ""
+			default:
 				NotFound(w, "Template")
 				return
 			}
-			// Template will be resolved locally by the broker
-		}
 
-		// Guard: reject dispatch when the resolved template has no files and
-		// no content hash. This catches templates stuck in 'pending' state
-		// before they reach broker hydration (where the failure is opaque).
-		if resolvedTemplate != nil && len(resolvedTemplate.Files) == 0 && resolvedTemplate.ContentHash == "" {
+		case len(resolvedTemplate.Files) == 0 && resolvedTemplate.ContentHash == "":
+			// Guard: reject dispatch when the resolved template has no files and
+			// no content hash. This catches templates stuck in 'pending' state
+			// before they reach broker hydration (where the failure is opaque).
 			name := resolvedTemplate.Slug
 			if name == "" {
 				name = resolvedTemplate.Name
 			}
-			ValidationError(w, "template "+name+" has no files — sync template files first with: scion template sync "+name, nil)
-			return
+			if !templateFromHubDefault {
+				ValidationError(w, "template "+name+" has no files — sync template files first with: scion template sync "+name, nil)
+				return
+			}
+			s.warnHubDefaultTemplateUnusable(ctx, req.Template, projectID,
+				"template "+name+" has no files — sync template files first with: scion template sync "+name)
+			req.Template, resolvedTemplate = "", nil
 		}
 	}
 
@@ -659,6 +703,13 @@ func (s *Server) createAgentInProject(
 
 	// Apply project-level defaults (harness config, limits, resources) from annotations
 	applyProjectDefaults(agent.AppliedConfig, project)
+
+	// Hub operational agent_defaults — strictly between applyProjectDefaults
+	// and populateAgentConfig. See applyHubAgentDefaults for why that placement
+	// is the whole point.
+	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
+		ctx = withHubDefaultHarnessConfig(ctx)
+	}
 
 	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
 

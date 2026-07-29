@@ -225,6 +225,13 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// Harness type — is the pre-existing normal case.
 	hcFromProjectAnnotation := hcName != "" && project != nil && project.Annotations != nil &&
 		project.Annotations[projectSettingDefaultHarnessConfig] == hcName
+	// A third provenance: the hub operational default_harness_config, applied
+	// by applyHubAgentDefaults just above the call to this function. Carried on
+	// the context rather than inferred by comparing hcName back against the
+	// setting — that comparison cannot tell "the hub defaulted it" from "the
+	// user named the same config the hub defaults to". Without this an operator
+	// cannot tell a bad hub default from a bad project annotation in the log.
+	hcFromHubDefault := hcName != "" && !hcFromProjectAnnotation && hubDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
 		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
 	}
@@ -279,6 +286,13 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 			//           broker to hydrate from Hub storage. An operator can fix
 			//           it, so say so loudly.
 			//
+			//   WARN  — the name came from the hub operational
+			//           agent_defaults.default_harness_config. Same argument,
+			//           one tier lower and deployment-wide: a stale hub default
+			//           silently costs every agent in the deployment its ID and
+			//           hash. The two are distinguished in the log attributes
+			//           so an operator knows which knob to turn.
+			//
 			//   DEBUG — anything else. Most often hcName is the template's bare
 			//           Harness type ("claude") rather than a stored
 			//           harness-config slug, via getHarnessConfigFromTemplate's
@@ -292,14 +306,15 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 				projectID = project.ID
 			}
 			level := slog.LevelDebug
-			if hcFromProjectAnnotation {
+			if hcFromProjectAnnotation || hcFromHubDefault {
 				level = slog.LevelWarn
 			}
 			s.agentLifecycleLog.Log(ctx, level,
 				"harness config not found in project or global scope; "+
 					"agent will be dispatched without a config ID/hash and the broker must resolve it locally",
 				"slug", hcName, "agent_id", agent.ID, "project_id", projectID,
-				"from_project_annotation", hcFromProjectAnnotation)
+				"from_project_annotation", hcFromProjectAnnotation,
+				"from_hub_default", hcFromHubDefault)
 		}
 	}
 

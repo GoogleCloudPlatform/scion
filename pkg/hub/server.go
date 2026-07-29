@@ -2340,9 +2340,42 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			}
 		}
 
+		// Hub operational default template — lowest tier. Below the scheduled
+		// payload and below the project annotation, both of which have already
+		// had their chance above. Sets payload.Template and agent.Template
+		// together, matching the annotation rung's shape. In file mode
+		// hubAgentDefaults() is always the zero value so this never fires
+		// (design §3.2.4). This is the twin of the rung on the agent-create
+		// path in handlers_agents_core.go — design §5.2 risk (d) is these two
+		// diverging again, so both paths get both rungs, no exceptions.
+		templateFromHubDefault := false
+		if payload.Template == "" {
+			if d := s.hubAgentDefaults(); d.DefaultTemplate != "" {
+				payload.Template = d.DefaultTemplate
+				agent.Template = d.DefaultTemplate
+				templateFromHubDefault = true
+			}
+		}
+
 		// Resolve template if specified
 		if payload.Template != "" {
 			tmpl, tmplErr := s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
+			// DEGRADATION RULE (design §3.2.2), the scheduler-path equivalent of
+			// the create path's. A resolve failure never fails a scheduled
+			// dispatch on this path, so there is no 404 to suppress — but a name
+			// that nothing can resolve must not be left on the agent record
+			// either, because the broker would then try to hydrate a template
+			// that does not exist. Clear it and say so. Gated on the
+			// templateFromHubDefault flag, never inferred from the setting.
+			if templateFromHubDefault && (tmplErr != nil || tmpl == nil) {
+				reason := "not found"
+				if tmplErr != nil {
+					reason = "lookup failed: " + tmplErr.Error()
+				}
+				s.warnHubDefaultTemplateUnusable(ctx, payload.Template, evt.ProjectID, reason)
+				payload.Template = ""
+				agent.Template = ""
+			}
 			if tmplErr == nil && tmpl != nil {
 				if tmpl.Slug != "" {
 					agent.Template = tmpl.Slug
@@ -2375,6 +2408,13 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		// Apply project-level defaults (harness config, limits, resources) from annotations
 		applyProjectDefaults(agent.AppliedConfig, project)
+
+		// Hub operational agent_defaults — strictly between applyProjectDefaults
+		// and populateAgentConfig, exactly as on the agent-create path. See
+		// applyHubAgentDefaults for why that placement is the whole point.
+		if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
+			ctx = withHubDefaultHarnessConfig(ctx)
+		}
 
 		s.populateAgentConfig(ctx, agent, project, nil)
 
