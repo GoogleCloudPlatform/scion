@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"maps"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -494,6 +495,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		req.ResolvedEnv = make(map[string]string)
 	}
 	injectModelEnv(req.ResolvedEnv, agent.AppliedConfig)
+	injectThinkingLevelEnv(req.ResolvedEnv, agent.AppliedConfig)
 
 	// Resolve env vars from Hub storage (user/project/broker scopes) and merge.
 	// Storage env vars fill in keys not already set (with a non-empty value)
@@ -1246,6 +1248,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	injectModelEnv(resolvedEnv, agent.AppliedConfig)
+	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
 
 	// Merge env vars from Hub storage; storage vars fill in keys not already
 	// set (with a non-empty value) by explicit config env vars.
@@ -1539,6 +1542,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 
 	injectModelEnv(resolvedEnv, agent.AppliedConfig)
+	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
 
 	if d.tokenGenerator != nil {
 		var additionalScopes []AgentTokenScope
@@ -1723,6 +1727,26 @@ func injectModelEnv(env map[string]string, cfg *store.AgentAppliedConfig) {
 	}
 	if _, ok := env["SCION_MODEL"]; !ok {
 		env["SCION_MODEL"] = cfg.Model
+	}
+}
+
+// injectThinkingLevelEnv sets SCION_THINKING_LEVEL in env from the agent's
+// applied config, if a thinking level is configured and the key is not already
+// present in env. Mirrors the SCION_MODEL injector above and must be called
+// from exactly the same dispatch sites — a site that injects one and not the
+// other reproduces the annotation-drop bug on that path only, silently.
+// env must be non-nil.
+//
+// The env var is the terminal hop for thinking level: pkg/agent/run.go reads
+// SCION_THINKING_LEVEL from opts.Env under an "if not already set" guard, so a
+// hub-supplied value wins and this fix works against already-deployed brokers
+// without a wire-field change.
+func injectThinkingLevelEnv(env map[string]string, cfg *store.AgentAppliedConfig) {
+	if cfg == nil || cfg.ThinkingLevel == nil {
+		return
+	}
+	if _, ok := env["SCION_THINKING_LEVEL"]; !ok {
+		env["SCION_THINKING_LEVEL"] = strconv.Itoa(*cfg.ThinkingLevel)
 	}
 }
 
