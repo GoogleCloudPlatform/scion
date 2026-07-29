@@ -86,6 +86,13 @@ func hubDefaultsFixture(t *testing.T, settingsYAML, templateJSON string) string 
 // criterion 7/9 and rung 3 proves the hub tier sits above settings.yaml without
 // replacing it.
 func TestProvision_HubAgentDefaults_BelowTemplateAboveSettings(t *testing.T) {
+	// LOAD-BEARING, and it is shared by all three rungs on purpose. Because this
+	// one const stays live in every subtest, rung 1 runs template 100 + hub 50 +
+	// BROKER 10 simultaneously and therefore asserts the (template, broker) pair
+	// as well as (template, hub). That coverage is easy to delete by accident:
+	// "rung 1 never looks at settings.yaml" is true of the assertion and false of
+	// the fixture. Do not give the rungs separate settingsYAML values, and do not
+	// drop default_max_turns here because rung 3 looks like its only consumer.
 	const settingsYAML = `schema_version: "1"
 default_harness_config: test-harness
 default_max_turns: 10
@@ -119,29 +126,33 @@ harness_configs:
 		seedTemplateFiles bool
 	}{
 		{
-			name:              "template beats hub default and settings",
-			template:          "limits-tpl",
-			hub:               hubDefaults,
-			wantTurns:         100,
-			wantCalls:         101,
-			wantDuration:      "100m",
-			wantExplanation:   "criterion 8: a hub-wide floor must never override a deliberate per-template value",
+			name:         "template beats hub default and settings",
+			template:     "limits-tpl",
+			hub:          hubDefaults,
+			wantTurns:    100,
+			wantCalls:    101,
+			wantDuration: "100m",
+			wantExplanation: "criterion 8, and it decides TWO pairs at once: (template, hub) — a hub-wide " +
+				"floor must never override a deliberate per-template value — and (template, broker), " +
+				"because settingsYAML's default_max_turns 10 is live in this subtest too",
 			seedTemplateFiles: true,
 		},
 		{
-			name:            "hub default applies with no template value",
-			hub:             hubDefaults,
-			wantTurns:       50,
-			wantCalls:       51,
-			wantDuration:    "50m",
-			wantExplanation: "criteria 7 and 9: hub default wins over the broker's own settings.yaml",
+			name:         "hub default applies with no template value",
+			hub:          hubDefaults,
+			wantTurns:    50,
+			wantCalls:    51,
+			wantDuration: "50m",
+			wantExplanation: "criteria 7 and 9, the (hub, broker) pair: hub default wins over " +
+				"the broker's own settings.yaml",
 		},
 		{
-			name:            "settings.yaml applies with no hub default",
-			wantTurns:       10,
-			wantCalls:       11,
-			wantDuration:    "10m",
-			wantExplanation: "the broker's own defaults tier still works when the hub sends nothing",
+			name:         "settings.yaml applies with no hub default",
+			wantTurns:    10,
+			wantCalls:    11,
+			wantDuration: "10m",
+			wantExplanation: "the broker's own defaults tier still works when the hub sends nothing " +
+				"(file-mode / old-hub parity)",
 		},
 	}
 
@@ -297,8 +308,10 @@ harness_configs:
 // TEST, NOT A PIN. Read this before trusting it.
 //
 // It does not — and structurally cannot — pin the defensive copy at
-// provision.go:1173. Review proved that by deleting the copy and watching this
-// stay green. The reason is provision.go:1334-1338: ProvisionAgent reloads
+// provision.go (the `base := *hd.Resources` copy in the hub agent_defaults
+// block). Review proved that by deleting the copy and watching this stay
+// green. The reason is the `finalScionCfg = updatedCfg` reload near the end of
+// ProvisionAgent: it reloads
 // finalScionCfg from disk before returning, so the pointer this test inspects
 // can never be the aliased one no matter what the merge did. Asserting on the
 // written scion-agent.json does not help either — that file is marshalled from

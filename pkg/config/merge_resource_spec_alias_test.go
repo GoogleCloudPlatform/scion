@@ -21,7 +21,8 @@ import (
 )
 
 // TestMergeResourceSpec_ReturnsBaseWhenOverrideNil guards the aliasing hazard
-// that the defensive copy at pkg/agent/provision.go:1173 exists to avoid, and it
+// that the defensive copy in pkg/agent/provision.go's hub agent_defaults block
+// (`base := *hd.Resources`) exists to avoid, and it
 // works by inverting the usual direction: it does not assert that the copy is
 // present, it asserts that the copy is still NECESSARY.
 //
@@ -33,8 +34,8 @@ import (
 // WHY THIS TEST LIVES IN pkg/config AND NOT NEXT TO THE CODE IT PROTECTS.
 // This is deliberate and it must not be "tidied up" by moving it into
 // pkg/agent's Resources test family. Aliasing is a POINTER IDENTITY property,
-// and ProvisionAgent reloads its config from disk at provision.go:1334-1338 and
-// reassigns finalScionCfg. That round trip PRESERVES VALUES AND DESTROYS
+// and ProvisionAgent reloads its config from disk near its end
+// (`finalScionCfg = updatedCfg`). That round trip PRESERVES VALUES AND DESTROYS
 // IDENTITY. So any version of this test routed through ProvisionAgent — or
 // asserting on the written scion-agent.json, whose serialization launders
 // identity the same way — passes whether or not the defensive copy exists. It
@@ -51,7 +52,7 @@ func TestMergeResourceSpec_ReturnsBaseWhenOverrideNil(t *testing.T) {
 	base := &api.ResourceSpec{Limits: api.ResourceList{CPU: "3"}}
 	if got := MergeResourceSpec(base, nil); got != base {
 		t.Fatal("MergeResourceSpec no longer returns its base argument when override is nil. " +
-			"The defensive copy at pkg/agent/provision.go:1173 exists solely because it did; " +
+			"The defensive copy in pkg/agent/provision.go (base := *hd.Resources) exists solely because it did; " +
 			"re-derive whether it is still needed before removing it.")
 	}
 }
