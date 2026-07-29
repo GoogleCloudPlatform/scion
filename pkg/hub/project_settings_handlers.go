@@ -309,6 +309,17 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 	// req.Profile — so an unconditional write here would clobber an explicit
 	// user choice. Only the project tier was missing: scion.io/active-profile
 	// was parsed and persisted but never applied to any agent.
+	//
+	// Second precedence edge, less obvious than request-over-project: this also
+	// places the project above the broker's own active profile. The broker fell
+	// back to its local settings.ActiveProfile when the hub sent nothing — in
+	// extractRequiredEnvKeys, and again inside ResolveRuntime, which treats an
+	// empty profile as "use vs.ActiveProfile". A project value now pre-empts
+	// both, so this affects harness-config resolution and env/secret extraction
+	// as well as runtime selection. Intended — hub configuration should outrank
+	// broker-local defaults for a hub-created agent — and it degrades
+	// gracefully: resolveManagerForOpts returns the default manager when
+	// ResolveRuntime errors, so a stale annotation cannot fail dispatch.
 	if ac.Profile == "" && settings.ActiveProfile != "" {
 		ac.Profile = settings.ActiveProfile
 	}
@@ -353,6 +364,17 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 	// override, so a field set at agent/template level still wins and only
 	// unset fields fall through to the project — the same precedence as
 	// before, applied at field granularity instead of struct granularity.
+	//
+	// That equivalence holds *within this function*. Downstream it does shift
+	// something: what changes is the set of fields left empty for lower tiers
+	// to fill. A project cpu-limit that used to be discarded here arrived at
+	// the broker empty and was supplied by the profile tier, the broker's local
+	// settings.DefaultResources, or finally BuiltinDefaultResources
+	// (pkg/agent/provision.go). It now arrives populated, so those tiers no
+	// longer fire for that field. That is the intended direction — an explicit
+	// project setting should outrank a broker built-in — but it means the
+	// effective value can change for a deployment that was relying on a broker
+	// default to fill a gap this function was creating.
 	if hasResources {
 		if projectRes := projectResourceSpecToAPI(settings.DefaultResources); projectRes != nil {
 			ac.InlineConfig.Resources = config.MergeResourceSpec(projectRes, ac.InlineConfig.Resources)
