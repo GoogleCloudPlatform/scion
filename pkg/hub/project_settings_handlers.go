@@ -19,6 +19,7 @@ import (
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -335,14 +336,26 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 		ac.InlineConfig.MaxDuration = settings.DefaultMaxDuration
 	}
 
-	// Apply resource defaults
+	// Apply resource defaults, field by field.
+	//
+	// This used to be all-or-nothing: the project's whole ResourceSpec was
+	// installed if InlineConfig.Resources was nil and discarded entirely
+	// otherwise. That made a template setting a single field — say a memory
+	// limit — silently drop every unrelated project default, including the
+	// disk size and both CPU values. It was also inconsistent with the three
+	// limits stamped immediately above (MaxTurns, MaxModelCalls, MaxDuration),
+	// which have always merged per field.
+	//
+	// MergeResourceSpec(base, override) is the canonical per-field merge and is
+	// what the neighbouring template path already uses
+	// (pkg/config/settings.go:234, called from pkg/config/templates.go:744).
+	// The project is the base and the existing agent/template value is the
+	// override, so a field set at agent/template level still wins and only
+	// unset fields fall through to the project — the same precedence as
+	// before, applied at field granularity instead of struct granularity.
 	if hasResources {
-		projectRes := projectResourceSpecToAPI(settings.DefaultResources)
-		if projectRes != nil {
-			if ac.InlineConfig.Resources == nil {
-				ac.InlineConfig.Resources = projectRes
-			}
-			// If inline already has resources, don't override — agent/template level wins
+		if projectRes := projectResourceSpecToAPI(settings.DefaultResources); projectRes != nil {
+			ac.InlineConfig.Resources = config.MergeResourceSpec(projectRes, ac.InlineConfig.Resources)
 		}
 	}
 }

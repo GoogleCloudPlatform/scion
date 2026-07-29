@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -312,6 +313,138 @@ func TestApplyProjectDefaults_ActiveProfile(t *testing.T) {
 		ac := &store.AgentAppliedConfig{}
 		applyProjectDefaults(ac, project)
 		assert.Empty(t, ac.Profile)
+	})
+}
+
+// allResourceAnnotations is the full set of project resource defaults, used by
+// the merge tests below so that each case can show exactly which fields
+// survive.
+func allResourceAnnotations() map[string]string {
+	return map[string]string{
+		"scion.io/default-resources-cpu-request":    "500m",
+		"scion.io/default-resources-memory-request": "1Gi",
+		"scion.io/default-resources-cpu-limit":      "2",
+		"scion.io/default-resources-memory-limit":   "4Gi",
+		"scion.io/default-resources-disk":           "10Gi",
+	}
+}
+
+// TestApplyProjectDefaults_ResourcesMerge pins the per-field merge. The
+// previous implementation replaced the whole ResourceSpec only when
+// InlineConfig.Resources was nil, so a template that set any single field
+// discarded every project default — including ones it said nothing about.
+// MaxTurns/MaxModelCalls/MaxDuration ten lines above have always merged per
+// field; resources now match.
+func TestApplyProjectDefaults_ResourcesMerge(t *testing.T) {
+	t.Run("applies all project resources when inline has none", func(t *testing.T) {
+		project := &store.Project{Annotations: allResourceAnnotations()}
+		ac := &store.AgentAppliedConfig{}
+		applyProjectDefaults(ac, project)
+
+		require.NotNil(t, ac.InlineConfig)
+		require.NotNil(t, ac.InlineConfig.Resources)
+		assert.Equal(t, "500m", ac.InlineConfig.Resources.Requests.CPU)
+		assert.Equal(t, "1Gi", ac.InlineConfig.Resources.Requests.Memory)
+		assert.Equal(t, "2", ac.InlineConfig.Resources.Limits.CPU)
+		assert.Equal(t, "4Gi", ac.InlineConfig.Resources.Limits.Memory)
+		assert.Equal(t, "10Gi", ac.InlineConfig.Resources.Disk)
+	})
+
+	// The headline case: one inline field must not wipe out the other four.
+	t.Run("partial inline resources fall through per field", func(t *testing.T) {
+		project := &store.Project{Annotations: allResourceAnnotations()}
+		ac := &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{
+				Resources: &api.ResourceSpec{
+					Limits: api.ResourceList{Memory: "8Gi"},
+				},
+			},
+		}
+		applyProjectDefaults(ac, project)
+
+		require.NotNil(t, ac.InlineConfig.Resources)
+		assert.Equal(t, "8Gi", ac.InlineConfig.Resources.Limits.Memory,
+			"the agent/template value must still win for the field it sets")
+		assert.Equal(t, "500m", ac.InlineConfig.Resources.Requests.CPU,
+			"unrelated project defaults must survive")
+		assert.Equal(t, "1Gi", ac.InlineConfig.Resources.Requests.Memory)
+		assert.Equal(t, "2", ac.InlineConfig.Resources.Limits.CPU)
+		assert.Equal(t, "10Gi", ac.InlineConfig.Resources.Disk)
+	})
+
+	t.Run("fully specified inline resources are untouched", func(t *testing.T) {
+		project := &store.Project{Annotations: allResourceAnnotations()}
+		ac := &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{
+				Resources: &api.ResourceSpec{
+					Requests: api.ResourceList{CPU: "100m", Memory: "256Mi"},
+					Limits:   api.ResourceList{CPU: "1", Memory: "512Mi"},
+					Disk:     "1Gi",
+				},
+			},
+		}
+		applyProjectDefaults(ac, project)
+
+		assert.Equal(t, "100m", ac.InlineConfig.Resources.Requests.CPU)
+		assert.Equal(t, "256Mi", ac.InlineConfig.Resources.Requests.Memory)
+		assert.Equal(t, "1", ac.InlineConfig.Resources.Limits.CPU)
+		assert.Equal(t, "512Mi", ac.InlineConfig.Resources.Limits.Memory)
+		assert.Equal(t, "1Gi", ac.InlineConfig.Resources.Disk)
+	})
+
+	// A project that sets only some fields must not invent values for the rest.
+	t.Run("partial project resources leave unset fields empty", func(t *testing.T) {
+		project := &store.Project{Annotations: map[string]string{
+			"scion.io/default-resources-disk": "10Gi",
+		}}
+		ac := &store.AgentAppliedConfig{}
+		applyProjectDefaults(ac, project)
+
+		require.NotNil(t, ac.InlineConfig)
+		require.NotNil(t, ac.InlineConfig.Resources)
+		assert.Equal(t, "10Gi", ac.InlineConfig.Resources.Disk)
+		assert.Empty(t, ac.InlineConfig.Resources.Requests.CPU)
+		assert.Empty(t, ac.InlineConfig.Resources.Requests.Memory)
+		assert.Empty(t, ac.InlineConfig.Resources.Limits.CPU)
+		assert.Empty(t, ac.InlineConfig.Resources.Limits.Memory)
+	})
+
+	t.Run("no project resource annotations leaves inline resources alone", func(t *testing.T) {
+		project := &store.Project{Annotations: map[string]string{
+			"scion.io/default-max-turns": "5",
+		}}
+		ac := &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{
+				Resources: &api.ResourceSpec{Disk: "1Gi"},
+			},
+		}
+		applyProjectDefaults(ac, project)
+
+		require.NotNil(t, ac.InlineConfig.Resources)
+		assert.Equal(t, "1Gi", ac.InlineConfig.Resources.Disk)
+		assert.Empty(t, ac.InlineConfig.Resources.Requests.CPU)
+		assert.Equal(t, 5, ac.InlineConfig.MaxTurns)
+	})
+
+	// The merge must not alias the project's spec into the agent's config:
+	// projectResourceSpecToAPI allocates per call, but a future refactor that
+	// returned a shared pointer would let one agent's mutation leak into the
+	// next. Pinning it here makes that a test failure rather than a data race.
+	t.Run("merged spec is not shared between agents", func(t *testing.T) {
+		project := &store.Project{Annotations: allResourceAnnotations()}
+
+		first := &store.AgentAppliedConfig{}
+		applyProjectDefaults(first, project)
+		second := &store.AgentAppliedConfig{}
+		applyProjectDefaults(second, project)
+
+		require.NotNil(t, first.InlineConfig.Resources)
+		require.NotNil(t, second.InlineConfig.Resources)
+		assert.NotSame(t, first.InlineConfig.Resources, second.InlineConfig.Resources)
+
+		first.InlineConfig.Resources.Disk = "mutated"
+		assert.Equal(t, "10Gi", second.InlineConfig.Resources.Disk,
+			"mutating one agent's resources must not affect another's")
 	})
 }
 
