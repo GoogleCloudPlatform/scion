@@ -754,13 +754,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Inject skill resolver from Hub connection for skill provisioning.
 	if conn := s.resolveHubConnection(r); conn != nil && conn.HubClient != nil {
 		hubResolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
-		router := agent.NewRoutingSkillResolver(hubResolver)
 		defaultGHToken := req.ResolvedEnv["GITHUB_TOKEN"]
 		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, req.ProvisionCredentials, s.ghResolutionCache)
-		// RegisterFallback is wired for gh:// but not yet activated: Phase 2 Hub-side
-		// defects (hash format mismatch, no Content field, ref-defaulting) must be
-		// fixed before Hub routing can go live. Flip to RegisterFallback once resolved.
-		router.Register("gh", ghResolver)
 
 		// GCP resolver uses Hub API for registry alias lookup.
 		registrySvc := conn.HubClient.SkillRegistries()
@@ -779,7 +774,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				Status:   reg.Status,
 			}, nil
 		}
-		router.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
+
+		router := buildSkillRouter(hubResolver, ghResolver, agent.NewGCPSkillResolver(gcpLookup))
 
 		var resolver agent.SkillResolver = router
 		if s.skCache != nil {

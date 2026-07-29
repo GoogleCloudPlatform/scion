@@ -19,9 +19,46 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
+
+// fallbackTimeout is the budget for a detached fallback call. The local GitHub
+// resolver makes two metadata API calls plus one raw download per file in each
+// skill; a 15-file skill is ~17 HTTP requests, all with a 30s per-request
+// timeout. The fallback receives the whole retry set (up to 50 skills) in a
+// single call, so the budget must cover the batch. Two minutes is generous for
+// small batches; larger batches may hit the ceiling, in which case the budget
+// should be scaled by the number of refs being retried rather than raised
+// wholesale.
+const fallbackTimeout = 2 * time.Minute
+
+// fallbackMinBudget is the minimum remaining lifetime a caller context must have
+// to be worth inheriting. A context with less than this is treated as effectively
+// spent: the fallback is detached from it and given a fresh fallbackTimeout budget
+// instead. This prevents a Hub that is merely slow (rather than fully blocking)
+// from leaving the fallback with an unserviceable sliver of time.
+const fallbackMinBudget = 10 * time.Second
+
+// fallbackContext returns a context for the fallback resolver. If the primary
+// ctx is still healthy and has a usable budget left it is used as-is, so the
+// caller's cancellation and deadline are preserved. If it is already cancelled
+// or expired — or so close to its deadline that the fallback could not finish
+// (e.g. the Hub call consumed nearly all of the caller's budget) — the context
+// is detached from the cancellation signal and given a bounded budget so the
+// fallback can still complete. Values (logging, tracing) are preserved either
+// way.
+func fallbackContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		if dl, ok := ctx.Deadline(); !ok || time.Until(dl) >= fallbackMinBudget {
+			// Healthy with a usable budget — inherit deadline and cancellation.
+			return ctx, func() {}
+		}
+	}
+	// Spent, or too little budget left — detach with a bounded budget.
+	return context.WithTimeout(context.WithoutCancel(ctx), fallbackTimeout)
+}
 
 // RoutingSkillResolver dispatches SkillReferences to scheme-specific resolvers.
 // It groups incoming refs by URI scheme, sends each group to the registered
@@ -143,7 +180,14 @@ func (r *RoutingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 				"fallback", resolverNameOf(fb),
 				"refs", len(schemeRefs),
 				"error", err)
-			sr, err = fb.Resolve(ctx, schemeRefs, opts)
+			// A Hub timeout or deadline expiry on the primary call must not
+			// immediately cancel the fallback: the caller's semantic intent is
+			// "resolve this skill", not "resolve it only if the Hub responds in
+			// time". fallbackContext keeps a healthy caller context and swaps a
+			// spent one for a bounded budget.
+			fbCtx, fbCancel := fallbackContext(ctx)
+			sr, err = fb.Resolve(fbCtx, schemeRefs, opts)
+			fbCancel()
 			if err != nil {
 				return nil, fmt.Errorf("fallback resolver for scheme %q failed: %w", scheme, err)
 			}
@@ -208,7 +252,12 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 		"fallback", resolverNameOf(fb),
 		"refs", len(retryRefs))
 
-	fr, err := fb.Resolve(ctx, retryRefs, opts)
+	// fallbackContext for the same reason as the transport-level retry above: a
+	// Hub deadline that has already expired must not pre-empt the fallback.
+	fbCtx, fbCancel := fallbackContext(ctx)
+	defer fbCancel()
+
+	fr, err := fb.Resolve(fbCtx, retryRefs, opts)
 	if err != nil {
 		slog.Warn("fallback skill resolver failed, keeping primary errors",
 			"scheme", scheme,
