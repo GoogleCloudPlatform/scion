@@ -157,6 +157,14 @@ func (c *GitHubResolutionCache) load() {
 	}
 	now := time.Now()
 	for uri, entry := range f.Entries {
+		// Skip credential-bearing entries that pre-fix code may have written to
+		// disk. Such entries have Content == nil after deserialisation (json:"-"),
+		// so loading them would reproduce the stale-404 bug from issue #565.
+		// Dropping them here causes the broker to re-resolve fresh on the next
+		// request, which is correct behaviour.
+		if strings.Contains(uri, "#") {
+			continue
+		}
 		if now.Before(entry.ExpiresAt) {
 			c.entries[uri] = entry
 		}

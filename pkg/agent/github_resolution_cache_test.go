@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -215,6 +216,47 @@ func TestGitHubResolutionCache_MixedPublicAndCredential(t *testing.T) {
 	}
 	if _, ok := cache2.Get(credKey); ok {
 		t.Error("credential entry: must not survive reload (should be memory-only)")
+	}
+}
+
+// TestGitHubResolutionCache_LoadSkipsOldCredentialEntries verifies that load()
+// does not re-hydrate credential-bearing cache entries (key containing "#")
+// that pre-fix broker code may have written to disk.
+//
+// Without this filter, deploying the fix onto a broker that already used the
+// ?token= path would cause load() to import stale entries with Content == nil,
+// reproducing the exact stale-404 bug (#565) on the first post-deployment
+// restart until those entries expire (up to 24h for SHA-pinned refs).
+func TestGitHubResolutionCache_LoadSkipsOldCredentialEntries(t *testing.T) {
+	dir := t.TempDir()
+
+	// Manually write a disk file as pre-fix code would have: a #-keyed entry
+	// with a valid future expiry (simulating what old Put() wrote to disk).
+	credKey := "gh://owner/repo/priv-skill@main#deadbeef12345678"
+	oldFile := resolutionCacheFile{
+		Entries: map[string]*resolutionCacheEntry{
+			credKey: {
+				Skill:     ResolvedSkill{Name: "priv-skill", URI: "gh://owner/repo/priv-skill@main"},
+				CachedAt:  time.Now(),
+				ExpiresAt: time.Now().Add(5 * time.Minute),
+			},
+		},
+	}
+	data, err := json.MarshalIndent(oldFile, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, resolutionCacheFileName), data, 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// load() must not re-hydrate the credential entry.
+	cache, err := NewGitHubResolutionCache(dir, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+	if _, ok := cache.Get(credKey); ok {
+		t.Error("load() re-hydrated a credential entry from disk; expected it to be skipped")
 	}
 }
 
