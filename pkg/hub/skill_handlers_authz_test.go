@@ -248,11 +248,31 @@ func TestSkillAuthz_Resolve_GH_ForbiddenProject(t *testing.T) {
 // TestSkillAuthz_Resolve_GH_BrokerAllowed is the ALLOW counterpart to
 // TestSkillAuthz_Resolve_GH_ForbiddenProject. The production Runtime Broker
 // authenticates to the Hub over HMAC, which populates BrokerIdentity — not
-// AgentIdentity or UserIdentity. If canUseProjectGitHubToken does not honour
-// BrokerIdentity, every broker gh:// resolution fails closed with "forbidden",
-// breaking the only production caller. This test pins that behaviour.
+// AgentIdentity or UserIdentity. A broker registered as a provider for the
+// project must clear the authz gate; if it did not, every broker gh:// resolution
+// would fail closed with "forbidden", breaking the only production caller.
 func TestSkillAuthz_Resolve_GH_BrokerAllowed(t *testing.T) {
-	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv, s, _, _, project := setupSkillAuthzTest(t)
+	ctx := context.Background()
+
+	// The project has no GitHub App installation, so resolveGitHubToken returns
+	// the "public" scope and the GitHub API is still contacted (with an empty
+	// token). Point the Hub at a local server so no live call is made.
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(ghServer.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = ghServer.URL
+
+	// Register the broker as a provider for the project: that registration, not
+	// the mere existence of a BrokerIdentity, is what grants access.
+	brokerID := api.NewUUID()
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   brokerID,
+		BrokerName: "skill-test-broker",
+		Status:     "online",
+	}))
 
 	body, err := json.Marshal(ResolveSkillsRequest{
 		Skills:    []ResolveSkillRef{{URI: "gh://acme/private-repo/skills/secret"}},
@@ -264,7 +284,7 @@ func TestSkillAuthz_Resolve_GH_BrokerAllowed(t *testing.T) {
 	// identity directly, mirroring what brokerauth does on a real request.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/resolve", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity(tid("skill-broker"))))
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity(brokerID)))
 
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
@@ -280,6 +300,38 @@ func TestSkillAuthz_Resolve_GH_BrokerAllowed(t *testing.T) {
 		assert.NotEqual(t, "forbidden", e.Code,
 			"broker identity must pass canUseProjectGitHubToken; got forbidden: %s", e.Message)
 	}
+}
+
+// TestSkillAuthz_Resolve_GH_BrokerDenied is the DENY counterpart to
+// TestSkillAuthz_Resolve_GH_BrokerAllowed. POST /api/v1/brokers/join is
+// unauthenticated, so any anonymous caller can mint a BrokerIdentity. A broker
+// that is not registered as a provider for the project must therefore not be
+// able to make the Hub mint that project's GitHub App token.
+func TestSkillAuthz_Resolve_GH_BrokerDenied(t *testing.T) {
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+
+	body, err := json.Marshal(ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: "gh://acme/private-repo/skills/secret"}},
+		ProjectID: project.ID,
+	})
+	require.NoError(t, err)
+
+	// Broker not registered as a provider for this project. No GitHub stub is
+	// needed: authz rejects the request before GitHub is contacted.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity(api.NewUUID())))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Empty(t, resp.Resolved, "unregistered broker must not resolve a project gh:// skill")
+	require.NotEmpty(t, resp.Errors, "unregistered broker should get forbidden")
+	assert.Equal(t, "forbidden", resp.Errors[0].Code)
 }
 
 func TestSkillAuthz_Resolve_PublicSkillAllowed(t *testing.T) {
