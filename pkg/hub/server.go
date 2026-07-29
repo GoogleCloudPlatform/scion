@@ -2367,12 +2367,18 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			// either, because the broker would then try to hydrate a template
 			// that does not exist. Clear it and say so. Gated on the
 			// templateFromHubDefault flag, never inferred from the setting.
-			if templateFromHubDefault && (tmplErr != nil || tmpl == nil) {
-				reason := "not found"
-				if tmplErr != nil {
-					reason = "lookup failed: " + tmplErr.Error()
-				}
-				s.warnHubDefaultTemplateUnusable(ctx, payload.Template, evt.ProjectID, reason)
+			//
+			// A genuine not-found only. A transient store error is deliberately
+			// excluded, for the reason spelled out at length on the create path
+			// in handlers_agents_core.go: a DB blip is not evidence that the
+			// setting is stale, and clearing on one would make some scheduled
+			// dispatches silently lose their template and others keep it
+			// depending on store weather. On a store error this path keeps its
+			// pre-existing behaviour — leave the name alone and let the broker
+			// try to resolve it locally.
+			if templateFromHubDefault && tmpl == nil &&
+				(tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
+				s.warnHubDefaultTemplateUnusable(ctx, payload.Template, evt.ProjectID, "not found")
 				payload.Template = ""
 				agent.Template = ""
 			}

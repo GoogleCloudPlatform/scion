@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -239,6 +240,56 @@ func TestCreateAgent_RequestedTemplate_Missing_Still404s(t *testing.T) {
 
 	assert.Empty(t, logs.hubDefaultTemplateWarnings(),
 		"the hub-default degradation must not fire for a request-supplied name")
+}
+
+// erroringTemplateStore makes the first lookup in resolveTemplate fail with a
+// non-ErrNotFound error, simulating a DB blip or network fault.
+type erroringTemplateStore struct {
+	store.Store
+	err error
+}
+
+func (s *erroringTemplateStore) GetTemplate(context.Context, string) (*store.Template, error) {
+	return nil, s.err
+}
+
+// TestCreateAgent_HubDefaultTemplate_StoreError_StillFailsHard is the boundary
+// of the degradation rule, and the asymmetry is deliberate.
+//
+// The two exits that degrade are DETERMINISTIC: the template really is
+// unusable, it will be unusable on the next create too, and the operator gets
+// the same warning every time until they fix the setting. A store error is
+// neither — it is transient, and it is an I-don't-know rather than a
+// this-is-broken. A DB blip is no evidence that the hub default is stale.
+// Degrading it would mean some creates silently get no template and others get
+// one depending on store weather, which is harder to diagnose than the clean
+// failure it replaced: the agent comes up looking fine and then behaves
+// differently from its siblings for a reason its own record cannot explain.
+//
+// The same line is drawn by the pre-start hook resolution in
+// handlers_agent_create_helpers.go ("The hub fallback is entered only on a
+// definitive 'no project hook' (ErrNotFound). Any other project-lookup failure
+// [...] is ambiguous"), so this is a house convention rather than a local call.
+//
+// If this test starts failing because someone "finished the job" and degraded
+// all three exits, that is the bug, not this test.
+func TestCreateAgent_HubDefaultTemplate_StoreError_StillFailsHard(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, _, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+	srv.store = &erroringTemplateStore{Store: srv.store, err: errors.New("connection reset by peer")}
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "hub-default-store-error",
+		ProjectID: project.ID,
+		Task:      "do something",
+	})
+	assert.NotEqual(t, http.StatusCreated, rec.Code,
+		"a store error must fail the create even when the name came from the hub default; body: %s",
+		rec.Body.String())
+	assert.Empty(t, logs.hubDefaultTemplateWarnings(),
+		"a store error is not a stale-setting warning — it must not be reported as one")
 }
 
 // TestCreateAgent_ProjectAnnotationTemplate_Missing_Still404s extends the
@@ -609,6 +660,52 @@ func TestDispatchAgentEventHandler_PayloadTemplate_Missing_KeepsName(t *testing.
 		"a payload-supplied name keeps the pre-change behaviour: the broker may resolve it locally")
 	assert.Empty(t, logs.hubDefaultTemplateWarnings(),
 		"the hub-default degradation must not fire for a payload-supplied name")
+}
+
+// erroringSchedulerStore is the scheduler-path counterpart of
+// erroringTemplateStore.
+type erroringSchedulerStore struct {
+	*mockScheduledEventStore
+	err error
+}
+
+func (s *erroringSchedulerStore) GetTemplate(context.Context, string) (*store.Template, error) {
+	return nil, s.err
+}
+
+// TestDispatchAgentEventHandler_HubDefaultTemplate_StoreError_KeepsName is the
+// scheduler mirror of the boundary. This path cannot "fail hard" — a resolve
+// failure never fails a scheduled dispatch — so the analogue of failing hard is
+// keeping the pre-existing behaviour: leave the name alone and let the broker
+// try to resolve it locally. Clearing it on a transient blip would give exactly
+// the intermittent silent divergence the create-path test above describes, with
+// scheduled agents losing their template only on the dispatches that happened
+// to hit a bad moment.
+func TestDispatchAgentEventHandler_HubDefaultTemplate_StoreError_KeepsName(t *testing.T) {
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+
+	srv := newEventHandlerTestServer(&erroringSchedulerStore{
+		mockScheduledEventStore: ms,
+		err:                     errors.New("connection reset by peer"),
+	})
+	logs := captureHarnessLogs(srv)
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
+
+	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+		ID:        "dispatch-hub-store-error",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"sched-hub-store-error","task":"Do the thing"}`,
+	})
+	require.NoError(t, err)
+
+	created := findMockAgent(ms, "sched-hub-store-error")
+	require.NotNil(t, created, "agent was not created")
+	assert.Equal(t, "hub-tmpl", created.Template,
+		"a store error is not evidence the setting is stale — keep the name, as before")
+	assert.Empty(t, logs.hubDefaultTemplateWarnings(),
+		"a store error must not be reported as a stale-setting warning")
 }
 
 // TestDispatchAgentEventHandler_HubDefaultTemplate_Applies is the scheduler

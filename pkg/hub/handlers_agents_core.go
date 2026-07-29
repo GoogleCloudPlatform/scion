@@ -521,21 +521,52 @@ func (s *Server) createAgentInProject(
 	// the setting, which cannot distinguish a hub default from a user who
 	// happened to name the same template.
 	//
-	// All three unusable-template exits below degrade, not just the 404: a
-	// stale hub default pointing at a file-less (still-pending) template has
-	// exactly the same deployment-wide blast radius as one pointing at a
-	// deleted template.
+	// TWO of the three unusable-template exits below degrade — not-found, and
+	// the file-less (still-pending) template. The design named the 404 as the
+	// instance; the file-less case is the same thing, because a stale hub
+	// default pointing at a pending template blocks every create in the
+	// deployment exactly as one pointing at a deleted template does.
+	//
+	// The store-error exit deliberately does NOT degrade, and the asymmetry is
+	// the point rather than an oversight — do not "finish the job" by adding it:
+	//
+	//   - The other two are DETERMINISTIC. The template genuinely is unusable,
+	//     it will still be unusable on the next create, and the operator gets
+	//     the same self-describing warning every time until they fix the
+	//     setting. That trades a permanent outage for a permanent, visible
+	//     warning.
+	//
+	//   - A store error is TRANSIENT, and it is an I-don't-know rather than a
+	//     this-is-broken. A DB blip is no evidence that the setting is stale.
+	//     Degrading it would mean some creates silently get no template and
+	//     others get one depending on store weather — intermittent silent
+	//     misconfiguration, harder to diagnose than the clean failure it
+	//     replaced, because the agent comes up looking fine and then behaves
+	//     differently from its siblings for a reason its own record cannot
+	//     explain.
+	//
+	//   - The deployment-outage argument does not carry here either: if
+	//     resolveTemplate is returning store errors then creates are already
+	//     failing for infrastructure reasons, and failing loudly is correct in
+	//     that state. This rule exists for stale SETTINGS, not unhealthy stores.
+	//
+	// This is a house convention, not a local judgement call. The pre-start hook
+	// resolution in handlers_agent_create_helpers.go draws the same line and
+	// writes down the same reasoning: "The hub fallback is entered only on a
+	// definitive 'no project hook' (ErrNotFound). Any other project-lookup
+	// failure (DB blip, duplicate rows) is ambiguous [...] On an ambiguous error
+	// we log and stage nothing." Same principle — never treat an ambiguous error
+	// as evidence — with one honest difference: that code can only log and do
+	// nothing, whereas here the caller is still on the other end of an HTTP
+	// request, so the ambiguous branch can and should return a real error.
 	var resolvedTemplate *store.Template
 	if req.Template != "" {
 		resolvedTemplate, err = s.resolveTemplate(ctx, req.Template, projectID)
 		switch {
 		case err != nil && err != store.ErrNotFound:
-			if !templateFromHubDefault {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			s.warnHubDefaultTemplateUnusable(ctx, req.Template, projectID, "lookup failed: "+err.Error())
-			req.Template, resolvedTemplate = "", nil
+			// Always hard-fails, hub-default provenance included. See above.
+			writeErrorFromErr(w, err, "")
+			return
 
 		case resolvedTemplate == nil:
 			// Template was requested but not found — check if the broker has
