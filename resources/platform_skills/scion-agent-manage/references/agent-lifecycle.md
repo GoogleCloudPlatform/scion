@@ -4,7 +4,7 @@ When to delete an agent, when to stop one, and who may authorize it.
 
 ## Default: delete when done
 
-`scion delete <name> --non-interactive` frees the broker slot. `scion list` silently
+`scion delete <name> --non-interactive` frees system resources. `scion list` silently
 truncates at 50 agents — stopped agents count against that ceiling. **Delete is the
 default disposition for a completed agent.** Add `--preserve-branch` to keep the branch
 for later review — but the flag does not push; confirm the branch is on the remote first.
@@ -66,6 +66,6 @@ accepted. Time-box it; do not leave agents stopped indefinitely.
 - **Interpreting "clean up" as permission to delete leads.** It never is, unless the
   human names the specific workstream being closed.
 - **Leaving agents stopped for audit trail.** Commit findings to files instead. Stopped
-  agents consume broker slots and count against the 50-agent list ceiling.
+  agents consume system resources and count against the 50-agent list ceiling.
 - **Deleting an agent with unpushed work.** Always verify work is pushed to the
   remote (not just committed locally) or written to a shared volume before deletion.
