@@ -1185,9 +1185,11 @@ func envScopeSourceLabel(scope string) string {
 // and an empty slice if nothing outranks it.
 //
 // This is derived from the ordering list rather than hard-coded so that moving
-// an entry in envScopePrecedence changes who outranks whom everywhere at once —
-// the same property that makes the resolver and the provenance reporter unable
-// to drift apart.
+// an entry in envScopePrecedence changes who outranks whom for all three
+// consumers in this file at once — the same property that keeps the resolver
+// and the `scion hub env list` provenance reporter from drifting apart. It says
+// nothing about reporters that do not read the list; see envScopePrecedence for
+// the one that does not.
 func envScopesOutranking(order []string, scope string) []string {
 	at := slices.Index(order, scope)
 	if at < 0 {
