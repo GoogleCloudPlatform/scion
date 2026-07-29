@@ -757,6 +757,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		router := agent.NewRoutingSkillResolver(hubResolver)
 		defaultGHToken := req.ResolvedEnv["GITHUB_TOKEN"]
 		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, req.ProvisionCredentials, s.ghResolutionCache)
+		// RegisterFallback is wired for gh:// but not yet activated: Phase 2 Hub-side
+		// defects (hash format mismatch, no Content field, ref-defaulting) must be
+		// fixed before Hub routing can go live. Flip to RegisterFallback once resolved.
 		router.Register("gh", ghResolver)
 
 		// GCP resolver uses Hub API for registry alias lookup.
