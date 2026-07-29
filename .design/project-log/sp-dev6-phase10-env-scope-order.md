@@ -230,3 +230,103 @@ early is true in every relation it states and false in what it implies by stoppi
   for limits, but the broker's own `settings.yaml` contributes to Resources at three ranks, two
   of them above hub (`sp-rev-p8`'s measurement). These are two different precedence systems and
   the reference doc must not join them.
+
+## Phase 10d — review fixes from `sp-rev-p10` (CHANGES REQUESTED on `ce23801a..14883cbf`)
+
+Four edits, three of them text and one a regex. No behaviour change: the ladder,
+the resolver, the reporter and the boot wiring are all untouched. New commit on
+top of `14883cbf` — `14883cbf` is merged into `scion/sp-integration @ d2989488`
+and must not move.
+
+**F-1 — `httpdispatcher.go`, the inertness paragraph on `WarnOutrankedBrokerEnvKeys`.**
+The comment said the check is inert "which is the case for the ladder currently
+in `envScopePrecedence`". That was true when 10a wrote it and 10b inverted the
+ladder underneath it without updating the prose. Under the shipped ladder
+`runtime_broker` is weakest, `envScopesOutranking` returns hub/project/user, and
+the check is LIVE. Rewritten to say so, and to say what *would* make it inert.
+This is the comment a maintainer reads before deciding whether the 10c call site
+is load-bearing, and it was telling them it was a no-op.
+
+**F-2 — `cmd/server_foreground_brokerenv_test.go`, the boot drift guard.**
+`strings.Contains` is satisfied by a commented-out call site, so the guard's
+label "it only fails when the line disappears" was an overstatement in the
+direction that matters. Replaced with an anchored `(?m)` pattern requiring
+statement position, and the declared-gaps list now records what the guard still
+cannot see (a call present at statement position but unreachable). Demonstrated
+by mutation rather than asserted — see the table below.
+
+**F-3 (sentence only) — `httpdispatcher.go:1092`.** The claim that changing the
+order here "is the ONLY edit required to change it everywhere" is false:
+`Server.buildEnvGatherResponse` in `handlers_agents_core.go` answers the same
+provenance question from its own hardcoded chain, defaults the reported scope to
+`hub`, and never consults `runtime_broker`, so a broker-only key is reported
+there as `hub`. Verified read-only before writing the claim down (`runtime_broker`
+occurrences in that function: 0; `envScopePrecedence` references: 0). Per
+`sp-em`'s scope ruling the *sentence* is fixed and the *gap* is not — that
+reporter is a tracked follow-up and this phase does not touch its file.
+
+**N-1 — `httpdispatcher.go:1072`.** "runtime_broker is deliberately LAST" sat
+above a lowest-first slice in which `runtime_broker` is element 0. The word was
+true of precedence and false of the literal. Replaced with the spelled-out
+sequence, per design §3.4's "a literal sequence, not a word".
+
+### F-2 mutation evidence
+
+A fix to a mutation-detection gap is only demonstrated by the mutation, so all
+four arms were run, serially, with `df` checked before and after (96% both ends,
+no threshold crossed):
+
+| arm | mutation | result |
+|---|---|---|
+| baseline | none | 4/4 green, `rc=0` — also the positive control that the new pattern matches at all |
+| **M7** | prefix the call site with `// ` | **RED**, `rc=1`, exactly one failure |
+| M4 | delete the line | RED, `rc=1`, exactly one failure |
+| restore | none | 4/4 green, file byte-identical to `HEAD` |
+
+M7 previously passed; that is the whole point of the change. The failure was
+read as a *body*, not a count — the assertion text is
+`boot path no longer calls warnShadowedBrokerEnv(ctx, dispatcher) at statement
+position — deleted, or commented out`, which distinguishes the guard firing from
+a build failure. `anchored-FAILs=1` alone would not have.
+
+Envscope suite re-run under `-race`: 14/14, `ok 92.082s`. Build and vet clean.
+File set is exactly two files; `handlers_agents_core.go` is untouched.
+
+## Phase 10e — the second unscoped claim (`29f5279d`)
+
+`e2514675` fixed finding F-3 at the `envScopePrecedence` doc block and left the same claim standing
+at `envScopesOutranking`, ~60 lines below: *"changes who outranks whom everywhere at once — the same
+property that makes the resolver and the provenance reporter unable to drift apart."* The file
+therefore shipped a scoped and an unscoped statement of one property, with the unscoped one attached
+to the function that computes the answer.
+
+`buildEnvGatherResponse` is a provenance reporter, does not read `envScopePrecedence`, and can
+drift. Verified read-only before the claim was written: `runtime_broker` occurrences inside it are
+0, `envScopePrecedence` references are 0, and `envScopeSourceLabel` maps `store.ScopeRuntimeBroker`
+to `"broker"` — so the two reporters disagree about the same key today.
+
+`29f5279d` scopes the comment to the three consumers in this file and states explicitly that it
+covers no reporter which does not read the list. Comments only, one file, fast-forward from
+`e2514675` (which is merged and did not move).
+
+**Method notes worth keeping.**
+
+- *Comments-only was proven, not asserted*, with a live negative control: the filter returns 0 on
+  this diff and **84** on `ce23801a..14883cbf`. A filter must be bounded on both sides by its own
+  universe — one returning 0 and one returning everything are both broken and neither announces
+  itself.
+- *A line-oriented grep cannot see a wrapped phrase.* The phrase spanned lines 1189–1190, so a
+  phrase count was **equal** at both revs and read as "nothing changed". The count was arithmetically
+  right about a quantity nobody meant. Normalise whitespace, or match a fragment short enough not to
+  wrap.
+- *The SKIP fence broke on first use, fail-closed.* Widening the RUN pattern to add a SKIP limb lost
+  the end-of-line anchor, so subtest `=== RUN` lines counted against a source-derived WANT (45 vs 14,
+  6 vs 4). Count top-level RUN only, anchored; require `SKIP == 0`; require the `ok` line. Add one
+  limb per edit and control it before adding the next.
+- *A green under disk pressure needs the run count.* `t.TempDir` succeeding and a later write hitting
+  ENOSPC under a `t.Skipf` handler yields a green manufactured by disk exhaustion. Both suites here
+  are structurally immune: `t.Skip` count 0 and `t.TempDir` count 0.
+- *Gap-4 counts are scoped.* 7/0 before and 0/2 after are claims about `pkg/hub/httpdispatcher.go`.
+  Package-wide the hardcoded limb is **4**, all in `handlers_agents_core.go`, unchanged across
+  `b03a09ac`, `f0093316` and `d2989488`. A three-limb gate run without that pathspec red-lights the
+  correct tree.
