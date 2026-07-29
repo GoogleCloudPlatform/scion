@@ -265,6 +265,56 @@ func TestApplyProjectDefaults_Model(t *testing.T) {
 	})
 }
 
+// TestApplyProjectDefaults_ActiveProfile pins the project tier of the profile
+// precedence chain. scion.io/active-profile was parsed
+// (projectSettingsFromAnnotations) and persisted
+// (applyProjectSettingsToAnnotations) but never applied to any agent — the
+// annotation had no read site outside its defining file, so setting it in the
+// Project Settings UI did nothing.
+//
+// The request tier already worked and must keep working: the agent-create path
+// stamps AppliedConfig.Profile from req.Profile in handlers_agent_create_helpers.go.
+// Hence the only-if-unset guard, matching the Model and HarnessConfig siblings.
+func TestApplyProjectDefaults_ActiveProfile(t *testing.T) {
+	t.Run("applies active profile when empty", func(t *testing.T) {
+		project := &store.Project{
+			Annotations: map[string]string{
+				"scion.io/active-profile": "k8s-prod",
+			},
+		}
+		ac := &store.AgentAppliedConfig{}
+		applyProjectDefaults(ac, project)
+		assert.Equal(t, "k8s-prod", ac.Profile,
+			"the project's active-profile annotation should reach AppliedConfig")
+	})
+
+	t.Run("does not override explicit profile", func(t *testing.T) {
+		project := &store.Project{
+			Annotations: map[string]string{
+				"scion.io/active-profile": "k8s-prod",
+			},
+		}
+		ac := &store.AgentAppliedConfig{Profile: "docker-local"}
+		applyProjectDefaults(ac, project)
+		assert.Equal(t, "docker-local", ac.Profile,
+			"an explicit request-level profile outranks the project annotation")
+	})
+
+	t.Run("no annotation leaves profile untouched", func(t *testing.T) {
+		project := &store.Project{Annotations: map[string]string{}}
+		ac := &store.AgentAppliedConfig{Profile: "docker-local"}
+		applyProjectDefaults(ac, project)
+		assert.Equal(t, "docker-local", ac.Profile)
+	})
+
+	t.Run("no annotation and no explicit value leaves profile empty", func(t *testing.T) {
+		project := &store.Project{Annotations: map[string]string{}}
+		ac := &store.AgentAppliedConfig{}
+		applyProjectDefaults(ac, project)
+		assert.Empty(t, ac.Profile)
+	})
+}
+
 func TestProjectSettings_DefaultGCPIdentity(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)

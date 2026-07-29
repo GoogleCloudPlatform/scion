@@ -302,6 +302,16 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 		ac.ThinkingLevel = settings.DefaultThinkingLevel
 	}
 
+	// Apply the project's active profile (only if not already set by
+	// agent/CLI). The guard is load-bearing: the request tier already works —
+	// handlers_agent_create_helpers.go stamps AppliedConfig.Profile from
+	// req.Profile — so an unconditional write here would clobber an explicit
+	// user choice. Only the project tier was missing: scion.io/active-profile
+	// was parsed and persisted but never applied to any agent.
+	if ac.Profile == "" && settings.ActiveProfile != "" {
+		ac.Profile = settings.ActiveProfile
+	}
+
 	// Check if there are any project limit/resource defaults to apply
 	hasLimits := settings.DefaultMaxTurns > 0 || settings.DefaultMaxModelCalls > 0 || settings.DefaultMaxDuration != ""
 	hasResources := settings.DefaultResources != nil

@@ -412,6 +412,68 @@ func TestCreateAgent_ProjectHarnessConfigUnresolvableLeavesIDEmpty(t *testing.T)
 }
 
 // ---------------------------------------------------------------------------
+// active-profile: the same precedence chain, end to end
+// ---------------------------------------------------------------------------
+
+// TestCreateAgent_ProjectActiveProfileApplied is the behaviour change:
+// scion.io/active-profile was parsed and persisted but never applied, so
+// setting it in Project Settings had no effect on any agent.
+func TestCreateAgent_ProjectActiveProfileApplied(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	setProjectAnnotations(t, s, project, map[string]string{
+		projectSettingActiveProfile: "project-profile",
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "prec-profile-project",
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	assert.Equal(t, "project-profile", agent.AppliedConfig.Profile,
+		"the project's active-profile annotation must reach the dispatched agent")
+}
+
+// TestCreateAgent_RequestProfileBeatsProjectActiveProfile is the guard test.
+// The request tier already worked before this change
+// (TestCreateAgent_ProfileStoredInAppliedConfig); an unguarded write in
+// applyProjectDefaults would silently clobber it.
+func TestCreateAgent_RequestProfileBeatsProjectActiveProfile(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	setProjectAnnotations(t, s, project, map[string]string{
+		projectSettingActiveProfile: "project-profile",
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "prec-profile-request",
+		ProjectID: project.ID,
+		Profile:   "request-profile",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	agent, err := s.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
+	assert.Equal(t, "request-profile", agent.AppliedConfig.Profile,
+		"an explicit request profile must outrank the project's active-profile annotation")
+}
+
+// ---------------------------------------------------------------------------
 // Scheduler dispatch path (server.go, dispatchAgentEventHandler)
 // ---------------------------------------------------------------------------
 
