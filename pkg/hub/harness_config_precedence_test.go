@@ -19,7 +19,10 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -409,6 +412,102 @@ func TestCreateAgent_ProjectHarnessConfigUnresolvableLeavesIDEmpty(t *testing.T)
 	assert.Empty(t, agent.AppliedConfig.HarnessConfigID,
 		"no ID can be stamped, so a remote broker cannot hydrate from Hub storage")
 	assert.Empty(t, agent.AppliedConfig.HarnessConfigHash)
+}
+
+// ---------------------------------------------------------------------------
+// Not-found logging: level tracks provenance
+// ---------------------------------------------------------------------------
+
+// levelCapturingHandler records the level and message of every log record that
+// passes the level filter, so a test can assert on how loudly something was
+// logged rather than only whether it happened.
+type levelCapturingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *levelCapturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *levelCapturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *levelCapturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *levelCapturingHandler) WithGroup(string) slog.Handler      { return h }
+
+// harnessNotFoundRecords returns the captured records for the
+// harness-config-not-found message.
+func (h *levelCapturingHandler) harnessNotFoundRecords() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []slog.Record
+	for _, r := range h.records {
+		if strings.Contains(r.Message, "harness config not found") {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// captureHarnessLogs swaps the server's agent-lifecycle logger for a capturing
+// one and returns the handler.
+func captureHarnessLogs(srv *Server) *levelCapturingHandler {
+	h := &levelCapturingHandler{}
+	srv.agentLifecycleLog = slog.New(h)
+	return h
+}
+
+// TestCreateAgent_UnresolvableProjectHarnessConfigWarns pins the WARN half of
+// the provenance rule. A project annotation naming a harness config that does
+// not exist is an operator-fixable misconfiguration that displaced a known-good
+// template value, so it must be loud.
+func TestCreateAgent_UnresolvableProjectHarnessConfigWarns(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+
+	createHarnessTemplate(t, s, "tmpl-harness", "template-harness")
+	setProjectHarnessConfigAnnotation(t, s, project, "does-not-exist")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "log-project-unresolvable",
+		ProjectID: project.ID,
+		Template:  "tmpl-harness",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	found := logs.harnessNotFoundRecords()
+	require.Len(t, found, 1, "expected exactly one not-found log record")
+	assert.Equal(t, slog.LevelWarn, found[0].Level,
+		"an unresolvable project annotation must warn — it displaced the template")
+}
+
+// TestCreateAgent_TemplateHarnessTypeNotFoundDoesNotWarn pins the DEBUG half,
+// which is the whole point of tracking provenance. Here hcName is the
+// template's bare Harness type ("claude"), not a stored slug, and no
+// HarnessConfig row matches it — the default state of a deployment that has
+// never created one. Warning here would fire on every agent create.
+func TestCreateAgent_TemplateHarnessTypeNotFoundDoesNotWarn(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+
+	createHarnessOnlyTemplate(t, s, "tmpl-bare", "claude")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "log-template-harness-type",
+		ProjectID: project.ID,
+		Template:  "tmpl-bare",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	found := logs.harnessNotFoundRecords()
+	require.Len(t, found, 1, "the event is still recorded, just not at WARN")
+	assert.Equal(t, slog.LevelDebug, found[0].Level,
+		"a bare harness type falling through from the template is the normal case, not a warning")
 }
 
 // ---------------------------------------------------------------------------
