@@ -737,6 +737,19 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.Model != "" {
 		result.Model = override.Model
 	}
+	// ThinkingLevel is a *int: nil means "unset", so a nil override never
+	// clobbers a base value. Copy the pointee rather than the pointer — the
+	// merge's shallow copy above already aliases base's fields, and adding a
+	// second alias to a caller-owned struct is a trap for the next editor
+	// (at provision.go the override is opts.InlineConfig, which is reachable
+	// from the broker's request struct).
+	if override.ThinkingLevel != nil {
+		v := *override.ThinkingLevel
+		result.ThinkingLevel = &v
+	}
+	// Secrets is deliberately NOT cased here. Secrets reach agents via
+	// start_context.go; a merge case would create a second, competing secret
+	// channel with its own precedence rules.
 	if override.Kubernetes != nil {
 		result.Kubernetes = mergeKubernetesConfig(result.Kubernetes, override.Kubernetes)
 	}

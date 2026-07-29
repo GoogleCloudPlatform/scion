@@ -1996,3 +1996,68 @@ func TestMergeScionConfig_Skills(t *testing.T) {
 		}
 	})
 }
+
+// thinkingLevelPtr returns a pointer to i. api.ScionConfig.ThinkingLevel is a
+// *int so that "unset" is distinguishable from an explicit 0.
+func thinkingLevelPtr(i int) *int { return &i }
+
+// TestMergeScionConfig_ThinkingLevel_ContributedFromOverride is the direct
+// regression test for Gap 1B: before the ThinkingLevel merge case existed, a
+// value in the override position was silently dropped by MergeScionConfig, so
+// every override-position carrier (--config / API create, the web configure
+// form, the managed runtime) lost it.
+func TestMergeScionConfig_ThinkingLevel_ContributedFromOverride(t *testing.T) {
+	base := &api.ScionConfig{}
+	override := &api.ScionConfig{ThinkingLevel: thinkingLevelPtr(7)}
+
+	got := MergeScionConfig(base, override)
+
+	if got.ThinkingLevel == nil {
+		t.Fatal("ThinkingLevel = nil, want 7 (override value dropped by merge)")
+	}
+	if *got.ThinkingLevel != 7 {
+		t.Errorf("ThinkingLevel = %d, want 7", *got.ThinkingLevel)
+	}
+}
+
+// TestMergeScionConfig_ThinkingLevel_NotWipedByEmptyOverride guards the
+// base-inheritance half of the merge, which must not change: a nil override
+// means "unset", not "clear". The three wipe sites (provision.go:787, :1115,
+// run.go:310) merge an empty override over an arrived value and must not
+// destroy it. Green before and after the Gap 1B change.
+func TestMergeScionConfig_ThinkingLevel_NotWipedByEmptyOverride(t *testing.T) {
+	base := &api.ScionConfig{ThinkingLevel: thinkingLevelPtr(7)}
+	override := &api.ScionConfig{}
+
+	got := MergeScionConfig(base, override)
+
+	if got.ThinkingLevel == nil {
+		t.Fatal("ThinkingLevel = nil, want 7 (empty override wiped the base value)")
+	}
+	if *got.ThinkingLevel != 7 {
+		t.Errorf("ThinkingLevel = %d, want 7", *got.ThinkingLevel)
+	}
+}
+
+// TestMergeScionConfig_ThinkingLevel_NoAliasing pins the deep copy in the
+// ThinkingLevel merge case. A bare pointer assignment would leave the merged
+// result aliasing the caller-owned override struct (at provision.go:734 the
+// override is opts.InlineConfig, reachable from the broker's request struct),
+// so a later mutation through either handle would be visible in the other.
+// Red if the deep copy is replaced with result.ThinkingLevel = override.ThinkingLevel.
+func TestMergeScionConfig_ThinkingLevel_NoAliasing(t *testing.T) {
+	base := &api.ScionConfig{}
+	override := &api.ScionConfig{ThinkingLevel: thinkingLevelPtr(7)}
+
+	got := MergeScionConfig(base, override)
+	if got.ThinkingLevel == nil {
+		t.Fatal("ThinkingLevel = nil, want 7")
+	}
+
+	*override.ThinkingLevel = 9
+
+	if *got.ThinkingLevel != 7 {
+		t.Errorf("ThinkingLevel = %d after mutating the override, want 7: "+
+			"the merged result aliases the caller-owned override pointer", *got.ThinkingLevel)
+	}
+}
