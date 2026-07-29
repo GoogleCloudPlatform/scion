@@ -1458,6 +1458,10 @@ func TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic(t *testing.T) 
 	}
 	if created == nil {
 		t.Fatal("agent was not created in the store")
+		// Unreachable: t.Fatal calls runtime.Goexit. Present because
+		// staticcheck does not model t.Fatal as terminating, so without it
+		// SA5011 reads every deref below as an unguarded nil dereference.
+		return
 	}
 	if created.Template != "my-tmpl" {
 		t.Errorf("expected template %q, got %q", "my-tmpl", created.Template)
