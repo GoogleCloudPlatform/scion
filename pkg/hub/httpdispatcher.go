@@ -1063,141 +1063,145 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 	return d.deferredDataOp(ctx, agent, "finalize_env", &FinalizeEnvDispatchArgs{Env: env})
 }
 
-// resolveEnvFromStorage queries Hub env var storage for all applicable scopes
-// and returns a merged map with precedence: user > project > global.
+// envScopePrecedence is the single, authoritative statement of the order in
+// which Hub env var storage scopes are applied, LOWEST PRECEDENCE FIRST:
+//
+//	hub  <  project  <  user  <  runtime_broker
+//
+// Explicit agent config outranks all four: buildCreateRequest seeds
+// ResolvedEnv from AppliedConfig.Env and storage values only fill keys the
+// config left unset or empty.
+//
+// Every consumer of env var storage derives its order from this list — the
+// resolver (resolveEnvFromStorage) and the provenance reporter that tells the
+// CLI where a value came from (buildEnvSources). Changing the order here is
+// the ONLY edit required to change it everywhere, and is a user-visible
+// behaviour change for any deployment that defines the same key in two scopes.
+var envScopePrecedence = []string{
+	store.ScopeHub,
+	store.ScopeProject,
+	store.ScopeUser,
+	store.ScopeRuntimeBroker,
+}
+
+// envScopeID returns the ID the given scope is keyed by for this agent, or ""
+// if the scope does not apply (e.g. an agent with no project). The hub scope is
+// keyed by the hub's own instance ID, not by anything on the agent.
+func (d *HTTPAgentDispatcher) envScopeID(scope string, agent *store.Agent) string {
+	switch scope {
+	case store.ScopeHub:
+		return d.hubID
+	case store.ScopeProject:
+		return agent.ProjectID
+	case store.ScopeUser:
+		return agent.OwnerID
+	case store.ScopeRuntimeBroker:
+		return agent.RuntimeBrokerID
+	default:
+		return ""
+	}
+}
+
+// envScopesInPrecedenceOrder returns the env var storage queries that apply to
+// this agent, lowest precedence first, so a caller can simply run them in order
+// and let later scopes overwrite earlier ones.
+//
+// Scopes whose scope ID is empty for this agent are omitted, with the exception
+// of the hub scope: it is always queried, because an empty ScopeID means "no
+// scope-ID filter" to the store and the hub scope has always been queried
+// unconditionally.
+func (d *HTTPAgentDispatcher) envScopesInPrecedenceOrder(agent *store.Agent) []store.EnvVarFilter {
+	filters := make([]store.EnvVarFilter, 0, len(envScopePrecedence))
+	for _, scope := range envScopePrecedence {
+		scopeID := d.envScopeID(scope, agent)
+		if scopeID == "" && scope != store.ScopeHub {
+			if d.debug {
+				d.log.Debug("env scope does not apply to agent (empty scope ID)", "scope", scope, "agent_id", agent.ID)
+			}
+			continue
+		}
+		filters = append(filters, store.EnvVarFilter{Scope: scope, ScopeID: scopeID})
+	}
+	return filters
+}
+
+// envScopeSourceLabel maps a storage scope to the source name reported to the
+// CLI. The labels are the user-facing names, which are not identical to the
+// scope constants: store.ScopeRuntimeBroker is reported as "broker".
+func envScopeSourceLabel(scope string) string {
+	switch scope {
+	case store.ScopeHub:
+		return "hub"
+	case store.ScopeProject:
+		return "project"
+	case store.ScopeUser:
+		return "user"
+	case store.ScopeRuntimeBroker:
+		return "broker"
+	default:
+		return scope
+	}
+}
+
+// resolveEnvFromStorage queries Hub env var storage for every scope that
+// applies to the agent and returns a merged map. Scopes are applied lowest
+// precedence first; the order itself is stated in exactly one place,
+// envScopePrecedence above.
+//
+// The caller then overlays explicit agent config env on top of the result, so
+// agent config outranks every storage scope (see buildCreateRequest).
 func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, error) {
 	result := make(map[string]string)
 
-	// Query hub-scoped env vars (lowest precedence)
-	vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeHub, ScopeID: d.hubID})
-	if err != nil {
-		if d.debug {
-			d.log.Warn("Failed to list hub env vars", "error", err)
+	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+		vars, err := d.store.ListEnvVars(ctx, filter)
+		if err != nil {
+			if d.debug {
+				d.log.Warn("Failed to list env vars", "scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
+			}
+			continue
 		}
-	} else {
 		if d.debug {
 			keys := make([]string, 0, len(vars))
 			for _, v := range vars {
 				keys = append(keys, v.Key)
 			}
-			d.log.Debug("resolveEnvFromStorage: hub scope", "count", len(vars), "keys", keys)
+			d.log.Debug("resolveEnvFromStorage: scope", "scope", filter.Scope, "scope_id", filter.ScopeID, "count", len(vars), "keys", keys)
 		}
 		for _, v := range vars {
 			result[v.Key] = v.Value
 		}
 	}
 
-	// Query project-scoped env vars
-	if agent.ProjectID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: agent.ProjectID})
-		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to list project env vars", "error", err)
-			}
-		} else {
-			if d.debug {
-				keys := make([]string, 0, len(vars))
-				for _, v := range vars {
-					keys = append(keys, v.Key)
-				}
-				d.log.Debug("resolveEnvFromStorage: project scope", "project_id", agent.ProjectID, "count", len(vars), "keys", keys)
-			}
-			for _, v := range vars {
-				result[v.Key] = v.Value
-			}
-		}
-	} else if d.debug {
-		d.log.Debug("resolveEnvFromStorage: skipping project scope (empty projectID)")
-	}
-
-	// Query user-scoped env vars (higher precedence)
-	if agent.OwnerID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser, ScopeID: agent.OwnerID})
-		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to list user env vars", "error", err)
-			}
-		} else {
-			if d.debug {
-				keys := make([]string, 0, len(vars))
-				for _, v := range vars {
-					keys = append(keys, v.Key)
-				}
-				d.log.Debug("resolveEnvFromStorage: user scope", "ownerID", agent.OwnerID, "count", len(vars), "keys", keys)
-			}
-			for _, v := range vars {
-				result[v.Key] = v.Value
-			}
-		}
-	} else if d.debug {
-		d.log.Debug("resolveEnvFromStorage: skipping user scope (empty ownerID)")
-	}
-
-	// Query runtime_broker-scoped env vars (if applicable)
-	if agent.RuntimeBrokerID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeRuntimeBroker, ScopeID: agent.RuntimeBrokerID})
-		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to list broker env vars", "error", err)
-			}
-		} else {
-			if d.debug {
-				keys := make([]string, 0, len(vars))
-				for _, v := range vars {
-					keys = append(keys, v.Key)
-				}
-				d.log.Debug("resolveEnvFromStorage: broker scope", "brokerID", agent.RuntimeBrokerID, "count", len(vars), "keys", keys)
-			}
-			for _, v := range vars {
-				result[v.Key] = v.Value
-			}
-		}
-	} else if d.debug {
-		d.log.Debug("resolveEnvFromStorage: skipping broker scope (empty brokerID)")
-	}
-
 	return result, nil
 }
 
 // buildEnvSources creates a map of env key -> scope for reporting to the CLI.
+//
+// It walks the same scopes in the same order as resolveEnvFromStorage, from the
+// same envScopePrecedence list, so the source it reports is always the scope
+// whose value actually won and the two functions cannot drift apart. Agent
+// config is applied last because it outranks every storage scope.
 func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.Agent, resolvedEnv map[string]string) map[string]string {
 	sources := make(map[string]string)
 
-	// Check hub scope (lowest precedence — later scopes override)
-	vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeHub, ScopeID: d.hubID})
-	if err == nil {
+	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+		vars, err := d.store.ListEnvVars(ctx, filter)
+		if err != nil {
+			if d.debug {
+				d.log.Warn("Failed to list env vars for source reporting", "scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
+			}
+			continue
+		}
+		label := envScopeSourceLabel(filter.Scope)
 		for _, v := range vars {
 			if _, inResolved := resolvedEnv[v.Key]; inResolved {
-				sources[v.Key] = "hub"
+				sources[v.Key] = label
 			}
 		}
 	}
 
-	// Check project scope
-	if agent.ProjectID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: agent.ProjectID})
-		if err == nil {
-			for _, v := range vars {
-				if _, inResolved := resolvedEnv[v.Key]; inResolved {
-					sources[v.Key] = "project"
-				}
-			}
-		}
-	}
-
-	// Check user scope (overrides project)
-	if agent.OwnerID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser, ScopeID: agent.OwnerID})
-		if err == nil {
-			for _, v := range vars {
-				if _, inResolved := resolvedEnv[v.Key]; inResolved {
-					sources[v.Key] = "user"
-				}
-			}
-		}
-	}
-
-	// Check config scope
+	// Check config scope (outranks every storage scope)
 	if agent.AppliedConfig != nil {
 		for k := range agent.AppliedConfig.Env {
 			if _, inResolved := resolvedEnv[k]; inResolved {

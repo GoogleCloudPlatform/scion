@@ -50,12 +50,13 @@ var hubEnvCmd = &cobra.Command{
 
 Environment variables can be scoped to:
   - Hub: Available to all agents across the entire hub (admin-only writes)
-  - User (default): Available to all your agents
   - Project: Available to agents in a specific project
+  - User (default): Available to all your agents
   - Broker: Available to agents running on a specific broker
 
-Variables are resolved hierarchically when an agent starts:
-  hub -> user -> project -> broker -> agent config
+Variables are resolved hierarchically when an agent starts, lowest precedence
+first — a later scope overrides the same key set by an earlier one:
+  hub -> project -> user -> broker -> agent config
 
 Examples:
   # Set a user-scoped variable (two formats)
