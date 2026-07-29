@@ -1595,6 +1595,15 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		return nil, fmt.Errorf("invalid gh:// URI: %w", err)
 	}
 
+	// gh:// URIs with ?token= name a ProvisionCredentials secret that lives on
+	// the broker, not the Hub. Resolving here would silently substitute the
+	// project's GitHub App token and hand back raw.githubusercontent.com URLs
+	// the broker cannot authenticate. Return an error so the per-URI fallback
+	// routes these to the local resolver, which looks up the named secret.
+	if ghRef.TokenSecretName != "" {
+		return nil, fmt.Errorf("gh:// URI with ?token= must be resolved by the local resolver")
+	}
+
 	// Default an omitted ref to HEAD, matching the local resolver
 	// (github_skill_resolver.go resolveCommitSHA). Doing this before the cache
 	// key is computed also means gh://o/r/p and gh://o/r/p@HEAD share one

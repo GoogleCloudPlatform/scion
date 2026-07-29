@@ -32,11 +32,17 @@ type recordingResolver struct {
 	hardErr  error
 
 	called []api.SkillReference
+	// calls counts Resolve invocations, which len(called) cannot distinguish
+	// from a single multi-ref call. Tests use it to prove the Hub was consulted
+	// at all — the assertion that actually fails if gh:// is reverted from
+	// RegisterFallback back to Register.
+	calls int
 }
 
 func (r *recordingResolver) ResolverName() string { return r.name }
 
 func (r *recordingResolver) Resolve(_ context.Context, refs []api.SkillReference, _ agent.ResolveOpts) (*agent.ResolveResult, error) {
+	r.calls++
 	r.called = append(r.called, refs...)
 	if r.hardErr != nil {
 		return nil, r.hardErr
@@ -70,6 +76,9 @@ func TestBuildSkillRouter_GHRoutesToHubFirst(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	if hub.calls != 1 {
+		t.Fatalf("hub was called %d time(s), want exactly 1 — gh:// is not routed Hub-first", hub.calls)
+	}
 	if len(hub.called) != 1 {
 		t.Fatalf("hub received %d refs, want 1 — gh:// is not routed Hub-first", len(hub.called))
 	}
@@ -112,6 +121,12 @@ func TestBuildSkillRouter_GHFallsBackOnHubPerURIError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// Without this the test passes even if gh:// is reverted to Register("gh",
+	// ghResolver): the local resolver would be called first and still return
+	// "local-skill". Asserting the Hub was tried is what makes it a flip guard.
+	if hub.calls != 1 {
+		t.Fatalf("hub was called %d time(s), want exactly 1 — gh:// must be tried Hub-first", hub.calls)
+	}
 	if len(gh.called) != 1 {
 		t.Fatalf("local GitHub resolver received %d refs, want 1", len(gh.called))
 	}
@@ -141,6 +156,11 @@ func TestBuildSkillRouter_GHFallsBackOnHubTransportError(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	// As above: proves the Hub was attempted before the local resolver, so a
+	// revert of the routing flip fails here rather than passing coincidentally.
+	if hub.calls != 1 {
+		t.Fatalf("hub was called %d time(s), want exactly 1 — gh:// must be tried Hub-first", hub.calls)
 	}
 	if len(gh.called) != 1 {
 		t.Fatalf("local GitHub resolver received %d refs, want 1", len(gh.called))
@@ -189,8 +209,17 @@ func TestBuildSkillRouter_OtherSchemes(t *testing.T) {
 			if len(hub.called) != tt.wantHub {
 				t.Errorf("hub received %d refs, want %d", len(hub.called), tt.wantHub)
 			}
+			// Each case sends a single ref, so the expected ref count doubles as
+			// the expected number of Resolve invocations: 1 for the Hub-routed
+			// schemes, 0 for the scheme that must bypass the Hub entirely.
+			if hub.calls != tt.wantHub {
+				t.Errorf("hub was called %d time(s), want %d", hub.calls, tt.wantHub)
+			}
 			if len(gcp.called) != tt.wantGCP {
 				t.Errorf("gcp resolver received %d refs, want %d", len(gcp.called), tt.wantGCP)
+			}
+			if gcp.calls != tt.wantGCP {
+				t.Errorf("gcp resolver was called %d time(s), want %d", gcp.calls, tt.wantGCP)
 			}
 			if len(gh.called) != 0 {
 				t.Errorf("github resolver received %d refs, want 0", len(gh.called))

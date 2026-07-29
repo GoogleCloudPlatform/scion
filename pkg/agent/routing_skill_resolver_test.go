@@ -16,8 +16,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -762,9 +764,12 @@ type ctxProbeResolver struct {
 	resolved []ResolvedSkill
 	errors   []ResolveError
 
-	called    []api.SkillReference
-	callCtxOK bool   // ctx.Err() == nil at call time
-	sawValue  string // value carried over from the caller's context
+	called       []api.SkillReference
+	callCtxOK    bool      // ctx.Err() == nil at call time
+	sawValue     string    // value carried over from the caller's context
+	callDeadline time.Time // deadline of the context the fallback was called with
+	callHasDL    bool      // whether that context carried a deadline at all
+	onCall       func(ctx context.Context)
 }
 
 type ctxProbeKey struct{}
@@ -773,8 +778,13 @@ func (m *ctxProbeResolver) ResolverName() string { return m.name }
 func (m *ctxProbeResolver) Resolve(ctx context.Context, refs []api.SkillReference, _ ResolveOpts) (*ResolveResult, error) {
 	m.called = append(m.called, refs...)
 	m.callCtxOK = ctx.Err() == nil
+	m.callDeadline, m.callHasDL = ctx.Deadline()
 	if v, ok := ctx.Value(ctxProbeKey{}).(string); ok {
 		m.sawValue = v
+	}
+	if m.onCall != nil {
+		m.onCall(ctx)
+		m.callCtxOK = ctx.Err() == nil
 	}
 	if !m.callCtxOK {
 		return nil, ctx.Err()
@@ -812,7 +822,14 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 			t.Fatalf("fallback received %d refs, want 1", len(local.called))
 		}
 		if !local.callCtxOK {
-			t.Error("fallback was called with an already-cancelled context; want WithoutCancel")
+			t.Error("fallback was called with an already-cancelled context; want a detached context")
+		}
+		// Detached, but not unbounded: the replacement context must carry its
+		// own deadline so a wedged fallback cannot run forever.
+		if !local.callHasDL {
+			t.Error("detached fallback context has no deadline; want a bounded budget")
+		} else if d := time.Until(local.callDeadline); d <= 0 || d > fallbackTimeout+time.Minute {
+			t.Errorf("detached fallback budget = %v, want (0, %v]", d, fallbackTimeout)
 		}
 		if local.sawValue != "trace-abc" {
 			t.Errorf("fallback context lost caller values: got %q, want %q", local.sawValue, "trace-abc")
@@ -849,7 +866,12 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 			t.Fatalf("fallback received %d refs, want 1", len(local.called))
 		}
 		if !local.callCtxOK {
-			t.Error("fallback retry was called with an already-cancelled context; want WithoutCancel")
+			t.Error("fallback retry was called with an already-cancelled context; want a detached context")
+		}
+		if !local.callHasDL {
+			t.Error("detached fallback context has no deadline; want a bounded budget")
+		} else if d := time.Until(local.callDeadline); d <= 0 || d > fallbackTimeout+time.Minute {
+			t.Errorf("detached fallback budget = %v, want (0, %v]", d, fallbackTimeout)
 		}
 		if local.sawValue != "trace-xyz" {
 			t.Errorf("fallback context lost caller values: got %q, want %q", local.sawValue, "trace-xyz")
@@ -859,6 +881,107 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 		if len(result.Errors) != 0 {
 			t.Errorf("expected hub error to be superseded by fallback, got %+v", result.Errors)
+		}
+	})
+
+	// The detach above is a repair for a spent context, not the default. When
+	// the caller's context is still healthy the fallback must inherit it, so
+	// the caller's deadline still applies and a client disconnect mid-fallback
+	// still stops the work.
+	t.Run("transport error with healthy context inherits caller context", func(t *testing.T) {
+		callerDeadline := time.Now().Add(30 * time.Second)
+		ctx, cancel := context.WithDeadline(
+			context.WithValue(context.Background(), ctxProbeKey{}, "trace-live"), callerDeadline)
+		defer cancel()
+
+		hub := &mockSchemeResolver{name: "hub", hardErr: errors.New("hub unreachable")}
+		local := &ctxProbeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "gh-skill", URI: "gh://owner/repo/skill"}},
+		}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		result, err := router.Resolve(ctx, []api.SkillReference{
+			{URI: "gh://owner/repo/skill"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !local.callCtxOK {
+			t.Fatal("fallback context was already cancelled")
+		}
+		if !local.callHasDL || !local.callDeadline.Equal(callerDeadline) {
+			t.Errorf("fallback deadline = %v (set=%v), want caller deadline %v",
+				local.callDeadline, local.callHasDL, callerDeadline)
+		}
+		if local.sawValue != "trace-live" {
+			t.Errorf("fallback context lost caller values: got %q", local.sawValue)
+		}
+		if len(result.Resolved) != 1 {
+			t.Errorf("got %d resolved, want 1", len(result.Resolved))
+		}
+	})
+
+	t.Run("healthy context still propagates caller cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		hub := &mockSchemeResolver{name: "hub", hardErr: errors.New("hub unreachable")}
+		local := &ctxProbeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "gh-skill", URI: "gh://owner/repo/skill"}},
+			// Simulate the caller disconnecting while the fallback is in flight.
+			onCall: func(context.Context) { cancel() },
+		}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		_, err := router.Resolve(ctx, []api.SkillReference{
+			{URI: "gh://owner/repo/skill"},
+		}, ResolveOpts{})
+		if err == nil {
+			t.Fatal("expected error when the caller cancels during the fallback")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("error = %v, want context.Canceled to propagate to the fallback", err)
+		}
+	})
+
+	t.Run("per-URI retry with healthy context inherits caller context", func(t *testing.T) {
+		callerDeadline := time.Now().Add(45 * time.Second)
+		ctx, cancel := context.WithDeadline(
+			context.WithValue(context.Background(), ctxProbeKey{}, "trace-live2"), callerDeadline)
+		defer cancel()
+
+		hub := &mockSchemeResolver{
+			name: "hub",
+			errors: []ResolveError{
+				{URI: "gh://owner/repo/bad", Code: "resolve_failed", Message: "hub could not resolve"},
+			},
+		}
+		local := &ctxProbeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "bad", URI: "gh://owner/repo/bad"}},
+		}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		result, err := router.Resolve(ctx, []api.SkillReference{
+			{URI: "gh://owner/repo/bad"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !local.callHasDL || !local.callDeadline.Equal(callerDeadline) {
+			t.Errorf("fallback deadline = %v (set=%v), want caller deadline %v",
+				local.callDeadline, local.callHasDL, callerDeadline)
+		}
+		if local.sawValue != "trace-live2" {
+			t.Errorf("fallback context lost caller values: got %q", local.sawValue)
+		}
+		if len(result.Resolved) != 1 {
+			t.Errorf("got %d resolved, want 1", len(result.Resolved))
 		}
 	})
 }

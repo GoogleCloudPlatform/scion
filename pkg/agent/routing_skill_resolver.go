@@ -19,9 +19,31 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
+
+// fallbackTimeout bounds a fallback resolve that had to be detached from an
+// already-spent caller context. The local GitHub resolver uses a 30s HTTP
+// timeout and makes at most two calls per skill URI, so two minutes is
+// generous without being unbounded.
+const fallbackTimeout = 2 * time.Minute
+
+// fallbackContext returns a context for the fallback resolver. If the primary
+// ctx is still healthy it is used as-is, so the caller's cancellation and
+// deadline are preserved. If it is already cancelled or expired (e.g. the Hub
+// call consumed the caller's budget), the context is detached from the
+// cancellation signal and given a bounded budget so the fallback can still
+// complete. Values (logging, tracing) are preserved either way.
+func fallbackContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		// Healthy — inherit the caller context, deadline and cancellation intact.
+		return ctx, func() {}
+	}
+	// Already spent — detach so the fallback can run with a fresh, bounded budget.
+	return context.WithTimeout(context.WithoutCancel(ctx), fallbackTimeout)
+}
 
 // RoutingSkillResolver dispatches SkillReferences to scheme-specific resolvers.
 // It groups incoming refs by URI scheme, sends each group to the registered
@@ -143,11 +165,14 @@ func (r *RoutingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 				"fallback", resolverNameOf(fb),
 				"refs", len(schemeRefs),
 				"error", err)
-			// Use WithoutCancel so a Hub timeout or deadline expiry on the
-			// primary call does not immediately cancel the fallback. The
-			// caller's semantic intent is "resolve this skill", not "resolve
-			// it only if the Hub responds in time".
-			sr, err = fb.Resolve(context.WithoutCancel(ctx), schemeRefs, opts)
+			// A Hub timeout or deadline expiry on the primary call must not
+			// immediately cancel the fallback: the caller's semantic intent is
+			// "resolve this skill", not "resolve it only if the Hub responds in
+			// time". fallbackContext keeps a healthy caller context and swaps a
+			// spent one for a bounded budget.
+			fbCtx, fbCancel := fallbackContext(ctx)
+			sr, err = fb.Resolve(fbCtx, schemeRefs, opts)
+			fbCancel()
 			if err != nil {
 				return nil, fmt.Errorf("fallback resolver for scheme %q failed: %w", scheme, err)
 			}
@@ -212,9 +237,12 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 		"fallback", resolverNameOf(fb),
 		"refs", len(retryRefs))
 
-	// WithoutCancel for the same reason as the transport-level retry above: a
+	// fallbackContext for the same reason as the transport-level retry above: a
 	// Hub deadline that has already expired must not pre-empt the fallback.
-	fr, err := fb.Resolve(context.WithoutCancel(ctx), retryRefs, opts)
+	fbCtx, fbCancel := fallbackContext(ctx)
+	defer fbCancel()
+
+	fr, err := fb.Resolve(fbCtx, retryRefs, opts)
 	if err != nil {
 		slog.Warn("fallback skill resolver failed, keeping primary errors",
 			"scheme", scheme,

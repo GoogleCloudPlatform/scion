@@ -184,3 +184,77 @@ func TestSkillsResolve_GHCacheKeyedByURI(t *testing.T) {
 	assert.Equal(t, int64(4), gh.calls.Load(),
 		"a different skill path must miss the cache and hit GitHub")
 }
+
+// TestSkillsResolve_GHDeclinesTokenSecretURI pins the one gh:// shape the Hub
+// must refuse to resolve. `?token=NAME` names a ProvisionCredentials secret
+// that exists only on the broker; the Hub has no way to read it. If the Hub
+// resolved these anyway it would silently substitute the project's GitHub App
+// token and return raw.githubusercontent.com URLs the broker cannot
+// authenticate at install time — a confusing download failure well after the
+// resolve appeared to succeed.
+//
+// Declining with an error is load-bearing: the broker's
+// RoutingSkillResolver.retryErrorsWithFallback turns any per-URI error into a
+// fallback to the local resolver, which does look up the named secret. So the
+// error is the routing signal, not a dead end.
+//
+// The fake GitHub here would happily serve this URI, so the test genuinely
+// discriminates: without the guard the request resolves successfully.
+func TestSkillsResolve_GHDeclinesTokenSecretURI(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "private-repo"
+		skillPath = "skills/secret"
+		commitSHA = "cccccccccccccccccccccccccccccccccccccccc"
+	)
+
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	gh := newFakeGitHub(t, owner, repo, skillPath, commitSHA)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: "gh://" + owner + "/" + repo + "/secret?token=MY_TOKEN"}},
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Empty(t, resp.Resolved,
+		"Hub must not resolve a ?token= URI: it cannot read the named broker secret")
+	require.Len(t, resp.Errors, 1, "the declined URI must surface as a per-URI error")
+
+	// The error must be a resolve failure, not an authz denial: Alice owns the
+	// project, so authz passed and the Hub declined on its own terms. A
+	// "forbidden" here would mean the broker's fallback is masking a real
+	// permission bug.
+	assert.NotEqual(t, "forbidden", resp.Errors[0].Code,
+		"authz should pass for the project owner; got forbidden: %s", resp.Errors[0].Message)
+	assert.Equal(t, "resolve_failed", resp.Errors[0].Code)
+	assert.Contains(t, resp.Errors[0].Message, "local resolver",
+		"the error should explain that the local resolver owns this URI shape")
+
+	// The Hub must decline before contacting GitHub — otherwise it has already
+	// minted and spent the project's App token on a request it cannot serve.
+	assert.Zero(t, gh.calls.Load(),
+		"Hub must decline the ?token= URI without calling GitHub")
+
+	// A ?token=-free URI for the same skill still resolves, so the guard is
+	// scoped to the token parameter rather than disabling gh:// caching.
+	rec = doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: "gh://" + owner + "/" + repo + "/secret"}},
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Decode into a fresh value: omitted JSON fields leave the previous
+	// response's Errors in place and would make this assertion meaningless.
+	var plainResp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&plainResp))
+	assert.Empty(t, plainResp.Errors, "the same skill without ?token= must still resolve")
+	assert.Len(t, plainResp.Resolved, 1)
+}
