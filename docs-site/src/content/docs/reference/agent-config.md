@@ -187,7 +187,21 @@ first:
 
 A project setting is an *override*: it takes precedence over the template the
 project uses. Leave it blank to let the template — and then the rest of the
-chain — decide.
+chain — decide. Blank means **unset, falls through** — it does not mean "set to
+whatever the default happens to be".
+
+:::note[This is a partial ordering, and it does not cover environment variables]
+The three ranks above are the top of a longer chain, not the whole of it — below
+the template sit hub `agent_defaults` and the broker's own `settings.yaml`, and
+`resources` does not follow this ordering at all.
+
+Environment variables are governed by a **separate** precedence system that ranks
+the same-named sources differently. A rule taken from one and applied to the other
+gives answers backwards.
+
+See **[Settings Precedence](/reference/settings-precedence/)** for both systems in
+full, the `SCION_*` variables Scion injects, and the known gaps.
+:::
 
 `resources` merges **field by field** rather than as a whole block. A template
 that sets only a memory limit keeps that limit and still picks up the project's
