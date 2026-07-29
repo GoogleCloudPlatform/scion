@@ -292,6 +292,88 @@ func TestCreateAgent_HubDefaultTemplate_StoreError_StillFailsHard(t *testing.T) 
 		"a store error is not a stale-setting warning — it must not be reported as one")
 }
 
+// createPendingTemplate creates a template that resolves but is unusable: no
+// files and no content hash, the state a template sits in between creation and
+// `scion template sync`. This is the input to the file-less exit.
+func createPendingTemplate(t *testing.T, s store.Store, slug string) *store.Template {
+	t.Helper()
+	tmpl := &store.Template{
+		ID:      tid("template-pending-" + slug + "-" + t.Name()),
+		Name:    slug,
+		Slug:    slug,
+		Harness: "claude",
+		// No Files, no ContentHash — deliberately.
+		Scope:  store.TemplateScopeGlobal,
+		Status: "pending",
+	}
+	require.NoError(t, s.CreateTemplate(context.Background(), tmpl))
+	return tmpl
+}
+
+// TestCreateAgent_PendingTemplate_Requested_Still400s is the pre-existing half
+// of the file-less exit, and it is the one that needed a test most: Phase 7
+// refactored that guard from a standalone `if resolvedTemplate != nil && ...`
+// after the not-found block into a case of the same switch. The control flow is
+// equivalent — the old guard's nil check made it mutually exclusive with the
+// not-found branch anyway — but that was a reading standing in for a test, on a
+// user-visible 400 this PR restructured. Now it is a test.
+func TestCreateAgent_PendingTemplate_Requested_Still400s(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+	createPendingTemplate(t, s, "pending-tmpl")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "requested-pending",
+		ProjectID: project.ID,
+		Template:  "pending-tmpl",
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"a request-named pending template must still be rejected; body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "sync template files first",
+		"the actionable remediation must survive the switch refactor")
+	assert.Empty(t, logs.hubDefaultTemplateWarnings(),
+		"the hub-default degradation must not fire for a request-supplied name")
+}
+
+// TestCreateAgent_HubDefaultTemplate_Pending_DoesNotFailCreate is the other
+// polarity: the same unusable template, reached through the hub default, must
+// degrade rather than 400. This is the "degrade #2" exit — a stale hub default
+// naming a template nobody ever synced would otherwise block every create in the
+// deployment, exactly as a deleted one would.
+//
+// Both, or neither counts — the same standard the brief set for the 404 pair.
+func TestCreateAgent_HubDefaultTemplate_Pending_DoesNotFailCreate(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+	createPendingTemplate(t, s, "pending-tmpl")
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "pending-tmpl"})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "hub-default-pending",
+		ProjectID: project.ID,
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"a stale hub default naming an unsynced template must not fail the create; body: %s",
+		rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	agent, err := s.GetAgent(context.Background(), resp.Agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, agent.Template, "the unusable template must be cleared, not carried to the broker")
+
+	warnings := logs.hubDefaultTemplateWarnings()
+	require.Len(t, warnings, 1, "the degradation must be logged, not silent")
+	reason, ok := recordAttr(warnings[0], "reason")
+	require.True(t, ok)
+	assert.Contains(t, reason.String(), "sync template files first",
+		"the warning must carry the same actionable remediation the 400 would have")
+}
+
 // TestCreateAgent_ProjectAnnotationTemplate_Missing_Still404s extends the
 // polarity control one tier down: the project annotation is also not the hub
 // default, so it keeps the 404 too. This is what proves the provenance flag is
@@ -782,14 +864,43 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotatio
 	})
 }
 
+// resolvingHarnessConfigStore mirrors the existing resolvingTemplateStore: the
+// one method change that lets populateAgentConfig actually stamp an ID, so a
+// test can assert on the stamp rather than only on the name.
+//
+// The plain mockScheduledEventStore returns ErrNotFound here, which is enough to
+// prove the NAME reaches the slot but says nothing about WHEN — the hub rung
+// could run after populateAgentConfig and the name would still be on the record.
+// Only a stamped ID distinguishes the two.
+type resolvingHarnessConfigStore struct {
+	*mockScheduledEventStore
+}
+
+func (r *resolvingHarnessConfigStore) GetHarnessConfigBySlug(_ context.Context, slug, _, _ string) (*store.HarnessConfig, error) {
+	return &store.HarnessConfig{
+		ID:          "hc-resolvable",
+		Name:        slug,
+		Slug:        slug,
+		Harness:     "claude",
+		ContentHash: "cafebabe",
+		Scope:       store.HarnessConfigScopeGlobal,
+	}, nil
+}
+
 // TestDispatchAgentEventHandler_HubDefaultHarnessConfig_Applies is the scheduler
 // mirror of the harness-config rung: same function, same placement, strictly
 // between applyProjectDefaults and populateAgentConfig.
+//
+// The HarnessConfigID assertion is the half that pins "strictly BEFORE
+// populateAgentConfig" on this path. Sink the call below populateAgentConfig and
+// the name is still set on the record — only the stamp disappears, and with it a
+// remote broker's ability to hydrate the config. Without this assertion that
+// inversion ships green (review B1, mutation M5).
 func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_Applies(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 
-	srv := newEventHandlerTestServer(ms)
+	srv := newEventHandlerTestServer(&resolvingHarnessConfigStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-wide-hc"})
 
 	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
@@ -804,6 +915,52 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_Applies(t *testing.T)
 	require.NotNil(t, created)
 	require.NotNil(t, created.AppliedConfig)
 	assert.Equal(t, "hub-wide-hc", created.AppliedConfig.HarnessConfig)
+	assert.Equal(t, "hc-resolvable", created.AppliedConfig.HarnessConfigID,
+		"a stamped ID proves the rung ran BEFORE populateAgentConfig — criterion 10's second conjunct")
+	assert.Equal(t, "cafebabe", created.AppliedConfig.HarnessConfigHash)
+}
+
+// TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToProjectAnnotation
+// is criterion 10 on the scheduler path, and it is the test that pins "strictly
+// AFTER applyProjectDefaults" for the whole change.
+//
+// It matters more here than the equivalent create-path test, because the two
+// paths source the annotation differently: the create path reads
+// scion.io/default-harness-config inline before the call, whereas THIS path gets
+// it from applyProjectDefaults itself. So the scheduler is the only path where
+// the ordering relative to applyProjectDefaults is load-bearing for the
+// annotation — and it was the unpinned one. Hoist the call above
+// applyProjectDefaults and the hub default silently beats every project's
+// annotation on every scheduled dispatch (review B1, mutation M4).
+//
+// Both conjuncts of criterion 10 are asserted: Y wins, and Y's ID is stamped
+// rather than left empty.
+func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToProjectAnnotation(t *testing.T) {
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{
+		ID:          "project-1",
+		Name:        "test-project",
+		Annotations: map[string]string{projectSettingDefaultHarnessConfig: "project-hc-y"},
+	}
+
+	srv := newEventHandlerTestServer(&resolvingHarnessConfigStore{ms})
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-hc-x"})
+
+	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+		ID:        "dispatch-hub-hc-annotation",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"sched-annotation-beats-hub"}`,
+	})
+	require.NoError(t, err)
+
+	created := findMockAgent(ms, "sched-annotation-beats-hub")
+	require.NotNil(t, created)
+	require.NotNil(t, created.AppliedConfig)
+	assert.Equal(t, "project-hc-y", created.AppliedConfig.HarnessConfig,
+		"the project annotation outranks the hub operational default on this path too")
+	assert.Equal(t, "hc-resolvable", created.AppliedConfig.HarnessConfigID,
+		"criterion 10: the winning value's ID must be stamped, not left empty")
 }
 
 // TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToTemplate is the

@@ -2376,6 +2376,18 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			// depending on store weather. On a store error this path keeps its
 			// pre-existing behaviour — leave the name alone and let the broker
 			// try to resolve it locally.
+			//
+			// On the errors.Is limb: resolveTemplate collapses a miss to
+			// (nil, nil) — it swallows store.ErrNotFound at each of its three
+			// lookups — so with today's stores that limb does not fire, and
+			// tmpl == nil is doing all the work. It is kept deliberately, and it
+			// is not quite dead code: resolveTemplate swallows by equality
+			// (err != store.ErrNotFound), so a store that ever WRAPPED
+			// ErrNotFound would escape the swallow and arrive here, and this
+			// limb would correctly read it as a definitive miss rather than as
+			// an ambiguous failure. Checked at the time of writing: the ent
+			// adapter returns bare store.ErrNotFound from mapError and
+			// parseGetID, and nothing in pkg/store wraps it.
 			if templateFromHubDefault && tmpl == nil &&
 				(tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
 				s.warnHubDefaultTemplateUnusable(ctx, payload.Template, evt.ProjectID, "not found")

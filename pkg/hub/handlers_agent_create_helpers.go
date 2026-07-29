@@ -231,6 +231,11 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// setting — that comparison cannot tell "the hub defaulted it" from "the
 	// user named the same config the hub defaults to". Without this an operator
 	// cannot tell a bad hub default from a bad project annotation in the log.
+	// The !hcFromProjectAnnotation conjunct cannot currently be false when the
+	// ctx flag is true — if the annotation supplied the name then the slot was
+	// occupied and applyHubAgentDefaults never fired — so it is defence in
+	// depth, not a live case. Kept so the two provenances stay mutually
+	// exclusive by construction rather than by that reasoning holding.
 	hcFromHubDefault := hcName != "" && !hcFromProjectAnnotation && hubDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
 		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
