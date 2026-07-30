@@ -15,16 +15,48 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// =============================================================================
+// Tests for looksLikeGitHubDirectoryURL
+// =============================================================================
+
+func TestLooksLikeGitHubDirectoryURL(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"valid directory URL", "https://github.com/org/repo/tree/main/skills", true},
+		{"valid with nested path", "https://github.com/org/repo/tree/v1.0/skills/sub", true},
+		{"valid with uppercase host", "https://GitHub.com/org/repo/tree/main/skills", true},
+		{"missing tree segment", "https://github.com/org/repo/blob/main/file.go", false},
+		{"not github host", "https://gitlab.com/org/repo/tree/main/skills", false},
+		{"http scheme", "http://github.com/org/repo/tree/main/skills", false},
+		{"ftp scheme", "ftp://github.com/org/repo/tree/main/skills", false},
+		{"bare path", "/home/user/skills", false},
+		{"empty string", "", false},
+		{"skill URI", "skill://my-skill", false},
+		{"invalid URL", "://bad", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, looksLikeGitHubDirectoryURL(c.input))
+		})
+	}
+}
 
 // =============================================================================
 // Unit tests for pure helper functions (no network, no Hub)
@@ -523,4 +555,423 @@ func TestRunProjectSkillsList_APIError(t *testing.T) {
 func TestPrintSkillInjectionTable_NoOutput(t *testing.T) {
 	// Smoke test — should not panic on empty list.
 	printSkillInjectionTable(nil)
+}
+
+// =============================================================================
+// --from-directory tests
+// =============================================================================
+
+func TestProjectSkillsAddCmd_FromDirectoryFlag(t *testing.T) {
+	f := projectSkillsAddCmd.Flags().Lookup("from-directory")
+	assert.NotNil(t, f, "add command should have --from-directory flag")
+	assert.Equal(t, "string", f.Value.Type())
+}
+
+// newProjectFromDirMockServer returns a mock hub that handles discover-directory
+// and injected-skills add endpoints. addCalls tracks how many add POSTs were made.
+func newProjectFromDirMockServer(t *testing.T, skills []map[string]interface{}, addCalls *atomic.Int32, failSecondAdd bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.URL.Path == "/api/v1/projects/"+testProjectID && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":   testProjectID,
+				"name": "test-project",
+				"slug": "test-project",
+			})
+
+		case r.URL.Path == "/api/v1/skills/discover-directory" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"skills":  skills,
+				"count":   len(skills),
+				"skipped": []string{},
+			})
+
+		case strings.HasSuffix(r.URL.Path, "/injected-skills") && r.Method == http.MethodPost:
+			n := addCalls.Add(1)
+			if failSecondAdd && n == 2 {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"code":    "bad_request",
+					"message": "skill already exists",
+				})
+				return
+			}
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":       "new-entry-uuid",
+				"skillUri": req["skillUri"],
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"code":    "not_found",
+				"message": "not found",
+			})
+		}
+	}))
+}
+
+func TestRunProjectSkillsFromDirectory_NonTTY_AddsAll(t *testing.T) {
+	skills := []map[string]interface{}{
+		{"uri": "skill://org/skill-a", "name": "skill-a"},
+		{"uri": "skill://org/skill-b", "name": "skill-b"},
+	}
+	var addCalls atomic.Int32
+	server := newProjectFromDirMockServer(t, skills, &addCalls, false)
+	defer server.Close()
+	setProjectSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	projectDir := setupProjectSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	origInteractive := isInteractiveTerminal
+	defer func() { isInteractiveTerminal = origInteractive }()
+	isInteractiveTerminal = func() bool { return false }
+
+	var buf bytes.Buffer
+	projectSkillsAddCmd.SetOut(&buf)
+	defer projectSkillsAddCmd.SetOut(nil)
+
+	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "", "https://github.com/org/repo/tree/main/skills")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(2), addCalls.Load())
+	assert.Contains(t, buf.String(), "Added 2 of 2")
+}
+
+func TestRunProjectSkillsFromDirectory_TTY_Yes_AddsAll(t *testing.T) {
+	skills := []map[string]interface{}{
+		{"uri": "skill://org/skill-a", "name": "skill-a"},
+		{"uri": "skill://org/skill-b", "name": "skill-b"},
+	}
+	var addCalls atomic.Int32
+	server := newProjectFromDirMockServer(t, skills, &addCalls, false)
+	defer server.Close()
+	setProjectSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	projectDir := setupProjectSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	origInteractive := isInteractiveTerminal
+	defer func() { isInteractiveTerminal = origInteractive }()
+	isInteractiveTerminal = func() bool { return true }
+
+	origAutoConfirm := autoConfirm
+	defer func() { autoConfirm = origAutoConfirm }()
+	autoConfirm = true
+
+	var buf bytes.Buffer
+	projectSkillsAddCmd.SetOut(&buf)
+	defer projectSkillsAddCmd.SetOut(nil)
+
+	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "", "https://github.com/org/repo/tree/main/skills")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(2), addCalls.Load())
+	assert.Contains(t, buf.String(), "Added 2 of 2")
+}
+
+func TestRunProjectSkillsFromDirectory_TTY_Abort(t *testing.T) {
+	skills := []map[string]interface{}{
+		{"uri": "skill://org/skill-a", "name": "skill-a"},
+	}
+	var addCalls atomic.Int32
+	server := newProjectFromDirMockServer(t, skills, &addCalls, false)
+	defer server.Close()
+	setProjectSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	projectDir := setupProjectSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	origInteractive := isInteractiveTerminal
+	defer func() { isInteractiveTerminal = origInteractive }()
+	isInteractiveTerminal = func() bool { return true }
+
+	origAutoConfirm := autoConfirm
+	defer func() { autoConfirm = origAutoConfirm }()
+	autoConfirm = false
+
+	var buf bytes.Buffer
+	projectSkillsAddCmd.SetOut(&buf)
+	defer projectSkillsAddCmd.SetOut(nil)
+	projectSkillsAddCmd.SetIn(strings.NewReader("n\n"))
+	defer projectSkillsAddCmd.SetIn(nil)
+
+	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "", "https://github.com/org/repo/tree/main/skills")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(0), addCalls.Load())
+	assert.Contains(t, buf.String(), "Aborted")
+}
+
+func TestRunProjectSkillsFromDirectory_NoSkills(t *testing.T) {
+	skills := []map[string]interface{}{}
+	var addCalls atomic.Int32
+	server := newProjectFromDirMockServer(t, skills, &addCalls, false)
+	defer server.Close()
+	setProjectSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	projectDir := setupProjectSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	var buf bytes.Buffer
+	projectSkillsAddCmd.SetOut(&buf)
+	defer projectSkillsAddCmd.SetOut(nil)
+
+	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "", "https://github.com/org/repo/tree/main/empty")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(0), addCalls.Load())
+	assert.Contains(t, buf.String(), "No skills found")
+}
+
+func TestRunProjectSkillsFromDirectory_PartialFailure(t *testing.T) {
+	skills := []map[string]interface{}{
+		{"uri": "skill://org/skill-a", "name": "skill-a"},
+		{"uri": "skill://org/skill-b", "name": "skill-b"},
+	}
+	var addCalls atomic.Int32
+	server := newProjectFromDirMockServer(t, skills, &addCalls, true) // second add fails
+	defer server.Close()
+	setProjectSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	projectDir := setupProjectSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	origInteractive := isInteractiveTerminal
+	defer func() { isInteractiveTerminal = origInteractive }()
+	isInteractiveTerminal = func() bool { return false }
+
+	var outBuf bytes.Buffer
+	var errBuf bytes.Buffer
+	projectSkillsAddCmd.SetOut(&outBuf)
+	projectSkillsAddCmd.SetErr(&errBuf)
+	defer projectSkillsAddCmd.SetOut(nil)
+	defer projectSkillsAddCmd.SetErr(nil)
+
+	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "", "https://github.com/org/repo/tree/main/skills")
+	assert.NoError(t, err)
+	assert.Contains(t, outBuf.String(), "Added 1 of 2")
+	assert.Contains(t, errBuf.String(), "Warning: 1 of 2 skills could not be added")
+}
+
+func TestRunProjectSkillsFromDirectory_DiscoverError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case "/api/v1/skills/discover-directory":
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"code":    "internal_error",
+				"message": "internal server error",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setProjectSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	projectDir := setupProjectSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "", "https://github.com/org/repo/tree/main/skills")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "skill discovery failed")
+}
+
+func TestRunProjectSkillsFromDirectory_StripsUserinfo(t *testing.T) {
+	var receivedSourceURL string
+	skills := []map[string]interface{}{
+		{"uri": "skill://org/skill-a", "name": "skill-a"},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.URL.Path == "/api/v1/projects/"+testProjectID && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":   testProjectID,
+				"name": "test-project",
+				"slug": "test-project",
+			})
+
+		case r.URL.Path == "/api/v1/skills/discover-directory" && r.Method == http.MethodPost:
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			receivedSourceURL, _ = req["sourceUrl"].(string)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"skills":  skills,
+				"count":   len(skills),
+				"skipped": []string{},
+			})
+
+		case strings.HasSuffix(r.URL.Path, "/injected-skills") && r.Method == http.MethodPost:
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":       "new-entry-uuid",
+				"skillUri": req["skillUri"],
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setProjectSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	projectDir := setupProjectSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	origInteractive := isInteractiveTerminal
+	defer func() { isInteractiveTerminal = origInteractive }()
+	isInteractiveTerminal = func() bool { return false }
+
+	var buf bytes.Buffer
+	projectSkillsAddCmd.SetOut(&buf)
+	defer projectSkillsAddCmd.SetOut(nil)
+
+	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "",
+		"https://token:secret@github.com/org/repo/tree/main/skills")
+	assert.NoError(t, err)
+	assert.NotContains(t, receivedSourceURL, "token")
+	assert.NotContains(t, receivedSourceURL, "secret")
+	assert.Contains(t, receivedSourceURL, "github.com/org/repo/tree/main/skills")
+}
+
+func TestRunProjectSkillsFromDirectory_InvalidURL(t *testing.T) {
+	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "", "ftp://example.com/skills")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "--from-directory must be an https://github.com/")
+}
+
+func TestRunProjectSkillsAdd_FromDirConflictWithAs(t *testing.T) {
+	origFromDir := projectSkillsFromDir
+	origAs := projectSkillsAs
+	defer func() {
+		projectSkillsFromDir = origFromDir
+		projectSkillsAs = origAs
+	}()
+	projectSkillsFromDir = "https://github.com/org/repo/tree/main/skills"
+	projectSkillsAs = "my-alias"
+
+	err := runProjectSkillsAdd(projectSkillsAddCmd, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "--as and --optional cannot be used with --from-directory")
+}
+
+func TestRunProjectSkillsAdd_FromDirConflictWithOptional(t *testing.T) {
+	origFromDir := projectSkillsFromDir
+	origOpt := projectSkillsOptional
+	defer func() {
+		projectSkillsFromDir = origFromDir
+		projectSkillsOptional = origOpt
+	}()
+	projectSkillsFromDir = "https://github.com/org/repo/tree/main/skills"
+	projectSkillsOptional = true
+
+	err := runProjectSkillsAdd(projectSkillsAddCmd, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "--as and --optional cannot be used with --from-directory")
+}
+
+func TestRunProjectSkillsAdd_FromDirConflictWithSkillURI(t *testing.T) {
+	origFromDir := projectSkillsFromDir
+	defer func() { projectSkillsFromDir = origFromDir }()
+	projectSkillsFromDir = "https://github.com/org/repo/tree/main/skills"
+
+	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"skill://foo"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot combine a skill URI argument with --from-directory")
+}
+
+func TestRunProjectSkillsFromDirectory_TotalFailure(t *testing.T) {
+	skills := []map[string]interface{}{
+		{"uri": "skill://org/skill-a", "name": "skill-a"},
+		{"uri": "skill://org/skill-b", "name": "skill-b"},
+	}
+	var addCalls atomic.Int32
+	// Server that fails ALL add calls.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.URL.Path == "/api/v1/projects/"+testProjectID && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":   testProjectID,
+				"name": "test-project",
+				"slug": "test-project",
+			})
+
+		case r.URL.Path == "/api/v1/skills/discover-directory" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"skills":  skills,
+				"count":   len(skills),
+				"skipped": []string{},
+			})
+
+		case strings.HasSuffix(r.URL.Path, "/injected-skills") && r.Method == http.MethodPost:
+			addCalls.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"code":    "bad_request",
+				"message": "skill already exists",
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setProjectSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	projectDir := setupProjectSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	origInteractive := isInteractiveTerminal
+	defer func() { isInteractiveTerminal = origInteractive }()
+	isInteractiveTerminal = func() bool { return false }
+
+	var outBuf bytes.Buffer
+	var errBuf bytes.Buffer
+	projectSkillsAddCmd.SetOut(&outBuf)
+	projectSkillsAddCmd.SetErr(&errBuf)
+	defer projectSkillsAddCmd.SetOut(nil)
+	defer projectSkillsAddCmd.SetErr(nil)
+
+	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "", "https://github.com/org/repo/tree/main/skills")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "all 2 skill(s) failed to add")
+	assert.Equal(t, int32(2), addCalls.Load())
 }

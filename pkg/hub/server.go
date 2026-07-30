@@ -2994,6 +2994,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/resources/import", s.handleResourcesImport)
 	s.mux.HandleFunc("/api/v1/resources/discover", s.handleResourcesDiscover)
 
+	// Skill directory discovery (batch-add support for injected skills). Registered
+	// as an exact path so it takes precedence over the /api/v1/skills/ subtree
+	// handler above.
+	s.mux.HandleFunc("/api/v1/skills/discover-directory", s.handleSkillsDiscoverDirectory)
+
 	// GitHub App webhook and setup callback (unauthenticated — uses webhook signature)
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook)
 	s.mux.HandleFunc("/github-app/setup", s.handleGitHubAppSetup)

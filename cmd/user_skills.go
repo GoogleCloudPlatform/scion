@@ -17,6 +17,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -67,8 +69,9 @@ var userSkillsAddCmd = &cobra.Command{
 
 Examples:
   scion user skills add skill://my-skill
-  scion user skills add skill://my-skill@1.2 --as alias --optional`,
-	Args: cobra.ExactArgs(1),
+  scion user skills add skill://my-skill@1.2 --as alias --optional
+  scion user skills add --from-directory https://github.com/org/repo/tree/main/skills`,
+	Args: cobra.RangeArgs(0, 1),
 	RunE: runUserSkillsAdd,
 }
 
@@ -92,6 +95,7 @@ Examples:
 var (
 	userSkillsAs       string
 	userSkillsOptional bool
+	userSkillsFromDir  string
 )
 
 func init() {
@@ -103,6 +107,8 @@ func init() {
 
 	userSkillsAddCmd.Flags().StringVar(&userSkillsAs, "as", "", "Alias for the skill (SkillAs)")
 	userSkillsAddCmd.Flags().BoolVar(&userSkillsOptional, "optional", false, "Mark the skill as optional (failure does not abort provisioning)")
+	userSkillsAddCmd.Flags().StringVar(&userSkillsFromDir, "from-directory", "",
+		"GitHub directory URL to discover skills from")
 }
 
 // resolveUserSkillsService returns an InjectedSkillsService for the current user.
@@ -145,6 +151,20 @@ func runUserSkillsList(cmd *cobra.Command, args []string) error {
 }
 
 func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
+	if userSkillsFromDir != "" {
+		if userSkillsAs != "" || userSkillsOptional {
+			return fmt.Errorf("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
+		}
+		if len(args) > 0 {
+			return fmt.Errorf("cannot combine a skill URI argument with --from-directory; choose one")
+		}
+		return runUserSkillsFromDirectory(cmd, userSkillsFromDir)
+	}
+
+	if len(args) == 0 {
+		return fmt.Errorf("skill URI or --from-directory is required")
+	}
+
 	skillURI := args[0]
 
 	normalized, err := api.NormalizeSkillURI(skillURI)
@@ -215,5 +235,93 @@ func runUserSkillsRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Removed injected skill (ID: %s)\n", entryID)
+	return nil
+}
+
+func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
+	// Fix 1: Strip userinfo (e.g. token:secret@) before sending.
+	if parsed, err := url.Parse(dirURL); err == nil && parsed.User != nil {
+		parsed.User = nil
+		dirURL = parsed.String()
+	}
+
+	// Fix 2: Client-side URL validation.
+	if !looksLikeGitHubDirectoryURL(dirURL) {
+		return fmt.Errorf("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
+	}
+
+	// Fix 4: Split nil-error check.
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	if err != nil {
+		return fmt.Errorf("hub connection required: %w", err)
+	}
+	if hubCtx == nil {
+		return fmt.Errorf("hub is not enabled; configure hub.endpoint to use user skills")
+	}
+
+	// Fix 3: Separate context for discover phase (30s).
+	parentCtx := cmd.Context()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	discoverCtx, discoverCancel := context.WithTimeout(parentCtx, 30*time.Second)
+	defer discoverCancel()
+
+	result, err := hubCtx.Client.DiscoverSkillsDirectory(discoverCtx, hubclient.DiscoverSkillsDirectoryRequest{
+		SourceURL: dirURL,
+		// No ProjectID for user scope.
+	})
+	if err != nil {
+		return fmt.Errorf("skill discovery failed: %w", err)
+	}
+	if len(result.Skills) == 0 {
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No skills found at the given URL.")
+		return nil
+	}
+
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Discovered %d skill(s):\n", len(result.Skills))
+	for _, s := range result.Skills {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  %s  (%s)\n", s.URI, s.Name)
+	}
+	if len(result.Skipped) > 0 {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  (%d folder(s) skipped)\n", len(result.Skipped))
+	}
+
+	if isInteractiveTerminal() && !autoConfirm {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
+		var answer string
+		_, _ = fmt.Fscanln(cmd.InOrStdin(), &answer)
+		if answer != "" && strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+			return nil
+		}
+	}
+
+	// Fix 3: Fresh timeout for add phase (60s), starts after the user responds.
+	addCtx, addCancel := context.WithTimeout(parentCtx, 60*time.Second)
+	defer addCancel()
+
+	svc := hubCtx.Client.UserInjectedSkills()
+	var addErrors []string
+	for _, s := range result.Skills {
+		_, err := svc.Add(addCtx, &hubclient.AddInjectedSkillRequest{SkillURI: s.URI})
+		if err != nil {
+			addErrors = append(addErrors, fmt.Sprintf("%s: %v", s.Name, err))
+		}
+	}
+	if len(addErrors) > 0 {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %d of %d skills could not be added:\n", len(addErrors), len(result.Skills))
+		for _, e := range addErrors {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", e)
+		}
+	}
+	added := len(result.Skills) - len(addErrors)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Added %d of %d skill(s).\n", added, len(result.Skills))
+
+	// Fix 6: Return error when all adds fail.
+	if added == 0 && len(result.Skills) > 0 {
+		return fmt.Errorf("all %d skill(s) failed to add", len(result.Skills))
+	}
+
 	return nil
 }
