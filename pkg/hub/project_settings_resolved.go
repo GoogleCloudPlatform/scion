@@ -486,19 +486,36 @@ func (s *Server) hubDefaultFor(
 			// this endpoint refuses to perform. Resolution would come back in
 			// through the one field small enough to look harmless.
 			//
-			// Second: the fact that file mode carries no agent defaults is a
-			// GAP, NOT A DESIGN. extractAgentDefaults proves the file format
-			// can already express these keys; BuildLayer1SnapshotFromFile
-			// simply does not read them. Someone will close that gap. On that
-			// day file mode starts holding real agent-defaults data, and every
-			// ABSENT this endpoint had been emitting becomes silently wrong —
-			// no test fails, no error is raised, the field just begins lying.
-			// UNKNOWN survives that change untouched and becomes answerable
-			// when the plumbing lands. ABSENT is correct only for as long as
-			// the gap persists; UNKNOWN is correct either way. If you are the
-			// person fixing BuildLayer1SnapshotFromFile: this endpoint was
-			// waiting for you, and it should start returning real answers here
-			// with no change to this file.
+			// Second, and load-bearing: ABSENT would be a claim about WHY the
+			// data is missing, and this endpoint is not entitled to that claim
+			// either way it turns out.
+			//
+			// extractAgentDefaults proves the file format can already express
+			// these keys; BuildLayer1SnapshotFromFile does not read them. Two
+			// readings of that were live, and UNKNOWN is the correct answer
+			// under BOTH — which is the entire reason to prefer it:
+			//
+			//   - If it is a gap someone later closes, file mode begins holding
+			//     real agent-defaults data, and every ABSENT previously emitted
+			//     becomes silently wrong: no test fails, no error is raised, the
+			//     field simply starts lying. UNKNOWN survives untouched and
+			//     becomes answerable when the plumbing lands.
+			//   - If the emptiness is permanent, ABSENT is not merely
+			//     wrong-until-fixed but permanently wrong, because it would
+			//     report "the operator configured nothing" about data the hub is
+			//     structurally incapable of reading.
+			//
+			// Upstream has since settled which reading applies, and it is the
+			// second: hub_agent_defaults.go records that
+			// BuildLayer1SnapshotFromFile "deliberately leaves the agent-defaults
+			// fields empty (design §3.2.4)" in order to keep file-mode dispatch
+			// byte-identical. So do not expect this to start returning
+			// present/absent in file mode — UNKNOWN is the permanent, honest
+			// answer there, not a placeholder awaiting better plumbing.
+			//
+			// Note that the argument above did not depend on knowing which
+			// reading was true. That is the property worth preserving if this
+			// comment is ever revised.
 			//
 			// WHY THE RAW SECTION DOCUMENT, when a typed accessor is sitting
 			// right there: s.hubAgentDefaults() returns AgentDefaultsSettings,
@@ -628,7 +645,22 @@ func (o *OperationalSettings) rawSection(name string) (json.RawMessage, bool) {
 	o.mu.RUnlock()
 
 	if inDB {
-		return state.Value, true
+		// Copy. The caller would otherwise receive bytes the cache still owns:
+		// the lock is released above, but state.Value shares its backing array
+		// with the live cache entry, so a caller writing through the returned
+		// slice corrupts the process-wide settings cache for every reader —
+		// Snapshot() included, not just this endpoint. Downstream the effect is
+		// quiet rather than loud: hubAgentDefaultsDoc's unmarshal starts
+		// failing, which flips every agent_defaults-backed key to "unknown"
+		// hub-wide.
+		//
+		// Today's only consumer passes these bytes to json.Unmarshal, which
+		// does not write to its input. That is a property of today's consumer,
+		// not of this function's contract, and this accessor is the first thing
+		// in the package to hand raw cache bytes across a file boundary.
+		out := make(json.RawMessage, len(state.Value))
+		copy(out, state.Value)
+		return out, true
 	}
 
 	sec := opsettings.SectionByName(name)

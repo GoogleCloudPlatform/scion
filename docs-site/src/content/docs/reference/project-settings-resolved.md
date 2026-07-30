@@ -115,10 +115,10 @@ a false statement. Two distinct situations produce `unknown`:
   a settings database, the agent-defaults section is never loaded, even if the
   operator's file contains it. The hub holds a zero value that reflects the load
   path, not the operator's intent. Reporting `absent` here would claim the
-  operator configured nothing, which the hub is in no position to know. This is
-  a gap in file-mode loading rather than a deliberate limitation; if it is
-  closed, these settings will begin reporting `present`/`absent` normally, with
-  no change to the endpoint.
+  operator configured nothing, which the hub is in no position to know. This
+  emptiness is deliberate — it keeps file-mode behaviour unchanged for existing
+  single-node installs — so in file mode `unknown` is the permanent and correct
+  answer for these settings, not a temporary gap awaiting a fix.
 
 - **A value that cannot be distinguished from unset.** Some hub defaults are
   stored in a form where an explicitly-configured empty value and an unset value

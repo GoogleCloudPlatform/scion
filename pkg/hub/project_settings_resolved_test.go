@@ -256,7 +256,39 @@ func TestResolvedSettings_EndpointReturnsNoEffectiveValue(t *testing.T) {
 
 	require.Contains(t, body, "project")
 	require.Contains(t, body, "settings")
-	assert.Len(t, body, 2, "unexpected top-level keys in the resolved response")
+	assert.Lenf(t, body, len(expectedResolvedWrapperFields),
+		"unexpected top-level keys in the resolved response. If you added a field on "+
+			"purpose it must be added in THREE places: hub.ResolvedProjectSettings, "+
+			"hubclient.ResolvedProjectSettings, and expectedResolvedWrapperFields in "+
+			"project_settings_resolved_guard_test.go — which is where this assertion "+
+			"reads its expected count from, so it cannot drift out of step with the "+
+			"shape guard.")
+
+	// The denylist, over the "project" sub-object as well as the per-setting
+	// entries. Both halves matter, and the second was added because it was
+	// missing: review demonstrated a forbidden name reaching the wire inside
+	// "project" while this loop scanned only settings[key]. A denylist that
+	// looks in one of the two places a field can land is not a weaker check
+	// than one that looks in both — it is a check that reports on the wrong
+	// object.
+	//
+	// "winner" is on the list for a specific reason. The shape guard's own
+	// comment offers it as an example of a name no denylist would think of;
+	// review then used exactly that name to smuggle a field past every guard in
+	// the suite. It is here as a marker of that, not because anyone expects it.
+	forbiddenNames := []string{
+		"value", "effective", "effectiveValue", "source", "hubValue", "winner",
+	}
+
+	var projectObj map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body["project"], &projectObj))
+	for _, forbidden := range forbiddenNames {
+		assert.NotContainsf(t, projectObj, forbidden,
+			"the \"project\" sub-object must not carry %q: this endpoint does not "+
+				"resolve precedence, and the shape guard deliberately does not police "+
+				"hubclient.ProjectSettings' field list, so this is the only check "+
+				"looking here", forbidden)
+	}
 
 	var settings map[string]map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(body["settings"], &settings))
@@ -265,11 +297,14 @@ func TestResolvedSettings_EndpointReturnsNoEffectiveValue(t *testing.T) {
 		entry, ok := settings[key]
 		require.Truef(t, ok, "registered setting %q missing from the wire payload", key)
 
-		// The forbidden names are checked here as a belt-and-braces read of the
-		// real payload. The authoritative check is the exact-set guard in
-		// project_settings_resolved_guard_test.go — this loop is a denylist and
-		// would not catch a name nobody thought of.
-		for _, forbidden := range []string{"value", "effective", "effectiveValue", "source", "hubValue"} {
+		// Read of the real payload, complementary to the exact-set guard in
+		// project_settings_resolved_guard_test.go. Note the ordering claim that
+		// used to sit here — that the exact-set guard was "the authoritative
+		// check" and this loop merely belt-and-braces — was measured false: for
+		// the whole of this phase the guard could not see a promoted field, and
+		// this denylist is what actually fired. Neither is authoritative over
+		// the other; they fail on different things.
+		for _, forbidden := range forbiddenNames {
 			assert.NotContainsf(t, entry, forbidden,
 				"the resolved response must not carry %q: this endpoint does not "+
 					"resolve precedence", forbidden)
