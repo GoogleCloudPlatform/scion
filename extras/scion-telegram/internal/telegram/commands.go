@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // AgentInfo holds an agent's slug and current activity state.
@@ -329,23 +331,34 @@ func (h *CommandHandler) handleUnlink(msg *TGMessage) {
 func (h *CommandHandler) handleHelp(msg *TGMessage) {
 	chatID := msg.Chat.ID
 
+	versionLine := fmt.Sprintf("\n\n<i>Scion Telegram Integration — %s</i>", html.EscapeString(version.Get()))
+
+	var text string
 	if isGroupChat(chatID) {
-		h.reply(chatID, "Available commands:\n"+
-			"/setup — Link this group to a project\n"+
-			"/default — Set the default agent\n"+
-			"/agents — List agents in the linked project\n"+
-			"/settings — Configure group settings\n"+
-			"/unlink — Unlink this group from its project\n"+
-			"/help — Show this help message\n\n"+
-			"Send /help in a DM to the bot for account management commands.")
+		text = "Available commands:\n" +
+			"/setup — Link this group to a project\n" +
+			"/default — Set the default agent\n" +
+			"/agents — List agents in the linked project\n" +
+			"/settings — Configure group settings\n" +
+			"/unlink — Unlink this group from its project\n" +
+			"/help — Show this help message\n\n" +
+			"Send /help in a DM to the bot for account management commands." +
+			versionLine
 	} else {
-		h.reply(chatID, "Available commands (DM):\n"+
-			"/register — Link your Telegram account to your scion hub identity\n"+
-			"/unregister — Remove your Telegram account link\n"+
-			"/status — Show linked groups and registration status\n"+
-			"/notifications — Manage per-agent notification subscriptions\n"+
-			"/help — Show this help message\n\n"+
-			"Add me to a group and use /setup there to link it to a scion project.")
+		text = "Available commands (DM):\n" +
+			"/register — Link your Telegram account to your scion hub identity\n" +
+			"/unregister — Remove your Telegram account link\n" +
+			"/status — Show linked groups and registration status\n" +
+			"/notifications — Manage per-agent notification subscriptions\n" +
+			"/help — Show this help message\n\n" +
+			"Add me to a group and use /setup there to link it to a scion project." +
+			versionLine
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := h.api.SendMessage(ctx, chatID, text, "HTML"); err != nil {
+		h.log.Error("Failed to send help reply", "chat_id", chatID, "error", err)
 	}
 }
 

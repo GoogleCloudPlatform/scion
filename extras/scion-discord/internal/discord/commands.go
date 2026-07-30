@@ -12,6 +12,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -507,7 +508,8 @@ func helpText() string {
 		"`/scion settings` — Configure channel notification settings\n" +
 		"`/scion info` — Show your registration info\n" +
 		"`/scion help` — Show this help message\n\n" +
-		"Mention the bot or an agent by name in a linked channel to send messages."
+		"Mention the bot or an agent by name in a linked channel to send messages.\n\n" +
+		fmt.Sprintf("_Scion Discord Integration — %s_", version.Get())
 }
 
 // HandleHelp responds with a listing of available commands.
