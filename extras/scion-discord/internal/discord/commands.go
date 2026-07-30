@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/bwmarrin/discordgo"
@@ -232,6 +233,27 @@ func (h *CommandHandler) RegisterCommandsForGuild(guildID string) error {
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "thread",
+				Description: "Create a thread with a new agent in it",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionString,
+						Name:        "title",
+						Description: "Thread name; also the basis for the agent slug",
+						Required:    true,
+						MaxLength:   100,
+					},
+					{
+						Type:         discordgo.ApplicationCommandOptionString,
+						Name:         "template",
+						Description:  "Agent template (defaults to the project's default)",
+						Required:     false,
+						Autocomplete: true,
+					},
+				},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
 				Name:        "help",
 				Description: "Show available commands",
 			},
@@ -260,6 +282,7 @@ var ephemeralCommands = map[string]bool{
 	"unlink":   true,
 	"settings": true,
 	"default":  true,
+	"thread":   true,
 }
 
 // ephemeralFlag returns MessageFlagsEphemeral if the subcommand should be
@@ -327,6 +350,8 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 			h.HandleSettings(s, i)
 		case "default":
 			h.HandleDefault(s, i)
+		case "thread":
+			h.HandleThread(s, i)
 		// register and unregister are handled by RegistrationHandler
 		// and should be wired up in the broker's dispatch
 		default:
@@ -412,6 +437,7 @@ func helpText() string {
 		"`/scion msg <agent> <text>` — Send a message to an agent\n" +
 		"`/scion logs <agent>` — View agent logs\n" +
 		"`/scion default [agent]` — Set or clear the default agent\n" +
+		"`/scion thread <title> [template]` — Create a thread with a new agent\n" +
 		"`/scion register` — Link your Discord account to Scion Hub\n" +
 		"`/scion unregister` — Unlink your Discord account\n" +
 		"`/scion settings` — Configure channel notification settings\n" +
@@ -1072,6 +1098,123 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		Content:    currentText + promptText,
 		Components: rows,
 	})
+}
+
+// HandleThread validates parameters for creating a Discord thread with a new
+// Scion agent. This phase implements validation only (steps 0.1–0.6 from the
+// design doc); actual thread and agent creation will be added in a later phase.
+func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	title := getSubcommandOption(i, "title")
+	if title == "" {
+		h.followup(s, i, "Please provide a thread title.")
+		return
+	}
+
+	// Step 0.1: Resolve parent channel.
+	// If invoked from inside a thread, create a sibling in the parent channel
+	// (decision 1a). If in a regular channel, use the current channel.
+	channelID := i.ChannelID
+	parentID := threadParentID(s, channelID)
+	if parentID != "" {
+		// We are inside a thread — create sibling in parent channel.
+		channelID = parentID
+	}
+
+	// Step 0.2: Resolve channel link.
+	link, err := resolveChannelLink(ctx, s, h.store, channelID)
+	if err != nil {
+		h.log.Error("Failed to resolve channel link for thread command", "error", err, "channel_id", channelID)
+		h.followup(s, i, "Something went wrong. Please try again.")
+		return
+	}
+	if link == nil {
+		h.followup(s, i, "This channel is not linked to a project. Run `/scion setup` first.")
+		return
+	}
+
+	// Step 0.3: Check user registration.
+	discordUserID := interactionUserID(i)
+	if discordUserID == "" {
+		h.followup(s, i, "Could not identify your user.")
+		return
+	}
+
+	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
+	if err != nil {
+		h.log.Error("Failed to check user mapping for thread command", "error", err, "discord_user_id", discordUserID)
+		h.followup(s, i, "Something went wrong. Please try again.")
+		return
+	}
+	if mapping == nil {
+		h.followup(s, i, "You need to link your Discord account first. Run `/scion register`.")
+		return
+	}
+
+	// Step 0.4: Slugify the title.
+	// Use api.Slugify (not the local slugify in brokerauth.go) for hub compatibility.
+	slug := api.Slugify(title)
+	if slug == "" {
+		h.followup(s, i, fmt.Sprintf("The title %q produces an invalid agent name. Please use a title with at least one letter or number.", title))
+		return
+	}
+
+	// Step 0.5: Check for slug conflicts.
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	if err != nil {
+		h.log.Error("Failed to list agents for slug conflict check", "error", err, "project_id", link.ProjectID)
+		h.followup(s, i, "Failed to verify agent name availability. Please try again.")
+		return
+	}
+	for _, agent := range agents {
+		if agent.Slug == slug {
+			h.followup(s, i, fmt.Sprintf("An agent named **%s** already exists in this project. Please choose a different title.", slug))
+			return
+		}
+	}
+
+	// Step 0.6: Validate template (if provided).
+	templateName := getSubcommandOption(i, "template")
+	if templateName != "" {
+		templates, err := h.hubClient.ListTemplates(ctx, link.ProjectID)
+		if err != nil {
+			h.log.Error("Failed to list templates for validation", "error", err, "project_id", link.ProjectID)
+			h.followup(s, i, "Failed to verify template. Please try again.")
+			return
+		}
+		found := false
+		for _, t := range templates {
+			if t.Slug == templateName || t.Name == templateName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			h.followup(s, i, fmt.Sprintf("Template **%s** not found. Use autocomplete to pick from available templates, or omit the template to use the project default.", templateName))
+			return
+		}
+	}
+
+	// All validation passed. Placeholder for future phases (thread + agent creation).
+	templateMsg := ""
+	if templateName != "" {
+		templateMsg = fmt.Sprintf(" with template **%s**", templateName)
+	}
+	h.followup(s, i, fmt.Sprintf(
+		"Validation passed. Agent **%s** would be created in a new thread \"%s\"%s. (Thread creation coming in a future phase.)",
+		slug, title, templateMsg,
+	))
+
+	h.log.Info("Thread command validation passed",
+		"title", title,
+		"slug", slug,
+		"template", templateName,
+		"channel_id", channelID,
+		"project_id", link.ProjectID,
+		"discord_user_id", discordUserID,
+	)
 }
 
 // HandleSettings shows channel settings with toggle buttons.
