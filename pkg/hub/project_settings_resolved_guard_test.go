@@ -339,6 +339,19 @@ const resolvedGuardModulePrefix = "github.com/GoogleCloudPlatform/scion/"
 // the first person who genuinely needs an exception has a declared place to put
 // it, with the review that a diff to this list attracts — rather than reaching
 // for the easier fix of deleting the recursion.
+//
+// KEYED BY TYPE, NOT BY SITE. An entry here exempts EVERY site at which the type
+// is reached, including sites the failure message did not name. Read that
+// together with the dedup note in walkMarshalerBan: the message names only the
+// FIRST path a violating type was reached by, so the reviewer of an exception
+// diff is systematically shown a NARROWER blast radius than the exception
+// actually has. Measured instance: hubclient.ProjectResourceList is reached as
+// both .DefaultResources.Requests and .DefaultResources.Limits, and only
+// .Requests is ever named — exempting it on the strength of that message would
+// silently exempt .Limits too.
+//
+// If a per-site exemption is ever genuinely wanted, key this on (type, path) and
+// change the walk to match. Do not approximate it by exempting the type.
 var resolvedGuardMarshalerExceptions = map[reflect.Type]bool{}
 
 // assertNoCustomMarshaler fails if v, or ANY type reachable from it, implements
