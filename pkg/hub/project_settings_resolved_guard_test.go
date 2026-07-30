@@ -340,6 +340,26 @@ const resolvedGuardModulePrefix = "github.com/GoogleCloudPlatform/scion/"
 // it, with the review that a diff to this list attracts — rather than reaching
 // for the easier fix of deleting the recursion.
 //
+// THE WORD "SITE" BELOW IS A DEFINED TERM, AND THE DEFINITION IS NOT HERE. It is
+// stated once, in the failure message inside walkMarshalerBan — search this file
+// for "A SITE is". Deliberately not restated at this end: two copies of a
+// definition are two definitions and they drift, so the cost is paid as one jump
+// rather than as an eventual contradiction.
+//
+// WHICH USES IT GOVERNS. Every occurrence of the bare noun in this file, with
+// three fixed compounds excepted — "call site", "use site" and
+// "construction site" — which carry their ordinary programming meanings. Each is
+// kept whole on one line here and should stay that way: a compound split across
+// a line break reads as a bare noun to a line-based census, which is the only
+// instrument anyone has used on this file. That exception is an enumeration and
+// not a pattern: "per-site" below IS the defined term, and a new compound is a
+// new decision rather than an automatic exemption.
+//
+// WHY IT IS POINTED AT RATHER THAN LEFT IMPLICIT. A definition placed inside a
+// failure message reaches only a reader who has already triggered the assertion;
+// whoever edits the map below has not, and exempting a type is the most
+// consequential edit this file offers.
+//
 // KEYED BY TYPE, NOT BY SITE. An entry here exempts EVERY site at which the type
 // is reached, including sites the failure message did not name. Read that
 // together with the dedup note in walkMarshalerBan: the message names only the
@@ -1802,8 +1822,8 @@ func TestResolvedSettingsGuard_InstrumentControls(t *testing.T) {
 // file has looked at.
 //
 // The property was already held before this test existed — but only by the
-// compiler, incidentally, at the two sites that construct the map, with no
-// message attached. That is a worse position than it sounds, because the field
+// compiler, incidentally, at the map's two construction sites, with no message
+// attached. That is a worse position than it sounds, because the field
 // immediately above it, Project, has a named test explaining that retyping it is
 // the supported way to sneak an effective value into this response. The
 // asymmetry reads as "this class was considered and Settings was found not to
