@@ -163,6 +163,8 @@ func TestProjectSettingKeys_NoDrift(t *testing.T) {
 // across the package), this asserts the narrower and more useful property: the
 // source file is the *only* declaration site, so parsing it is sufficient.
 func TestProjectSettingKeys_NoConstantsOutsideSourceFile(t *testing.T) {
+	// "." is pkg/hub: go test runs in the package directory. The recipe in the
+	// build-tag test below is repo-root-relative, so this file uses both roots.
 	strays, sourceFileConsts, err := scanForStrayProjectSettingConsts(".")
 
 	// The scan reports instrument failures — nothing parsed, source file absent,
@@ -229,8 +231,6 @@ func writeGoFixture(t *testing.T, dir, name, content string) {
 // This is a coverage gap rather than a guard on a guard: the case would be worth
 // testing even if the third check did not exist, because "a file set with no test
 // file" is a distinct input the function makes a decision about.
-//
-// Probe by pt-rev-3.
 func TestScanForStrayProjectSettingConsts_NoTestFileIsAnError(t *testing.T) {
 	dir := t.TempDir()
 	writeGoFixture(t, dir, projectSettingsSourceFile,
@@ -271,24 +271,36 @@ func TestScanForStrayProjectSettingConsts_NoTestFileIsAnError(t *testing.T) {
 // The load-bearing demonstration is a probe planted in the real pkg/hub, where
 // a tag IS in force. It is not shippable — it mutates the package under test —
 // so it is written out here rather than cited, and it runs against nothing but
-// a clone of this repository:
+// a clone of this repository, from the repository root:
 //
 //	printf '//go:build !no_sqlite\n\npackage hub\n\nconst projectSettingProbe = "x"\n' \
 //	  > pkg/hub/probe_stray.go
-//	go list -tags no_sqlite -f '{{join .GoFiles "\n"}}' ./pkg/hub | grep -c probe_stray.go  # 0
-//	go list                 -f '{{join .GoFiles "\n"}}' ./pkg/hub | grep -c probe_stray.go  # 1
-//	go test -tags no_sqlite ./pkg/hub/ -run NoConstantsOutsideSourceFile                    # FAIL
+//	go list -tags no_sqlite -f '{{join .GoFiles "\n"}}' ./pkg/hub | grep -c probe_stray.go || true  # 0
+//	go list                 -f '{{join .GoFiles "\n"}}' ./pkg/hub | grep -c probe_stray.go || true  # 1
+//	go test -tags no_sqlite ./pkg/hub/ -run NoConstantsOutsideSourceFile                   || true  # FAIL
 //	rm pkg/hub/probe_stray.go
 //
 // The 0 says the compiler cannot see the file under the tag; the 1 is the
 // control proving the probe exists at all; the FAIL says the guard reports it
 // regardless. Both counts are needed — a single number cannot distinguish
-// "excluded by the tag" from "never planted". (Original probe: pt-rev-3,
-// PR 597.) This test is the shippable remainder.
+// "excluded by the tag" from "never planted". This test is the shippable
+// remainder.
 //
-// Run those as five separate commands. The expected 0 makes grep exit 1, so
-// under set -e or a && chain the block stops there — after the probe is planted
-// and before the line that removes it.
+// Every `|| true` is paste-safety, nothing more. Two of the three results
+// documented above are non-zero exits — grep -c exits 1 on the expected 0, and
+// go test exits 1 on the expected FAIL — so under set -e, or in a && chain, the
+// block stops at the first of them: after the probe is planted and before the
+// line that removes it. Annotating only the grep lines is not enough. That was
+// measured: it moves the abort down to the go test rather than removing it, and
+// the probe is stranded either way. The remaining one, on the line expecting 1,
+// covers the failure path — an unexpected 0 there exits 1 as well, and a
+// surprising result is the worst moment to skip the cleanup. A stranded
+// probe_stray.go is not a harmless leftover: it turns a plain
+// `go test ./pkg/hub/` red with a message about settings being silently dropped
+// on clone, which points at the guard rather than at the stray file. Nothing is
+// hidden by any of this. grep -c exits 1 whether go list succeeded, failed, or
+// ran in the wrong directory, so that status never distinguished them. The two
+// counts do.
 //
 // staticcheck's SA1019 recommends go/packages, and its advertised advantage is
 // that it applies build tags. For this guard that advantage is a defect. A
@@ -308,8 +320,6 @@ func TestScanForStrayProjectSettingConsts_NoTestFileIsAnError(t *testing.T) {
 // one NO build context satisfies — see the fixture below. With a realistic tag
 // it went green through the migration too, and the paragraph above would have
 // been describing this test as well.
-//
-// Probe by pt-rev-3.
 func TestScanForStrayProjectSettingConsts_SelectsFilesRegardlessOfBuildTags(t *testing.T) {
 	dir := t.TempDir()
 	writeGoFixture(t, dir, projectSettingsSourceFile,
