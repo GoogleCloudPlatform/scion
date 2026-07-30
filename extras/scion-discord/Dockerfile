@@ -16,7 +16,10 @@ COPY extras/scion-discord/ extras/scion-discord/
 
 # Build from the discord module directory
 WORKDIR /src/extras/scion-discord
-RUN CGO_ENABLED=0 go build -tags no_embed_web -o /discord-bot ./cmd/scion-plugin-discord
+COPY hack/version.sh /src/hack/version.sh
+RUN CGO_ENABLED=0 go build -tags no_embed_web \
+    -ldflags "$(sh /src/hack/version.sh)" \
+    -o /discord-bot ./cmd/scion-plugin-discord
 
 FROM gcr.io/distroless/static-debian12
 COPY --from=builder /discord-bot /discord-bot

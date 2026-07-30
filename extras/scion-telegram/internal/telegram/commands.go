@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // AgentInfo holds an agent's slug and current activity state.
@@ -329,6 +330,8 @@ func (h *CommandHandler) handleUnlink(msg *TGMessage) {
 func (h *CommandHandler) handleHelp(msg *TGMessage) {
 	chatID := msg.Chat.ID
 
+	versionLine := fmt.Sprintf("\n_Scion Telegram Integration — %s_", version.Get())
+
 	if isGroupChat(chatID) {
 		h.reply(chatID, "Available commands:\n"+
 			"/setup — Link this group to a project\n"+
@@ -337,7 +340,8 @@ func (h *CommandHandler) handleHelp(msg *TGMessage) {
 			"/settings — Configure group settings\n"+
 			"/unlink — Unlink this group from its project\n"+
 			"/help — Show this help message\n\n"+
-			"Send /help in a DM to the bot for account management commands.")
+			"Send /help in a DM to the bot for account management commands."+
+			versionLine)
 	} else {
 		h.reply(chatID, "Available commands (DM):\n"+
 			"/register — Link your Telegram account to your scion hub identity\n"+
@@ -345,7 +349,8 @@ func (h *CommandHandler) handleHelp(msg *TGMessage) {
 			"/status — Show linked groups and registration status\n"+
 			"/notifications — Manage per-agent notification subscriptions\n"+
 			"/help — Show this help message\n\n"+
-			"Add me to a group and use /setup there to link it to a scion project.")
+			"Add me to a group and use /setup there to link it to a scion project."+
+			versionLine)
 	}
 }
 

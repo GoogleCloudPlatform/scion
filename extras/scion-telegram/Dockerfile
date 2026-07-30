@@ -26,12 +26,14 @@ COPY cmd/ cmd/
 
 # Copy the telegram module.
 COPY extras/scion-telegram/ extras/scion-telegram/
+COPY hack/version.sh /src/hack/version.sh
 
 WORKDIR /src/extras/scion-telegram
 
 RUN go mod download
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w $(sh /src/hack/version.sh)" \
     -o /scion-plugin-telegram ./cmd/scion-plugin-telegram
 
 FROM gcr.io/distroless/static-debian12:nonroot
