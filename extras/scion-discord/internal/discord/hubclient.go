@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,23 +14,28 @@ import (
 
 // httpHubClient implements HubClient using HTTP calls to the Hub API.
 type httpHubClient struct {
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	httpClient *http.Client
+	hubURL         string
+	hmacKey        string
+	brokerID       string
+	httpClient     *http.Client
+	longHTTPClient *http.Client // no global timeout — used for long-running calls like CreateAgent
 }
 
 // NewHTTPHubClient creates a new HubClient that calls the Scion Hub API.
 // If httpClient is nil, a default client with a 15s timeout is used.
+// A separate longHTTPClient with no global timeout is created for long-running
+// operations like CreateAgent (which synchronously dispatches container create+start
+// and routinely takes 30–120s).
 func NewHTTPHubClient(hubURL, hmacKey, brokerID string, httpClient *http.Client) HubClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &httpHubClient{
-		hubURL:     hubURL,
-		hmacKey:    hmacKey,
-		brokerID:   brokerID,
-		httpClient: httpClient,
+		hubURL:         hubURL,
+		hmacKey:        hmacKey,
+		brokerID:       brokerID,
+		httpClient:     httpClient,
+		longHTTPClient: &http.Client{}, // no global timeout; per-call context controls deadline
 	}
 }
 
@@ -298,6 +304,84 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]
 	}
 
 	return templates, nil
+}
+
+// hubCreateAgentResponse mirrors the relevant fields of the hub's CreateAgentResponse.
+// The hub returns {"agent": {...}, "warnings": [...], ...}; we only need the agent.
+type hubCreateAgentResponse struct {
+	Agent struct {
+		Slug string `json:"slug"`
+		Name string `json:"name"`
+	} `json:"agent"`
+}
+
+func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req CreateAgentRequest, onBehalfOf string) (*CreateAgentResponse, error) {
+	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
+
+	slog.Debug("Creating agent via hub", "url", url, "name", req.Name, "template", req.Template, "on_behalf_of", onBehalfOf)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal create agent request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create agent request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Set the delegated identity header so the hub attributes the agent to the
+	// invoking user rather than leaving it ownerless.
+	if onBehalfOf != "" {
+		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
+	}
+
+	if err := c.signRequest(httpReq); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	// Use the long-timeout client — agent creation synchronously dispatches
+	// container create+start and routinely takes 30–120s. The default httpClient
+	// has a 15s timeout which would cause every create to fail.
+	resp, err := c.longHTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("create agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusCreated: // 201 — success
+		var result hubCreateAgentResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, fmt.Errorf("decode create agent response: %w", err)
+		}
+		return &CreateAgentResponse{
+			Slug: result.Agent.Slug,
+			Name: result.Agent.Name,
+		}, nil
+
+	case http.StatusOK: // 200 — hub resumed/started an existing agent; treat as conflict per design decision 7b
+		return nil, fmt.Errorf("an agent with this name already exists and was resumed by the hub — use a different title")
+
+	case http.StatusConflict: // 409 — slug conflict
+		return nil, fmt.Errorf("an agent with this slug already exists — try a different title")
+
+	case http.StatusNotFound: // 404 — template or project not found
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("not found: %s", he.Message)
+
+	case http.StatusBadRequest: // 400 — validation error
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("validation error: %s", he.Message)
+
+	case http.StatusForbidden: // 403 — permission denied
+		return nil, fmt.Errorf("you don't have permission to create agents in this project")
+
+	default:
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("create agent returned status %d: %s", resp.StatusCode, he.Message)
+	}
 }
 
 func (c *httpHubClient) signRequest(req *http.Request) error {

@@ -45,6 +45,18 @@ type Template struct {
 	Name string
 }
 
+// CreateAgentRequest holds the parameters for creating a new agent via the hub.
+type CreateAgentRequest struct {
+	Name     string `json:"name"`
+	Template string `json:"template,omitempty"`
+}
+
+// CreateAgentResponse holds the hub's response after creating an agent.
+type CreateAgentResponse struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
 // HubClient provides access to the Scion hub API for project and agent listing.
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
@@ -52,6 +64,11 @@ type HubClient interface {
 	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
 	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
 	ListTemplates(ctx context.Context, projectID string) ([]Template, error)
+
+	// CreateAgent POSTs /api/v1/projects/{projectId}/agents.
+	// onBehalfOf is a namespaced principal (e.g. "user:alice@example.com"); it is
+	// sent as the X-Scion-On-Behalf-Of header, NOT in the body.
+	CreateAgent(ctx context.Context, projectID string, req CreateAgentRequest, onBehalfOf string) (*CreateAgentResponse, error)
 }
 
 // CommandHandler manages Discord slash command registration and dispatch.
@@ -360,69 +377,116 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 	}()
 }
 
-// HandleAutocomplete handles autocomplete interactions for the "agent"
-// option. It looks up the channel link, fetches agents, and returns
-// matching choices.
+// HandleAutocomplete handles autocomplete interactions by dispatching on the
+// focused option. Supports "agent" (existing) and "template" (new) options.
 func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
 	if len(data.Options) == 0 {
 		return
 	}
 
-	sub := data.Options[0]
+	focused := focusedOption(data.Options[0])
+	if focused == nil {
+		return
+	}
 
-	for _, opt := range sub.Options {
-		if !opt.Focused {
-			continue
-		}
-		if opt.Name != "agent" {
-			continue
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
-		if err != nil || link == nil {
-			// No link — return empty choices.
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-				Data: &discordgo.InteractionResponseData{},
-			})
-			return
-		}
-
-		agents, err := h.getAgents(ctx, link.ProjectID)
-		if err != nil {
-			h.log.Debug("Failed to get agents for autocomplete", "error", err)
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-				Data: &discordgo.InteractionResponseData{},
-			})
-			return
-		}
-
-		prefix := strings.ToLower(opt.StringValue())
-		var choices []*discordgo.ApplicationCommandOptionChoice
-
-		for _, slug := range agents {
-			if strings.HasPrefix(strings.ToLower(slug), prefix) {
-				choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
-					Name:  slug,
-					Value: slug,
-				})
-			}
-			if len(choices) >= 25 {
-				break
-			}
-		}
-
+	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
+	if err != nil || link == nil {
+		// No link — return empty choices.
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-			Data: &discordgo.InteractionResponseData{Choices: choices},
+			Data: &discordgo.InteractionResponseData{},
 		})
 		return
 	}
+
+	var choices []*discordgo.ApplicationCommandOptionChoice
+	switch focused.Name {
+	case "agent":
+		choices = h.completeAgents(ctx, link.ProjectID, focused.StringValue())
+	case "template":
+		choices = h.completeTemplates(ctx, link.ProjectID, focused.StringValue())
+	default:
+		// Unknown option — return empty choices.
+	}
+
+	// Discord hard-caps at 25 choices.
+	if len(choices) > 25 {
+		choices = choices[:25]
+	}
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+		Data: &discordgo.InteractionResponseData{Choices: choices},
+	})
+}
+
+// focusedOption returns the option with Focused==true in the subcommand, or nil.
+func focusedOption(sub *discordgo.ApplicationCommandInteractionDataOption) *discordgo.ApplicationCommandInteractionDataOption {
+	for _, opt := range sub.Options {
+		if opt.Focused {
+			return opt
+		}
+	}
+	return nil
+}
+
+// completeAgents returns autocomplete choices for the "agent" option, filtered
+// by the typed prefix.
+func (h *CommandHandler) completeAgents(ctx context.Context, projectID, typed string) []*discordgo.ApplicationCommandOptionChoice {
+	agents, err := h.getAgents(ctx, projectID)
+	if err != nil {
+		h.log.Debug("Failed to get agents for autocomplete", "error", err)
+		return nil
+	}
+
+	prefix := strings.ToLower(typed)
+	var choices []*discordgo.ApplicationCommandOptionChoice
+	for _, slug := range agents {
+		if strings.HasPrefix(strings.ToLower(slug), prefix) {
+			choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+				Name:  slug,
+				Value: slug,
+			})
+		}
+		if len(choices) >= 25 {
+			break
+		}
+	}
+	return choices
+}
+
+// completeTemplates returns autocomplete choices for the "template" option,
+// filtered by the typed prefix.
+func (h *CommandHandler) completeTemplates(ctx context.Context, projectID, typed string) []*discordgo.ApplicationCommandOptionChoice {
+	templates, err := h.hubClient.ListTemplates(ctx, projectID)
+	if err != nil {
+		h.log.Debug("Failed to get templates for autocomplete", "error", err)
+		return nil
+	}
+
+	prefix := strings.ToLower(typed)
+	var choices []*discordgo.ApplicationCommandOptionChoice
+	for _, t := range templates {
+		label := t.Name
+		if label == "" {
+			label = t.Slug
+		}
+		if strings.HasPrefix(strings.ToLower(t.Slug), prefix) ||
+			strings.HasPrefix(strings.ToLower(label), prefix) {
+			choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+				Name:  label,
+				Value: t.Slug,
+			})
+		}
+		if len(choices) >= 25 {
+			break
+		}
+	}
+	return choices
 }
 
 // helpText returns the help message listing available commands.
