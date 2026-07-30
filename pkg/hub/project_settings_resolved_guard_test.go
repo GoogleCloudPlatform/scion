@@ -66,6 +66,207 @@ var (
 	expectedResolvedEntryFields   = []string{"hubDefault", "projectSet", "projectValue"}
 )
 
+// resolvedResponseTypes enumerates every type whose fields land directly in the
+// resolved-settings JSON object. There are exactly four, and they are listed
+// rather than described, because a rule stated as "all the response types" is
+// not checkable — the next reader cannot tell whether a type they are looking
+// at is in the set:
+//
+//   - hub.ResolvedProjectSettings        — the wrapper the handler marshals
+//   - hub.ResolvedProjectSetting         — one entry in its Settings map
+//   - hubclient.ResolvedProjectSettings  — the client mirror of the wrapper
+//   - hubclient.ResolvedProjectSetting   — the client mirror of the entry
+//
+// hubclient.ProjectSettings is deliberately NOT here. It is carried whole
+// behind the "project" key rather than promoted into this object, it has
+// nineteen fields that change for unrelated reasons, and it legitimately uses
+// omitempty throughout. The wire-level denylist in
+// project_settings_resolved_test.go is what looks inside it.
+//
+// COVERAGE ARGUMENT — why the checks applied to these four are the set they
+// are. This guard reads the keys encoding/json emits for ONE constructed value.
+// That is a bound on real responses only if nothing can suppress a key for that
+// value while emitting it for another. There are THREE ways that can happen,
+// and the enumeration is the whole argument — "we handled the obvious ones" is
+// not a soundness claim:
+//
+//  1. `omitempty` drops the field when it is zero.
+//     -> assertNoPromotedOmitEmpty
+//  2. a nil EMBEDDED STRUCT POINTER drops every field it promotes, with no
+//     tag and no marshaller involved.
+//     -> assertNoEmbeddedStructPointer
+//  3. a custom MarshalJSON declines to write the key.
+//     -> assertNoCustomMarshaler
+//
+// Close all three and a zero-value marshal is PROVABLY complete, which is a
+// stronger claim than the incidental completeness this guard had before.
+//
+// Each was measured, and the list reached three by being wrong at two. Route 2
+// was found by review after the first version of this argument shipped claiming
+// the enumeration was complete at two:
+//
+//	type shape struct { ProjectSet bool `json:"projectSet"`; *embed }
+//	type embed struct { Winner string `json:"winner"` }   // note: no omitempty
+//
+//	ZERO      -> {"projectSet":false}
+//	POPULATED -> {"projectSet":true,"winner":"sneaked"}
+//
+// Invisible to an omitempty ban (no tag to find), invisible to a marshaller ban
+// (no marshaller), and green under the exact-set assertion. A NAMED pointer
+// field is fine and is not what this rejects: `Extra *embed json:"extra"`
+// marshals to {"projectSet":false,"extra":null}, because it nests under a key
+// instead of promoting.
+//
+// WHY PROHIBITION RATHER THAN A POPULATED FIXTURE. Two different things get
+// called "just populate the value first", and only one of them is ruled out:
+//
+//   - Filling REFLECTIVELY cannot reach route 2. FieldByName through a nil
+//     embedded pointer panics outright with "reflect: indirection through nil
+//     pointer to embedded struct", and no single traversal handles embedded
+//     values and embedded pointers both.
+//   - Asserting on a fully-populated HAND-CONSTRUCTED value does work, on all
+//     three routes. Nothing reflects, so the embedded pointer is simply non-nil
+//     because the literal made it so. This is a real alternative and it is not
+//     what the comment above should be read as excluding.
+//
+// Prohibition is chosen over that alternative on DRIFT, not on reach. A
+// populated fixture is a hand-maintained copy of the type: add a field, forget
+// to populate it, and the guard silently goes blind with nothing failing. That
+// is the same defect class the descriptor derivation in this commit removes, so
+// spending it here to save it there would be a wash at best. The prohibition is
+// structural — it cannot rot, because there is nothing to keep in sync. Its
+// real cost is that it constrains future code and cannot express a
+// legitimately-conditional key; if that day comes, the populated fixture is the
+// thing to reach for, and this paragraph is why.
+//
+// WHAT THE WALKS DO WITH EACH ANONYMOUS CASE. The three differ, and one loop
+// that treats them alike is wrong:
+//
+//   - embedded VALUE struct  -> RECURSE. Its fields promote, so its tags and
+//     its own embedded fields are in scope.
+//   - embedded struct POINTER -> REJECT, and never dereference. Dereferencing
+//     would inspect the target's tags, find them clean, and pass the shape.
+//   - embedded INTERFACE (exported) -> LEAVE. It does not flatten; it becomes a
+//     stable named key. Measured: {"projectSet":false,"PIface":null} zero,
+//     {"projectSet":true,"PIface":{...}} populated. The value changes, the key
+//     does not, and the key is all the exact-set assertion reads.
+//
+// The recursion is load-bearing, because route 2 is depth-recursive and hides
+// one level under an embedded value, where a top-level scan does not look:
+//
+//	type deep struct { Winner string `json:"winner"` }
+//	type mid  struct { *deep }                                  // pointer
+//	type outer struct { ProjectSet bool `json:"projectSet"`; mid } // VALUE
+//
+//	ZERO      -> {"projectSet":false}
+//	POPULATED -> {"projectSet":true,"winner":"sneaked"}
+//
+// outer's only anonymous field is `mid`, a struct VALUE — so a check phrased as
+// "no anonymous pointer fields on the four types" passes this. Measured against
+// assertNoEmbeddedStructPointer, it is rejected at path "mid.deep".
+func resolvedResponseTypes() []any {
+	return []any{
+		ResolvedProjectSettings{},
+		ResolvedProjectSetting{},
+		hubclient.ResolvedProjectSettings{},
+		hubclient.ResolvedProjectSetting{},
+	}
+}
+
+// assertNoEmbeddedStructPointer fails if v, or anything embedded in it, has an
+// anonymous pointer-to-struct field.
+//
+// This is intervener 2, and it is the one that was missing from the first
+// version of this argument. An embedded struct POINTER promotes its fields onto
+// the parent object exactly like an embedded value does — but when the pointer
+// is nil, encoding/json emits none of them. No `omitempty` is involved and no
+// custom marshaller is involved, so the other two checks are both blind to it,
+// and a guard reading a zero value sees a clean object:
+//
+//	ZERO      -> {"projectSet":false}
+//	POPULATED -> {"projectSet":true,"winner":"sneaked"}
+//
+// A NAMED pointer field is fine and is not rejected here: it nests under its
+// own key and marshals to `null` when nil, so the key is still present and the
+// exact-set assertion still sees it. The problem is specific to promotion.
+//
+// Rejecting rather than handling is deliberate. A fill cannot rescue this shape
+// — FieldByName through a nil embedded pointer panics with "reflect:
+// indirection through nil pointer to embedded struct" — and there is no single
+// reflective traversal that copes with embedded values and embedded pointers
+// both. When no traversal is sound, prohibiting the shape is the only honest
+// move left.
+func assertNoEmbeddedStructPointer(t *testing.T, v any) {
+	t.Helper()
+
+	typ := reflect.TypeOf(v)
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	require.Equal(t, reflect.Struct, typ.Kind())
+
+	var walk func(typ reflect.Type, path string)
+	walk = func(typ reflect.Type, path string) {
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			tag := field.Tag.Get("json")
+			if tag == "-" {
+				continue
+			}
+			if !field.Anonymous || strings.Split(tag, ",")[0] != "" {
+				continue // named field: nests under a key, always emitted
+			}
+
+			assert.NotEqualf(t, reflect.Pointer, field.Type.Kind(),
+				"%s%s is an embedded struct POINTER, which is not allowed on the "+
+					"resolved-settings response types.\n"+
+					"Its fields are promoted onto this object, so when it is nil the "+
+					"encoder emits none of them and the exact-set shape guard — which "+
+					"reads a zero value — sees nothing missing. No omitempty and no "+
+					"custom marshaller are involved, so neither of the other two checks "+
+					"can see it either.\n"+
+					"Give it a name and a json tag if you need it: a named pointer nests "+
+					"under its own key and marshals to null, which the guard can see.",
+				path, field.Name)
+
+			if field.Type.Kind() == reflect.Struct {
+				walk(field.Type, path+field.Name+".")
+			}
+		}
+	}
+	walk(typ, "")
+}
+
+// assertNoCustomMarshaler fails if v implements json.Marshaler.
+//
+// A custom marshaller can emit a key conditionally — on a field's value, on the
+// time of day, on anything — so no guard that inspects a test-constructed value
+// can bound what it writes. Measured on the real type, a marshaller emitting
+// "winner" only when ProjectSet was true left every guard in this file green
+// while the field reached the wire in production.
+//
+// The prohibition is cheap because these are plain data types with no reason to
+// hand-roll encoding. If one ever genuinely needs a custom marshaller, this
+// assertion is the right place to stop and reconsider: the shape guard would
+// have to be rewritten to drive the marshaller across enough inputs to
+// enumerate its outputs, which is a much larger and less reliable test than
+// this one.
+func assertNoCustomMarshaler(t *testing.T, v any) {
+	t.Helper()
+
+	marshaler := reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	typ := reflect.TypeOf(v)
+
+	assert.Falsef(t, typ.Implements(marshaler) || reflect.PointerTo(typ).Implements(marshaler),
+		"%s implements json.Marshaler, which this guard cannot see through.\n"+
+			"A custom marshaller decides at runtime which keys to write, so the exact-set "+
+			"assertion below — which reads what the encoder emits for one constructed "+
+			"value — stops being a bound on what real responses contain. This was measured, "+
+			"not theorised: a marshaller that emitted \"winner\" only for populated entries "+
+			"put that field on the wire with every guard in this file green.\n"+
+			"If you need a custom marshaller here, this test needs rethinking first.", typ)
+}
+
 // jsonWireNames returns the JSON object keys encoding/json ACTUALLY emits for
 // v. It marshals rather than reflecting, because the wire — not the tag list —
 // is the contract, and the two are not the same set.
@@ -76,12 +277,11 @@ var (
 // added via an embedded unexported struct reached a live 200 response named
 // "winner" with the entire suite for this endpoint green.
 //
-// `omitempty` would defeat this helper: it drops a zero-valued field, so a key
-// could exist on the type, be populated by the handler, reach the wire, and
-// still be missing from the set this helper computes for a test-constructed
-// value. Callers must therefore pair it with assertNoPromotedOmitEmpty, which
-// removes the possibility rather than trying to dodge it. See that function for
-// why the obvious alternative — populating the value first — does not work.
+// This helper reports on ONE value. That is only a bound on what real
+// responses contain if nothing can suppress a key for the value it is given —
+// so callers must pair it with both assertNoPromotedOmitEmpty and
+// assertNoCustomMarshaler. Neither is optional and neither implies the other;
+// resolvedResponseTypes carries the coverage argument.
 func jsonWireNames(t *testing.T, v any) []string {
 	t.Helper()
 
@@ -108,13 +308,29 @@ func jsonWireNames(t *testing.T, v any) []string {
 // second half of the fix — without it the wire guard has a hole the same shape
 // as the one it was written to close.
 //
-// THE ALTERNATIVE WAS TRIED AND MEASURED. The obvious way to beat `omitempty`
-// is to populate the value before marshalling it, reflectively so that fields
-// the test does not know about are filled too. That does not work, and it fails
-// on precisely the case this guard exists for: a field promoted from an
-// embedded UNEXPORTED struct is not settable through reflect (CanSet is false,
-// and there is no way around it short of unsafe). Measured on the real type,
-// with the encoder as the judge:
+// THE ALTERNATIVE WAS TRIED AND MEASURED, AND THE FIRST EXPLANATION OF WHY IT
+// FAILED WAS WRONG. The obvious way to beat `omitempty` is to populate the
+// value before marshalling, reflectively, so that fields the test does not know
+// about are filled too.
+//
+// The correct statement is about the TRAVERSAL, not about reflect's powers.
+// Walking fields by index — Field(i), recursing into embedded types — reaches
+// the embedded struct FIELD, whose CanSet is false, so the fill silently skips
+// everything promoted through it. Reaching the same data by name is a different
+// story: FieldByName("Winner") on an embedded unexported VALUE struct returns
+// CanSet=true and SetString works, with no unsafe. Measured:
+//
+//	Field(i) recursion          -> CanSet=false, skipped
+//	FieldByName("Winner")       -> CanSet=true, SetString succeeds
+//
+// So "reflect cannot set it" is false, and an earlier version of this comment —
+// and of the commit message that introduced it — said exactly that. What is
+// true is that the by-index fill does not reach it. A by-name fill would.
+//
+// The fill is still not used here, for the reason in resolvedResponseTypes: it
+// cannot address route 2 at all, since FieldByName through a nil embedded
+// pointer panics. Prohibiting the shapes is sound; out-constructing them is
+// not. Measured on the real type, with the encoder as the judge:
 //
 //	type ResolvedProjectSetting struct { ...; ctrlSneak }
 //	type ctrlSneak struct { Winner string `json:"winner,omitempty"` }
@@ -128,12 +344,17 @@ func jsonWireNames(t *testing.T, v any) []string {
 // closing it, which is the same failure as a comment that explains why an
 // unsound skip is safe.
 //
-// Banning `omitempty` outright is the honest version, and it costs nothing
-// here: this response never omits keys by design. Every registered setting
-// appears every time, and an unset projectValue is explicit `null` rather than
-// a missing key, precisely so a client cannot read "absent" out of silence.
-// `omitempty` on these types would contradict the documented contract before it
-// ever troubled a test.
+// Banning `omitempty` outright is the honest version of that half, and it costs
+// nothing here: this response never omits keys by design. Every registered
+// setting appears every time, and an unset projectValue is explicit `null`
+// rather than a missing key, precisely so a client cannot read "absent" out of
+// silence. `omitempty` on these types would contradict the documented contract
+// before it ever troubled a test.
+//
+// HALF is the operative word. This closes the tag route and nothing else; a
+// custom marshaller suppresses keys without any tag being involved, and this
+// function is blind to it. assertNoCustomMarshaler closes that one. See
+// resolvedResponseTypes for why both are needed and neither implies the other.
 func assertNoPromotedOmitEmpty(t *testing.T, v any) {
 	t.Helper()
 
@@ -155,18 +376,19 @@ func assertNoPromotedOmitEmpty(t *testing.T, v any) {
 
 			// An embedded struct with no tag NAME has its fields promoted into
 			// this object, so its tags are this object's tags. reflect can read
-			// the type of an unexported embedded field even though it cannot
-			// set its value, which is what lets this check reach where a
-			// reflective fill could not.
-			if field.Anonymous && parts[0] == "" {
-				ft := field.Type
-				for ft.Kind() == reflect.Pointer {
-					ft = ft.Elem()
-				}
-				if ft.Kind() == reflect.Struct {
-					walk(ft, path+field.Name+".")
-					continue
-				}
+			// the TYPE of an unexported embedded field regardless of whether it
+			// could set a value there, which is what lets this check reach
+			// fields a by-index fill skips.
+			//
+			// Deliberately NOT dereferencing pointers. An earlier version did,
+			// in order to walk through them — which meant it accepted an
+			// embedded POINTER, the one shape whose promoted keys vanish
+			// wholesale from a zero value. That shape is rejected outright by
+			// assertNoEmbeddedStructPointer; dereferencing here would inspect
+			// its tags and pronounce it clean.
+			if field.Anonymous && parts[0] == "" && field.Type.Kind() == reflect.Struct {
+				walk(field.Type, path+field.Name+".")
+				continue
 			}
 
 			for _, opt := range parts[1:] {
@@ -395,18 +617,26 @@ func TestResolvedSettingsResponseShape_NoEffectiveValue(t *testing.T) {
 	// one obvious place — the guard is meant to be a speed bump that forces an
 	// argument, not a wall that gets deleted by the first person it
 	// inconveniences.
-	// Step 1: no promoted field may hide from the encoder. Without this the
-	// step below can be defeated by six lines; see assertNoPromotedOmitEmpty.
-	for _, v := range []any{
-		ResolvedProjectSettings{}, ResolvedProjectSetting{},
-		hubclient.ResolvedProjectSettings{}, hubclient.ResolvedProjectSetting{},
-	} {
-		assertNoPromotedOmitEmpty(t, v)
+	// Step 1 is what makes step 2 sound. These are not three good ideas: they
+	// are an enumeration of every way a field can exist on these types and
+	// still be missing from a marshalled zero value, and step 2 is complete
+	// only because the enumeration is. The list was wrong at two until review
+	// found the third — see the coverage argument on resolvedResponseTypes,
+	// which records what each one is and how it was measured.
+	for _, v := range resolvedResponseTypes() {
+		assertNoPromotedOmitEmpty(t, v)     // intervener 1: tags
+		assertNoEmbeddedStructPointer(t, v) // intervener 2: type structure
+		assertNoCustomMarshaler(t, v)       // intervener 3: behaviour
 	}
 
-	// Step 2: the encoder's actual output is exactly the expected set. Safe on
-	// zero values only because of step 1 — encoding/json emits a key for every
-	// field it knows about unless omitempty tells it not to.
+	// Step 2: the encoder's actual output is exactly the expected set.
+	//
+	// A ZERO value is sufficient here, and that is a conclusion rather than a
+	// convenience. encoding/json emits a key for every exported field it knows
+	// about; the only two things that can suppress one are `omitempty` (step
+	// 1a) and a custom marshaller choosing not to write it (step 1b). With both
+	// prohibited, what the encoder emits for the zero value IS the complete key
+	// set.
 	assert.Equal(t, expectedResolvedWrapperFields,
 		jsonWireNames(t, ResolvedProjectSettings{}),
 		"hub.ResolvedProjectSettings"+rationale)
