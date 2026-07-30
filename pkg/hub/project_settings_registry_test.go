@@ -200,6 +200,12 @@ func TestScanForStrayProjectSettingConsts_EmptyDirIsAnError(t *testing.T) {
 
 	require.Error(t, err,
 		"scanning an empty directory returned a clean result; the guard is a no-op")
+	// Pin which guard fired, for the same reason the missing-test-file case does:
+	// an empty directory must stop at the no-.go-files check, and asserting only
+	// that *an* error came back would also accept an error from a later guard or
+	// from a genuine instrument failure.
+	assert.Contains(t, err.Error(), "no .go files in",
+		"the scan errored, but not on the empty-directory condition this control exists to reach")
 	assert.Empty(t, strays)
 	assert.Zero(t, sourceFileConsts)
 }
@@ -240,7 +246,11 @@ func TestScanForStrayProjectSettingConsts_NoTestFileIsAnError(t *testing.T) {
 	// Pin which guard fired. Without this the test would also pass if the scan
 	// failed for one of the two earlier reasons, which are already covered and
 	// are not what this case is about.
-	assert.Contains(t, err.Error(), "_test.go",
+	// The full phrase, not the bare "_test.go" substring: both earlier guards
+	// interpolate dir into their messages, so the loose form's discriminating
+	// power depends on t.TempDir() never containing "_test.go". It does not
+	// today, and the tighter string costs nothing to stop depending on it.
+	assert.Contains(t, err.Error(), "is a _test.go file",
 		"the scan errored, but not on the missing-test-file condition this case exists to reach")
 	assert.Empty(t, strays)
 	assert.Zero(t, sourceFileConsts)
@@ -258,13 +268,27 @@ func TestScanForStrayProjectSettingConsts_NoTestFileIsAnError(t *testing.T) {
 // constraint that is actually in force, and a reader who sees //go:build in a
 // fixture will assume it does.
 //
-// The load-bearing demonstration was a probe planted in the real pkg/hub, where
-// the tag WAS in force: go list reported 0 GoFiles for that file under
-// -tags no_sqlite and 1 untagged, proving the compiler could not see it, and the
-// guard reported it as a stray anyway. That probe is not shippable — it requires
-// mutating the package under test — so it lives as a reproduction in
-// reviews/pr597-unreviewed-paths-review.md (pt-rev-3). This test is the
-// shippable remainder.
+// The load-bearing demonstration is a probe planted in the real pkg/hub, where
+// a tag IS in force. It is not shippable — it mutates the package under test —
+// so it is written out here rather than cited, and it runs against nothing but
+// a clone of this repository:
+//
+//	printf '//go:build !no_sqlite\n\npackage hub\n\nconst projectSettingProbe = "x"\n' \
+//	  > pkg/hub/probe_stray.go
+//	go list -tags no_sqlite -f '{{join .GoFiles "\n"}}' ./pkg/hub | grep -c probe_stray.go  # 0
+//	go list                 -f '{{join .GoFiles "\n"}}' ./pkg/hub | grep -c probe_stray.go  # 1
+//	go test -tags no_sqlite ./pkg/hub/ -run NoConstantsOutsideSourceFile                    # FAIL
+//	rm pkg/hub/probe_stray.go
+//
+// The 0 says the compiler cannot see the file under the tag; the 1 is the
+// control proving the probe exists at all; the FAIL says the guard reports it
+// regardless. Both counts are needed — a single number cannot distinguish
+// "excluded by the tag" from "never planted". (Original probe: pt-rev-3,
+// PR 597.) This test is the shippable remainder.
+//
+// Run those as five separate commands. The expected 0 makes grep exit 1, so
+// under set -e or a && chain the block stops there — after the probe is planted
+// and before the line that removes it.
 //
 // staticcheck's SA1019 recommends go/packages, and its advertised advantage is
 // that it applies build tags. For this guard that advantage is a defect. A
@@ -274,10 +298,16 @@ func TestScanForStrayProjectSettingConsts_NoTestFileIsAnError(t *testing.T) {
 //
 // Without this test the property is preserved but UNEXERCISED. Every //go:build
 // !no_sqlite file in pkg/hub today is a _test.go file, and test files are exempt
-// from the constant check regardless, so nothing on the current tree would go red
-// if tag-blindness were lost: a migration to go/packages would compile, pass every
-// other test in this file, and reopen the data-loss path in silence. Correct
-// behaviour that nothing would notice losing is indistinguishable from luck.
+// from the constant check regardless, so nothing else on the current tree would
+// go red if tag-blindness were lost: a migration to go/packages would compile,
+// pass every other test in this file, and reopen the data-loss path in silence.
+// Correct behaviour that nothing would notice losing is indistinguishable from
+// luck.
+//
+// That this test is the exception depends entirely on the fixture's tag being
+// one NO build context satisfies — see the fixture below. With a realistic tag
+// it went green through the migration too, and the paragraph above would have
+// been describing this test as well.
 //
 // Probe by pt-rev-3.
 func TestScanForStrayProjectSettingConsts_SelectsFilesRegardlessOfBuildTags(t *testing.T) {
@@ -286,14 +316,23 @@ func TestScanForStrayProjectSettingConsts_SelectsFilesRegardlessOfBuildTags(t *t
 		"package hub\n\nconst projectSettingProbeSource = \"scion.io/probe-source\"\n")
 	// Satisfies the test-file requirement without declaring anything.
 	writeGoFixture(t, dir, "probe_selection_test.go", "package hub\n")
-	// The stray: excluded from the no_sqlite build exactly as the real !no_sqlite
-	// files in pkg/hub are, so a tag-aware loader would not report it.
+	// The stray carries a tag NOTHING EVER SETS, and the choice is load-bearing.
+	// The obvious tag, !no_sqlite, is the real in-tree shape and is why this test
+	// exists — but it is SATISFIED in the default build context, so a tag-aware
+	// loader selects the file anyway and this test stays green through exactly
+	// the migration it warns about. Measured, both tag modes including the one
+	// CI runs: with !no_sqlite an ambient build.Default.MatchFile selection is
+	// GREEN (a miss); with the tag below it is RED, while the shipped tag-blind
+	// scan stays GREEN either way. The fixture's job is detection, not
+	// resemblance.
 	writeGoFixture(t, dir, "tagged_stray.go",
-		"//go:build !no_sqlite\n\npackage hub\n\n"+
+		"//go:build scion_never_defined_tag\n\npackage hub\n\n"+
 			"const projectSettingTaggedStray = \"scion.io/tagged-stray\"\n")
 
 	strays, sourceFileConsts, err := scanForStrayProjectSettingConsts(dir)
-	require.NoError(t, err)
+	require.NoError(t, err,
+		"the scan errored on a three-file fixture it should handle; the assertions below "+
+			"cannot distinguish a clean tree from a scan that never ran")
 
 	// Positive control, same reason as in the guard above: a zero here means the
 	// scan stopped parsing, not that the planted file was judged clean.
