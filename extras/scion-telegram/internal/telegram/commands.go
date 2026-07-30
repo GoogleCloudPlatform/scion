@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -330,7 +331,7 @@ func (h *CommandHandler) handleUnlink(msg *TGMessage) {
 func (h *CommandHandler) handleHelp(msg *TGMessage) {
 	chatID := msg.Chat.ID
 
-	versionLine := fmt.Sprintf("\n\n_Scion Telegram Integration — %s_", version.Get())
+	versionLine := fmt.Sprintf("\n\n<i>Scion Telegram Integration — %s</i>", html.EscapeString(version.Get()))
 
 	var text string
 	if isGroupChat(chatID) {
@@ -356,7 +357,7 @@ func (h *CommandHandler) handleHelp(msg *TGMessage) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := h.api.SendMessage(ctx, chatID, text, "Markdown"); err != nil {
+	if _, err := h.api.SendMessage(ctx, chatID, text, "HTML"); err != nil {
 		h.log.Error("Failed to send help reply", "chat_id", chatID, "error", err)
 	}
 }
