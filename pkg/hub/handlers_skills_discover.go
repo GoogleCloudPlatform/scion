@@ -15,12 +15,16 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // skillDiscoverKind is the resourceImportKind used to scan a fetched remote
@@ -61,10 +65,17 @@ type DiscoveredSkill struct {
 
 // DiscoverSkillsResponse is the response body for
 // POST /api/v1/skills/discover-directory.
+// Skipped names the child directories that were passed over because they had no
+// SKILL.md, so the UI can explain why a folder the user expected is missing.
 type DiscoverSkillsResponse struct {
-	Skills []DiscoveredSkill `json:"skills"`
-	Count  int               `json:"count"`
+	Skills  []DiscoveredSkill `json:"skills"`
+	Skipped []string          `json:"skipped,omitempty"`
+	Count   int               `json:"count"`
 }
+
+// maxDiscoverBodyBytes caps the request body. The body is two short strings;
+// anything larger is a mistake or an attempt to make the hub buffer garbage.
+const maxDiscoverBodyBytes = 64 << 10
 
 // handleSkillsDiscoverDirectory handles POST /api/v1/skills/discover-directory:
 // it fetches a remote GitHub directory, scans it for subdirectories containing
@@ -81,30 +92,15 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 
 	ctx := r.Context()
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxDiscoverBodyBytes)
+
 	var req DiscoverSkillsRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
 
-	// Auth: agents need project:agent:create and may only discover for their own
-	// project (mirrors handleProjectDiscoverTemplates); users need only to be
-	// authenticated, since discovery reads a public-or-project-credentialed
-	// GitHub URL and persists nothing.
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if !agentIdent.HasScope(ScopeAgentCreate) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
-			return
-		}
-		if req.ProjectID != "" && req.ProjectID != agentIdent.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover skills within their own project", nil)
-			return
-		}
-		// Scope the fetch to the agent's own project even when the caller
-		// omitted projectId, so project GitHub credentials still apply.
-		req.ProjectID = agentIdent.ProjectID()
-	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
+	if !s.authorizeSkillDiscover(ctx, w, &req) {
 		return
 	}
 
@@ -112,28 +108,60 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "sourceUrl is required", nil)
 		return
 	}
-	if !config.IsRemoteURI(req.SourceURL) {
+	// Skills are only resolvable from GitHub, so anything else is a mistake or an
+	// attack. config.IsRemoteURI is deliberately not used here: it also admits
+	// rclone connection strings (":local:/" would have the hub copy its own
+	// filesystem) and bare http:// URLs (an SSRF vector against hub-internal
+	// hosts). Neither can ever yield a usable skill URI.
+	if u, parseErr := url.Parse(req.SourceURL); parseErr != nil ||
+		u.Scheme != "https" || !strings.EqualFold(u.Host, "github.com") {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"sourceUrl must be a remote URI (http://, https://, or rclone)", nil)
+			"sourceUrl must be an https://github.com/... URL", nil)
 		return
 	}
 
-	cachePath, err := s.fetchRemoteForImport(ctx, req.ProjectID, req.SourceURL)
+	// A skill URI may carry a ?token=SECRET_NAME suffix naming the secret used to
+	// resolve it. discoverResourceDirs builds child URLs by plain concatenation
+	// ("<sourceURL>/<child>"), which would bury the query mid-path and make every
+	// child unnormalizable. Split it off here and re-attach it per skill below.
+	// The suffix is also irrelevant to the fetch itself, which authenticates from
+	// project credentials, so the fetch gets the bare URL too.
+	base, tokenSuffix := req.SourceURL, ""
+	if i := strings.Index(req.SourceURL, "?"); i >= 0 {
+		base, tokenSuffix = req.SourceURL[:i], req.SourceURL[i:]
+	}
+
+	cachePath, err := s.fetchRemoteForImport(ctx, req.ProjectID, base)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "discover_failed", "Failed to fetch remote skills: "+err.Error(), nil)
+		// Never echo err: the sparse-checkout fallback shells out to git with a
+		// "https://x-access-token:<TOKEN>@github.com/..." remote, and git's stderr
+		// embeds that URL verbatim on failure.
+		s.resourceLog.Warn("skill discovery fetch failed",
+			"sourceURL", base, "projectID", req.ProjectID, "error", err)
+		writeError(w, http.StatusBadRequest, "discover_failed",
+			"Failed to fetch remote skills; check the URL and repository access", nil)
 		return
 	}
 	defer func() { _ = os.RemoveAll(cachePath) }()
 
-	dirs, _, err := discoverResourceDirs(cachePath, req.SourceURL, skillDiscoverKind)
+	dirs, skippedDirs, err := discoverResourceDirs(cachePath, base, skillDiscoverKind)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "discover_failed", err.Error(), nil)
+		s.resourceLog.Warn("skill discovery scan failed", "sourceURL", base, "error", err)
+		writeError(w, http.StatusBadRequest, "discover_failed",
+			"Failed to scan skills at the given URL", nil)
 		return
 	}
 
 	skills := make([]DiscoveredSkill, 0, len(dirs))
 	for _, d := range dirs {
-		uri, normErr := api.NormalizeSkillURI(d.sourceURL)
+		// Reject names that would inject URI syntax. A repo directory literally
+		// named "helper?token=PROD_SECRET" would otherwise smuggle a token
+		// parameter into the skill URI we hand back to the client.
+		if strings.ContainsAny(d.name, "?#&=") || strings.Contains(d.name, "..") {
+			s.resourceLog.Warn("skipping discovered skill with unsafe directory name", "name", d.name)
+			continue
+		}
+		uri, normErr := api.NormalizeSkillURI(d.sourceURL + tokenSuffix)
 		if normErr != nil {
 			// A directory whose URL cannot be expressed as a skill URI is not
 			// addressable, so it cannot be added. Drop it rather than failing
@@ -147,9 +175,80 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 
 	if len(skills) == 0 {
 		writeError(w, http.StatusBadRequest, "discover_failed",
-			"no skills found at "+req.SourceURL, nil)
+			"no skills found at "+base, nil)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, DiscoverSkillsResponse{Skills: skills, Count: len(skills)})
+	skipped := make([]string, 0, len(skippedDirs))
+	for _, sd := range skippedDirs {
+		skipped = append(skipped, sd.name)
+	}
+
+	writeJSON(w, http.StatusOK, DiscoverSkillsResponse{
+		Skills:  skills,
+		Skipped: skipped,
+		Count:   len(skills),
+	})
+}
+
+// authorizeSkillDiscover authorizes the caller and, for agents, forces the
+// request onto the agent's own project. It writes the error response and
+// returns false when the caller is rejected.
+//
+// Discovery persists nothing, but it does *spend* a project's GitHub
+// credentials: fetchRemoteForImport mints a GitHub App installation token or
+// reads the project's GITHUB_TOKEN secret. Supplying a projectId therefore has
+// to be authorized exactly like any other use of that project's credentials,
+// which is why the user branch runs the same CheckAccess as
+// authorizeProjectImport rather than settling for "is logged in".
+func (s *Server) authorizeSkillDiscover(ctx context.Context, w http.ResponseWriter, req *DiscoverSkillsRequest) bool {
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if !agentIdent.HasScope(ScopeAgentCreate) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
+			return false
+		}
+		if req.ProjectID != "" && req.ProjectID != agentIdent.ProjectID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover skills within their own project", nil)
+			return false
+		}
+		// Scope the fetch to the agent's own project even when the caller
+		// omitted projectId, so project GitHub credentials still apply.
+		req.ProjectID = agentIdent.ProjectID()
+		return true
+	}
+
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
+		return false
+	}
+
+	// No projectId means an unauthenticated fetch of a public repo — any
+	// logged-in user may do that.
+	if req.ProjectID == "" {
+		return true
+	}
+
+	decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+		Type:       "agent",
+		ParentType: "project",
+		ParentID:   req.ProjectID,
+	}, ActionCreate)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"You don't have permission to discover skills in this project", nil)
+		return false
+	}
+
+	// Confirm the project exists so a typo'd UUID fails loudly rather than
+	// silently degrading to an unauthenticated fetch.
+	if _, perr := s.store.GetProject(ctx, req.ProjectID); perr != nil {
+		if errors.Is(perr, store.ErrNotFound) {
+			NotFound(w, "Project")
+			return false
+		}
+		writeErrorFromErr(w, perr, "")
+		return false
+	}
+	return true
 }
