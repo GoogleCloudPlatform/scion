@@ -853,3 +853,26 @@ func hasWorkspaceContent(dir string) bool {
 	}
 	return false
 }
+
+// withHubAgentDefaults attaches the hub's operational agent_defaults from a
+// create request to the provisioning context, so ProvisionAgent can apply them
+// at its own low-precedence tier (below template and inline config, above this
+// broker's settings.yaml defaults).
+//
+// The value rides the context rather than a new ProvisionAgent parameter,
+// following ContextWithBrokerMode / ContextWithHarnessConfigPath /
+// ContextWithGitClone — ProvisionAgent already takes eleven arguments.
+//
+// Returns ctx unchanged when the hub sent nothing, which is every local
+// dispatch, every file-mode hub (design §3.2.4), and every hub that predates
+// the wire field. An empty-but-non-nil value is treated as absent too, so a
+// downstream nil check is the only gate needed.
+func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cfg == nil || cfg.HubAgentDefaults.IsEmpty() {
+		return ctx
+	}
+	return api.ContextWithHubAgentDefaults(ctx, cfg.HubAgentDefaults)
+}

@@ -834,6 +834,59 @@ func HarnessConfigPathFromContext(ctx context.Context) string {
 	return v
 }
 
+// HubAgentDefaults carries the Hub's operational agent_defaults limit/resource
+// fields to a runtime broker, for application at the broker's LOW-precedence
+// defaults tier.
+//
+// These four fields need no Hub-side resolution (unlike default_template and
+// default_harness_config, which the Hub must resolve so it can stamp IDs and
+// hashes), so they deliberately do NOT travel in AppliedConfig / InlineConfig.
+// Anything the Hub stamps into InlineConfig arrives at the broker as
+// top-of-chain and would outrank a template that sets max_turns explicitly —
+// the exact precedence inversion this channel exists to avoid.
+//
+// The zero value means "the Hub supplied no defaults"; callers leave the
+// pointer nil in that case so an unset field is indistinguishable on the wire
+// from a Hub that predates the field. See design §3.2.3.
+type HubAgentDefaults struct {
+	MaxTurns      int           `json:"maxTurns,omitempty"`
+	MaxModelCalls int           `json:"maxModelCalls,omitempty"`
+	MaxDuration   string        `json:"maxDuration,omitempty"`
+	Resources     *ResourceSpec `json:"resources,omitempty"`
+}
+
+// IsEmpty reports whether no default carries a value. An empty set is not put
+// on the wire, which is what keeps file-mode dispatch byte-identical to the
+// pre-change behaviour (the file-mode snapshot leaves these fields zero).
+func (d *HubAgentDefaults) IsEmpty() bool {
+	if d == nil {
+		return true
+	}
+	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil
+}
+
+type hubAgentDefaultsContextKey struct{}
+
+// ContextWithHubAgentDefaults records the Hub's operational agent_defaults on
+// the context so provisioning can apply them at its own low-precedence tier.
+// Modelled on ContextWithBrokerMode / ContextWithHarnessConfigPath: the value
+// rides the context rather than growing ProvisionAgent's already-long
+// parameter list.
+func ContextWithHubAgentDefaults(ctx context.Context, d *HubAgentDefaults) context.Context {
+	return context.WithValue(ctx, hubAgentDefaultsContextKey{}, d)
+}
+
+// HubAgentDefaultsFromContext returns the Hub's operational agent_defaults from
+// the context, or nil if the Hub sent none (local mode, file-mode Hub, or a Hub
+// that predates the field).
+func HubAgentDefaultsFromContext(ctx context.Context) *HubAgentDefaults {
+	if ctx == nil {
+		return nil
+	}
+	v, _ := ctx.Value(hubAgentDefaultsContextKey{}).(*HubAgentDefaults)
+	return v
+}
+
 type StartOptions struct {
 	Name              string
 	Task              string

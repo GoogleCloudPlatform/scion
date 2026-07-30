@@ -23,11 +23,14 @@ import (
 	"log/slog"
 	"maps"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -162,6 +165,13 @@ type HTTPAgentDispatcher struct {
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
 	harnessConfigRepairer func(ctx context.Context, name string) error
 	templateRepairer      func(ctx context.Context, ref string) error
+
+	// hubAgentDefaultsProvider returns the hub's operational agent_defaults at
+	// dispatch time. A callback rather than a snapshot because the settings
+	// propagation goroutine rewrites them while the hub runs; the Server's
+	// accessor reads under its lock. Nil = no hub defaults (local dispatcher,
+	// tests) and the wire field is omitted.
+	hubAgentDefaultsProvider func() opsettings.AgentDefaultsSettings
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -247,6 +257,13 @@ func (d *HTTPAgentDispatcher) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
 // DB manifest from storage when a hash mismatch is detected during dispatch.
 func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Context, name string) error) {
 	d.harnessConfigRepairer = fn
+}
+
+// SetHubAgentDefaultsProvider registers the accessor for the hub's operational
+// agent_defaults, read on every dispatch so a settings change takes effect
+// without a restart. Mirrors SetHarnessConfigRepairer.
+func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.AgentDefaultsSettings) {
+	d.hubAgentDefaultsProvider = fn
 }
 
 // SetImageRegistry sets the image registry prefix for rewriting bare image
@@ -467,6 +484,17 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			GCPIdentity:               remoteGCPIdentity,
 			ProjectPreStartHookScript: agent.AppliedConfig.ProjectPreStartHookScript,
 		}
+
+		// Hub operational agent_defaults (limits/resources only) travel in
+		// their own low-rank slot, NOT in InlineConfig: InlineConfig lands in
+		// the override position at provision.go's merge and would let a
+		// hub-wide floor outrank a template's explicit max_turns. The broker
+		// applies these below the template and above its own settings.yaml
+		// defaults. Nil in file mode — see remoteHubAgentDefaults.
+		if d.hubAgentDefaultsProvider != nil {
+			req.Config.HubAgentDefaults = remoteHubAgentDefaults(d.hubAgentDefaultsProvider())
+		}
+
 		req.ResolvedEnv = agent.AppliedConfig.Env
 
 		// Thread through the full inline ScionConfig for broker-side provisioning
@@ -494,6 +522,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		req.ResolvedEnv = make(map[string]string)
 	}
 	injectModelEnv(req.ResolvedEnv, agent.AppliedConfig)
+	injectThinkingLevelEnv(req.ResolvedEnv, agent.AppliedConfig)
 
 	// Resolve env vars from Hub storage (user/project/broker scopes) and merge.
 	// Storage env vars fill in keys not already set (with a non-empty value)
@@ -1061,141 +1090,340 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 	return d.deferredDataOp(ctx, agent, "finalize_env", &FinalizeEnvDispatchArgs{Env: env})
 }
 
-// resolveEnvFromStorage queries Hub env var storage for all applicable scopes
-// and returns a merged map with precedence: user > project > global.
+// envScopePrecedence is the single, authoritative statement of the order in
+// which Hub env var STORAGE scopes are applied, LOWEST PRECEDENCE FIRST:
+//
+//	runtime_broker  <  hub  <  project  <  user
+//
+// The slice below is written LOWEST FIRST, so read the sequence rather than a
+// word: runtime_broker, then hub, then project, then user. runtime_broker is
+// therefore the WEAKEST of the four in precedence and the FIRST element in the
+// slice; user is the strongest and the last element. Saying "runtime_broker is
+// last" is true of precedence and false of the literal, which is why the
+// sequence is spelled out instead.
+//
+// It was the strongest until this changed, and
+// that was an accident of the order four near-identical blocks happened to
+// appear in — not a decision. Broker-scoped env is the most infrastructural and
+// least specific of the four, so it is the weakest default rather than an
+// override nobody can escape. The scope may be removed entirely in a future
+// release; bottom-ranking it is a step in that direction.
+//
+// THIS IS ONLY THE STORAGE-SCOPE LADDER. It is not the whole settings
+// precedence chain — templates, harness overrides, profiles and project
+// annotations all sit between these scopes and the final agent config, and they
+// are resolved elsewhere. See the settings-precedence reference doc for the
+// full stack; do not read the four names above as a complete ordering.
+//
+// Where explicit agent config sits, precisely, because the relation is NOT a
+// plain inequality: buildCreateRequest seeds ResolvedEnv from
+// AppliedConfig.Env, then storage fills only the keys config left ABSENT or set
+// to the EMPTY STRING. So a non-empty config value outranks all four scopes,
+// while an empty one is a passthrough marker that deliberately yields to
+// storage.
+//
+// The three consumers in THIS file derive their order from this list — the
+// resolver (resolveEnvFromStorage), the provenance reporter that tells the CLI
+// where a value came from (buildEnvSources), and the startup shadow warning
+// (WarnOutrankedBrokerEnvKeys). For those three, changing the order here is the
+// only edit required, and it is a user-visible behaviour change for any
+// deployment that defines the same key in two scopes.
+//
+// THAT IS NOT THE SAME AS "everywhere", AND THE DIFFERENCE IS LOAD-BEARING.
+// Server.buildEnvGatherResponse in handlers_agents_core.go answers the same
+// "where did this value come from" question for the env-gather path from its
+// own hardcoded chain: it defaults the reported scope to hub, then checks user,
+// project, config and secret, and never consults runtime_broker at all — so a
+// broker-only key is reported there as "hub". It does not reference this list,
+// and its user-before-project order agrees with this one by coincidence rather
+// than by construction. Reordering here does not reach it. That reporter is
+// tracked as a separate follow-up and is deliberately not changed by phase 10;
+// what matters here is that you must not read this list as the only place a
+// scope order is written down.
+var envScopePrecedence = []string{
+	store.ScopeRuntimeBroker,
+	store.ScopeHub,
+	store.ScopeProject,
+	store.ScopeUser,
+}
+
+// envScopeID returns the ID the given scope is keyed by for this agent, or ""
+// if the scope does not apply (e.g. an agent with no project). The hub scope is
+// keyed by the hub's own instance ID, not by anything on the agent.
+func (d *HTTPAgentDispatcher) envScopeID(scope string, agent *store.Agent) string {
+	switch scope {
+	case store.ScopeHub:
+		return d.hubID
+	case store.ScopeProject:
+		return agent.ProjectID
+	case store.ScopeUser:
+		return agent.OwnerID
+	case store.ScopeRuntimeBroker:
+		return agent.RuntimeBrokerID
+	default:
+		return ""
+	}
+}
+
+// envScopesInPrecedenceOrder returns the env var storage queries that apply to
+// this agent, lowest precedence first, so a caller can simply run them in order
+// and let later scopes overwrite earlier ones.
+//
+// Scopes whose scope ID is empty for this agent are omitted, with the exception
+// of the hub scope: it is always queried, because an empty ScopeID means "no
+// scope-ID filter" to the store and the hub scope has always been queried
+// unconditionally.
+func (d *HTTPAgentDispatcher) envScopesInPrecedenceOrder(agent *store.Agent) []store.EnvVarFilter {
+	if agent == nil {
+		return nil
+	}
+	filters := make([]store.EnvVarFilter, 0, len(envScopePrecedence))
+	for _, scope := range envScopePrecedence {
+		scopeID := d.envScopeID(scope, agent)
+		if scopeID == "" && scope != store.ScopeHub {
+			if d.debug {
+				d.log.Debug("env scope does not apply to agent (empty scope ID)", "scope", scope, "agent_id", agent.ID)
+			}
+			continue
+		}
+		filters = append(filters, store.EnvVarFilter{Scope: scope, ScopeID: scopeID})
+	}
+	return filters
+}
+
+// envScopeSourceLabel maps a storage scope to the source name reported to the
+// CLI. The labels are the user-facing names, which are not identical to the
+// scope constants: store.ScopeRuntimeBroker is reported as "broker".
+func envScopeSourceLabel(scope string) string {
+	switch scope {
+	case store.ScopeHub:
+		return "hub"
+	case store.ScopeProject:
+		return "project"
+	case store.ScopeUser:
+		return "user"
+	case store.ScopeRuntimeBroker:
+		return "broker"
+	default:
+		return scope
+	}
+}
+
+// envScopesOutranking returns the scopes in order that beat the given scope,
+// i.e. those appearing after it. Returns nil if scope is not in order at all,
+// and an empty slice if nothing outranks it.
+//
+// This is derived from the ordering list rather than hard-coded so that moving
+// an entry in envScopePrecedence changes who outranks whom for all three
+// consumers in this file at once — the same property that keeps the resolver
+// and the `scion hub env list` provenance reporter from drifting apart. It says
+// nothing about reporters that do not read the list; see envScopePrecedence for
+// the one that does not.
+func envScopesOutranking(order []string, scope string) []string {
+	at := slices.Index(order, scope)
+	if at < 0 {
+		return nil
+	}
+	return slices.Clone(order[at+1:])
+}
+
+// envScopeCollision is one env var key that is defined at some scope and also
+// at a scope that outranks it, so the lower scope's value is shadowed.
+type envScopeCollision struct {
+	// Key is the env var key defined in both places.
+	Key string
+	// ScopeIDs are the IDs, within the outranked scope, that define Key —
+	// for the runtime_broker scope these are broker IDs. Sorted.
+	ScopeIDs []string
+	// OutrankedBy names the scopes that outrank the outranked scope and also
+	// define Key, lowest precedence first.
+	OutrankedBy []string
+}
+
+// envScopeCollisions reports the keys defined at scope `target` that are also
+// defined at some scope outranking `target` under `order`, so that the value
+// set at `target` never reaches an agent that the higher scope also applies to.
+//
+// `order` is a parameter rather than a read of envScopePrecedence so that this
+// can be exercised against a ladder other than the one currently compiled in —
+// which is the only way to test the warning while the ordering change it exists
+// to announce has not landed yet.
+//
+// It deliberately OVER-reports: it matches on key alone and does not compare
+// values or check that the two scope IDs share any agent. A broker-scoped key
+// shadowed only by a user who never runs an agent on that broker is still
+// listed. For a warning about a silent, unmigratable behaviour flip, a false
+// positive costs a line of boot log and a false negative costs an operator
+// their pinned value.
+func envScopeCollisions(order []string, target string, vars []store.EnvVar) []envScopeCollision {
+	higher := envScopesOutranking(order, target)
+	if len(higher) == 0 {
+		return nil
+	}
+	// key -> scope IDs at the target scope, and key -> outranking scopes.
+	targetIDs := make(map[string]map[string]bool)
+	shadowedBy := make(map[string]map[string]bool)
+	for _, v := range vars {
+		switch {
+		case v.Scope == target:
+			if targetIDs[v.Key] == nil {
+				targetIDs[v.Key] = make(map[string]bool)
+			}
+			targetIDs[v.Key][v.ScopeID] = true
+		case slices.Contains(higher, v.Scope):
+			if shadowedBy[v.Key] == nil {
+				shadowedBy[v.Key] = make(map[string]bool)
+			}
+			shadowedBy[v.Key][v.Scope] = true
+		}
+	}
+
+	collisions := make([]envScopeCollision, 0, len(targetIDs))
+	for key, ids := range targetIDs {
+		scopes := shadowedBy[key]
+		if len(scopes) == 0 {
+			continue
+		}
+		// Report outranking scopes in precedence order, not alphabetically, so
+		// the log reads in the same direction as the ladder.
+		outrankedBy := make([]string, 0, len(scopes))
+		for _, scope := range higher {
+			if scopes[scope] {
+				outrankedBy = append(outrankedBy, scope)
+			}
+		}
+		scopeIDs := slices.Sorted(maps.Keys(ids))
+		collisions = append(collisions, envScopeCollision{Key: key, ScopeIDs: scopeIDs, OutrankedBy: outrankedBy})
+	}
+	slices.SortFunc(collisions, func(a, b envScopeCollision) int {
+		return strings.Compare(a.Key, b.Key)
+	})
+	return collisions
+}
+
+// WarnOutrankedBrokerEnvKeys logs, once at hub startup, every env var key that
+// is set at runtime_broker scope and also at a scope that outranks
+// runtime_broker — that is, every key whose broker-scoped value is silently not
+// the one agents receive.
+//
+// It exists because moving runtime_broker down the ladder (design §3.4 variant
+// 4-B) is a behaviour change with no migration available: the hub cannot tell a
+// value a broker operator pinned deliberately from one set by accident, so it
+// cannot fix them and must not try. Naming the affected keys at boot is the
+// only warning that can be offered, and it is one query per scope.
+//
+// Whether it does anything at all is decided by envScopePrecedence and nothing
+// else. UNDER THE LADDER THAT SHIPPED IN PHASE 10b, runtime_broker is the
+// weakest scope, so hub, project and user all outrank it, envScopesOutranking
+// returns those three, and THIS CHECK IS LIVE: it issues one query per
+// outranking scope and warns on every shadowed key. Do not read the call site
+// added at boot as a no-op.
+//
+// It goes inert only if runtime_broker is moved back to the top of that list,
+// at which point envScopesOutranking returns empty and this returns before
+// issuing a single query. The warning and the change it warns about are driven
+// by the same one line, in both directions.
+func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) error {
+	higher := envScopesOutranking(envScopePrecedence, store.ScopeRuntimeBroker)
+	if len(higher) == 0 {
+		return nil
+	}
+
+	// One query per scope. An empty ScopeID is "no scope-ID filter" to the
+	// store, so each of these returns the scope's vars across every ID
+	// (entadapter/secret_store.go: the ScopeID predicate is only applied when
+	// the field is non-empty).
+	var vars []store.EnvVar
+	for _, scope := range append([]string{store.ScopeRuntimeBroker}, higher...) {
+		got, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: scope})
+		if err != nil {
+			return fmt.Errorf("listing %s-scoped env vars: %w", scope, err)
+		}
+		vars = append(vars, got...)
+	}
+
+	collisions := envScopeCollisions(envScopePrecedence, store.ScopeRuntimeBroker, vars)
+	if len(collisions) == 0 {
+		return nil
+	}
+
+	d.log.Warn("runtime_broker env vars are overridden by higher-precedence scopes; agents receive the higher scope's value",
+		"key_count", len(collisions),
+		"precedence_lowest_first", strings.Join(envScopePrecedence, " < "))
+	for _, c := range collisions {
+		d.log.Warn("broker-scoped env var is shadowed",
+			"key", c.Key,
+			"broker_ids", c.ScopeIDs,
+			"outranked_by", c.OutrankedBy)
+	}
+	return nil
+}
+
+// resolveEnvFromStorage queries Hub env var storage for every scope that
+// applies to the agent and returns a merged map. Scopes are applied lowest
+// precedence first; the order itself is stated in exactly one place,
+// envScopePrecedence above.
+//
+// The caller then overlays explicit agent config env on top of the result, so
+// agent config outranks every storage scope (see buildCreateRequest).
 func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, error) {
 	result := make(map[string]string)
+	if agent == nil {
+		return result, nil
+	}
 
-	// Query hub-scoped env vars (lowest precedence)
-	vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeHub, ScopeID: d.hubID})
-	if err != nil {
-		if d.debug {
-			d.log.Warn("Failed to list hub env vars", "error", err)
+	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+		vars, err := d.store.ListEnvVars(ctx, filter)
+		if err != nil {
+			if d.debug {
+				d.log.Warn("Failed to list env vars", "scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
+			}
+			continue
 		}
-	} else {
 		if d.debug {
 			keys := make([]string, 0, len(vars))
 			for _, v := range vars {
 				keys = append(keys, v.Key)
 			}
-			d.log.Debug("resolveEnvFromStorage: hub scope", "count", len(vars), "keys", keys)
+			d.log.Debug("resolveEnvFromStorage: scope", "scope", filter.Scope, "scope_id", filter.ScopeID, "count", len(vars), "keys", keys)
 		}
 		for _, v := range vars {
 			result[v.Key] = v.Value
 		}
 	}
 
-	// Query project-scoped env vars
-	if agent.ProjectID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: agent.ProjectID})
-		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to list project env vars", "error", err)
-			}
-		} else {
-			if d.debug {
-				keys := make([]string, 0, len(vars))
-				for _, v := range vars {
-					keys = append(keys, v.Key)
-				}
-				d.log.Debug("resolveEnvFromStorage: project scope", "project_id", agent.ProjectID, "count", len(vars), "keys", keys)
-			}
-			for _, v := range vars {
-				result[v.Key] = v.Value
-			}
-		}
-	} else if d.debug {
-		d.log.Debug("resolveEnvFromStorage: skipping project scope (empty projectID)")
-	}
-
-	// Query user-scoped env vars (higher precedence)
-	if agent.OwnerID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser, ScopeID: agent.OwnerID})
-		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to list user env vars", "error", err)
-			}
-		} else {
-			if d.debug {
-				keys := make([]string, 0, len(vars))
-				for _, v := range vars {
-					keys = append(keys, v.Key)
-				}
-				d.log.Debug("resolveEnvFromStorage: user scope", "ownerID", agent.OwnerID, "count", len(vars), "keys", keys)
-			}
-			for _, v := range vars {
-				result[v.Key] = v.Value
-			}
-		}
-	} else if d.debug {
-		d.log.Debug("resolveEnvFromStorage: skipping user scope (empty ownerID)")
-	}
-
-	// Query runtime_broker-scoped env vars (if applicable)
-	if agent.RuntimeBrokerID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeRuntimeBroker, ScopeID: agent.RuntimeBrokerID})
-		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to list broker env vars", "error", err)
-			}
-		} else {
-			if d.debug {
-				keys := make([]string, 0, len(vars))
-				for _, v := range vars {
-					keys = append(keys, v.Key)
-				}
-				d.log.Debug("resolveEnvFromStorage: broker scope", "brokerID", agent.RuntimeBrokerID, "count", len(vars), "keys", keys)
-			}
-			for _, v := range vars {
-				result[v.Key] = v.Value
-			}
-		}
-	} else if d.debug {
-		d.log.Debug("resolveEnvFromStorage: skipping broker scope (empty brokerID)")
-	}
-
 	return result, nil
 }
 
 // buildEnvSources creates a map of env key -> scope for reporting to the CLI.
+//
+// It walks the same scopes in the same order as resolveEnvFromStorage, from the
+// same envScopePrecedence list, so the source it reports is always the scope
+// whose value actually won and the two functions cannot drift apart. Agent
+// config is applied last because it outranks every storage scope.
 func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.Agent, resolvedEnv map[string]string) map[string]string {
 	sources := make(map[string]string)
+	if agent == nil {
+		return sources
+	}
 
-	// Check hub scope (lowest precedence — later scopes override)
-	vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeHub, ScopeID: d.hubID})
-	if err == nil {
+	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+		vars, err := d.store.ListEnvVars(ctx, filter)
+		if err != nil {
+			if d.debug {
+				d.log.Warn("Failed to list env vars for source reporting", "scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
+			}
+			continue
+		}
+		label := envScopeSourceLabel(filter.Scope)
 		for _, v := range vars {
 			if _, inResolved := resolvedEnv[v.Key]; inResolved {
-				sources[v.Key] = "hub"
+				sources[v.Key] = label
 			}
 		}
 	}
 
-	// Check project scope
-	if agent.ProjectID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeProject, ScopeID: agent.ProjectID})
-		if err == nil {
-			for _, v := range vars {
-				if _, inResolved := resolvedEnv[v.Key]; inResolved {
-					sources[v.Key] = "project"
-				}
-			}
-		}
-	}
-
-	// Check user scope (overrides project)
-	if agent.OwnerID != "" {
-		vars, err := d.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser, ScopeID: agent.OwnerID})
-		if err == nil {
-			for _, v := range vars {
-				if _, inResolved := resolvedEnv[v.Key]; inResolved {
-					sources[v.Key] = "user"
-				}
-			}
-		}
-	}
-
-	// Check config scope
+	// Check config scope (outranks every storage scope)
 	if agent.AppliedConfig != nil {
 		for k := range agent.AppliedConfig.Env {
 			if _, inResolved := resolvedEnv[k]; inResolved {
@@ -1246,6 +1474,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	injectModelEnv(resolvedEnv, agent.AppliedConfig)
+	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
 
 	// Merge env vars from Hub storage; storage vars fill in keys not already
 	// set (with a non-empty value) by explicit config env vars.
@@ -1539,6 +1768,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 
 	injectModelEnv(resolvedEnv, agent.AppliedConfig)
+	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
 
 	if d.tokenGenerator != nil {
 		var additionalScopes []AgentTokenScope
@@ -1726,6 +1956,26 @@ func injectModelEnv(env map[string]string, cfg *store.AgentAppliedConfig) {
 	}
 }
 
+// injectThinkingLevelEnv sets SCION_THINKING_LEVEL in env from the agent's
+// applied config, if a thinking level is configured and the key is not already
+// present in env. Mirrors the SCION_MODEL injector above and must be called
+// from exactly the same dispatch sites — a site that injects one and not the
+// other reproduces the annotation-drop bug on that path only, silently.
+// env must be non-nil.
+//
+// The env var is the terminal hop for thinking level: pkg/agent/run.go reads
+// SCION_THINKING_LEVEL from opts.Env under an "if not already set" guard, so a
+// hub-supplied value wins and this fix works against already-deployed brokers
+// without a wire-field change.
+func injectThinkingLevelEnv(env map[string]string, cfg *store.AgentAppliedConfig) {
+	if cfg == nil || cfg.ThinkingLevel == nil {
+		return
+	}
+	if _, ok := env["SCION_THINKING_LEVEL"]; !ok {
+		env["SCION_THINKING_LEVEL"] = strconv.Itoa(*cfg.ThinkingLevel)
+	}
+}
+
 // Cross-node lifecycle dispatch (B4-2)
 // =============================================================================
 
@@ -1905,7 +2155,29 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them
-// into a flat list. Higher scopes override lower: user < project < runtime_broker.
+// into a flat list. Higher scopes override lower:
+//
+//	hub  <  user  <  project  <  runtime_broker
+//
+// 🔴 SECRETS AND ENV VARS DO NOT USE THE SAME ORDER. Compare
+// envScopePrecedence above: env vars rank runtime_broker LOWEST and user
+// HIGHEST; secrets rank them the other way round, on both axes.
+//
+// DO NOT READ THIS COMMENT AS DOCUMENTING A DESIGNED DIFFERENCE. NOBODY HAS
+// ESTABLISHED THAT THE DIVERGENCE IS INTENTIONAL. It is FILED, as issue #624,
+// and open. What this comment records is only what the code does today: the
+// secret order is implemented independently in pkg/secret (both backends build
+// the scope list in this order and merge last-wins, and scopePrecedence ranks
+// it numerically). So editing this comment to match the env one would make it
+// describe code that does not exist — the divergence has to be closed in
+// pkg/secret, under #624, or not at all.
+//
+// Phase 10 widened the gap rather than creating it: demoting runtime_broker for
+// env vars added the second axis. That makes the pull toward "harmonising" the
+// two stronger, and it is exactly the change that must not be made here.
+//
+// The hub rung was missing from this comment before Phase 10; both backends
+// have always queried it as the lowest scope.
 func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.Agent) ([]ResolvedSecret, error) {
 	if d.secretBackend == nil {
 		if d.debug {

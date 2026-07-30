@@ -36,6 +36,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -148,6 +149,23 @@ type ServerConfig struct {
 	// Used to populate default telemetry config on new agents when no per-agent
 	// or template-level telemetry config is set.
 	TelemetryConfig *api.TelemetryConfig
+	// AgentDefaults holds the hub operational agent_defaults section
+	// (Layer-1 settings, koanf keys default_template, default_harness_config,
+	// default_max_turns, default_max_model_calls, default_max_duration,
+	// default_resources).
+	//
+	// Written only by ApplySnapshot, under s.mu. Read only through
+	// s.hubAgentDefaults(), which also takes s.mu — never read this field
+	// directly from a request path (see operational_settings.go, the
+	// propagation goroutine writes it concurrently with request handling).
+	//
+	// In file mode this stays at its zero value: BuildLayer1SnapshotFromFile
+	// deliberately leaves the agent-defaults fields empty because a co-located
+	// broker reads the same settings.yaml and applies them itself at the
+	// BOTTOM of its own chain. Populating them hub-side as well would promote
+	// them to the hub tier and silently outrank broker profile resources and
+	// template limits. See the design's §3.2.4 and alternative A7.
+	AgentDefaults opsettings.AgentDefaultsSettings
 	// MaxSubscriptionsPerUser is the maximum number of notification subscriptions
 	// allowed per subscriber. Zero means unlimited (default).
 	MaxSubscriptionsPerUser int
@@ -519,6 +537,34 @@ type RemoteAgentConfig struct {
 	// inlined at agent-create time. The broker writes it to
 	// pre-start.d/30-project-custom before the agent starts.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
+
+	// HubAgentDefaults carries the hub's operational agent_defaults for
+	// application at the broker's LOW-precedence defaults tier — deliberately
+	// not folded into InlineConfig, which is a top-of-chain slot.
+	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+}
+
+// RemoteHubAgentDefaults carries the four limit/resource operational
+// agent_defaults from the hub to a runtime broker.
+//
+// Only the fields that need no hub-side resolution travel here.
+// default_template and default_harness_config are absent by design: the hub
+// must resolve those itself so it can stamp TemplateID/TemplateHash and
+// HarnessConfigID/HarnessConfigHash, and they therefore ride the existing
+// AppliedConfig ladder instead.
+//
+// Version skew is safe by construction: a broker that predates this field
+// ignores the unknown JSON key, so hub defaults simply do not apply — which is
+// exactly today's behaviour. No capability negotiation is needed.
+//
+// Field-for-field JSON-compatible with api.HubAgentDefaults, which is the type
+// the broker decodes into; TestRemoteHubAgentDefaults_WireCompatibleWithBroker
+// pins that.
+type RemoteHubAgentDefaults struct {
+	MaxTurns      int               `json:"maxTurns,omitempty"`
+	MaxModelCalls int               `json:"maxModelCalls,omitempty"`
+	MaxDuration   string            `json:"maxDuration,omitempty"`
+	Resources     *api.ResourceSpec `json:"resources,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -1944,6 +1990,12 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHarnessConfigRepairer(s.syncHarnessConfigFromStorage)
 	dispatcher.SetTemplateRepairer(s.syncTemplateFromStorage)
 
+	// Wire the hub's operational agent_defaults so dispatch can carry the
+	// limit/resource ones to the broker's low-precedence tier. The accessor
+	// takes s.mu; it returns the zero value in file mode, where the wire field
+	// is then omitted and broker behaviour is unchanged.
+	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
+
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
 
@@ -2322,9 +2374,60 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			}
 		}
 
+		// Hub operational default template — lowest tier. Below the scheduled
+		// payload and below the project annotation, both of which have already
+		// had their chance above. Sets payload.Template and agent.Template
+		// together, matching the annotation rung's shape. In file mode
+		// hubAgentDefaults() is always the zero value so this never fires
+		// (design §3.2.4). This is the twin of the rung on the agent-create
+		// path in handlers_agents_core.go — design §5.2 risk (d) is these two
+		// diverging again, so both paths get both rungs, no exceptions.
+		templateFromHubDefault := false
+		if payload.Template == "" {
+			if d := s.hubAgentDefaults(); d.DefaultTemplate != "" {
+				payload.Template = d.DefaultTemplate
+				agent.Template = d.DefaultTemplate
+				templateFromHubDefault = true
+			}
+		}
+
 		// Resolve template if specified
 		if payload.Template != "" {
 			tmpl, tmplErr := s.resolveTemplate(ctx, payload.Template, evt.ProjectID)
+			// DEGRADATION RULE (design §3.2.2), the scheduler-path equivalent of
+			// the create path's. A resolve failure never fails a scheduled
+			// dispatch on this path, so there is no 404 to suppress — but a name
+			// that nothing can resolve must not be left on the agent record
+			// either, because the broker would then try to hydrate a template
+			// that does not exist. Clear it and say so. Gated on the
+			// templateFromHubDefault flag, never inferred from the setting.
+			//
+			// A genuine not-found only. A transient store error is deliberately
+			// excluded, for the reason spelled out at length on the create path
+			// in handlers_agents_core.go: a DB blip is not evidence that the
+			// setting is stale, and clearing on one would make some scheduled
+			// dispatches silently lose their template and others keep it
+			// depending on store weather. On a store error this path keeps its
+			// pre-existing behaviour — leave the name alone and let the broker
+			// try to resolve it locally.
+			//
+			// On the errors.Is limb: resolveTemplate collapses a miss to
+			// (nil, nil) — it swallows store.ErrNotFound at each of its three
+			// lookups — so with today's stores that limb does not fire, and
+			// tmpl == nil is doing all the work. It is kept deliberately, and it
+			// is not quite dead code: resolveTemplate swallows by equality
+			// (err != store.ErrNotFound), so a store that ever WRAPPED
+			// ErrNotFound would escape the swallow and arrive here, and this
+			// limb would correctly read it as a definitive miss rather than as
+			// an ambiguous failure. Checked at the time of writing: the ent
+			// adapter returns bare store.ErrNotFound from mapError and
+			// parseGetID, and nothing in pkg/store wraps it.
+			if templateFromHubDefault && tmpl == nil &&
+				(tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
+				s.warnHubDefaultTemplateUnusable(ctx, payload.Template, evt.ProjectID, "not found")
+				payload.Template = ""
+				agent.Template = ""
+			}
 			if tmplErr == nil && tmpl != nil {
 				if tmpl.Slug != "" {
 					agent.Template = tmpl.Slug
@@ -2357,6 +2460,13 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		// Apply project-level defaults (harness config, limits, resources) from annotations
 		applyProjectDefaults(agent.AppliedConfig, project)
+
+		// Hub operational agent_defaults — strictly between applyProjectDefaults
+		// and populateAgentConfig, exactly as on the agent-create path. See
+		// applyHubAgentDefaults for why that placement is the whole point.
+		if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
+			ctx = withHubDefaultHarnessConfig(ctx)
+		}
 
 		s.populateAgentConfig(ctx, agent, project, nil)
 

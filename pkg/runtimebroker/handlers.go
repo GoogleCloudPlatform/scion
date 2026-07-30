@@ -796,6 +796,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Carry the hub's operational agent_defaults into provisioning. No-op when
+	// the hub sent none, which is every local and file-mode dispatch.
+	ctx = withHubAgentDefaults(ctx, req.Config)
+
 	// Branch based on provision-only flag
 	if req.ProvisionOnly {
 		// Provision only: set up dirs, worktree, templates without starting the container

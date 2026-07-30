@@ -720,6 +720,35 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "hub_name")
 	}
 
+	// Agent defaults (hub operational agent_defaults section).
+	//
+	// Written unconditionally from the snapshot rather than only-if-non-empty,
+	// so that clearing a value in the DB clears it here too. In file mode the
+	// snapshot's agent-defaults fields are always zero — see
+	// BuildLayer1SnapshotFromFile — so this assignment is a no-op there and
+	// file-mode dispatch is unchanged.
+	newDefaults := opsettings.AgentDefaultsSettings{
+		DefaultTemplate:      snap.DefaultTemplate,
+		DefaultHarnessConfig: snap.DefaultHarnessConfig,
+		DefaultMaxTurns:      snap.DefaultMaxTurns,
+		DefaultMaxModelCalls: snap.DefaultMaxModelCalls,
+		DefaultMaxDuration:   snap.DefaultMaxDuration,
+	}
+	// Deep-copy the one pointer field, symmetrically with hubAgentDefaults()'s
+	// read side. Aliasing the snapshot's pointee would leave the CALLER of
+	// ApplySnapshot holding a live, lock-free handle on s.config, which is the
+	// same hazard the accessor deep-copies to avoid. Benign today — Snapshot()
+	// allocates a fresh spec per call and every caller discards it — but the
+	// asymmetry would read as an oversight later, and the fix is two lines.
+	if snap.DefaultResources != nil {
+		rs := *snap.DefaultResources
+		newDefaults.DefaultResources = &rs
+	}
+	if !agentDefaultsEqual(s.config.AgentDefaults, newDefaults) {
+		applied = append(applied, "agent_defaults")
+	}
+	s.config.AgentDefaults = newDefaults
+
 	s.mu.Unlock()
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the

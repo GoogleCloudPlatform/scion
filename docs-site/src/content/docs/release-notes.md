@@ -2,6 +2,100 @@
 title: Release Notes
 ---
 
+## Jul 29, 2026
+
+A settings-precedence day. Scion's configuration has two independent precedence systems — one for
+environment variables, one for `ScionConfig` limits and resources — and they rank the same-named
+sources differently. That has never been written down, so this release writes it down and fixes
+the two ordering decisions that were accidents rather than choices. There are **two breaking
+changes**; read both, because one of them is a row saying that something *survives*.
+
+New: **[Settings Precedence](/reference/settings-precedence/)**, the reference page for all of it,
+including the known gaps this release does not fix.
+
+### ⚠️ Breaking Changes
+
+* **[Settings]:** **`profiles.<name>.env` is retired.** Environment variables declared directly
+  under a profile are no longer injected, under both the versioned and the pre-v1 settings schema —
+  migrating your schema version will not restore them.
+
+  This is larger than it sounds. Profile `env` was not one source among several: it was merged as
+  the *override* argument in `ResolveHarnessConfig`, so it **outranked** `harness_configs.<hc>.env`
+  on any shared key. In the common layout where a project's `.scion/settings.yaml` declares its
+  environment under a profile, that merge **was the mechanism by which project settings outranked
+  global settings for environment variables.**
+
+  **Migration: the closest replacement is `harness_configs.<hc>.env` — but it is not
+  profile-scoped.** Values set there apply to **every profile** that uses that harness config, and
+  must be duplicated into **each** harness config the profile previously covered.
+  **There is no per-profile, all-harness-configs equivalent.**
+
+  ⚠️ The second half of that matters more than the first. `HarnessConfigs` is a top-level map and
+  the profile plays no part in the lookup, so if `dev` and `prod` share a harness config, migrating
+  a dev-scoped endpoint or credential into it **silently applies it to `prod`.** Audit every
+  profile sharing a harness config before moving a key into it. If you need per-profile scope,
+  `profiles.<name>.harness_overrides.<hc>.env` survives and is profile-scoped — at the cost of one
+  entry per harness config.
+
+  Rank *is* preserved by the move: a `harness_configs` entry in a project's `.scion/settings.yaml`
+  still outranks the same entry in the global settings file.
+
+  ⚠️ The key still parses. Leaving `profiles.<name>.env` in place produces no error, no warning
+  and no log line; the values are simply never injected. Search your settings files — validation
+  will not find them for you.
+
+  Rationale: the settings schema had grown rich enough that the number of control and injection
+  points needed paring down.
+
+* **[Settings]:** **`profiles.<name>.harness_overrides.<hc>.env` is NOT retired — it continues to
+  work.** It rides a different merge and is unaffected by the retirement above, and it remains the
+  **highest-ranked** env source in harness-config resolution. The non-env keys on the same entry —
+  `image`, `user`, `auth_selected_type`, `volumes` — are likewise unaffected.
+
+  This entry exists because the previous one does: a reader who sees `profiles.<name>.env` retired
+  will reasonably assume the whole `profiles` env family went with it and rip out working
+  configuration.
+
+  A consequence worth stating plainly, because it is the easiest thing to get backwards: since the
+  top rank did not move, *"harness-config env now takes precedence over profile env"* is **not**
+  true after this change. Only the middle rank of a three-rank order was removed.
+
+* **[Hub]:** **The `runtime_broker` env scope is demoted from the highest-priority scope to the
+  lowest.** The storage-scope ladder is now `runtime_broker < hub < project < user`. Three pairwise
+  relations invert — `(user, runtime_broker)`, `(project, runtime_broker)` and
+  `(hub, runtime_broker)` — and each now resolves to the non-broker side.
+
+  **This is a deliberate reversal of working behaviour, not a bug fix.** Any deployment that set a
+  broker-scoped variable specifically to pin something a user or project also sets will silently
+  flip. There is no migration and no automatic rewrite. **Operators should review every key defined
+  at broker scope before upgrading.**
+
+  To make the blast radius visible the hub now emits a one-shot startup log listing every key
+  defined at `runtime_broker` scope *and* at a scope that now outranks it. That log is the only
+  warning available. The scope may be removed entirely in a future release; bottom-ranking it is a
+  step in that direction.
+
+  Note this applies to **environment variables only**. Secrets are resolved by a different ladder
+  and still rank `runtime_broker` highest.
+
+### 🚀 Features
+
+* **[Hub]:** Env scope precedence now has a single source of truth. The resolver, the provenance
+  reporter behind `scion hub env list`, and the new startup shadow warning all derive their order
+  from one list, so they can no longer disagree about who outranks whom.
+* **[Docs]:** New **[Settings Precedence](/reference/settings-precedence/)** reference, covering
+  both precedence systems separately, the `SCION_*` variables Scion injects and which of them
+  discard a user-supplied value, hub `agent_defaults` and their null semantics, and a catalogue of
+  known gaps.
+
+### 🐛 Fixes
+
+* **[Agent]:** In hub-dispatched (broker) mode, harness-config env is now visible to the auth
+  pipeline before credentials are resolved, and outranks template env. Credentials declared in a
+  harness config — `GOOGLE_CLOUD_PROJECT`, `CLOUD_ML_REGION` and similar — previously arrived too
+  late for auth detection to see them. Local (non-broker) mode is unchanged; this is not a global
+  reordering.
+
 ## Jul 5, 2026
 
 The largest single commit in recent history landed: Phase 5 HA (Mode 3) support — a complete high-availability architecture for chat integrations with gRPC broker protocol, advisory lock failover, standalone Discord deployment, and an integration runtime library. Platform skills also became embedded in the binary.

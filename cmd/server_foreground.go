@@ -394,6 +394,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubSrv.SetDispatcher(dispatcher)
 		log.Printf("Agent dispatcher configured (HTTP-based)")
 
+		warnShadowedBrokerEnv(ctx, dispatcher)
+
 		// Initialize message broker from versioned settings.
 		// Uses FanOutBroker to support multiple simultaneous broker plugins.
 		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil {
@@ -593,6 +595,38 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	case <-ctx.Done():
 		wg.Wait()
 		return nil
+	}
+}
+
+// brokerEnvShadowWarner is the single method warnShadowedBrokerEnv needs. It
+// exists so the boot wiring can be exercised without standing up a hub.Server.
+type brokerEnvShadowWarner interface {
+	WarnOutrankedBrokerEnvKeys(context.Context) error
+}
+
+// warnShadowedBrokerEnv runs the one-shot boot check for runtime_broker-scoped
+// env vars that a higher-precedence scope now overrides. It is the operator-
+// facing half of demoting runtime_broker to the weakest env storage scope: the
+// hub cannot tell a deliberately pinned broker value from an accidental one, so
+// it must not migrate them, and naming them once at boot is the only warning
+// available.
+//
+// It runs SYNCHRONOUSLY, and that is the point. Behind a goroutine it would
+// reproduce the exact defect it exists to report: if ctx were cancelled between
+// here and the point the queries ran, no warning would ever be emitted and the
+// diff would still look done. A handful of small SELECTs on a path that runs
+// once per process is not worth that trade.
+//
+// The failure branch says DID NOT RUN rather than "failed", because from the
+// operator's side those are one event: no list of shadowed keys was produced.
+// The absence of warnings below must not be read as "nothing is shadowed".
+func warnShadowedBrokerEnv(ctx context.Context, w brokerEnvShadowWarner) {
+	if w == nil {
+		return
+	}
+	if err := w.WarnOutrankedBrokerEnvKeys(ctx); err != nil {
+		slog.Warn("Broker env shadow check DID NOT RUN. Treat the absence of shadowed-key warnings as unknown, not as none.",
+			"error", err)
 	}
 }
 

@@ -1110,8 +1110,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if settings.Telemetry != nil {
 				settingsCfg.Telemetry = config.ConvertV1TelemetryToAPI(settings.Telemetry)
 			}
-			// Template has highest priority, so it should override settings.
-			// We construct a config with ONLY the settings env, then merge finalScionCfg over it.
+			// Template has highest priority IN THIS MERGE, so it overrides
+			// settings here. We construct a config with ONLY the settings env,
+			// then merge finalScionCfg over it.
+			//
+			// This is no longer the whole story for the CONTAINER env. In
+			// broker mode, harness-config env is separately injected into
+			// opts.Env by resolveAuthEnvOverlay (run.go), and opts.Env is
+			// passed as extraEnv to buildAgentEnv (run.go), where it overrides
+			// finalScionCfg.Env. So for a key declared by both the template and
+			// the harness config, the harness-config value is what reaches the
+			// container, even though the template wins the merge below.
+			// Pinned by TestBrokerMode_HarnessConfigEnvOutranksTemplateEnv.
 			finalScionCfg = config.MergeScionConfig(settingsCfg, finalScionCfg)
 		}
 
@@ -1134,6 +1144,54 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if ho, ok := p.HarnessOverrides[harnessConfigName]; ok && ho.Resources != nil {
 				finalScionCfg.Resources = config.MergeResourceSpec(finalScionCfg.Resources, ho.Resources)
 			}
+		}
+	}
+
+	// Hub operational agent_defaults: below the template and below inline
+	// config (both of which have already populated finalScionCfg by the merge
+	// at step 2b), above this broker's own settings.yaml defaults (applied
+	// immediately below). Same only-if-zero shape as that block, so the two
+	// tiers compose without either needing to know about the other.
+	//
+	// The placement IS the design. Move this after the settings block and the
+	// hub tier loses to settings.yaml; stamp these values hub-side into
+	// InlineConfig instead and they arrive as top-of-chain and beat a
+	// template's explicit max_turns — the inversion this channel exists to
+	// avoid (design §3.2.1, rejected alternative A5).
+	//
+	// The hub sends nothing in file mode, so this never fires there and
+	// file-mode behaviour is unchanged: a co-located broker reads the same
+	// settings.yaml and applies these values itself at the BOTTOM tier below.
+	// The rank of hub agent_defaults is therefore mode-dependent — bottom of
+	// the broker chain in file mode, just above broker settings in Postgres
+	// mode. That is deliberate; see design §3.2.4 and alternative A7.
+	//
+	// Note the asymmetry for Resources: "above this broker's own settings.yaml
+	// defaults" means default_resources ONLY. Broker profile resources and
+	// harness overrides live in that same file but are merged in step 2e ABOVE,
+	// so they win per-field over the hub default_resources applied here — while
+	// broker default_max_turns loses to hub default_max_turns. The hub tier
+	// therefore sits in a different place for Resources than for the three
+	// scalars. That falls out of the insertion point the design specifies and is
+	// the conservative direction (§3.2.4 explicitly does not want hub defaults
+	// silently overriding broker profile resources).
+	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil && finalScionCfg != nil {
+		if finalScionCfg.MaxTurns == 0 && hd.MaxTurns > 0 {
+			finalScionCfg.MaxTurns = hd.MaxTurns
+		}
+		if finalScionCfg.MaxModelCalls == 0 && hd.MaxModelCalls > 0 {
+			finalScionCfg.MaxModelCalls = hd.MaxModelCalls
+		}
+		if finalScionCfg.MaxDuration == "" && hd.MaxDuration != "" {
+			finalScionCfg.MaxDuration = hd.MaxDuration
+		}
+		if hd.Resources != nil {
+			// Hub defaults in BASE position: per-field merge with the
+			// agent/template value winning any field it sets. MergeResourceSpec
+			// returns base itself when override is nil, so copy first rather
+			// than aliasing the context's spec into the persisted config.
+			base := *hd.Resources
+			finalScionCfg.Resources = config.MergeResourceSpec(&base, finalScionCfg.Resources)
 		}
 	}
 

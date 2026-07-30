@@ -50,10 +50,28 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 
 	result := baseConfig
 
-	// Merge profile-level env
-	if profile.Env != nil {
-		result.Env = mergeMaps(result.Env, profile.Env)
-	}
+	// profiles.<name>.env is deliberately NOT merged here. It was removed in
+	// Gap 3 ("G3-full") as a breaking change, on this rationale from the
+	// product owner:
+	//
+	//	"settings schema has gotten pretty rich, need to pare down the number
+	//	 of control and injection points, profiles are already a bit
+	//	 problematic in other ways in the architecture."
+	//
+	// This is the ONLY statement of intent for the removal, which is why it
+	// is recorded here and not only in the CHANGELOG. Do not restore the
+	// merge because a caller appears to want profile env: the removal is the
+	// feature, not an oversight.
+	//
+	// Note what this does NOT remove. profiles.<name>.harness_overrides.<hc>.env
+	// below is a different key with a different blast radius and is still
+	// merged. Volumes are also untouched.
+	//
+	// Pinned by TestResolveHarnessConfig_ProfileEnvNotMerged (pkg/config) and
+	// TestResolveAuthEnvOverlay_ProfileEnvNoLongerArrivesViaHarnessConfig
+	// (pkg/agent). Both leave harness_overrides UNSET for the key under test:
+	// this removes a rank that is not the top of its ladder, and a middle-rank
+	// removal is invisible whenever a higher rank is populated.
 
 	// Merge profile-level volumes
 	if profile.Volumes != nil {
@@ -72,6 +90,19 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 			if override.AuthSelectedType != "" {
 				result.AuthSelectedType = override.AuthSelectedType
 			}
+			// profiles.<name>.harness_overrides.<hc>.env SURVIVES G3-full, which
+			// removed profiles.<name>.env above but deliberately stopped here.
+			//
+			// This is now the only profiles-scoped env injection point left, and it
+			// is the TOP-RANKED env source in this function — merged after the base,
+			// so it outranks harness_configs.<hc>.env. Removing it too was ruled
+			// against on reversibility: retiring this rank later is additive, while
+			// restoring it after shipping would be a revert of a documented breaking
+			// change.
+			//
+			// It is NOT the migration path for the removed profiles.<name>.env.
+			// That is harness_configs.<hc>.env, a different, top-level key, which
+			// survives independently of this one.
 			if override.Env != nil {
 				result.Env = mergeMaps(result.Env, override.Env)
 			}

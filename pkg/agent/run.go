@@ -457,37 +457,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// 3. Resolve credentials via new auth pipeline
 
-	// Inject profile/harness-config env vars into opts.Env BEFORE building the
-	// auth overlay so that GatherAuthWithEnv can see credentials like
-	// GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_REGION declared in the active
-	// settings profile.
-	if settings != nil && !opts.BrokerMode {
-		var settingsEnv map[string]string
-		if harnessConfigName != "" {
-			if hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil {
-				settingsEnv = hcEntry.Env
-			}
-		} else if profileName != "" {
-			if p, ok := settings.Profiles[profileName]; ok {
-				settingsEnv = p.Env
-			}
-		}
-		if len(settingsEnv) > 0 {
-			if opts.Env == nil {
-				opts.Env = make(map[string]string)
-			}
-			for k, v := range settingsEnv {
-				if _, exists := opts.Env[k]; !exists {
-					opts.Env[k] = v
-				}
-			}
-		}
-	}
-
-	// Build a temporary auth overlay from resolved env-type secrets so auth
-	// resolution can detect credentials without mutating opts.Env (which is
-	// later projected into the container environment).
-	authEnvOverlay := buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets)
+	// Inject settings-declared env into opts.Env and build the auth overlay.
+	// Extracted so the injection-then-overlay sequence is testable without
+	// standing up a full agent; see resolveAuthEnvOverlay.
+	authEnvOverlay := resolveAuthEnvOverlay(&opts, settings, profileName, harnessConfigName)
 
 	canFallbackToNoAuth := func() bool {
 		return opts.HarnessAuth == "" && noAuthConfig != nil &&
@@ -1201,6 +1174,44 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string) ([]str
 		agentEnv = append(agentEnv, fmt.Sprintf("%s=%s", k, v))
 	}
 	return agentEnv, warnings, missingKeys
+}
+
+// resolveAuthEnvOverlay injects settings-declared env vars into opts.Env and
+// returns the auth overlay that GatherAuthWithEnv consumes. It is the exact
+// sequence Start runs at the point auth resolution begins, extracted so it can
+// be exercised directly in tests.
+func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSettings, profileName, harnessConfigName string) map[string]string {
+	// Inject harness-config env into opts.Env BEFORE the auth overlay is built,
+	// so GatherAuthWithEnv can see credentials the harness config declares
+	// (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION, ...).
+	//
+	// Runs in broker mode too. The gate that used to stand here excluded
+	// hub-dispatched agents, which is every agent in a hub deployment — but only
+	// from the AUTH OVERLAY: the same values already reach the container via
+	// finalScionCfg.Env (provision.go:1098-1115, ungated). The gate therefore
+	// bought no isolation, it only blinded auth resolution. See design §0.2.
+	//
+	// Profile env is no longer a source here — this reads the harness config
+	// only. Note this does NOT retire profile env: ResolveHarnessConfig still
+	// merges profile.Env into its result (settings_v1.go:54-55), and
+	// provision.go:1098 feeds it to the container regardless. See design §0.3.
+	if settings != nil && harnessConfigName != "" {
+		if hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil && len(hcEntry.Env) > 0 {
+			if opts.Env == nil {
+				opts.Env = make(map[string]string)
+			}
+			for k, v := range hcEntry.Env {
+				if _, exists := opts.Env[k]; !exists { // never clobber hub-supplied values
+					opts.Env[k] = v
+				}
+			}
+		}
+	}
+
+	// Build a temporary auth overlay from resolved env-type secrets so auth
+	// resolution can detect credentials without mutating opts.Env (which is
+	// later projected into the container environment).
+	return buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets)
 }
 
 // buildAuthEnvOverlay creates an auth-only view of the environment by layering
