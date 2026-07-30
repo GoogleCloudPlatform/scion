@@ -76,6 +76,22 @@ import (
 // is false the moment a template layer sits in between. That is why HubDefault
 // reports presence and never the value.
 //
+// As of 2026-07, this is not merely an architectural preference — the ordering
+// this endpoint would have to assume does not currently exist to be assumed.
+// docs-site/src/content/docs/reference/settings-precedence.md explicitly
+// DECLINES to publish a precedence position for hub agent_defaults: the
+// intended model (a low-priority fallback near the bottom of the chain) and the
+// implementation (applied at agent-create time, behaving as though near the
+// top) disagree, the resolution is deferred, and the page says in terms "Do not
+// build on either reading." Tracked as issue #623. The same page records that
+// the rank additionally moves with the hub's storage mode — above the broker's
+// settings.yaml defaults in Postgres mode, at the bottom of the broker chain in
+// file mode — so there is not even one ordering to copy.
+//
+// Concretely: an effective value shipped here would not become wrong at some
+// future date. It would be wrong now, and it would be wrong in a way the
+// project has already written down.
+//
 // TestResolvedSettingsResponseShape_NoEffectiveValue enforces this as an
 // exact-set assertion over the response types' JSON tags, so any new field —
 // whatever it is called — fails the build rather than review. That test is the

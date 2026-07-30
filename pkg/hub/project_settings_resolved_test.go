@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -337,4 +338,67 @@ func TestResolvedSettings_EndpointUnknownProject(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet,
 		"/api/v1/projects/does-not-exist/settings/resolved", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestResolvedSettings_NonHubMemberForbidden asserts that the Forbidden branch
+// of this endpoint is REACHABLE and correct: a caller who is not a hub member
+// gets 403.
+//
+// Read the wording carefully, because the obvious version of this test cannot
+// be written on this platform. The seeded hub-member-read-all policy grants
+// ActionRead on ALL projects to EVERY hub member, so a caller who is merely not
+// a member OF THIS PROJECT is legitimately authorized and gets 200. A test
+// named "non-member is refused" would have had to assert 200 in order to pass,
+// which is very likely why no negative test existed here in the first place.
+// The meaningful denial is therefore a non-HUB-member, and that is what this
+// asserts.
+//
+// Both facts are pinned below, the surprising one deliberately, so that the
+// next person to read this does not "fix" the 200 into a 403 and break the
+// platform's actual access model.
+func TestResolvedSettings_NonHubMemberForbidden(t *testing.T) {
+	srv, s, _, hubMemberNonProjectMember, project := setupDemoPolicyTest(t)
+
+	// A user who exists and is authenticated, but was never added to the
+	// hub-members group. ensureHubMembership is deliberately NOT called.
+	outsider := &store.User{
+		ID:          tid("user-outsider"),
+		Email:       "outsider@test.com",
+		DisplayName: "Outsider",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(t.Context(), outsider))
+
+	resolvedPath := "/api/v1/projects/" + project.ID + "/settings/resolved"
+	settingsPath := "/api/v1/projects/" + project.ID + "/settings"
+
+	// The assertion the lead asked for: the Forbidden branch is reachable.
+	rec := doRequestAsUser(t, srv, outsider, http.MethodGet, resolvedPath, nil)
+	assert.Equalf(t, http.StatusForbidden, rec.Code,
+		"a non-hub-member must be refused by the resolved endpoint; body: %s",
+		rec.Body.String())
+
+	// Control against the pre-existing endpoint this handler was modelled on.
+	// If GET /settings ever stops refusing this caller, the line above is
+	// asserting a local quirk rather than the platform's policy, and the two
+	// should be changed together rather than drifting apart.
+	rec = doRequestAsUser(t, srv, outsider, http.MethodGet, settingsPath, nil)
+	assert.Equalf(t, http.StatusForbidden, rec.Code,
+		"control: the pre-existing GET /settings must refuse the same caller, "+
+			"otherwise /settings/resolved is enforcing a policy of its own; body: %s",
+		rec.Body.String())
+
+	// The counter-intuitive half. This caller is NOT a member of the project,
+	// and is nonetheless authorized, because hub-member-read-all grants read on
+	// every project to every hub member. This is pinned as correct-as-designed.
+	// If it ever returns 403, the hub's read model has changed and this
+	// endpoint's authorization needs rereading — do not simply update the
+	// expectation.
+	rec = doRequestAsUser(t, srv, hubMemberNonProjectMember, http.MethodGet, resolvedPath, nil)
+	assert.Equalf(t, http.StatusOK, rec.Code,
+		"a hub member who is not a project member is granted read by "+
+			"hub-member-read-all and must get 200, not 403; body: %s",
+		rec.Body.String())
 }

@@ -39,7 +39,7 @@ func jsonTagNames(t *testing.T, v any) []string {
 	t.Helper()
 
 	typ := reflect.TypeOf(v)
-	for typ.Kind() == reflect.Ptr {
+	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
 	require.Equalf(t, reflect.Struct, typ.Kind(),
