@@ -1479,8 +1479,8 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 			SenderID:  discordUserID,
 			Recipient: "agent:" + agentResp.Slug,
 			Msg: fmt.Sprintf(
-				"You have been created for the Discord thread %q. "+
-					"Introduce yourself there and ask what I need.",
+				"You have been created and asked to participate in the Discord thread %q. "+
+					"Read the 'scion-messaging' skill if available and then introduce yourself in the thread to ask how you can help.",
 				title),
 			Type: messages.TypeInstruction,
 			Metadata: map[string]string{
