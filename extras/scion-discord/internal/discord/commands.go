@@ -1245,6 +1245,10 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 		h.followup(s, i, "You need to link your Discord account first. Run `/scion register`.")
 		return
 	}
+	if mapping.ScionEmail == "" {
+		h.followup(s, i, "Your registered account does not have an associated email address. Please re-register.")
+		return
+	}
 
 	// Step 0.4: Slugify the title.
 	// Use api.Slugify (not the local slugify in brokerauth.go) for hub compatibility.
@@ -1358,9 +1362,11 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 			}
 			thread = ch
 			var msg *discordgo.Message
-			msg, threadErr = s.ChannelMessageSend(ch.ID, statusContent)
-			if threadErr == nil && msg != nil {
+			msg, msgErr := s.ChannelMessageSend(ch.ID, statusContent)
+			if msgErr == nil && msg != nil {
 				statusMsgID = msg.ID
+			} else {
+				h.log.Warn("Failed to send status message in new thread", "error", msgErr)
 			}
 		}
 	}()
@@ -1465,11 +1471,23 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	if h.deliverInbound != nil {
 		topic := projectcompat.AgentTopic(link.ProjectID, agentResp.Slug)
 		kickoffMsg := &messages.StructuredMessage{
-			Sender: "user:" + mapping.ScionEmail,
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "discord",
+			ThreadID:  thread.ID,
+			Sender:    "user:" + mapping.ScionEmail,
+			SenderID:  discordUserID,
+			Recipient: "agent:" + agentResp.Slug,
 			Msg: fmt.Sprintf(
 				"You have been created for the Discord thread %q. "+
 					"Introduce yourself there and ask what I need.",
 				title),
+			Type: messages.TypeInstruction,
+			Metadata: map[string]string{
+				"discord_channel_id": thread.ID,
+				"discord_guild_id":   i.GuildID,
+				"project_id":         link.ProjectID,
+			},
 		}
 		if he := h.deliverInbound(topic, kickoffMsg); he != nil {
 			h.log.Warn("Failed to deliver kickoff message",

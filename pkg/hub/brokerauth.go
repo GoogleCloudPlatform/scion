@@ -845,6 +845,9 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 		}
 		return nil, http.StatusInternalServerError, fmt.Errorf("failed to resolve on-behalf-of principal: %w", err)
 	}
+	if user == nil {
+		return nil, http.StatusForbidden, fmt.Errorf("on-behalf-of principal not found")
+	}
 
 	// Check if user is suspended
 	if user.Status == "suspended" {
