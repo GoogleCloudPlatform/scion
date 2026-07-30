@@ -36,7 +36,7 @@ import (
 // is `-tags no_sqlite`, and project_settings_resolved_test.go carries
 // `//go:build !no_sqlite` — so every behaviour test for this endpoint is
 // invisible to CI, and the tests in THIS file are the only ones that run there.
-// At the time of writing that is 10 of 17 invisible.
+// At the time of writing that is 10 of 20 invisible.
 //
 // Measure it, do not count the funcs by eye:
 //
@@ -90,8 +90,11 @@ var (
 // and the enumeration is the whole argument — "we handled the obvious ones" is
 // not a soundness claim:
 //
-//  1. `omitempty` drops the field when it is zero.
-//     -> assertNoPromotedOmitEmpty
+//  1. a TAG OPTION suppresses the field when it is zero. `omitempty` does
+//     this; so does `omitzero` (Go 1.24+), which was missed for exactly as long
+//     as this check named `omitempty` alone. Stated as a category, and enforced
+//     with an allowlist, because the language has grown one of these twice.
+//     -> assertOnlySafeTagOptions
 //  2. a nil EMBEDDED STRUCT POINTER drops every field it promotes, with no
 //     tag and no marshaller involved.
 //     -> assertNoEmbeddedStructPointer
@@ -222,9 +225,14 @@ func assertNoEmbeddedStructPointer(t *testing.T, v any) {
 					"resolved-settings response types.\n"+
 					"Its fields are promoted onto this object, so when it is nil the "+
 					"encoder emits none of them and the exact-set shape guard — which "+
-					"reads a zero value — sees nothing missing. No omitempty and no "+
-					"custom marshaller are involved, so neither of the other two checks "+
-					"can see it either.\n"+
+					"reads a zero value — sees nothing missing.\n"+
+					"This fires on the SHAPE, whatever the promoted fields are tagged "+
+					"with. In the canonical case no omitempty and no custom marshaller "+
+					"are involved, so neither of the other two checks can see it. If the "+
+					"target DOES carry omitempty, this check simply reports it first — "+
+					"the walk rejects the pointer instead of descending through it, so "+
+					"the message says \"embedded pointer\" and not \"omitempty\". The "+
+					"verdict is correct either way; it is not a false positive.\n"+
 					"Give it a name and a json tag if you need it: a named pointer nests "+
 					"under its own key and marshals to null, which the guard can see.",
 				path, field.Name)
@@ -251,13 +259,54 @@ func assertNoEmbeddedStructPointer(t *testing.T, v any) {
 // have to be rewritten to drive the marshaller across enough inputs to
 // enumerate its outputs, which is a much larger and less reliable test than
 // this one.
+// implementsJSONMarshaler reports whether EITHER receiver form of typ carries a
+// custom MarshalJSON.
+//
+// THE TWO HALVES COVER DISJOINT INPUTS; NEITHER IS BELT-AND-BRACES. Measured:
+//
+//	input typ            value half   pointer half
+//	T (value type)         false*        true       *false iff receiver is *T
+//	*T (pointer type)      true          FALSE
+//
+// For a VALUE type the value half is strictly implied by the pointer half — a
+// value-receiver method is in *T's method set too — so it catches nothing the
+// other misses. For a POINTER type the implication reverses and the pointer half
+// goes false, because PointerTo(*T) is **T, whose method set is empty. Each half
+// is therefore the only working half for one of the two input kinds.
+//
+// Today every caller passes a value, so the VALUE half is unreachable-but-not-
+// wrong; it becomes the only thing that works the moment someone writes
+// assertNoCustomMarshaler(t, &ResolvedProjectSettings{}). Both are pinned below
+// rather than only the one currently doing work, because "this half is dead" is
+// a fact about the call sites, not about the function.
+//
+// WHY THE POINTER HALF MATTERS FOR THIS ENDPOINT SPECIFICALLY. A pointer-receiver
+// MarshalJSON is invoked by encoding/json only on an addressable value, so
+// json.Marshal(T{}) does not call it and json.Marshal(&T{}) does. That split is
+// not hypothetical here: the handler marshals a POINTER — resolvedProjectSettings
+// returns *ResolvedProjectSettings and writeJSON is handed that pointer directly
+// — while jsonWireNames below marshals a VALUE. So a value-receiver-only check
+// permits precisely the form production uses, and the guard would read a clean
+// zero-value object while the handler emitted whatever the marshaller wrote.
+//
+// This is factored out of the assertion so a test can interrogate it directly.
+// TestResolvedGuard_MarshalerCheckSeesBothReceiverForms pins the pointer half
+// specifically: deleting it turns that test red with no mutation planted.
+// Without it, deleting the half is invisible to the entire committed suite, and
+// a reader who assumes "if the type implements it, so does the pointer" — the
+// implication holds only in that direction — would simplify the condition and
+// see nothing fail.
+func implementsJSONMarshaler(typ reflect.Type) bool {
+	marshaler := reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	return typ.Implements(marshaler) || reflect.PointerTo(typ).Implements(marshaler)
+}
+
 func assertNoCustomMarshaler(t *testing.T, v any) {
 	t.Helper()
 
-	marshaler := reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 	typ := reflect.TypeOf(v)
 
-	assert.Falsef(t, typ.Implements(marshaler) || reflect.PointerTo(typ).Implements(marshaler),
+	assert.Falsef(t, implementsJSONMarshaler(typ),
 		"%s implements json.Marshaler, which this guard cannot see through.\n"+
 			"A custom marshaller decides at runtime which keys to write, so the exact-set "+
 			"assertion below — which reads what the encoder emits for one constructed "+
@@ -279,7 +328,7 @@ func assertNoCustomMarshaler(t *testing.T, v any) {
 //
 // This helper reports on ONE value. That is only a bound on what real
 // responses contain if nothing can suppress a key for the value it is given —
-// so callers must pair it with both assertNoPromotedOmitEmpty and
+// so callers must pair it with both assertOnlySafeTagOptions and
 // assertNoCustomMarshaler. Neither is optional and neither implies the other;
 // resolvedResponseTypes carries the coverage argument.
 func jsonWireNames(t *testing.T, v any) []string {
@@ -301,7 +350,7 @@ func jsonWireNames(t *testing.T, v any) []string {
 	return names
 }
 
-// assertNoPromotedOmitEmpty fails if any field promoted onto v's top-level JSON
+// (see assertOnlySafeTagOptions below) fails if any field promoted onto v's top-level JSON
 // object carries `,omitempty`.
 //
 // This is what makes jsonWireNames trustworthy on a zero value, and it is the
@@ -355,7 +404,60 @@ func jsonWireNames(t *testing.T, v any) []string {
 // custom marshaller suppresses keys without any tag being involved, and this
 // function is blind to it. assertNoCustomMarshaler closes that one. See
 // resolvedResponseTypes for why both are needed and neither implies the other.
-func assertNoPromotedOmitEmpty(t *testing.T, v any) {
+// safeJSONTagOptions is an ALLOWLIST: json tag options known not to affect
+// WHICH KEYS the encoder emits. Anything not listed here is rejected.
+//
+// This is an allowlist rather than a denylist of the bad options, and that was a
+// deliberate reversal after being caught. The check named `omitempty` and only
+// `omitempty`; Go 1.24 added `omitzero`, a second spelling of the same hazard,
+// and this file did not mention it. Measured on the real types at 25f82c33 with
+// `winner,omitzero` planted on BOTH hub and hubclient ResolvedProjectSetting:
+// the whole suite passed in both tag modes while the key reached the wire —
+// byte-for-byte the defect the coverage argument above says this guard exists to
+// stop, with one word changed.
+//
+// The two designs fail in opposite directions, and only one of them is safe:
+//
+//   - denylist: an option nobody here has heard of is ACCEPTED SILENTLY. That is
+//     the defect itself, and it is how omitzero survived.
+//   - allowlist: an option nobody here has heard of FAILS LOUDLY, and someone
+//     spends one line and a sentence of justification adding it.
+//
+// The cost is real — a legitimate future option produces a red that has to be
+// cleared by hand — and it is the right trade only because this check is scoped
+// to four enumerated types that are meant to be boring data. It would be
+// obnoxious applied broadly.
+//
+// IT IS DELIBERATELY EMPTY. The rule is therefore "a json tag on these types
+// carries a NAME AND NOTHING ELSE"; any comma is rejected. Measured across all
+// four types: ten fields, zero tag options, zero commas — so the strict form
+// costs nothing today, and no exemption needs carving for it now.
+//
+// `string` is the obvious candidate if one is ever needed (it changes how a
+// value is ENCODED, a number written as a JSON string, never whether its key
+// appears). It is deliberately NOT pre-authorised: an allowlist entry nobody
+// uses is an unreviewed exemption sitting open.
+//
+// THREE BOUNDARY CASES a reader will reach for, none of which is a hole:
+//
+//   - json:"-"   no comma, so this check ACCEPTS it. But the field then leaves
+//     the wire entirely, so its key is missing from the zero marshal and the
+//     exact-set assertion fails against expectedResolved*Fields. Caught
+//     downstream, not here.
+//   - json:"-,"  a literal "-" key. HAS a comma, so it is rejected right here.
+//   - no tag     no comma, ACCEPTED. The key becomes the Go field name, present
+//     in the zero marshal but absent from the expected set, so the exact-set
+//     assertion fails. Caught downstream.
+//
+// The comma rule and the exact-set assertion cover the three between them. This
+// is spelled out because `json:"-"` sailing through looks like a hole, and a
+// reader who "fixes" it here will be hardening the wrong check.
+var safeJSONTagOptions = map[string]bool{}
+
+// assertOnlySafeTagOptions fails if any field whose key is promoted into the
+// resolved-settings object carries a json tag option that is not on
+// safeJSONTagOptions.
+func assertOnlySafeTagOptions(t *testing.T, v any) {
 	t.Helper()
 
 	typ := reflect.TypeOf(v)
@@ -392,18 +494,29 @@ func assertNoPromotedOmitEmpty(t *testing.T, v any) {
 			}
 
 			for _, opt := range parts[1:] {
-				assert.NotEqualf(t, "omitempty", opt,
-					"%s%s carries `omitempty`, which is not allowed on the "+
-						"resolved-settings response types.\n"+
+				if safeJSONTagOptions[opt] {
+					continue
+				}
+				assert.Failf(t, "unsafe json tag option",
+					"%s%s carries the json tag option `%s`, which is not on the "+
+						"known-safe list for the resolved-settings response types, "+
+						"which carry a tag NAME and nothing else.\n"+
 						"Two reasons, and the second is the one that bites:\n"+
 						"  1. This response never omits keys. Every registered setting is "+
 						"reported every time, and an unset projectValue is explicit null, "+
 						"so that a client cannot infer \"absent\" from a missing key.\n"+
-						"  2. `omitempty` hides a zero-valued field from the encoder, and "+
-						"the shape guard reads the encoder's output. A field with "+
-						"`omitempty` can reach real clients while "+
-						"TestResolvedSettingsResponseShape_NoEffectiveValue stays green.",
-					path, field.Name)
+						"  2. An option that suppresses a zero-valued field hides it from "+
+						"the encoder, and the shape guard reads the encoder's output. Such "+
+						"a field can reach real clients while "+
+						"TestResolvedSettingsResponseShape_NoEffectiveValue stays green. "+
+						"This is not hypothetical: `omitempty` and `omitzero` both do it, "+
+						"and `omitzero` additionally honours a user-defined IsZero(), so "+
+						"the key set can depend on a method's opinion of zero-ness rather "+
+						"than on the value being zero at all.\n"+
+						"If `%s` genuinely cannot change which keys are emitted, add it to "+
+						"safeJSONTagOptions with a note saying why. Do not delete this "+
+						"check to make it pass.",
+					path, field.Name, opt, opt)
 			}
 		}
 	}
@@ -624,9 +737,7 @@ func TestResolvedSettingsResponseShape_NoEffectiveValue(t *testing.T) {
 	// found the third — see the coverage argument on resolvedResponseTypes,
 	// which records what each one is and how it was measured.
 	for _, v := range resolvedResponseTypes() {
-		assertNoPromotedOmitEmpty(t, v)     // intervener 1: tags
-		assertNoEmbeddedStructPointer(t, v) // intervener 2: type structure
-		assertNoCustomMarshaler(t, v)       // intervener 3: behaviour
+		assertResponseKeySetIsTypeDetermined(t, v)
 	}
 
 	// Step 2: the encoder's actual output is exactly the expected set.
@@ -643,6 +754,28 @@ func TestResolvedSettingsResponseShape_NoEffectiveValue(t *testing.T) {
 	assert.Equal(t, expectedResolvedEntryFields,
 		jsonWireNames(t, ResolvedProjectSetting{}),
 		"hub.ResolvedProjectSetting"+rationale)
+
+	// The SAME assertion over a POINTER, because that is the production path:
+	// resolvedProjectSettings returns *ResolvedProjectSettings and writeJSON
+	// marshals that pointer. The value form above is what this guard has always
+	// read, and the two can disagree — encoding/json invokes a pointer-receiver
+	// MarshalJSON only on an addressable value, so a marshaller reachable from
+	// &T but not from T would rewrite the response with the value assertion
+	// green.
+	//
+	// assertNoCustomMarshaler currently makes that divergence impossible, so
+	// today these two pairs are provably identical and this looks redundant. It
+	// is kept because the PAIR is itself a second, independent control on the
+	// marshaller ban, reached by a different route than the instrument table: if
+	// the ban is ever weakened AND a pointer-receiver marshaller appears, the &T
+	// assertion fires and the T assertion does not. A proof resting on the ban
+	// does not survive the ban being narrowed; this does.
+	assert.Equal(t, expectedResolvedWrapperFields,
+		jsonWireNames(t, &ResolvedProjectSettings{}),
+		"*hub.ResolvedProjectSettings (the production path)"+rationale)
+	assert.Equal(t, expectedResolvedEntryFields,
+		jsonWireNames(t, &ResolvedProjectSetting{}),
+		"*hub.ResolvedProjectSetting (the production path)"+rationale)
 
 	// The hubclient mirror is part of the same contract: a field added to only
 	// one side would produce a client type that silently disagrees with the
@@ -929,4 +1062,315 @@ func TestResolvedSettings_ProjectFieldTypeIdentity(t *testing.T) {
 			"exact-set shape guard no longer sees what this endpoint actually returns — "+
 			"a widened wrapper is the supported way to sneak an effective value into this "+
 			"response, which is precisely what these guards exist to prevent.")
+}
+
+// marshalerCtrlValue carries a VALUE-receiver MarshalJSON. Both receiver forms
+// of this type satisfy json.Marshaler, so either half of the check catches it.
+type marshalerCtrlValue struct {
+	X int `json:"x"`
+}
+
+func (marshalerCtrlValue) MarshalJSON() ([]byte, error) { return []byte(`{"custom":1}`), nil }
+
+// marshalerCtrlPointer carries a POINTER-receiver MarshalJSON. Only *T satisfies
+// json.Marshaler; T does not. This is the shape a value-receiver-only check misses.
+type marshalerCtrlPointer struct {
+	X int `json:"x"`
+}
+
+func (*marshalerCtrlPointer) MarshalJSON() ([]byte, error) { return []byte(`{"custom":1}`), nil }
+
+// marshalerCtrlNone is the negative control: no custom marshaller at all.
+type marshalerCtrlNone struct {
+	X int `json:"x"`
+}
+
+// TestResolvedGuard_MarshalerCheckSeesBothReceiverForms tests the INSTRUMENT, not
+// the response types.
+//
+// The marshaller ban is the only thing standing between this guard and a defect
+// that was found in review, and its pointer half is solely responsible for
+// catching the pointer-receiver form. Measured: with a pointer-receiver
+// MarshalJSON planted on the real ResolvedProjectSettings, the full condition
+// fails and the value half alone passes. Nothing in the committed suite noticed
+// the difference, because a planted mutation is not a test — so this is that
+// test.
+//
+// It asserts the halves SEPARATELY rather than just asserting the combined
+// result. A control that only checked the combined value would stay green if
+// someone deleted the pointer half and the value half happened to cover the
+// cases, which is the same unattributed-red mistake this file's own controls
+// made earlier: red, but not for the reason claimed.
+func TestResolvedGuard_MarshalerCheckSeesBothReceiverForms(t *testing.T) {
+	marshaler := reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+
+	t.Run("pointer receiver is invisible to the value half", func(t *testing.T) {
+		typ := reflect.TypeOf(marshalerCtrlPointer{})
+
+		// The attribution. If this pair ever flips, the comment on
+		// implementsJSONMarshaler is wrong and the pointer half is redundant.
+		assert.False(t, typ.Implements(marshaler),
+			"a pointer-receiver MarshalJSON must NOT satisfy json.Marshaler on the "+
+				"value type; if it does, this control no longer distinguishes the halves")
+		assert.True(t, reflect.PointerTo(typ).Implements(marshaler),
+			"a pointer-receiver MarshalJSON must satisfy json.Marshaler on the pointer type")
+
+		assert.True(t, implementsJSONMarshaler(typ),
+			"the check must reject a pointer-receiver marshaller. If this fails, the "+
+				"`|| reflect.PointerTo(...)` half has been removed, and the guard now "+
+				"permits exactly the receiver form the handler uses")
+	})
+
+	t.Run("value receiver is caught too", func(t *testing.T) {
+		typ := reflect.TypeOf(marshalerCtrlValue{})
+
+		assert.True(t, typ.Implements(marshaler))
+		assert.True(t, reflect.PointerTo(typ).Implements(marshaler),
+			"a value-receiver method is in the pointer type's method set as well; this "+
+				"is why deleting the VALUE half alone would not turn these cases red, "+
+				"and why the two halves are not symmetric")
+		assert.True(t, implementsJSONMarshaler(typ))
+	})
+
+	// Pins the VALUE half. It is unreachable from today's call sites, which all
+	// pass values — deleting it leaves every other case in this test green — so
+	// without this subtest the half is undefended and reads as redundant. It is
+	// not: for a pointer TYPE the pointer half goes false, because PointerTo(*T)
+	// is **T with an empty method set.
+	t.Run("pointer type is invisible to the pointer half", func(t *testing.T) {
+		typ := reflect.TypeOf(&marshalerCtrlPointer{})
+
+		assert.True(t, typ.Implements(marshaler),
+			"*T satisfies json.Marshaler directly")
+		assert.False(t, reflect.PointerTo(typ).Implements(marshaler),
+			"PointerTo(*T) is **T and satisfies nothing; if this ever flips, the "+
+				"disjointness argument on implementsJSONMarshaler is wrong")
+
+		assert.True(t, implementsJSONMarshaler(typ),
+			"the check must reject a marshaller reached through a pointer TYPE. If "+
+				"this fails, the `typ.Implements(marshaler)` half has been removed as "+
+				"redundant — it is not redundant, it is merely unused today")
+	})
+
+	t.Run("no marshaller is not rejected", func(t *testing.T) {
+		typ := reflect.TypeOf(marshalerCtrlNone{})
+
+		assert.False(t, implementsJSONMarshaler(typ),
+			"the check must not fire on an ordinary struct; without this the ban could "+
+				"pass by rejecting everything")
+	})
+
+	// The reason the receiver form matters at all: encoding/json calls a
+	// pointer-receiver marshaller only on an addressable value. The guard marshals
+	// a value, production marshals a pointer, so the two disagree about what this
+	// type even emits.
+	t.Run("encoding/json honours the receiver form", func(t *testing.T) {
+		asValue, err := json.Marshal(marshalerCtrlPointer{X: 7})
+		require.NoError(t, err)
+		asPointer, err := json.Marshal(&marshalerCtrlPointer{X: 7})
+		require.NoError(t, err)
+
+		assert.JSONEq(t, `{"x":7}`, string(asValue),
+			"marshalling the VALUE must bypass the pointer-receiver marshaller")
+		assert.JSONEq(t, `{"custom":1}`, string(asPointer),
+			"marshalling the POINTER must invoke it — this divergence is why the ban "+
+				"cannot look at one receiver form only")
+	})
+}
+
+// assertResponseKeySetIsTypeDetermined runs all three interveners against v.
+//
+// The three are bundled here rather than called separately at the use site so
+// that TestResolvedSettingsGuard_InstrumentControls can drive them as a unit.
+// Deleting any one of the three from this function turns control rows red;
+// called individually at the use site, a deletion there would be invisible.
+func assertResponseKeySetIsTypeDetermined(t *testing.T, v any) {
+	t.Helper()
+
+	assertOnlySafeTagOptions(t, v)      // intervener 1: tags
+	assertNoEmbeddedStructPointer(t, v) // intervener 2: type structure
+	assertNoCustomMarshaler(t, v)       // intervener 3: behaviour
+}
+
+// Control fixtures for TestResolvedSettingsGuard_InstrumentControls. Each is the
+// smallest type that exhibits one shape. They are deliberately NOT variations on
+// the real response types: a control that resembles the thing it guards invites
+// someone to "fix" the control when the real type changes.
+type (
+	ctlClean struct {
+		ProjectSet bool `json:"projectSet"`
+	}
+	ctlEmbedTarget struct {
+		Winner string `json:"winner"`
+	}
+	ctlOmitTarget struct {
+		Winner string `json:"winner,omitempty"`
+	}
+	ctlZeroTarget struct {
+		Winner string `json:"winner,omitzero"`
+	}
+)
+
+type ctlOmitEmpty struct {
+	ProjectSet bool `json:"projectSet"`
+	ctlOmitTarget
+}
+
+// ctlOmitZero is the shape that was green at 25f82c33 while putting a key on the
+// wire. It is the reason the tag check became an allowlist.
+type ctlOmitZero struct {
+	ProjectSet bool `json:"projectSet"`
+	ctlZeroTarget
+}
+
+type ctlEmbeddedPtr struct {
+	ProjectSet bool `json:"projectSet"`
+	*ctlEmbedTarget
+}
+
+type ctlMid struct{ *ctlEmbedTarget }
+
+// ctlNestedPtr hides the embedded pointer one level down, under an embedded
+// VALUE. A top-level scan for anonymous pointer fields does not see it.
+type ctlNestedPtr struct {
+	ProjectSet bool `json:"projectSet"`
+	ctlMid
+}
+
+type ctlEmbeddedValue struct {
+	ProjectSet bool `json:"projectSet"`
+	ctlEmbedTarget
+}
+
+type ctlNamedPtr struct {
+	ProjectSet bool            `json:"projectSet"`
+	Extra      *ctlEmbedTarget `json:"extra"`
+}
+
+// instrumentFires reports whether f fails when run against v.
+//
+// f is run against a throwaway *testing.T so a neighbouring assertion cannot
+// manufacture the result — the failure mode that made two of this file's own
+// manual controls go red for the wrong reason, tripping the exact-set and mirror
+// assertions rather than the instrument under test.
+//
+// The goroutine is not incidental. The instruments use require.* for their
+// structural preconditions, and require failing calls FailNow, which is
+// runtime.Goexit. Run inline that would tear down the calling test goroutine
+// mid-table; contained here, the deferred close still runs and the caller sees
+// an ordinary "it failed".
+func instrumentFires(t *testing.T, f func(*testing.T, any), v any) bool {
+	t.Helper()
+
+	// Every input must be a struct, because the instruments open with a
+	// require on the kind. Without this line a non-struct row would trip that
+	// require, sub.Failed() would report true, and a REJECT row would PASS —
+	// recording the instrument as having caught a defect it never examined.
+	// That is the red-for-the-wrong-reason failure this table exists to prevent,
+	// so it would be a poor thing to reproduce inside the table itself.
+	require.Equal(t, reflect.Struct, reflect.Indirect(reflect.ValueOf(v)).Kind(),
+		"control inputs must be structs; the instruments require on kind and a "+
+			"non-struct would be rejected as malformed rather than examined")
+
+	sub := &testing.T{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f(sub, v)
+	}()
+	<-done
+
+	return sub.Failed()
+}
+
+// TestResolvedSettingsGuard_InstrumentControls pins the instruments themselves.
+//
+// Before this existed the whole shape guard could be removed in two lines with
+// the suite still green: deleting the pointer half of the marshaller check, or
+// deleting the intervener calls outright, broke no test in either tag mode. The
+// controls for those cases had been run by hand and were correct, but evidence
+// that lives in a transcript does not fail a build, and the next person to
+// simplify one of these conditions will have neither.
+//
+// The ACCEPT rows carry as much weight as the REJECT rows. A ban that rejects
+// everything passes every REJECT row while making the guard useless, and a
+// legitimate named-pointer or embedded-value field must keep working.
+func TestResolvedSettingsGuard_InstrumentControls(t *testing.T) {
+	const why = "\n\nThis control exists so the instrument cannot be weakened in " +
+		"silence. If you are reading this because you simplified one of the " +
+		"assert helpers, the simplification removed coverage — see the coverage " +
+		"argument on resolvedResponseTypes before changing it back."
+
+	cases := []struct {
+		name string
+		f    func(*testing.T, any)
+		v    any
+		want bool
+	}{
+		// REJECT rows: intervener 1, tags.
+		{"omitempty promoted from embedded value", assertOnlySafeTagOptions, ctlOmitEmpty{}, true},
+		{"omitzero promoted from embedded value", assertOnlySafeTagOptions, ctlOmitZero{}, true},
+
+		// REJECT rows: intervener 2, type structure.
+		{"embedded pointer at top level", assertNoEmbeddedStructPointer, ctlEmbeddedPtr{}, true},
+		{"embedded pointer one level down", assertNoEmbeddedStructPointer, ctlNestedPtr{}, true},
+
+		// REJECT rows: intervener 3, behaviour. The pointer-receiver row is the
+		// form production uses; without it, deleting the pointer half of the
+		// check breaks nothing.
+		{"value-receiver MarshalJSON", assertNoCustomMarshaler, marshalerCtrlValue{}, true},
+		{"pointer-receiver MarshalJSON", assertNoCustomMarshaler, marshalerCtrlPointer{}, true},
+
+		// REJECT rows through the COMPOSITE. These are what make deleting one of
+		// the three calls inside assertResponseKeySetIsTypeDetermined visible.
+		{"composite catches tags", assertResponseKeySetIsTypeDetermined, ctlOmitZero{}, true},
+		{"composite catches structure", assertResponseKeySetIsTypeDetermined, ctlNestedPtr{}, true},
+		{"composite catches behaviour", assertResponseKeySetIsTypeDetermined, marshalerCtrlPointer{}, true},
+
+		// ACCEPT rows.
+		{"named pointer field is ACCEPTED", assertNoEmbeddedStructPointer, ctlNamedPtr{}, false},
+		{"embedded value is ACCEPTED", assertNoEmbeddedStructPointer, ctlEmbeddedValue{}, false},
+		{"plain tags are ACCEPTED", assertOnlySafeTagOptions, ctlEmbeddedValue{}, false},
+		{"no marshaller is ACCEPTED", assertNoCustomMarshaler, ctlEmbeddedValue{}, false},
+		{"a clean type passes the composite", assertResponseKeySetIsTypeDetermined, ctlClean{}, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := instrumentFires(t, tc.f, tc.v); got != tc.want {
+				t.Errorf("instrument fired=%v, want %v%s", got, tc.want, why)
+			}
+		})
+	}
+}
+
+// TestResolvedSettings_SettingsValueTypeIdentity pins the map's value type.
+//
+// The coverage argument on resolvedResponseTypes reasons about four types. That
+// reasoning only reaches the "settings" sub-objects because the map's value type
+// IS one of the four; widen it and the response grows a shape no guard in this
+// file has looked at.
+//
+// The property was already held before this test existed — but only by the
+// compiler, incidentally, at the two sites that construct the map, with no
+// message attached. That is a worse position than it sounds, because the field
+// immediately above it, Project, has a named test explaining that retyping it is
+// the supported way to sneak an effective value into this response. The
+// asymmetry reads as "this class was considered and Settings was found not to
+// need it," which is not true and is not what anyone decided.
+func TestResolvedSettings_SettingsValueTypeIdentity(t *testing.T) {
+	field, ok := reflect.TypeOf(ResolvedProjectSettings{}).FieldByName("Settings")
+	require.True(t, ok, "ResolvedProjectSettings has no Settings field")
+	require.Equal(t, reflect.Map, field.Type.Kind(),
+		"Settings must stay a map; the guards below assume a map value type")
+
+	assert.Equal(t, reflect.TypeOf(ResolvedProjectSetting{}), field.Type.Elem(),
+		"the resolved response's \"settings\" map must stay keyed to exactly "+
+			"ResolvedProjectSetting.\n"+
+			"Widening this value type — embedding ResolvedProjectSetting in a richer "+
+			"struct, say — moves the per-setting object outside the set of types the "+
+			"shape guard checks, and a widened entry is precisely how an effective "+
+			"value would reach clients. That is the thing these guards exist to "+
+			"prevent, and it is why this is asserted rather than left to the two "+
+			"construction sites where the compiler happens to notice.")
 }
