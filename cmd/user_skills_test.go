@@ -720,6 +720,16 @@ func TestRunUserSkillsAdd_FromDirConflictWithAs(t *testing.T) {
 	assert.Contains(t, err.Error(), "--as and --optional cannot be used with --from-directory")
 }
 
+func TestRunUserSkillsAdd_FromDirConflictWithSkillURI(t *testing.T) {
+	origFromDir := userSkillsFromDir
+	defer func() { userSkillsFromDir = origFromDir }()
+	userSkillsFromDir = "https://github.com/org/repo/tree/main/skills"
+
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://foo"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot combine a skill URI argument with --from-directory")
+}
+
 func TestRunUserSkillsFromDirectory_TotalFailure(t *testing.T) {
 	skills := []map[string]interface{}{
 		{"uri": "skill://org/skill-a", "name": "skill-a"},

@@ -155,6 +155,9 @@ func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 		if userSkillsAs != "" || userSkillsOptional {
 			return fmt.Errorf("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
 		}
+		if len(args) > 0 {
+			return fmt.Errorf("cannot combine a skill URI argument with --from-directory; choose one")
+		}
 		return runUserSkillsFromDirectory(cmd, userSkillsFromDir)
 	}
 
