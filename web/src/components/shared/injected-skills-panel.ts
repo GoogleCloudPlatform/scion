@@ -198,6 +198,14 @@ export class ScionInjectedSkillsPanel extends LitElement {
   /** When a URI input is transformed to canonical form, holds the preview string. */
   @state() private dialogTransformed: string | null = null;
 
+  // Directory discovery (batch-add). Populated by handleDiscoverDirectory() when
+  // the user probes a GitHub directory URL for the skills it contains.
+  @state() private discoveryDialogOpen = false;
+  @state() private discoveredSkills: Array<{ uri: string; name: string }> = [];
+  @state() private selectedSkillURIs: Set<string> = new Set();
+  @state() private discoveryLoading = false;
+  @state() private discoveryError: string | null = null;
+
   // Delete — tracked by index to avoid key collisions on hub rows (all have id='')
   @state() private _deletingIndex: number | null = null;
 
@@ -327,6 +335,34 @@ export class ScionInjectedSkillsPanel extends LitElement {
         font-family: var(--scion-font-mono, monospace);
         font-size: 0.75rem;
         color: var(--scion-text-muted, #64748b);
+      }
+
+      /* Directory-discovery selection dialog. Mirrors the equivalent block in
+         resource-import.ts so both checkbox pickers look the same. */
+      .selection-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        margin-bottom: 0.75rem;
+      }
+
+      .selection-count {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .selection-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        max-height: 400px;
+        overflow-y: auto;
+      }
+
+      .selection-item {
+        padding: 0.25rem 0;
       }
 
       .no-results {
@@ -498,6 +534,34 @@ export class ScionInjectedSkillsPanel extends LitElement {
     await this.load();
   }
 
+  /**
+   * Add several skill URIs at once.
+   *
+   * Hub scope uses a PUT-whole-list API, so calling addEntry() N times would
+   * issue N read-modify-write round-trips and leave N-1 pointless intermediate
+   * states on the server. Instead we build the full user_defined list once and
+   * write it in a single PUT.
+   *
+   * Project and user scopes have per-item POST endpoints, so they degrade to N
+   * individual addEntry() calls — unchanged behaviour, and those endpoints are
+   * idempotent by design.
+   */
+  private async addEntries(uris: string[]): Promise<void> {
+    if (uris.length === 0) return;
+    if (this.scope === 'hub') {
+      const userDefined = this.rows.filter((r) => !r.readonly).map((r) => this.rowToSkillRef(r));
+      for (const uri of uris) {
+        userDefined.push(this.buildSkillRef(uri, '', false));
+      }
+      await this.putHubUserDefined(userDefined);
+      await this.load();
+    } else {
+      for (const uri of uris) {
+        await this.addEntry(uri, '', false);
+      }
+    }
+  }
+
   private async deleteEntry(row: SkillRow, rowIndex: number): Promise<void> {
     if (this.scope === 'hub') {
       // For hub: remove from user_defined and PUT.
@@ -591,7 +655,17 @@ export class ScionInjectedSkillsPanel extends LitElement {
     this.dialogLoading = false;
     this.dialogError = null;
     this.dialogTransformed = null;
+    this.resetDiscovery();
     this.dialogOpen = true;
+  }
+
+  /** Clear all directory-discovery state (called when the add dialog opens/closes). */
+  private resetDiscovery(): void {
+    this.discoveryDialogOpen = false;
+    this.discoveredSkills = [];
+    this.selectedSkillURIs = new Set();
+    this.discoveryLoading = false;
+    this.discoveryError = null;
   }
 
   private closeDialog(): void {
@@ -680,6 +754,166 @@ export class ScionInjectedSkillsPanel extends LitElement {
     } finally {
       this.dialogLoading = false;
     }
+  }
+
+  // ── Directory discovery (batch add) ──────────────────────────────────────
+
+  /**
+   * True when the URI currently typed in the dialog should offer directory
+   * discovery. A URL that normalizes to a gh:// or skill:// URI is
+   * unambiguously a single skill, so only "Add Skill" is offered. A URL that
+   * stays a full https:// URL either points at a directory of skills or at a
+   * single skill on a non-standard path — the user's choice of button
+   * disambiguates.
+   */
+  private get showDiscoverButton(): boolean {
+    const candidate = this.dialogTransformed ?? this.dialogUri.trim();
+    return candidate.startsWith('https://');
+  }
+
+  /**
+   * Probe the pasted URL for skills. On success this opens the selection
+   * dialog with everything pre-selected; on failure the error is shown inline
+   * in the add dialog and no selection dialog is opened.
+   */
+  private async handleDiscoverDirectory(): Promise<void> {
+    const sourceUrl = this.dialogUri.trim();
+    if (!sourceUrl) {
+      this.discoveryError = 'Skill URI is required';
+      return;
+    }
+
+    this.discoveryLoading = true;
+    this.discoveryError = null;
+    this.dialogError = null;
+    try {
+      const body: { sourceUrl: string; projectId?: string } = { sourceUrl };
+      if (this.scope === 'project' && this.scopeId) body.projectId = this.scopeId;
+
+      const res = await apiFetch('/api/v1/skills/discover-directory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `Discovery failed (HTTP ${res.status})`));
+      }
+      const data = (await res.json()) as { skills?: Array<{ uri: string; name: string }> };
+      this.discoveredSkills = data.skills ?? [];
+      if (this.discoveredSkills.length === 0) {
+        this.discoveryError = 'No skills found at this URL.';
+        return;
+      }
+      this.selectedSkillURIs = new Set(this.discoveredSkills.map((s) => s.uri));
+      this.discoveryDialogOpen = true;
+    } catch (err) {
+      this.discoveryError = err instanceof Error ? err.message : 'Discovery failed';
+    } finally {
+      this.discoveryLoading = false;
+    }
+  }
+
+  /** Add every checked skill, then close both the selection and add dialogs. */
+  private async handleDiscoveryConfirm(): Promise<void> {
+    this.discoveryLoading = true;
+    this.discoveryError = null;
+    try {
+      await this.addEntries([...this.selectedSkillURIs]);
+      this.discoveryDialogOpen = false;
+      this.closeDialog();
+      this.resetDiscovery();
+    } catch (err) {
+      this.discoveryError = err instanceof Error ? err.message : 'Failed to add selected skills';
+    } finally {
+      this.discoveryLoading = false;
+    }
+  }
+
+  /**
+   * Checkbox list of discovered skills. Rows show the bare directory name; no
+   * SKILL.md frontmatter is read, so there is no description to display.
+   *
+   * This deliberately duplicates the select-all/list/count shape of
+   * resource-import.ts rather than sharing a component: the two dialogs operate
+   * on different data shapes and the duplication is ~70 lines.
+   */
+  private renderDiscoveryDialog() {
+    if (!this.discoveryDialogOpen) return nothing;
+
+    const total = this.discoveredSkills.length;
+    const allSelected = this.selectedSkillURIs.size === total;
+    const noneSelected = this.selectedSkillURIs.size === 0;
+
+    return html`
+      <sl-dialog
+        label="Select Skills to Add"
+        open
+        @sl-request-close=${() => {
+          this.discoveryDialogOpen = false;
+        }}
+        style="--width: 560px;"
+      >
+        <div class="selection-header">
+          <sl-checkbox
+            ?checked=${allSelected}
+            ?indeterminate=${!allSelected && !noneSelected}
+            @sl-change=${(e: Event) => {
+              const checked = (e.target as HTMLInputElement).checked;
+              this.selectedSkillURIs = checked
+                ? new Set(this.discoveredSkills.map((s) => s.uri))
+                : new Set();
+            }}
+          >
+            Select All
+          </sl-checkbox>
+          <span class="selection-count">${this.selectedSkillURIs.size} of ${total} selected</span>
+        </div>
+        <div class="selection-list">
+          ${this.discoveredSkills.map(
+            (skill) => html`
+              <div class="selection-item">
+                <sl-checkbox
+                  ?checked=${this.selectedSkillURIs.has(skill.uri)}
+                  @sl-change=${(e: Event) => {
+                    const checked = (e.target as HTMLInputElement).checked;
+                    const updated = new Set(this.selectedSkillURIs);
+                    if (checked) updated.add(skill.uri);
+                    else updated.delete(skill.uri);
+                    this.selectedSkillURIs = updated;
+                  }}
+                >
+                  ${skill.name}
+                </sl-checkbox>
+              </div>
+            `
+          )}
+        </div>
+        ${this.discoveryError
+          ? html`<div class="dialog-error">${this.discoveryError}</div>`
+          : nothing}
+
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.discoveryLoading}
+          @click=${() => {
+            this.discoveryDialogOpen = false;
+          }}
+        >
+          Cancel
+        </sl-button>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.discoveryLoading}
+          ?disabled=${noneSelected || this.discoveryLoading}
+          @click=${() => void this.handleDiscoveryConfirm()}
+        >
+          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+          Add Selected (${this.selectedSkillURIs.size})
+        </sl-button>
+      </sl-dialog>
+    `;
   }
 
   // ── Drag & drop ──────────────────────────────────────────────────────────
@@ -777,7 +1011,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
             ? this.renderEmpty()
             : this.renderTable()}
 
-      ${this.renderDialog()}
+      ${this.renderDialog()} ${this.renderDiscoveryDialog()}
     `;
   }
 
@@ -1050,6 +1284,16 @@ export class ScionInjectedSkillsPanel extends LitElement {
                       Will be stored as: <strong>${this.dialogTransformed}</strong>
                     </div>`
                   : nothing}
+                ${this.showDiscoverButton
+                  ? html`<div class="dialog-hint">
+                      <sl-icon name="folder2-open"></sl-icon>
+                      This looks like it could be a directory of skills — use
+                      <strong>Discover Skills from Directory</strong> to pick several at once.
+                    </div>`
+                  : nothing}
+                ${this.discoveryError
+                  ? html`<div class="dialog-error">${this.discoveryError}</div>`
+                  : nothing}
               `}
 
           <sl-input
@@ -1088,15 +1332,29 @@ export class ScionInjectedSkillsPanel extends LitElement {
           slot="footer"
           variant="default"
           @click=${this.closeDialog}
-          ?disabled=${this.dialogLoading}
+          ?disabled=${this.dialogLoading || this.discoveryLoading}
         >
           Cancel
         </sl-button>
+        ${!isSearchMode && this.showDiscoverButton
+          ? html`
+              <sl-button
+                slot="footer"
+                variant="default"
+                ?loading=${this.discoveryLoading}
+                ?disabled=${this.dialogLoading || this.discoveryLoading}
+                @click=${() => void this.handleDiscoverDirectory()}
+              >
+                <sl-icon slot="prefix" name="folder2-open"></sl-icon>
+                Discover Skills from Directory
+              </sl-button>
+            `
+          : nothing}
         <sl-button
           slot="footer"
           variant="primary"
           ?loading=${this.dialogLoading}
-          ?disabled=${this.dialogLoading}
+          ?disabled=${this.dialogLoading || this.discoveryLoading}
           @click=${this.handleAddSkill}
         >
           Add Skill
