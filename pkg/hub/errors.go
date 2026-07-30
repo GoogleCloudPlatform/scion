@@ -60,6 +60,9 @@ const (
 	ErrCodeMissingEnvVars = "missing_env_vars"
 	ErrCodeCloneFailed    = "clone_failed"
 	ErrCodePullFailed     = "pull_failed"
+	// ErrCodeDiscoverFailed reports a remote-directory probe that could not be
+	// fetched or yielded nothing usable (see handleSkillsDiscoverDirectory).
+	ErrCodeDiscoverFailed = "discover_failed"
 
 	// Delivery error codes
 	ErrCodeAgentNotFound   = "agent_not_found"

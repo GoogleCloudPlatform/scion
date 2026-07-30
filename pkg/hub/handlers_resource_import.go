@@ -585,7 +585,7 @@ func (s *Server) handleProjectDiscoverTemplates(w http.ResponseWriter, r *http.R
 		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, s.templateImportKind())
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "discover_failed", err.Error(), nil)
+		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
 		return
 	}
 
@@ -665,7 +665,7 @@ func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *h
 		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, s.harnessConfigImportKind())
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "discover_failed", err.Error(), nil)
+		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
 		return
 	}
 
@@ -773,7 +773,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 
 	names, skipped, err := s.discoverFromRemote(ctx, projectID, sourceURL, kind)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "discover_failed", err.Error(), nil)
+		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
 		return
 	}
 

@@ -173,6 +173,9 @@ func TestHandleSkillsDiscoverDirectory_StandardSkillsDir(t *testing.T) {
 		"repo-main/skills/alpha-skill/SKILL.md": "---\nname: alpha-skill\n---\nAlpha",
 		"repo-main/skills/beta-skill/SKILL.md":  "---\nname: beta-skill\n---\nBeta",
 		"repo-main/skills/not-a-skill/README":   "no marker here",
+		// Carries a SKILL.md but its name would inject URI syntax, so the name
+		// guard drops it. It must still be reported in Skipped.
+		"repo-main/skills/bad=name/SKILL.md": "---\nname: bad\n---\nBad",
 	}, func(req *http.Request) { requestedURL = req.URL.String() })()
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, skillsDiscoverPath, DiscoverSkillsRequest{
@@ -207,9 +210,14 @@ func TestHandleSkillsDiscoverDirectory_StandardSkillsDir(t *testing.T) {
 	if _, ok := byName["not-a-skill"]; ok {
 		t.Errorf("directory without SKILL.md should not be discovered: %+v", resp.Skills)
 	}
-	// The marker-less sibling is reported so the UI can explain its absence.
-	if len(resp.Skipped) != 1 || resp.Skipped[0] != "not-a-skill" {
-		t.Errorf("Skipped = %v, want [not-a-skill]", resp.Skipped)
+	// Both the marker-less sibling and the unsafely-named one are reported so
+	// the UI can explain their absence rather than silently dropping them.
+	gotSkipped := map[string]bool{}
+	for _, name := range resp.Skipped {
+		gotSkipped[name] = true
+	}
+	if len(resp.Skipped) != 2 || !gotSkipped["not-a-skill"] || !gotSkipped["bad=name"] {
+		t.Errorf("Skipped = %v, want [not-a-skill bad=name] in some order", resp.Skipped)
 	}
 }
 
@@ -294,8 +302,8 @@ func TestHandleSkillsDiscoverDirectory_NoSkillsFound(t *testing.T) {
 	if !strings.Contains(apiErr.Message, "no skills found") {
 		t.Errorf("expected 'no skills found' in message, got %q", apiErr.Message)
 	}
-	if apiErr.Code != "discover_failed" {
-		t.Errorf("code = %q, want discover_failed", apiErr.Code)
+	if apiErr.Code != ErrCodeDiscoverFailed {
+		t.Errorf("code = %q, want %q", apiErr.Code, ErrCodeDiscoverFailed)
 	}
 }
 
@@ -575,8 +583,8 @@ func TestHandleSkillsDiscoverDirectory_FetchFailure(t *testing.T) {
 	if !strings.Contains(apiErr.Message, "Failed to fetch remote skills") {
 		t.Errorf("message = %q, want it to contain %q", apiErr.Message, "Failed to fetch remote skills")
 	}
-	if apiErr.Code != "discover_failed" {
-		t.Errorf("code = %q, want discover_failed", apiErr.Code)
+	if apiErr.Code != ErrCodeDiscoverFailed {
+		t.Errorf("code = %q, want %q", apiErr.Code, ErrCodeDiscoverFailed)
 	}
 	if body := rec.Body.String(); strings.Contains(body, "leaky-token-98765") ||
 		strings.Contains(body, "x-access-token") {
@@ -631,6 +639,210 @@ func TestHandleSkillsDiscoverDirectory_NonRemoteURL(t *testing.T) {
 	}
 	if fetched {
 		t.Error("handler attempted a fetch for a rejected sourceUrl")
+	}
+}
+
+// TestHandleSkillsDiscoverDirectory_MixedCaseHost verifies the host gate and the
+// downstream fetch agree on case. The gate is deliberately case-insensitive
+// (hostnames are), but config.DetectRemoteType matches "github.com" exactly, so
+// without canonicalization a mixed-case host passed validation and then died in
+// the fetch layer with a generic 400.
+func TestHandleSkillsDiscoverDirectory_MixedCaseHost(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	admin := skillDiscoverAdmin(t, s, "user-skill-discover-mixedcase")
+
+	var requestedURL string
+	defer mockSkillTarballWithHook(t, map[string]string{
+		"repo-main/skills/alpha-skill/SKILL.md": "alpha",
+	}, func(req *http.Request) { requestedURL = req.URL.String() })()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, skillsDiscoverPath, DiscoverSkillsRequest{
+		SourceURL: "https://GitHub.COM/acme/repo/tree/main/skills",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	const wantURL = "https://github.com/acme/repo/archive/refs/heads/main.tar.gz"
+	if requestedURL != wantURL {
+		t.Errorf("outbound tarball URL = %q, want %q", requestedURL, wantURL)
+	}
+
+	resp := decodeDiscoverSkills(t, rec)
+	if resp.Count != 1 || resp.Skills[0].URI != "gh://acme/repo/alpha-skill@main" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+// TestHandleSkillsDiscoverDirectory_SourceURLWithFragment verifies a #fragment is
+// stripped before discoverResourceDirs appends "/<child>". Left in place it would
+// produce child URLs like ".../skills#notes/alpha-skill", which look plausible
+// but resolve to nothing.
+func TestHandleSkillsDiscoverDirectory_SourceURLWithFragment(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	admin := skillDiscoverAdmin(t, s, "user-skill-discover-fragment")
+
+	var requestedURL string
+	defer mockSkillTarballWithHook(t, map[string]string{
+		"repo-main/skills/alpha-skill/SKILL.md": "alpha",
+		"repo-main/skills/beta-skill/SKILL.md":  "beta",
+	}, func(req *http.Request) { requestedURL = req.URL.String() })()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, skillsDiscoverPath, DiscoverSkillsRequest{
+		SourceURL: "https://github.com/acme/repo/tree/main/skills#notes",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(requestedURL, "notes") {
+		t.Errorf("fragment leaked into the fetch URL: %s", requestedURL)
+	}
+
+	resp := decodeDiscoverSkills(t, rec)
+	if resp.Count != 2 {
+		t.Fatalf("expected 2 skills, got %+v", resp)
+	}
+	want := map[string]bool{
+		"gh://acme/repo/alpha-skill@main": true,
+		"gh://acme/repo/beta-skill@main":  true,
+	}
+	for _, sk := range resp.Skills {
+		if !want[sk.URI] {
+			t.Errorf("unexpected URI %q; want one of %v", sk.URI, want)
+		}
+		delete(want, sk.URI)
+	}
+	if len(want) != 0 {
+		t.Errorf("missing URIs: %v", want)
+	}
+}
+
+// TestHandleSkillsDiscoverDirectory_StripsURLCredentials verifies userinfo is
+// dropped during canonicalization. "https://x-access-token:SECRET@github.com/..."
+// parses with Host == "github.com", and the canonical base is both logged and
+// echoed in the "no skills found at <base>" message — so a pasted credential
+// would otherwise reach the hub log, the client, and GitHub.
+func TestHandleSkillsDiscoverDirectory_StripsURLCredentials(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	admin := skillDiscoverAdmin(t, s, "user-skill-discover-userinfo")
+
+	var requestedURL, authHeader string
+	defer mockSkillTarballWithHook(t, map[string]string{
+		"repo-main/skills/alpha-skill/SKILL.md": "alpha",
+	}, func(req *http.Request) {
+		requestedURL = req.URL.String()
+		authHeader = req.Header.Get("Authorization")
+	})()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, skillsDiscoverPath, DiscoverSkillsRequest{
+		SourceURL: "https://x-access-token:pasted-secret-4242@github.com/acme/repo/tree/main/skills",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	const wantURL = "https://github.com/acme/repo/archive/refs/heads/main.tar.gz"
+	if requestedURL != wantURL {
+		t.Errorf("outbound tarball URL = %q, want %q", requestedURL, wantURL)
+	}
+	if strings.Contains(authHeader, "pasted-secret-4242") {
+		t.Errorf("pasted credential reached the wire as auth: %q", authHeader)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "pasted-secret-4242") ||
+		strings.Contains(body, "x-access-token") {
+		t.Errorf("response body echoes the pasted credential: %s", body)
+	}
+}
+
+// TestHandleSkillsDiscoverDirectory_SourceURLWithoutTreeRef verifies a GitHub URL
+// with no /tree/<ref>/ segment is rejected up front. Such a URL would otherwise
+// pass the host check, spend a full tarball fetch, and then fail normalization
+// for every child — surfacing as a misleading "no skills found".
+func TestHandleSkillsDiscoverDirectory_SourceURLWithoutTreeRef(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	admin := skillDiscoverAdmin(t, s, "user-skill-discover-notree")
+
+	// Any fetch attempt is a failure of the test's premise; make it loud.
+	old := http.DefaultClient.Transport
+	defer func() { http.DefaultClient.Transport = old }()
+	fetched := false
+	http.DefaultClient.Transport = &mockRoundTripper{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			fetched = true
+			return nil, fmt.Errorf("unexpected outbound request to %s", req.URL)
+		},
+	}
+
+	cases := []struct {
+		name      string
+		sourceURL string
+	}{
+		{"bare repo", "https://github.com/acme/repo"},
+		{"repo with trailing slash", "https://github.com/acme/repo/"},
+		{"path without tree", "https://github.com/acme/repo/skills"},
+		{"org only", "https://github.com/acme"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost, skillsDiscoverPath, DiscoverSkillsRequest{
+				SourceURL: tc.sourceURL,
+			})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for %q, got %d: %s", tc.sourceURL, rec.Code, rec.Body.String())
+			}
+			apiErr := decodeDiscoverError(t, rec)
+			if apiErr.Code != ErrCodeInvalidRequest {
+				t.Errorf("code = %q, want %q", apiErr.Code, ErrCodeInvalidRequest)
+			}
+			if !strings.Contains(apiErr.Message, "tree") {
+				t.Errorf("message = %q, want an actionable message mentioning 'tree'", apiErr.Message)
+			}
+		})
+	}
+	if fetched {
+		t.Error("handler attempted a fetch for a sourceUrl with no /tree/<ref>/ segment")
+	}
+}
+
+// TestHandleSkillsDiscoverDirectory_CacheCleanup is a canary for the handler's
+// `defer os.RemoveAll(cachePath)`: discovery persists nothing, so the fetched
+// tarball must not outlive the response. HOME is redirected so the assertion
+// covers a private copy of ~/.scion/cache/remote-templates.
+func TestHandleSkillsDiscoverDirectory_CacheCleanup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cacheRoot := filepath.Join(home, ".scion", "cache", "remote-templates")
+
+	srv, s, _ := testTemplateBootstrapServer(t)
+	admin := skillDiscoverAdmin(t, s, "user-skill-discover-cleanup")
+
+	defer mockSkillTarball(t, map[string]string{
+		"repo-main/skills/alpha-skill/SKILL.md": "alpha",
+	})()
+
+	countCacheEntries := func() int {
+		entries, err := os.ReadDir(cacheRoot)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return 0
+			}
+			t.Fatalf("failed to read cache root %s: %v", cacheRoot, err)
+		}
+		return len(entries)
+	}
+
+	before := countCacheEntries()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, skillsDiscoverPath, DiscoverSkillsRequest{
+		SourceURL: "https://github.com/acme/repo/tree/main/skills",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if after := countCacheEntries(); after != before {
+		t.Errorf("cache entries under %s = %d after discovery, want %d — the fetched "+
+			"tree was not cleaned up", cacheRoot, after, before)
 	}
 }
 
