@@ -55,7 +55,7 @@ env:
   # template's env block) still works as an explicit, non-overridable pin.
   # Consequence: ANTHROPIC_MODEL now reaches the supervised harness process
   # (and what it spawns) rather than every process in the container.
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: "haiku-4-5"
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4-5"
 command:
   base: ["claude", "--no-chrome", "--dangerously-skip-permissions"]
   resume_flag: "--continue"
