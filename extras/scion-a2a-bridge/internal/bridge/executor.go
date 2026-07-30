@@ -360,73 +360,66 @@ func RouteInfoMiddleware(route RouteInfo, next http.Handler) http.Handler {
 	})
 }
 
-// AuthUnaryInterceptor returns a gRPC unary interceptor that validates API key
-// or bearer token credentials from gRPC metadata. Pass insecure=true to skip
-// auth (requires explicit opt-in via config).
-func AuthUnaryInterceptor(cfg *Config) grpc.UnaryServerInterceptor {
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		if cfg.Auth.Scheme == "none" || cfg.Bridge.GRPCInsecure {
-			return handler(ctx, req)
-		}
-		if err := validateGRPCAuth(ctx, cfg); err != nil {
-			return nil, err
-		}
-		return handler(ctx, req)
-	}
-}
-
-// AuthStreamInterceptor returns a gRPC stream interceptor that validates API key
-// or bearer token credentials from gRPC metadata.
-func AuthStreamInterceptor(cfg *Config) grpc.StreamServerInterceptor {
-	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		if cfg.Auth.Scheme == "none" || cfg.Bridge.GRPCInsecure {
-			return handler(srv, ss)
-		}
-		if err := validateGRPCAuth(ss.Context(), cfg); err != nil {
-			return err
-		}
-		return handler(srv, ss)
-	}
-}
-
-// validateGRPCAuth extracts credentials from gRPC metadata and validates them.
-func validateGRPCAuth(ctx context.Context, cfg *Config) error {
+// grpcHeaderLookup adapts gRPC incoming metadata to a headerLookup. gRPC
+// metadata keys are always lowercase, so canonical HTTP names are lowered here.
+func grpcHeaderLookup(ctx context.Context) (headerLookup, bool) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return status.Error(codes.Unauthenticated, "missing metadata")
+		return nil, false
 	}
+	return func(name string) string {
+		if vals := md.Get(strings.ToLower(name)); len(vals) > 0 {
+			return vals[0]
+		}
+		return ""
+	}, true
+}
 
-	var credential string
-	switch cfg.Auth.Scheme {
-	case "apiKey":
-		if vals := md.Get("x-api-key"); len(vals) > 0 {
-			credential = vals[0]
-		}
-	case "bearer":
-		if vals := md.Get("authorization"); len(vals) > 0 {
-			auth := vals[0]
-			if strings.HasPrefix(auth, "Bearer ") {
-				credential = strings.TrimPrefix(auth, "Bearer ")
-			}
-		}
-	default:
-		if vals := md.Get("x-api-key"); len(vals) > 0 {
-			credential = vals[0]
-		}
-		if credential == "" {
-			if vals := md.Get("authorization"); len(vals) > 0 {
-				auth := vals[0]
-				if strings.HasPrefix(auth, "Bearer ") {
-					credential = strings.TrimPrefix(auth, "Bearer ")
-				}
-			}
-		}
+// authenticateGRPC runs the shared authenticator against gRPC metadata and maps
+// failures onto gRPC status codes.
+func (s *Server) authenticateGRPC(ctx context.Context) (context.Context, error) {
+	if s.config.Auth.Scheme == "none" || s.config.Bridge.GRPCInsecure {
+		return ctx, nil
 	}
+	lookup, ok := grpcHeaderLookup(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "missing metadata")
+	}
+	authCtx, authErr := s.authenticate(ctx, lookup)
+	if authErr != nil {
+		if authErr.internal {
+			return nil, status.Error(codes.Internal, authErr.msg)
+		}
+		return nil, status.Error(codes.Unauthenticated, authErr.msg)
+	}
+	return authCtx, nil
+}
 
-	if !verifyCredential(credential, cfg.Auth.APIKey) {
-		return status.Error(codes.Unauthenticated, "invalid credentials")
+// AuthUnaryInterceptor returns a gRPC unary interceptor that validates caller
+// credentials using the same schemes as the HTTP transports (including the
+// per-user hubUAT/hubJWT schemes, which inject a CallerIdentity into the
+// context). Auth is skipped when auth.scheme is "none" or bridge.grpc_insecure
+// is set.
+func (s *Server) AuthUnaryInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		authCtx, err := s.authenticateGRPC(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return handler(authCtx, req)
 	}
-	return nil
+}
+
+// AuthStreamInterceptor returns a gRPC stream interceptor with the same
+// semantics as AuthUnaryInterceptor.
+func (s *Server) AuthStreamInterceptor() grpc.StreamServerInterceptor {
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		authCtx, err := s.authenticateGRPC(ss.Context())
+		if err != nil {
+			return err
+		}
+		return handler(srv, &ctxServerStream{ServerStream: ss, ctx: authCtx})
+	}
 }
 
 // RouteInfoUnaryInterceptor returns a gRPC unary server interceptor that injects
@@ -441,17 +434,19 @@ func RouteInfoUnaryInterceptor(route RouteInfo) grpc.UnaryServerInterceptor {
 // injects a fixed RouteInfo into the stream context.
 func RouteInfoStreamInterceptor(route RouteInfo) grpc.StreamServerInterceptor {
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		wrapped := &routeInfoServerStream{ServerStream: ss, ctx: WithRouteInfo(ss.Context(), route)}
+		wrapped := &ctxServerStream{ServerStream: ss, ctx: WithRouteInfo(ss.Context(), route)}
 		return handler(srv, wrapped)
 	}
 }
 
-// routeInfoServerStream wraps a grpc.ServerStream to override its Context.
-type routeInfoServerStream struct {
+// ctxServerStream wraps a grpc.ServerStream to override its Context, letting
+// interceptors inject values (auth identity, route info) that downstream
+// handlers observe.
+type ctxServerStream struct {
 	grpc.ServerStream
 	ctx context.Context
 }
 
-func (s *routeInfoServerStream) Context() context.Context {
+func (s *ctxServerStream) Context() context.Context {
 	return s.ctx
 }

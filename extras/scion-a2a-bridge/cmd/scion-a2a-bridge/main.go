@@ -22,14 +22,13 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
-
-	"net"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
@@ -181,11 +180,17 @@ func main() {
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
 	srv.WarnOnOpenAuth()
 
+	// Bound non-streaming responses: blocking sends can take up to
+	// Timeouts.SendMessage, so allow that plus margin. SSE responses opt out of
+	// this deadline via SSEWriteDeadlineMiddleware, which installs a rolling
+	// per-write deadline instead.
+	writeTimeout := cfg.Timeouts.SendMessage + 30*time.Second
+
 	httpServer := &http.Server{
 		Addr:           listenAddr,
 		Handler:        srv.Handler(),
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   0, // Disabled: SSE streams and long executor timeouts exceed any fixed deadline; per-write deadlines are managed by SSEWriteDeadlineMiddleware.
+		WriteTimeout:   writeTimeout,
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
@@ -203,8 +208,9 @@ func main() {
 	// NOTE: gRPC and REST transports require a single-project, single-agent
 	// configuration because they lack per-request project/agent routing. The
 	// executor injects the configured default route into every request context.
-	// Auth is also not applied to these transports — secure them via network
-	// policy or a proxy.
+	// Auth uses the same schemes as the JSON-RPC transport (including the
+	// per-user hubUAT/hubJWT schemes) and can only be disabled by explicitly
+	// setting bridge.grpc_insecure / bridge.rest_insecure.
 	var grpcServer *grpc.Server
 	if cfg.Bridge.GRPCListenAddress != "" {
 		if len(cfg.Projects) == 0 || len(cfg.Projects[0].ExposedAgents) == 0 {
@@ -234,11 +240,11 @@ func main() {
 				PermitWithoutStream: true,
 			}),
 			grpc.ChainUnaryInterceptor(
-				bridge.AuthUnaryInterceptor(cfg),
+				srv.AuthUnaryInterceptor(),
 				bridge.RouteInfoUnaryInterceptor(defaultRoute),
 			),
 			grpc.ChainStreamInterceptor(
-				bridge.AuthStreamInterceptor(cfg),
+				srv.AuthStreamInterceptor(),
 				bridge.RouteInfoStreamInterceptor(defaultRoute),
 			),
 		)
@@ -280,7 +286,7 @@ func main() {
 				"address", cfg.Bridge.RESTListenAddress)
 		}
 
-		restHandler := bridge.AuthHTTPMiddleware(cfg, bridge.MaxBytesReaderMiddleware(1<<20,
+		restHandler := srv.AuthHTTPMiddleware(bridge.MaxBytesReaderMiddleware(1<<20,
 			bridge.RouteInfoMiddleware(defaultRoute,
 				bridge.SSEWriteDeadlineMiddleware(
 					a2asrv.NewRESTHandler(
@@ -295,7 +301,7 @@ func main() {
 			Addr:           cfg.Bridge.RESTListenAddress,
 			Handler:        restHandler,
 			ReadTimeout:    30 * time.Second,
-			WriteTimeout:   0, // Disabled: SSE streams and long executor timeouts exceed any fixed deadline; per-write deadlines are managed by SSEWriteDeadlineMiddleware.
+			WriteTimeout:   writeTimeout, // SSE responses override this with a rolling deadline (SSEWriteDeadlineMiddleware).
 			IdleTimeout:    120 * time.Second,
 			MaxHeaderBytes: 1 << 20,
 		}
