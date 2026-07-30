@@ -373,10 +373,35 @@ func assertNoCustomMarshaler(t *testing.T, v any) {
 func walkMarshalerBan(t *testing.T, v any, judgeOutOfModule bool) {
 	t.Helper()
 
-	// Dedup gates RECURSION ONLY, never reporting. Keying a map on reflect.Type
-	// and consulting it before recording a finding silently collapses distinct
-	// SITES that share a type — measured while building this: three interface{}
-	// fields that are all map[string]interface{} reported as one.
+	// DEDUP GATES REPORTING TOO, AND THE COMMENT THAT USED TO SIT HERE DENIED IT.
+	// It claimed "recursion only, never reporting". That is false for struct
+	// types: the visited check below returns ABOVE the assertion, so a violating
+	// type reachable by several paths is named at the FIRST path only. Measured
+	// at 1e022df8 — one marshaller on hubclient.ProjectResourceList, which
+	// .Project.DefaultResources reaches as both Requests and Limits:
+	//
+	//   "DefaultResources.Requests" mentions 2   (one per mirror root)
+	//   "DefaultResources.Limits"   mentions 0   <- never named
+	//
+	// THIS IS NOT A COVERAGE HOLE AND MUST NOT BE READ AS ONE. Implementing
+	// json.Marshaler is a property of the TYPE, not of the path it was reached
+	// by, so the verdict at the first site is the verdict at every site and no
+	// violation can escape. What is lost is blast radius in the diagnostic, which
+	// is why the message below says "reached at" and not "reached only at".
+	//
+	// The soundness argument is worth keeping because it does NOT generalise:
+	// per-type dedup is safe here precisely because the judged property is
+	// type-determined. It would be unsafe for a path-dependent property — which
+	// is one more reason the tag check is not recursed alongside this one.
+	//
+	// The old comment also cited a case it does not cover: three interface{}
+	// fields sharing map[string]interface{}. Interface kinds return at the
+	// struct-kind check ABOVE this map and are never reported by this walk at
+	// all, so they never exercised the dedup. The prototype defect that lesson
+	// came from was real; generalising it to this code was not.
+	//
+	// Scope: this map is per-ROOT, rebuilt on each call, which is why a violating
+	// type is named once per mirror root rather than once in total.
 	visited := map[reflect.Type]bool{}
 
 	var walk func(typ reflect.Type, path string)
@@ -407,6 +432,10 @@ func walkMarshalerBan(t *testing.T, v any, judgeOutOfModule bool) {
 		if !resolvedGuardMarshalerExceptions[typ] {
 			assert.Falsef(t, implementsJSONMarshaler(typ),
 				"%s implements json.Marshaler, reached at %s.\n"+
+					"That path is the FIRST this walk reached the type by, not "+
+					"necessarily the only one: the type is judged once per root, so "+
+					"other fields of the same type are affected but go unnamed here. "+
+					"Removing the marshaller fixes every such site at once.\n"+
 					"A custom marshaller decides at runtime which keys to write, so the "+
 					"exact-set assertion — which reads what the encoder emits for one "+
 					"constructed value — stops being a bound on what real responses "+
