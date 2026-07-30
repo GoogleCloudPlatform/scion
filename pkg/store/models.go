@@ -222,9 +222,11 @@ const (
 	SharingModeClonePerAgent WorkspaceSharingMode = "clone-per-agent"
 
 	// SharingModeWorktreePerAgent: each agent gets its own git worktree over
-	// one shared checkout. The shared checkout + all worktrees live on NFS.
+	// one shared checkout. Supported on Hub-managed git projects (Phase 1+).
+	// On Docker/VM runtimes the shared base and worktrees live on node-local
+	// storage; on Kubernetes the NFS backend is required (node-local worktrees
+	// on K8s are not supported and fall back to clone-per-agent).
 	// Maps from label value "worktree-per-agent".
-	// Note: not yet on Hub-managed projects — reserved for Phase 1+.
 	SharingModeWorktreePerAgent WorkspaceSharingMode = "worktree-per-agent"
 )
 
