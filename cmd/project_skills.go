@@ -400,7 +400,11 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 
 	// Resolve project ID for auth token forwarding.
 	// Fix 3: Use separate context for discover phase (30s).
-	discoverCtx, discoverCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	parentCtx := cmd.Context()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	discoverCtx, discoverCancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer discoverCancel()
 
 	var projectID string
@@ -443,7 +447,7 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 	if isInteractiveTerminal() && !autoConfirm {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
 		var answer string
-		_, _ = fmt.Fscan(cmd.InOrStdin(), &answer)
+		_, _ = fmt.Fscanln(cmd.InOrStdin(), &answer)
 		if answer != "" && strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
 			return nil
@@ -451,7 +455,7 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 	}
 
 	// Fix 3: Fresh timeout for add phase (60s), starts after the user responds.
-	addCtx, addCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	addCtx, addCancel := context.WithTimeout(parentCtx, 60*time.Second)
 	defer addCancel()
 
 	// Add each skill.

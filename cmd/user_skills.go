@@ -260,7 +260,11 @@ func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
 	}
 
 	// Fix 3: Separate context for discover phase (30s).
-	discoverCtx, discoverCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	parentCtx := cmd.Context()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	discoverCtx, discoverCancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer discoverCancel()
 
 	result, err := hubCtx.Client.DiscoverSkillsDirectory(discoverCtx, hubclient.DiscoverSkillsDirectoryRequest{
@@ -286,7 +290,7 @@ func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
 	if isInteractiveTerminal() && !autoConfirm {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
 		var answer string
-		_, _ = fmt.Fscan(cmd.InOrStdin(), &answer)
+		_, _ = fmt.Fscanln(cmd.InOrStdin(), &answer)
 		if answer != "" && strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
 			return nil
@@ -294,7 +298,7 @@ func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
 	}
 
 	// Fix 3: Fresh timeout for add phase (60s), starts after the user responds.
-	addCtx, addCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	addCtx, addCancel := context.WithTimeout(parentCtx, 60*time.Second)
 	defer addCancel()
 
 	svc := hubCtx.Client.UserInjectedSkills()
