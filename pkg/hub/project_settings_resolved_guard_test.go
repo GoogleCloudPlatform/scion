@@ -822,15 +822,21 @@ func TestResolvedSettings_RegistryNoDrift(t *testing.T) {
 		assert.Containsf(t, resolvedSettingDescriptors, key,
 			"project setting %q is in projectSettingKeys but has no entry in "+
 				"resolvedSettingDescriptors, so GET /settings/resolved reports it as "+
-				"\"unknown\" forever instead of answering for it. RULE OUT A MISSPELLED "+
-				"KEY FIRST, exactly as the other direction below says: if both have "+
-				"failed, one of the two keys named is a typo of the other and adding a "+
-				"descriptor is the wrong fix — it leaves two descriptors for one setting "+
-				"and trips the count assertion below. THE TYPO IS NOT NECESSARILY THE KEY "+
-				"THIS MESSAGE NAMES; see the other message for how to tell. Otherwise the "+
-				"key is genuinely unwired: add a descriptor in "+
-				"project_settings_resolved.go naming the hub source for it (hubSourceNone "+
-				"if there is genuinely no hub-level counterpart).",
+				"\"unknown\" forever instead of answering for it. WHICH FIX YOU NEED "+
+				"DEPENDS ON WHETHER THE OTHER DIRECTION ALSO FAILED, so read the rest of "+
+				"the output before editing anything.\n\n"+
+				"IF THIS IS THE ONLY FAILURE HERE (this message, plus the count assertion "+
+				"below reporting one MORE registry key than descriptors), the key is "+
+				"genuinely unwired: add a descriptor in project_settings_resolved.go "+
+				"naming the hub source for it (hubSourceNone if there is genuinely no "+
+				"hub-level counterpart). Measured: a new key added to projectSettingKeys "+
+				"alone produces exactly this pair and nothing from the other direction.\n\n"+
+				"IF THE OTHER DIRECTION ALSO FAILED, do not add anything yet. A "+
+				"misspelling reddens both directions at once, one of the two keys named "+
+				"is a typo of the other, and adding a descriptor is the wrong fix — it "+
+				"leaves two descriptors for one setting and trips the count assertion "+
+				"below. THE TYPO IS NOT NECESSARILY THE KEY THIS MESSAGE NAMES; see the "+
+				"other message for how to tell.",
 			key)
 	}
 
@@ -1052,15 +1058,20 @@ func TestResolvedSettingsResponseShape_NoEffectiveValue(t *testing.T) {
 		"the client mirror in pkg/hubclient/types.go (ResolvedProjectSettings /\n" +
 		"ResolvedProjectSetting). The two types are hand-mirrored across a package\n" +
 		"boundary. This is NOT the only assertion that notices when they drift, and\n" +
-		"the list below may not be closed: the declared-tag equality a few lines down\n" +
-		"fires as well, and so does the clean-substitute control row in\n" +
-		"project_settings_resolved_wireup_test.go — which reports its OWN machinery as\n" +
-		"broken rather than the mirror, so do not start debugging there.\n" +
+		"the list may not be closed: the declared-tag equality a few lines down fires\n" +
+		"as well.\n" +
+		"Something else also goes red on this divergence, and it is a DIFFERENT KIND OF\n" +
+		"THING, so do not count it as a third drift check: the clean-substitute CONTROL\n" +
+		"row in project_settings_resolved_wireup_test.go. A control is not a\n" +
+		"drift detector — it goes red as collateral damage and reports its OWN\n" +
+		"machinery as broken rather than the mirror, so do not start debugging there.\n" +
 		"What this assertion contributes that the tag equality cannot is the hardcoded\n" +
 		"expected set: it reads the mirror's wire names and compares them to a fixed\n" +
 		"list, so it fires even when both sides were changed together and agree with\n" +
 		"each other. The tag equality compares the two sides only to one another and\n" +
-		"is silent in that case. Both directions measured at the time of writing."
+		"is silent in that case. To re-verify rather than take that on trust: plant a\n" +
+		"field on the hubclient mirror alone and both fire; plant the same field on\n" +
+		"BOTH sides and only this one does."
 
 	assert.Equal(t, expectedResolvedWrapperFields,
 		jsonWireNames(t, hubclient.ResolvedProjectSettings{}),
