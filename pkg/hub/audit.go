@@ -371,9 +371,27 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 				_ = logger.LogBrokerAuthEvent(r.Context(), event)
 			}
 
-			// Set both broker-specific and generic identity contexts
+			// Set broker-specific identity context
 			ctx := contextWithBrokerIdentity(r.Context(), identity)
-			ctx = contextWithIdentity(ctx, identity)
+
+			// Resolve delegated requestor identity if present
+			userIdent, statusCode, oboErr := svc.resolveOnBehalfOf(ctx, r)
+			if oboErr != nil {
+				errCode := ErrCodeForbidden
+				if statusCode == http.StatusBadRequest {
+					errCode = ErrCodeInvalidRequest
+				}
+				writeError(w, statusCode, errCode, oboErr.Error(), nil)
+				return
+			}
+
+			if userIdent != nil {
+				ctx = context.WithValue(ctx, userContextKey{}, userIdent)
+				ctx = contextWithIdentity(ctx, userIdent)
+			} else {
+				ctx = contextWithIdentity(ctx, identity)
+			}
+
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

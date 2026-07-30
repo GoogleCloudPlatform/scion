@@ -66,11 +66,18 @@ func DefaultBrokerAuthConfig() BrokerAuthConfig {
 	}
 }
 
+// OnBehalfOfResolver resolves a user email to a store.User.
+// This minimal interface decouples the on-behalf-of logic from the full store.
+type OnBehalfOfResolver interface {
+	GetUserByEmail(ctx context.Context, email string) (*store.User, error)
+}
+
 // BrokerAuthService handles broker registration and HMAC-based authentication.
 type BrokerAuthService struct {
-	config BrokerAuthConfig
-	store  store.Store
-	nonces *NonceCache
+	config             BrokerAuthConfig
+	store              store.Store
+	nonces             *NonceCache
+	onBehalfOfResolver OnBehalfOfResolver
 }
 
 // NonceCache provides replay attack prevention by caching used nonces.
@@ -138,10 +145,13 @@ func (nc *NonceCache) cleanup() {
 }
 
 // NewBrokerAuthService creates a new broker authentication service.
+// The store is used both for broker operations and as the default
+// OnBehalfOfResolver for delegated requestor identity.
 func NewBrokerAuthService(config BrokerAuthConfig, s store.Store) *BrokerAuthService {
 	svc := &BrokerAuthService{
-		config: config,
-		store:  s,
+		config:             config,
+		store:              s,
+		onBehalfOfResolver: s, // store.Store satisfies OnBehalfOfResolver
 	}
 	if config.EnableNonceCache {
 		svc.nonces = NewNonceCache(config.NonceCacheTTL)
@@ -450,6 +460,11 @@ const (
 	HeaderNonce         = "X-Scion-Nonce"
 	HeaderSignature     = "X-Scion-Signature"
 	HeaderSignedHeaders = "X-Scion-Signed-Headers"
+	// HeaderOnBehalfOf carries a delegated requestor identity.
+	// Format: scheme:identifier (e.g. "user:alice@example.com").
+	// The hub resolves this to a real user and sets the user identity
+	// in the request context alongside the broker identity.
+	HeaderOnBehalfOf = "X-Scion-On-Behalf-Of"
 )
 
 // ValidateBrokerSignature validates an HMAC-signed request from a Runtime Broker.
@@ -796,8 +811,56 @@ func slugify(name string) string {
 // Middleware
 // =============================================================================
 
+// resolveOnBehalfOf parses the X-Scion-On-Behalf-Of header and resolves the
+// principal to a UserIdentity. Returns (nil, nil) when the header is absent.
+// Returns a non-nil error with an appropriate HTTP status when the header is
+// present but the principal cannot be resolved.
+func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Request) (UserIdentity, int, error) {
+	header := r.Header.Get(HeaderOnBehalfOf)
+	if header == "" {
+		return nil, 0, nil
+	}
+
+	// Parse scheme:identifier
+	parts := strings.SplitN(header, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return nil, http.StatusBadRequest, fmt.Errorf("invalid on-behalf-of format: expected scheme:identifier")
+	}
+
+	scheme, identifier := parts[0], parts[1]
+
+	// Only "user" scheme is currently supported
+	if scheme != "user" {
+		return nil, http.StatusBadRequest, fmt.Errorf("unsupported on-behalf-of scheme: %s", scheme)
+	}
+
+	if svc.onBehalfOfResolver == nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("on-behalf-of resolver not configured")
+	}
+
+	user, err := svc.onBehalfOfResolver.GetUserByEmail(ctx, identifier)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, http.StatusForbidden, fmt.Errorf("on-behalf-of principal not found")
+		}
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to resolve on-behalf-of principal: %w", err)
+	}
+
+	// Check if user is suspended
+	if user.Status == "suspended" {
+		return nil, http.StatusForbidden, fmt.Errorf("on-behalf-of principal is suspended")
+	}
+
+	// Construct an AuthenticatedUser with "integration" client type,
+	// matching the precedent from handlers_broker_inbound.go.
+	authenticatedUser := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "integration")
+	return authenticatedUser, 0, nil
+}
+
 // BrokerAuthMiddleware creates middleware for HMAC-based broker authentication.
 // This runs AFTER UnifiedAuthMiddleware and checks for X-Scion-Broker-ID header.
+// When the X-Scion-On-Behalf-Of header is also present, the middleware resolves
+// the asserted principal and sets both broker and user identities in context.
 func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -821,9 +884,31 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 				return
 			}
 
-			// Set both broker-specific and generic identity contexts
+			// Set broker-specific identity context
 			ctx := contextWithBrokerIdentity(r.Context(), identity)
-			ctx = contextWithIdentity(ctx, identity)
+
+			// Resolve delegated requestor identity if present
+			userIdent, statusCode, oboErr := svc.resolveOnBehalfOf(ctx, r)
+			if oboErr != nil {
+				errCode := ErrCodeForbidden
+				if statusCode == http.StatusBadRequest {
+					errCode = ErrCodeInvalidRequest
+				}
+				writeError(w, statusCode, errCode, oboErr.Error(), nil)
+				return
+			}
+
+			if userIdent != nil {
+				// Both broker and user identities: set user as the primary
+				// identity so GetUserIdentityFromContext returns it, while
+				// the broker remains accessible via GetBrokerIdentityFromContext.
+				ctx = context.WithValue(ctx, userContextKey{}, userIdent)
+				ctx = contextWithIdentity(ctx, userIdent)
+			} else {
+				// No on-behalf-of header — broker is the sole identity (unchanged behavior)
+				ctx = contextWithIdentity(ctx, identity)
+			}
+
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

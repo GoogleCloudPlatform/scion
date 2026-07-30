@@ -1056,3 +1056,300 @@ func TestBrokerReregistration_MergesLabels(t *testing.T) {
 		t.Errorf("Expected user-label=user-value to be preserved, got %q", broker.Labels["user-label"])
 	}
 }
+
+// =============================================================================
+// X-Scion-On-Behalf-Of tests
+// =============================================================================
+
+// setupSignedBrokerRequest creates a broker with a secret and returns a helper
+// function that produces signed requests with the given method, path, and body.
+func setupSignedBrokerRequest(t *testing.T, svc *BrokerAuthService, s store.Store) (brokerID string, signReq func(method, path string, headers map[string]string) *http.Request) {
+	t.Helper()
+	ctx := context.Background()
+
+	brokerID = uuid.New().String()
+	broker := &store.RuntimeBroker{
+		ID:      brokerID,
+		Name:    "obo-test-broker",
+		Slug:    "obo-test-broker",
+		Status:  store.BrokerStatusOnline,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	secretKey := []byte("obo-test-secret-key-32-bytes!!!!")
+	secret := &store.BrokerSecret{
+		BrokerID:  brokerID,
+		SecretKey: secretKey,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+		Status:    store.BrokerSecretStatusActive,
+	}
+	if err := s.CreateBrokerSecret(ctx, secret); err != nil {
+		t.Fatalf("failed to create broker secret: %v", err)
+	}
+
+	nonceCounter := 0
+	signReq = func(method, path string, extraHeaders map[string]string) *http.Request {
+		nonceCounter++
+		timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+		nonce := "obo-nonce-" + strconv.Itoa(nonceCounter)
+
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set(HeaderBrokerID, brokerID)
+		req.Header.Set(HeaderTimestamp, timestamp)
+		req.Header.Set(HeaderNonce, nonce)
+
+		for k, v := range extraHeaders {
+			req.Header.Set(k, v)
+		}
+
+		canonicalString := svc.buildCanonicalString(req, timestamp, nonce)
+		h := hmac.New(sha256.New, secretKey)
+		h.Write(canonicalString)
+		signature := base64.StdEncoding.EncodeToString(h.Sum(nil))
+		req.Header.Set(HeaderSignature, signature)
+
+		return req
+	}
+
+	return brokerID, signReq
+}
+
+func TestBrokerAuthMiddleware_OnBehalfOf_NoHeader(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	_, signReq := setupSignedBrokerRequest(t, svc, s)
+
+	var gotBrokerIdentity BrokerIdentity
+	var gotUserIdentity UserIdentity
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBrokerIdentity = GetBrokerIdentityFromContext(r.Context())
+		gotUserIdentity = GetUserIdentityFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := BrokerAuthMiddleware(svc)(handler)
+	req := signReq(http.MethodGet, "/api/v1/test", nil)
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if gotBrokerIdentity == nil {
+		t.Fatal("Expected broker identity to be set")
+	}
+	if gotUserIdentity != nil {
+		t.Error("Expected no user identity when X-Scion-On-Behalf-Of is absent")
+	}
+}
+
+func TestBrokerAuthMiddleware_OnBehalfOf_ValidUser(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	_, signReq := setupSignedBrokerRequest(t, svc, s)
+
+	// Create a user in the store
+	userID := uuid.New().String()
+	if err := s.CreateUser(ctx, &store.User{
+		ID:          userID,
+		Email:       "alice@example.com",
+		DisplayName: "Alice",
+		Role:        "member",
+		Status:      "active",
+	}); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	var gotBrokerIdentity BrokerIdentity
+	var gotUserIdentity UserIdentity
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBrokerIdentity = GetBrokerIdentityFromContext(r.Context())
+		gotUserIdentity = GetUserIdentityFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := BrokerAuthMiddleware(svc)(handler)
+	req := signReq(http.MethodPost, "/api/v1/projects/p1/agents", map[string]string{
+		HeaderOnBehalfOf: "user:alice@example.com",
+	})
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if gotBrokerIdentity == nil {
+		t.Fatal("Expected broker identity to be set")
+	}
+	if gotUserIdentity == nil {
+		t.Fatal("Expected user identity to be set")
+	}
+	if gotUserIdentity.Email() != "alice@example.com" {
+		t.Errorf("Expected email alice@example.com, got %s", gotUserIdentity.Email())
+	}
+	if gotUserIdentity.ID() != userID {
+		t.Errorf("Expected user ID %s, got %s", userID, gotUserIdentity.ID())
+	}
+	if gotUserIdentity.DisplayName() != "Alice" {
+		t.Errorf("Expected display name Alice, got %s", gotUserIdentity.DisplayName())
+	}
+	if gotUserIdentity.Role() != "member" {
+		t.Errorf("Expected role member, got %s", gotUserIdentity.Role())
+	}
+
+	// Verify the AuthenticatedUser has "integration" client type
+	if au, ok := gotUserIdentity.(*AuthenticatedUser); ok {
+		if au.ClientType() != "integration" {
+			t.Errorf("Expected client type 'integration', got %s", au.ClientType())
+		}
+	} else {
+		t.Error("Expected UserIdentity to be *AuthenticatedUser")
+	}
+}
+
+func TestBrokerAuthMiddleware_OnBehalfOf_UnknownUser(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	_, signReq := setupSignedBrokerRequest(t, svc, s)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Handler should not be called for unknown user")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := BrokerAuthMiddleware(svc)(handler)
+	req := signReq(http.MethodPost, "/api/v1/test", map[string]string{
+		HeaderOnBehalfOf: "user:unknown@example.com",
+	})
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "on-behalf-of principal not found") {
+		t.Errorf("Expected 'on-behalf-of principal not found' in response, got: %s", w.Body.String())
+	}
+}
+
+func TestBrokerAuthMiddleware_OnBehalfOf_SuspendedUser(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	_, signReq := setupSignedBrokerRequest(t, svc, s)
+
+	// Create a suspended user
+	if err := s.CreateUser(ctx, &store.User{
+		ID:          uuid.New().String(),
+		Email:       "suspended@example.com",
+		DisplayName: "Suspended User",
+		Role:        "member",
+		Status:      "suspended",
+	}); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Handler should not be called for suspended user")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := BrokerAuthMiddleware(svc)(handler)
+	req := signReq(http.MethodPost, "/api/v1/test", map[string]string{
+		HeaderOnBehalfOf: "user:suspended@example.com",
+	})
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "on-behalf-of principal is suspended") {
+		t.Errorf("Expected 'on-behalf-of principal is suspended' in response, got: %s", w.Body.String())
+	}
+}
+
+func TestBrokerAuthMiddleware_OnBehalfOf_UnsupportedScheme(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	_, signReq := setupSignedBrokerRequest(t, svc, s)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Handler should not be called for unsupported scheme")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := BrokerAuthMiddleware(svc)(handler)
+	req := signReq(http.MethodPost, "/api/v1/test", map[string]string{
+		HeaderOnBehalfOf: "discord:12345",
+	})
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "unsupported on-behalf-of scheme") {
+		t.Errorf("Expected 'unsupported on-behalf-of scheme' in response, got: %s", w.Body.String())
+	}
+}
+
+func TestBrokerAuthMiddleware_OnBehalfOf_NonBrokerRequest(t *testing.T) {
+	svc, _ := setupTestBrokerAuthService(t)
+
+	var gotUserIdentity UserIdentity
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUserIdentity = GetUserIdentityFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := BrokerAuthMiddleware(svc)(handler)
+
+	// Non-broker request (no X-Scion-Broker-ID) with the on-behalf-of header
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.Header.Set(HeaderOnBehalfOf, "user:alice@example.com")
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if gotUserIdentity != nil {
+		t.Error("Expected on-behalf-of header to be ignored for non-broker requests")
+	}
+}
+
+func TestBrokerAuthMiddleware_OnBehalfOf_InvalidFormat(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	_, signReq := setupSignedBrokerRequest(t, svc, s)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Handler should not be called for invalid format")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := BrokerAuthMiddleware(svc)(handler)
+
+	tests := []struct {
+		name   string
+		header string
+	}{
+		{"no colon", "alice@example.com"},
+		{"empty scheme", ":alice@example.com"},
+		{"empty identifier", "user:"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := signReq(http.MethodPost, "/api/v1/test", map[string]string{
+				HeaderOnBehalfOf: tc.header,
+			})
+			w := httptest.NewRecorder()
+			wrapped.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("Expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
