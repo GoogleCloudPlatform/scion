@@ -466,13 +466,24 @@ func walkMarshalerBan(t *testing.T, v any, judgeOutOfModule bool) {
 		if !resolvedGuardMarshalerExceptions[typ] {
 			assert.Falsef(t, implementsJSONMarshaler(typ),
 				"%s implements json.Marshaler, reached at %s.\n"+
-					"That path is the FIRST this walk reached the type by, and may "+
-					"not be the only one: the type is judged once per root that "+
-					"REACHES it, so ANY further site of the same type — if the type "+
-					"has one — is affected too and is not named here. Read this as "+
-					"'this list may be incomplete', NOT as 'there are more'; a type "+
-					"with a single site is named in full. Removing the marshaller "+
-					"fixes every site at once, however many there are.\n"+
+					"HOW TO COUNT WHAT YOU ARE LOOKING AT. A SITE is one chain of "+
+					"field names descending from one root. The identical chain "+
+					"underneath a DIFFERENT root is a SECOND site, not the same site "+
+					"printed twice — the term is defined here because the two "+
+					"readings give different numbers and the rest of this paragraph "+
+					"is unreadable without one of them. The walk emits ONE line for "+
+					"every root the type is reachable from, quoting the first site "+
+					"that root arrived by, and stays silent about later sites BENEATH "+
+					"THAT SAME ROOT. The line count above is therefore a count of "+
+					"ROOTS and not of sites. Worked both ways: a type hanging off one "+
+					"chain beneath each of two roots emits 2 lines and every site it "+
+					"has is quoted; a type hanging off two chains beneath a single "+
+					"root emits 1 line and one of its sites is missing. THE OUTPUT "+
+					"CANNOT TELL YOU WHICH OF THOSE YOU HAVE. Treat the list as "+
+					"possibly short, never as evidence that something else is out "+
+					"there, and do not go searching for a chain that may not exist. "+
+					"Deleting the marshaller repairs every site simultaneously, "+
+					"quoted or not.\n"+
 					"A custom marshaller decides at runtime which keys to write, so the "+
 					"exact-set assertion — which reads what the encoder emits for one "+
 					"constructed value — stops being a bound on what real responses "+
