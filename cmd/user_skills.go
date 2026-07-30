@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -67,8 +68,9 @@ var userSkillsAddCmd = &cobra.Command{
 
 Examples:
   scion user skills add skill://my-skill
-  scion user skills add skill://my-skill@1.2 --as alias --optional`,
-	Args: cobra.ExactArgs(1),
+  scion user skills add skill://my-skill@1.2 --as alias --optional
+  scion user skills add --from-directory https://github.com/org/repo/tree/main/skills`,
+	Args: cobra.RangeArgs(0, 1),
 	RunE: runUserSkillsAdd,
 }
 
@@ -92,6 +94,7 @@ Examples:
 var (
 	userSkillsAs       string
 	userSkillsOptional bool
+	userSkillsFromDir  string
 )
 
 func init() {
@@ -103,6 +106,8 @@ func init() {
 
 	userSkillsAddCmd.Flags().StringVar(&userSkillsAs, "as", "", "Alias for the skill (SkillAs)")
 	userSkillsAddCmd.Flags().BoolVar(&userSkillsOptional, "optional", false, "Mark the skill as optional (failure does not abort provisioning)")
+	userSkillsAddCmd.Flags().StringVar(&userSkillsFromDir, "from-directory", "",
+		"GitHub directory URL to discover skills from")
 }
 
 // resolveUserSkillsService returns an InjectedSkillsService for the current user.
@@ -145,6 +150,14 @@ func runUserSkillsList(cmd *cobra.Command, args []string) error {
 }
 
 func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
+	if userSkillsFromDir != "" {
+		return runUserSkillsFromDirectory(cmd, userSkillsFromDir)
+	}
+
+	if len(args) == 0 {
+		return fmt.Errorf("skill URI or --from-directory is required")
+	}
+
 	skillURI := args[0]
 
 	normalized, err := api.NormalizeSkillURI(skillURI)
@@ -215,5 +228,63 @@ func runUserSkillsRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Removed injected skill (ID: %s)\n", entryID)
+	return nil
+}
+
+func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	if err != nil || hubCtx == nil {
+		return fmt.Errorf("hub connection required: %w", err)
+	}
+
+	result, err := hubCtx.Client.DiscoverSkillsDirectory(ctx, hubclient.DiscoverSkillsDirectoryRequest{
+		SourceURL: dirURL,
+		// No ProjectID for user scope.
+	})
+	if err != nil {
+		return fmt.Errorf("skill discovery failed: %w", err)
+	}
+	if len(result.Skills) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No skills found at the given URL.")
+		return nil
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Discovered %d skill(s):\n", len(result.Skills))
+	for _, s := range result.Skills {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s  (%s)\n", s.URI, s.Name)
+	}
+	if len(result.Skipped) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "  (%d folder(s) skipped)\n", len(result.Skipped))
+	}
+
+	if isInteractiveTerminal() && !autoConfirm {
+		fmt.Fprintf(cmd.OutOrStdout(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
+		var answer string
+		fmt.Fscan(cmd.InOrStdin(), &answer)
+		if answer != "" && strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+			return nil
+		}
+	}
+
+	svc := hubCtx.Client.UserInjectedSkills()
+	var addErrors []string
+	for _, s := range result.Skills {
+		_, err := svc.Add(ctx, &hubclient.AddInjectedSkillRequest{SkillURI: s.URI})
+		if err != nil {
+			addErrors = append(addErrors, fmt.Sprintf("%s: %v", s.Name, err))
+		}
+	}
+	if len(addErrors) > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %d of %d skills could not be added:\n", len(addErrors), len(result.Skills))
+		for _, e := range addErrors {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", e)
+		}
+	}
+	added := len(result.Skills) - len(addErrors)
+	fmt.Fprintf(cmd.OutOrStdout(), "Added %d of %d skill(s).\n", added, len(result.Skills))
 	return nil
 }

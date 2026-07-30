@@ -113,6 +113,10 @@ type Client interface {
 	// HubPreStartHooks returns the hub-scoped pre-start hook service.
 	HubPreStartHooks() HubPreStartHookService
 
+	// DiscoverSkillsDirectory calls POST /api/v1/skills/discover-directory and returns
+	// the list of skills found at the given GitHub directory URL.
+	DiscoverSkillsDirectory(ctx context.Context, req DiscoverSkillsDirectoryRequest) (*DiscoverSkillsDirectoryResponse, error)
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
