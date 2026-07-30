@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/bwmarrin/discordgo"
@@ -38,12 +39,36 @@ func (p ProjectOption) DisplayName() string {
 	return p.ID
 }
 
+// Template holds a template's identifiers for display in selection UI.
+type Template struct {
+	Slug string
+	Name string
+}
+
+// CreateAgentRequest holds the parameters for creating a new agent via the hub.
+type CreateAgentRequest struct {
+	Name     string `json:"name"`
+	Template string `json:"template,omitempty"`
+}
+
+// CreateAgentResponse holds the hub's response after creating an agent.
+type CreateAgentResponse struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
 // HubClient provides access to the Scion hub API for project and agent listing.
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
 	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
+	ListTemplates(ctx context.Context, projectID string) ([]Template, error)
+
+	// CreateAgent POSTs /api/v1/projects/{projectId}/agents.
+	// onBehalfOf is a namespaced principal (e.g. "user:alice@example.com"); it is
+	// sent as the X-Scion-On-Behalf-Of header, NOT in the body.
+	CreateAgent(ctx context.Context, projectID string, req CreateAgentRequest, onBehalfOf string) (*CreateAgentResponse, error)
 }
 
 // CommandHandler manages Discord slash command registration and dispatch.
@@ -225,6 +250,27 @@ func (h *CommandHandler) RegisterCommandsForGuild(guildID string) error {
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "thread",
+				Description: "Create a thread with a new agent in it",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionString,
+						Name:        "title",
+						Description: "Thread name; also the basis for the agent slug",
+						Required:    true,
+						MaxLength:   100,
+					},
+					{
+						Type:         discordgo.ApplicationCommandOptionString,
+						Name:         "template",
+						Description:  "Agent template (defaults to the project's default)",
+						Required:     false,
+						Autocomplete: true,
+					},
+				},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
 				Name:        "help",
 				Description: "Show available commands",
 			},
@@ -253,6 +299,7 @@ var ephemeralCommands = map[string]bool{
 	"unlink":   true,
 	"settings": true,
 	"default":  true,
+	"thread":   true,
 }
 
 // ephemeralFlag returns MessageFlagsEphemeral if the subcommand should be
@@ -320,6 +367,8 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 			h.HandleSettings(s, i)
 		case "default":
 			h.HandleDefault(s, i)
+		case "thread":
+			h.HandleThread(s, i)
 		// register and unregister are handled by RegistrationHandler
 		// and should be wired up in the broker's dispatch
 		default:
@@ -328,69 +377,116 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 	}()
 }
 
-// HandleAutocomplete handles autocomplete interactions for the "agent"
-// option. It looks up the channel link, fetches agents, and returns
-// matching choices.
+// HandleAutocomplete handles autocomplete interactions by dispatching on the
+// focused option. Supports "agent" (existing) and "template" (new) options.
 func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
 	if len(data.Options) == 0 {
 		return
 	}
 
-	sub := data.Options[0]
+	focused := focusedOption(data.Options[0])
+	if focused == nil {
+		return
+	}
 
-	for _, opt := range sub.Options {
-		if !opt.Focused {
-			continue
-		}
-		if opt.Name != "agent" {
-			continue
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
-		if err != nil || link == nil {
-			// No link — return empty choices.
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-				Data: &discordgo.InteractionResponseData{},
-			})
-			return
-		}
-
-		agents, err := h.getAgents(ctx, link.ProjectID)
-		if err != nil {
-			h.log.Debug("Failed to get agents for autocomplete", "error", err)
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-				Data: &discordgo.InteractionResponseData{},
-			})
-			return
-		}
-
-		prefix := strings.ToLower(opt.StringValue())
-		var choices []*discordgo.ApplicationCommandOptionChoice
-
-		for _, slug := range agents {
-			if strings.HasPrefix(strings.ToLower(slug), prefix) {
-				choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
-					Name:  slug,
-					Value: slug,
-				})
-			}
-			if len(choices) >= 25 {
-				break
-			}
-		}
-
+	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
+	if err != nil || link == nil {
+		// No link — return empty choices.
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-			Data: &discordgo.InteractionResponseData{Choices: choices},
+			Data: &discordgo.InteractionResponseData{},
 		})
 		return
 	}
+
+	var choices []*discordgo.ApplicationCommandOptionChoice
+	switch focused.Name {
+	case "agent":
+		choices = h.completeAgents(ctx, link.ProjectID, focused.StringValue())
+	case "template":
+		choices = h.completeTemplates(ctx, link.ProjectID, focused.StringValue())
+	default:
+		// Unknown option — return empty choices.
+	}
+
+	// Discord hard-caps at 25 choices.
+	if len(choices) > 25 {
+		choices = choices[:25]
+	}
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+		Data: &discordgo.InteractionResponseData{Choices: choices},
+	})
+}
+
+// focusedOption returns the option with Focused==true in the subcommand, or nil.
+func focusedOption(sub *discordgo.ApplicationCommandInteractionDataOption) *discordgo.ApplicationCommandInteractionDataOption {
+	for _, opt := range sub.Options {
+		if opt.Focused {
+			return opt
+		}
+	}
+	return nil
+}
+
+// completeAgents returns autocomplete choices for the "agent" option, filtered
+// by the typed prefix.
+func (h *CommandHandler) completeAgents(ctx context.Context, projectID, typed string) []*discordgo.ApplicationCommandOptionChoice {
+	agents, err := h.getAgents(ctx, projectID)
+	if err != nil {
+		h.log.Debug("Failed to get agents for autocomplete", "error", err)
+		return nil
+	}
+
+	prefix := strings.ToLower(typed)
+	var choices []*discordgo.ApplicationCommandOptionChoice
+	for _, slug := range agents {
+		if strings.HasPrefix(strings.ToLower(slug), prefix) {
+			choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+				Name:  slug,
+				Value: slug,
+			})
+		}
+		if len(choices) >= 25 {
+			break
+		}
+	}
+	return choices
+}
+
+// completeTemplates returns autocomplete choices for the "template" option,
+// filtered by the typed prefix.
+func (h *CommandHandler) completeTemplates(ctx context.Context, projectID, typed string) []*discordgo.ApplicationCommandOptionChoice {
+	templates, err := h.hubClient.ListTemplates(ctx, projectID)
+	if err != nil {
+		h.log.Debug("Failed to get templates for autocomplete", "error", err)
+		return nil
+	}
+
+	prefix := strings.ToLower(typed)
+	var choices []*discordgo.ApplicationCommandOptionChoice
+	for _, t := range templates {
+		label := t.Name
+		if label == "" {
+			label = t.Slug
+		}
+		if strings.HasPrefix(strings.ToLower(t.Slug), prefix) ||
+			strings.HasPrefix(strings.ToLower(label), prefix) {
+			choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+				Name:  label,
+				Value: t.Slug,
+			})
+		}
+		if len(choices) >= 25 {
+			break
+		}
+	}
+	return choices
 }
 
 // helpText returns the help message listing available commands.
@@ -405,6 +501,7 @@ func helpText() string {
 		"`/scion msg <agent> <text>` — Send a message to an agent\n" +
 		"`/scion logs <agent>` — View agent logs\n" +
 		"`/scion default [agent]` — Set or clear the default agent\n" +
+		"`/scion thread <title> [template]` — Create a thread with a new agent\n" +
 		"`/scion register` — Link your Discord account to Scion Hub\n" +
 		"`/scion unregister` — Unlink your Discord account\n" +
 		"`/scion settings` — Configure channel notification settings\n" +
@@ -1065,6 +1162,371 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		Content:    currentText + promptText,
 		Components: rows,
 	})
+}
+
+// isForumChannelType checks whether a Discord channel ID refers to a forum or
+// media channel (types 15 and 16). Standalone helper that works with any
+// *discordgo.Session — unlike DiscordBroker.isForumChannel, it does not
+// require broker state.
+func isForumChannelType(s *discordgo.Session, channelID string) bool {
+	if s == nil {
+		return false
+	}
+
+	var ch *discordgo.Channel
+	var err error
+	if s.State != nil {
+		ch, err = s.State.Channel(channelID)
+	}
+	if ch == nil || err != nil {
+		if s.Ratelimiter == nil {
+			return false
+		}
+		ch, err = s.Channel(channelID)
+		if err != nil || ch == nil {
+			return false
+		}
+	}
+
+	return ch.Type == discordgo.ChannelTypeGuildForum ||
+		ch.Type == discordgo.ChannelTypeGuildMedia
+}
+
+// HandleThread creates a Discord thread and a Scion agent in one command.
+// It implements the full lifecycle: validation (Phase 0), concurrent fan-out
+// (Phase 1/6), binding + kickoff (Phase 2–3/7), and hub capability probe
+// (Phase 8). See arch-scion-thread-cmd.md for the complete design.
+func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	title := getSubcommandOption(i, "title")
+	if title == "" {
+		h.followup(s, i, "Please provide a thread title.")
+		return
+	}
+
+	// Step 0.1: Resolve parent channel.
+	// If invoked from inside a thread, create a sibling in the parent channel
+	// (decision 1a). If in a regular channel, use the current channel.
+	channelID := i.ChannelID
+	parentID := threadParentID(s, channelID)
+	if parentID != "" {
+		// We are inside a thread — create sibling in parent channel.
+		channelID = parentID
+	}
+
+	// Step 0.2: Resolve channel link.
+	link, err := resolveChannelLink(ctx, s, h.store, channelID)
+	if err != nil {
+		h.log.Error("Failed to resolve channel link for thread command", "error", err, "channel_id", channelID)
+		h.followup(s, i, "Something went wrong. Please try again.")
+		return
+	}
+	if link == nil {
+		h.followup(s, i, "This channel is not linked to a project. Run `/scion setup` first.")
+		return
+	}
+
+	// Step 0.3: Check user registration.
+	discordUserID := interactionUserID(i)
+	if discordUserID == "" {
+		h.followup(s, i, "Could not identify your user.")
+		return
+	}
+
+	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
+	if err != nil {
+		h.log.Error("Failed to check user mapping for thread command", "error", err, "discord_user_id", discordUserID)
+		h.followup(s, i, "Something went wrong. Please try again.")
+		return
+	}
+	if mapping == nil {
+		h.followup(s, i, "You need to link your Discord account first. Run `/scion register`.")
+		return
+	}
+	if mapping.ScionEmail == "" {
+		h.followup(s, i, "Your registered account does not have an associated email address. Please re-register.")
+		return
+	}
+
+	// Step 0.4: Slugify the title.
+	// Use api.Slugify (not the local slugify in brokerauth.go) for hub compatibility.
+	slug := api.Slugify(title)
+	if slug == "" {
+		h.followup(s, i, fmt.Sprintf("The title %q produces an invalid agent name. Please use a title with at least one letter or number.", title))
+		return
+	}
+
+	// Step 0.5: Check for slug conflicts.
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	if err != nil {
+		h.log.Error("Failed to list agents for slug conflict check", "error", err, "project_id", link.ProjectID)
+		h.followup(s, i, "Failed to verify agent name availability. Please try again.")
+		return
+	}
+	for _, agent := range agents {
+		if agent.Slug == slug {
+			h.followup(s, i, fmt.Sprintf("An agent named **%s** already exists in this project. Please choose a different title.", slug))
+			return
+		}
+	}
+
+	// Step 0.6: Validate template (if provided).
+	templateName := getSubcommandOption(i, "template")
+	if templateName != "" {
+		templates, err := h.hubClient.ListTemplates(ctx, link.ProjectID)
+		if err != nil {
+			h.log.Error("Failed to list templates for validation", "error", err, "project_id", link.ProjectID)
+			h.followup(s, i, "Failed to verify template. Please try again.")
+			return
+		}
+		found := false
+		for _, t := range templates {
+			if t.Slug == templateName || t.Name == templateName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			h.followup(s, i, fmt.Sprintf("Template **%s** not found. Use autocomplete to pick from available templates, or omit the template to use the project default.", templateName))
+			return
+		}
+	}
+
+	// --- Phase 8: Hub capability probe ---
+	// TODO: Implement a proper hub capability probe at startup or via a
+	// lightweight endpoint to detect whether X-Scion-On-Behalf-Of is supported.
+	// For now, after CreateAgent returns we could verify agent.OwnerID matches
+	// the expected user. If the hub silently ignores the header, the agent
+	// would be ownerless — a condition that should be detected and reported.
+	// Full probe deferred to a follow-up change.
+
+	// --- Phase 6: Concurrent fan-out ---
+	h.log.Info("Thread command validation passed, starting orchestration",
+		"title", title,
+		"slug", slug,
+		"template", templateName,
+		"channel_id", channelID,
+		"project_id", link.ProjectID,
+		"discord_user_id", discordUserID,
+	)
+
+	statusContent := fmt.Sprintf("⏳ Creating agent `%s`…", slug)
+	isForum := isForumChannelType(s, channelID)
+
+	var wg sync.WaitGroup
+	var agentResp *CreateAgentResponse
+	var agentErr error
+	var thread *discordgo.Channel
+	var statusMsgID string
+	var threadErr error
+
+	wg.Add(2)
+
+	// Goroutine A: Create the agent via the hub (long-running, up to 5 min).
+	go func() {
+		defer wg.Done()
+		createCtx, createCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer createCancel()
+		agentResp, agentErr = h.hubClient.CreateAgent(createCtx, link.ProjectID, CreateAgentRequest{
+			Name:     slug,
+			Template: templateName,
+		}, "user:"+mapping.ScionEmail)
+	}()
+
+	// Goroutine B: Create the Discord thread + post the status message.
+	go func() {
+		defer wg.Done()
+		if isForum {
+			// Forum channels: the post IS the thread; body is mandatory.
+			var ch *discordgo.Channel
+			ch, threadErr = s.ForumThreadStartComplex(channelID, &discordgo.ThreadStart{
+				Name:                title,
+				AutoArchiveDuration: 10080, // 7 days
+			}, &discordgo.MessageSend{
+				Content: statusContent,
+			})
+			if threadErr == nil && ch != nil {
+				thread = ch
+				// In a forum post the starter message ID matches the thread ID.
+				statusMsgID = ch.ID
+			}
+		} else {
+			// Text channels: create thread then post a message inside it.
+			var ch *discordgo.Channel
+			ch, threadErr = s.ThreadStart(channelID, title,
+				discordgo.ChannelTypeGuildPublicThread, 10080)
+			if threadErr != nil {
+				return
+			}
+			thread = ch
+			var msg *discordgo.Message
+			msg, msgErr := s.ChannelMessageSend(ch.ID, statusContent)
+			if msgErr == nil && msg != nil {
+				statusMsgID = msg.ID
+			} else {
+				h.log.Warn("Failed to send status message in new thread", "error", msgErr)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// --- Error compensation matrix ---
+	// Handle all four outcomes from the concurrent fan-out.
+
+	switch {
+	case agentErr != nil && threadErr != nil:
+		// Both failed — single ephemeral error.
+		h.log.Error("Thread command: both agent and thread creation failed",
+			"agent_error", agentErr, "thread_error", threadErr,
+			"slug", slug, "title", title)
+		h.followup(s, i, fmt.Sprintf(
+			"Failed to create both the agent and the thread.\n"+
+				"Agent error: %s\n"+
+				"Thread error: %s",
+			agentErr.Error(), threadErr.Error()))
+		return
+
+	case agentErr != nil && threadErr == nil:
+		// Agent failed, thread OK — edit status message to show error; ephemeral reply.
+		h.log.Error("Thread command: agent creation failed but thread was created",
+			"agent_error", agentErr, "slug", slug, "thread_id", thread.ID)
+		if statusMsgID != "" {
+			_, editErr := s.ChannelMessageEdit(thread.ID, statusMsgID,
+				fmt.Sprintf("❌ Agent creation failed: %s", agentErr.Error()))
+			if editErr != nil {
+				h.log.Error("Failed to edit status message after agent error", "error", editErr)
+			}
+		}
+		h.followup(s, i, fmt.Sprintf(
+			"Thread **%s** was created but the agent could not be started.\n"+
+				"Error: %s\n"+
+				"You can retry with `/scion thread` or manually create an agent and bind it with `/scion default <agent>` in the thread.",
+			title, agentErr.Error()))
+		return
+
+	case agentErr == nil && threadErr != nil:
+		// Agent OK, thread failed — ephemeral reply MUST name the slug.
+		h.log.Error("Thread command: thread creation failed but agent was created",
+			"thread_error", threadErr, "slug", agentResp.Slug)
+		h.followup(s, i, fmt.Sprintf(
+			"Agent **%s** was created but the Discord thread could not be created.\n"+
+				"Error: %s\n"+
+				"The agent is running. Create a thread manually and run `/scion default %s` in it to bind.",
+			agentResp.Slug, threadErr.Error(), agentResp.Slug))
+		return
+	}
+
+	// --- Both succeeded: Phase 7 — Binding + Kickoff ---
+
+	// Step 1: SetThreadDefault — bind the thread to the agent.
+	bindCtx, bindCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer bindCancel()
+
+	bindErr := h.store.SetThreadDefault(bindCtx, channelID, thread.ID, agentResp.Slug)
+	if bindErr != nil {
+		h.log.Error("Failed to set thread default after creation",
+			"error", bindErr, "channel_id", channelID, "thread_id", thread.ID, "slug", agentResp.Slug)
+	}
+
+	// Step 2: SetConversationContext — pre-seed the outbound route.
+	ccErr := h.store.SetConversationContext(bindCtx, &ConversationContext{
+		DiscordUserID: discordUserID,
+		ProjectID:     link.ProjectID,
+		AgentSlug:     agentResp.Slug,
+		LastChannelID: thread.ID,
+		LastMessageAt: time.Now(),
+	})
+	if ccErr != nil {
+		h.log.Error("Failed to set conversation context after creation",
+			"error", ccErr, "discord_user_id", discordUserID, "slug", agentResp.Slug)
+	}
+
+	// Check if binding failed — report success-with-caveat.
+	if bindErr != nil || ccErr != nil {
+		// Both resources exist and are healthy, only the link is missing.
+		if statusMsgID != "" {
+			templateLabel := "default"
+			if templateName != "" {
+				templateLabel = templateName
+			}
+			_, editErr := s.ChannelMessageEdit(thread.ID, statusMsgID,
+				fmt.Sprintf("✅ Agent `%s` created (template: %s) — but automatic binding failed. Run `/scion default %s` in this thread.",
+					agentResp.Slug, templateLabel, agentResp.Slug))
+			if editErr != nil {
+				h.log.Error("Failed to edit status message after bind error", "error", editErr)
+			}
+		}
+		h.followup(s, i, fmt.Sprintf(
+			"Agent **%s** and thread **%s** were created, but binding failed.\n"+
+				"Run `/scion default %s` in the thread to bind them manually.\n"+
+				"Jump to thread: https://discord.com/channels/%s/%s",
+			agentResp.Slug, title, agentResp.Slug, i.GuildID, thread.ID))
+		return
+	}
+
+	// Step 3: deliverInbound kickoff message.
+	if h.deliverInbound != nil {
+		topic := projectcompat.AgentTopic(link.ProjectID, agentResp.Slug)
+		kickoffMsg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "discord",
+			ThreadID:  thread.ID,
+			Sender:    "user:" + mapping.ScionEmail,
+			SenderID:  discordUserID,
+			Recipient: "agent:" + agentResp.Slug,
+			Msg: fmt.Sprintf(
+				"You have been created for the Discord thread %q. "+
+					"Introduce yourself there and ask what I need.",
+				title),
+			Type: messages.TypeInstruction,
+			Metadata: map[string]string{
+				"discord_channel_id": thread.ID,
+				"discord_guild_id":   i.GuildID,
+				"project_id":         link.ProjectID,
+			},
+		}
+		if he := h.deliverInbound(topic, kickoffMsg); he != nil {
+			h.log.Warn("Failed to deliver kickoff message",
+				"error", he.Error(), "slug", agentResp.Slug, "topic", topic)
+			// Non-fatal — the agent exists and is bound, user can message it directly.
+		}
+	}
+
+	// Step 4: Edit the status message to show ready state.
+	if statusMsgID != "" {
+		templateLabel := "default"
+		if templateName != "" {
+			templateLabel = templateName
+		}
+		_, editErr := s.ChannelMessageEdit(thread.ID, statusMsgID,
+			fmt.Sprintf("✅ Ready — agent `%s` (template: %s)", agentResp.Slug, templateLabel))
+		if editErr != nil {
+			h.log.Error("Failed to edit status message to ready state", "error", editErr)
+		}
+	}
+
+	// Step 5: Ephemeral followup with jump link.
+	templateInfo := ""
+	if templateName != "" {
+		templateInfo = fmt.Sprintf(" (template: **%s**)", templateName)
+	}
+	h.followup(s, i, fmt.Sprintf(
+		"Thread created with agent **%s**%s.\nhttps://discord.com/channels/%s/%s",
+		agentResp.Slug, templateInfo, i.GuildID, thread.ID))
+
+	h.log.Info("Thread command completed successfully",
+		"title", title,
+		"slug", agentResp.Slug,
+		"template", templateName,
+		"channel_id", channelID,
+		"thread_id", thread.ID,
+		"project_id", link.ProjectID,
+		"discord_user_id", discordUserID,
+	)
 }
 
 // HandleSettings shows channel settings with toggle buttons.

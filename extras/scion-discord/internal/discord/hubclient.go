@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,23 +14,28 @@ import (
 
 // httpHubClient implements HubClient using HTTP calls to the Hub API.
 type httpHubClient struct {
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	httpClient *http.Client
+	hubURL         string
+	hmacKey        string
+	brokerID       string
+	httpClient     *http.Client
+	longHTTPClient *http.Client // no global timeout — used for long-running calls like CreateAgent
 }
 
 // NewHTTPHubClient creates a new HubClient that calls the Scion Hub API.
 // If httpClient is nil, a default client with a 15s timeout is used.
+// A separate longHTTPClient with no global timeout is created for long-running
+// operations like CreateAgent (which synchronously dispatches container create+start
+// and routinely takes 30–120s).
 func NewHTTPHubClient(hubURL, hmacKey, brokerID string, httpClient *http.Client) HubClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &httpHubClient{
-		hubURL:     hubURL,
-		hmacKey:    hmacKey,
-		brokerID:   brokerID,
-		httpClient: httpClient,
+		hubURL:         hubURL,
+		hmacKey:        hmacKey,
+		brokerID:       brokerID,
+		httpClient:     httpClient,
+		longHTTPClient: &http.Client{}, // no global timeout; per-call context controls deadline
 	}
 }
 
@@ -198,6 +204,185 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 		agents[i] = AgentInfo{Slug: a.Slug, Activity: a.Activity}
 	}
 	return agents, nil
+}
+
+type hubTemplatesResponse struct {
+	Templates []hubTemplate `json:"templates"`
+}
+
+type hubTemplate struct {
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+	Scope       string `json:"scope"`
+	ScopeID     string `json:"scopeId,omitempty"`
+	Status      string `json:"status"`
+}
+
+func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]Template, error) {
+	// Fetch global templates.
+	globalURL := c.hubURL + "/api/v1/templates?scope=global&status=active"
+
+	slog.Debug("Listing global templates from hub", "url", globalURL, "broker_id", c.brokerID)
+
+	globalReq, err := http.NewRequestWithContext(ctx, "GET", globalURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create list global templates request: %w", err)
+	}
+	if err := c.signRequest(globalReq); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	globalResp, err := c.httpClient.Do(globalReq)
+	if err != nil {
+		return nil, fmt.Errorf("list global templates request failed: %w", err)
+	}
+	defer globalResp.Body.Close()
+
+	if globalResp.StatusCode != http.StatusOK {
+		slog.Debug("Hub returned non-OK for list global templates", "status", globalResp.StatusCode, "url", globalURL)
+		return nil, fmt.Errorf("list global templates returned status %d", globalResp.StatusCode)
+	}
+
+	var globalResult hubTemplatesResponse
+	if err := json.NewDecoder(globalResp.Body).Decode(&globalResult); err != nil {
+		return nil, fmt.Errorf("decode list global templates response: %w", err)
+	}
+
+	slog.Debug("Hub returned global templates", "count", len(globalResult.Templates))
+
+	// Merge into a map keyed by slug; project-scoped templates take precedence.
+	bySlug := make(map[string]hubTemplate, len(globalResult.Templates))
+	for _, t := range globalResult.Templates {
+		bySlug[t.Slug] = t
+	}
+
+	// Fetch project-scoped templates if a project ID is provided.
+	if projectID != "" {
+		projectURL := fmt.Sprintf("%s/api/v1/templates?scope=project&projectId=%s&status=active", c.hubURL, projectID)
+
+		slog.Debug("Listing project templates from hub", "url", projectURL, "project_id", projectID)
+
+		projectReq, err := http.NewRequestWithContext(ctx, "GET", projectURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create list project templates request: %w", err)
+		}
+		if err := c.signRequest(projectReq); err != nil {
+			return nil, fmt.Errorf("sign request: %w", err)
+		}
+
+		projectResp, err := c.httpClient.Do(projectReq)
+		if err != nil {
+			slog.Warn("Failed to list project templates, using global only", "error", err, "project_id", projectID)
+		} else {
+			defer projectResp.Body.Close()
+			if projectResp.StatusCode == http.StatusOK {
+				var projectResult hubTemplatesResponse
+				if err := json.NewDecoder(projectResp.Body).Decode(&projectResult); err != nil {
+					slog.Warn("Failed to decode project templates response, using global only", "error", err)
+				} else {
+					slog.Debug("Hub returned project templates", "count", len(projectResult.Templates))
+					// Project-scoped templates override global ones with the same slug.
+					for _, t := range projectResult.Templates {
+						bySlug[t.Slug] = t
+					}
+				}
+			} else {
+				slog.Debug("Hub returned non-OK for list project templates", "status", projectResp.StatusCode)
+			}
+		}
+	}
+
+	// Convert map to slice.
+	templates := make([]Template, 0, len(bySlug))
+	for _, t := range bySlug {
+		name := t.DisplayName
+		if name == "" {
+			name = t.Name
+		}
+		templates = append(templates, Template{Slug: t.Slug, Name: name})
+	}
+
+	return templates, nil
+}
+
+// hubCreateAgentResponse mirrors the relevant fields of the hub's CreateAgentResponse.
+// The hub returns {"agent": {...}, "warnings": [...], ...}; we only need the agent.
+type hubCreateAgentResponse struct {
+	Agent struct {
+		Slug string `json:"slug"`
+		Name string `json:"name"`
+	} `json:"agent"`
+}
+
+func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req CreateAgentRequest, onBehalfOf string) (*CreateAgentResponse, error) {
+	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
+
+	slog.Debug("Creating agent via hub", "url", url, "name", req.Name, "template", req.Template, "on_behalf_of", onBehalfOf)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal create agent request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create agent request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Set the delegated identity header so the hub attributes the agent to the
+	// invoking user rather than leaving it ownerless.
+	if onBehalfOf != "" {
+		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
+		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
+	}
+
+	if err := c.signRequest(httpReq); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	// Use the long-timeout client — agent creation synchronously dispatches
+	// container create+start and routinely takes 30–120s. The default httpClient
+	// has a 15s timeout which would cause every create to fail.
+	resp, err := c.longHTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("create agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusCreated: // 201 — success
+		var result hubCreateAgentResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, fmt.Errorf("decode create agent response: %w", err)
+		}
+		return &CreateAgentResponse{
+			Slug: result.Agent.Slug,
+			Name: result.Agent.Name,
+		}, nil
+
+	case http.StatusOK: // 200 — hub resumed/started an existing agent; treat as conflict per design decision 7b
+		return nil, fmt.Errorf("an agent with this name already exists and was resumed by the hub — use a different title")
+
+	case http.StatusConflict: // 409 — slug conflict
+		return nil, fmt.Errorf("an agent with this slug already exists — try a different title")
+
+	case http.StatusNotFound: // 404 — template or project not found
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("not found: %s", he.Message)
+
+	case http.StatusBadRequest: // 400 — validation error
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("validation error: %s", he.Message)
+
+	case http.StatusForbidden: // 403 — permission denied
+		return nil, fmt.Errorf("you don't have permission to create agents in this project")
+
+	default:
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("create agent returned status %d: %s", resp.StatusCode, he.Message)
+	}
 }
 
 func (c *httpHubClient) signRequest(req *http.Request) error {

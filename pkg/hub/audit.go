@@ -363,17 +363,28 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 				return
 			}
 
-			// Log success
-			event.EventType = BrokerAuthEventAuthSuccess
-			event.Success = true
-
-			if logger != nil {
-				_ = logger.LogBrokerAuthEvent(r.Context(), event)
+			// Set broker-specific identity context and resolve on-behalf-of
+			ctx := contextWithBrokerIdentity(r.Context(), identity)
+			ctx, userIdent, ok := svc.applyOnBehalfOf(ctx, w, r, identity)
+			if !ok {
+				return
 			}
 
-			// Set both broker-specific and generic identity contexts
-			ctx := contextWithBrokerIdentity(r.Context(), identity)
-			ctx = contextWithIdentity(ctx, identity)
+			// Populate on-behalf-of details in the audit event before logging
+			event.EventType = BrokerAuthEventAuthSuccess
+			event.Success = true
+			if userIdent != nil {
+				if event.Details == nil {
+					event.Details = make(map[string]string)
+				}
+				event.Details["on_behalf_of_email"] = userIdent.Email()
+				event.Details["on_behalf_of_user_id"] = userIdent.ID()
+			}
+
+			if logger != nil {
+				_ = logger.LogBrokerAuthEvent(ctx, event)
+			}
+
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
