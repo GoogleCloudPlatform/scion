@@ -200,6 +200,106 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 	return agents, nil
 }
 
+type hubTemplatesResponse struct {
+	Templates []hubTemplate `json:"templates"`
+}
+
+type hubTemplate struct {
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+	Scope       string `json:"scope"`
+	ScopeID     string `json:"scopeId,omitempty"`
+	Status      string `json:"status"`
+}
+
+func (c *httpHubClient) ListTemplates(ctx context.Context, projectID string) ([]Template, error) {
+	// Fetch global templates.
+	globalURL := c.hubURL + "/api/v1/templates?scope=global&status=active"
+
+	slog.Debug("Listing global templates from hub", "url", globalURL, "broker_id", c.brokerID)
+
+	globalReq, err := http.NewRequestWithContext(ctx, "GET", globalURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create list global templates request: %w", err)
+	}
+	if err := c.signRequest(globalReq); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	globalResp, err := c.httpClient.Do(globalReq)
+	if err != nil {
+		return nil, fmt.Errorf("list global templates request failed: %w", err)
+	}
+	defer globalResp.Body.Close()
+
+	if globalResp.StatusCode != http.StatusOK {
+		slog.Debug("Hub returned non-OK for list global templates", "status", globalResp.StatusCode, "url", globalURL)
+		return nil, fmt.Errorf("list global templates returned status %d", globalResp.StatusCode)
+	}
+
+	var globalResult hubTemplatesResponse
+	if err := json.NewDecoder(globalResp.Body).Decode(&globalResult); err != nil {
+		return nil, fmt.Errorf("decode list global templates response: %w", err)
+	}
+
+	slog.Debug("Hub returned global templates", "count", len(globalResult.Templates))
+
+	// Merge into a map keyed by slug; project-scoped templates take precedence.
+	bySlug := make(map[string]hubTemplate, len(globalResult.Templates))
+	for _, t := range globalResult.Templates {
+		bySlug[t.Slug] = t
+	}
+
+	// Fetch project-scoped templates if a project ID is provided.
+	if projectID != "" {
+		projectURL := fmt.Sprintf("%s/api/v1/templates?scope=project&projectId=%s&status=active", c.hubURL, projectID)
+
+		slog.Debug("Listing project templates from hub", "url", projectURL, "project_id", projectID)
+
+		projectReq, err := http.NewRequestWithContext(ctx, "GET", projectURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create list project templates request: %w", err)
+		}
+		if err := c.signRequest(projectReq); err != nil {
+			return nil, fmt.Errorf("sign request: %w", err)
+		}
+
+		projectResp, err := c.httpClient.Do(projectReq)
+		if err != nil {
+			slog.Warn("Failed to list project templates, using global only", "error", err, "project_id", projectID)
+		} else {
+			defer projectResp.Body.Close()
+			if projectResp.StatusCode == http.StatusOK {
+				var projectResult hubTemplatesResponse
+				if err := json.NewDecoder(projectResp.Body).Decode(&projectResult); err != nil {
+					slog.Warn("Failed to decode project templates response, using global only", "error", err)
+				} else {
+					slog.Debug("Hub returned project templates", "count", len(projectResult.Templates))
+					// Project-scoped templates override global ones with the same slug.
+					for _, t := range projectResult.Templates {
+						bySlug[t.Slug] = t
+					}
+				}
+			} else {
+				slog.Debug("Hub returned non-OK for list project templates", "status", projectResp.StatusCode)
+			}
+		}
+	}
+
+	// Convert map to slice.
+	templates := make([]Template, 0, len(bySlug))
+	for _, t := range bySlug {
+		name := t.DisplayName
+		if name == "" {
+			name = t.Name
+		}
+		templates = append(templates, Template{Slug: t.Slug, Name: name})
+	}
+
+	return templates, nil
+}
+
 func (c *httpHubClient) signRequest(req *http.Request) error {
 	if c.brokerID == "" || c.hmacKey == "" {
 		return nil

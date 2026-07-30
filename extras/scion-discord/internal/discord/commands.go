@@ -38,12 +38,19 @@ func (p ProjectOption) DisplayName() string {
 	return p.ID
 }
 
+// Template holds a template's identifiers for display in selection UI.
+type Template struct {
+	Slug string
+	Name string
+}
+
 // HubClient provides access to the Scion hub API for project and agent listing.
 type HubClient interface {
 	ListProjects(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
 	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
+	ListTemplates(ctx context.Context, projectID string) ([]Template, error)
 }
 
 // CommandHandler manages Discord slash command registration and dispatch.
