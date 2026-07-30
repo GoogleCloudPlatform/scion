@@ -302,6 +302,22 @@ func assertNoEmbeddedStructPointer(t *testing.T, v any) {
 // a reader who assumes "if the type implements it, so does the pointer" — the
 // implication holds only in that direction — would simplify the condition and
 // see nothing fail.
+//
+// THE TWO HALVES ARE NOT EQUALLY PROTECTED, AND THE WEAK ONE IS THE VALUE HALF.
+// walkMarshalerBan dereferences to a struct kind before calling this, so every
+// call from the walk passes a struct type, and for struct T the method set of *T
+// contains T's. The POINTER half therefore decides every walked node on its own.
+// Measured at 1e022df8: deleting the value half reds exactly one subtest and no
+// row of the control table; deleting the pointer half reds eight rows.
+//
+// The value half is still REQUIRED. It is the half that carries pointer-TYPED
+// inputs, which reach this predicate only from callers that do not normalize.
+// Deleting it makes the predicate silently wrong for those and that is a false
+// negative in the R21 class. It is pinned by exactly one assertion, in the test
+// named above; delete the half and that assertion together and the package goes
+// green. Anyone tempted to "simplify" this to the pointer disjunct because the
+// walk makes it redundant should add a caller-side normalization guarantee
+// first, and there is none today.
 func implementsJSONMarshaler(typ reflect.Type) bool {
 	marshaler := reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 	return typ.Implements(marshaler) || reflect.PointerTo(typ).Implements(marshaler)
@@ -1675,15 +1691,41 @@ func TestResolvedSettingsGuard_InstrumentControls(t *testing.T) {
 		{"composite catches behaviour", assertResponseKeySetIsTypeDetermined, marshalerCtrlPointer{}, true},
 
 		// POINTER-TYPE inputs. Every row above passes a VALUE, which is what
-		// resolvedResponseTypes supplies today — and that is precisely why these
-		// exist. assertNoCustomMarshaler does not dereference, so its two halves
-		// swap which one carries the check depending on the input form: for a
-		// value the pointer half does the work, for a pointer the value half
-		// does. If resolvedResponseTypes is ever changed to return pointers, the
-		// ban keeps working and the value rows above go on pinning the half that
-		// is no longer load-bearing — a green table that has quietly stopped
-		// testing what runs. Pinning both forms means whichever half carries it
-		// is covered.
+		// resolvedResponseTypes supplies today.
+		//
+		// THIS BLOCK'S ORIGINAL JUSTIFICATION IS NO LONGER TRUE, AND THE ROWS ARE
+		// KEPT FOR A DIFFERENT REASON. It used to read: "assertNoCustomMarshaler
+		// does not dereference, so its two halves swap which one carries the
+		// check depending on the input form." That was accurate when the ban was
+		// a single top-level check. It is FALSE now — walkMarshalerBan strips
+		// Pointer/Slice/Array/Map before judging, so every node reaching the
+		// predicate from the walk is a struct kind, and for struct T the method
+		// set of *T is a superset of T's. The pointer half alone decides every
+		// node the walk visits.
+		//
+		// So for the three MARSHALLER rows below, value and pointer inputs now
+		// pin the SAME half, and the old payoff line — "pinning both forms means
+		// whichever half carries it is covered" — is false for them. Measured:
+		// deleting the value disjunct reds ZERO rows of this table.
+		//
+		// WHAT THEY STILL PIN, which is a real property and not a consolation:
+		// that the walk NORMALIZES. A pointer input and a value input must reach
+		// the same verdict, and these rows fail if someone removes the
+		// dereference loop or makes it partial.
+		//
+		// Two of the five rows are UNAFFECTED by any of this: "embedded pointer"
+		// and "omitzero" route to assertNoEmbeddedStructPointer and
+		// assertOnlySafeTagOptions, which were not changed and do not dereference.
+		//
+		// The comment this replaces predicted its own failure mode — "a green
+		// table that has quietly stopped testing what runs" — and then became an
+		// instance of it. Coverage of the value disjunct went from four rows to
+		// one when the walk began dereferencing. That one is
+		// TestResolvedGuard_MarshalerCheckSeesBothReceiverForms, which calls the
+		// predicate directly; delete the disjunct and that subtest together and
+		// the whole package is green. Do not delete either. The disjunct is
+		// correct and required for pointer-typed inputs handed to the predicate
+		// outside the walk; removing it is a false negative in the R21 class.
 		{"pointer input, pointer-receiver MarshalJSON", assertNoCustomMarshaler, &marshalerCtrlPointer{}, true},
 		{"pointer input, value-receiver MarshalJSON", assertNoCustomMarshaler, &marshalerCtrlValue{}, true},
 		{"pointer input, embedded pointer", assertNoEmbeddedStructPointer, &ctlEmbeddedPtr{}, true},
@@ -1696,11 +1738,19 @@ func TestResolvedSettingsGuard_InstrumentControls(t *testing.T) {
 		{"plain tags are ACCEPTED", assertOnlySafeTagOptions, ctlEmbeddedValue{}, false},
 		{"no marshaller is ACCEPTED", assertNoCustomMarshaler, ctlEmbeddedValue{}, false},
 		{"a clean type passes the composite", assertResponseKeySetIsTypeDetermined, ctlClean{}, false},
+		{"a clean POINTER passes the composite", assertResponseKeySetIsTypeDetermined, &ctlClean{}, false},
+
+		// DEPTH rows, REJECT. These were filed under the ACCEPT heading above by
+		// mistake; a row's want is in its last field, not in the heading it sits
+		// under, so this misfiling could not change a result — but a reader
+		// scanning headings would have miscounted the accepts, which is how a
+		// table stops being read carefully.
 		{"nested POINTER-receiver marshaller is rejected", assertNoCustomMarshaler, ctlDoorA{}, true},
 		{"nested VALUE-receiver marshaller is rejected", assertNoCustomMarshaler, ctlDoorValue{}, true},
+
+		// DEPTH rows, ACCEPT — the over-rejection controls for the two above.
 		{"nested structs with no marshaller anywhere", assertNoCustomMarshaler, ctlDeepClean{}, false},
 		{"out-of-module marshaller is reached but not judged", assertNoCustomMarshaler, ctlOutOfModule{}, false},
-		{"a clean POINTER passes the composite", assertResponseKeySetIsTypeDetermined, &ctlClean{}, false},
 	}
 
 	for _, tc := range cases {
