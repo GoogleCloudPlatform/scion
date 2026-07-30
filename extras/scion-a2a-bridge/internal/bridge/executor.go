@@ -32,7 +32,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 // routeKey is a context key for passing project/agent routing info to the executor.

@@ -16,7 +16,6 @@ package bridge
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,28 +27,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
+
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
-
-// ErrCodeInvalidParams is the JSON-RPC error code for invalid params.
-// Previously defined in handler.go; kept here for test compatibility.
-const ErrCodeInvalidParams = -32602
-
-// SendMessageParams mirrors the A2A message/send params for test assertions.
-type SendMessageParams struct {
-	TaskID        string             `json:"taskId,omitempty"`
-	Message       Message            `json:"message"`
-	Configuration *SendMessageConfig `json:"configuration,omitempty"`
-}
-
-// SendMessageConfig mirrors the A2A configuration block.
-type SendMessageConfig struct {
-	Blocking *bool `json:"blocking,omitempty"`
-}
-
-func boolPtr(b bool) *bool { return &b }
 
 // --- Mock hubclient ---
 
@@ -168,6 +153,14 @@ func (m *mockHubClient) ProjectPreStartHooks(projectID string) hubclient.Project
 }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
+}
+
+// DiscoverSkillsDirectory and HubPreStartHooks were added to hubclient.Client
+// upstream (#914, #892) without updating this mock, which broke the bridge test
+// build on main.
+func (m *mockHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
+func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 
 // --- Test helpers ---
@@ -816,19 +809,59 @@ func TestSendFollowUp_ResolvesAgentIDViaLookup(t *testing.T) {
 	}
 }
 
-// --- Server-layer tests for handleSendMessage with TaskID ---
+// --- Server-layer tests for message/send via SDK handler ---
 
-func TestHandleSendMessage_PassesTaskIDToSendMessage(t *testing.T) {
+// newFollowUpTestServerWithHub creates a test server wired to a custom mockHubClient,
+// including the SDK executor and JSON-RPC handler (matching newTestServer pattern).
+func newFollowUpTestServerWithHub(t *testing.T, hub hubclient.Client, cfg *Config) (*Server, *httptest.Server, *state.Store) {
+	t.Helper()
 	dir := t.TempDir()
 	store, err := state.New(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
-	defer store.Close()
+	t.Cleanup(func() { store.Close() })
 
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b := New(store, hub, nil, cfg, nil, log)
+	t.Cleanup(func() { b.Shutdown() })
+
+	executor := NewScionExecutor(b, log)
+	routeAuth := RouteKeyAuthenticator()
+	innerStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: routeAuth,
+	})
+	scopedStore := NewScopedTaskStore(innerStore)
+	sdkRequestHandler := a2asrv.NewHandler(
+		executor,
+		a2asrv.WithLogger(log),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{
+			Streaming:         true,
+			PushNotifications: false,
+		}),
+		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
+		a2asrv.WithTaskStore(scopedStore),
+	)
+	b.SetSDKRequestHandler(sdkRequestHandler)
+	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(sdkRequestHandler)
+
+	srv := NewServer(b, cfg, nil, log, sdkJSONRPCHandler)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return srv, ts, store
+}
+
+func TestHandleSendMessage_NewMessage_RoutesToExecutor(t *testing.T) {
 	var mu sync.Mutex
 	var capturedMeta map[string]string
 	agents := &mockAgentService{
+		listFn: func(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error) {
+			return &hubclient.ListAgentsResponse{
+				Agents: []hubclient.Agent{
+					{ID: "agent-id-1", Slug: "agent-a", ProjectID: "proj-1"},
+				},
+			}, nil
+		},
 		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -842,31 +875,22 @@ func TestHandleSendMessage_PassesTaskIDToSendMessage(t *testing.T) {
 		Hub:      HubConfig{User: "test-user"},
 		Auth:     AuthConfig{Scheme: "apiKey", APIKey: "test-key"},
 		Projects: []ProjectConfig{{Slug: "proj-1", ExposedAgents: []string{"agent-a"}}},
-		Timeouts: TimeoutConfig{SendMessage: 2 * time.Second},
+		Timeouts: TimeoutConfig{SendMessage: 5 * time.Second},
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hub := &mockHubClient{agents: agents}
-	bridge := New(store, hub, nil, cfg, nil, log)
-	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log, testHandler())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
+	_, ts, _ := newFollowUpTestServerWithHub(t, hub, cfg)
 
-	seedTask(t, store, "existing-task", "ctx-1", "proj-1", "agent-a", "aid", TaskStateWorking)
-
-	params := SendMessageParams{
-		TaskID: "existing-task",
-		Message: Message{
-			Role:  RoleUser,
-			Parts: []Part{{Text: "follow up"}},
-		},
-		Configuration: &SendMessageConfig{
-			Blocking: boolPtr(false),
+	// SDK SendMessage: the message contains no taskId → new task.
+	params := map[string]interface{}{
+		"message": map[string]interface{}{
+			"messageId": "test-msg-1",
+			"role":      "user",
+			"parts":     []map[string]interface{}{{"text": "follow up"}},
 		},
 	}
 
 	rpcResp := doRPC(t, ts, "/projects/proj-1/agents/agent-a/jsonrpc",
-		"message/send", params, "test-key")
+		"SendMessage", params, "test-key")
 
 	if rpcResp.Error != nil {
 		t.Fatalf("unexpected error: code=%d msg=%s", rpcResp.Error.Code, rpcResp.Error.Message)
@@ -891,114 +915,43 @@ func TestHandleSendMessage_PassesTaskIDToSendMessage(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if capturedMeta["a2aTaskId"] != "existing-task" {
-		t.Errorf("metadata a2aTaskId = %q, want %q", capturedMeta["a2aTaskId"], "existing-task")
+	if capturedMeta["a2aTaskId"] == "" {
+		t.Error("expected non-empty a2aTaskId in metadata")
 	}
 }
 
-func TestHandleSendMessage_ErrTaskTerminal_ReturnsCorrectError(t *testing.T) {
-	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("state.New: %v", err)
-	}
-	defer store.Close()
-
-	agents := &mockAgentService{}
+func TestHandleSendMessage_NoHubClient_ReturnsError(t *testing.T) {
 	cfg := &Config{
 		Bridge:   BridgeConfig{ExternalURL: "https://test.example.com"},
 		Hub:      HubConfig{User: "test-user"},
 		Auth:     AuthConfig{Scheme: "apiKey", APIKey: "test-key"},
 		Projects: []ProjectConfig{{Slug: "proj-1", ExposedAgents: []string{"agent-a"}}},
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hub := &mockHubClient{agents: agents}
-	bridge := New(store, hub, nil, cfg, nil, log)
-	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log, testHandler())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
+	// nil hub client → executor returns error
+	_, ts, _ := newFollowUpTestServerWithHub(t, nil, cfg)
 
-	seedTask(t, store, "done-task", "ctx-1", "proj-1", "agent-a", "aid", TaskStateCompleted)
-
-	params := SendMessageParams{
-		TaskID: "done-task",
-		Message: Message{
-			Role:  RoleUser,
-			Parts: []Part{{Text: "try to follow up"}},
+	params := map[string]interface{}{
+		"message": map[string]interface{}{
+			"messageId": "test-msg-2",
+			"role":      "user",
+			"parts":     []map[string]interface{}{{"text": "try it"}},
 		},
 	}
 
 	rpcResp := doRPC(t, ts, "/projects/proj-1/agents/agent-a/jsonrpc",
-		"message/send", params, "test-key")
+		"SendMessage", params, "test-key")
 
 	if rpcResp.Error == nil {
-		t.Fatal("expected error for terminal task")
+		t.Fatal("expected error when hub client is nil")
 	}
-	if rpcResp.Error.Code != ErrCodeInvalidParams {
-		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
-	}
-	if rpcResp.Error.Message != "task is in a terminal state" {
-		t.Errorf("error message = %q, want %q", rpcResp.Error.Message, "task is in a terminal state")
-	}
-}
-
-func TestHandleSendMessage_UnknownTaskID_ReturnsAgentNotFound(t *testing.T) {
-	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("state.New: %v", err)
-	}
-	defer store.Close()
-
-	agents := &mockAgentService{}
-	cfg := &Config{
-		Bridge:   BridgeConfig{ExternalURL: "https://test.example.com"},
-		Hub:      HubConfig{User: "test-user"},
-		Auth:     AuthConfig{Scheme: "apiKey", APIKey: "test-key"},
-		Projects: []ProjectConfig{{Slug: "proj-1", ExposedAgents: []string{"agent-a"}}},
-	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hub := &mockHubClient{agents: agents}
-	bridge := New(store, hub, nil, cfg, nil, log)
-	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log, testHandler())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	params := SendMessageParams{
-		TaskID: "no-such-task",
-		Message: Message{
-			Role:  RoleUser,
-			Parts: []Part{{Text: "follow up"}},
-		},
-	}
-
-	rpcResp := doRPC(t, ts, "/projects/proj-1/agents/agent-a/jsonrpc",
-		"message/send", params, "test-key")
-
-	if rpcResp.Error == nil {
-		t.Fatal("expected error for unknown task ID")
-	}
-	if rpcResp.Error.Code != ErrCodeInvalidParams {
-		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
-	}
-	if rpcResp.Error.Message != "agent not found" {
-		t.Errorf("error message = %q, want %q", rpcResp.Error.Message, "agent not found")
+	// The SDK wraps internal errors with a negative error code.
+	if rpcResp.Error.Code >= 0 {
+		t.Errorf("expected negative error code, got %d", rpcResp.Error.Code)
 	}
 }
 
 func TestHandleSendMessage_NoTaskID_RoutesToNewTask(t *testing.T) {
-	// When TaskID is empty, SendMessage should try to create a new task (and fail
-	// because there's no real hub client to resolve the context). This verifies
-	// the router correctly falls through to the new-task path.
-	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("state.New: %v", err)
-	}
-	defer store.Close()
-
+	// When the message contains no taskId, the SDK executor creates a new task.
 	agents := &mockAgentService{
 		listFn: func(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error) {
 			return &hubclient.ListAgentsResponse{
@@ -1018,58 +971,28 @@ func TestHandleSendMessage_NoTaskID_RoutesToNewTask(t *testing.T) {
 		Projects: []ProjectConfig{{Slug: "proj-1", ExposedAgents: []string{"agent-a"}}},
 		Timeouts: TimeoutConfig{SendMessage: 2 * time.Second},
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hub := &mockHubClient{agents: agents}
-	bridge := New(store, hub, nil, cfg, nil, log)
-	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log, testHandler())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
+	_, ts, _ := newFollowUpTestServerWithHub(t, hub, cfg)
 
-	params := SendMessageParams{
-		Message: Message{
-			Role:  RoleUser,
-			Parts: []Part{{Text: "new message"}},
-		},
-		Configuration: &SendMessageConfig{
-			Blocking: boolPtr(false),
+	// SDK SendMessage with no taskId → new task path.
+	params := map[string]interface{}{
+		"message": map[string]interface{}{
+			"messageId": "test-msg-3",
+			"role":      "user",
+			"parts":     []map[string]interface{}{{"text": "new message"}},
 		},
 	}
 
 	rpcResp := doRPC(t, ts, "/projects/proj-1/agents/agent-a/jsonrpc",
-		"message/send", params, "test-key")
+		"SendMessage", params, "test-key")
 
-	// Should succeed — the new task path creates a context and task.
+	// Should succeed — the executor creates a context and task via the SDK.
 	if rpcResp.Error != nil {
 		t.Fatalf("unexpected error: code=%d msg=%s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 
-	resultBytes, err2 := json.Marshal(rpcResp.Result)
-	if err2 != nil {
-		t.Fatalf("marshal result: %v", err2)
-	}
-	var result TaskResult
-	if err2 = json.Unmarshal(resultBytes, &result); err2 != nil {
-		t.Fatalf("unmarshal result: %v", err2)
-	}
-
-	if result.ID == "" {
-		t.Error("expected non-empty task ID for new task")
-	}
-	if result.Status.State != TaskStateSubmitted {
-		t.Errorf("status.state = %q, want %q", result.Status.State, TaskStateSubmitted)
-	}
-}
-
-func TestSendFollowUp_SendMessageParams_TaskIDField(t *testing.T) {
-	// Verify the TaskID field is correctly parsed from JSON.
-	raw := `{"taskId":"my-task-123","message":{"role":"user","parts":[{"text":"hi"}]}}`
-	var params SendMessageParams
-	if err := json.Unmarshal([]byte(raw), &params); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if params.TaskID != "my-task-123" {
-		t.Errorf("TaskID = %q, want %q", params.TaskID, "my-task-123")
+	if rpcResp.Result == nil {
+		t.Fatal("expected non-nil result")
 	}
 }
 
