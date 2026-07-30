@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -151,6 +152,9 @@ func runUserSkillsList(cmd *cobra.Command, args []string) error {
 
 func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 	if userSkillsFromDir != "" {
+		if userSkillsAs != "" || userSkillsOptional {
+			return fmt.Errorf("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
+		}
 		return runUserSkillsFromDirectory(cmd, userSkillsFromDir)
 	}
 
@@ -232,15 +236,31 @@ func runUserSkillsRemove(cmd *cobra.Command, args []string) error {
 }
 
 func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
-	if err != nil || hubCtx == nil {
-		return fmt.Errorf("hub connection required: %w", err)
+	// Fix 1: Strip userinfo (e.g. token:secret@) before sending.
+	if parsed, err := url.Parse(dirURL); err == nil && parsed.User != nil {
+		parsed.User = nil
+		dirURL = parsed.String()
 	}
 
-	result, err := hubCtx.Client.DiscoverSkillsDirectory(ctx, hubclient.DiscoverSkillsDirectoryRequest{
+	// Fix 2: Client-side URL validation.
+	if !looksLikeGitHubDirectoryURL(dirURL) {
+		return fmt.Errorf("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
+	}
+
+	// Fix 4: Split nil-error check.
+	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	if err != nil {
+		return fmt.Errorf("hub connection required: %w", err)
+	}
+	if hubCtx == nil {
+		return fmt.Errorf("hub is not enabled; configure hub.endpoint to use user skills")
+	}
+
+	// Fix 3: Separate context for discover phase (30s).
+	discoverCtx, discoverCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer discoverCancel()
+
+	result, err := hubCtx.Client.DiscoverSkillsDirectory(discoverCtx, hubclient.DiscoverSkillsDirectoryRequest{
 		SourceURL: dirURL,
 		// No ProjectID for user scope.
 	})
@@ -270,10 +290,14 @@ func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
 		}
 	}
 
+	// Fix 3: Fresh timeout for add phase (60s), starts after the user responds.
+	addCtx, addCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer addCancel()
+
 	svc := hubCtx.Client.UserInjectedSkills()
 	var addErrors []string
 	for _, s := range result.Skills {
-		_, err := svc.Add(ctx, &hubclient.AddInjectedSkillRequest{SkillURI: s.URI})
+		_, err := svc.Add(addCtx, &hubclient.AddInjectedSkillRequest{SkillURI: s.URI})
 		if err != nil {
 			addErrors = append(addErrors, fmt.Sprintf("%s: %v", s.Name, err))
 		}
@@ -286,5 +310,11 @@ func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
 	}
 	added := len(result.Skills) - len(addErrors)
 	fmt.Fprintf(cmd.OutOrStdout(), "Added %d of %d skill(s).\n", added, len(result.Skills))
+
+	// Fix 6: Return error when all adds fail.
+	if added == 0 && len(result.Skills) > 0 {
+		return fmt.Errorf("all %d skill(s) failed to add", len(result.Skills))
+	}
+
 	return nil
 }

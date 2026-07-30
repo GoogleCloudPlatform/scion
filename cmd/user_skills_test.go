@@ -578,6 +578,204 @@ func TestRunUserSkillsFromDirectory_PartialFailure(t *testing.T) {
 	assert.Contains(t, errBuf.String(), "Warning: 1 of 2 skills could not be added")
 }
 
+func TestRunUserSkillsFromDirectory_TTY_Yes_AddsAll(t *testing.T) {
+	skills := []map[string]interface{}{
+		{"uri": "skill://org/skill-a", "name": "skill-a"},
+		{"uri": "skill://org/skill-b", "name": "skill-b"},
+	}
+	var addCalls atomic.Int32
+	server := newUserFromDirMockServer(t, skills, &addCalls, false)
+	defer server.Close()
+	setUserSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	_, projectDir := setupUserSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	origInteractive := isInteractiveTerminal
+	defer func() { isInteractiveTerminal = origInteractive }()
+	isInteractiveTerminal = func() bool { return true }
+
+	origAutoConfirm := autoConfirm
+	defer func() { autoConfirm = origAutoConfirm }()
+	autoConfirm = true
+
+	var buf bytes.Buffer
+	userSkillsAddCmd.SetOut(&buf)
+	defer userSkillsAddCmd.SetOut(nil)
+
+	err := runUserSkillsFromDirectory(userSkillsAddCmd, "https://github.com/org/repo/tree/main/skills")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(2), addCalls.Load())
+	assert.Contains(t, buf.String(), "Added 2 of 2")
+}
+
+func TestRunUserSkillsFromDirectory_DiscoverError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.URL.Path == "/api/v1/skills/discover-directory":
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"code":    "internal_error",
+				"message": "internal server error",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setUserSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	_, projectDir := setupUserSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	err := runUserSkillsFromDirectory(userSkillsAddCmd, "https://github.com/org/repo/tree/main/skills")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "skill discovery failed")
+}
+
+func TestRunUserSkillsFromDirectory_StripsUserinfo(t *testing.T) {
+	var receivedSourceURL string
+	skills := []map[string]interface{}{
+		{"uri": "skill://org/skill-a", "name": "skill-a"},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.URL.Path == "/api/v1/skills/discover-directory" && r.Method == http.MethodPost:
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			receivedSourceURL, _ = req["sourceUrl"].(string)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"skills":  skills,
+				"count":   len(skills),
+				"skipped": []string{},
+			})
+
+		case r.URL.Path == "/api/v1/users/me/injected-skills" && r.Method == http.MethodPost:
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":       "new-user-entry-uuid",
+				"skillUri": req["skillUri"],
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setUserSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	_, projectDir := setupUserSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	origInteractive := isInteractiveTerminal
+	defer func() { isInteractiveTerminal = origInteractive }()
+	isInteractiveTerminal = func() bool { return false }
+
+	var buf bytes.Buffer
+	userSkillsAddCmd.SetOut(&buf)
+	defer userSkillsAddCmd.SetOut(nil)
+
+	err := runUserSkillsFromDirectory(userSkillsAddCmd,
+		"https://token:secret@github.com/org/repo/tree/main/skills")
+	assert.NoError(t, err)
+	assert.NotContains(t, receivedSourceURL, "token")
+	assert.NotContains(t, receivedSourceURL, "secret")
+	assert.Contains(t, receivedSourceURL, "github.com/org/repo/tree/main/skills")
+}
+
+func TestRunUserSkillsFromDirectory_InvalidURL(t *testing.T) {
+	err := runUserSkillsFromDirectory(userSkillsAddCmd, "ftp://example.com/skills")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "--from-directory must be an https://github.com/")
+}
+
+func TestRunUserSkillsAdd_FromDirConflictWithAs(t *testing.T) {
+	origFromDir := userSkillsFromDir
+	origAs := userSkillsAs
+	defer func() {
+		userSkillsFromDir = origFromDir
+		userSkillsAs = origAs
+	}()
+	userSkillsFromDir = "https://github.com/org/repo/tree/main/skills"
+	userSkillsAs = "my-alias"
+
+	err := runUserSkillsAdd(userSkillsAddCmd, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "--as and --optional cannot be used with --from-directory")
+}
+
+func TestRunUserSkillsFromDirectory_TotalFailure(t *testing.T) {
+	skills := []map[string]interface{}{
+		{"uri": "skill://org/skill-a", "name": "skill-a"},
+	}
+	var addCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.URL.Path == "/api/v1/skills/discover-directory" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"skills":  skills,
+				"count":   len(skills),
+				"skipped": []string{},
+			})
+
+		case r.URL.Path == "/api/v1/users/me/injected-skills" && r.Method == http.MethodPost:
+			addCalls.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"code":    "bad_request",
+				"message": "skill already exists",
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setUserSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	_, projectDir := setupUserSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	origInteractive := isInteractiveTerminal
+	defer func() { isInteractiveTerminal = origInteractive }()
+	isInteractiveTerminal = func() bool { return false }
+
+	var outBuf bytes.Buffer
+	var errBuf bytes.Buffer
+	userSkillsAddCmd.SetOut(&outBuf)
+	userSkillsAddCmd.SetErr(&errBuf)
+	defer userSkillsAddCmd.SetOut(nil)
+	defer userSkillsAddCmd.SetErr(nil)
+
+	err := runUserSkillsFromDirectory(userSkillsAddCmd, "https://github.com/org/repo/tree/main/skills")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "all 1 skill(s) failed to add")
+	assert.Equal(t, int32(1), addCalls.Load())
+}
+
 func TestRunUserSkillsList_APIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

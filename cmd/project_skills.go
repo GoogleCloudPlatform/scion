@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -220,8 +221,13 @@ func runProjectSkillsList(cmd *cobra.Command, args []string) error {
 
 func runProjectSkillsAdd(cmd *cobra.Command, args []string) error {
 	if projectSkillsFromDir != "" {
-		// Project arg may still be present (first positional).
-		projectArg, _ := splitProjectSkillsArgs(args)
+		if projectSkillsAs != "" || projectSkillsOptional {
+			return fmt.Errorf("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
+		}
+		projectArg, skillRef := splitProjectSkillsArgs(args)
+		if skillRef != "" {
+			return fmt.Errorf("cannot combine a skill URI argument with --from-directory; choose one")
+		}
 		return runProjectSkillsFromDirectory(cmd, projectArg, projectSkillsFromDir)
 	}
 
@@ -358,19 +364,48 @@ func printSkillInjectionTable(entries []api.SkillInjectionEntry) {
 	_ = tw.Flush()
 }
 
-func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+// looksLikeGitHubDirectoryURL returns true if s appears to be a GitHub
+// directory URL of the form https://github.com/org/repo/tree/<ref>/...
+// This is a client-side pre-check; the server validates authoritatively.
+func looksLikeGitHubDirectoryURL(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https" &&
+		strings.EqualFold(u.Host, "github.com") &&
+		strings.Contains(u.Path, "/tree/")
+}
 
+func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string) error {
+	// Fix 1: Strip userinfo (e.g. token:secret@) before sending.
+	if parsed, err := url.Parse(dirURL); err == nil && parsed.User != nil {
+		parsed.User = nil
+		dirURL = parsed.String()
+	}
+
+	// Fix 2: Client-side URL validation.
+	if !looksLikeGitHubDirectoryURL(dirURL) {
+		return fmt.Errorf("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
+	}
+
+	// Fix 4: Split nil-error check.
 	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
-	if err != nil || hubCtx == nil {
+	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
+	}
+	if hubCtx == nil {
+		return fmt.Errorf("hub is not enabled; configure hub.endpoint to use project skills")
 	}
 
 	// Resolve project ID for auth token forwarding.
+	// Fix 3: Use separate context for discover phase (30s).
+	discoverCtx, discoverCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer discoverCancel()
+
 	var projectID string
 	if projectArg != "" {
-		proj, err := resolveProjectByNameOrID(ctx, hubCtx.Client, projectArg)
+		proj, err := resolveProjectByNameOrID(discoverCtx, hubCtx.Client, projectArg)
 		if err != nil {
 			return fmt.Errorf("could not resolve project %q: %w", projectArg, err)
 		}
@@ -383,7 +418,7 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 	}
 
 	// Discover skills.
-	result, err := hubCtx.Client.DiscoverSkillsDirectory(ctx, hubclient.DiscoverSkillsDirectoryRequest{
+	result, err := hubCtx.Client.DiscoverSkillsDirectory(discoverCtx, hubclient.DiscoverSkillsDirectoryRequest{
 		SourceURL: dirURL,
 		ProjectID: projectID,
 	})
@@ -415,11 +450,15 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 		}
 	}
 
+	// Fix 3: Fresh timeout for add phase (60s), starts after the user responds.
+	addCtx, addCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer addCancel()
+
 	// Add each skill.
 	svc := hubCtx.Client.ProjectInjectedSkills(projectID)
 	var addErrors []string
 	for _, s := range result.Skills {
-		_, err := svc.Add(ctx, &hubclient.AddInjectedSkillRequest{SkillURI: s.URI})
+		_, err := svc.Add(addCtx, &hubclient.AddInjectedSkillRequest{SkillURI: s.URI})
 		if err != nil {
 			addErrors = append(addErrors, fmt.Sprintf("%s: %v", s.Name, err))
 		}
@@ -432,5 +471,11 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 	}
 	added := len(result.Skills) - len(addErrors)
 	fmt.Fprintf(cmd.OutOrStdout(), "Added %d of %d skill(s).\n", added, len(result.Skills))
+
+	// Fix 6: Return error when all adds fail.
+	if added == 0 && len(result.Skills) > 0 {
+		return fmt.Errorf("all %d skill(s) failed to add", len(result.Skills))
+	}
+
 	return nil
 }
