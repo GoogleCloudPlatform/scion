@@ -464,13 +464,13 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 		}
 	}
 	if len(addErrors) > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %d of %d skills could not be added:\n", len(addErrors), len(result.Skills))
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %d of %d skills could not be added:\n", len(addErrors), len(result.Skills))
 		for _, e := range addErrors {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", e)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", e)
 		}
 	}
 	added := len(result.Skills) - len(addErrors)
-	fmt.Fprintf(cmd.OutOrStdout(), "Added %d of %d skill(s).\n", added, len(result.Skills))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Added %d of %d skill(s).\n", added, len(result.Skills))
 
 	// Fix 6: Return error when all adds fail.
 	if added == 0 && len(result.Skills) > 0 {
