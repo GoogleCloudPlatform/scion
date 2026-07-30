@@ -1327,12 +1327,29 @@ func TestResolvedSettingsGuard_InstrumentControls(t *testing.T) {
 		{"composite catches structure", assertResponseKeySetIsTypeDetermined, ctlNestedPtr{}, true},
 		{"composite catches behaviour", assertResponseKeySetIsTypeDetermined, marshalerCtrlPointer{}, true},
 
+		// POINTER-TYPE inputs. Every row above passes a VALUE, which is what
+		// resolvedResponseTypes supplies today — and that is precisely why these
+		// exist. assertNoCustomMarshaler does not dereference, so its two halves
+		// swap which one carries the check depending on the input form: for a
+		// value the pointer half does the work, for a pointer the value half
+		// does. If resolvedResponseTypes is ever changed to return pointers, the
+		// ban keeps working and the value rows above go on pinning the half that
+		// is no longer load-bearing — a green table that has quietly stopped
+		// testing what runs. Pinning both forms means whichever half carries it
+		// is covered.
+		{"pointer input, pointer-receiver MarshalJSON", assertNoCustomMarshaler, &marshalerCtrlPointer{}, true},
+		{"pointer input, value-receiver MarshalJSON", assertNoCustomMarshaler, &marshalerCtrlValue{}, true},
+		{"pointer input, embedded pointer", assertNoEmbeddedStructPointer, &ctlEmbeddedPtr{}, true},
+		{"pointer input, omitzero", assertOnlySafeTagOptions, &ctlOmitZero{}, true},
+		{"pointer input, composite catches behaviour", assertResponseKeySetIsTypeDetermined, &marshalerCtrlPointer{}, true},
+
 		// ACCEPT rows.
 		{"named pointer field is ACCEPTED", assertNoEmbeddedStructPointer, ctlNamedPtr{}, false},
 		{"embedded value is ACCEPTED", assertNoEmbeddedStructPointer, ctlEmbeddedValue{}, false},
 		{"plain tags are ACCEPTED", assertOnlySafeTagOptions, ctlEmbeddedValue{}, false},
 		{"no marshaller is ACCEPTED", assertNoCustomMarshaler, ctlEmbeddedValue{}, false},
 		{"a clean type passes the composite", assertResponseKeySetIsTypeDetermined, ctlClean{}, false},
+		{"a clean POINTER passes the composite", assertResponseKeySetIsTypeDetermined, &ctlClean{}, false},
 	}
 
 	for _, tc := range cases {
