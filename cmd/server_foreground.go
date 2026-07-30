@@ -621,6 +621,9 @@ type brokerEnvShadowWarner interface {
 // operator's side those are one event: no list of shadowed keys was produced.
 // The absence of warnings below must not be read as "nothing is shadowed".
 func warnShadowedBrokerEnv(ctx context.Context, w brokerEnvShadowWarner) {
+	if w == nil {
+		return
+	}
 	if err := w.WarnOutrankedBrokerEnvKeys(ctx); err != nil {
 		slog.Warn("Broker env shadow check DID NOT RUN. Treat the absence of shadowed-key warnings as unknown, not as none.",
 			"error", err)

@@ -868,6 +868,9 @@ func hasWorkspaceContent(dir string) bool {
 // the wire field. An empty-but-non-nil value is treated as absent too, so a
 // downstream nil check is the only gate needed.
 func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if cfg == nil || cfg.HubAgentDefaults.IsEmpty() {
 		return ctx
 	}

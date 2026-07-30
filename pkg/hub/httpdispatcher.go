@@ -1174,6 +1174,9 @@ func (d *HTTPAgentDispatcher) envScopeID(scope string, agent *store.Agent) strin
 // scope-ID filter" to the store and the hub scope has always been queried
 // unconditionally.
 func (d *HTTPAgentDispatcher) envScopesInPrecedenceOrder(agent *store.Agent) []store.EnvVarFilter {
+	if agent == nil {
+		return nil
+	}
 	filters := make([]store.EnvVarFilter, 0, len(envScopePrecedence))
 	for _, scope := range envScopePrecedence {
 		scopeID := d.envScopeID(scope, agent)
@@ -1365,6 +1368,9 @@ func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) er
 // agent config outranks every storage scope (see buildCreateRequest).
 func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, error) {
 	result := make(map[string]string)
+	if agent == nil {
+		return result, nil
+	}
 
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
@@ -1397,6 +1403,9 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 // config is applied last because it outranks every storage scope.
 func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.Agent, resolvedEnv map[string]string) map[string]string {
 	sources := make(map[string]string)
+	if agent == nil {
+		return sources
+	}
 
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)

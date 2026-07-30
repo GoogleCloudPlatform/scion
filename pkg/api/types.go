@@ -880,6 +880,9 @@ func ContextWithHubAgentDefaults(ctx context.Context, d *HubAgentDefaults) conte
 // the context, or nil if the Hub sent none (local mode, file-mode Hub, or a Hub
 // that predates the field).
 func HubAgentDefaultsFromContext(ctx context.Context) *HubAgentDefaults {
+	if ctx == nil {
+		return nil
+	}
 	v, _ := ctx.Value(hubAgentDefaultsContextKey{}).(*HubAgentDefaults)
 	return v
 }

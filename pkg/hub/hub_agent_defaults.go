@@ -148,6 +148,9 @@ func withHubDefaultHarnessConfig(ctx context.Context) context.Context {
 // hubDefaultHarnessConfigFromContext reports whether the agent's harness-config
 // name came from the hub operational default.
 func hubDefaultHarnessConfigFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
 	v, _ := ctx.Value(hubDefaultHarnessConfigCtxKey{}).(bool)
 	return v
 }
