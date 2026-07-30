@@ -82,6 +82,11 @@ naive loop O(N) round-trips with N-1 pointless intermediate server states.
 per-item POST path unchanged — those endpoints are idempotent, and duplicating
 their logic would be the more fragile choice.
 
+> **Correction (see `ps-dirbatch-p1-fix.md`, FIX-4):** the project/user POST
+> endpoints are *not* idempotent — they return 409 on a duplicate skill URI. The
+> claim above was wrong and the resulting partial-add defect was fixed in
+> commit `28c9ab74`.
+
 **Dialog duplicated, not extracted.** Per Alt A2 in the design: the two checkbox
 pickers operate on `string[]` vs `{uri, name}[]`, so sharing would need generics
 or a render slot for ~70 lines of markup. The `.selection-*` CSS was copied into
