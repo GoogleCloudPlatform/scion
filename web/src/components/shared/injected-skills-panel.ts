@@ -537,28 +537,49 @@ export class ScionInjectedSkillsPanel extends LitElement {
   /**
    * Add several skill URIs at once.
    *
+   * URIs already present in this scope are dropped first. Neither backend
+   * de-duplicates: the project/user POST endpoint returns 409 on a duplicate
+   * skillUri, and the hub PUT stores whatever list it is given, so a
+   * re-discovery of the same directory would otherwise either fail outright or
+   * append duplicate rows.
+   *
    * Hub scope uses a PUT-whole-list API, so calling addEntry() N times would
    * issue N read-modify-write round-trips and leave N-1 pointless intermediate
    * states on the server. Instead we build the full user_defined list once and
    * write it in a single PUT.
    *
-   * Project and user scopes have per-item POST endpoints, so they degrade to N
-   * individual addEntry() calls — unchanged behaviour, and those endpoints are
-   * idempotent by design.
+   * Project and user scopes have per-item POST endpoints and no batch variant,
+   * so they degrade to N individual addEntry() calls. Failures are collected
+   * rather than aborting the loop: a mid-batch throw would leave a partial add
+   * with no recovery path, since retrying would 409 on the skills that did land.
    */
   private async addEntries(uris: string[]): Promise<void> {
-    if (uris.length === 0) return;
+    const existing = new Set(this.rows.map((r) => r.uri));
+    const fresh = uris.filter((u) => !existing.has(u));
+    if (fresh.length === 0) return;
+
     if (this.scope === 'hub') {
       const userDefined = this.rows.filter((r) => !r.readonly).map((r) => this.rowToSkillRef(r));
-      for (const uri of uris) {
+      for (const uri of fresh) {
         userDefined.push(this.buildSkillRef(uri, '', false));
       }
       await this.putHubUserDefined(userDefined);
       await this.load();
-    } else {
-      for (const uri of uris) {
+      return;
+    }
+
+    const failures: string[] = [];
+    for (const uri of fresh) {
+      try {
         await this.addEntry(uri, '', false);
+      } catch (err) {
+        failures.push(`${uri}: ${err instanceof Error ? err.message : 'failed'}`);
       }
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `${failures.length} of ${fresh.length} skills could not be added — ${failures.join('; ')}`
+      );
     }
   }
 
@@ -659,7 +680,11 @@ export class ScionInjectedSkillsPanel extends LitElement {
     this.dialogOpen = true;
   }
 
-  /** Clear all directory-discovery state (called when the add dialog opens/closes). */
+  /**
+   * Clear all directory-discovery state. Called from both openDialog() and
+   * closeDialog() so a discovery error or a stale selection can never survive a
+   * Cancel and reappear the next time the add dialog is opened.
+   */
   private resetDiscovery(): void {
     this.discoveryDialogOpen = false;
     this.discoveredSkills = [];
@@ -676,6 +701,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
     }
     // Abort any in-flight search so it doesn't update state after close.
     this.cancelSearch();
+    this.resetDiscovery();
   }
 
   private handleSearchInput(query: string): void {
@@ -765,10 +791,14 @@ export class ScionInjectedSkillsPanel extends LitElement {
    * stays a full https:// URL either points at a directory of skills or at a
    * single skill on a non-standard path — the user's choice of button
    * disambiguates.
+   *
+   * The github.com host is required because the discover endpoint rejects
+   * anything else; offering the button for other hosts would only buy the user
+   * a round-trip to a 400.
    */
   private get showDiscoverButton(): boolean {
     const candidate = this.dialogTransformed ?? this.dialogUri.trim();
-    return candidate.startsWith('https://');
+    return candidate.toLowerCase().startsWith('https://github.com/');
   }
 
   /**
@@ -777,6 +807,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
    * in the add dialog and no selection dialog is opened.
    */
   private async handleDiscoverDirectory(): Promise<void> {
+    // Post the raw directory URL, not the normalized form — discover needs the directory path.
     const sourceUrl = this.dialogUri.trim();
     if (!sourceUrl) {
       this.discoveryError = 'Skill URI is required';
@@ -820,8 +851,8 @@ export class ScionInjectedSkillsPanel extends LitElement {
     try {
       await this.addEntries([...this.selectedSkillURIs]);
       this.discoveryDialogOpen = false;
+      // closeDialog() clears discovery state via resetDiscovery().
       this.closeDialog();
-      this.resetDiscovery();
     } catch (err) {
       this.discoveryError = err instanceof Error ? err.message : 'Failed to add selected skills';
     } finally {
