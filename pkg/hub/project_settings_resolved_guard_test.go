@@ -822,9 +822,15 @@ func TestResolvedSettings_RegistryNoDrift(t *testing.T) {
 		assert.Containsf(t, resolvedSettingDescriptors, key,
 			"project setting %q is in projectSettingKeys but has no entry in "+
 				"resolvedSettingDescriptors, so GET /settings/resolved reports it as "+
-				"\"unknown\" forever instead of answering for it. Add a descriptor in "+
-				"project_settings_resolved.go naming the hub source for this key "+
-				"(hubSourceNone if there is genuinely no hub-level counterpart).",
+				"\"unknown\" forever instead of answering for it. RULE OUT A MISSPELLED "+
+				"KEY FIRST, exactly as the other direction below says: if both have "+
+				"failed, one of the two keys named is a typo of the other and adding a "+
+				"descriptor is the wrong fix — it leaves two descriptors for one setting "+
+				"and trips the count assertion below. THE TYPO IS NOT NECESSARILY THE KEY "+
+				"THIS MESSAGE NAMES; see the other message for how to tell. Otherwise the "+
+				"key is genuinely unwired: add a descriptor in "+
+				"project_settings_resolved.go naming the hub source for it (hubSourceNone "+
+				"if there is genuinely no hub-level counterpart).",
 			key)
 	}
 
@@ -836,12 +842,19 @@ func TestResolvedSettings_RegistryNoDrift(t *testing.T) {
 	for key := range resolvedSettingDescriptors {
 		assert.Containsf(t, registered, key,
 			"resolvedSettingDescriptors has an entry for %q, which is not in "+
-				"projectSettingKeys. RULE OUT A MISSPELLED KEY FIRST: the setting may "+
-				"still be registered under its correct spelling, in which case the fix is "+
-				"to correct this key and nothing needs deleting or adding. That case also "+
-				"reddens the OTHER direction above, whose advice — add a descriptor for "+
-				"the seemingly unwired key — would leave two descriptors for one setting "+
-				"and then trip the count assertion below. Failing that: the key was "+
+				"projectSettingKeys. RULE OUT A MISSPELLED KEY FIRST. A misspelling "+
+				"reddens BOTH directions at once, and the two messages then name two "+
+				"spellings of one setting — one of which is a typo of the other, with "+
+				"nothing wrong with the setting itself. WHICH of the two is the typo "+
+				"depends on where it was typed, and neither message can tell you: "+
+				"measured both ways, a raw string in the descriptor table puts the typo "+
+				"in THIS message, and a raw string in projectSettingKeys puts it in the "+
+				"other one. Do not assume this key is the wrong one. Both tables normally "+
+				"reference the same constants, so the typo is a RAW STRING somewhere a "+
+				"constant belongs — find that and you have found which key to correct. "+
+				"Correcting it clears both messages; following the other message's advice "+
+				"instead leaves two descriptors for one setting and trips the count "+
+				"assertion below. Failing all that: the key was "+
 				"removed from the registry and this descriptor should go with it, or it "+
 				"was never a project setting and the endpoint must not report it. Those "+
 				"are the causes seen so far and the list is not closed; work out which "+
