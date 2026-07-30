@@ -221,6 +221,63 @@ type ProjectSettings struct {
 	DefaultGCPIdentityServiceAccountID string `json:"defaultGCPIdentityServiceAccountID,omitempty"` // Required when mode is "assign"
 }
 
+// ResolvedHubDefault reports whether a hub-level default exists for a project
+// setting, in the GET /api/v1/projects/{id}/settings/resolved response.
+//
+// Tri-state, not a bool: "unknown" means presence could not be determined
+// (the hub source was unreachable, or it cannot distinguish an
+// explicitly-zero value from an unset one) and must NOT be read as "no".
+type ResolvedHubDefault string
+
+const (
+	// ResolvedHubDefaultPresent — a hub-level default was observed.
+	ResolvedHubDefaultPresent ResolvedHubDefault = "present"
+	// ResolvedHubDefaultAbsent — the hub source was consulted and carries no value.
+	ResolvedHubDefaultAbsent ResolvedHubDefault = "absent"
+	// ResolvedHubDefaultUnknown — presence could not be honestly determined.
+	ResolvedHubDefaultUnknown ResolvedHubDefault = "unknown"
+)
+
+// ResolvedProjectSetting is one key's entry in the resolved-settings response.
+//
+// NOTE FOR ANYONE ADDING A FIELD HERE: this type deliberately carries no
+// effective value, no winning source, and no hub value. The endpoint named
+// "resolved" does not resolve, because resolution is the resolver's job:
+// computing an effective value here would be a second implementation of the
+// precedence order, and a second implementation can silently drift from the
+// real one — a stale answer is still a well-formed answer, so nothing fails.
+//
+// This includes a hub value, not just an "effective" one: in a two-field object
+// {projectValue, hubValue} the juxtaposition is itself the precedence claim,
+// because two adjacent fields with nothing between them assert that there is
+// nothing between them. HubDefault therefore reports existence only.
+//
+// The hub-side mirror of this type is guarded by an exact-set assertion over
+// JSON tags, so adding a field here without adding it there fails the build.
+type ResolvedProjectSetting struct {
+	// ProjectSet reports whether the project annotation is present at all.
+	ProjectSet bool `json:"projectSet"`
+	// ProjectValue is the raw annotation string, or null when unset.
+	ProjectValue *string `json:"projectValue"`
+	// HubDefault reports the existence of a hub default — not its value, not its rank.
+	HubDefault ResolvedHubDefault `json:"hubDefault"`
+}
+
+// ResolvedProjectSettings is the GET /api/v1/projects/{id}/settings/resolved
+// response body.
+//
+// Settings is keyed by raw annotation key (e.g. "scion.io/default-model"), and
+// its key set is exactly the hub's authoritative project-settings registry.
+//
+// A consumer that needs an effective value must resolve it itself, against
+// whatever precedence ladder exists at the time it asks. See ResolvedProjectSetting.
+type ResolvedProjectSettings struct {
+	// Project is the existing GET /settings payload, unchanged.
+	Project *ProjectSettings `json:"project"`
+	// Settings is keyed by annotation key.
+	Settings map[string]ResolvedProjectSetting `json:"settings"`
+}
+
 // ProjectResourceSpec defines default resource requirements at the project level.
 type ProjectResourceSpec struct {
 	Requests *ProjectResourceList `json:"requests,omitempty"`

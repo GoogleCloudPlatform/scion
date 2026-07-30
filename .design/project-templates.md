@@ -231,6 +231,26 @@ Routing: added to the `subPath` dispatch in `handleProjectRoutes`
 
 #### Response shape
 
+> **STALE — NOT AS BUILT.** The response shape, Go types and rationale in the
+> rest of §4.1 describe a `{value, source, projectValue, hubValue}` quad that was
+> specified, reviewed and then deliberately **not** implemented. They are kept
+> here as the record of a rejected design, not as a specification.
+>
+> As built: the response is `{project, settings}`, and each entry is
+> `{projectSet, projectValue, hubDefault}` where `hubDefault` is the tri-state
+> `"present" | "absent" | "unknown"`. There is **no** effective value, **no**
+> `source`, and **no** hub value — only whether a hub default exists.
+>
+> Why: computing an effective value here would be a second implementation of the
+> precedence order in a package that cannot observe changes to the first one, and
+> the copy fails silently because a stale answer is still a well-formed answer.
+> The `{projectValue, hubValue}` pairing is the same claim by another route — two
+> adjacent fields with nothing between them assert that nothing is between them,
+> which is false whenever the template or harness-config layer supplies the value.
+> See the header comment in `pkg/hub/project_settings_resolved.go` and
+> `docs-site/src/content/docs/reference/project-settings-resolved.md`.
+> `TestResolvedSettingsResponseShape_NoEffectiveValue` enforces it.
+
 ```jsonc
 {
   "project": { /* exactly the existing ProjectSettings object, unchanged */ },
@@ -404,6 +424,13 @@ Feature A is a pure read-side projection over data that already exists in
 in-memory `AgentAppliedConfig`; it persists nothing new.
 
 ### 4.3 UI specification
+
+> **STALE — depends on the rejected §4.1 shape.** Every rule below reads
+> `fields.<name>.hubValue`; the endpoint as built has no `fields` map and returns
+> no hub value. The rules that render a hub value inline (`Hub default: ${hubValue}`,
+> `Use hub default (${hubValue})`) cannot be implemented against the shipped
+> response and are not merely renamed — the data is deliberately absent. A UI
+> revision is out of scope for this phase; see §4.1's STALE note for why.
 
 File: `web/src/components/pages/project-settings.ts`.
 

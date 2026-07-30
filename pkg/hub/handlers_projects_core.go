@@ -1462,6 +1462,14 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /settings/resolved path. Must be tested separately from
+	// "settings" above rather than as a prefix: this is a distinct read-only
+	// sub-resource with no PUT, not a mode of the settings endpoint.
+	if subPath == "settings/resolved" {
+		s.handleProjectSettingsResolved(w, r, projectID)
+		return
+	}
+
 	// Check for nested /discover-templates path
 	if subPath == "discover-templates" {
 		s.handleProjectDiscoverTemplates(w, r, projectID)
