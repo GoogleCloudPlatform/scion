@@ -335,6 +335,7 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 	// invoking user rather than leaving it ownerless.
 	if onBehalfOf != "" {
 		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
+		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
 	}
 
 	if err := c.signRequest(httpReq); err != nil {

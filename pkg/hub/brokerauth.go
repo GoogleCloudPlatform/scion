@@ -857,6 +857,32 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 	return authenticatedUser, 0, nil
 }
 
+// applyOnBehalfOf resolves the delegated requestor identity and returns the
+// updated context plus the resolved UserIdentity (nil when the header is
+// absent). If the X-Scion-On-Behalf-Of header is present and valid, both
+// broker and user identities are set in the context. If absent, the broker
+// is set as the sole identity. On error it writes the HTTP error response
+// and returns (nil, nil, false).
+func (svc *BrokerAuthService) applyOnBehalfOf(ctx context.Context, w http.ResponseWriter, r *http.Request, brokerIdent BrokerIdentity) (context.Context, UserIdentity, bool) {
+	userIdent, statusCode, oboErr := svc.resolveOnBehalfOf(ctx, r)
+	if oboErr != nil {
+		errCode := ErrCodeForbidden
+		if statusCode == http.StatusBadRequest {
+			errCode = ErrCodeInvalidRequest
+		}
+		writeError(w, statusCode, errCode, oboErr.Error(), nil)
+		return nil, nil, false
+	}
+
+	if userIdent != nil {
+		ctx = context.WithValue(ctx, userContextKey{}, userIdent)
+		ctx = contextWithIdentity(ctx, userIdent)
+	} else {
+		ctx = contextWithIdentity(ctx, brokerIdent)
+	}
+	return ctx, userIdent, true
+}
+
 // BrokerAuthMiddleware creates middleware for HMAC-based broker authentication.
 // This runs AFTER UnifiedAuthMiddleware and checks for X-Scion-Broker-ID header.
 // When the X-Scion-On-Behalf-Of header is also present, the middleware resolves
@@ -884,29 +910,11 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 				return
 			}
 
-			// Set broker-specific identity context
+			// Set broker-specific identity context and resolve on-behalf-of
 			ctx := contextWithBrokerIdentity(r.Context(), identity)
-
-			// Resolve delegated requestor identity if present
-			userIdent, statusCode, oboErr := svc.resolveOnBehalfOf(ctx, r)
-			if oboErr != nil {
-				errCode := ErrCodeForbidden
-				if statusCode == http.StatusBadRequest {
-					errCode = ErrCodeInvalidRequest
-				}
-				writeError(w, statusCode, errCode, oboErr.Error(), nil)
+			ctx, _, ok := svc.applyOnBehalfOf(ctx, w, r, identity)
+			if !ok {
 				return
-			}
-
-			if userIdent != nil {
-				// Both broker and user identities: set user as the primary
-				// identity so GetUserIdentityFromContext returns it, while
-				// the broker remains accessible via GetBrokerIdentityFromContext.
-				ctx = context.WithValue(ctx, userContextKey{}, userIdent)
-				ctx = contextWithIdentity(ctx, userIdent)
-			} else {
-				// No on-behalf-of header — broker is the sole identity (unchanged behavior)
-				ctx = contextWithIdentity(ctx, identity)
 			}
 
 			next.ServeHTTP(w, r.WithContext(ctx))
