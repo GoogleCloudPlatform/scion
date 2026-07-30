@@ -409,7 +409,7 @@ func walkMarshalerBan(t *testing.T, v any, judgeOutOfModule bool) {
 	// at 1e022df8 — one marshaller on hubclient.ProjectResourceList, which
 	// .Project.DefaultResources reaches as both Requests and Limits:
 	//
-	//   "DefaultResources.Requests" mentions 2   (one per mirror root)
+	//   "DefaultResources.Requests" mentions 2   (one per root that REACHES it)
 	//   "DefaultResources.Limits"   mentions 0   <- never named
 	//
 	// THIS IS NOT A COVERAGE HOLE AND MUST NOT BE READ AS ONE. Implementing
@@ -425,12 +425,17 @@ func walkMarshalerBan(t *testing.T, v any, judgeOutOfModule bool) {
 	//
 	// The old comment also cited a case it does not cover: three interface{}
 	// fields sharing map[string]interface{}. Interface kinds return at the
-	// struct-kind check ABOVE this map and are never reported by this walk at
-	// all, so they never exercised the dedup. The prototype defect that lesson
-	// came from was real; generalising it to this code was not.
+	// struct-kind check, which sits BELOW this declaration and ABOVE the visited
+	// check that follows it, so they are never reported by this walk at all and
+	// never exercised the dedup. The prototype defect that lesson came from was
+	// real; generalising it to this code was not.
 	//
-	// Scope: this map is per-ROOT, rebuilt on each call, which is why a violating
-	// type is named once per mirror root rather than once in total.
+	// Scope: this map is per-ROOT, rebuilt on each call, so a violating type is
+	// named once per root that REACHES it rather than once in total. Reaching is
+	// the operative property, not mirror-ness: resolvedResponseTypes lists FOUR
+	// roots and the measurement above is 2, because only the two plural
+	// ResolvedProjectSettings carry a field that reaches this subgraph. A fifth
+	// root that reached it would make the count 3.
 	visited := map[reflect.Type]bool{}
 
 	var walk func(typ reflect.Type, path string)
@@ -461,10 +466,13 @@ func walkMarshalerBan(t *testing.T, v any, judgeOutOfModule bool) {
 		if !resolvedGuardMarshalerExceptions[typ] {
 			assert.Falsef(t, implementsJSONMarshaler(typ),
 				"%s implements json.Marshaler, reached at %s.\n"+
-					"That path is the FIRST this walk reached the type by, not "+
-					"necessarily the only one: the type is judged once per root, so "+
-					"other fields of the same type are affected but go unnamed here. "+
-					"Removing the marshaller fixes every such site at once.\n"+
+					"That path is the FIRST this walk reached the type by, and may "+
+					"not be the only one: the type is judged once per root that "+
+					"REACHES it, so ANY further site of the same type — if the type "+
+					"has one — is affected too and is not named here. Read this as "+
+					"'this list may be incomplete', NOT as 'there are more'; a type "+
+					"with a single site is named in full. Removing the marshaller "+
+					"fixes every site at once, however many there are.\n"+
 					"A custom marshaller decides at runtime which keys to write, so the "+
 					"exact-set assertion — which reads what the encoder emits for one "+
 					"constructed value — stops being a bound on what real responses "+
