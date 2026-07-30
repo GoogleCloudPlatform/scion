@@ -17,6 +17,9 @@
 
 FROM golang:1.26-bookworm AS builder
 
+ARG GIT_COMMIT=unknown
+ARG BUILD_VERSION=dev
+
 WORKDIR /src
 
 # Copy the root module (required by the replace directive).
@@ -26,14 +29,13 @@ COPY cmd/ cmd/
 
 # Copy the telegram module.
 COPY extras/scion-telegram/ extras/scion-telegram/
-COPY hack/version.sh /src/hack/version.sh
 
 WORKDIR /src/extras/scion-telegram
 
 RUN go mod download
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
-    -ldflags="-s -w $(sh /src/hack/version.sh)" \
+    -ldflags="-s -w -X 'github.com/GoogleCloudPlatform/scion/pkg/version.Commit=${GIT_COMMIT}' -X 'github.com/GoogleCloudPlatform/scion/pkg/version.Version=${BUILD_VERSION}'" \
     -o /scion-plugin-telegram ./cmd/scion-plugin-telegram
 
 FROM gcr.io/distroless/static-debian12:nonroot
