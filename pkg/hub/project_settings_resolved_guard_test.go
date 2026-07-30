@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -79,7 +80,7 @@ var (
 //
 // hubclient.ProjectSettings is deliberately NOT here. It is carried whole
 // behind the "project" key rather than promoted into this object, it has
-// nineteen fields that change for unrelated reasons, and it legitimately uses
+// sixteen fields that change for unrelated reasons, and it legitimately uses
 // omitempty throughout. The wire-level denylist in
 // project_settings_resolved_test.go is what looks inside it.
 //
@@ -167,7 +168,12 @@ var (
 // outer's only anonymous field is `mid`, a struct VALUE — so a check phrased as
 // "no anonymous pointer fields on the four types" passes this. Measured against
 // assertNoEmbeddedStructPointer, it is rejected at path "mid.deep".
-func resolvedResponseTypes() []any {
+// IT IS A VAR, NOT A FUNC, DELIBERATELY. TestResolvedSettingsGuard_InterveningIsWiredToTheResponseTypes
+// swaps it to prove the shape guard actually applies its interveners to whatever
+// this returns. Do not turn it back into a func, and do not hardcode this list at
+// the call sites: both break that closure, and hardcoding also stops the guard
+// growing as the type list grows, which is the regression the swap exists to catch.
+var resolvedResponseTypes = func() []any {
 	return []any{
 		ResolvedProjectSettings{},
 		ResolvedProjectSetting{},
@@ -301,19 +307,138 @@ func implementsJSONMarshaler(typ reflect.Type) bool {
 	return typ.Implements(marshaler) || reflect.PointerTo(typ).Implements(marshaler)
 }
 
+// resolvedGuardModulePrefix bounds the recursive marshaller ban. Types outside
+// this module are reached but never judged: banning json.Marshaler on someone
+// else's type is not a rule we can enforce or a defect we can fix, and time.Time
+// and json.RawMessage both implement it legitimately.
+const resolvedGuardModulePrefix = "github.com/GoogleCloudPlatform/scion/"
+
+// resolvedGuardMarshalerExceptions lists in-module types permitted to implement
+// json.Marshaler despite being reachable from a resolved response.
+//
+// IT IS EMPTY, AND IT IS DELIBERATELY WRITTEN AS AN EMPTY LIST RATHER THAN
+// OMITTED. Measured at the time of writing: zero in-module types reachable from
+// the four roots implement json.Marshaler, and zero out-of-module types are
+// reachable at all, so nothing needs exempting today. The list exists so that
+// the first person who genuinely needs an exception has a declared place to put
+// it, with the review that a diff to this list attracts — rather than reaching
+// for the easier fix of deleting the recursion.
+var resolvedGuardMarshalerExceptions = map[reflect.Type]bool{}
+
+// assertNoCustomMarshaler fails if v, or ANY type reachable from it, implements
+// json.Marshaler.
+//
+// WHY THIS ONE RECURSES WHEN THE OTHER TWO DO NOT. The three interveners are not
+// equally dangerous at depth. omitempty, omitzero and a nil embedded pointer are
+// SUBTRACTIVE: they can drop a declared key, so the emitted set stays a subset of
+// the declared names, and a reader of the struct can still enumerate the worst
+// case. A marshaller is the only one that can INVENT a key that appears in no
+// field declaration anywhere. That asymmetry is why the ban recurses to unbounded
+// depth while assertOnlySafeTagOptions and the exact-set assertion correctly stay
+// at the four-type frontier — stretching the tag rule across the boundary would
+// fail sixteen legitimate omitempty fields on hubclient.ProjectSettings, where
+// absence genuinely means unset.
+//
+// MEASURED, NOT ASSUMED — this replaced a top-level-only check that was blind to
+// four real doors. Planting a pointer-receiver MarshalJSON on hubclient.BucketConfig
+// (reached at .Project.Bucket, depth 2) erased "provider" and "name" — both of
+// which are NOT omitempty, so mandatory keys set to real values vanished from the
+// wire — while every package in ./pkg/... stayed green under BOTH tag modes.
+// hubclient.ProjectResourceList at .Project.DefaultResources.Requests is three
+// hops out and behaved identically. The surface is depth-unbounded, so the guard
+// is too.
+//
+// NO ADDRESSABILITY MITIGATION EXISTS ON THE CURRENT TYPES, and that is a fact
+// about these fields rather than about the class. .Project, .Bucket,
+// .DefaultResources, .Requests and .Limits are every one of them POINTER fields,
+// and a pointer field is reached through a pointer whatever the parent is, so the
+// marshaller fires on json.Marshal(T{}) exactly as it does on json.Marshal(&T{}).
+// Add a VALUE-typed struct field tomorrow and the mitigation returns along with
+// the divergence it causes: the guard feeding a value would observe a clean
+// payload while the handler marshalling a pointer ships the exploited one.
 func assertNoCustomMarshaler(t *testing.T, v any) {
 	t.Helper()
+	walkMarshalerBan(t, v, false)
+}
 
-	typ := reflect.TypeOf(v)
+// walkMarshalerBan is assertNoCustomMarshaler with the module-boundary rule made
+// switchable, so that the rule itself can be controlled rather than trusted.
+//
+// judgeOutOfModule is FALSE in production use. It exists because a rule whose
+// only stated justification is "insurance against a type nobody has added yet"
+// reads as dead code, and the next person deletes it. With it true,
+// TestResolvedGuard_ModuleBoundaryRuleIsLoadBearing shows precisely what the
+// rule is buying: time.Time implements json.Marshaler legitimately, so without
+// the boundary the first standard-library type reached becomes a false positive.
+func walkMarshalerBan(t *testing.T, v any, judgeOutOfModule bool) {
+	t.Helper()
 
-	assert.Falsef(t, implementsJSONMarshaler(typ),
-		"%s implements json.Marshaler, which this guard cannot see through.\n"+
-			"A custom marshaller decides at runtime which keys to write, so the exact-set "+
-			"assertion below — which reads what the encoder emits for one constructed "+
-			"value — stops being a bound on what real responses contain. This was measured, "+
-			"not theorised: a marshaller that emitted \"winner\" only for populated entries "+
-			"put that field on the wire with every guard in this file green.\n"+
-			"If you need a custom marshaller here, this test needs rethinking first.", typ)
+	// Dedup gates RECURSION ONLY, never reporting. Keying a map on reflect.Type
+	// and consulting it before recording a finding silently collapses distinct
+	// SITES that share a type — measured while building this: three interface{}
+	// fields that are all map[string]interface{} reported as one.
+	visited := map[reflect.Type]bool{}
+
+	var walk func(typ reflect.Type, path string)
+	walk = func(typ reflect.Type, path string) {
+		for {
+			switch typ.Kind() {
+			case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+				typ = typ.Elem()
+				continue
+			}
+			break
+		}
+		if typ.Kind() != reflect.Struct {
+			// Interfaces land here. A dynamic type is not knowable statically,
+			// so .Project.Runtimes, .Harnesses and .Profiles are a PERMANENT
+			// residual of this approach, not an oversight. No reflective guard
+			// closes them.
+			return
+		}
+		if pkg := typ.PkgPath(); pkg != "" && !strings.HasPrefix(pkg, resolvedGuardModulePrefix) && !judgeOutOfModule {
+			return // out of module: reached, never judged
+		}
+		if visited[typ] {
+			return
+		}
+		visited[typ] = true
+
+		if !resolvedGuardMarshalerExceptions[typ] {
+			assert.Falsef(t, implementsJSONMarshaler(typ),
+				"%s implements json.Marshaler, reached at %s.\n"+
+					"A custom marshaller decides at runtime which keys to write, so the "+
+					"exact-set assertion — which reads what the encoder emits for one "+
+					"constructed value — stops being a bound on what real responses "+
+					"contain. This was measured, not theorised: a marshaller that emitted "+
+					"\"winner\" only for populated entries put that field on the wire with "+
+					"every guard in this file green, and one planted at depth 2 on "+
+					"hubclient.BucketConfig erased two NON-omitempty keys with all 54 "+
+					"packages green.\n"+
+					"If you need a custom marshaller here, this test needs rethinking "+
+					"first. If the type is genuinely allowed one, add it to "+
+					"resolvedGuardMarshalerExceptions and say why.", typ, path)
+		}
+
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			// Recurse into anonymous fields even when the embedded TYPE is
+			// unexported, and skip NAMED unexported fields. The two are not the
+			// same case and the distinction is load-bearing, measured both ways:
+			// an embedded unexported struct promotes its exported fields onto the
+			// wire, so a marshaller below it fires — {"deep":{"pwned":true}} —
+			// while a named unexported field is never marshalled at all, so
+			// judging its type would be a false positive on something that cannot
+			// reach a response.
+			if !f.Anonymous && f.PkgPath != "" {
+				continue
+			}
+			walk(f.Type, path+"."+f.Name)
+		}
+	}
+
+	rt := reflect.TypeOf(v)
+	walk(rt, rt.String())
 }
 
 // jsonWireNames returns the JSON object keys encoding/json ACTUALLY emits for
@@ -704,13 +829,30 @@ func TestResolvedSettings_ResponseCoversRegistry(t *testing.T) {
 //
 // KNOWN AND DELIBERATE LIMIT OF THIS GUARD: it covers the resolved wrapper and
 // the per-key object. It does NOT look inside hubclient.ProjectSettings, which
-// the "project" key carries whole. A field added to ProjectSettings reaches
-// this response unguarded by this test. Exact-setting that type here was
-// considered and rejected: it has nineteen fields that legitimately change for
-// reasons unrelated to this endpoint, so this guard would fail on other
-// people's honest work, and a guard that cries wolf gets deleted. The realistic
-// version of that drift — the "project" field being retyped to a locally
-// widened struct — is covered by TestResolvedSettings_ProjectFieldTypeIdentity
+// the "project" key carries whole, NOR into the graph reachable from it, which
+// runs to depth 3 and beyond.
+//
+// Two ways that graph can change the wire, not one. A field ADDED to a reachable
+// type reaches this response unguarded. A custom MarshalJSON on a reachable type
+// also REMOVES keys whose values were set — measured, with telemetryEnabled set
+// and then absent from the bytes. State the removal case too: a limit statement
+// that understates the limit is worse than none, because it is what the next
+// reader relies on instead of looking.
+//
+// Exact-setting hubclient.ProjectSettings here was considered and rejected: it
+// has sixteen fields that legitimately change for reasons unrelated to this
+// endpoint, so that guard would fail on other people's honest work, and a guard
+// that cries wolf gets deleted.
+//
+// THAT ARGUMENT IS ABOUT EXACT-SETTING ONLY. It does not carry to the recursive
+// marshaller ban in assertNoCustomMarshaler, and must not be read as having
+// considered and rejected it — it was not considered when this comment was
+// written. A marshaller ban cannot cry wolf here: zero reachable types implement
+// json.Marshaler today, so it has zero false positives, measured, with a
+// positive control. That ban is what covers the removal case; this test does not.
+//
+// The realistic version of the ADD drift — the "project" field being retyped to a
+// locally widened struct — is covered by TestResolvedSettings_ProjectFieldTypeIdentity
 // below instead.
 func TestResolvedSettingsResponseShape_NoEffectiveValue(t *testing.T) {
 	const rationale = "\n\n" +
@@ -1178,6 +1320,45 @@ func TestResolvedGuard_MarshalerCheckSeesBothReceiverForms(t *testing.T) {
 	})
 }
 
+// TestResolvedGuard_ModuleBoundaryRuleIsLoadBearing pins the module-boundary
+// rule by showing what happens without it.
+//
+// Both halves are needed and neither alone is evidence. The ACCEPT half says the
+// guard tolerates time.Time today, which is equally consistent with the guard
+// never having reached it. The DISABLED half shows the type IS reached and IS
+// judgeable, so the tolerance is the boundary rule doing work rather than the
+// recursion falling short.
+//
+// Measured while building this, and the reason the rule ships despite the
+// exception list being empty: with the boundary disabled the walk visits 8
+// in-module struct types plus 4 more it should never have entered, and time.Time
+// becomes a false positive. Zero-out-of-module-today is a fact about the current
+// types, not a property of the guard.
+func TestResolvedGuard_ModuleBoundaryRuleIsLoadBearing(t *testing.T) {
+	t.Run("time.Time really does implement json.Marshaler", func(t *testing.T) {
+		// If this ever goes false the control below is vacuous: it would be
+		// passing because there is nothing to catch, not because of the rule.
+		assert.True(t, implementsJSONMarshaler(reflect.TypeOf(time.Time{})),
+			"the boundary-rule control depends on time.Time being a real "+
+				"json.Marshaler; if it is not, this test proves nothing")
+	})
+
+	t.Run("boundary rule ON accepts the out-of-module type", func(t *testing.T) {
+		assert.False(t, instrumentFires(t, assertNoCustomMarshaler, ctlOutOfModule{}),
+			"time.Time is out of module and must be reached but not judged")
+	})
+
+	t.Run("boundary rule DISABLED turns it into a false positive", func(t *testing.T) {
+		disabled := func(t *testing.T, v any) { walkMarshalerBan(t, v, true) }
+		assert.True(t, instrumentFires(t, disabled, ctlOutOfModule{}),
+			"with the boundary rule off, the first standard-library type reached "+
+				"becomes a false positive — which is exactly what the rule buys. "+
+				"If this row goes green the rule has stopped doing anything and "+
+				"deleting it would be free, so check the walk still descends into "+
+				"named struct fields before believing it.")
+	})
+}
+
 // assertResponseKeySetIsTypeDetermined runs all three interveners against v.
 //
 // The three are bundled here rather than called separately at the use site so
@@ -1187,7 +1368,7 @@ func TestResolvedGuard_MarshalerCheckSeesBothReceiverForms(t *testing.T) {
 //
 // KNOWN RESIDUAL, MEASURED, NOT CLOSED. Bundling narrows what a deletion can
 // reach; it does not make the CALL to this function self-defending. Deleting
-// the three-line loop in TestResolvedSettings_ResponseKeySetIsTypeDetermined
+// the three-line loop in TestResolvedSettingsResponseShape_NoEffectiveValue
 // leaves the ENTIRE pkg/hub suite green (rc=0) and is not a compile artefact
 // (go vet clean; no orphaned range variable). Three lines removes every shape
 // guard in this file and nothing goes red.
@@ -1197,7 +1378,18 @@ func TestResolvedGuard_MarshalerCheckSeesBothReceiverForms(t *testing.T) {
 // is three lines now, and nothing caught the six-line version either. Coverage
 // did not drop. Do not read the control table's green as evidence that the
 // guards are still wired up — the table proves the instruments work, never
-// that anything calls them. Closing this needs a check outside `go test`.
+// that anything calls them.
+//
+// CORRECTION, this line previously read "closing this needs a check outside
+// `go test`": that was FALSE, and it ruled out the class of fix that turned out
+// to work. The residual IS closable inside `go test`, with resolvedResponseTypes
+// as a swappable var — see TestResolvedSettingsGuard_InterveningIsWiredToTheResponseTypes,
+// which poisons that var and asserts the subject test notices.
+//
+// The residual described above is therefore CLOSED. This paragraph stays because
+// the reasoning is still load-bearing: the control table proves the instruments
+// work and never that anything calls them, and that remains true. What changed is
+// that a second test now supplies the missing half.
 func assertResponseKeySetIsTypeDetermined(t *testing.T, v any) {
 	t.Helper()
 
@@ -1240,6 +1432,108 @@ type ctlOmitZero struct {
 type ctlEmbeddedPtr struct {
 	ProjectSet bool `json:"projectSet"`
 	*ctlEmbedTarget
+}
+
+// ctlDoorA / ctlDoorB mirror the two doors that were measured OPEN against the
+// real types before the marshaller ban recursed: hubclient.BucketConfig reached
+// at .Project.Bucket (depth 2) and hubclient.ProjectResourceList reached at
+// .Project.DefaultResources.Requests (depth 3).
+//
+// They are shape copies rather than the real types because the real ones carry
+// no marshaller and must not be given one to satisfy a test. The depths are the
+// measured depths, and the intermediate hop is a POINTER field in both, which is
+// what the real graph does and what removes any addressability mitigation.
+//
+// NOTE ON WHAT THE REAL DOORS PROVED, which no committed row can restate: with a
+// pointer-receiver MarshalJSON planted on hubclient.BucketConfig, "provider" and
+// "name" left the wire. Neither is omitempty. The exposure is not confined to
+// optional fields.
+type ctlDoorLeaf struct {
+	Provider string `json:"provider"`
+}
+
+func (*ctlDoorLeaf) MarshalJSON() ([]byte, error) { return []byte(`{"doorPwned":true}`), nil }
+
+type ctlDoorAInner struct {
+	Bucket *ctlDoorLeaf `json:"bucket,omitempty"`
+}
+
+// ctlDoorA: leaf marshaller two hops out.
+type ctlDoorA struct {
+	Project *ctlDoorAInner `json:"project"`
+}
+
+// ctlDoorLeafValue is ctlDoorLeaf with a VALUE receiver. Both receiver forms are
+// pinned at depth because a real door can be written either way, and the walk must
+// not depend on which one the author picked.
+//
+// WHAT THIS ROW DOES NOT DO, stated because the pairing invites the wrong reading:
+// it does not isolate the value disjunct of implementsJSONMarshaler. The walk
+// dereferences to a struct type before judging any node, and for a struct type T the
+// method set of *T contains that of T, so the POINTER disjunct alone decides every
+// node the walk ever reaches. Measured: deleting the value disjunct fails exactly one
+// test in this package -- TestResolvedGuard_MarshalerCheckSeesBothReceiverForms,
+// which calls the predicate directly -- and NO row of the control table, this one
+// included. Deleting the pointer disjunct fails eight rows. The value disjunct is
+// load-bearing for the predicate's pointer-typed inputs and redundant inside the
+// walk; only the direct-predicate test pins it.
+type ctlDoorLeafValue struct {
+	Provider string `json:"provider"`
+}
+
+func (ctlDoorLeafValue) MarshalJSON() ([]byte, error) { return []byte(`{"doorPwned":true}`), nil }
+
+type ctlDoorValueInner struct {
+	Bucket *ctlDoorLeafValue `json:"bucket,omitempty"`
+}
+
+// ctlDoorValue: value-receiver leaf marshaller two hops out.
+type ctlDoorValue struct {
+	Project *ctlDoorValueInner `json:"project"`
+}
+
+type ctlDoorBSpec struct {
+	Requests *ctlDoorLeaf `json:"requests,omitempty"`
+}
+
+type ctlDoorBInner struct {
+	DefaultResources *ctlDoorBSpec `json:"defaultResources,omitempty"`
+}
+
+// ctlDoorB: leaf marshaller three hops out.
+type ctlDoorB struct {
+	Project *ctlDoorBInner `json:"project"`
+}
+
+// ctlOutOfModule reaches a standard-library type that implements json.Marshaler
+// legitimately. The recursion must REACH time.Time and decline to judge it.
+//
+// This fixture is why resolvedGuardModulePrefix is not decorative: with the
+// boundary rule disabled, this exact shape produces a false positive. That is
+// pinned by TestResolvedGuard_ModuleBoundaryRuleIsLoadBearing rather than left
+// to the comment, because "insurance against a type nobody has added yet" is
+// the argument a future reader deletes.
+type ctlOutOfModule struct {
+	When time.Time `json:"when"`
+}
+
+// ctlDeepClean is ctlDoorB's shape with no marshaller anywhere. It is the
+// over-rejection control for the recursion: without it, a ban that fired on
+// every nested struct would pass all the REJECT rows above and look correct.
+type ctlDeepCleanLeaf struct {
+	Provider string `json:"provider"`
+}
+
+type ctlDeepCleanSpec struct {
+	Requests *ctlDeepCleanLeaf `json:"requests,omitempty"`
+}
+
+type ctlDeepCleanInner struct {
+	DefaultResources *ctlDeepCleanSpec `json:"defaultResources,omitempty"`
+}
+
+type ctlDeepClean struct {
+	Project *ctlDeepCleanInner `json:"project"`
 }
 
 type ctlMid struct{ *ctlEmbedTarget }
@@ -1335,6 +1629,16 @@ func TestResolvedSettingsGuard_InstrumentControls(t *testing.T) {
 		{"value-receiver MarshalJSON", assertNoCustomMarshaler, marshalerCtrlValue{}, true},
 		{"pointer-receiver MarshalJSON", assertNoCustomMarshaler, marshalerCtrlPointer{}, true},
 
+		// REJECT rows: intervener 3 AT DEPTH. These are the two doors that were
+		// measured OPEN on the real types — BucketConfig at depth 2 and
+		// ProjectResourceList at depth 3 — with every package in ./pkg/... green
+		// under both tag modes. A top-level-only ban passes both of these rows,
+		// which is exactly why the acceptance criterion for the recursion was
+		// these two going red rather than the suite staying green.
+		{"marshaller two hops out", assertNoCustomMarshaler, ctlDoorA{}, true},
+		{"marshaller three hops out", assertNoCustomMarshaler, ctlDoorB{}, true},
+		{"composite catches depth", assertResponseKeySetIsTypeDetermined, ctlDoorB{}, true},
+
 		// REJECT rows through the COMPOSITE. These are what make deleting one of
 		// the three calls inside assertResponseKeySetIsTypeDetermined visible.
 		{"composite catches tags", assertResponseKeySetIsTypeDetermined, ctlOmitZero{}, true},
@@ -1363,6 +1667,10 @@ func TestResolvedSettingsGuard_InstrumentControls(t *testing.T) {
 		{"plain tags are ACCEPTED", assertOnlySafeTagOptions, ctlEmbeddedValue{}, false},
 		{"no marshaller is ACCEPTED", assertNoCustomMarshaler, ctlEmbeddedValue{}, false},
 		{"a clean type passes the composite", assertResponseKeySetIsTypeDetermined, ctlClean{}, false},
+		{"nested POINTER-receiver marshaller is rejected", assertNoCustomMarshaler, ctlDoorA{}, true},
+		{"nested VALUE-receiver marshaller is rejected", assertNoCustomMarshaler, ctlDoorValue{}, true},
+		{"nested structs with no marshaller anywhere", assertNoCustomMarshaler, ctlDeepClean{}, false},
+		{"out-of-module marshaller is reached but not judged", assertNoCustomMarshaler, ctlOutOfModule{}, false},
 		{"a clean POINTER passes the composite", assertResponseKeySetIsTypeDetermined, &ctlClean{}, false},
 	}
 
