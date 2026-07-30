@@ -1184,6 +1184,20 @@ func TestResolvedGuard_MarshalerCheckSeesBothReceiverForms(t *testing.T) {
 // that TestResolvedSettingsGuard_InstrumentControls can drive them as a unit.
 // Deleting any one of the three from this function turns control rows red;
 // called individually at the use site, a deletion there would be invisible.
+//
+// KNOWN RESIDUAL, MEASURED, NOT CLOSED. Bundling narrows what a deletion can
+// reach; it does not make the CALL to this function self-defending. Deleting
+// the three-line loop in TestResolvedSettings_ResponseKeySetIsTypeDetermined
+// leaves the ENTIRE pkg/hub suite green (rc=0) and is not a compile artefact
+// (go vet clean; no orphaned range variable). Three lines removes every shape
+// guard in this file and nothing goes red.
+//
+// The honest framing is that the composite made this residual SMALLER but not
+// weaker: the same total-removal edit was six lines before the composite and
+// is three lines now, and nothing caught the six-line version either. Coverage
+// did not drop. Do not read the control table's green as evidence that the
+// guards are still wired up — the table proves the instruments work, never
+// that anything calls them. Closing this needs a check outside `go test`.
 func assertResponseKeySetIsTypeDetermined(t *testing.T, v any) {
 	t.Helper()
 
