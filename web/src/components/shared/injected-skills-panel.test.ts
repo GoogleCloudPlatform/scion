@@ -423,6 +423,68 @@ describe('injected-skills-panel — handleDiscoverDirectory', () => {
     expect(el.discoveryError).toBeTruthy();
   });
 
+  it('captures the backend skipped[] list and explains it in the dialog', async () => {
+    // The backend reports child directories it passed over (no SKILL.md, or an
+    // unsafe name). Without surfacing them, a folder the user expected simply
+    // vanishes from the list with no explanation.
+    const el = await createPanel('project', [], {
+      discover: {
+        status: 200,
+        body: {
+          skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }],
+          skipped: ['not-a-skill'],
+          count: 1,
+        },
+      },
+    });
+
+    el.dialogUri = 'https://github.com/org/repo/tree/main/skills';
+    await el.handleDiscoverDirectory();
+    await el.updateComplete;
+
+    expect(el.skippedSkillNames).toEqual(['not-a-skill']);
+    const note = el.shadowRoot.querySelector('.discovery-skipped-note');
+    expect(note).toBeTruthy();
+    // Collapse the template's incidental whitespace before matching.
+    expect(note.textContent.replace(/\s+/g, ' ').trim()).toBe(
+      '1 folder not recognized as skills was skipped.'
+    );
+  });
+
+  it('pluralizes the skipped note and omits it when nothing was skipped', async () => {
+    const el = await createPanel('project', [], {
+      discover: {
+        status: 200,
+        body: {
+          skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }],
+          skipped: ['not-a-skill', 'docs'],
+          count: 1,
+        },
+      },
+    });
+    el.dialogUri = 'https://github.com/org/repo/tree/main/skills';
+    await el.handleDiscoverDirectory();
+    await el.updateComplete;
+
+    expect(
+      el.shadowRoot.querySelector('.discovery-skipped-note').textContent.replace(/\s+/g, ' ').trim()
+    ).toBe('2 folders not recognized as skills were skipped.');
+
+    // A response with no skipped[] must not render an empty note.
+    const clean = await createPanel('project', [], {
+      discover: {
+        status: 200,
+        body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 },
+      },
+    });
+    clean.dialogUri = 'https://github.com/org/repo/tree/main/skills';
+    await clean.handleDiscoverDirectory();
+    await clean.updateComplete;
+
+    expect(clean.skippedSkillNames).toEqual([]);
+    expect(clean.shadowRoot.querySelector('.discovery-skipped-note')).toBeNull();
+  });
+
   it('holds discoveryLoading for the duration of the probe, on success and on failure', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -717,6 +779,31 @@ describe('injected-skills-panel — handleDiscoveryConfirm', () => {
     expect(el.discoveryError).toBeTruthy();
   });
 
+  it('closes both dialogs silently when every selected URI is already present', async () => {
+    // addEntries() returns early when nothing is fresh, so no request is made.
+    // That is intentional — an all-duplicates batch has nothing to write — but
+    // the silence is easy to break by accident, so pin it.
+    const calls: Call[] = [];
+    const el = await createPanel('hub', calls);
+
+    el.rows = [row('gh://org/repo/a@main'), row('gh://org/repo/b@main')];
+    el.dialogOpen = true;
+    el.discoveryDialogOpen = true;
+    el.discoveredSkills = [
+      { uri: 'gh://org/repo/a@main', name: 'a' },
+      { uri: 'gh://org/repo/b@main', name: 'b' },
+    ];
+    el.selectedSkillURIs = new Set(el.discoveredSkills.map((s: any) => s.uri));
+
+    await el.handleDiscoveryConfirm();
+
+    expect(calls).toHaveLength(0);
+    expect(el.discoveryDialogOpen).toBe(false);
+    expect(el.dialogOpen).toBe(false);
+    expect(el.discoveryError).toBeNull();
+    expect(el.discoveryLoading).toBe(false);
+  });
+
   it('reports a partial project-scope batch without losing the successful adds', async () => {
     const calls: Call[] = [];
     const el = await createPanel('project', calls, {
@@ -753,6 +840,7 @@ describe('injected-skills-panel — discovery state lifecycle', () => {
     const el = await createPanel('project', []);
     el.discoveryError = 'stale error';
     el.discoveredSkills = [{ uri: 'gh://org/repo/a@main', name: 'a' }];
+    el.skippedSkillNames = ['stale-folder'];
     el.selectedSkillURIs = new Set(['gh://org/repo/a@main']);
     el.discoveryDialogOpen = true;
 
@@ -760,6 +848,7 @@ describe('injected-skills-panel — discovery state lifecycle', () => {
 
     expect(el.discoveryError).toBeNull();
     expect(el.discoveredSkills).toEqual([]);
+    expect(el.skippedSkillNames).toEqual([]);
     expect(el.selectedSkillURIs.size).toBe(0);
     expect(el.discoveryDialogOpen).toBe(false);
     expect(el.dialogOpen).toBe(true);
@@ -770,11 +859,13 @@ describe('injected-skills-panel — discovery state lifecycle', () => {
     el.dialogOpen = true;
     el.discoveryError = 'no skills found at ...';
     el.discoveredSkills = [{ uri: 'gh://org/repo/a@main', name: 'a' }];
+    el.skippedSkillNames = ['stale-folder'];
 
     el.closeDialog();
 
     expect(el.dialogOpen).toBe(false);
     expect(el.discoveryError).toBeNull();
     expect(el.discoveredSkills).toEqual([]);
+    expect(el.skippedSkillNames).toEqual([]);
   });
 });

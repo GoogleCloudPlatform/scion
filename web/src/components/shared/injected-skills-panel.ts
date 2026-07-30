@@ -202,6 +202,13 @@ export class ScionInjectedSkillsPanel extends LitElement {
   // the user probes a GitHub directory URL for the skills it contains.
   @state() private discoveryDialogOpen = false;
   @state() private discoveredSkills: Array<{ uri: string; name: string }> = [];
+  /**
+   * Child directory names the backend passed over (no SKILL.md, or a name that
+   * could not be turned into a safe skill URI). Surfaced in the selection dialog
+   * so a folder the user expected to see gets an explanation rather than
+   * vanishing silently.
+   */
+  @state() private skippedSkillNames: string[] = [];
   @state() private selectedSkillURIs: Set<string> = new Set();
   @state() private discoveryLoading = false;
   @state() private discoveryError: string | null = null;
@@ -363,6 +370,12 @@ export class ScionInjectedSkillsPanel extends LitElement {
 
       .selection-item {
         padding: 0.25rem 0;
+      }
+
+      .discovery-skipped-note {
+        margin: 0.75rem 0 0;
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
       }
 
       .no-results {
@@ -556,6 +569,9 @@ export class ScionInjectedSkillsPanel extends LitElement {
   private async addEntries(uris: string[]): Promise<void> {
     const existing = new Set(this.rows.map((r) => r.uri));
     const fresh = uris.filter((u) => !existing.has(u));
+    // When every selected skill is already present, close silently — no network
+    // call needed. Issuing an empty batch would be a no-op PUT on hub scope and
+    // zero POSTs elsewhere, so the only effect would be a pointless round-trip.
     if (fresh.length === 0) return;
 
     if (this.scope === 'hub') {
@@ -688,6 +704,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
   private resetDiscovery(): void {
     this.discoveryDialogOpen = false;
     this.discoveredSkills = [];
+    this.skippedSkillNames = [];
     this.selectedSkillURIs = new Set();
     this.discoveryLoading = false;
     this.discoveryError = null;
@@ -829,8 +846,12 @@ export class ScionInjectedSkillsPanel extends LitElement {
       if (!res.ok) {
         throw new Error(await extractApiError(res, `Discovery failed (HTTP ${res.status})`));
       }
-      const data = (await res.json()) as { skills?: Array<{ uri: string; name: string }> };
+      const data = (await res.json()) as {
+        skills?: Array<{ uri: string; name: string }>;
+        skipped?: string[];
+      };
       this.discoveredSkills = data.skills ?? [];
+      this.skippedSkillNames = data.skipped ?? [];
       if (this.discoveredSkills.length === 0) {
         this.discoveryError = 'No skills found at this URL.';
         return;
@@ -919,6 +940,13 @@ export class ScionInjectedSkillsPanel extends LitElement {
             `
           )}
         </div>
+        ${this.skippedSkillNames.length > 0
+          ? html`<p class="discovery-skipped-note">
+              ${this.skippedSkillNames.length}
+              folder${this.skippedSkillNames.length === 1 ? '' : 's'} not recognized as skills
+              ${this.skippedSkillNames.length === 1 ? 'was' : 'were'} skipped.
+            </p>`
+          : nothing}
         ${this.discoveryError
           ? html`<div class="dialog-error">${this.discoveryError}</div>`
           : nothing}
