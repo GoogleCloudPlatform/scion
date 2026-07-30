@@ -112,7 +112,15 @@ func TestResolvedSettingsGuard_InterveningIsWiredToTheResponseTypes(t *testing.T
 				"they conclude \"the interveners ran\" from \"the subject failed\", " +
 				"and this row exists to show the subject does not fail merely " +
 				"because the type list was swapped. Diagnose this before reading " +
-				"anything else in this test.")
+				"anything else in this test.\n\n" +
+				"START BY RULING OUT A FAILURE THAT HAS NOTHING TO DO WITH THE SWAP. " +
+				"Not every assertion in the subject is driven by " +
+				"resolvedResponseTypes: the hub/hubclient mirror assertions name their " +
+				"types literally, so a mirror divergence surfaces HERE, as this row " +
+				"going red, while the swap machinery is working perfectly. Measured: " +
+				"adding a field to hubclient.ResolvedProjectSettings alone reddens this " +
+				"row. Run the subject test on its own, unswapped, before touching " +
+				"anything in this file.")
 		}
 	})
 }

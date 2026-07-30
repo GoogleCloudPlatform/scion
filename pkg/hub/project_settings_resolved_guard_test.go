@@ -836,9 +836,16 @@ func TestResolvedSettings_RegistryNoDrift(t *testing.T) {
 	for key := range resolvedSettingDescriptors {
 		assert.Containsf(t, registered, key,
 			"resolvedSettingDescriptors has an entry for %q, which is not in "+
-				"projectSettingKeys. Either it was removed from the registry (delete the "+
-				"descriptor too) or it was never a project setting (the endpoint must not "+
-				"report it).",
+				"projectSettingKeys. RULE OUT A MISSPELLED KEY FIRST: the setting may "+
+				"still be registered under its correct spelling, in which case the fix is "+
+				"to correct this key and nothing needs deleting or adding. That case also "+
+				"reddens the OTHER direction above, whose advice — add a descriptor for "+
+				"the seemingly unwired key — would leave two descriptors for one setting "+
+				"and then trip the count assertion below. Failing that: the key was "+
+				"removed from the registry and this descriptor should go with it, or it "+
+				"was never a project setting and the endpoint must not report it. Those "+
+				"are the causes seen so far and the list is not closed; work out which "+
+				"one you have before editing, because the fixes are mutually exclusive.",
 			key)
 	}
 
@@ -1031,7 +1038,16 @@ func TestResolvedSettingsResponseShape_NoEffectiveValue(t *testing.T) {
 		"still failing. That is not a bug in the hatch: the field also has to be added to\n" +
 		"the client mirror in pkg/hubclient/types.go (ResolvedProjectSettings /\n" +
 		"ResolvedProjectSetting). The two types are hand-mirrored across a package\n" +
-		"boundary, and this assertion is the only thing that notices when they diverge."
+		"boundary. This is NOT the only assertion that notices when they drift, and\n" +
+		"the list below may not be closed: the declared-tag equality a few lines down\n" +
+		"fires as well, and so does the clean-substitute control row in\n" +
+		"project_settings_resolved_wireup_test.go — which reports its OWN machinery as\n" +
+		"broken rather than the mirror, so do not start debugging there.\n" +
+		"What this assertion contributes that the tag equality cannot is the hardcoded\n" +
+		"expected set: it reads the mirror's wire names and compares them to a fixed\n" +
+		"list, so it fires even when both sides were changed together and agree with\n" +
+		"each other. The tag equality compares the two sides only to one another and\n" +
+		"is silent in that case. Both directions measured at the time of writing."
 
 	assert.Equal(t, expectedResolvedWrapperFields,
 		jsonWireNames(t, hubclient.ResolvedProjectSettings{}),
