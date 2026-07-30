@@ -773,10 +773,10 @@ func TestRunProjectSkillsFromDirectory_PartialFailure(t *testing.T) {
 func TestRunProjectSkillsFromDirectory_DiscoverError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.URL.Path == "/api/v1/skills/discover-directory":
+		case "/api/v1/skills/discover-directory":
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"code":    "internal_error",

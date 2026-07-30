@@ -426,26 +426,26 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 		return fmt.Errorf("skill discovery failed: %w", err)
 	}
 	if len(result.Skills) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No skills found at the given URL.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No skills found at the given URL.")
 		return nil
 	}
 
 	// Print discovered skills.
-	fmt.Fprintf(cmd.OutOrStdout(), "Discovered %d skill(s):\n", len(result.Skills))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Discovered %d skill(s):\n", len(result.Skills))
 	for _, s := range result.Skills {
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s  (%s)\n", s.URI, s.Name)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  %s  (%s)\n", s.URI, s.Name)
 	}
 	if len(result.Skipped) > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "  (%d folder(s) skipped: not recognized as skills)\n", len(result.Skipped))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  (%d folder(s) skipped: not recognized as skills)\n", len(result.Skipped))
 	}
 
 	// TTY: prompt unless --yes/--non-interactive.
 	if isInteractiveTerminal() && !autoConfirm {
-		fmt.Fprintf(cmd.OutOrStdout(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
 		var answer string
-		fmt.Fscan(cmd.InOrStdin(), &answer)
+		_, _ = fmt.Fscan(cmd.InOrStdin(), &answer)
 		if answer != "" && strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
-			fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
 			return nil
 		}
 	}
