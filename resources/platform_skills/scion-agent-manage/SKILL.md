@@ -55,7 +55,6 @@ Example — "have a claude xl developer write a file":
 
 ```bash
 scion start file-writer -t developer --harness claude --model xl \
-  --non-interactive \
   "Read your brief at /scion-volumes/scratchpad/briefs/file-writer.md and follow it."
 ```
 
