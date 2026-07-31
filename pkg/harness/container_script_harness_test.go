@@ -286,6 +286,89 @@ func TestContainerScriptHarness_ApplyAuthSettings_WritesCandidates(t *testing.T)
 	}
 }
 
+func TestContainerScriptHarness_ApplyAuthSettings_ExplicitTypeFromResolvedAuth(t *testing.T) {
+	// Regression test: when SCION_HARNESS_SELECTED_AUTH is present in the
+	// resolved auth's env vars, explicit_type in auth-candidates.json must
+	// come from it — not from c.entry.AuthSelectedType (which may be empty).
+	// This ensures the container-side provisioner uses the Go side's resolved
+	// auth method instead of falling back to auto-detection, which can pick a
+	// wrong higher-priority method (e.g., api-key over vertex-ai).
+	// entry.AuthSelectedType is intentionally empty here (zero value from
+	// newTestContainerScriptHarness) to isolate the resolved-auth signal.
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+
+	// Simulate the scenario: resolved auth knows it's vertex-ai
+	// (SCION_HARNESS_SELECTED_AUTH), but c.entry.AuthSelectedType is empty
+	// (harness config metadata doesn't have it). Both ANTHROPIC_API_KEY and
+	// GOOGLE_CLOUD_PROJECT are present as candidates.
+	resolved := &api.ResolvedAuth{
+		Method: "container-script",
+		EnvVars: map[string]string{
+			"SCION_HARNESS_SELECTED_AUTH": "vertex-ai",
+			"ANTHROPIC_API_KEY":           "sk-test",
+			"GOOGLE_CLOUD_PROJECT":        "my-project",
+			"GOOGLE_CLOUD_REGION":         "us-central1",
+		},
+	}
+	if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if payload["explicit_type"] != "vertex-ai" {
+		t.Errorf("explicit_type=%v, want vertex-ai", payload["explicit_type"])
+	}
+}
+
+func TestContainerScriptHarness_ApplyAuthSettings_ExplicitTypeFallsBackToEntry(t *testing.T) {
+	// When SCION_HARNESS_SELECTED_AUTH is absent from resolved env vars,
+	// explicit_type should fall back to c.entry.AuthSelectedType.
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: testharness\nimage: scion-test:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+	entry := config.HarnessConfigEntry{
+		Harness:          "testharness",
+		Image:            "scion-test:latest",
+		AuthSelectedType: "api-key",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	agentHome := t.TempDir()
+	resolved := &api.ResolvedAuth{
+		Method:  "container-script",
+		EnvVars: map[string]string{"ANTHROPIC_API_KEY": "sk-test"},
+	}
+	if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if payload["explicit_type"] != "api-key" {
+		t.Errorf("explicit_type=%v, want api-key", payload["explicit_type"])
+	}
+}
+
 func TestContainerScriptHarness_ApplyAuthSettings_StagesFileSecrets(t *testing.T) {
 	// Harness entry with a required_files declaration matching Codex auth-file.
 	dir := t.TempDir()

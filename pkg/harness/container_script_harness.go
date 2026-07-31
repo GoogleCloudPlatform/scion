@@ -509,9 +509,20 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	// prevents the container-side script from writing the file).
 	resolved.Files = remainingFiles
 
+	// Prefer the resolved auth's selected type (staged as
+	// SCION_HARNESS_SELECTED_AUTH by ResolveAuth) over harness config
+	// metadata (c.entry.AuthSelectedType). The Go side resolves the
+	// auth method correctly on both create and resume; the config
+	// metadata may be empty or stale, causing the container-side
+	// provisioner to auto-detect and potentially pick a wrong method.
+	explicitType := c.entry.AuthSelectedType
+	if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" {
+		explicitType = st
+	}
+
 	payload := map[string]interface{}{
 		"schema_version":    1,
-		"explicit_type":     c.entry.AuthSelectedType,
+		"explicit_type":     explicitType,
 		"resolved_method":   resolved.Method,
 		"env_vars":          sortedKeys(resolved.EnvVars),
 		"env_secret_files":  envSecretFiles,

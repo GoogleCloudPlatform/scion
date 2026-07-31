@@ -203,6 +203,62 @@ class TestAuthAllOf(unittest.TestCase):
             ctx.select_auth(spec)
 
 
+class TestAuthExplicitTypeOverridesAutoDetect(unittest.TestCase):
+    """Regression: explicit_type must bypass auto-detection priority ordering.
+
+    When ANTHROPIC_API_KEY and GOOGLE_CLOUD_PROJECT are both present in
+    candidates but explicit_type is "vertex-ai", select_auth must pick
+    vertex-ai — not api-key (which would win under auto-detection because
+    api-key has higher priority in the spec method list).
+    """
+
+    def _claude_spec(self) -> sh.AuthSpec:
+        """Mirrors the AUTH spec from provision.py (Claude harness)."""
+        return sh.AuthSpec("claude", [
+            sh.env_method("api-key", any_of=["ANTHROPIC_API_KEY"]),
+            sh.env_method("oauth-token", any_of=["CLAUDE_CODE_OAUTH_TOKEN"]),
+            sh.env_method("vertex-ai",
+                          all_of=["GOOGLE_CLOUD_PROJECT"],
+                          any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"]),
+        ])
+
+    def test_explicit_vertex_ai_wins_over_api_key(self):
+        ctx = _make_ctx(candidates={
+            "explicit_type": "vertex-ai",
+            "env_vars": [
+                "ANTHROPIC_API_KEY",
+                "GOOGLE_CLOUD_PROJECT",
+                "GOOGLE_CLOUD_REGION",
+                "SCION_HARNESS_SELECTED_AUTH",
+            ],
+            "env_secret_files": {
+                "ANTHROPIC_API_KEY": "/dev/null",
+                "GOOGLE_CLOUD_PROJECT": "/dev/null",
+                "GOOGLE_CLOUD_REGION": "/dev/null",
+                "SCION_HARNESS_SELECTED_AUTH": "/dev/null",
+            },
+        })
+        result = ctx.select_auth(self._claude_spec())
+        self.assertEqual(result.method, "vertex-ai")
+
+    def test_without_explicit_type_api_key_wins(self):
+        """Verify auto-detection does pick api-key when explicit_type is empty."""
+        ctx = _make_ctx(candidates={
+            "env_vars": [
+                "ANTHROPIC_API_KEY",
+                "GOOGLE_CLOUD_PROJECT",
+                "GOOGLE_CLOUD_REGION",
+            ],
+            "env_secret_files": {
+                "ANTHROPIC_API_KEY": "/dev/null",
+                "GOOGLE_CLOUD_PROJECT": "/dev/null",
+                "GOOGLE_CLOUD_REGION": "/dev/null",
+            },
+        })
+        result = ctx.select_auth(self._claude_spec())
+        self.assertEqual(result.method, "api-key")
+
+
 class TestAuthFileMethod(unittest.TestCase):
     """File-based auth method detection."""
 
