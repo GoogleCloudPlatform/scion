@@ -315,6 +315,7 @@ export class ScionPageProjects extends LitElement {
           ` : nothing}
           <scion-view-toggle
             .view=${this.viewMode}
+            .showGraph=${false}
             storageKey="scion-view-projects"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
