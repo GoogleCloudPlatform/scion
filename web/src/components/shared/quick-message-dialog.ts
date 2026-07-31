@@ -137,7 +137,7 @@ export class ScionQuickMessageDialog extends LitElement {
           <sl-textarea
             placeholder="Type your message…"
             rows="4"
-            value=${this.messageText}
+            .value=${this.messageText}
             @sl-input=${(e: Event) => {
               this.messageText = (e.target as HTMLInputElement).value;
             }}
