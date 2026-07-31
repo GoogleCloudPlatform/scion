@@ -166,7 +166,7 @@ func (r *GitHubSkillResolver) tokenForRef(ref *GitHubSkillRef) (string, error) {
 	// Priority 2: Repo-specific convention key (GH_OWNER__REPO).
 	repoKey := deriveGitHubTokenKey(ref.Owner, ref.Repo)
 	if val := r.provisionCredentials[repoKey]; val != "" {
-		fmt.Fprintf(os.Stderr, "github: using credential %s for %s/%s\n", repoKey, ref.Owner, ref.Repo)
+		util.Debugf("github: using credential %s for %s/%s", repoKey, ref.Owner, ref.Repo)
 		return val, nil
 	}
 
