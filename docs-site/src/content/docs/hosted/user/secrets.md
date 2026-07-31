@@ -176,7 +176,7 @@ When resolving a `gh://owner/repo/...` URI, Scion checks credentials in this ord
 
 The first match wins. If no convention secret exists, behavior is identical to the default single-token resolution.
 
-### Injection Modes
+### Injection Mode Behavior
 
 Convention-keyed GitHub secrets support the standard injection modes:
 
