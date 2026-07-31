@@ -1270,7 +1270,7 @@ func TestStageAttachments_HappyPath(t *testing.T) {
 	testDir := filepath.Join("/workspace", ".test-attachments-happy")
 	err := os.MkdirAll(testDir, 0755)
 	require.NoError(t, err)
-	defer os.RemoveAll(testDir)
+	defer func() { _ = os.RemoveAll(testDir) }()
 
 	testFile1 := filepath.Join(testDir, "test1.txt")
 	testFile2 := filepath.Join(testDir, "test2.txt")
@@ -1304,7 +1304,7 @@ func TestStageAttachments_HappyPath(t *testing.T) {
 	assert.Equal(t, "test2.txt", filepath.Base(staged[1]))
 
 	// Clean up staged files
-	os.RemoveAll(filepath.Dir(staged[0]))
+	_ = os.RemoveAll(filepath.Dir(staged[0]))
 }
 
 func TestStageAttachments_MissingScratchpad(t *testing.T) {
@@ -1333,7 +1333,7 @@ func TestStageAttachments_DuplicateBasenames(t *testing.T) {
 	require.NoError(t, err)
 	err = os.MkdirAll(dir2, 0755)
 	require.NoError(t, err)
-	defer os.RemoveAll(testDir)
+	defer func() { _ = os.RemoveAll(testDir) }()
 
 	err = os.WriteFile(filepath.Join(dir1, "types.go"), []byte("package v1"), 0644)
 	require.NoError(t, err)
@@ -1361,7 +1361,7 @@ func TestStageAttachments_DuplicateBasenames(t *testing.T) {
 	assert.Equal(t, "package v2", string(c2))
 
 	// Cleanup
-	os.RemoveAll(filepath.Dir(staged[0]))
+	_ = os.RemoveAll(filepath.Dir(staged[0]))
 }
 
 func TestStageAttachments_NonExistentFile(t *testing.T) {
@@ -1387,7 +1387,7 @@ func TestStageAttachments_NonRegularFile(t *testing.T) {
 	testDir := filepath.Join("/workspace", ".test-nonreg-attach")
 	err := os.MkdirAll(testDir, 0755)
 	require.NoError(t, err)
-	defer os.RemoveAll(testDir)
+	defer func() { _ = os.RemoveAll(testDir) }()
 
 	_, err = stageAttachments([]string{testDir})
 	require.Error(t, err)
@@ -1404,7 +1404,7 @@ func TestStageAttachments_DefaultAgentSlug(t *testing.T) {
 	testDir := filepath.Join("/workspace", ".test-slug-default")
 	err := os.MkdirAll(testDir, 0755)
 	require.NoError(t, err)
-	defer os.RemoveAll(testDir)
+	defer func() { _ = os.RemoveAll(testDir) }()
 
 	testFile := filepath.Join(testDir, "file.txt")
 	err = os.WriteFile(testFile, []byte("test"), 0644)
@@ -1418,7 +1418,7 @@ func TestStageAttachments_DefaultAgentSlug(t *testing.T) {
 	assert.Contains(t, staged[0], "/_user/")
 
 	// Cleanup
-	os.RemoveAll(filepath.Dir(staged[0]))
+	_ = os.RemoveAll(filepath.Dir(staged[0]))
 }
 
 func TestStageAttachments_FilteredPathsSkipped(t *testing.T) {
@@ -1432,7 +1432,7 @@ func TestStageAttachments_FilteredPathsSkipped(t *testing.T) {
 	testDir := filepath.Join("/workspace", ".test-filter-attach")
 	err := os.MkdirAll(testDir, 0755)
 	require.NoError(t, err)
-	defer os.RemoveAll(testDir)
+	defer func() { _ = os.RemoveAll(testDir) }()
 
 	validFile := filepath.Join(testDir, "valid.go")
 	err = os.WriteFile(validFile, []byte("package valid"), 0644)
@@ -1446,5 +1446,5 @@ func TestStageAttachments_FilteredPathsSkipped(t *testing.T) {
 	assert.Equal(t, "valid.go", filepath.Base(staged[0]))
 
 	// Cleanup
-	os.RemoveAll(filepath.Dir(staged[0]))
+	_ = os.RemoveAll(filepath.Dir(staged[0]))
 }
