@@ -109,6 +109,15 @@ func init() {
 			KoanfPaths: []string{"server.notification_channels"},
 			New:        func() any { return &NotificationsSettings{} },
 		},
+		{
+			// project_defaults is durable via DB but has no settings.yaml
+			// representation. It controls hub-level defaults applied at
+			// project creation time (e.g. default scratchpad shared dir).
+			// Absent DB row = compiled defaults (default_scratchpad=true).
+			Name:       "project_defaults",
+			KoanfPaths: nil,
+			New:        func() any { return &ProjectDefaultsSettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -290,6 +299,15 @@ func compileSchemas() {
 			"additionalProperties": false,
 		},
 		"notifications": buildNotificationsSchema(),
+		// project_defaults schema is hand-written — like maintenance, it has
+		// no $defs in settings-v1.schema.json because it is runtime/DB state.
+		"project_defaults": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"default_scratchpad": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
 	}
 
 	rawSchemas = sectionSchemaMap

@@ -80,3 +80,11 @@ type GitHubAppSettings struct {
 type NotificationsSettings struct {
 	NotificationChannels []config.V1NotificationChannelConfig `json:"notification_channels,omitempty"`
 }
+
+// ProjectDefaultsSettings holds Layer-1 project creation defaults.
+type ProjectDefaultsSettings struct {
+	// DefaultScratchpad controls whether new projects automatically get a
+	// "scratchpad" shared directory. When nil (section absent from DB),
+	// the compiled default is true (ON).
+	DefaultScratchpad *bool `json:"default_scratchpad,omitempty"`
+}
