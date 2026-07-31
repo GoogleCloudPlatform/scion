@@ -333,6 +333,15 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		project.OwnerID = user.ID()
 	}
 
+	// Apply default shared dirs from hub settings.
+	// Only stamp when the project has no shared dirs. Since
+	// CreateProjectRequest has no SharedDirs field, this is always
+	// true for direct-create — but the guard future-proofs against
+	// API evolution.
+	if len(project.SharedDirs) == 0 {
+		project.SharedDirs = s.defaultProjectSharedDirs()
+	}
+
 	if err := s.store.CreateProject(ctx, project); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1035,6 +1044,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			project.CreatedBy = user.ID()
 			project.OwnerID = user.ID()
+		}
+
+		// Apply default shared dirs from hub settings (new projects only).
+		if len(project.SharedDirs) == 0 {
+			project.SharedDirs = s.defaultProjectSharedDirs()
 		}
 
 		if err := s.store.CreateProject(ctx, project); err != nil {

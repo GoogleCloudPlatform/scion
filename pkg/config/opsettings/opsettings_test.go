@@ -30,7 +30,8 @@ import (
 
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "telemetry",
-		"agent_defaults", "endpoints", "github_app", "notifications"}
+		"agent_defaults", "endpoints", "github_app", "notifications",
+		"project_defaults"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -63,10 +64,15 @@ func TestSectionMarshalUnmarshal(t *testing.T) {
 }
 
 func TestSectionHasKoanfPaths(t *testing.T) {
+	// Sections that are DB-only (no settings.yaml representation).
+	dbOnlySections := map[string]bool{
+		"maintenance":      true,
+		"project_defaults": true,
+	}
 	for _, sec := range Registry {
-		if sec.Name == "maintenance" {
+		if dbOnlySections[sec.Name] {
 			if len(sec.KoanfPaths) != 0 {
-				t.Errorf("maintenance section should have empty KoanfPaths, got %v", sec.KoanfPaths)
+				t.Errorf("%s section should have empty KoanfPaths, got %v", sec.Name, sec.KoanfPaths)
 			}
 			continue
 		}
@@ -182,6 +188,9 @@ func TestValidateValidDoc(t *testing.T) {
 		{"endpoints", `{"public_url":"https://hub.example.com","image_registry":"gcr.io/my-project"}`},
 		{"github_app", `{"app_id":12345,"webhooks_enabled":true}`},
 		{"notifications", `{"notification_channels":[{"type":"slack"}]}`},
+		{"project_defaults", `{"default_scratchpad":true}`},
+		{"project_defaults", `{"default_scratchpad":false}`},
+		{"project_defaults", `{}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -202,6 +211,8 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"maintenance", `{"admin_mode":"yes"}`, "wrong type for boolean"},
 		{"agent_defaults", `{"default_max_turns":"not-a-number"}`, "wrong type for int"},
 		{"github_app", `{"app_id":"not-a-number"}`, "wrong type for int64"},
+		{"project_defaults", `{"default_scratchpad":"yes"}`, "wrong type for boolean"},
+		{"project_defaults", `{"unknown_field":true}`, "additional property"},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -834,6 +845,17 @@ func TestSectionNames(t *testing.T) {
 	names := SectionNames()
 	if len(names) != len(Registry) {
 		t.Errorf("expected %d names, got %d", len(Registry), len(names))
+	}
+	// Verify project_defaults appears in the list.
+	found := false
+	for _, n := range names {
+		if n == "project_defaults" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("project_defaults not found in SectionNames()")
 	}
 }
 

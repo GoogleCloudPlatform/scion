@@ -804,6 +804,29 @@ func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	s.maintenance.Set(snap.AdminMode, snap.MaintenanceMessage)
 }
 
+// ProjectDefaultScratchpad returns whether the default scratchpad shared
+// dir is enabled for new projects. Returns true (compiled default) when
+// the project_defaults section is absent from the DB.
+func (o *OperationalSettings) ProjectDefaultScratchpad() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["project_defaults"]
+	if !ok {
+		return true // compiled default: ON
+	}
+
+	var pd opsettings.ProjectDefaultsSettings
+	if err := json.Unmarshal(state.Value, &pd); err != nil {
+		return true // parse error → fall back to compiled default
+	}
+
+	if pd.DefaultScratchpad != nil {
+		return *pd.DefaultScratchpad
+	}
+	return true // field omitted in doc → compiled default
+}
+
 // applySnapshotLogLevel applies the log-level portion of the snapshot.
 // This is separated from applySnapshot because log level is a Layer-0 setting
 // (per design §3.1) and is only changed in file mode via reloadSettings.
