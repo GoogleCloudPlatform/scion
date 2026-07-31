@@ -113,6 +113,13 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 	}
 
 	// File/SQLite mode: no persistent storage for this section.
-	// Return the validated payload as acknowledgement.
-	writeJSON(w, http.StatusOK, body)
+	// Resolve against compiled default for a consistent response shape,
+	// regardless of deployment mode.
+	enabled := true // compiled default
+	if body.DefaultScratchpad != nil {
+		enabled = *body.DefaultScratchpad
+	}
+	writeJSON(w, http.StatusOK, opsettings.ProjectDefaultsSettings{
+		DefaultScratchpad: &enabled,
+	})
 }
