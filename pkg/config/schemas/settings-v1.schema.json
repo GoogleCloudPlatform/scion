@@ -226,9 +226,9 @@
     },
     "default_thinking_level": {
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
       "maximum": 100,
-      "description": "Default thinking/reasoning level for new agents (0-100).",
+      "description": "Default thinking/reasoning level for new agents (1-100). 0 is reserved as the clear sentinel.",
       "x-scope": "any",
       "x-since": "1"
     }

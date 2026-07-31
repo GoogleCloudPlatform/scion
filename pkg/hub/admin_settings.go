@@ -459,7 +459,11 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		}
 	}
 	if req.DefaultThinkingLevel != nil {
-		raw["default_thinking_level"] = *req.DefaultThinkingLevel
+		if *req.DefaultThinkingLevel > 0 {
+			raw["default_thinking_level"] = *req.DefaultThinkingLevel
+		} else {
+			delete(raw, "default_thinking_level")
+		}
 	}
 	if req.AutoInjectGcloudADC != nil {
 		if *req.AutoInjectGcloudADC {

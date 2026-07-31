@@ -157,7 +157,7 @@ type hubDefaultSource int
 
 const (
 	// hubSourceNone: no hub-level counterpart exists for this setting.
-	// opsettings.AgentDefaultsSettings has exactly six fields, enumerated in
+	// opsettings.AgentDefaultsSettings has exactly eight fields, enumerated in
 	// full, so this is a measured structural fact rather than an unsearched
 	// one — which is why these keys may report ABSENT rather than UNKNOWN.
 	hubSourceNone hubDefaultSource = iota
@@ -240,7 +240,7 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 	projectSettingDefaultThinkingLevel: {
 		source:            hubSourceAgentDefaults,
 		path:              []string{"default_thinking_level"},
-		absentWhenMissing: false, // schema minimum:0 includes zero; omitempty drops both nil and 0
+		absentWhenMissing: true, // *int with omitempty; 0 is the clear sentinel and deletes the key, so absence is unambiguous
 	},
 	projectSettingTelemetryEnabled: {
 		source: hubSourceTelemetryDefault,
@@ -411,7 +411,7 @@ func (s *Server) hubDefaultFor(
 ) (ResolvedHubDefault, any) {
 	switch desc.source {
 	case hubSourceNone:
-		// Measured structural absence: AgentDefaultsSettings has six fields and
+		// Measured structural absence: AgentDefaultsSettings has eight fields and
 		// none of them corresponds to this setting.
 		return ResolvedHubDefaultAbsent, nil
 

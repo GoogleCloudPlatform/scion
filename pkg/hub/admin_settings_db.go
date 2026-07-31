@@ -973,7 +973,11 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			d.DefaultModel = *req.DefaultModel
 		}
 		if req.DefaultThinkingLevel != nil {
-			d.DefaultThinkingLevel = req.DefaultThinkingLevel
+			if *req.DefaultThinkingLevel > 0 {
+				d.DefaultThinkingLevel = req.DefaultThinkingLevel
+			} else {
+				d.DefaultThinkingLevel = nil
+			}
 		}
 		doc = d
 

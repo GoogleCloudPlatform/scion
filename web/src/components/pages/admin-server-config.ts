@@ -820,10 +820,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     /* ── Settings-DB: env-override banner ── */
 
     .env-override-banner {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-      padding: 0.75rem 1rem;
       margin-bottom: 1.5rem;
       border-radius: var(--scion-radius, 0.5rem);
       background: var(--sl-color-warning-50, #fffbeb);
@@ -832,20 +828,41 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.875rem;
     }
 
-    .env-override-banner-title {
+    .env-override-banner summary {
       display: flex;
       align-items: center;
       gap: 0.5rem;
+      padding: 0.75rem 1rem;
       font-weight: 600;
+      cursor: pointer;
+      list-style: none;
     }
 
-    .env-override-banner-title sl-icon {
+    .env-override-banner summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .env-override-banner summary .disclosure-arrow {
+      font-size: 0.625rem;
+      transition: transform 150ms ease;
+    }
+
+    .env-override-banner[open] summary .disclosure-arrow {
+      transform: rotate(90deg);
+    }
+
+    .env-override-banner summary sl-icon {
       font-size: 1rem;
     }
 
     .env-override-banner-keys {
+      padding: 0 1rem 0.75rem;
       font-size: 0.8125rem;
-      line-height: 1.6;
+      line-height: 1.8;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.25rem;
     }
 
     .env-override-banner-keys code {
@@ -854,7 +871,6 @@ export class ScionPageAdminServerConfig extends LitElement {
       background: var(--sl-color-warning-100, #fef3c7);
       padding: 0.125rem 0.375rem;
       border-radius: 0.25rem;
-      margin-right: 0.25rem;
     }
 
     /* ── Layer-aware: read-only field rendering ── */
@@ -1541,7 +1557,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_model = resolvedModel || '';
     }
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
     }
 
     const server: Record<string, unknown> = {};
@@ -1681,7 +1697,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_model = resolvedModel || undefined;
     }
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
     }
 
     // Server
@@ -1967,15 +1983,16 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderEnvOverrideBanner(): typeof nothing | ReturnType<typeof html> {
     if (this.envOverrides.length === 0) return nothing;
     return html`
-      <div class="env-override-banner">
-        <div class="env-override-banner-title">
+      <details class="env-override-banner">
+        <summary>
+          <span class="disclosure-arrow">&#9654;</span>
           <sl-icon name="exclamation-triangle"></sl-icon>
           Some settings are overridden by environment variables on this node
-        </div>
+        </summary>
         <div class="env-override-banner-keys">
           ${this.envOverrides.map((key) => html`<code>${KOANF_KEY_LABELS[key] || key}</code>`)}
         </div>
-      </div>
+      </details>
     `;
   }
 
@@ -2720,7 +2737,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                     html`${this.renderEnvBadge('default_thinking_level')}
                     <div style="display:flex;align-items:center;gap:0.75rem">
                       <sl-range
-                        min="0" max="100" step="1"
+                        min="1" max="100" step="1"
                         .value=${this.defaultThinkingLevel ?? 50}
                         ?disabled=${this.defaultThinkingLevel === null}
                         style="flex:1"
@@ -2732,7 +2749,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                       >Set</sl-checkbox>
                     </div>
                     <span class="hint" style="display:flex;justify-content:space-between;margin-top:0.25rem">
-                      <span>0 = minimal reasoning</span>
+                      <span>1 = minimal reasoning</span>
                       <span>${this.defaultThinkingLevel === null ? 'Using harness default' : ''}</span>
                       <span>100 = maximum reasoning</span>
                     </span>`
