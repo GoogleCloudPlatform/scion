@@ -447,6 +447,9 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 			hubRefs = append(setting.System, setting.UserDefined...)
 		}
 	}
+	for i := range hubRefs {
+		hubRefs[i].Scope = "hub"
+	}
 
 	// Fetch user-scope injected skills.
 	var userRefs []api.SkillReference
@@ -461,6 +464,9 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 				userRefs = append(userRefs, si.ToSkillReference())
 			}
 		}
+	}
+	for i := range userRefs {
+		userRefs[i].Scope = "user"
 	}
 
 	// Fetch project-scope injected skills.
@@ -477,9 +483,15 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 			}
 		}
 	}
+	for i := range projectRefs {
+		projectRefs[i].Scope = "project"
+	}
 
 	// Template refs are already in InlineConfig.Skills (highest precedence).
 	templateRefs := agent.AppliedConfig.InlineConfig.Skills
+	for i := range templateRefs {
+		templateRefs[i].Scope = "template"
+	}
 
 	// Merge: hub → user → project → template (lowest to highest precedence).
 	merged := mergeSkillRefs(hubRefs, userRefs, projectRefs, templateRefs)

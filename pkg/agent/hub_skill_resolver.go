@@ -77,10 +77,12 @@ func (r *HubSkillResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 			As:                 ref.As,
 			Version:            rs.ResolvedVersion,
 			Hash:               rs.ContentHash,
+			Scope:              ref.Scope,
 			Files:              files,
 			Deprecated:         rs.Deprecated,
 			DeprecationMessage: rs.DeprecationMessage,
 			ReplacementURI:     rs.ReplacementURI,
+			Optional:           ref.Optional,
 		})
 	}
 

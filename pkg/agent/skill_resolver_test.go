@@ -270,27 +270,74 @@ func TestInstallResolvedSkills_PathTraversal(t *testing.T) {
 }
 
 func TestInstallResolvedSkills_DuplicateDestination(t *testing.T) {
+	// After the collision resolution change, duplicate destinations are resolved
+	// via scope-based precedence instead of producing a hard error.
+	content := []byte("# Winner Skill")
+	contentHash := transfer.HashBytes(content)
+	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+		{Path: "SKILL.md", Hash: contentHash},
+	})
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = origTransport }()
+
 	skills := []ResolvedSkill{
 		{
-			Name: "scion",
-			URI:  "skill://scion/core/scion@^1.0",
+			Name:  "scion",
+			URI:   "skill://scion/core/scion@^1.0",
+			Scope: "template",
+			Hash:  bundleHash,
+			Files: []ResolvedFile{
+				{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: contentHash},
+			},
 		},
 		{
-			Name: "custom",
-			URI:  "skill://project/custom@latest",
-			As:   "scion", // same dest name
+			Name:  "custom",
+			URI:   "skill://project/custom@latest",
+			As:    "scion", // same dest name
+			Scope: "project",
+			Hash:  bundleHash,
+			Files: []ResolvedFile{
+				{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: contentHash},
+			},
 		},
 	}
 
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
-	if err == nil {
-		t.Fatal("expected error for duplicate destination")
+	record, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	if err != nil {
+		t.Fatalf("expected success after collision resolution, got error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "conflict") {
-		t.Errorf("error should mention conflict, got: %v", err)
+
+	// Project scope wins over template scope.
+	if len(record.Skills) != 1 {
+		t.Fatalf("expected 1 installed skill, got %d", len(record.Skills))
+	}
+	if record.Skills[0].URI != "skill://project/custom@latest" {
+		t.Errorf("expected project-scope skill to win, got URI %q", record.Skills[0].URI)
+	}
+
+	// Collision should be recorded.
+	if len(record.Collisions) != 1 {
+		t.Fatalf("expected 1 collision entry, got %d", len(record.Collisions))
+	}
+	c := record.Collisions[0]
+	if c.DestName != "scion" {
+		t.Errorf("collision destName = %q, want %q", c.DestName, "scion")
+	}
+	if c.WinnerURI != "skill://project/custom@latest" {
+		t.Errorf("collision winner = %q, want project skill", c.WinnerURI)
+	}
+	if c.DroppedURI != "skill://scion/core/scion@^1.0" {
+		t.Errorf("collision dropped = %q, want template skill", c.DroppedURI)
 	}
 }
 
@@ -897,5 +944,208 @@ func TestGitHubTokenFromContext(t *testing.T) {
 	ctx := ContextWithGitHubToken(context.Background(), "ghp_example")
 	if got := GitHubTokenFromContext(ctx); got != "ghp_example" {
 		t.Errorf("GitHubTokenFromContext = %q, want %q", got, "ghp_example")
+	}
+}
+
+// --- deduplicateByDestName tests ---
+
+func TestDeduplicateByDestName_ProjectWinsOverTemplate(t *testing.T) {
+	skills := []ResolvedSkill{
+		{Name: "my-skill", URI: "skill://scion/core/my-skill@1.0", Scope: "template"},
+		{Name: "my-skill", URI: "gh://org/repo/skills/my-skill", Scope: "project"},
+	}
+
+	deduped, collisions := deduplicateByDestName(skills)
+
+	if len(deduped) != 1 {
+		t.Fatalf("expected 1 skill after dedup, got %d", len(deduped))
+	}
+	if deduped[0].URI != "gh://org/repo/skills/my-skill" {
+		t.Errorf("expected project-scope skill to win, got URI %q", deduped[0].URI)
+	}
+
+	if len(collisions) != 1 {
+		t.Fatalf("expected 1 collision, got %d", len(collisions))
+	}
+	c := collisions[0]
+	if c.WinnerScope != "project" {
+		t.Errorf("winner scope = %q, want %q", c.WinnerScope, "project")
+	}
+	if c.DroppedScope != "template" {
+		t.Errorf("dropped scope = %q, want %q", c.DroppedScope, "template")
+	}
+}
+
+func TestDeduplicateByDestName_SameScopeLaterWins(t *testing.T) {
+	skills := []ResolvedSkill{
+		{Name: "my-skill", URI: "skill://scion/core/my-skill@1.0", Scope: "template"},
+		{Name: "my-skill", URI: "skill://scion/core/my-skill@2.0", Scope: "template"},
+	}
+
+	deduped, collisions := deduplicateByDestName(skills)
+
+	if len(deduped) != 1 {
+		t.Fatalf("expected 1 skill after dedup, got %d", len(deduped))
+	}
+	// Later entry (index 1) should win on equal scope.
+	if deduped[0].URI != "skill://scion/core/my-skill@2.0" {
+		t.Errorf("expected later entry to win on same scope, got URI %q", deduped[0].URI)
+	}
+
+	if len(collisions) != 1 {
+		t.Fatalf("expected 1 collision, got %d", len(collisions))
+	}
+	if collisions[0].DroppedURI != "skill://scion/core/my-skill@1.0" {
+		t.Errorf("expected earlier entry to be dropped, got %q", collisions[0].DroppedURI)
+	}
+}
+
+func TestDeduplicateByDestName_NoCollision(t *testing.T) {
+	skills := []ResolvedSkill{
+		{Name: "skill-a", URI: "skill://scion/core/skill-a@1.0", Scope: "template"},
+		{Name: "skill-b", URI: "skill://scion/core/skill-b@1.0", Scope: "project"},
+		{Name: "skill-c", URI: "gh://org/repo/skills/skill-c", Scope: "hub"},
+	}
+
+	deduped, collisions := deduplicateByDestName(skills)
+
+	if len(deduped) != 3 {
+		t.Fatalf("expected 3 skills (no collision), got %d", len(deduped))
+	}
+	if len(collisions) != 0 {
+		t.Errorf("expected 0 collisions, got %d", len(collisions))
+	}
+
+	// Verify order is preserved.
+	if deduped[0].Name != "skill-a" || deduped[1].Name != "skill-b" || deduped[2].Name != "skill-c" {
+		t.Errorf("order not preserved: got %q, %q, %q", deduped[0].Name, deduped[1].Name, deduped[2].Name)
+	}
+}
+
+func TestDeduplicateByDestName_CollisionRecordedInRecord(t *testing.T) {
+	content := []byte("# Skill")
+	contentHash := transfer.HashBytes(content)
+	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+		{Path: "SKILL.md", Hash: contentHash},
+	})
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = origTransport }()
+
+	skills := []ResolvedSkill{
+		{
+			Name: "shared-name", URI: "skill://hub/shared-name@1.0", Scope: "hub",
+			Hash: bundleHash, Files: []ResolvedFile{
+				{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: contentHash},
+			},
+		},
+		{
+			Name: "shared-name", URI: "skill://project/shared-name@2.0", Scope: "project",
+			Hash: bundleHash, Files: []ResolvedFile{
+				{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: contentHash},
+			},
+		},
+	}
+
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+
+	record, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	if err != nil {
+		t.Fatalf("installResolvedSkills() error: %v", err)
+	}
+
+	if len(record.Collisions) != 1 {
+		t.Fatalf("expected 1 collision in record, got %d", len(record.Collisions))
+	}
+	c := record.Collisions[0]
+	if c.DestName != "shared-name" {
+		t.Errorf("collision destName = %q, want %q", c.DestName, "shared-name")
+	}
+	if c.WinnerURI != "skill://project/shared-name@2.0" {
+		t.Errorf("collision winner = %q, want project skill", c.WinnerURI)
+	}
+	if c.DroppedURI != "skill://hub/shared-name@1.0" {
+		t.Errorf("collision dropped = %q, want hub skill", c.DroppedURI)
+	}
+}
+
+func TestDeduplicateByDestName_OptionalLoserNoWarn(t *testing.T) {
+	// When the dropped skill is optional, the collision should still be recorded
+	// but the log level should be Debug, not Warn. We verify the collision entry
+	// is present and that the Optional field on the loser is correctly set.
+	skills := []ResolvedSkill{
+		{Name: "my-skill", URI: "skill://scion/core/my-skill@1.0", Scope: "hub", Optional: true},
+		{Name: "my-skill", URI: "skill://scion/core/my-skill@2.0", Scope: "project"},
+	}
+
+	deduped, collisions := deduplicateByDestName(skills)
+
+	if len(deduped) != 1 {
+		t.Fatalf("expected 1 skill after dedup, got %d", len(deduped))
+	}
+	if deduped[0].URI != "skill://scion/core/my-skill@2.0" {
+		t.Errorf("expected project-scope skill to win, got URI %q", deduped[0].URI)
+	}
+	if len(collisions) != 1 {
+		t.Fatalf("expected 1 collision, got %d", len(collisions))
+	}
+	// The collision entry should reflect the dropped (optional) skill.
+	if collisions[0].DroppedURI != "skill://scion/core/my-skill@1.0" {
+		t.Errorf("expected optional skill to be dropped, got %q", collisions[0].DroppedURI)
+	}
+}
+
+func TestDeduplicateByDestName_FullPrecedenceOrder(t *testing.T) {
+	// Verify the full precedence chain: project > template > user > hub > platform > ""
+	scopes := []string{"", "platform", "hub", "user", "template", "project"}
+
+	for i := 0; i < len(scopes)-1; i++ {
+		lower := scopes[i]
+		higher := scopes[i+1]
+		t.Run(fmt.Sprintf("%s_beats_%s", higher, lower), func(t *testing.T) {
+			skills := []ResolvedSkill{
+				{Name: "test-skill", URI: "skill://lower/test-skill@1.0", Scope: lower},
+				{Name: "test-skill", URI: "skill://higher/test-skill@2.0", Scope: higher},
+			}
+
+			deduped, collisions := deduplicateByDestName(skills)
+
+			if len(deduped) != 1 {
+				t.Fatalf("expected 1 skill, got %d", len(deduped))
+			}
+			if deduped[0].Scope != higher {
+				t.Errorf("expected scope %q to win, got %q", higher, deduped[0].Scope)
+			}
+			if len(collisions) != 1 {
+				t.Fatalf("expected 1 collision, got %d", len(collisions))
+			}
+			if collisions[0].WinnerScope != higher {
+				t.Errorf("winner scope = %q, want %q", collisions[0].WinnerScope, higher)
+			}
+		})
+	}
+}
+
+func TestDeduplicateByDestName_AsAlias(t *testing.T) {
+	// Skills with explicit As aliases that don't collide should pass through.
+	skills := []ResolvedSkill{
+		{Name: "my-skill", URI: "skill://scion/core/my-skill@1.0", Scope: "template"},
+		{Name: "my-skill", URI: "gh://org/repo/skills/my-skill", Scope: "project", As: "my-skill-alt"},
+	}
+
+	deduped, collisions := deduplicateByDestName(skills)
+
+	if len(deduped) != 2 {
+		t.Fatalf("expected 2 skills (alias avoids collision), got %d", len(deduped))
+	}
+	if len(collisions) != 0 {
+		t.Errorf("expected 0 collisions with alias, got %d", len(collisions))
 	}
 }
