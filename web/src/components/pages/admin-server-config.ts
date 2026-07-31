@@ -27,6 +27,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
+import { normalizeModelAlias } from '../../shared/model-utils.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -202,6 +203,8 @@ interface ServerConfigResponse {
   default_max_model_calls?: number;
   default_max_duration?: string;
   default_resources?: ResourceSpec;
+  default_model?: string;
+  default_thinking_level?: number | null;
 
   // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
   settings_tier?: 'db' | 'file';
@@ -334,6 +337,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_max_model_calls: 'Default Max Model Calls',
   default_max_duration: 'Default Max Duration',
   default_resources: 'Default Resources',
+  default_model: 'Default Model',
+  default_thinking_level: 'Default Thinking Level',
   // endpoints section
   'server.hub.public_url': 'Public URL',
   image_registry: 'Image Registry',
@@ -392,6 +397,20 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultResCpuLim = '';
   @state() private defaultResMemLim = '';
   @state() private defaultResDisk = '';
+
+  // Default agent model settings
+  @state() private defaultModel = '';
+  @state() private defaultModelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
+  @state() private defaultCustomModelId = '';
+  @state() private defaultThinkingLevel: number | null = null;
+
+  // Agent defaults sub-tab
+  @state() private agentDefaultsTab = 'general';
+
+  // Project defaults
+  @state() private scratchpadEnabled = true;
+  @state() private scratchpadApiAvailable = true;
+  @state() private scratchpadLoading = false;
 
   // Server
   @state() private serverMode = '';
@@ -611,6 +630,19 @@ export class ScionPageAdminServerConfig extends LitElement {
     .form-field .hint {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
+    }
+
+    .agent-defaults-tabs sl-tab-group {
+      --indicator-color: var(--scion-primary, #3b82f6);
+    }
+
+    .agent-defaults-tabs sl-tab::part(base) {
+      font-size: 0.8125rem;
+      padding: 0.5rem 0.75rem;
+    }
+
+    .agent-defaults-tabs sl-tab-panel::part(base) {
+      padding: 1rem 0 0 0;
     }
 
     .version-info {
@@ -1181,6 +1213,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       const [res] = await Promise.all([
         apiFetch('/api/v1/admin/server-config'),
         this.loadSchemaKeys(),
+        this.loadProjectDefaults(),
       ]);
       if (!res.ok) {
         this.error = await extractApiError(res, 'Failed to load server configuration');
@@ -1196,6 +1229,40 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.error = 'Failed to connect to server';
     } finally {
       this.loading = false;
+    }
+  }
+
+  private async loadProjectDefaults(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/project-defaults');
+      if (res.status === 501) {
+        this.scratchpadApiAvailable = false;
+        return;
+      }
+      if (!res.ok) return;
+      const data = (await res.json()) as { default_scratchpad?: boolean };
+      this.scratchpadEnabled = data.default_scratchpad !== false;
+      this.scratchpadApiAvailable = true;
+    } catch {
+      this.scratchpadApiAvailable = false;
+    }
+  }
+
+  private async saveScratchpadDefault(enabled: boolean): Promise<void> {
+    this.scratchpadLoading = true;
+    try {
+      const res = await apiFetch('/api/v1/admin/project-defaults', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ default_scratchpad: enabled }),
+      });
+      if (res.ok) {
+        this.scratchpadEnabled = enabled;
+      }
+    } catch {
+      // Silently fail — the toggle will revert visually on reload
+    } finally {
+      this.scratchpadLoading = false;
     }
   }
 
@@ -1241,6 +1308,23 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultResCpuLim = defRes?.limits?.cpu || '';
     this.defaultResMemLim = defRes?.limits?.memory || '';
     this.defaultResDisk = defRes?.disk || '';
+
+    // Default model settings
+    this.defaultModel = data.default_model || '';
+    if (this.defaultModel) {
+      const dm = normalizeModelAlias(this.defaultModel);
+      if (['small', 'medium', 'large', 'extra-large'].includes(dm)) {
+        this.defaultModelSelection = dm as 'small' | 'medium' | 'large' | 'extra-large';
+        this.defaultCustomModelId = '';
+      } else {
+        this.defaultModelSelection = 'other';
+        this.defaultCustomModelId = this.defaultModel;
+      }
+    } else {
+      this.defaultModelSelection = '';
+      this.defaultCustomModelId = '';
+    }
+    this.defaultThinkingLevel = data.default_thinking_level ?? null;
 
     // Server
     const srv = data.server;
@@ -1449,6 +1533,17 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_resources = defaultResources;
     }
 
+    // Default model settings
+    if (ok('default_model')) {
+      const resolvedModel = this.defaultModelSelection === 'other'
+        ? this.defaultCustomModelId.trim()
+        : this.defaultModelSelection;
+      payload.default_model = resolvedModel || '';
+    }
+    if (ok('default_thinking_level')) {
+      payload.default_thinking_level = this.defaultThinkingLevel;
+    }
+
     const server: Record<string, unknown> = {};
 
     // Hub — only Layer-1 hub fields
@@ -1576,6 +1671,17 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
       if (this.defaultResDisk) defaultResources.disk = this.defaultResDisk;
       payload.default_resources = defaultResources;
+    }
+
+    // Default model settings
+    if (ok('default_model')) {
+      const resolvedModel = this.defaultModelSelection === 'other'
+        ? this.defaultCustomModelId.trim()
+        : this.defaultModelSelection;
+      payload.default_model = resolvedModel || undefined;
+    }
+    if (ok('default_thinking_level')) {
+      payload.default_thinking_level = this.defaultThinkingLevel;
     }
 
     // Server
@@ -2371,8 +2477,10 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderGeneralTab() {
     return html`
       ${this.renderVersionInfo()}
+
+      <!-- Card 1: General -->
       <div class="section">
-        <h3 class="section-title">General Settings</h3>
+        <h3 class="section-title">General</h3>
         <div class="form-grid">
           <div class="form-field">
             <label>Server Mode</label>
@@ -2425,84 +2533,6 @@ export class ScionPageAdminServerConfig extends LitElement {
               </sl-select>`
             )}
           </div>
-          <div class="form-field">
-            <label>Active Profile</label>
-            <span class="hint">Default runtime profile for agents</span>
-            ${this.renderFieldValue(
-              'active_profile',
-              this.activeProfile,
-              html`<sl-input
-                value=${this.activeProfile}
-                placeholder="default"
-                @sl-input=${(e: Event) => {
-                  this.activeProfile = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
-            )}
-          </div>
-          <div class="form-field">
-            <label>Default Template</label>
-            ${this.renderFieldValue(
-              'default_template',
-              this.defaultTemplate,
-              html`${this.renderEnvBadge('default_template')}<sl-input
-                value=${this.defaultTemplate}
-                placeholder="default"
-                @sl-input=${(e: Event) => {
-                  this.defaultTemplate = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
-            )}
-          </div>
-          <div class="form-field">
-            <label>Default Harness Config</label>
-            ${this.renderFieldValue(
-              'default_harness_config',
-              this.resolvedHarnessConfig,
-              html`${this.renderEnvBadge('default_harness_config')}
-            <sl-select
-              .value=${this.harnessConfigSelection}
-              @sl-change=${(e: Event) => {
-                this.harnessConfigSelection = (e.target as HTMLSelectElement).value;
-                if (this.harnessConfigSelection !== '__other__') {
-                  this.customHarnessConfig = '';
-                }
-              }}
-            >
-              <sl-option value="">None</sl-option>
-              ${this.harnessConfigs.length > 0
-                ? this.harnessConfigs.map(
-                    (hc) => html`
-                      <sl-option value=${hc.name}>
-                        ${hc.displayName || hc.name}
-                        ${hc.harness ? html` <small>(${hc.harness})</small>` : ''}
-                      </sl-option>
-                    `
-                  )
-                : KNOWN_HARNESS_NAMES.map(
-                    (name) => html`
-                      <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
-                    `
-                  )}
-              <sl-option value="__other__">Other (specify)</sl-option>
-            </sl-select>`
-            )}
-          </div>
-          ${this.harnessConfigSelection === '__other__'
-            ? html`
-                <div class="form-field">
-                  <label>Custom Harness Config Name</label>
-                  <sl-input
-                    value=${this.customHarnessConfig}
-                    placeholder="e.g. my-custom-harness"
-                    @sl-input=${(e: Event) => {
-                      this.customHarnessConfig = (e.target as HTMLInputElement).value;
-                    }}
-                  ></sl-input>
-                  <span class="hint">Name of the harness config directory (from .scion/harness-configs/).</span>
-                </div>
-              `
-            : nothing}
           <div class="form-field full-width">
             <label>Image Registry</label>
             <span class="hint"
@@ -2520,16 +2550,17 @@ export class ScionPageAdminServerConfig extends LitElement {
               ></sl-input>`
             )}
           </div>
-          <div class="form-field full-width">
-            <label>Workspace Path</label>
-            <span class="hint">Override default workspace path for agent worktrees</span>
+          <div class="form-field">
+            <label>Active Profile</label>
+            <span class="hint">Default runtime profile for agents</span>
             ${this.renderFieldValue(
-              'workspace_path',
-              this.workspacePath,
+              'active_profile',
+              this.activeProfile,
               html`<sl-input
-                value=${this.workspacePath}
+                value=${this.activeProfile}
+                placeholder="default"
                 @sl-input=${(e: Event) => {
-                  this.workspacePath = (e.target as HTMLInputElement).value;
+                  this.activeProfile = (e.target as HTMLInputElement).value;
                 }}
               ></sl-input>`
             )}
@@ -2537,122 +2568,316 @@ export class ScionPageAdminServerConfig extends LitElement {
         </div>
       </div>
 
+      <!-- Card 2: Agent Defaults with sub-tabs -->
       <div class="section">
-        ${this.renderSectionHeader('Default Agent Limits', 'agent_defaults')}
+        ${this.renderSectionHeader('Agent Defaults', 'agent_defaults')}
         ${this.renderSectionMeta('agent_defaults')}
-        <div class="form-grid">
-          <div class="form-field">
-            <label>Default Max Turns</label>
-            <span class="hint">Maximum conversation turns for new agents</span>
-            ${this.renderFieldValue(
-              'default_max_turns',
-              this.defaultMaxTurns ? String(this.defaultMaxTurns) : '',
-              html`${this.renderEnvBadge('default_max_turns')}<sl-input
-                type="number"
-                value=${this.defaultMaxTurns ? String(this.defaultMaxTurns) : ''}
-                placeholder="No limit"
-                @sl-input=${(e: Event) => {
-                  this.defaultMaxTurns = parseInt((e.target as HTMLInputElement).value) || 0;
-                }}
-              ></sl-input>`
-            )}
-          </div>
-          <div class="form-field">
-            <label>Default Max Model Calls</label>
-            <span class="hint">Maximum LLM API calls for new agents</span>
-            ${this.renderFieldValue(
-              'default_max_model_calls',
-              this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : '',
-              html`${this.renderEnvBadge('default_max_model_calls')}<sl-input
-                type="number"
-                value=${this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : ''}
-                placeholder="No limit"
-                @sl-input=${(e: Event) => {
-                  this.defaultMaxModelCalls = parseInt((e.target as HTMLInputElement).value) || 0;
-                }}
-              ></sl-input>`
-            )}
-          </div>
-          <div class="form-field full-width">
-            <label>Default Max Duration</label>
-            <span class="hint">Maximum execution time (Go duration, e.g. 2h, 30m)</span>
-            ${this.renderFieldValue(
-              'default_max_duration',
-              this.defaultMaxDuration,
-              html`${this.renderEnvBadge('default_max_duration')}<sl-input
-                value=${this.defaultMaxDuration}
-                placeholder="e.g. 2h, 30m"
-                @sl-input=${(e: Event) => {
-                  this.defaultMaxDuration = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
-            )}
-          </div>
+        <div class="agent-defaults-tabs">
+          <sl-tab-group
+            @sl-tab-show=${(e: CustomEvent) => {
+              this.agentDefaultsTab = (e.detail as { name: string }).name;
+            }}
+          >
+            <sl-tab slot="nav" panel="general" ?active=${this.agentDefaultsTab === 'general'}>General</sl-tab>
+            <sl-tab slot="nav" panel="limits" ?active=${this.agentDefaultsTab === 'limits'}>Limits</sl-tab>
+            <sl-tab slot="nav" panel="resources" ?active=${this.agentDefaultsTab === 'resources'}>Resources</sl-tab>
+
+            <sl-tab-panel name="general">
+              <div class="form-grid">
+                <div class="form-field">
+                  <label>Default Template</label>
+                  ${this.renderFieldValue(
+                    'default_template',
+                    this.defaultTemplate,
+                    html`${this.renderEnvBadge('default_template')}<sl-input
+                      value=${this.defaultTemplate}
+                      placeholder="default"
+                      @sl-input=${(e: Event) => {
+                        this.defaultTemplate = (e.target as HTMLInputElement).value;
+                      }}
+                    ></sl-input>`
+                  )}
+                </div>
+                <div class="form-field">
+                  <label>Default Harness Config</label>
+                  ${this.renderFieldValue(
+                    'default_harness_config',
+                    this.resolvedHarnessConfig,
+                    html`${this.renderEnvBadge('default_harness_config')}
+                  <sl-select
+                    .value=${this.harnessConfigSelection}
+                    @sl-change=${(e: Event) => {
+                      this.harnessConfigSelection = (e.target as HTMLSelectElement).value;
+                      if (this.harnessConfigSelection !== '__other__') {
+                        this.customHarnessConfig = '';
+                      }
+                    }}
+                  >
+                    <sl-option value="">None</sl-option>
+                    ${this.harnessConfigs.length > 0
+                      ? this.harnessConfigs.map(
+                          (hc) => html`
+                            <sl-option value=${hc.name}>
+                              ${hc.displayName || hc.name}
+                              ${hc.harness ? html` <small>(${hc.harness})</small>` : ''}
+                            </sl-option>
+                          `
+                        )
+                      : KNOWN_HARNESS_NAMES.map(
+                          (name) => html`
+                            <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
+                          `
+                        )}
+                    <sl-option value="__other__">Other (specify)</sl-option>
+                  </sl-select>`
+                  )}
+                </div>
+                ${this.harnessConfigSelection === '__other__'
+                  ? html`
+                      <div class="form-field">
+                        <label>Custom Harness Config Name</label>
+                        <sl-input
+                          value=${this.customHarnessConfig}
+                          placeholder="e.g. my-custom-harness"
+                          @sl-input=${(e: Event) => {
+                            this.customHarnessConfig = (e.target as HTMLInputElement).value;
+                          }}
+                        ></sl-input>
+                        <span class="hint">Name of the harness config directory (from .scion/harness-configs/).</span>
+                      </div>
+                    `
+                  : nothing}
+                <div class="form-field full-width">
+                  <label>Workspace Path</label>
+                  <span class="hint">Override default workspace path for agent worktrees</span>
+                  ${this.renderFieldValue(
+                    'workspace_path',
+                    this.workspacePath,
+                    html`<sl-input
+                      value=${this.workspacePath}
+                      @sl-input=${(e: Event) => {
+                        this.workspacePath = (e.target as HTMLInputElement).value;
+                      }}
+                    ></sl-input>`
+                  )}
+                </div>
+                <div class="form-field full-width">
+                  ${this.renderFieldValue(
+                    'telemetry.enabled',
+                    this.telemetryEnabled ? 'Enabled' : 'Disabled',
+                    html`${this.renderEnvBadge('telemetry.enabled')}<sl-switch
+                      ?checked=${this.telemetryEnabled}
+                      @sl-change=${(e: Event) => {
+                        this.telemetryEnabled = (e.target as HTMLInputElement).checked;
+                      }}
+                      >Enable Telemetry</sl-switch
+                    >`
+                  )}
+                  <span class="hint">Default opt-in state for new agents</span>
+                </div>
+                <div class="form-field">
+                  <label>Default Model</label>
+                  ${this.renderFieldValue(
+                    'default_model',
+                    this.defaultModel || '—',
+                    html`${this.renderEnvBadge('default_model')}<sl-select
+                      placeholder="use harness default"
+                      clearable
+                      value=${this.defaultModelSelection}
+                      @sl-change=${(e: Event) => {
+                        const val = (e.target as HTMLSelectElement).value as '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
+                        this.defaultModelSelection = val;
+                        if (val !== 'other') this.defaultCustomModelId = '';
+                      }}
+                    >
+                      <sl-option value="small">Small</sl-option>
+                      <sl-option value="medium">Medium</sl-option>
+                      <sl-option value="large">Large</sl-option>
+                      <sl-option value="extra-large">Extra Large</sl-option>
+                      <sl-option value="other">Other (specify)</sl-option>
+                    </sl-select>`
+                  )}
+                </div>
+                ${this.defaultModelSelection === 'other'
+                  ? html`
+                      <div class="form-field">
+                        <label>Model ID</label>
+                        <sl-input
+                          placeholder="e.g. claude-opus-4-8"
+                          .value=${this.defaultCustomModelId}
+                          @sl-input=${(e: Event) => {
+                            this.defaultCustomModelId = (e.target as HTMLInputElement).value;
+                          }}
+                        ></sl-input>
+                      </div>
+                    `
+                  : nothing}
+                <div class="form-field full-width">
+                  <label>Default Thinking Level${this.defaultThinkingLevel !== null ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)">(${this.defaultThinkingLevel})</span>` : ''}</label>
+                  ${this.renderFieldValue(
+                    'default_thinking_level',
+                    this.defaultThinkingLevel !== null ? String(this.defaultThinkingLevel) : 'Not set',
+                    html`${this.renderEnvBadge('default_thinking_level')}
+                    <div style="display:flex;align-items:center;gap:0.75rem">
+                      <sl-range
+                        min="0" max="100" step="1"
+                        .value=${this.defaultThinkingLevel ?? 50}
+                        ?disabled=${this.defaultThinkingLevel === null}
+                        style="flex:1"
+                        @sl-input=${(e: Event) => { this.defaultThinkingLevel = (e.target as HTMLInputElement & { value: number }).value; }}
+                      ></sl-range>
+                      <sl-checkbox
+                        ?checked=${this.defaultThinkingLevel !== null}
+                        @sl-change=${(e: Event) => { this.defaultThinkingLevel = (e.target as HTMLInputElement & { checked: boolean }).checked ? 50 : null; }}
+                      >Set</sl-checkbox>
+                    </div>
+                    <span class="hint" style="display:flex;justify-content:space-between;margin-top:0.25rem">
+                      <span>0 = minimal reasoning</span>
+                      <span>${this.defaultThinkingLevel === null ? 'Using harness default' : ''}</span>
+                      <span>100 = maximum reasoning</span>
+                    </span>`
+                  )}
+                </div>
+              </div>
+            </sl-tab-panel>
+
+            <sl-tab-panel name="limits">
+              <div class="form-grid">
+                <div class="form-field">
+                  <label>Default Max Turns</label>
+                  <span class="hint">Maximum conversation turns for new agents</span>
+                  ${this.renderFieldValue(
+                    'default_max_turns',
+                    this.defaultMaxTurns ? String(this.defaultMaxTurns) : '',
+                    html`${this.renderEnvBadge('default_max_turns')}<sl-input
+                      type="number"
+                      value=${this.defaultMaxTurns ? String(this.defaultMaxTurns) : ''}
+                      placeholder="No limit"
+                      @sl-input=${(e: Event) => {
+                        this.defaultMaxTurns = parseInt((e.target as HTMLInputElement).value) || 0;
+                      }}
+                    ></sl-input>`
+                  )}
+                </div>
+                <div class="form-field">
+                  <label>Default Max Model Calls</label>
+                  <span class="hint">Maximum LLM API calls for new agents</span>
+                  ${this.renderFieldValue(
+                    'default_max_model_calls',
+                    this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : '',
+                    html`${this.renderEnvBadge('default_max_model_calls')}<sl-input
+                      type="number"
+                      value=${this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : ''}
+                      placeholder="No limit"
+                      @sl-input=${(e: Event) => {
+                        this.defaultMaxModelCalls = parseInt((e.target as HTMLInputElement).value) || 0;
+                      }}
+                    ></sl-input>`
+                  )}
+                </div>
+                <div class="form-field full-width">
+                  <label>Default Max Duration</label>
+                  <span class="hint">Maximum execution time (Go duration, e.g. 2h, 30m)</span>
+                  ${this.renderFieldValue(
+                    'default_max_duration',
+                    this.defaultMaxDuration,
+                    html`${this.renderEnvBadge('default_max_duration')}<sl-input
+                      value=${this.defaultMaxDuration}
+                      placeholder="e.g. 2h, 30m"
+                      @sl-input=${(e: Event) => {
+                        this.defaultMaxDuration = (e.target as HTMLInputElement).value;
+                      }}
+                    ></sl-input>`
+                  )}
+                </div>
+              </div>
+            </sl-tab-panel>
+
+            <sl-tab-panel name="resources">
+              ${this.renderFieldValue(
+                'default_resources',
+                [this.defaultResCpuReq, this.defaultResMemReq, this.defaultResCpuLim, this.defaultResMemLim, this.defaultResDisk].filter(Boolean).join(', '),
+                html`${this.renderEnvBadge('default_resources')}
+              <div class="form-grid">
+                <div class="form-field">
+                  <label>CPU Request</label>
+                  <sl-input
+                    value=${this.defaultResCpuReq}
+                    placeholder="e.g. 500m, 1"
+                    @sl-input=${(e: Event) => {
+                      this.defaultResCpuReq = (e.target as HTMLInputElement).value;
+                    }}
+                  ></sl-input>
+                </div>
+                <div class="form-field">
+                  <label>Memory Request</label>
+                  <sl-input
+                    value=${this.defaultResMemReq}
+                    placeholder="e.g. 512Mi, 1Gi"
+                    @sl-input=${(e: Event) => {
+                      this.defaultResMemReq = (e.target as HTMLInputElement).value;
+                    }}
+                  ></sl-input>
+                </div>
+                <div class="form-field">
+                  <label>CPU Limit</label>
+                  <sl-input
+                    value=${this.defaultResCpuLim}
+                    placeholder="e.g. 1, 2"
+                    @sl-input=${(e: Event) => {
+                      this.defaultResCpuLim = (e.target as HTMLInputElement).value;
+                    }}
+                  ></sl-input>
+                </div>
+                <div class="form-field">
+                  <label>Memory Limit</label>
+                  <sl-input
+                    value=${this.defaultResMemLim}
+                    placeholder="e.g. 1Gi, 2Gi"
+                    @sl-input=${(e: Event) => {
+                      this.defaultResMemLim = (e.target as HTMLInputElement).value;
+                    }}
+                  ></sl-input>
+                </div>
+                <div class="form-field full-width">
+                  <label>Disk</label>
+                  <sl-input
+                    value=${this.defaultResDisk}
+                    placeholder="e.g. 10Gi"
+                    @sl-input=${(e: Event) => {
+                      this.defaultResDisk = (e.target as HTMLInputElement).value;
+                    }}
+                  ></sl-input>
+                </div>
+              </div>`
+              )}
+            </sl-tab-panel>
+          </sl-tab-group>
         </div>
       </div>
 
-      <div class="section">
-        <h3 class="section-title">Default Agent Resources</h3>
-        ${this.renderFieldValue(
-          'default_resources',
-          [this.defaultResCpuReq, this.defaultResMemReq, this.defaultResCpuLim, this.defaultResMemLim, this.defaultResDisk].filter(Boolean).join(', '),
-          html`${this.renderEnvBadge('default_resources')}
-        <div class="form-grid">
-          <div class="form-field">
-            <label>CPU Request</label>
-            <sl-input
-              value=${this.defaultResCpuReq}
-              placeholder="e.g. 500m, 1"
-              @sl-input=${(e: Event) => {
-                this.defaultResCpuReq = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
-          </div>
-          <div class="form-field">
-            <label>Memory Request</label>
-            <sl-input
-              value=${this.defaultResMemReq}
-              placeholder="e.g. 512Mi, 1Gi"
-              @sl-input=${(e: Event) => {
-                this.defaultResMemReq = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
-          </div>
-          <div class="form-field">
-            <label>CPU Limit</label>
-            <sl-input
-              value=${this.defaultResCpuLim}
-              placeholder="e.g. 1, 2"
-              @sl-input=${(e: Event) => {
-                this.defaultResCpuLim = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
-          </div>
-          <div class="form-field">
-            <label>Memory Limit</label>
-            <sl-input
-              value=${this.defaultResMemLim}
-              placeholder="e.g. 1Gi, 2Gi"
-              @sl-input=${(e: Event) => {
-                this.defaultResMemLim = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
-          </div>
-          <div class="form-field full-width">
-            <label>Disk</label>
-            <sl-input
-              value=${this.defaultResDisk}
-              placeholder="e.g. 10Gi"
-              @sl-input=${(e: Event) => {
-                this.defaultResDisk = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
-          </div>
-        </div>`
-        )}
-      </div>
-
-      ${this.renderMessageBrokerSection()}
+      <!-- Card 3: Project Default Settings -->
+      ${this.scratchpadApiAvailable
+        ? html`
+            <div class="section">
+              <h3 class="section-title">Project Default Settings</h3>
+              <div class="form-grid">
+                <div class="form-field full-width">
+                  <sl-switch
+                    ?checked=${this.scratchpadEnabled}
+                    ?disabled=${this.scratchpadLoading}
+                    @sl-change=${(e: Event) => {
+                      const checked = (e.target as HTMLInputElement).checked;
+                      void this.saveScratchpadDefault(checked);
+                    }}
+                    >Enable default scratchpad shared directory</sl-switch
+                  >
+                  <span class="hint">When enabled, new projects automatically get a shared scratchpad directory for inter-agent communication.</span>
+                </div>
+              </div>
+            </div>
+          `
+        : nothing}
     `;
   }
 
@@ -3210,6 +3435,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         </p>
         ${this.renderOAuthDisplay()}
       </div>
+
+      ${this.renderMessageBrokerSection()}
     `;
   }
 
@@ -3250,27 +3477,6 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private renderTelemetryTab() {
     return html`
-      <div class="section">
-        ${this.renderSectionHeader('Telemetry', 'telemetry')}
-        ${this.renderSectionMeta('telemetry')}
-        <div class="form-grid">
-          <div class="form-field full-width">
-            ${this.renderFieldValue(
-              'telemetry.enabled',
-              this.telemetryEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.enabled')}<sl-switch
-                ?checked=${this.telemetryEnabled}
-                @sl-change=${(e: Event) => {
-                  this.telemetryEnabled = (e.target as HTMLInputElement).checked;
-                }}
-                >Enable Telemetry Collection</sl-switch
-              >`
-            )}
-            <span class="hint">Default opt-in state for new agents</span>
-          </div>
-        </div>
-      </div>
-
       <div class="section">
         <h3 class="section-title">Cloud Export (OTLP)</h3>
         <div class="form-grid">
