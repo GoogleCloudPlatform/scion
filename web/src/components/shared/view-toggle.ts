@@ -22,7 +22,7 @@
  * dispatches a `view-change` CustomEvent.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 export type ViewMode = 'grid' | 'list' | 'graph';
@@ -40,6 +40,13 @@ export class ScionViewToggle extends LitElement {
    */
   @property({ type: String })
   storageKey = '';
+
+  /**
+   * Whether to show the graph-view segment. Set to false on pages
+   * that have no graph representation (e.g. the projects list).
+   */
+  @property({ type: Boolean })
+  showGraph = true;
 
   static override styles = css`
     :host {
@@ -145,7 +152,7 @@ export class ScionViewToggle extends LitElement {
         >
           <sl-icon name="list-ul"></sl-icon>
         </button>
-        ${this.renderGraphSegment()}
+        ${this.showGraph ? this.renderGraphSegment() : nothing}
       </div>
     `;
   }
