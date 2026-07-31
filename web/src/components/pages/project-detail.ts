@@ -122,6 +122,9 @@ export class ScionPageProjectDetail extends LitElement {
   private phaseFilter: AgentPhase | '' = '';
 
   @state()
+  private labelFilter = '';
+
+  @state()
   private sortField: AgentSortField = 'updated';
 
   @state()
@@ -1143,6 +1146,16 @@ export class ScionPageProjectDetail extends LitElement {
     if (this.phaseFilter) {
       list = list.filter(a => a.phase === this.phaseFilter);
     }
+    if (this.labelFilter.trim()) {
+      const parts = this.labelFilter.trim().split('=');
+      const filterKey = parts[0];
+      const filterValue = parts.slice(1).join('=');
+      list = list.filter(a => {
+        if (!a.labels) return false;
+        if (filterValue) return a.labels[filterKey] === filterValue;
+        return filterKey in a.labels;
+      });
+    }
     const sorted = [...list];
     sorted.sort((a, b) => {
       let cmp = 0;
@@ -1231,6 +1244,20 @@ export class ScionPageProjectDetail extends LitElement {
             @click=${() => this.setPhaseFilter('error')}
           >Error</button>
         </div>
+        <sl-input
+          size="small"
+          placeholder="Filter by label (key=value)"
+          clearable
+          .value=${this.labelFilter}
+          @sl-input=${(e: Event) => {
+            this.labelFilter = (e.target as HTMLElement & { value: string }).value;
+          }}
+          @sl-change=${() => { this.backgroundRefresh(); }}
+          @sl-clear=${() => { this.labelFilter = ''; this.backgroundRefresh(); }}
+          style="max-width: 220px;"
+        >
+          <sl-icon slot="prefix" name="tag"></sl-icon>
+        </sl-input>
         ${this.viewMode === 'grid' ? html`
           <sl-dropdown>
             <sl-button slot="trigger" size="small" outline>
