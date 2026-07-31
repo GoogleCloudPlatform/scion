@@ -27,7 +27,7 @@
 import { LitElement, html, css, svg, nothing } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import type { Agent } from '../../shared/types.js';
-import { getAgentDisplayStatus } from '../../shared/types.js';
+import { getAgentDisplayStatus, can, isTerminalAvailable } from '../../shared/types.js';
 import { getStateDisplay, type StatusVariant } from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
@@ -285,6 +285,38 @@ export class ScionAgentTreeView extends LitElement {
     }
 
     /*
+     * Terminal icon button — lower-right corner of the agent card.
+     * Only visible on hover; uses sl-icon-button for minimal padding.
+     */
+    .terminal-btn {
+      position: absolute;
+      bottom: 4px;
+      right: 4px;
+      z-index: 1;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+      font-size: 1rem;
+      color: var(--sl-color-neutral-600);
+    }
+
+    .node-wrapper:hover .terminal-btn {
+      opacity: 1;
+    }
+
+    .terminal-btn:hover {
+      color: var(--sl-color-primary-600);
+    }
+
+    .terminal-btn[disabled] {
+      opacity: 0.4;
+      pointer-events: none;
+    }
+
+    .node-wrapper:hover .terminal-btn[disabled] {
+      opacity: 0.4;
+    }
+
+    /*
      * User (human) nodes are placed directly in the stage (no wrapper div),
      * so they keep position:absolute and use inline left/top for placement.
      */
@@ -420,7 +452,7 @@ export class ScionAgentTreeView extends LitElement {
     for (const el of e.composedPath()) {
       if (el === this.canvasEl) break;
       const tag = (el as HTMLElement).tagName;
-      if (tag === 'A' || tag === 'BUTTON' || tag === 'SL-BUTTON') return;
+      if (tag === 'A' || tag === 'BUTTON' || tag === 'SL-BUTTON' || tag === 'SL-ICON-BUTTON') return;
     }
     this.dragging = true;
     this.dragStartX = e.clientX;
@@ -680,6 +712,19 @@ export class ScionAgentTreeView extends LitElement {
           ></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
         </a>
+        ${can(agent._capabilities, 'attach') ? html`
+          <sl-icon-button
+            class="terminal-btn"
+            name="terminal"
+            label="Terminal"
+            ?disabled=${!isTerminalAvailable(agent)}
+            @click=${(e: Event) => {
+              e.preventDefault();
+              e.stopPropagation();
+              window.location.href = `/agents/${agent.id}/terminal`;
+            }}
+          ></sl-icon-button>
+        ` : nothing}
         ${descendants > 0 ? html`
           <button
             class="collapse-chip"
