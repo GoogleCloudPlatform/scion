@@ -272,6 +272,19 @@ func (h *CommandHandler) RegisterCommandsForGuild(guildID string) error {
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "send",
+				Description: "Send a file by path or search for files by name",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionString,
+						Name:        "path",
+						Description: "Absolute file path or partial name to search",
+						Required:    true,
+					},
+				},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
 				Name:        "help",
 				Description: "Show available commands",
 			},
@@ -301,6 +314,7 @@ var ephemeralCommands = map[string]bool{
 	"settings": true,
 	"default":  true,
 	"thread":   true,
+	"send":     true,
 }
 
 // ephemeralFlag returns MessageFlagsEphemeral if the subcommand should be
@@ -370,6 +384,8 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 			h.HandleDefault(s, i)
 		case "thread":
 			h.HandleThread(s, i)
+		case "send":
+			h.HandleSend(s, i)
 		// register and unregister are handled by RegistrationHandler
 		// and should be wired up in the broker's dispatch
 		default:
@@ -502,6 +518,7 @@ func helpText() string {
 		"`/scion msg <agent> <text>` — Send a message to an agent\n" +
 		"`/scion logs <agent>` — View agent logs\n" +
 		"`/scion default [agent]` — Set or clear the default agent\n" +
+		"`/scion send <path>` — Send a file by path or search for files\n" +
 		"`/scion thread <title> [template]` — Create a thread with a new agent\n" +
 		"`/scion register` — Link your Discord account to Scion Hub\n" +
 		"`/scion unregister` — Unlink your Discord account\n" +

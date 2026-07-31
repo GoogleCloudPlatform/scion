@@ -60,6 +60,8 @@ func (h *CallbackHandler) Dispatch(s *discordgo.Session, i *discordgo.Interactio
 		h.handleSettingsCallback(s, i, customID)
 	case "default":
 		h.handleDefaultCallback(s, i, customID)
+	case "send":
+		h.handleSendCallback(s, i, customID)
 	default:
 		h.log.Debug("Unhandled callback prefix", "prefix", parts[0], "custom_id", customID)
 	}
@@ -602,6 +604,20 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 	default:
 		h.log.Debug("Unknown default action", "action", action, "custom_id", customID)
 	}
+}
+
+// --- Send file callback handlers ---
+
+// handleSendCallback routes send:file button clicks.
+// custom_id format: send:file:<key>
+func (h *CallbackHandler) handleSendCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
+	parts := strings.SplitN(customID, ":", 3)
+	if len(parts) < 3 || parts[1] != "file" {
+		h.log.Warn("Malformed send callback custom_id", "custom_id", customID)
+		return
+	}
+	key := parts[2]
+	handleSendFileCallback(s, i, key, h.log)
 }
 
 // --- Notification callback handlers ---
