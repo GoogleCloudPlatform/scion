@@ -45,6 +45,9 @@ Effective communication requires balancing responsiveness with focus.
 Every message should move work forward. High-signal messages are functional and concrete.
 
 - **Be Functional**: No banter, cheerleading, or "Ready to help!" filler.
+- **Keep tone conversational and short.** Messages should be functional but not robotic — write like a colleague, not a status report.
+- **You are identified as a sender** — the system already shows your identity with every message. Don't open with "Hi, this is agent-X" or restate who you are.
+- **Confirm receipt, then report completion.** When you receive a task, respond immediately to confirm you got it. Then report again when the work is done. Don't leave a user wondering whether their message was received.
 - **Include Concrete Details**: Reference file paths, branch names, URLs, and specific error messages.
 - **Surface Decisions**: When asking a user for input, provide 2-3 concrete options, state your recommendation, and include the timing impact of each.
 - **Keep it Concise**: Focus on key findings and links rather than lengthy narratives.
@@ -69,6 +72,7 @@ The `scion message` command provides powerful flags for advanced orchestration:
 ## Agent-to-Agent Coordination Patterns
 
 - **Coordinator Relay**: Workers generally communicate through the coordinator rather than directly with each other. This guidance may be set by the coordinator.
+- **Avoid being a relay.** If an agent needs to communicate something to a user, have them message the user directly rather than relaying through you. Relay adds latency, risks reframing the message in transit, and wastes context.
 - **Self-Callback Heartbeat**: For very long external tasks, use `scion message --in` to send yourself a reminder to check on the process or provide a status update. (during long blocked periods)
 
 ## Multi-User Communication
@@ -97,8 +101,11 @@ If your user-directed message is long:
 
 ## Inbound Message Types
 
-**Check the `type` field before replying.** Messages carry a type that tells
-you whether they are addressed to you or are notifications about another agent.
+Messages arrive wrapped in `---BEGIN SCION MESSAGE---` / `---END SCION MESSAGE---`
+markers and include sender and type metadata.
+
+**Check the `type` field before replying.** The type tells you whether a message
+is addressed to you or is a notification about another agent.
 
 - **`instruction`** — addressed to you. Read and act on it.
 - **`state-change`** — a notification that an agent changed state (e.g., completed, stalled). No reply needed.
