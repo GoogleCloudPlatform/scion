@@ -142,8 +142,10 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}
 
-	// Copy labels, excluding scion.io/* prefix (system markers) and
-	// workspace-mode (re-derived below). scion.dev/* labels are copied.
+	// Skip system labels (scion.io/* prefix). Project settings annotations
+	// live in project.Annotations, not Labels, and are copied separately
+	// via projectSettingKeys above. scion.dev/* labels are copied.
+	// workspace-mode is re-derived below, not copied raw.
 	if src.Labels != nil {
 		clone.Labels = make(map[string]string)
 		for k, v := range src.Labels {

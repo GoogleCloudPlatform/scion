@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -643,7 +644,7 @@ func TestProjectClone_StorageFilesCopied(t *testing.T) {
 	defer stor.mu.Unlock()
 	found := false
 	for path := range stor.objects {
-		if contains(path, clone.ID) {
+		if strings.Contains(path, clone.ID) {
 			found = true
 			break
 		}
@@ -651,13 +652,3 @@ func TestProjectClone_StorageFilesCopied(t *testing.T) {
 	assert.True(t, found, "storage files should exist under clone's project ID")
 }
 
-// contains checks if s contains substr. Using strings.Contains would require
-// importing strings, which is already imported by the package under test.
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
