@@ -610,6 +610,12 @@ type HarnessConfig struct {
 	Updated       time.Time          `json:"updated"`
 }
 
+// CloneProjectRequest is the request body for POST /api/v1/projects/{id}/clone.
+type CloneProjectRequest struct {
+	Name string `json:"name"`           // required
+	Slug string `json:"slug,omitempty"` // optional explicit slug override
+}
+
 // HarnessConfigData holds harness-specific configuration.
 type HarnessConfigData struct {
 	Harness                 string            `json:"harness,omitempty"`
