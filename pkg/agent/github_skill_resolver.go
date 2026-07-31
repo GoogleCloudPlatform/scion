@@ -120,20 +120,72 @@ func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredent
 	return r
 }
 
+// normalizeGitHubName uppercases a GitHub name and replaces hyphens and dots
+// with underscores to produce a valid env-var-style key segment.
+func normalizeGitHubName(name string) string {
+	s := strings.ToUpper(name)
+	s = strings.ReplaceAll(s, "-", "_")
+	s = strings.ReplaceAll(s, ".", "_")
+	return s
+}
+
+// deriveGitHubTokenKey converts a GitHub owner/repo pair into the conventional
+// project secret key name: GH_{OWNER}__{REPO}.
+func deriveGitHubTokenKey(owner, repo string) string {
+	return "GH_" + normalizeGitHubName(owner) + "__" + normalizeGitHubName(repo)
+}
+
+// deriveGitHubOwnerKey converts a GitHub owner into the owner-level
+// fallback key: GH_{OWNER}.
+func deriveGitHubOwnerKey(owner string) string {
+	return "GH_" + normalizeGitHubName(owner)
+}
+
 // tokenForRef returns the appropriate GitHub token for the given ref.
-// If ref.TokenSecretName is set, it looks up the named secret in provisionCredentials.
-// If the named secret is not found, it returns an error.
-// If no TokenSecretName is set, it returns the default token.
+//
+// Resolution precedence:
+//  1. Explicit ?token=SECRET_NAME on the URI — looked up in provisionCredentials.
+//  2. Repo-specific convention key GH_{OWNER}__{REPO} from provisionCredentials.
+//  3. Owner-level convention key GH_{OWNER} from provisionCredentials.
+//  4. Default GITHUB_TOKEN cascade (r.token).
+//  5. Empty string — unauthenticated; works for public repos.
+//
+// If ?token= is present but the named secret is missing, an error is returned.
+// Missing convention keys are not errors — the resolver silently falls through.
 func (r *GitHubSkillResolver) tokenForRef(ref *GitHubSkillRef) (string, error) {
-	if ref.TokenSecretName == "" {
-		return r.token, nil
+	// Priority 1: Explicit ?token= override.
+	if ref.TokenSecretName != "" {
+		// In Go, reading from a nil map is safe and returns "". Both nil map and
+		// missing/empty key produce the same error: the secret is unavailable.
+		if val := r.provisionCredentials[ref.TokenSecretName]; val != "" {
+			return val, nil
+		}
+		return "", fmt.Errorf("secret %q not found in ProvisionCredentials; ensure it is set at project scope", ref.TokenSecretName)
 	}
-	// In Go, reading from a nil map is safe and returns "". Both nil map and
-	// missing/empty key produce the same error: the secret is unavailable.
-	if val := r.provisionCredentials[ref.TokenSecretName]; val != "" {
+
+	// Priority 2: Repo-specific convention key (GH_OWNER__REPO).
+	repoKey := deriveGitHubTokenKey(ref.Owner, ref.Repo)
+	if val := r.provisionCredentials[repoKey]; val != "" {
+		util.Debugf("github: using credential %s for %s/%s", repoKey, ref.Owner, ref.Repo)
 		return val, nil
 	}
-	return "", fmt.Errorf("secret %q not found in ProvisionCredentials; ensure it is set at project scope", ref.TokenSecretName)
+
+	// Priority 3: Owner-level convention key (GH_OWNER).
+	ownerKey := deriveGitHubOwnerKey(ref.Owner)
+	if val := r.provisionCredentials[ownerKey]; val != "" {
+		util.Debugf("github: using credential %s for %s/%s", ownerKey, ref.Owner, ref.Repo)
+		return val, nil
+	}
+
+	// Priority 4: Default GITHUB_TOKEN cascade.
+	if r.token != "" {
+		util.Debugf("github: no convention credential for %s/%s, using default", ref.Owner, ref.Repo)
+		return r.token, nil
+	}
+
+	// Priority 5: No credential available — unauthenticated.
+	fmt.Fprintf(os.Stderr, "github: WARNING: no credential available for %s/%s, attempting unauthenticated\n", ref.Owner, ref.Repo)
+	return "", nil
 }
 
 func (r *GitHubSkillResolver) ResolverName() string { return "github" }

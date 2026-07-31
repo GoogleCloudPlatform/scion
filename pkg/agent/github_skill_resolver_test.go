@@ -1312,6 +1312,378 @@ func TestGitHubSkillResolver_SharedCacheSingleton(t *testing.T) {
 	}
 }
 
+// TestNormalizeGitHubName verifies the character normalization used in
+// convention-based key derivation.
+func TestNormalizeGitHubName(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"scion-frontiers", "SCION_FRONTIERS"},
+		{"scion-repo-contrib", "SCION_REPO_CONTRIB"},
+		{"GoogleCloudPlatform", "GOOGLECLOUDPLATFORM"},
+		{"ptone", "PTONE"},
+		{"my-org", "MY_ORG"},
+		{"my.repo", "MY_REPO"},
+		{"my_repo", "MY_REPO"},
+		{"my.special.repo", "MY_SPECIAL_REPO"},
+		{"a-b.c_d", "A_B_C_D"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got := normalizeGitHubName(tt.in)
+			if got != tt.want {
+				t.Errorf("normalizeGitHubName(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDeriveGitHubTokenKey verifies the convention-based key derivation
+// for repo-specific credentials (GH_OWNER__REPO).
+func TestDeriveGitHubTokenKey(t *testing.T) {
+	tests := []struct {
+		owner, repo string
+		want        string
+	}{
+		{"scion-frontiers", "scion-repo-contrib", "GH_SCION_FRONTIERS__SCION_REPO_CONTRIB"},
+		{"GoogleCloudPlatform", "scion", "GH_GOOGLECLOUDPLATFORM__SCION"},
+		{"ptone", "scion", "GH_PTONE__SCION"},
+		{"my-org", "my.repo", "GH_MY_ORG__MY_REPO"},
+		{"my-org", "my.special.repo", "GH_MY_ORG__MY_SPECIAL_REPO"},
+	}
+	for _, tt := range tests {
+		name := tt.owner + "/" + tt.repo
+		t.Run(name, func(t *testing.T) {
+			got := deriveGitHubTokenKey(tt.owner, tt.repo)
+			if got != tt.want {
+				t.Errorf("deriveGitHubTokenKey(%q, %q) = %q, want %q", tt.owner, tt.repo, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDeriveGitHubOwnerKey verifies the convention-based key derivation
+// for owner-level credentials (GH_OWNER).
+func TestDeriveGitHubOwnerKey(t *testing.T) {
+	tests := []struct {
+		owner string
+		want  string
+	}{
+		{"scion-frontiers", "GH_SCION_FRONTIERS"},
+		{"GoogleCloudPlatform", "GH_GOOGLECLOUDPLATFORM"},
+		{"ptone", "GH_PTONE"},
+		{"my-org", "GH_MY_ORG"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.owner, func(t *testing.T) {
+			got := deriveGitHubOwnerKey(tt.owner)
+			if got != tt.want {
+				t.Errorf("deriveGitHubOwnerKey(%q) = %q, want %q", tt.owner, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTokenForRef_ConventionKeys verifies the updated tokenForRef resolution
+// precedence including convention-based key lookup.
+func TestTokenForRef_ConventionKeys(t *testing.T) {
+	t.Run("explicit token wins over convention key", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token: "default-token",
+			provisionCredentials: map[string]string{
+				"MY_EXPLICIT":    "explicit-value",
+				"GH_OWNER__REPO": "convention-repo-value",
+				"GH_OWNER":       "convention-owner-value",
+			},
+		}
+		ref := &GitHubSkillRef{
+			Owner:           "owner",
+			Repo:            "repo",
+			TokenSecretName: "MY_EXPLICIT",
+		}
+		got, err := r.tokenForRef(ref)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "explicit-value" {
+			t.Errorf("expected explicit-value, got %q", got)
+		}
+	})
+
+	t.Run("repo-specific convention key wins over owner-level", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token: "default-token",
+			provisionCredentials: map[string]string{
+				"GH_SCION_FRONTIERS__SCION_REPO_CONTRIB": "repo-specific-token",
+				"GH_SCION_FRONTIERS":                     "owner-level-token",
+			},
+		}
+		ref := &GitHubSkillRef{
+			Owner: "scion-frontiers",
+			Repo:  "scion-repo-contrib",
+		}
+		got, err := r.tokenForRef(ref)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "repo-specific-token" {
+			t.Errorf("expected repo-specific-token, got %q", got)
+		}
+	})
+
+	t.Run("owner-level key used when no repo-specific key", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token: "default-token",
+			provisionCredentials: map[string]string{
+				"GH_SCION_FRONTIERS": "owner-level-token",
+			},
+		}
+		ref := &GitHubSkillRef{
+			Owner: "scion-frontiers",
+			Repo:  "any-repo",
+		}
+		got, err := r.tokenForRef(ref)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "owner-level-token" {
+			t.Errorf("expected owner-level-token, got %q", got)
+		}
+	})
+
+	t.Run("default token used when no convention keys exist", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token:                "default-token",
+			provisionCredentials: map[string]string{},
+		}
+		ref := &GitHubSkillRef{
+			Owner: "some-owner",
+			Repo:  "some-repo",
+		}
+		got, err := r.tokenForRef(ref)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "default-token" {
+			t.Errorf("expected default-token, got %q", got)
+		}
+	})
+
+	t.Run("empty token returned when no credentials at all", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token:                "",
+			provisionCredentials: map[string]string{},
+		}
+		ref := &GitHubSkillRef{
+			Owner: "some-owner",
+			Repo:  "some-repo",
+		}
+		got, err := r.tokenForRef(ref)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "" {
+			t.Errorf("expected empty token, got %q", got)
+		}
+	})
+
+	t.Run("nil provisionCredentials falls through to default", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token:                "default-token",
+			provisionCredentials: nil,
+		}
+		ref := &GitHubSkillRef{
+			Owner: "some-owner",
+			Repo:  "some-repo",
+		}
+		got, err := r.tokenForRef(ref)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "default-token" {
+			t.Errorf("expected default-token, got %q", got)
+		}
+	})
+
+	t.Run("missing convention key is silent not an error", func(t *testing.T) {
+		// When no convention key exists, no error should be returned —
+		// the resolver silently falls through to the default token.
+		r := &GitHubSkillResolver{
+			token: "default-token",
+			provisionCredentials: map[string]string{
+				"UNRELATED_SECRET": "unrelated-value",
+			},
+		}
+		ref := &GitHubSkillRef{
+			Owner: "nonexistent-owner",
+			Repo:  "nonexistent-repo",
+		}
+		got, err := r.tokenForRef(ref)
+		if err != nil {
+			t.Fatalf("missing convention key should not produce an error, got: %v", err)
+		}
+		if got != "default-token" {
+			t.Errorf("expected default-token fallback, got %q", got)
+		}
+	})
+}
+
+// TestTokenForRef_ConventionKeyIntegration verifies that convention-based
+// credential selection works end-to-end through the Resolve method.
+func TestTokenForRef_ConventionKeyIntegration(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var gotAuth string
+	mux.HandleFunc("/repos/scion-frontiers/scion-repo-contrib/commits/HEAD", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/scion-frontiers/scion-repo-contrib/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/scion-frontiers/scion-repo-contrib/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	resolver := &GitHubSkillResolver{
+		httpClient: server.Client(),
+		token:      "default-token",
+		apiBase:    server.URL,
+		rawBase:    server.URL + "/raw",
+		provisionCredentials: map[string]string{
+			"GH_SCION_FRONTIERS__SCION_REPO_CONTRIB": "convention-repo-token",
+		},
+	}
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://scion-frontiers/scion-repo-contrib/my-skill"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+	if gotAuth != "Bearer convention-repo-token" {
+		t.Errorf("expected convention-repo-token to be used, got Authorization: %q", gotAuth)
+	}
+}
+
+// TestTokenForRef_OwnerKeyIntegration verifies owner-level convention key
+// resolution works end-to-end through the Resolve method.
+func TestTokenForRef_OwnerKeyIntegration(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var gotAuth string
+	mux.HandleFunc("/repos/scion-frontiers/other-repo/commits/HEAD", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/scion-frontiers/other-repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/scion-frontiers/other-repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	resolver := &GitHubSkillResolver{
+		httpClient: server.Client(),
+		token:      "default-token",
+		apiBase:    server.URL,
+		rawBase:    server.URL + "/raw",
+		provisionCredentials: map[string]string{
+			"GH_SCION_FRONTIERS": "owner-level-token",
+		},
+	}
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://scion-frontiers/other-repo/my-skill"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+	if gotAuth != "Bearer owner-level-token" {
+		t.Errorf("expected owner-level-token to be used, got Authorization: %q", gotAuth)
+	}
+}
+
+// TestTokenForRef_ExplicitTokenWinsOverConvention verifies that an explicit
+// ?token= parameter on the URI takes precedence over convention keys.
+func TestTokenForRef_ExplicitTokenWinsOverConvention(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var gotAuth string
+	mux.HandleFunc("/repos/scion-frontiers/scion-repo-contrib/commits/HEAD", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/scion-frontiers/scion-repo-contrib/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/scion-frontiers/scion-repo-contrib/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	resolver := &GitHubSkillResolver{
+		httpClient: server.Client(),
+		token:      "default-token",
+		apiBase:    server.URL,
+		rawBase:    server.URL + "/raw",
+		provisionCredentials: map[string]string{
+			"MY_EXPLICIT_TOKEN":                      "explicit-token-value",
+			"GH_SCION_FRONTIERS__SCION_REPO_CONTRIB": "convention-token-value",
+			"GH_SCION_FRONTIERS":                     "owner-token-value",
+		},
+	}
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://scion-frontiers/scion-repo-contrib/my-skill?token=MY_EXPLICIT_TOKEN"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+	if gotAuth != "Bearer explicit-token-value" {
+		t.Errorf("expected explicit ?token= to win over convention key, got Authorization: %q", gotAuth)
+	}
+}
+
+// TestTokenForRef_CLILocalMode verifies that CLI local mode (nil
+// ProvisionCredentials) continues to work — convention key lookup on a nil
+// map is safe and falls through to the default token from os.Getenv.
+func TestTokenForRef_CLILocalMode(t *testing.T) {
+	r := &GitHubSkillResolver{
+		token:                "env-github-token",
+		provisionCredentials: nil, // CLI local mode: no ProvisionCredentials
+	}
+	ref := &GitHubSkillRef{
+		Owner: "scion-frontiers",
+		Repo:  "scion-repo-contrib",
+	}
+	got, err := r.tokenForRef(ref)
+	if err != nil {
+		t.Fatalf("CLI local mode should not produce an error, got: %v", err)
+	}
+	if got != "env-github-token" {
+		t.Errorf("expected env-github-token (default), got %q", got)
+	}
+}
+
 type stubSkillResolver struct {
 	result *ResolveResult
 }
