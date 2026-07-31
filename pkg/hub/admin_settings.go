@@ -60,6 +60,10 @@ type ServerConfigResponse struct {
 	DefaultMaxDuration   string            `json:"default_max_duration,omitempty"`
 	DefaultResources     *api.ResourceSpec `json:"default_resources,omitempty"`
 
+	// Default agent model settings
+	DefaultModel         string `json:"default_model,omitempty"`
+	DefaultThinkingLevel *int   `json:"default_thinking_level,omitempty"`
+
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty"`
 
@@ -88,6 +92,10 @@ type ServerConfigUpdateRequest struct {
 	DefaultMaxModelCalls *int              `json:"default_max_model_calls,omitempty"`
 	DefaultMaxDuration   *string           `json:"default_max_duration,omitempty"`
 	DefaultResources     *api.ResourceSpec `json:"default_resources,omitempty"`
+
+	// Default agent model settings
+	DefaultModel         *string `json:"default_model,omitempty"`
+	DefaultThinkingLevel *int    `json:"default_thinking_level,omitempty"`
 
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC *bool `json:"auto_inject_gcloud_adc,omitempty"`
@@ -242,6 +250,8 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultMaxModelCalls: vs.DefaultMaxModelCalls,
 		DefaultMaxDuration:   vs.DefaultMaxDuration,
 		DefaultResources:     vs.DefaultResources,
+		DefaultModel:         vs.DefaultModel,
+		DefaultThinkingLevel: vs.DefaultThinkingLevel,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 	}
 
@@ -440,6 +450,20 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 	}
 	if req.DefaultResources != nil {
 		raw["default_resources"] = marshalToMap(req.DefaultResources)
+	}
+	if req.DefaultModel != nil {
+		if *req.DefaultModel != "" {
+			raw["default_model"] = *req.DefaultModel
+		} else {
+			delete(raw, "default_model")
+		}
+	}
+	if req.DefaultThinkingLevel != nil {
+		if *req.DefaultThinkingLevel > 0 {
+			raw["default_thinking_level"] = *req.DefaultThinkingLevel
+		} else {
+			delete(raw, "default_thinking_level")
+		}
 	}
 	if req.AutoInjectGcloudADC != nil {
 		if *req.AutoInjectGcloudADC {

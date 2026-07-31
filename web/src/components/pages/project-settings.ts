@@ -20,7 +20,7 @@
  * Displays project-scoped templates, environment variables, secrets, and danger-zone actions (delete).
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Project, Template, AdminGroup, GitHubAppProjectStatus, GitHubTokenPermissions, RuntimeBroker, BrokerProfile, GCPServiceAccount, PreStartHook, PreStartHookSummary } from '../../shared/types.js';
@@ -552,6 +552,24 @@ export class ScionPageProjectSettings extends LitElement {
       color: var(--sl-color-success-600, #16a34a);
     }
 
+    /* Hub-default indicator: shown next to labels when a setting inherits from hub */
+    .hub-indicator-icon {
+      font-size: 0.75rem;
+      color: var(--sl-color-neutral-500, #64748b);
+      vertical-align: middle;
+      margin-left: 0.25rem;
+      cursor: help;
+    }
+
+    .config-field.hub-inherited {
+      border-left: 2px solid var(--sl-color-primary-300, #93c5fd);
+      padding-left: 0.5rem;
+    }
+
+    .config-field.hub-inherited > label {
+      color: var(--sl-color-neutral-600, #475569);
+    }
+
     .done-footer {
       display: flex;
       justify-content: flex-start;
@@ -1039,6 +1057,40 @@ export class ScionPageProjectSettings extends LitElement {
       return `Use hub default (${entry.hubValue})`;
     }
     return fallbackLabel;
+  }
+
+  /**
+   * Returns true when a setting is currently using its hub default — i.e. not
+   * explicitly set at the project level while a hub default is present.
+   */
+  private isHubDefault(annotationKey: string): boolean {
+    const entry = this.resolvedSettings[annotationKey];
+    return !!entry && !entry.projectSet && entry.hubDefault === 'present';
+  }
+
+  /**
+   * Renders a small hub-default indicator icon with a tooltip showing the
+   * inherited hub value. Returns `nothing` when the setting is overridden at
+   * the project level or when no hub default exists.
+   */
+  private renderHubIndicator(annotationKey: string) {
+    const entry = this.resolvedSettings[annotationKey];
+    if (!entry || entry.projectSet || entry.hubDefault !== 'present') {
+      return nothing;
+    }
+    let displayValue = 'set';
+    if (entry.hubValue != null) {
+      if (typeof entry.hubValue === 'boolean') {
+        displayValue = entry.hubValue ? 'enabled' : 'disabled';
+      } else {
+        displayValue = String(entry.hubValue);
+      }
+    }
+    return html`
+      <sl-tooltip content="Hub default: ${displayValue}">
+        <sl-icon name="building" class="hub-indicator-icon"></sl-icon>
+      </sl-tooltip>
+    `;
   }
 
   private async loadHarnessConfigs(): Promise<void> {
@@ -1551,8 +1603,8 @@ export class ScionPageProjectSettings extends LitElement {
 
           <sl-tab-panel name="general">
             <div class="config-form">
-              <div class="config-field">
-                <label>Default Template</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-template') ? 'hub-inherited' : ''}">
+                <label>Default Template ${this.renderHubIndicator('scion.io/default-template')}</label>
                 <sl-select
                   placeholder=${this.hubSelectLabel('scion.io/default-template', 'None (use server default)')}
                   clearable
@@ -1571,8 +1623,8 @@ export class ScionPageProjectSettings extends LitElement {
                 >
               </div>
 
-              <div class="config-field">
-                <label>Default Harness Config</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-harness-config') ? 'hub-inherited' : ''}">
+                <label>Default Harness Config ${this.renderHubIndicator('scion.io/default-harness-config')}</label>
                 <sl-select
                   placeholder=${this.hubSelectLabel('scion.io/default-harness-config', 'None (use server default)')}
                   clearable
@@ -1603,8 +1655,8 @@ export class ScionPageProjectSettings extends LitElement {
                 >
               </div>
 
-              <div class="config-field">
-                <label>Default Model</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-model') ? 'hub-inherited' : ''}">
+                <label>Default Model ${this.renderHubIndicator('scion.io/default-model')}</label>
                 <sl-select
                   placeholder="use harness default"
                   clearable
@@ -1643,8 +1695,8 @@ export class ScionPageProjectSettings extends LitElement {
                   `
                 : ''}
 
-              <div class="config-field">
-                <label>Default Thinking Level${this.defaultThinkingLevel !== null ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)">(${this.defaultThinkingLevel})</span>` : ''}</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-thinking-level') ? 'hub-inherited' : ''}">
+                <label>Default Thinking Level ${this.renderHubIndicator('scion.io/default-thinking-level')}${this.defaultThinkingLevel !== null ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)">(${this.defaultThinkingLevel})</span>` : ''}</label>
                 <div style="display:flex;align-items:center;gap:0.75rem">
                   <sl-range
                     min="0" max="100" step="1"
@@ -1666,8 +1718,8 @@ export class ScionPageProjectSettings extends LitElement {
                 </span>
               </div>
 
-              <div class="config-field">
-                <label>Telemetry</label>
+              <div class="config-field ${this.isHubDefault('scion.io/telemetry-enabled') ? 'hub-inherited' : ''}">
+                <label>Telemetry ${this.renderHubIndicator('scion.io/telemetry-enabled')}</label>
                 <sl-select
                   value=${this.configTelemetryEnabled === true
                     ? 'enabled'
@@ -1784,8 +1836,8 @@ export class ScionPageProjectSettings extends LitElement {
                 >Applied to new agents unless overridden by template or agent config.</span
               >
 
-              <div class="config-field">
-                <label>Default Max Turns</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-max-turns') ? 'hub-inherited' : ''}">
+                <label>Default Max Turns ${this.renderHubIndicator('scion.io/default-max-turns')}</label>
                 <sl-input
                   type="number"
                   placeholder=${this.hubHint('scion.io/default-max-turns') || 'No limit'}
@@ -1799,8 +1851,8 @@ export class ScionPageProjectSettings extends LitElement {
                 <span class="field-help">Maximum conversation turns per agent.</span>
               </div>
 
-              <div class="config-field">
-                <label>Default Max Model Calls</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-max-model-calls') ? 'hub-inherited' : ''}">
+                <label>Default Max Model Calls ${this.renderHubIndicator('scion.io/default-max-model-calls')}</label>
                 <sl-input
                   type="number"
                   placeholder=${this.hubHint('scion.io/default-max-model-calls') || 'No limit'}
@@ -1816,8 +1868,8 @@ export class ScionPageProjectSettings extends LitElement {
                 <span class="field-help">Maximum LLM API calls per agent.</span>
               </div>
 
-              <div class="config-field">
-                <label>Default Max Duration</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-max-duration') ? 'hub-inherited' : ''}">
+                <label>Default Max Duration ${this.renderHubIndicator('scion.io/default-max-duration')}</label>
                 <sl-input
                   type="text"
                   placeholder=${this.hubHint('scion.io/default-max-duration') || 'e.g. 2h, 30m'}
@@ -1838,8 +1890,8 @@ export class ScionPageProjectSettings extends LitElement {
                 >Default resource requests and limits for new agents.</span
               >
 
-              <div class="config-field">
-                <label>CPU Request</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-resources-cpu-request') ? 'hub-inherited' : ''}">
+                <label>CPU Request ${this.renderHubIndicator('scion.io/default-resources-cpu-request')}</label>
                 <sl-input
                   type="text"
                   placeholder=${this.hubHint('scion.io/default-resources-cpu-request') || 'e.g. 500m, 1'}
@@ -1851,8 +1903,8 @@ export class ScionPageProjectSettings extends LitElement {
                 ></sl-input>
               </div>
 
-              <div class="config-field">
-                <label>Memory Request</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-resources-memory-request') ? 'hub-inherited' : ''}">
+                <label>Memory Request ${this.renderHubIndicator('scion.io/default-resources-memory-request')}</label>
                 <sl-input
                   type="text"
                   placeholder=${this.hubHint('scion.io/default-resources-memory-request') || 'e.g. 512Mi, 1Gi'}
@@ -1864,8 +1916,8 @@ export class ScionPageProjectSettings extends LitElement {
                 ></sl-input>
               </div>
 
-              <div class="config-field">
-                <label>CPU Limit</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-resources-cpu-limit') ? 'hub-inherited' : ''}">
+                <label>CPU Limit ${this.renderHubIndicator('scion.io/default-resources-cpu-limit')}</label>
                 <sl-input
                   type="text"
                   placeholder=${this.hubHint('scion.io/default-resources-cpu-limit') || 'e.g. 1, 2'}
@@ -1877,8 +1929,8 @@ export class ScionPageProjectSettings extends LitElement {
                 ></sl-input>
               </div>
 
-              <div class="config-field">
-                <label>Memory Limit</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-resources-memory-limit') ? 'hub-inherited' : ''}">
+                <label>Memory Limit ${this.renderHubIndicator('scion.io/default-resources-memory-limit')}</label>
                 <sl-input
                   type="text"
                   placeholder=${this.hubHint('scion.io/default-resources-memory-limit') || 'e.g. 1Gi, 2Gi'}
@@ -1890,8 +1942,8 @@ export class ScionPageProjectSettings extends LitElement {
                 ></sl-input>
               </div>
 
-              <div class="config-field">
-                <label>Disk</label>
+              <div class="config-field ${this.isHubDefault('scion.io/default-resources-disk') ? 'hub-inherited' : ''}">
+                <label>Disk ${this.renderHubIndicator('scion.io/default-resources-disk')}</label>
                 <sl-input
                   type="text"
                   placeholder=${this.hubHint('scion.io/default-resources-disk') || 'e.g. 10Gi'}

@@ -284,6 +284,10 @@ type VersionedSettings struct {
 	DefaultMaxDuration   string            `json:"default_max_duration,omitempty" yaml:"default_max_duration,omitempty" koanf:"default_max_duration"`
 	DefaultResources     *api.ResourceSpec `json:"default_resources,omitempty" yaml:"default_resources,omitempty" koanf:"default_resources"`
 
+	// Default agent model settings
+	DefaultModel         string `json:"default_model,omitempty" yaml:"default_model,omitempty" koanf:"default_model"`
+	DefaultThinkingLevel *int   `json:"default_thinking_level,omitempty" yaml:"default_thinking_level,omitempty" koanf:"default_thinking_level"`
+
 	// AutoInjectGcloudADC controls whether the host's gcloud Application Default
 	// Credentials file is automatically injected into agent containers in
 	// co-located (workstation) mode.

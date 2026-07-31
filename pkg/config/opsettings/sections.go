@@ -57,6 +57,8 @@ type AgentDefaultsSettings struct {
 	DefaultMaxModelCalls int               `json:"default_max_model_calls,omitempty"`
 	DefaultMaxDuration   string            `json:"default_max_duration,omitempty"`
 	DefaultResources     *api.ResourceSpec `json:"default_resources,omitempty"`
+	DefaultModel         string            `json:"default_model,omitempty"`
+	DefaultThinkingLevel *int              `json:"default_thinking_level,omitempty"`
 }
 
 // EndpointsSettings holds Layer-1 endpoint configuration.
