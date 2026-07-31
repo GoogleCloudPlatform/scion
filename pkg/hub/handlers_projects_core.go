@@ -1470,6 +1470,12 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /clone path
+	if subPath == "clone" {
+		s.handleProjectClone(w, r, projectID)
+		return
+	}
+
 	// Check for nested /discover-templates path
 	if subPath == "discover-templates" {
 		s.handleProjectDiscoverTemplates(w, r, projectID)
