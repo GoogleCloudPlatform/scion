@@ -36,6 +36,7 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
+import '../shared/quick-message-dialog.js';
 
 @customElement('scion-page-agents')
 export class ScionPageAgents extends LitElement {
@@ -104,6 +105,15 @@ export class ScionPageAgents extends LitElement {
 
   @state()
   private sortDir: SortDir = 'desc';
+
+  @state()
+  private quickMessageAgentId = '';
+
+  @state()
+  private quickMessageAgentName = '';
+
+  @state()
+  private quickMessageOpen = false;
 
   static override styles = [
     listPageStyles,
@@ -724,6 +734,13 @@ export class ScionPageAgents extends LitElement {
         ${this.renderFilterBar()}
         ${this.renderAgents()}
       `}
+
+      <scion-quick-message-dialog
+        agentId=${this.quickMessageAgentId}
+        agentName=${this.quickMessageAgentName}
+        ?open=${this.quickMessageOpen}
+        @sl-request-close=${() => { this.quickMessageOpen = false; }}
+      ></scion-quick-message-dialog>
     `;
   }
 
@@ -879,6 +896,26 @@ export class ScionPageAgents extends LitElement {
     const isLoading = this.actionLoading[agent.id] || false;
 
     return html`
+      ${can(agent._capabilities, 'message') ? html`
+        <sl-tooltip content="Message">
+          <span style="display: inline-flex">
+            <sl-button
+              class="action-btn-primary"
+              variant="default"
+              size="small"
+              outline
+              @click=${() => {
+                this.quickMessageAgentId = agent.id;
+                this.quickMessageAgentName = agent.name;
+                this.quickMessageOpen = true;
+              }}
+              aria-label="Message"
+            >
+              <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+            </sl-button>
+          </span>
+        </sl-tooltip>
+      ` : nothing}
       ${can(agent._capabilities, 'attach') ? html`
         <sl-tooltip content="Terminal">
           <span style="display: inline-flex">
