@@ -2,7 +2,8 @@
 name: scion-cli-operations
 description: >-
   Operational constraints for Scion agents running in containerized sandboxes.
-  Covers prohibited commands, hub-only API access, and system message format. Complements the scion CLI reference and messaging skills.
+  Covers prohibited commands and hub-only API access.
+  Complements the scion CLI reference and messaging skills.
 ---
 
 # Scion CLI Operating Constraints
@@ -37,16 +38,3 @@ scion start <name> \
 - **Inspect an Agent**: `scion look <agent-id>` — inspect the recent output and current terminal-UI state of any running agent.
 - **Full CLI Details**: `scion --help` — for specific details on all hierarchical commands.
 - **Focused Usage**: Use the scion CLI as needed for your task. Do not pre-emptively explore `.scion` folders, read agent-template files, etc. — focus only on what you need.
-
-## System Message Format
-
-You may be sent messages via the system. These will include markers:
-
-```
----BEGIN SCION MESSAGE---
----END SCION MESSAGE---
-```
-
-They will contain information about the sender and may be instructions, or a notification about an agent you are interacting with (for example, it completed its task or needs input).
-
-See scion-messaging skill for more information on messages
