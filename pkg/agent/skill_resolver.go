@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -234,8 +235,10 @@ type FileEntry struct {
 //
 // Precedence (highest to lowest): project > template > user > hub > platform > (unset)
 //
-// Rationale: project-level settings take precedence, consistent with other
-// project-level overrides in the system.
+// Rationale: project-level settings take precedence for destination-name
+// collisions, as approved in #654. Note: hub-side base-URI dedup
+// (mergeSkillRefs) uses the opposite order (template > project); the two
+// dedup passes operate on different dimensions (base URI vs dest name).
 var scopeRank = map[string]int{
 	"":         0,
 	"platform": 1,
@@ -271,11 +274,14 @@ func deduplicateByDestName(skills []ResolvedSkill) ([]ResolvedSkill, []SkillColl
 
 	winners := map[string]*candidate{} // destName → winning candidate
 	var collisions []SkillCollisionEntry
+	var passthrough []ResolvedSkill // skills with DestName errors; cannot participate in dedup
 
 	for i, skill := range skills {
 		dest, err := skill.DestName()
 		if err != nil {
-			// DestName errors are caught later during install; pass through.
+			// Cannot participate in dedup; pass through so the install loop
+			// surfaces the DestName error with a clear diagnostic.
+			passthrough = append(passthrough, skill)
 			continue
 		}
 
@@ -333,16 +339,16 @@ func deduplicateByDestName(skills []ResolvedSkill) ([]ResolvedSkill, []SkillColl
 	for _, c := range winners {
 		sorted = append(sorted, c)
 	}
-	// Sort by index for stable output order.
-	for i := 1; i < len(sorted); i++ {
-		for j := i; j > 0 && sorted[j].index < sorted[j-1].index; j-- {
-			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-		}
+	slices.SortFunc(sorted, func(a, b *candidate) int {
+		return a.index - b.index
+	})
+	deduplicated := make([]ResolvedSkill, 0, len(sorted)+len(passthrough))
+	for _, c := range sorted {
+		deduplicated = append(deduplicated, c.skill)
 	}
-	deduplicated := make([]ResolvedSkill, len(sorted))
-	for i, c := range sorted {
-		deduplicated[i] = c.skill
-	}
+	// Append skills with DestName errors so installResolvedSkills surfaces
+	// the error rather than silently dropping the skill.
+	deduplicated = append(deduplicated, passthrough...)
 
 	return deduplicated, collisions
 }
@@ -373,7 +379,10 @@ func installResolvedSkills(
 	}
 
 	for _, skill := range skills {
-		dest, _ := skill.DestName() // already validated above
+		dest, err := skill.DestName()
+		if err != nil {
+			return nil, fmt.Errorf("skill %q has invalid destination name: %w", skill.URI, err)
+		}
 
 		entry, err := installOneSkill(ctx, skill, dest, skillsDest)
 		if err != nil {

@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
+
+// collectHandler is a slog.Handler that collects records for test assertions.
+type collectHandler struct {
+	records *[]slog.Record
+}
+
+func (h *collectHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+func (h *collectHandler) Handle(_ context.Context, r slog.Record) error {
+	*h.records = append(*h.records, r)
+	return nil
+}
+func (h *collectHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *collectHandler) WithGroup(_ string) slog.Handler       { return h }
 
 // mockResolver implements SkillResolver for testing.
 type mockResolver struct {
@@ -1076,10 +1090,15 @@ func TestDeduplicateByDestName_CollisionRecordedInRecord(t *testing.T) {
 	}
 }
 
-func TestDeduplicateByDestName_OptionalLoserNoWarn(t *testing.T) {
-	// When the dropped skill is optional, the collision should still be recorded
-	// but the log level should be Debug, not Warn. We verify the collision entry
-	// is present and that the Optional field on the loser is correctly set.
+func TestDeduplicateByDestName_OptionalLoserUsesDebugLevel(t *testing.T) {
+	// When the dropped skill is optional, the collision log should be at Debug
+	// level, not Warn. Capture slog output to verify.
+	var records []slog.Record
+	handler := &collectHandler{records: &records}
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	defer slog.SetDefault(oldLogger)
+
 	skills := []ResolvedSkill{
 		{Name: "my-skill", URI: "skill://scion/core/my-skill@1.0", Scope: "hub", Optional: true},
 		{Name: "my-skill", URI: "skill://scion/core/my-skill@2.0", Scope: "project"},
@@ -1096,9 +1115,22 @@ func TestDeduplicateByDestName_OptionalLoserNoWarn(t *testing.T) {
 	if len(collisions) != 1 {
 		t.Fatalf("expected 1 collision, got %d", len(collisions))
 	}
-	// The collision entry should reflect the dropped (optional) skill.
 	if collisions[0].DroppedURI != "skill://scion/core/my-skill@1.0" {
 		t.Errorf("expected optional skill to be dropped, got %q", collisions[0].DroppedURI)
+	}
+
+	// Verify that the collision was logged at Debug level, not Warn.
+	var foundCollisionLog bool
+	for _, r := range records {
+		if strings.Contains(r.Message, "collision resolved") {
+			foundCollisionLog = true
+			if r.Level != slog.LevelDebug {
+				t.Errorf("expected Debug level for optional loser collision log, got %v", r.Level)
+			}
+		}
+	}
+	if !foundCollisionLog {
+		t.Error("expected a collision log record, found none")
 	}
 }
 
@@ -1130,6 +1162,85 @@ func TestDeduplicateByDestName_FullPrecedenceOrder(t *testing.T) {
 				t.Errorf("winner scope = %q, want %q", collisions[0].WinnerScope, higher)
 			}
 		})
+	}
+}
+
+func TestDeduplicateByDestName_DestNameErrorPassthrough(t *testing.T) {
+	// A skill with an invalid DestName (e.g. "INVALID" fails ValidateSkillName)
+	// must not be silently dropped. It should pass through the dedup and surface
+	// as an error during install.
+	skills := []ResolvedSkill{
+		{Name: "good-skill", URI: "skill://scion/core/good-skill@1.0", Scope: "template"},
+		{Name: "INVALID", URI: "skill://scion/core/bad@1.0", Scope: "project"}, // invalid name
+	}
+
+	deduped, collisions := deduplicateByDestName(skills)
+
+	// Both should be in the output: good-skill via the winners map, bad via passthrough.
+	if len(deduped) != 2 {
+		t.Fatalf("expected 2 skills (including passthrough), got %d", len(deduped))
+	}
+	if len(collisions) != 0 {
+		t.Errorf("expected 0 collisions, got %d", len(collisions))
+	}
+
+	// Verify the invalid skill is in the output so installResolvedSkills can surface the error.
+	foundInvalid := false
+	for _, s := range deduped {
+		if s.Name == "INVALID" {
+			foundInvalid = true
+		}
+	}
+	if !foundInvalid {
+		t.Error("expected invalid-name skill to pass through dedup, but it was dropped")
+	}
+
+	// Verify installResolvedSkills surfaces the error for the invalid skill.
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	if err == nil {
+		t.Fatal("expected error for skill with invalid DestName")
+	}
+	if !strings.Contains(err.Error(), "invalid") {
+		t.Errorf("error should mention invalid destination name, got: %v", err)
+	}
+}
+
+func TestDeduplicateByDestName_ThreeWayCollision(t *testing.T) {
+	// Three skills collide on the same DestName. The highest scope should win,
+	// and two collision entries should be recorded.
+	skills := []ResolvedSkill{
+		{Name: "shared", URI: "skill://hub/shared@1.0", Scope: "hub"},
+		{Name: "shared", URI: "skill://template/shared@2.0", Scope: "template"},
+		{Name: "shared", URI: "skill://project/shared@3.0", Scope: "project"},
+	}
+
+	deduped, collisions := deduplicateByDestName(skills)
+
+	if len(deduped) != 1 {
+		t.Fatalf("expected 1 skill after three-way dedup, got %d", len(deduped))
+	}
+	if deduped[0].URI != "skill://project/shared@3.0" {
+		t.Errorf("expected project-scope skill to win three-way collision, got URI %q", deduped[0].URI)
+	}
+	if deduped[0].Scope != "project" {
+		t.Errorf("expected scope %q, got %q", "project", deduped[0].Scope)
+	}
+
+	// Two collisions should be recorded (hub→template, then template→project).
+	if len(collisions) != 2 {
+		t.Fatalf("expected 2 collision entries for three-way, got %d", len(collisions))
+	}
+	// First collision: template beats hub.
+	if collisions[0].WinnerURI != "skill://template/shared@2.0" || collisions[0].DroppedURI != "skill://hub/shared@1.0" {
+		t.Errorf("first collision: winner=%q dropped=%q, want template over hub",
+			collisions[0].WinnerURI, collisions[0].DroppedURI)
+	}
+	// Second collision: project beats template.
+	if collisions[1].WinnerURI != "skill://project/shared@3.0" || collisions[1].DroppedURI != "skill://template/shared@2.0" {
+		t.Errorf("second collision: winner=%q dropped=%q, want project over template",
+			collisions[1].WinnerURI, collisions[1].DroppedURI)
 	}
 }
 

@@ -862,13 +862,16 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	// Skills: append (deferred override semantics per #230).
 	// Annotate override skills with "template" scope for destination-name
 	// collision resolution on the local (non-hub) provisioning path.
+	// Copy the slice to avoid mutating the caller's config.
 	if len(override.Skills) > 0 {
-		for i := range override.Skills {
-			if override.Skills[i].Scope == "" {
-				override.Skills[i].Scope = "template"
+		annotated := make([]api.SkillReference, len(override.Skills))
+		copy(annotated, override.Skills)
+		for i := range annotated {
+			if annotated[i].Scope == "" {
+				annotated[i].Scope = "template"
 			}
 		}
-		result.Skills = append(result.Skills, override.Skills...)
+		result.Skills = append(result.Skills, annotated...)
 	}
 
 	return &result
