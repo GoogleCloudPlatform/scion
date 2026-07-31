@@ -239,6 +239,23 @@ func TestCreateToken(t *testing.T) {
 		}
 	})
 
+	t.Run("accepts project:update", func(t *testing.T) {
+		_, token, err := svc.CreateToken(ctx, tid("user-1"), "proj-update-token", tid("project-1"),
+			[]string{"project:read", "project:update"}, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		found := false
+		for _, sc := range token.Scopes {
+			if sc == store.UATScopeProjectUpdate {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected project:update in token scopes, got %v", token.Scopes)
+		}
+	})
+
 	t.Run("rejects invalid scope", func(t *testing.T) {
 		_, _, err := svc.CreateToken(ctx, tid("user-1"), "bad-token", tid("project-1"),
 			[]string{"invalid:scope"}, nil)

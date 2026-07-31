@@ -1440,6 +1440,7 @@ const UATPrefix = "scion_pat_"
 // UAT scope constants define the allowed capability scopes.
 const (
 	UATScopeProjectRead   = "project:read"
+	UATScopeProjectUpdate = "project:update"
 	UATScopeAgentCreate   = "agent:create"
 	UATScopeAgentRead     = "agent:read"
 	UATScopeAgentList     = "agent:list"
@@ -1455,6 +1456,7 @@ const (
 // UATValidScopes is the set of all valid UAT scope strings.
 var UATValidScopes = map[string]bool{
 	UATScopeProjectRead:   true,
+	UATScopeProjectUpdate: true,
 	UATScopeAgentCreate:   true,
 	UATScopeAgentRead:     true,
 	UATScopeAgentList:     true,
