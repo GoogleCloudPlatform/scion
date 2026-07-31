@@ -300,9 +300,13 @@ export class ScionAgentTreeView extends LitElement {
       color: var(--sl-color-neutral-600);
     }
 
-    .node-wrapper:hover .terminal-btn,
+    .node-wrapper:hover .terminal-btn:not([disabled]),
     .node-wrapper:focus-within .terminal-btn:not([disabled]) {
       opacity: 1;
+    }
+
+    .node-wrapper:hover .terminal-btn[disabled] {
+      opacity: 0.4;
     }
 
     .terminal-btn:hover {
@@ -310,12 +314,7 @@ export class ScionAgentTreeView extends LitElement {
     }
 
     .terminal-btn[disabled] {
-      opacity: 0.4;
       pointer-events: none;
-    }
-
-    .node-wrapper:hover .terminal-btn[disabled] {
-      opacity: 0.4;
     }
 
     /*
