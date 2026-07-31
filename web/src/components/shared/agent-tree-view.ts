@@ -286,7 +286,8 @@ export class ScionAgentTreeView extends LitElement {
 
     /*
      * Terminal icon button — lower-right corner of the agent card.
-     * Only visible on hover; uses sl-icon-button for minimal padding.
+     * Hidden by default; revealed on hover or keyboard focus-within so
+     * the button is reachable without a pointer device.
      */
     .terminal-btn {
       position: absolute;
@@ -299,7 +300,8 @@ export class ScionAgentTreeView extends LitElement {
       color: var(--sl-color-neutral-600);
     }
 
-    .node-wrapper:hover .terminal-btn {
+    .node-wrapper:hover .terminal-btn,
+    .node-wrapper:focus-within .terminal-btn:not([disabled]) {
       opacity: 1;
     }
 
