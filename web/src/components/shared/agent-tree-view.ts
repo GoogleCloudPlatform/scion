@@ -305,7 +305,8 @@ export class ScionAgentTreeView extends LitElement {
       opacity: 1;
     }
 
-    .node-wrapper:hover .terminal-btn[disabled] {
+    .node-wrapper:hover .terminal-btn[disabled],
+    .node-wrapper:focus-within .terminal-btn[disabled] {
       opacity: 0.4;
     }
 
@@ -718,7 +719,7 @@ export class ScionAgentTreeView extends LitElement {
             class="terminal-btn"
             name="terminal"
             label="Terminal"
-            href="/agents/${agent.id}/terminal"
+            href=${isTerminalAvailable(agent) ? `/agents/${agent.id}/terminal` : nothing}
             ?disabled=${!isTerminalAvailable(agent)}
           ></sl-icon-button>
         ` : nothing}
