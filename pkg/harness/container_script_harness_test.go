@@ -293,6 +293,8 @@ func TestContainerScriptHarness_ApplyAuthSettings_ExplicitTypeFromResolvedAuth(t
 	// This ensures the container-side provisioner uses the Go side's resolved
 	// auth method instead of falling back to auto-detection, which can pick a
 	// wrong higher-priority method (e.g., api-key over vertex-ai).
+	// entry.AuthSelectedType is intentionally empty here (zero value from
+	// newTestContainerScriptHarness) to isolate the resolved-auth signal.
 	h, _ := newTestContainerScriptHarness(t)
 	agentHome := t.TempDir()
 
