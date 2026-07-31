@@ -40,7 +40,7 @@ func (h *collectHandler) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 func (h *collectHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
-func (h *collectHandler) WithGroup(_ string) slog.Handler       { return h }
+func (h *collectHandler) WithGroup(_ string) slog.Handler      { return h }
 
 // mockResolver implements SkillResolver for testing.
 type mockResolver struct {
