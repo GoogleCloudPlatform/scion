@@ -56,6 +56,7 @@ import type { ScionAgentLogViewer } from '../shared/agent-log-viewer.js';
 import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
 import '../shared/hash-display.js';
+import '../shared/quick-message-dialog.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -135,6 +136,9 @@ export class ScionPageAgentDetail extends LitElement {
 
   @state()
   private subscriptionLoading = false;
+
+  @state()
+  private quickMessageOpen = false;
 
   static override styles = css`
     :host {
@@ -969,6 +973,13 @@ export class ScionPageAgentDetail extends LitElement {
         </sl-tab-panel>
         <sl-tab-panel name="configuration">${this.renderConfigurationTab()}</sl-tab-panel>
       </sl-tab-group>
+
+      <scion-quick-message-dialog
+        agentId=${this.agentId}
+        agentName=${this.agent.name || ''}
+        ?open=${this.quickMessageOpen}
+        @sl-request-close=${() => { this.quickMessageOpen = false; }}
+      ></scion-quick-message-dialog>
     `;
   }
 
@@ -1013,6 +1024,19 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
         </div>
         <div class="header-actions">
+          ${can(agent._capabilities, 'message')
+            ? html`
+                <sl-button
+                  variant="default"
+                  size="small"
+                  outline
+                  @click=${() => { this.quickMessageOpen = true; }}
+                >
+                  <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                  Message
+                </sl-button>
+              `
+            : nothing}
           ${can(agent._capabilities, 'attach')
             ? html`
                 <a href="/agents/${this.agentId}/terminal" style="text-decoration: none;">

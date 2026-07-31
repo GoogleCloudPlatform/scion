@@ -46,6 +46,7 @@ import {
 } from '../../shared/lineage.js';
 import type { StatusType } from './status-badge.js';
 import './status-badge.js';
+import './quick-message-dialog.js';
 
 const VARIANT_COLOR: Record<StatusVariant, string> = {
   success: 'var(--sl-color-success-600)',
@@ -87,6 +88,9 @@ export class ScionAgentTreeView extends LitElement {
   @state() private scale = 1;
   @state() private panX = 0;
   @state() private panY = 0;
+  @state() private quickMessageAgentId = '';
+  @state() private quickMessageAgentName = '';
+  @state() private quickMessageOpen = false;
 
   @query('.canvas') private canvasEl?: HTMLDivElement;
 
@@ -316,6 +320,30 @@ export class ScionAgentTreeView extends LitElement {
 
     .terminal-btn[disabled] {
       pointer-events: none;
+    }
+
+    /*
+     * Message icon button — lower-right corner, left of the terminal button.
+     * Same hover-reveal pattern as .terminal-btn.
+     */
+    .message-btn {
+      position: absolute;
+      bottom: 4px;
+      right: 28px;
+      z-index: 1;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+      font-size: 1rem;
+      color: var(--sl-color-neutral-600);
+    }
+
+    .node-wrapper:hover .message-btn,
+    .node-wrapper:focus-within .message-btn {
+      opacity: 1;
+    }
+
+    .message-btn:hover {
+      color: var(--sl-color-primary-600);
     }
 
     /*
@@ -632,6 +660,13 @@ export class ScionAgentTreeView extends LitElement {
           <sl-button size="small" @click=${() => this.fitToView(width, height)} title="Fit to view">Fit</sl-button>
         </div>
       </div>
+
+      <scion-quick-message-dialog
+        agentId=${this.quickMessageAgentId}
+        agentName=${this.quickMessageAgentName}
+        ?open=${this.quickMessageOpen}
+        @sl-request-close=${() => { this.quickMessageOpen = false; }}
+      ></scion-quick-message-dialog>
     `;
   }
 
@@ -714,6 +749,20 @@ export class ScionAgentTreeView extends LitElement {
           ></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
         </a>
+        ${can(agent._capabilities, 'message') ? html`
+          <sl-icon-button
+            class="message-btn"
+            name="chat-dots"
+            label="Message"
+            @click=${(e: Event) => {
+              e.preventDefault();
+              e.stopPropagation();
+              this.quickMessageAgentId = agent.id;
+              this.quickMessageAgentName = agent.name;
+              this.quickMessageOpen = true;
+            }}
+          ></sl-icon-button>
+        ` : nothing}
         ${can(agent._capabilities, 'attach') ? html`
           <sl-icon-button
             class="terminal-btn"
