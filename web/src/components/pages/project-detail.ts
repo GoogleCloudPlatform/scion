@@ -179,6 +179,30 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private editorDataSources: Record<string, FileEditorDataSource> = {};
 
+  /**
+   * Whether the clone dialog is open
+   */
+  @state()
+  private cloneDialogOpen = false;
+
+  /**
+   * Name for the cloned project
+   */
+  @state()
+  private cloneName = '';
+
+  /**
+   * Whether the clone operation is in progress
+   */
+  @state()
+  private cloneLoading = false;
+
+  /**
+   * Error message from clone operation (shown inline in dialog)
+   */
+  @state()
+  private cloneError = '';
+
   static override styles = css`
     :host {
       display: block;
@@ -521,6 +545,30 @@ export class ScionPageProjectDetail extends LitElement {
       border-radius: var(--scion-radius, 0.5rem);
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 1rem;
+    }
+
+    .clone-summary {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 1rem;
+      line-height: 1.5;
+    }
+
+    .clone-summary strong {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .clone-slug-preview {
+      font-family: var(--scion-font-mono, monospace);
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.5rem;
+    }
+
+    .clone-error {
+      color: var(--sl-color-danger-700, #b91c1c);
+      font-size: 0.875rem;
+      margin-top: 0.75rem;
     }
 
     .back-link {
@@ -1280,6 +1328,106 @@ export class ScionPageProjectDetail extends LitElement {
     }
   }
 
+  private slugify(text: string): string {
+    return text
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  private openCloneDialog(): void {
+    this.cloneName = this.project ? `${this.project.name} copy` : '';
+    this.cloneError = '';
+    this.cloneLoading = false;
+    this.cloneDialogOpen = true;
+  }
+
+  private async handleCloneProject(): Promise<void> {
+    if (!this.cloneName.trim()) {
+      this.cloneError = 'Project name is required.';
+      return;
+    }
+
+    this.cloneLoading = true;
+    this.cloneError = '';
+
+    try {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/clone`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: this.cloneName.trim() }),
+      });
+
+      if (!response.ok) {
+        const errorText = await extractApiError(response, 'Failed to clone project');
+        throw new Error(errorText);
+      }
+
+      const cloned = (await response.json()) as { id: string; name: string; slug: string };
+      this.cloneDialogOpen = false;
+
+      // Navigate to the newly cloned project
+      window.history.pushState({}, '', `/projects/${cloned.id}`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } catch (err) {
+      this.cloneError = err instanceof Error ? err.message : 'Failed to clone project';
+    } finally {
+      this.cloneLoading = false;
+    }
+  }
+
+  private renderCloneDialog() {
+    return html`
+      <sl-dialog
+        label="Clone Project"
+        ?open=${this.cloneDialogOpen}
+        @sl-request-close=${(e: CustomEvent) => {
+          if (this.cloneLoading) {
+            e.preventDefault();
+            return;
+          }
+          this.cloneDialogOpen = false;
+        }}
+      >
+        <sl-input
+          label="Name"
+          .value=${this.cloneName}
+          @sl-input=${(e: Event) => (this.cloneName = (e.target as HTMLInputElement).value)}
+          ?disabled=${this.cloneLoading}
+        ></sl-input>
+        <div class="clone-slug-preview">
+          Slug: ${this.slugify(this.cloneName) || '...'}
+        </div>
+        <div class="clone-summary">
+          <strong>Copies:</strong> settings, labels, environment variables, injected skills,
+          pre-start hook, project harness configs and templates.<br />
+          <strong>Does not copy:</strong> secrets, agents, history, or chat integrations.
+        </div>
+        ${this.cloneError
+          ? html`<div class="clone-error">${this.cloneError}</div>`
+          : nothing}
+        <sl-button
+          slot="footer"
+          variant="primary"
+          @click=${() => this.handleCloneProject()}
+          ?loading=${this.cloneLoading}
+          ?disabled=${this.cloneLoading}
+        >
+          Clone
+        </sl-button>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => (this.cloneDialogOpen = false)}
+          ?disabled=${this.cloneLoading}
+        >
+          Cancel
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
   override render() {
     if (this.loading) {
       return this.renderLoading();
@@ -1328,6 +1476,14 @@ export class ScionPageProjectDetail extends LitElement {
                 >
                   <sl-icon slot="prefix" name="arrow-down-circle"></sl-icon>
                   Pull Latest
+                </sl-button>
+              `
+            : nothing}
+          ${can(this.project?._capabilities, 'read')
+            ? html`
+                <sl-button size="small" @click=${() => this.openCloneDialog()}>
+                  <sl-icon slot="prefix" name="copy"></sl-icon>
+                  Clone
                 </sl-button>
               `
             : nothing}
@@ -1467,6 +1623,8 @@ export class ScionPageProjectDetail extends LitElement {
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
 
       ${this.shouldShowFilesSection() ? this.renderFilesSection() : ''}
+
+      ${this.renderCloneDialog()}
     `;
   }
 
