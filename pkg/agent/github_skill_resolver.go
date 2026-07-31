@@ -179,7 +179,7 @@ func (r *GitHubSkillResolver) tokenForRef(ref *GitHubSkillRef) (string, error) {
 
 	// Priority 4: Default GITHUB_TOKEN cascade.
 	if r.token != "" {
-		fmt.Fprintf(os.Stderr, "github: no convention credential for %s/%s, using default\n", ref.Owner, ref.Repo)
+		util.Debugf("github: no convention credential for %s/%s, using default", ref.Owner, ref.Repo)
 		return r.token, nil
 	}
 
