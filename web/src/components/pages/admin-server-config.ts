@@ -1694,7 +1694,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       const resolvedModel = this.defaultModelSelection === 'other'
         ? this.defaultCustomModelId.trim()
         : this.defaultModelSelection;
-      payload.default_model = resolvedModel || undefined;
+      payload.default_model = resolvedModel || '';
     }
     if (ok('default_thinking_level')) {
       payload.default_thinking_level = this.defaultThinkingLevel ?? 0;

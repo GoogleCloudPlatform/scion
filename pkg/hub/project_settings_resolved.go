@@ -62,7 +62,7 @@ import (
 //   - In file/SQLite mode there is no OperationalSettings at all, so no
 //     agent_defaults document can be read. Every key backed by that section is
 //     genuinely UNKNOWN, not absent.
-//   - Five of the six opsettings.AgentDefaultsSettings fields are non-pointer
+//   - Six of the eight opsettings.AgentDefaultsSettings fields are non-pointer
 //     scalars marshalled with `omitempty`, so a value explicitly configured to
 //     the zero value is dropped at write time and is indistinguishable from
 //     never-configured. Where that ambiguity is reachable, absence is UNKNOWN.
@@ -488,7 +488,7 @@ func (s *Server) hubDefaultFor(
 			// whose fields are non-pointer scalars. Its zero value cannot
 			// distinguish "unset" from "configured to zero", so it cannot
 			// express UNKNOWN at all — an implementation built on it would
-			// report ABSENT for all five agent_defaults-backed keys in file
+			// report ABSENT for all seven agent_defaults-backed keys in file
 			// mode, confidently, on the strength of a zero value upstream
 			// documents as meaningless. Do not simplify this back to the typed
 			// accessor; that is the bug, not the cleanup.
@@ -613,7 +613,7 @@ func (s *Server) hubAgentDefaultsDoc() (map[string]json.RawMessage, bool) {
 // rawSection returns a section's raw persisted JSON document, pre-unmarshal.
 //
 // This exists because presence cannot be recovered after unmarshalling into the
-// section struct: opsettings.AgentDefaultsSettings stores five of its six
+// section struct: opsettings.AgentDefaultsSettings stores six of its eight
 // fields as non-pointer scalars, so "configured to zero" and "never configured"
 // become the same value. The raw document still distinguishes them, to the
 // extent the write path preserved the distinction at all.
