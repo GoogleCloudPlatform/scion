@@ -35,8 +35,8 @@ func createSourceProject(t *testing.T, srv *Server, s store.Store) *store.Projec
 		OwnerID:                DevUserID,
 		CreatedBy:              DevUserID,
 		Annotations: map[string]string{
-			"scion.io/default-model":         "claude-sonnet",
-			"scion.io/default-max-turns":     "100",
+			"scion.io/default-model":          "claude-sonnet",
+			"scion.io/default-max-turns":      "100",
 			"scion.io/default-harness-config": "my-config",
 		},
 		Labels: map[string]string{
@@ -275,7 +275,7 @@ func TestProjectClone_HappyPath(t *testing.T) {
 	}
 	assert.Equal(t, "https://api.example.com", envKeys["API_URL"])
 	assert.Equal(t, "token-value-123", envKeys["MASKED_TOKEN"]) // Sensitive is copied
-	assert.NotContains(t, envKeys, "SECRET_KEY")                 // Secret is NOT copied
+	assert.NotContains(t, envKeys, "SECRET_KEY")                // Secret is NOT copied
 
 	// Skill injections copied
 	cloneSkills, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, clone.ID)
@@ -651,4 +651,3 @@ func TestProjectClone_StorageFilesCopied(t *testing.T) {
 	}
 	assert.True(t, found, "storage files should exist under clone's project ID")
 }
-

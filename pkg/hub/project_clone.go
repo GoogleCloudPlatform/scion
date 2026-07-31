@@ -440,19 +440,19 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 
 	for _, srcTmpl := range result.Items {
 		newTmpl := &store.Template{
-			ID:          api.NewUUID(),
-			Name:        srcTmpl.Name,
-			Slug:        srcTmpl.Slug, // SAME slug — critical for annotation references
-			DisplayName: srcTmpl.DisplayName,
-			Description: srcTmpl.Description,
-			Harness:     srcTmpl.Harness,
-			Config:      srcTmpl.Config,
-			Scope:       store.TemplateScopeProject,
-			ScopeID:     clone.ID,
-			Visibility:  srcTmpl.Visibility,
-			Status:      srcTmpl.Status,
-			Files:       srcTmpl.Files,
-			ContentHash: srcTmpl.ContentHash,
+			ID:           api.NewUUID(),
+			Name:         srcTmpl.Name,
+			Slug:         srcTmpl.Slug, // SAME slug — critical for annotation references
+			DisplayName:  srcTmpl.DisplayName,
+			Description:  srcTmpl.Description,
+			Harness:      srcTmpl.Harness,
+			Config:       srcTmpl.Config,
+			Scope:        store.TemplateScopeProject,
+			ScopeID:      clone.ID,
+			Visibility:   srcTmpl.Visibility,
+			Status:       srcTmpl.Status,
+			Files:        srcTmpl.Files,
+			ContentHash:  srcTmpl.ContentHash,
 			BaseTemplate: srcTmpl.BaseTemplate,
 		}
 
