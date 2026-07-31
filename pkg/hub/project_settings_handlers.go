@@ -25,6 +25,9 @@ import (
 )
 
 // Annotation keys for project settings stored in project annotations.
+//
+// When adding a key here, add it to projectSettingKeys below as well.
+// TestProjectSettingKeys_NoDrift enforces this.
 const (
 	projectSettingDefaultTemplate      = "scion.io/default-template"
 	projectSettingDefaultHarnessConfig = "scion.io/default-harness-config"
@@ -49,6 +52,90 @@ const (
 	projectSettingDefaultResourcesMemLim = "scion.io/default-resources-memory-limit"
 	projectSettingDefaultResourcesDisk   = "scion.io/default-resources-disk"
 )
+
+// projectSettingKeys is the authoritative list of scion.io/* annotation keys
+// that constitute project settings. Anything not in this list is not a project
+// setting: it will not be copied by clone, nor reported by the resolved
+// settings endpoint.
+//
+// No production code reads this list yet. The intended consumers are the
+// project clone endpoint and the resolved-settings endpoint, which land in
+// later phases of this workstream; the list is introduced ahead of them so that
+// "copy the project settings" has one precise definition rather than three
+// approximate ones. Until those land, the registry's working value is
+// TestProjectSettingKeys_NoDrift below, which fails the build when a new
+// projectSetting* constant is not registered. Registry and guard are a single
+// executable invariant and should stay together — the list without the test is
+// merely an unused variable, and is reported as one by the linter.
+//
+// This is the single source of truth for "what is a project setting". A key
+// omitted here would be silently dropped when a project is cloned; a key
+// wrongly added here would be exposed in API responses and propagated into
+// clones. Errors in both directions are user-visible bugs, so treat edits to
+// this list as a change to the project-settings contract rather than as a list
+// edit.
+//
+// Two properties are maintained deliberately and are enforced by
+// TestProjectSettingKeys_NoDrift:
+//
+//  1. Every projectSetting* constant declared above appears here exactly once.
+//     A new setting that is not registered fails the build's tests rather than
+//     going unnoticed until someone loses it on clone.
+//  2. The order matches the constant declaration order above, which in turn
+//     matches the table in .design/project-templates.md §3.1, so all three can
+//     be diffed by eye.
+//
+// Note the scope: these are keys in project.Annotations. project.Labels is a
+// separate map that also carries scion.io/* keys — scion.io/system and
+// scion.io/global, set on the Global project at cmd/server_broker.go. Those are
+// system markers rather than project settings, so they do not belong here.
+// (Other scion.io/* keys such as scion.io/plugin, scion.io/broker-type and
+// scion.io/broker-role are RuntimeBroker labels and never appear on a project
+// at all.)
+//
+// Phase 4 (clone) label policy, recorded here because this comment is the
+// nearest thing to a spec for it: clone copies scion.dev/* labels and drops the
+// scion.io/* prefix entirely — a prefix rule rather than a two-key denylist, so
+// that a future system marker is not silently propagated into clones.
+//
+// One scion.dev/ label is excluded: store.LabelWorkspaceMode
+// ("scion.dev/workspace-mode") is NOT copied. It is derived for the new project
+// from the clone request and the new project's git remote, by the same
+// validation the create path applies (handlers_projects_core.go), which sets it
+// only when there is a git remote and the mode is one of the two valid values.
+// Copying it raw would bypass that check and let a clone carry a workspace mode
+// inconsistent with its own remote, which IsSharedWorkspace() and
+// IsWorktreePerAgent() would then evaluate against mismatched state.
+//
+// Finally, do not try to "complete" this list from hubclient.ProjectSettings.
+// That struct also carries Bucket, Runtimes, Harnesses and Profiles, which the
+// settings endpoint accepts on PUT, silently ignores, and never returns on GET.
+// They are not annotation-backed, so their absence here is correct and loses
+// nothing on clone.
+var projectSettingKeys = []string{
+	projectSettingDefaultTemplate,
+	projectSettingDefaultHarnessConfig,
+	projectSettingDefaultModel,
+	projectSettingDefaultThinkingLevel,
+	projectSettingTelemetryEnabled,
+	projectSettingActiveProfile,
+
+	// Default agent limits
+	projectSettingDefaultMaxTurns,
+	projectSettingDefaultMaxModelCalls,
+	projectSettingDefaultMaxDuration,
+
+	// Default GCP identity
+	projectSettingDefaultGCPIdentityMode,
+	projectSettingDefaultGCPIdentitySAID,
+
+	// Default resource spec (flat keys)
+	projectSettingDefaultResourcesCPUReq,
+	projectSettingDefaultResourcesMemReq,
+	projectSettingDefaultResourcesCPULim,
+	projectSettingDefaultResourcesMemLim,
+	projectSettingDefaultResourcesDisk,
+}
 
 // handleProjectSettings handles GET/PUT on /api/v1/projects/{projectId}/settings.
 func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, projectID string) {

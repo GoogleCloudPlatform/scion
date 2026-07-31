@@ -74,6 +74,9 @@ type ProjectService interface {
 
 	// GetCacheStatus returns the cache status for a project workspace.
 	GetCacheStatus(ctx context.Context, projectID string) (*ProjectCacheStatusResponse, error)
+
+	// Clone creates a new project seeded from an existing project's configuration.
+	Clone(ctx context.Context, sourceID string, req CloneProjectRequest) (*Project, error)
 }
 
 // projectService is the implementation of ProjectService.
@@ -522,4 +525,13 @@ func (s *projectService) GetCacheStatus(ctx context.Context, projectID string) (
 		return nil, err
 	}
 	return apiclient.DecodeResponse[ProjectCacheStatusResponse](resp)
+}
+
+// Clone creates a new project seeded from an existing project's configuration.
+func (s *projectService) Clone(ctx context.Context, sourceID string, req CloneProjectRequest) (*Project, error) {
+	resp, err := s.c.post(ctx, "/api/v1/projects/"+sourceID+"/clone", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[Project](resp)
 }

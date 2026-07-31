@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build install test test-fast vet lint compat-literals golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build install test test-fast vet lint compat-literals golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -121,6 +121,12 @@ web-typecheck:
 	@cd web && npm run typecheck
 	@echo "Type check passed."
 
+## web-test: Run the web frontend unit tests (vitest)
+web-test:
+	@echo "Running web frontend tests..."
+	@cd web && npm test
+	@echo "Web tests passed."
+
 ## fmt: Auto-format Go source files
 fmt:
 	@echo "Formatting Go source files..."
@@ -144,7 +150,7 @@ ci: fmt-check lint compat-literals test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck lint compat-literals golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint compat-literals golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 

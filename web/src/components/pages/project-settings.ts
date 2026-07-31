@@ -26,6 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, Project, Template, AdminGroup, GitHubAppProjectStatus, GitHubTokenPermissions, RuntimeBroker, BrokerProfile, GCPServiceAccount, PreStartHook, PreStartHookSummary } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
+import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/env-var-list.js';
@@ -61,6 +62,18 @@ interface ProjectSettings {
   defaultGCPIdentityServiceAccountID?: string | undefined;
   defaultModel?: string | undefined;
   defaultThinkingLevel?: number | null | undefined;
+}
+
+interface ResolvedHubSetting {
+  projectSet: boolean;
+  projectValue: string | null;
+  hubDefault: 'present' | 'absent' | 'unknown';
+  hubValue: any;
+}
+
+interface ResolvedProjectSettings {
+  project: ProjectSettings;
+  settings: Record<string, ResolvedHubSetting>;
 }
 
 interface HarnessConfigEntry {
@@ -144,6 +157,10 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private hubTelemetryDefault: boolean | null = null;
+
+  /** Per-setting hub default info from the resolved endpoint. */
+  @state()
+  private resolvedSettings: Record<string, ResolvedHubSetting> = {};
 
   // Default agent limits
   @state()
@@ -747,8 +764,7 @@ export class ScionPageProjectSettings extends LitElement {
     void this.loadProject().then(() => this.loadMembersGroup());
     void this.loadHubPreStartHook();
     void this.loadDropdownTemplates();
-    void this.loadSettings();
-    void this.loadHubTelemetryDefault();
+    void this.loadResolvedSettings();
     void this.loadHarnessConfigs();
     void this.loadBrokers();
     void this.loadGCPServiceAccounts();
@@ -898,39 +914,86 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
-  private async loadSettings(): Promise<void> {
+  /**
+   * Loads project settings via the resolved endpoint, which includes per-setting
+   * hub default information. Falls back to the plain /settings endpoint if the
+   * resolved endpoint returns 404 (older hub without the endpoint).
+   */
+  private async loadResolvedSettings(): Promise<void> {
     this.settingsLoading = true;
     try {
-      const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`);
-      if (response.ok) {
-        this.settings = (await response.json()) as ProjectSettings;
-        this.configDefaultTemplate = this.settings.defaultTemplate || '';
-        this.configDefaultHarnessConfig = this.settings.defaultHarnessConfig || '';
-        this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
-        this.configDefaultMaxTurns = this.settings.defaultMaxTurns || 0;
-        this.configDefaultMaxModelCalls = this.settings.defaultMaxModelCalls || 0;
-        this.configDefaultMaxDuration = this.settings.defaultMaxDuration || '';
-        const res = this.settings.defaultResources;
-        this.configDefaultResCpuReq = res?.requests?.cpu || '';
-        this.configDefaultResMemReq = res?.requests?.memory || '';
-        this.configDefaultResCpuLim = res?.limits?.cpu || '';
-        this.configDefaultResMemLim = res?.limits?.memory || '';
-        this.configDefaultResDisk = res?.disk || '';
-        this.configDefaultGCPIdentityMode = this.settings.defaultGCPIdentityMode || '';
-        this.configDefaultGCPIdentitySAID = this.settings.defaultGCPIdentityServiceAccountID || '';
-        if (this.settings.defaultModel) {
-          const dm = normalizeModelAlias(this.settings.defaultModel);
-          if (['small', 'medium', 'large', 'extra-large'].includes(dm)) {
-            this.defaultModelSelection = dm as 'small' | 'medium' | 'large' | 'extra-large';
-          } else {
-            this.defaultModelSelection = 'other';
-            this.defaultCustomModelId = this.settings.defaultModel;
-          }
+      const resolvedResponse = await apiFetch(
+        `/api/v1/projects/${this.projectId}/settings/resolved`
+      );
+
+      if (resolvedResponse.ok) {
+        const resolved = (await resolvedResponse.json()) as ResolvedProjectSettings;
+        // Use the project sub-object for form state — this is the same payload
+        // as GET /settings, so the PUT path is unchanged.
+        this.settings = resolved.project || {};
+        this.resolvedSettings = resolved.settings || {};
+
+        // Extract telemetry hub default from the resolved response, replacing
+        // the separate /api/v1/settings/public fetch.
+        const telEntry = this.resolvedSettings['scion.io/telemetry-enabled'];
+        if (telEntry?.hubDefault === 'present' && telEntry.hubValue != null) {
+          this.hubTelemetryDefault = telEntry.hubValue as boolean;
         } else {
-          this.defaultModelSelection = '';
+          this.hubTelemetryDefault = null;
         }
-        this.defaultThinkingLevel = this.settings.defaultThinkingLevel ?? null;
+      } else if (resolvedResponse.status === 404) {
+        // Backward compatibility: older hub without the resolved endpoint.
+        // Fall back to the plain settings endpoint with generic placeholders.
+        console.warn(
+          '[project-settings] /settings/resolved returned 404, falling back to /settings'
+        );
+        const fallbackResponse = await apiFetch(
+          `/api/v1/projects/${this.projectId}/settings`
+        );
+        if (fallbackResponse.ok) {
+          this.settings = (await fallbackResponse.json()) as ProjectSettings;
+        }
+        this.resolvedSettings = {};
+        // Also try loading telemetry default from public settings
+        void this.loadHubTelemetryDefaultFallback();
+      } else {
+        // Other error — try the plain endpoint as fallback
+        const fallbackResponse = await apiFetch(
+          `/api/v1/projects/${this.projectId}/settings`
+        );
+        if (fallbackResponse.ok) {
+          this.settings = (await fallbackResponse.json()) as ProjectSettings;
+        }
+        this.resolvedSettings = {};
       }
+
+      // Populate form state from settings (same as before)
+      this.configDefaultTemplate = this.settings.defaultTemplate || '';
+      this.configDefaultHarnessConfig = this.settings.defaultHarnessConfig || '';
+      this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
+      this.configDefaultMaxTurns = this.settings.defaultMaxTurns || 0;
+      this.configDefaultMaxModelCalls = this.settings.defaultMaxModelCalls || 0;
+      this.configDefaultMaxDuration = this.settings.defaultMaxDuration || '';
+      const res = this.settings.defaultResources;
+      this.configDefaultResCpuReq = res?.requests?.cpu || '';
+      this.configDefaultResMemReq = res?.requests?.memory || '';
+      this.configDefaultResCpuLim = res?.limits?.cpu || '';
+      this.configDefaultResMemLim = res?.limits?.memory || '';
+      this.configDefaultResDisk = res?.disk || '';
+      this.configDefaultGCPIdentityMode = this.settings.defaultGCPIdentityMode || '';
+      this.configDefaultGCPIdentitySAID = this.settings.defaultGCPIdentityServiceAccountID || '';
+      if (this.settings.defaultModel) {
+        const dm = normalizeModelAlias(this.settings.defaultModel);
+        if (['small', 'medium', 'large', 'extra-large'].includes(dm)) {
+          this.defaultModelSelection = dm as 'small' | 'medium' | 'large' | 'extra-large';
+        } else {
+          this.defaultModelSelection = 'other';
+          this.defaultCustomModelId = this.settings.defaultModel;
+        }
+      } else {
+        this.defaultModelSelection = '';
+      }
+      this.defaultThinkingLevel = this.settings.defaultThinkingLevel ?? null;
     } catch (err) {
       console.error('Failed to load project settings:', err);
     } finally {
@@ -938,7 +1001,8 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
-  private async loadHubTelemetryDefault(): Promise<void> {
+  /** Fallback for loading hub telemetry default when /settings/resolved is unavailable. */
+  private async loadHubTelemetryDefaultFallback(): Promise<void> {
     try {
       const response = await apiFetch('/api/v1/settings/public');
       if (response.ok) {
@@ -948,6 +1012,33 @@ export class ScionPageProjectSettings extends LitElement {
     } catch (err) {
       console.error('Failed to load hub telemetry default:', err);
     }
+  }
+
+  /**
+   * Returns a formatted hub default hint string for a given annotation key,
+   * or null if no hub value is available for display.
+   *
+   * Used to populate placeholder text on text/number inputs and to label the
+   * empty option on select inputs.
+   */
+  private hubHint(annotationKey: string): string | null {
+    const entry = this.resolvedSettings[annotationKey];
+    if (!entry || entry.hubDefault !== 'present' || entry.hubValue == null) {
+      return null;
+    }
+    return `Hub default: ${entry.hubValue}`;
+  }
+
+  /**
+   * Returns a select-option label incorporating the hub default value,
+   * or a generic fallback label when no hub value is available.
+   */
+  private hubSelectLabel(annotationKey: string, fallbackLabel: string): string {
+    const entry = this.resolvedSettings[annotationKey];
+    if (entry?.hubDefault === 'present' && entry.hubValue != null) {
+      return `Use hub default (${entry.hubValue})`;
+    }
+    return fallbackLabel;
   }
 
   private async loadHarnessConfigs(): Promise<void> {
@@ -1463,7 +1554,7 @@ export class ScionPageProjectSettings extends LitElement {
               <div class="config-field">
                 <label>Default Template</label>
                 <sl-select
-                  placeholder="None (use server default)"
+                  placeholder=${this.hubSelectLabel('scion.io/default-template', 'None (use server default)')}
                   clearable
                   value=${this.configDefaultTemplate}
                   ?disabled=${!canEdit}
@@ -1483,7 +1574,7 @@ export class ScionPageProjectSettings extends LitElement {
               <div class="config-field">
                 <label>Default Harness Config</label>
                 <sl-select
-                  placeholder="None (use server default)"
+                  placeholder=${this.hubSelectLabel('scion.io/default-harness-config', 'None (use server default)')}
                   clearable
                   value=${this.configDefaultHarnessConfig}
                   ?disabled=${!canEdit}
@@ -1501,12 +1592,11 @@ export class ScionPageProjectSettings extends LitElement {
                         `
                       )
                     : // Fallback: all known/installable harnesses (incl. opt-in), not the default-install set.
-                      html`
-                        <sl-option value="gemini">Gemini</sl-option>
-                        <sl-option value="claude">Claude</sl-option>
-                        <sl-option value="opencode">OpenCode</sl-option>
-                        <sl-option value="codex">Codex</sl-option>
-                      `}
+                      KNOWN_HARNESS_NAMES.map(
+                        (name) => html`
+                          <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
+                        `
+                      )}
                 </sl-select>
                 <span class="field-help"
                   >Harness configuration used by default for new agents.</span
@@ -1698,7 +1788,7 @@ export class ScionPageProjectSettings extends LitElement {
                 <label>Default Max Turns</label>
                 <sl-input
                   type="number"
-                  placeholder="No limit"
+                  placeholder=${this.hubHint('scion.io/default-max-turns') || 'No limit'}
                   .value=${this.configDefaultMaxTurns ? String(this.configDefaultMaxTurns) : ''}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -1713,7 +1803,7 @@ export class ScionPageProjectSettings extends LitElement {
                 <label>Default Max Model Calls</label>
                 <sl-input
                   type="number"
-                  placeholder="No limit"
+                  placeholder=${this.hubHint('scion.io/default-max-model-calls') || 'No limit'}
                   .value=${this.configDefaultMaxModelCalls
                     ? String(this.configDefaultMaxModelCalls)
                     : ''}
@@ -1730,7 +1820,7 @@ export class ScionPageProjectSettings extends LitElement {
                 <label>Default Max Duration</label>
                 <sl-input
                   type="text"
-                  placeholder="e.g. 2h, 30m"
+                  placeholder=${this.hubHint('scion.io/default-max-duration') || 'e.g. 2h, 30m'}
                   .value=${this.configDefaultMaxDuration}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -1752,7 +1842,7 @@ export class ScionPageProjectSettings extends LitElement {
                 <label>CPU Request</label>
                 <sl-input
                   type="text"
-                  placeholder="e.g. 500m, 1"
+                  placeholder=${this.hubHint('scion.io/default-resources-cpu-request') || 'e.g. 500m, 1'}
                   .value=${this.configDefaultResCpuReq}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -1765,7 +1855,7 @@ export class ScionPageProjectSettings extends LitElement {
                 <label>Memory Request</label>
                 <sl-input
                   type="text"
-                  placeholder="e.g. 512Mi, 1Gi"
+                  placeholder=${this.hubHint('scion.io/default-resources-memory-request') || 'e.g. 512Mi, 1Gi'}
                   .value=${this.configDefaultResMemReq}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -1778,7 +1868,7 @@ export class ScionPageProjectSettings extends LitElement {
                 <label>CPU Limit</label>
                 <sl-input
                   type="text"
-                  placeholder="e.g. 1, 2"
+                  placeholder=${this.hubHint('scion.io/default-resources-cpu-limit') || 'e.g. 1, 2'}
                   .value=${this.configDefaultResCpuLim}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -1791,7 +1881,7 @@ export class ScionPageProjectSettings extends LitElement {
                 <label>Memory Limit</label>
                 <sl-input
                   type="text"
-                  placeholder="e.g. 1Gi, 2Gi"
+                  placeholder=${this.hubHint('scion.io/default-resources-memory-limit') || 'e.g. 1Gi, 2Gi'}
                   .value=${this.configDefaultResMemLim}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -1804,7 +1894,7 @@ export class ScionPageProjectSettings extends LitElement {
                 <label>Disk</label>
                 <sl-input
                   type="text"
-                  placeholder="e.g. 10Gi"
+                  placeholder=${this.hubHint('scion.io/default-resources-disk') || 'e.g. 10Gi'}
                   .value=${this.configDefaultResDisk}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
