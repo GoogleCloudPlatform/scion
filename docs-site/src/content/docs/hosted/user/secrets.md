@@ -133,7 +133,7 @@ Create a project secret with one of these naming patterns:
 | `GH_{OWNER}__{REPO}` | One specific repo | `GH_ACME_CORP__PRIVATE_SKILLS` |
 | `GH_{OWNER}` | All repos under an owner/org | `GH_ACME_CORP` |
 
-**Normalization rules:** uppercase the name, replace hyphens (`-`) and dots (`.`) with underscores (`_`). The double underscore (`__`) separates owner from repo.
+**Normalization rules:** uppercase the name, replace hyphens (`-`) and dots (`.`) with underscores (`_`). The double underscore (`__`) separates owner from repo. *Note: Because of this normalization, names that differ only by hyphens, dots, or underscores (e.g., `acme-corp` and `acme_corp`) will resolve to the same secret name.*
 
 **Examples:**
 
