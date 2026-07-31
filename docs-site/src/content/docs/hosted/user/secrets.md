@@ -118,6 +118,88 @@ Once set, every agent that starts will have the credential file mounted at `~/.s
 
 ---
 
+## GitHub Multi-Repo Credentials
+
+When Scion resolves `gh://` URIs in template skill lists, it authenticates with the default `GITHUB_TOKEN` — typically a GitHub App installation token scoped to the project's own repository. This works for skills in public repos and the workspace repo itself, but **fails with 404** when a `gh://` URI references a skill in a different private repository.
+
+To solve this, Scion supports **convention-based project secrets** that automatically provide the right credential for each `gh://` URI based on the GitHub owner and repository name. No template changes are needed — the resolver derives a secret name from the URI and looks it up in your project secrets.
+
+### Naming Convention
+
+Create a project secret with one of these naming patterns:
+
+| Pattern | Scope | Example |
+| :--- | :--- | :--- |
+| `GH_{OWNER}__{REPO}` | One specific repo | `GH_ACME_CORP__PRIVATE_SKILLS` |
+| `GH_{OWNER}` | All repos under an owner/org | `GH_ACME_CORP` |
+
+**Normalization rules:** uppercase the name, replace hyphens (`-`) and dots (`.`) with underscores (`_`). The double underscore (`__`) separates owner from repo. *Note: Because of this normalization, names that differ only by hyphens, dots, or underscores (e.g., `acme-corp` and `acme_corp`) will resolve to the same secret name.*
+
+**Examples:**
+
+| GitHub Repository | Secret Name |
+| :--- | :--- |
+| `acme-corp/private-skills` | `GH_ACME_CORP__PRIVATE_SKILLS` |
+| `my-org/my.special.repo` | `GH_MY_ORG__MY_SPECIAL_REPO` |
+| All repos under `acme-corp` | `GH_ACME_CORP` |
+
+### Setup
+
+```bash
+# Repo-specific credential (fine-grained PAT or classic PAT with repo access)
+scion hub secret set --project GH_ACME_CORP__PRIVATE_SKILLS github_pat_...
+
+# Or cover all repos under an owner with one token
+scion hub secret set --project GH_ACME_CORP github_pat_...
+```
+
+Once set, template URIs resolve automatically — no `?token=` annotation needed:
+
+```yaml
+skills:
+  - uri: "gh://acme-corp/private-skills/my-skill"  # auto-uses GH_ACME_CORP__PRIVATE_SKILLS
+```
+
+An explicit `?token=SECRET_NAME` parameter on the URI still works as an override when disambiguation is needed.
+
+### Credential Resolution Order
+
+When resolving a `gh://owner/repo/...` URI, Scion checks credentials in this order:
+
+| Priority | Source | Description |
+| :--- | :--- | :--- |
+| 1 | `?token=SECRET_NAME` on the URI | Explicit override — bypasses convention lookup |
+| 2 | `GH_{OWNER}__{REPO}` | Repo-specific convention secret |
+| 3 | `GH_{OWNER}` | Owner-level convention secret |
+| 4 | Default `GITHUB_TOKEN` | App token, environment, or provision secret cascade |
+| 5 | Unauthenticated | No credential found; works for public repos only |
+
+The first match wins. If no convention secret exists, behavior is identical to the default single-token resolution.
+
+### Injection Mode Behavior
+
+Convention-keyed GitHub secrets support the standard injection modes:
+
+- **As Needed** (recommended): The credential is used at provision time to fetch skills and templates but is **not** exposed inside the agent container. This is the minimum-privilege posture.
+
+  ```bash
+  scion hub secret set --project GH_ACME_CORP__PRIVATE_SKILLS github_pat_...
+  ```
+
+- **Always**: The credential is also injected into the agent container as an environment variable (`GH_ACME_CORP__PRIVATE_SKILLS`). Use this when agents need runtime access to the same private repo.
+
+  ```bash
+  scion hub secret set --project --always GH_ACME_CORP__PRIVATE_SKILLS github_pat_...
+  ```
+
+For more on injection modes, see [Injection Modes](#injection-modes) above.
+
+:::note[Implementation Reference]
+This feature was introduced in [`GoogleCloudPlatform/scion` PR #919](https://github.com/GoogleCloudPlatform/scion/pull/919). For the full auth layer reference (PAT, GitHub App bot, `gh` CLI token, runtime fallbacks), see the `github-auth-fallback` agent skill.
+:::
+
+---
+
 ## Administrator Configuration (Hub)
 
 To use secrets in production, the Hub must be configured with a production-grade secrets backend.
