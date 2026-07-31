@@ -25,80 +25,31 @@ import (
 
 // GET /api/v1/projects/{projectId}/settings/resolved
 //
-// ############################################################################
-// # THIS ENDPOINT IS CALLED "resolved" AND IT DELIBERATELY DOES NOT RESOLVE. #
-// ############################################################################
+// This endpoint reports per-setting information about project annotations and
+// hub-level defaults. It does NOT resolve precedence — it does not report which
+// value wins, and a consumer that needs the effective value must resolve it
+// itself against whatever precedence ladder exists at the time it asks.
 //
-// If you are here to add the "missing" effective-value field, please read this
-// paragraph before you do. It is not an oversight and it is not laziness; the
-// field was specified, reviewed, and deliberately removed.
+// The response carries:
+//   - projectSet / projectValue: what the project annotation says.
+//   - hubDefault: whether a hub-level default exists (tri-state).
+//   - hubValue: the raw hub-configured value when hubDefault is "present",
+//     null otherwise. This is the value the hub operator configured, exposed
+//     so the settings UI can show it as a placeholder hint (e.g. "Hub default:
+//     200"). It is NOT an effective value: template and harness-config layers
+//     may override it before an agent receives it.
 //
-// This endpoint reports two things per project setting: what the project
-// annotation says, and whether a hub-level default EXISTS. It does not report
-// which of them wins.
+// The response deliberately does NOT carry:
+//   - An "effective" or "resolved" value that claims to know which layer wins.
+//   - A "source" field that names the winning layer.
 //
-// The reason is durable and has nothing to do with the state of any particular
-// branch: resolution is the resolver's job. Computing an effective value here
-// would be a SECOND implementation of the precedence order, living in a package
-// that cannot observe changes to the first one. Two implementations of one
-// ordering do not stay equal — and the copy fails silently, because a stale
-// answer is still a well-formed answer. There is no test that can fail when
-// this file's idea of the ladder and the resolver's idea of the ladder drift
-// apart, which is precisely why the value must not be computed here at all.
+// These are omitted because computing an effective value would be a second
+// implementation of the precedence order. Two implementations of one ordering
+// do not stay equal, and the copy fails silently because a stale answer is
+// still a well-formed answer.
 //
-// The layers between "project" and "hub" (template and harness-config) are what
-// make this concrete: a response asserting that a hub default takes effect is
-// wrong whenever one of those layers supplies a value instead.
-//
-// This is not only about a field literally named "value". Returning the hub's
-// VALUE alongside the project's — the {projectValue, hubValue} pair — is the
-// same mistake by another route, and the reason is not a matter of opinion:
-// the ladder's own implementation hit this bug and paid to avoid it.
-// hub_agent_defaults.go, on withHubDefaultHarnessConfig, records that
-// "Provenance is carried, not inferred. Comparing the name back against
-// s.hubAgentDefaults().DefaultHarnessConfig would misreport the case where a
-// user, a project annotation or a template happens to name the same harness
-// config the hub defaults to."
-//
-// Note the middle term: a project annotation is exactly what this endpoint
-// would be reporting as projectValue. That misreport REQUIRES the hub value to
-// be available for comparison, and upstream threaded a context key through the
-// request path specifically so it would not have to make that comparison. A
-// response carrying both values hands the same comparison to every client for
-// free, and the first UI to write `projectValue === hubValue ? "from hub" :
-// "overridden"` reproduces, client-side, a bug the team that owns the ladder
-// found expensive enough to re-architect around. So the answer to "the UI can
-// just compare them" is that the comparison IS the misreport.
-//
-// And additionally, the shape asserts precedence by adjacency: two fields with
-// nothing between them claim that there is nothing between them. A consumer
-// reading `projectValue: null, hubValue: 200` concludes "I will get 200", which
-// is false the moment a template layer sits in between. That is why HubDefault
-// reports presence and never the value.
-//
-// As of 2026-07, this is not merely an architectural preference — the ordering
-// this endpoint would have to assume does not currently exist to be assumed.
-// docs-site/src/content/docs/reference/settings-precedence.md explicitly
-// DECLINES to publish a precedence position for hub agent_defaults: the
-// intended model (a low-priority fallback near the bottom of the chain) and the
-// implementation (applied at agent-create time, behaving as though near the
-// top) disagree, the resolution is deferred, and the page says in terms "Do not
-// build on either reading." Tracked as issue #623. The same page records that
-// the rank additionally moves with the hub's storage mode — above the broker's
-// settings.yaml defaults in Postgres mode, at the bottom of the broker chain in
-// file mode — so there is not even one ordering to copy.
-//
-// Concretely: an effective value shipped here would not become wrong at some
-// future date. It would be wrong now, and it would be wrong in a way the
-// project has already written down.
-//
-// TestResolvedSettingsResponseShape_NoEffectiveValue enforces this as an
-// exact-set assertion over the response types' JSON tags, so any new field —
-// whatever it is called — fails the build rather than review. That test is the
-// enforcement; this comment is only the explanation.
-//
-// A consumer that needs the effective value must resolve it itself, against
-// whatever ladder exists at the time it asks.
+// TestResolvedSettingsResponseShape_NoEffectiveValue enforces the field set as
+// an exact-set assertion, so any new field fails the build rather than review.
 
 // ResolvedHubDefault reports whether a hub-level default exists for a project
 // setting. It is deliberately TRI-STATE rather than a bool.
@@ -140,9 +91,14 @@ const (
 // ResolvedProjectSetting is the per-key entry of the resolved-settings
 // response.
 //
-// There is deliberately no `value`, no `effective`, no `source` and no
-// `hubValue` field here. See the file header for why, and note that
-// TestResolvedSettingsResponseShape_NoEffectiveValue will fail if one is added.
+// There is deliberately no `value`, no `effective` and no `source` field here.
+// This endpoint does not resolve precedence — resolution is the resolver's job.
+//
+// HubValue is the raw hub-configured value for display purposes only. It does
+// NOT represent the effective value: template and harness-config layers may sit
+// between the hub default and what an agent actually receives. Clients must
+// treat it as an informational hint ("the hub has this configured"), never as a
+// precedence statement.
 //
 // On the absent `source` field specifically: its absence is deliberate, not an
 // omission. Reporting a winning source is the same precedence claim as
@@ -161,9 +117,14 @@ type ResolvedProjectSetting struct {
 	// per-key type knowledge that projectSettingsFromAnnotations already owns.
 	ProjectValue *string `json:"projectValue"`
 
-	// HubDefault reports the EXISTENCE of a hub-level default. Not its value,
-	// not its rank.
+	// HubDefault reports the EXISTENCE of a hub-level default. Not its rank.
 	HubDefault ResolvedHubDefault `json:"hubDefault"`
+
+	// HubValue is the raw hub-configured value when HubDefault is "present",
+	// null otherwise. This is the value the hub operator configured, exposed so
+	// the settings UI can display it as a placeholder hint. It is NOT an
+	// effective value and does not account for template or harness-config layers.
+	HubValue any `json:"hubValue"`
 }
 
 // ResolvedProjectSettings is the GET .../settings/resolved response body.
@@ -427,7 +388,7 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 			continue
 		}
 
-		entry.HubDefault = s.hubDefaultFor(desc, agentDefaults, agentDefaultsReadable)
+		entry.HubDefault, entry.HubValue = s.hubDefaultFor(desc, agentDefaults, agentDefaultsReadable)
 		settings[key] = entry
 	}
 
@@ -437,17 +398,18 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 	}
 }
 
-// hubDefaultFor answers the existence question for one descriptor.
+// hubDefaultFor answers the existence question for one descriptor and, when
+// a hub default is present, also extracts its raw value for display.
 func (s *Server) hubDefaultFor(
 	desc resolvedSettingDescriptor,
 	agentDefaults map[string]json.RawMessage,
 	agentDefaultsReadable bool,
-) ResolvedHubDefault {
+) (ResolvedHubDefault, any) {
 	switch desc.source {
 	case hubSourceNone:
 		// Measured structural absence: AgentDefaultsSettings has six fields and
 		// none of them corresponds to this setting.
-		return ResolvedHubDefaultAbsent
+		return ResolvedHubDefaultAbsent, nil
 
 	case hubSourceTelemetryDefault:
 		// *bool — presence-faithful, so this is a real answer rather than a
@@ -455,9 +417,9 @@ func (s *Server) hubDefaultFor(
 		// "config absent" case to distinguish here: an unset TelemetryDefault
 		// is a nil pointer either way.
 		if s.config.TelemetryDefault != nil {
-			return ResolvedHubDefaultPresent
+			return ResolvedHubDefaultPresent, *s.config.TelemetryDefault
 		}
-		return ResolvedHubDefaultAbsent
+		return ResolvedHubDefaultAbsent, nil
 
 	case hubSourceAgentDefaults:
 		if !agentDefaultsReadable {
@@ -532,12 +494,12 @@ func (s *Server) hubDefaultFor(
 			// read was adopted to avoid a name collision with the upstream
 			// hubAgentDefaults() accessor, not for correctness. The correctness
 			// property fell out of it. We got here partly by luck.
-			return ResolvedHubDefaultUnknown
+			return ResolvedHubDefaultUnknown, nil
 		}
 		return hubDefaultFromDoc(agentDefaults, desc)
 
 	default:
-		return ResolvedHubDefaultUnknown
+		return ResolvedHubDefaultUnknown, nil
 	}
 }
 
@@ -547,9 +509,14 @@ func (s *Server) hubDefaultFor(
 // unmarshalling into AgentDefaultsSettings is exactly where presence
 // information is destroyed, because its fields are non-pointer scalars whose
 // zero values are indistinguishable from unset.
-func hubDefaultFromDoc(doc map[string]json.RawMessage, desc resolvedSettingDescriptor) ResolvedHubDefault {
+//
+// When a hub default is present, the raw value is also returned (unmarshalled
+// to a native Go type via json.Unmarshal into any) for display by the settings
+// UI. The value is informational only and does not represent effective
+// resolution.
+func hubDefaultFromDoc(doc map[string]json.RawMessage, desc resolvedSettingDescriptor) (ResolvedHubDefault, any) {
 	if len(desc.path) == 0 {
-		return ResolvedHubDefaultUnknown
+		return ResolvedHubDefaultUnknown, nil
 	}
 
 	root, ok := doc[desc.path[0]]
@@ -558,16 +525,16 @@ func hubDefaultFromDoc(doc map[string]json.RawMessage, desc resolvedSettingDescr
 		// (*api.ResourceSpec). A pointer CAN represent unset, so its absence is
 		// faithful and reports as absent regardless of the leaf's own rule.
 		if len(desc.path) > 1 {
-			return ResolvedHubDefaultAbsent
+			return ResolvedHubDefaultAbsent, nil
 		}
-		return missingLeafState(desc)
+		return missingLeafState(desc), nil
 	}
 
 	if len(desc.path) == 1 {
 		if isJSONNull(root) {
-			return missingLeafState(desc)
+			return missingLeafState(desc), nil
 		}
-		return ResolvedHubDefaultPresent
+		return ResolvedHubDefaultPresent, unmarshalRawValue(root)
 	}
 
 	current := root
@@ -575,19 +542,29 @@ func hubDefaultFromDoc(doc map[string]json.RawMessage, desc resolvedSettingDescr
 		var next map[string]json.RawMessage
 		if err := json.Unmarshal(current, &next); err != nil {
 			// Shape is not what the schema says it should be. We cannot answer.
-			return ResolvedHubDefaultUnknown
+			return ResolvedHubDefaultUnknown, nil
 		}
 		child, ok := next[segment]
 		if !ok {
-			return missingLeafState(desc)
+			return missingLeafState(desc), nil
 		}
 		current = child
 	}
 
 	if isJSONNull(current) {
-		return missingLeafState(desc)
+		return missingLeafState(desc), nil
 	}
-	return ResolvedHubDefaultPresent
+	return ResolvedHubDefaultPresent, unmarshalRawValue(current)
+}
+
+// unmarshalRawValue converts a json.RawMessage to a native Go value (string,
+// float64, bool, etc.) for inclusion in the response. Returns nil on error.
+func unmarshalRawValue(raw json.RawMessage) any {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	return v
 }
 
 // missingLeafState maps a missing entry to absent or unknown per the

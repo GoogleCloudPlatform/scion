@@ -64,7 +64,7 @@ import (
 // Both must stay sorted; the assertions compare sorted slices.
 var (
 	expectedResolvedWrapperFields = []string{"project", "settings"}
-	expectedResolvedEntryFields   = []string{"hubDefault", "projectSet", "projectValue"}
+	expectedResolvedEntryFields   = []string{"hubDefault", "hubValue", "projectSet", "projectValue"}
 )
 
 // resolvedResponseTypes enumerates every type whose fields land directly in the
@@ -1119,6 +1119,11 @@ func TestResolvedSettings_MirrorAcceptsServerOutput(t *testing.T) {
 				ProjectValue: &value,
 				HubDefault:   ResolvedHubDefaultUnknown,
 			},
+			projectSettingDefaultMaxTurns: {
+				ProjectSet: false,
+				HubDefault: ResolvedHubDefaultPresent,
+				HubValue:   float64(120),
+			},
 		},
 	}
 
@@ -1142,6 +1147,14 @@ func TestResolvedSettings_MirrorAcceptsServerOutput(t *testing.T) {
 	require.NotNil(t, entry.ProjectValue,
 		"projectValue must stay a pointer: null and \"\" are different answers")
 	assert.Equal(t, value, *entry.ProjectValue)
+	assert.Nil(t, entry.HubValue,
+		"hubValue must be null when hubDefault is unknown")
+
+	turnsEntry, ok := mirror.Settings[projectSettingDefaultMaxTurns]
+	require.Truef(t, ok, "the mirror lost the %q entry", projectSettingDefaultMaxTurns)
+	assert.Equal(t, hubclient.ResolvedHubDefaultPresent, turnsEntry.HubDefault)
+	assert.Equal(t, float64(120), turnsEntry.HubValue,
+		"hubValue must survive the round trip when hubDefault is present")
 
 	require.NotNil(t, mirror.Project, "the mirror dropped the \"project\" sub-object")
 	assert.Equal(t, value, mirror.Project.DefaultModel)

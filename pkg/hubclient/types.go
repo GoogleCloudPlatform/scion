@@ -241,16 +241,15 @@ const (
 // ResolvedProjectSetting is one key's entry in the resolved-settings response.
 //
 // NOTE FOR ANYONE ADDING A FIELD HERE: this type deliberately carries no
-// effective value, no winning source, and no hub value. The endpoint named
-// "resolved" does not resolve, because resolution is the resolver's job:
-// computing an effective value here would be a second implementation of the
-// precedence order, and a second implementation can silently drift from the
-// real one — a stale answer is still a well-formed answer, so nothing fails.
+// effective value and no winning source. The endpoint named "resolved" does not
+// resolve, because resolution is the resolver's job: computing an effective
+// value here would be a second implementation of the precedence order, and a
+// second implementation can silently drift from the real one.
 //
-// This includes a hub value, not just an "effective" one: in a two-field object
-// {projectValue, hubValue} the juxtaposition is itself the precedence claim,
-// because two adjacent fields with nothing between them assert that there is
-// nothing between them. HubDefault therefore reports existence only.
+// HubValue is the raw hub-configured value for display purposes only. It does
+// NOT represent the effective value: template and harness-config layers may sit
+// between the hub default and what an agent actually receives. Clients must
+// treat it as an informational hint, never as a precedence statement.
 //
 // The hub-side mirror of this type is guarded by an exact-set assertion over
 // JSON tags, so adding a field here without adding it there fails the build.
@@ -259,8 +258,11 @@ type ResolvedProjectSetting struct {
 	ProjectSet bool `json:"projectSet"`
 	// ProjectValue is the raw annotation string, or null when unset.
 	ProjectValue *string `json:"projectValue"`
-	// HubDefault reports the existence of a hub default — not its value, not its rank.
+	// HubDefault reports the existence of a hub default — not its rank.
 	HubDefault ResolvedHubDefault `json:"hubDefault"`
+	// HubValue is the raw hub-configured value when HubDefault is "present",
+	// null otherwise. Informational only — not an effective value.
+	HubValue any `json:"hubValue"`
 }
 
 // ResolvedProjectSettings is the GET /api/v1/projects/{id}/settings/resolved

@@ -126,8 +126,65 @@ func TestResolvedSettings_HubDefaultPresenceSemantics(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			desc, ok := resolvedSettingDescriptors[tc.key]
 			require.Truef(t, ok, "no descriptor for %q", tc.key)
-			got := hubDefaultFromDoc(rawDoc(t, tc.doc), desc)
+			got, _ := hubDefaultFromDoc(rawDoc(t, tc.doc), desc)
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestResolvedSettings_HubValueExtraction checks that hubDefaultFromDoc returns
+// the raw hub value alongside the presence state when a hub default is present.
+func TestResolvedSettings_HubValueExtraction(t *testing.T) {
+	tests := []struct {
+		name      string
+		key       string
+		doc       string
+		wantValue any
+	}{
+		{
+			name:      "int value extracted",
+			key:       projectSettingDefaultMaxTurns,
+			doc:       `{"default_max_turns": 120}`,
+			wantValue: float64(120), // JSON numbers unmarshal to float64
+		},
+		{
+			name:      "string value extracted",
+			key:       projectSettingDefaultTemplate,
+			doc:       `{"default_template": "base"}`,
+			wantValue: "base",
+		},
+		{
+			name:      "nested resource value extracted",
+			key:       projectSettingDefaultResourcesCPUReq,
+			doc:       `{"default_resources": {"requests": {"cpu": "2"}}}`,
+			wantValue: "2",
+		},
+		{
+			name:      "nested disk value extracted",
+			key:       projectSettingDefaultResourcesDisk,
+			doc:       `{"default_resources": {"disk": "10Gi"}}`,
+			wantValue: "10Gi",
+		},
+		{
+			name:      "missing key returns nil value",
+			key:       projectSettingDefaultMaxTurns,
+			doc:       `{}`,
+			wantValue: nil,
+		},
+		{
+			name:      "null key returns nil value",
+			key:       projectSettingDefaultMaxTurns,
+			doc:       `{"default_max_turns": null}`,
+			wantValue: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desc, ok := resolvedSettingDescriptors[tc.key]
+			require.Truef(t, ok, "no descriptor for %q", tc.key)
+			_, gotValue := hubDefaultFromDoc(rawDoc(t, tc.doc), desc)
+			assert.Equal(t, tc.wantValue, gotValue)
 		})
 	}
 }
@@ -277,7 +334,7 @@ func TestResolvedSettings_EndpointReturnsNoEffectiveValue(t *testing.T) {
 	// review then used exactly that name to smuggle a field past every guard in
 	// the suite. It is here as a marker of that, not because anyone expects it.
 	forbiddenNames := []string{
-		"value", "effective", "effectiveValue", "source", "hubValue", "winner",
+		"value", "effective", "effectiveValue", "source", "winner",
 	}
 
 	var projectObj map[string]json.RawMessage
