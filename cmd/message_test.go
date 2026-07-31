@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -1103,4 +1105,351 @@ func TestNotifyFlagValidation(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+func TestResolveAttachmentPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "relative path resolves to /workspace",
+			path: "src/main.go",
+			want: "/workspace/src/main.go",
+		},
+		{
+			name: "bare filename resolves to /workspace",
+			path: "file.txt",
+			want: "/workspace/file.txt",
+		},
+		{
+			name: "absolute path under /workspace is accepted",
+			path: "/workspace/pkg/api/types.go",
+			want: "/workspace/pkg/api/types.go",
+		},
+		{
+			name: "absolute path under /scion-volumes is accepted",
+			path: "/scion-volumes/scratchpad/notes.md",
+			want: "/scion-volumes/scratchpad/notes.md",
+		},
+		{
+			name: "absolute path outside allowed roots is filtered",
+			path: "/etc/shadow",
+			want: "",
+		},
+		{
+			name: "absolute path outside allowed roots - tmp",
+			path: "/tmp/secret.txt",
+			want: "",
+		},
+		{
+			name: "path with dot-dot traversal outside workspace is filtered",
+			path: "/workspace/../etc/passwd",
+			want: "",
+		},
+		{
+			name: "relative path with dot-dot staying inside workspace",
+			path: "pkg/../cmd/message.go",
+			want: "/workspace/cmd/message.go",
+		},
+		{
+			name: "path with workspace prefix but different directory is filtered",
+			path: "/workspace-evil/secret.txt",
+			want: "",
+		},
+		{
+			name: "path with scion-volumes prefix but different directory is filtered",
+			path: "/scion-volumes-other/data.txt",
+			want: "",
+		},
+		{
+			name: "path with workspace prefix no separator is filtered",
+			path: "/workspacefoo",
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveAttachmentPath(tc.path)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestCopyFile(t *testing.T) {
+	// Create a temp source file
+	srcDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "source.txt")
+	content := []byte("hello world\nthis is a test file\n")
+	err := os.WriteFile(srcPath, content, 0644)
+	require.NoError(t, err)
+
+	// Copy it
+	dstDir := t.TempDir()
+	dstPath := filepath.Join(dstDir, "dest.txt")
+	err = copyFile(srcPath, dstPath)
+	require.NoError(t, err)
+
+	// Verify content matches
+	got, err := os.ReadFile(dstPath)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+
+	// Verify permissions are preserved
+	srcInfo, err := os.Stat(srcPath)
+	require.NoError(t, err)
+	dstInfo, err := os.Stat(dstPath)
+	require.NoError(t, err)
+	assert.Equal(t, srcInfo.Mode(), dstInfo.Mode())
+}
+
+func TestCopyFile_PreservesExecutablePermission(t *testing.T) {
+	srcDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "script.sh")
+	err := os.WriteFile(srcPath, []byte("#!/bin/sh\necho hi\n"), 0755)
+	require.NoError(t, err)
+
+	dstDir := t.TempDir()
+	dstPath := filepath.Join(dstDir, "script.sh")
+	err = copyFile(srcPath, dstPath)
+	require.NoError(t, err)
+
+	dstInfo, err := os.Stat(dstPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0755), dstInfo.Mode().Perm())
+}
+
+func TestUniqueDest(t *testing.T) {
+	dir := t.TempDir()
+
+	// First call: no conflict
+	dest, err := uniqueDest(dir, "file.go")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "file.go"), dest)
+
+	// Create the file so the next call must pick a new name
+	err = os.WriteFile(dest, []byte("x"), 0644)
+	require.NoError(t, err)
+
+	// Second call: conflict, should get _1
+	dest2, err := uniqueDest(dir, "file.go")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "file_1.go"), dest2)
+
+	// Create that file too
+	err = os.WriteFile(dest2, []byte("y"), 0644)
+	require.NoError(t, err)
+
+	// Third call: should get _2
+	dest3, err := uniqueDest(dir, "file.go")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "file_2.go"), dest3)
+}
+
+func TestUniqueDest_NoExtension(t *testing.T) {
+	dir := t.TempDir()
+
+	// File without extension
+	dest, err := uniqueDest(dir, "Makefile")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "Makefile"), dest)
+
+	err = os.WriteFile(dest, []byte("x"), 0644)
+	require.NoError(t, err)
+
+	dest2, err := uniqueDest(dir, "Makefile")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "Makefile_1"), dest2)
+}
+
+func TestStageAttachments_HappyPath(t *testing.T) {
+	if _, err := os.Stat("/scion-volumes/scratchpad"); os.IsNotExist(err) {
+		t.Skip("skipping stageAttachments integration test: /scion-volumes/scratchpad not available")
+	}
+
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+
+	// Create test files under /workspace
+	testDir := filepath.Join("/workspace", ".test-attachments-happy")
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(testDir) }()
+
+	testFile1 := filepath.Join(testDir, "test1.txt")
+	testFile2 := filepath.Join(testDir, "test2.txt")
+	err = os.WriteFile(testFile1, []byte("content1"), 0644)
+	require.NoError(t, err)
+	err = os.WriteFile(testFile2, []byte("content2"), 0644)
+	require.NoError(t, err)
+
+	staged, err := stageAttachments([]string{testFile1, testFile2})
+	require.NoError(t, err)
+	require.Len(t, staged, 2)
+
+	// Verify staged files exist under the correct agent directory
+	for _, sp := range staged {
+		assert.Contains(t, sp, "/scion-volumes/scratchpad/.attachments/test-agent/")
+		_, err := os.Stat(sp)
+		require.NoError(t, err)
+	}
+
+	// Verify content was copied correctly
+	c1, err := os.ReadFile(staged[0])
+	require.NoError(t, err)
+	assert.Equal(t, "content1", string(c1))
+
+	c2, err := os.ReadFile(staged[1])
+	require.NoError(t, err)
+	assert.Equal(t, "content2", string(c2))
+
+	// Verify original filenames are preserved
+	assert.Equal(t, "test1.txt", filepath.Base(staged[0]))
+	assert.Equal(t, "test2.txt", filepath.Base(staged[1]))
+
+	// Clean up staged files
+	_ = os.RemoveAll(filepath.Dir(staged[0]))
+}
+
+func TestStageAttachments_MissingScratchpad(t *testing.T) {
+	if _, err := os.Stat("/scion-volumes/scratchpad"); err == nil {
+		t.Skip("skipping missing-scratchpad test: /scion-volumes/scratchpad is mounted")
+	}
+
+	_, err := stageAttachments([]string{"/workspace/some/file.go"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "scratchpad volume not available")
+	assert.Contains(t, err.Error(), "scion shared-dir create scratchpad")
+}
+
+func TestStageAttachments_DuplicateBasenames(t *testing.T) {
+	if _, err := os.Stat("/scion-volumes/scratchpad"); os.IsNotExist(err) {
+		t.Skip("skipping: /scion-volumes/scratchpad not available")
+	}
+
+	t.Setenv("SCION_AGENT_NAME", "dup-test-agent")
+
+	// Create two files with the same basename in different directories
+	testDir := filepath.Join("/workspace", ".test-dup-basenames")
+	dir1 := filepath.Join(testDir, "v1")
+	dir2 := filepath.Join(testDir, "v2")
+	err := os.MkdirAll(dir1, 0755)
+	require.NoError(t, err)
+	err = os.MkdirAll(dir2, 0755)
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(testDir) }()
+
+	err = os.WriteFile(filepath.Join(dir1, "types.go"), []byte("package v1"), 0644)
+	require.NoError(t, err)
+	err = os.WriteFile(filepath.Join(dir2, "types.go"), []byte("package v2"), 0644)
+	require.NoError(t, err)
+
+	staged, err := stageAttachments([]string{
+		filepath.Join(dir1, "types.go"),
+		filepath.Join(dir2, "types.go"),
+	})
+	require.NoError(t, err)
+	require.Len(t, staged, 2)
+
+	// First should be types.go, second should be types_1.go
+	assert.Equal(t, "types.go", filepath.Base(staged[0]))
+	assert.Equal(t, "types_1.go", filepath.Base(staged[1]))
+
+	// Verify content is correct
+	c1, err := os.ReadFile(staged[0])
+	require.NoError(t, err)
+	assert.Equal(t, "package v1", string(c1))
+
+	c2, err := os.ReadFile(staged[1])
+	require.NoError(t, err)
+	assert.Equal(t, "package v2", string(c2))
+
+	// Cleanup
+	_ = os.RemoveAll(filepath.Dir(staged[0]))
+}
+
+func TestStageAttachments_NonExistentFile(t *testing.T) {
+	if _, err := os.Stat("/scion-volumes/scratchpad"); os.IsNotExist(err) {
+		t.Skip("skipping: /scion-volumes/scratchpad not available")
+	}
+
+	t.Setenv("SCION_AGENT_NAME", "noexist-test")
+
+	_, err := stageAttachments([]string{"/workspace/this-file-does-not-exist-xyz.go"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "this-file-does-not-exist-xyz.go")
+}
+
+func TestStageAttachments_NonRegularFile(t *testing.T) {
+	if _, err := os.Stat("/scion-volumes/scratchpad"); os.IsNotExist(err) {
+		t.Skip("skipping: /scion-volumes/scratchpad not available")
+	}
+
+	t.Setenv("SCION_AGENT_NAME", "nonreg-test")
+
+	// Create a directory (not a regular file) and try to attach it
+	testDir := filepath.Join("/workspace", ".test-nonreg-attach")
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(testDir) }()
+
+	_, err = stageAttachments([]string{testDir})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a regular file")
+}
+
+func TestStageAttachments_DefaultAgentSlug(t *testing.T) {
+	if _, err := os.Stat("/scion-volumes/scratchpad"); os.IsNotExist(err) {
+		t.Skip("skipping: /scion-volumes/scratchpad not available")
+	}
+
+	t.Setenv("SCION_AGENT_NAME", "")
+
+	testDir := filepath.Join("/workspace", ".test-slug-default")
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(testDir) }()
+
+	testFile := filepath.Join(testDir, "file.txt")
+	err = os.WriteFile(testFile, []byte("test"), 0644)
+	require.NoError(t, err)
+
+	staged, err := stageAttachments([]string{testFile})
+	require.NoError(t, err)
+	require.Len(t, staged, 1)
+
+	// Should use _user as the agent slug
+	assert.Contains(t, staged[0], "/_user/")
+
+	// Cleanup
+	_ = os.RemoveAll(filepath.Dir(staged[0]))
+}
+
+func TestStageAttachments_FilteredPathsSkipped(t *testing.T) {
+	if _, err := os.Stat("/scion-volumes/scratchpad"); os.IsNotExist(err) {
+		t.Skip("skipping: /scion-volumes/scratchpad not available")
+	}
+
+	t.Setenv("SCION_AGENT_NAME", "filter-test")
+
+	// Create a valid file
+	testDir := filepath.Join("/workspace", ".test-filter-attach")
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(testDir) }()
+
+	validFile := filepath.Join(testDir, "valid.go")
+	err = os.WriteFile(validFile, []byte("package valid"), 0644)
+	require.NoError(t, err)
+
+	// Pass one valid path and one that will be filtered
+	staged, err := stageAttachments([]string{validFile, "/etc/passwd"})
+	require.NoError(t, err)
+	// Only the valid file should be staged
+	require.Len(t, staged, 1)
+	assert.Equal(t, "valid.go", filepath.Base(staged[0]))
+
+	// Cleanup
+	_ = os.RemoveAll(filepath.Dir(staged[0]))
 }

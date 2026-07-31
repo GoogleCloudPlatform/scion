@@ -17,7 +17,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -232,6 +234,15 @@ Examples:
 		// --notify requires Hub mode
 		if msgNotify && hubCtx == nil {
 			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
+		}
+
+		// Stage attachments to shared volume (after Hub mode confirmed)
+		if len(msgAttach) > 0 && hubCtx != nil {
+			staged, err := stageAttachments(msgAttach)
+			if err != nil {
+				return fmt.Errorf("attachment staging failed: %w", err)
+			}
+			msgAttach = staged
 		}
 
 		// Group-targeted messages: fan out to each recipient
@@ -814,4 +825,148 @@ func init() {
 	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Target a specific thread within the channel")
 	messageCmd.AddCommand(messageChannelsCmd)
 	rootCmd.AddCommand(messageCmd)
+}
+
+// resolveAttachmentPath resolves a relative or absolute attachment path.
+// Relative paths are resolved relative to /workspace. Absolute paths outside
+// /workspace and /scion-volumes are filtered out with a warning. Returns ""
+// for filtered paths.
+func resolveAttachmentPath(p string) string {
+	if !filepath.IsAbs(p) {
+		p = filepath.Join("/workspace", p)
+	}
+
+	// Resolve symlinks to prevent directory traversal via symlinks
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		// If we can't resolve (e.g., file doesn't exist yet), fall back to Clean
+		resolved = filepath.Clean(p)
+	}
+
+	if strings.HasPrefix(resolved, "/workspace/") || resolved == "/workspace" ||
+		strings.HasPrefix(resolved, "/scion-volumes/") || resolved == "/scion-volumes" {
+		return resolved
+	}
+
+	fmt.Fprintf(os.Stderr, "Warning: attachment path %q is outside allowed roots "+
+		"(/workspace, /scion-volumes); skipping\n", p)
+	return ""
+}
+
+// copyFile copies the file at src to dst, preserving permissions.
+func copyFile(src, dst string) (err error) {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = srcFile.Close() }()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := dstFile.Close(); err == nil {
+			err = closeErr
+		}
+	}()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
+}
+
+// uniqueDest returns a unique destination path in dir for basename. If basename
+// already exists in dir, appends _1, _2, etc. before the extension.
+func uniqueDest(dir, basename string) (string, error) {
+	dest := filepath.Join(dir, basename)
+	_, err := os.Stat(dest)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return dest, nil
+		}
+		return "", err
+	}
+
+	ext := filepath.Ext(basename)
+	name := strings.TrimSuffix(basename, ext)
+	for i := 1; ; i++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s_%d%s", name, i, ext))
+		_, err := os.Stat(candidate)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return candidate, nil
+			}
+			return "", err
+		}
+	}
+}
+
+// stageAttachments copies attachment files to the scratchpad shared volume
+// and returns the new paths. Returns an error if the scratchpad is not
+// available — attachments require shared storage for cross-agent delivery.
+func stageAttachments(paths []string) (staged []string, err error) {
+	scratchpad := "/scion-volumes/scratchpad"
+
+	// Check scratchpad availability — hard error if absent
+	if _, err := os.Stat(scratchpad); os.IsNotExist(err) {
+		return nil, fmt.Errorf("scratchpad volume not available at %s; "+
+			"attachments require a scratchpad shared volume for cross-agent "+
+			"file transfer. Create one with: scion shared-dir create scratchpad",
+			scratchpad)
+	}
+
+	// Determine agent slug for per-agent directory
+	agentSlug := os.Getenv("SCION_AGENT_NAME")
+	if agentSlug == "" {
+		agentSlug = "_user"
+	}
+
+	// Generate per-message staging directory under agent slug
+	msgID := api.NewUUID()
+	stageDir := filepath.Join(scratchpad, ".attachments", agentSlug, msgID)
+	if err := os.MkdirAll(stageDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create attachment staging directory: %w", err)
+	}
+
+	// Clean up staging directory if we return an error
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(stageDir)
+		}
+	}()
+
+	staged = make([]string, 0, len(paths))
+	for _, p := range paths {
+		// Resolve path
+		resolved := resolveAttachmentPath(p)
+		if resolved == "" {
+			continue // filtered out (warning already printed)
+		}
+
+		// Validate file exists and is a regular file
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return nil, fmt.Errorf("attachment %q: %w", p, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("attachment %q: not a regular file", p)
+		}
+
+		// Copy to staging directory (handle duplicate basenames)
+		dest, err := uniqueDest(stageDir, filepath.Base(resolved))
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine destination for attachment %q: %w", p, err)
+		}
+		if err := copyFile(resolved, dest); err != nil {
+			return nil, fmt.Errorf("failed to stage attachment %q: %w", p, err)
+		}
+		staged = append(staged, dest)
+	}
+
+	return staged, nil
 }
