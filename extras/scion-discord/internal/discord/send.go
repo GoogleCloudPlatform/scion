@@ -105,19 +105,25 @@ type fileMatch struct {
 	ModTime time.Time
 }
 
-// hiddenDirs lists directory name prefixes to skip during file search.
-var hiddenDirs = map[string]bool{
-	".git":    true,
-	".cache":  true,
-	".local":  true,
-	".npm":    true,
-	".config": true,
+// isUnderSearchRoot checks that a cleaned, resolved path is under searchRoot.
+// Both the cleaned path and its symlink-resolved form must be under searchRoot
+// to prevent directory traversal and symlink escape attacks.
+func isUnderSearchRoot(path string) bool {
+	cleaned := filepath.Clean(path)
+	if !strings.HasPrefix(cleaned, searchRoot) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(resolved, searchRoot)
 }
 
 // HandleSend handles the /scion send <path> command.
-// If path is an absolute path to an existing file, it sends it directly.
-// Otherwise it searches /scion-volumes/ for matching files and presents
-// buttons for selection.
+// If path is an absolute path to an existing file under searchRoot, it sends
+// it directly. Otherwise it searches /scion-volumes/ for matching files and
+// presents buttons for selection.
 func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	pathArg := getSubcommandOption(i, "path")
 	if pathArg == "" {
@@ -125,12 +131,18 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 		return
 	}
 
-	// Case 1: Absolute path pointing to an existing file.
+	// Case 1: Absolute path pointing to an existing file, confined to searchRoot.
 	if filepath.IsAbs(pathArg) {
-		info, err := os.Stat(pathArg)
-		if err == nil && !info.IsDir() {
-			h.sendFile(s, i, pathArg, info)
-			return
+		cleaned := filepath.Clean(pathArg)
+		if strings.HasPrefix(cleaned, searchRoot) {
+			resolved, err := filepath.EvalSymlinks(cleaned)
+			if err == nil && strings.HasPrefix(resolved, searchRoot) {
+				info, err := os.Stat(resolved)
+				if err == nil && !info.IsDir() {
+					h.sendFile(s, i, resolved, info)
+					return
+				}
+			}
 		}
 	}
 
@@ -153,13 +165,16 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 
 	// Build buttons. Store full paths in the path store to avoid
 	// exceeding Discord's 100-char custom ID limit.
+	// N3: detect duplicate basenames to disambiguate labels.
+	labels := buildButtonLabels(matches)
+
 	var rows []discordgo.MessageComponent
 	var buttons []discordgo.MessageComponent
 
 	for idx, m := range matches {
 		key := globalSendPaths.Put(m.Path)
 		buttons = append(buttons, discordgo.Button{
-			Label:    filepath.Base(m.Path),
+			Label:    labels[idx],
 			Style:    discordgo.SecondaryButton,
 			CustomID: fmt.Sprintf("send:file:%s", key),
 		})
@@ -182,6 +197,38 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 	}
 }
 
+// buildButtonLabels returns a label for each match. When multiple matches
+// share the same basename, the parent directory is prepended to disambiguate.
+func buildButtonLabels(matches []fileMatch) []string {
+	labels := make([]string, len(matches))
+
+	// Count how many times each basename appears.
+	baseCounts := make(map[string]int)
+	for _, m := range matches {
+		baseCounts[filepath.Base(m.Path)]++
+	}
+
+	for idx, m := range matches {
+		base := filepath.Base(m.Path)
+		if baseCounts[base] > 1 {
+			parent := filepath.Base(filepath.Dir(m.Path))
+			label := parent + "/" + base
+			// Discord button labels max 80 chars.
+			if len(label) > 80 {
+				label = label[:80]
+			}
+			labels[idx] = label
+		} else {
+			label := base
+			if len(label) > 80 {
+				label = label[:80]
+			}
+			labels[idx] = label
+		}
+	}
+	return labels
+}
+
 // sendFile reads a file and sends it as a Discord attachment.
 func (h *CommandHandler) sendFile(s *discordgo.Session, i *discordgo.InteractionCreate, path string, info os.FileInfo) {
 	if info.Size() > maxDiscordFileSize {
@@ -193,7 +240,7 @@ func (h *CommandHandler) sendFile(s *discordgo.Session, i *discordgo.Interaction
 	data, err := os.ReadFile(path)
 	if err != nil {
 		h.log.Error("Failed to read file for send", "path", path, "error", err)
-		h.followup(s, i, fmt.Sprintf("Could not read file: %s", err.Error()))
+		h.followup(s, i, fmt.Sprintf("Could not read file: %s", filepath.Base(path)))
 		return
 	}
 
@@ -210,7 +257,8 @@ func (h *CommandHandler) sendFile(s *discordgo.Session, i *discordgo.Interaction
 }
 
 // searchFiles walks searchRoot looking for files whose path contains the
-// given query (case-insensitive). Returns up to maxFilesWalked examined files.
+// given query (case-insensitive). Symlinks that resolve outside searchRoot
+// are excluded to prevent symlink escape attacks.
 func searchFiles(query string) []fileMatch {
 	lowerQuery := strings.ToLower(query)
 	var matches []fileMatch
@@ -226,10 +274,9 @@ func searchFiles(query string) []fileMatch {
 			return filepath.SkipAll
 		}
 
-		// Skip hidden directories.
+		// Skip hidden directories (any directory starting with ".").
 		if d.IsDir() {
-			name := d.Name()
-			if strings.HasPrefix(name, ".") || hiddenDirs[name] {
+			if strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -237,6 +284,12 @@ func searchFiles(query string) []fileMatch {
 
 		// Match file paths case-insensitively.
 		if strings.Contains(strings.ToLower(path), lowerQuery) {
+			// R1: Resolve symlinks and verify target is still under searchRoot.
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil || !strings.HasPrefix(resolved, searchRoot) {
+				return nil
+			}
+
 			info, err := d.Info()
 			if err != nil {
 				return nil
@@ -262,8 +315,17 @@ func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate
 		return
 	}
 
-	info, err := os.Stat(path)
+	// Resolve symlinks and verify path is still under searchRoot.
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || !strings.HasPrefix(resolved, searchRoot) {
+		log.Warn("Send callback path failed confinement check", "path", path, "resolved", resolved, "error", err)
+		respondSendUpdate(s, i, "This file is no longer accessible.", log)
+		return
+	}
+
+	info, err := os.Stat(resolved)
 	if err != nil {
+		log.Error("Failed to stat file for send callback", "path", resolved, "error", err)
 		respondSendUpdate(s, i, fmt.Sprintf("File not found: %s", filepath.Base(path)), log)
 		return
 	}
@@ -279,14 +341,18 @@ func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate
 		return
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(resolved)
 	if err != nil {
-		log.Error("Failed to read file for send callback", "path", path, "error", err)
-		respondSendUpdate(s, i, fmt.Sprintf("Could not read file: %s", err.Error()), log)
+		log.Error("Failed to read file for send callback", "path", resolved, "error", err)
+		respondSendUpdate(s, i, fmt.Sprintf("Could not read file: %s", filepath.Base(path)), log)
 		return
 	}
 
-	// Send the file as a new followup message (the original button message stays).
+	// N2: Edit original button message to indicate which file was sent.
+	sentContent := fmt.Sprintf("Sent file: `%s`", filepath.Base(path))
+	respondSendUpdate(s, i, sentContent, log)
+
+	// Send the file as a new followup message.
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content: fmt.Sprintf("📎 `%s`", filepath.Base(path)),
 		Files: []*discordgo.File{
@@ -294,8 +360,7 @@ func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate
 		},
 	})
 	if err != nil {
-		log.Error("Failed to send file from callback", "path", path, "error", err)
-		respondSendUpdate(s, i, "Failed to send file. Please try again.", log)
+		log.Error("Failed to send file from callback", "path", resolved, "error", err)
 	}
 }
 
