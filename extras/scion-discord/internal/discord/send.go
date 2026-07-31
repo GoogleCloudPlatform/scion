@@ -132,22 +132,17 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 	}
 
 	// Case 1: Absolute path pointing to an existing file, confined to searchRoot.
-	if filepath.IsAbs(pathArg) {
-		cleaned := filepath.Clean(pathArg)
-		if strings.HasPrefix(cleaned, searchRoot) {
-			resolved, err := filepath.EvalSymlinks(cleaned)
-			if err == nil && strings.HasPrefix(resolved, searchRoot) {
-				info, err := os.Stat(resolved)
-				if err == nil && !info.IsDir() {
-					h.sendFile(s, i, resolved, info)
-					return
-				}
-			}
+	if filepath.IsAbs(pathArg) && isUnderSearchRoot(pathArg) {
+		resolved, _ := filepath.EvalSymlinks(filepath.Clean(pathArg))
+		info, err := os.Stat(resolved)
+		if err == nil && !info.IsDir() {
+			h.sendFile(s, i, resolved, info)
+			return
 		}
 	}
 
 	// Case 2: Search for files matching the argument.
-	matches := searchFiles(pathArg)
+	matches := searchFiles(searchRoot, pathArg)
 
 	if len(matches) == 0 {
 		h.followup(s, i, fmt.Sprintf("No files found matching '%s'", pathArg))
@@ -256,15 +251,15 @@ func (h *CommandHandler) sendFile(s *discordgo.Session, i *discordgo.Interaction
 	}
 }
 
-// searchFiles walks searchRoot looking for files whose path contains the
-// given query (case-insensitive). Symlinks that resolve outside searchRoot
-// are excluded to prevent symlink escape attacks.
-func searchFiles(query string) []fileMatch {
+// searchFiles walks root looking for files whose path contains the given
+// query (case-insensitive). Symlinks that resolve outside root are excluded
+// to prevent symlink escape attacks.
+func searchFiles(root, query string) []fileMatch {
 	lowerQuery := strings.ToLower(query)
 	var matches []fileMatch
 	filesWalked := 0
 
-	_ = filepath.WalkDir(searchRoot, func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries
 		}
@@ -284,9 +279,9 @@ func searchFiles(query string) []fileMatch {
 
 		// Match file paths case-insensitively.
 		if strings.Contains(strings.ToLower(path), lowerQuery) {
-			// R1: Resolve symlinks and verify target is still under searchRoot.
+			// Resolve symlinks and verify target is still under root.
 			resolved, err := filepath.EvalSymlinks(path)
-			if err != nil || !strings.HasPrefix(resolved, searchRoot) {
+			if err != nil || !strings.HasPrefix(resolved, root) {
 				return nil
 			}
 
@@ -315,14 +310,14 @@ func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate
 		return
 	}
 
-	// Resolve symlinks and verify path is still under searchRoot.
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || !strings.HasPrefix(resolved, searchRoot) {
-		log.Warn("Send callback path failed confinement check", "path", path, "resolved", resolved, "error", err)
+	// Verify path is still confined to searchRoot (resolves symlinks).
+	if !isUnderSearchRoot(path) {
+		log.Warn("Send callback path failed confinement check", "path", path)
 		respondSendUpdate(s, i, "This file is no longer accessible.", log)
 		return
 	}
 
+	resolved, _ := filepath.EvalSymlinks(filepath.Clean(path))
 	info, err := os.Stat(resolved)
 	if err != nil {
 		log.Error("Failed to stat file for send callback", "path", resolved, "error", err)

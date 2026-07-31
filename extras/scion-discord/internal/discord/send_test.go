@@ -1,10 +1,8 @@
 package discord
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -98,7 +96,7 @@ func TestSendPathStore_ConcurrentAccess(t *testing.T) {
 func TestSearchFiles_MatchesSubstring(t *testing.T) {
 	dir := setupSearchTestDir(t)
 
-	matches := searchFilesInDir(dir, "hello")
+	matches := searchFiles(dir, "hello")
 	assert.Len(t, matches, 1)
 	assert.Contains(t, matches[0].Path, "hello.txt")
 }
@@ -106,7 +104,7 @@ func TestSearchFiles_MatchesSubstring(t *testing.T) {
 func TestSearchFiles_CaseInsensitive(t *testing.T) {
 	dir := setupSearchTestDir(t)
 
-	matches := searchFilesInDir(dir, "HELLO")
+	matches := searchFiles(dir, "HELLO")
 	assert.Len(t, matches, 1)
 	assert.Contains(t, matches[0].Path, "hello.txt")
 }
@@ -114,7 +112,7 @@ func TestSearchFiles_CaseInsensitive(t *testing.T) {
 func TestSearchFiles_NoMatches(t *testing.T) {
 	dir := setupSearchTestDir(t)
 
-	matches := searchFilesInDir(dir, "nonexistent_xyz_abc")
+	matches := searchFiles(dir, "nonexistent_xyz_abc")
 	assert.Empty(t, matches)
 }
 
@@ -122,7 +120,7 @@ func TestSearchFiles_SkipsHiddenDirs(t *testing.T) {
 	dir := setupSearchTestDir(t)
 
 	// The .hidden directory contains a file named "secret.txt".
-	matches := searchFilesInDir(dir, "secret")
+	matches := searchFiles(dir, "secret")
 	assert.Empty(t, matches, "files in hidden directories should be skipped")
 }
 
@@ -138,7 +136,7 @@ func TestSearchFiles_SymlinkOutsideRoot(t *testing.T) {
 	symlinkPath := filepath.Join(dir, "escape-link.txt")
 	require.NoError(t, os.Symlink(outsideFile, symlinkPath))
 
-	matches := searchFilesInDir(dir, "escape-link")
+	matches := searchFiles(dir, "escape-link")
 	assert.Empty(t, matches, "symlinks pointing outside search root should be excluded")
 }
 
@@ -239,53 +237,4 @@ func setupSearchTestDir(t *testing.T) string {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".hidden", "secret.txt"), []byte("secret"), 0o644))
 
 	return dir
-}
-
-// searchFilesInDir is a test helper that runs the search logic against
-// an arbitrary directory root instead of the hardcoded searchRoot.
-// It duplicates the core logic of searchFiles to allow testing with
-// temp directories.
-func searchFilesInDir(root, query string) []fileMatch {
-	lowerQuery := strings.ToLower(query)
-	var matches []fileMatch
-	filesWalked := 0
-
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-
-		filesWalked++
-		if filesWalked > maxFilesWalked {
-			return filepath.SkipAll
-		}
-
-		if d.IsDir() {
-			if strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if strings.Contains(strings.ToLower(path), lowerQuery) {
-			// Verify symlink target is under the root.
-			resolved, err := filepath.EvalSymlinks(path)
-			if err != nil || !strings.HasPrefix(resolved, root) {
-				return nil
-			}
-
-			info, err := d.Info()
-			if err != nil {
-				return nil
-			}
-			matches = append(matches, fileMatch{
-				Path:    path,
-				ModTime: info.ModTime(),
-			})
-		}
-
-		return nil
-	})
-
-	return matches
 }
