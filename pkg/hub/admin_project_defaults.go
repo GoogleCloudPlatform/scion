@@ -113,13 +113,7 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 	}
 
 	// File/SQLite mode: no persistent storage for this section.
-	// Resolve against compiled default for a consistent response shape,
-	// regardless of deployment mode.
-	enabled := true // compiled default
-	if body.DefaultScratchpad != nil {
-		enabled = *body.DefaultScratchpad
-	}
-	writeJSON(w, http.StatusOK, opsettings.ProjectDefaultsSettings{
-		DefaultScratchpad: &enabled,
-	})
+	// Return 501 to signal that writes are not supported.
+	writeError(w, http.StatusNotImplemented, "not_implemented",
+		"Updating project defaults is not supported in file/SQLite mode", nil)
 }

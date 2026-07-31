@@ -211,31 +211,19 @@ func TestHandleAdminProjectDefaults_PutEmptyDocResolvesDefault(t *testing.T) {
 	}
 }
 
-func TestHandleAdminProjectDefaults_FileSQLiteMode_PutResolvesDefault(t *testing.T) {
-	// In file/SQLite mode (no OperationalSettings), PUT should still return
-	// the resolved value, not echo the raw body.
+func TestHandleAdminProjectDefaults_FileSQLiteMode_PutNotImplemented(t *testing.T) {
+	// In file/SQLite mode (no OperationalSettings), PUT should return 501
+	// because there is no persistent storage for this section.
 	srv := newAdminProjectDefaultsServer(t, nil) // nil store = file/SQLite mode
 
-	// PUT {} — file/SQLite mode should resolve against compiled default.
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/project-defaults",
-		bytes.NewBufferString(`{}`))
+		bytes.NewBufferString(`{"default_scratchpad": false}`))
 	req.Header.Set("Content-Type", "application/json")
 	req = adminContext(req)
 	rr := httptest.NewRecorder()
 	srv.handleAdminProjectDefaults(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-
-	var resp opsettings.ProjectDefaultsSettings
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if resp.DefaultScratchpad == nil {
-		t.Fatal("expected default_scratchpad to be present in resolved response")
-	}
-	if *resp.DefaultScratchpad != true {
-		t.Errorf("file/SQLite mode: expected default_scratchpad=true (compiled default), got %v", *resp.DefaultScratchpad)
+	if rr.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
