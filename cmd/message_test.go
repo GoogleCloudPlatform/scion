@@ -1225,15 +1225,17 @@ func TestUniqueDest(t *testing.T) {
 	dir := t.TempDir()
 
 	// First call: no conflict
-	dest := uniqueDest(dir, "file.go")
+	dest, err := uniqueDest(dir, "file.go")
+	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(dir, "file.go"), dest)
 
 	// Create the file so the next call must pick a new name
-	err := os.WriteFile(dest, []byte("x"), 0644)
+	err = os.WriteFile(dest, []byte("x"), 0644)
 	require.NoError(t, err)
 
 	// Second call: conflict, should get _1
-	dest2 := uniqueDest(dir, "file.go")
+	dest2, err := uniqueDest(dir, "file.go")
+	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(dir, "file_1.go"), dest2)
 
 	// Create that file too
@@ -1241,7 +1243,8 @@ func TestUniqueDest(t *testing.T) {
 	require.NoError(t, err)
 
 	// Third call: should get _2
-	dest3 := uniqueDest(dir, "file.go")
+	dest3, err := uniqueDest(dir, "file.go")
+	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(dir, "file_2.go"), dest3)
 }
 
@@ -1249,13 +1252,15 @@ func TestUniqueDest_NoExtension(t *testing.T) {
 	dir := t.TempDir()
 
 	// File without extension
-	dest := uniqueDest(dir, "Makefile")
+	dest, err := uniqueDest(dir, "Makefile")
+	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(dir, "Makefile"), dest)
 
-	err := os.WriteFile(dest, []byte("x"), 0644)
+	err = os.WriteFile(dest, []byte("x"), 0644)
 	require.NoError(t, err)
 
-	dest2 := uniqueDest(dir, "Makefile")
+	dest2, err := uniqueDest(dir, "Makefile")
+	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(dir, "Makefile_1"), dest2)
 }
 

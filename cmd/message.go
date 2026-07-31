@@ -835,11 +835,17 @@ func resolveAttachmentPath(p string) string {
 	if !filepath.IsAbs(p) {
 		p = filepath.Join("/workspace", p)
 	}
-	p = filepath.Clean(p)
 
-	if strings.HasPrefix(p, "/workspace/") || p == "/workspace" ||
-		strings.HasPrefix(p, "/scion-volumes/") || p == "/scion-volumes" {
-		return p
+	// Resolve symlinks to prevent directory traversal via symlinks
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		// If we can't resolve (e.g., file doesn't exist yet), fall back to Clean
+		resolved = filepath.Clean(p)
+	}
+
+	if strings.HasPrefix(resolved, "/workspace/") || resolved == "/workspace" ||
+		strings.HasPrefix(resolved, "/scion-volumes/") || resolved == "/scion-volumes" {
+		return resolved
 	}
 
 	fmt.Fprintf(os.Stderr, "Warning: attachment path %q is outside allowed roots "+
@@ -848,7 +854,7 @@ func resolveAttachmentPath(p string) string {
 }
 
 // copyFile copies the file at src to dst, preserving permissions.
-func copyFile(src, dst string) error {
+func copyFile(src, dst string) (err error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -864,27 +870,38 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if closeErr := dstFile.Close(); err == nil {
+			err = closeErr
+		}
+	}()
+
 	_, err = io.Copy(dstFile, srcFile)
-	if closeErr := dstFile.Close(); err == nil {
-		err = closeErr
-	}
 	return err
 }
 
 // uniqueDest returns a unique destination path in dir for basename. If basename
 // already exists in dir, appends _1, _2, etc. before the extension.
-func uniqueDest(dir, basename string) string {
+func uniqueDest(dir, basename string) (string, error) {
 	dest := filepath.Join(dir, basename)
-	if _, err := os.Stat(dest); os.IsNotExist(err) {
-		return dest
+	_, err := os.Stat(dest)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return dest, nil
+		}
+		return "", err
 	}
 
 	ext := filepath.Ext(basename)
 	name := strings.TrimSuffix(basename, ext)
 	for i := 1; ; i++ {
 		candidate := filepath.Join(dir, fmt.Sprintf("%s_%d%s", name, i, ext))
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate
+		_, err := os.Stat(candidate)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return candidate, nil
+			}
+			return "", err
 		}
 	}
 }
@@ -892,7 +909,7 @@ func uniqueDest(dir, basename string) string {
 // stageAttachments copies attachment files to the scratchpad shared volume
 // and returns the new paths. Returns an error if the scratchpad is not
 // available — attachments require shared storage for cross-agent delivery.
-func stageAttachments(paths []string) ([]string, error) {
+func stageAttachments(paths []string) (staged []string, err error) {
 	scratchpad := "/scion-volumes/scratchpad"
 
 	// Check scratchpad availability — hard error if absent
@@ -916,7 +933,14 @@ func stageAttachments(paths []string) ([]string, error) {
 		return nil, fmt.Errorf("failed to create attachment staging directory: %w", err)
 	}
 
-	staged := make([]string, 0, len(paths))
+	// Clean up staging directory if we return an error
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(stageDir)
+		}
+	}()
+
+	staged = make([]string, 0, len(paths))
 	for _, p := range paths {
 		// Resolve path
 		resolved := resolveAttachmentPath(p)
@@ -934,7 +958,10 @@ func stageAttachments(paths []string) ([]string, error) {
 		}
 
 		// Copy to staging directory (handle duplicate basenames)
-		dest := uniqueDest(stageDir, filepath.Base(resolved))
+		dest, err := uniqueDest(stageDir, filepath.Base(resolved))
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine destination for attachment %q: %w", p, err)
+		}
 		if err := copyFile(resolved, dest); err != nil {
 			return nil, fmt.Errorf("failed to stage attachment %q: %w", p, err)
 		}
