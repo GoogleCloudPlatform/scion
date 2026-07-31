@@ -718,12 +718,8 @@ export class ScionAgentTreeView extends LitElement {
             class="terminal-btn"
             name="terminal"
             label="Terminal"
+            href="/agents/${agent.id}/terminal"
             ?disabled=${!isTerminalAvailable(agent)}
-            @click=${(e: Event) => {
-              e.preventDefault();
-              e.stopPropagation();
-              window.location.href = `/agents/${agent.id}/terminal`;
-            }}
           ></sl-icon-button>
         ` : nothing}
         ${descendants > 0 ? html`
