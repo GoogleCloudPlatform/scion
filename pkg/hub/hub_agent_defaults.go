@@ -45,6 +45,10 @@ func (s *Server) hubAgentDefaults() opsettings.AgentDefaultsSettings {
 		rs := *d.DefaultResources
 		d.DefaultResources = &rs
 	}
+	if d.DefaultThinkingLevel != nil {
+		v := *d.DefaultThinkingLevel
+		d.DefaultThinkingLevel = &v
+	}
 	return d
 }
 
@@ -58,10 +62,23 @@ func agentDefaultsEqual(a, b opsettings.AgentDefaultsSettings) bool {
 		a.DefaultHarnessConfig != b.DefaultHarnessConfig ||
 		a.DefaultMaxTurns != b.DefaultMaxTurns ||
 		a.DefaultMaxModelCalls != b.DefaultMaxModelCalls ||
-		a.DefaultMaxDuration != b.DefaultMaxDuration {
+		a.DefaultMaxDuration != b.DefaultMaxDuration ||
+		a.DefaultModel != b.DefaultModel {
+		return false
+	}
+	if !intPtrEqual(a.DefaultThinkingLevel, b.DefaultThinkingLevel) {
 		return false
 	}
 	return resourceSpecEqual(a.DefaultResources, b.DefaultResources)
+}
+
+// intPtrEqual compares two *int values by pointee, treating nil as distinct
+// from a zero-valued int.
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // resourceSpecEqual compares two resource specs by value, treating nil and a

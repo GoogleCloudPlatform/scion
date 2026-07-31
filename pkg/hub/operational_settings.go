@@ -92,6 +92,8 @@ type Layer1Snapshot struct {
 	DefaultMaxModelCalls int
 	DefaultMaxDuration   string
 	DefaultResources     *api.ResourceSpec
+	DefaultModel         string
+	DefaultThinkingLevel *int
 
 	// Endpoints
 	PublicURL     string
@@ -582,6 +584,11 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.DefaultMaxTurns = k.Int("default_max_turns")
 	snap.DefaultMaxModelCalls = k.Int("default_max_model_calls")
 	snap.DefaultMaxDuration = k.String("default_max_duration")
+	snap.DefaultModel = k.String("default_model")
+	if k.Exists("default_thinking_level") {
+		v := k.Int("default_thinking_level")
+		snap.DefaultThinkingLevel = &v
+	}
 	if k.Exists("default_resources") {
 		data, err := json.Marshal(k.Get("default_resources"))
 		if err == nil {
@@ -733,6 +740,8 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		DefaultMaxTurns:      snap.DefaultMaxTurns,
 		DefaultMaxModelCalls: snap.DefaultMaxModelCalls,
 		DefaultMaxDuration:   snap.DefaultMaxDuration,
+		DefaultModel:         snap.DefaultModel,
+		DefaultThinkingLevel: snap.DefaultThinkingLevel,
 	}
 	// Deep-copy the one pointer field, symmetrically with hubAgentDefaults()'s
 	// read side. Aliasing the snapshot's pointee would leave the CALLER of
@@ -743,6 +752,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.DefaultResources != nil {
 		rs := *snap.DefaultResources
 		newDefaults.DefaultResources = &rs
+	}
+	if snap.DefaultThinkingLevel != nil {
+		v := *snap.DefaultThinkingLevel
+		newDefaults.DefaultThinkingLevel = &v
 	}
 	if !agentDefaultsEqual(s.config.AgentDefaults, newDefaults) {
 		applied = append(applied, "agent_defaults")

@@ -194,6 +194,8 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultMaxModelCalls = snap.DefaultMaxModelCalls
 	resp.DefaultMaxDuration = snap.DefaultMaxDuration
 	resp.DefaultResources = snap.DefaultResources
+	resp.DefaultModel = snap.DefaultModel
+	resp.DefaultThinkingLevel = snap.DefaultThinkingLevel
 
 	// Telemetry — always set from snapshot (nil = no telemetry configured).
 	resp.Telemetry = snap.TelemetryConfig
@@ -650,6 +652,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 	if req.DefaultResources != nil {
 		keys = append(keys, "default_resources")
 	}
+	if req.DefaultModel != nil {
+		keys = append(keys, "default_model")
+	}
+	if req.DefaultThinkingLevel != nil {
+		keys = append(keys, "default_thinking_level")
+	}
 
 	if req.Telemetry != nil {
 		keys = append(keys, "telemetry.enabled")
@@ -960,6 +968,12 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		}
 		if req.DefaultResources != nil {
 			d.DefaultResources = req.DefaultResources
+		}
+		if req.DefaultModel != nil {
+			d.DefaultModel = *req.DefaultModel
+		}
+		if req.DefaultThinkingLevel != nil {
+			d.DefaultThinkingLevel = req.DefaultThinkingLevel
 		}
 		doc = d
 

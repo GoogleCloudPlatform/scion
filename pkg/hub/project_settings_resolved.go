@@ -233,10 +233,14 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 		absentWhenMissing: false, // string, "" dropped by omitempty
 	},
 	projectSettingDefaultModel: {
-		source: hubSourceNone,
+		source:            hubSourceAgentDefaults,
+		path:              []string{"default_model"},
+		absentWhenMissing: false, // string, "" dropped by omitempty
 	},
 	projectSettingDefaultThinkingLevel: {
-		source: hubSourceNone,
+		source:            hubSourceAgentDefaults,
+		path:              []string{"default_thinking_level"},
+		absentWhenMissing: true, // *int pointer, nil is distinguishable from 0
 	},
 	projectSettingTelemetryEnabled: {
 		source: hubSourceTelemetryDefault,
