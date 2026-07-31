@@ -1153,6 +1153,21 @@ func TestResolveAttachmentPath(t *testing.T) {
 			path: "pkg/../cmd/message.go",
 			want: "/workspace/cmd/message.go",
 		},
+		{
+			name: "path with workspace prefix but different directory is filtered",
+			path: "/workspace-evil/secret.txt",
+			want: "",
+		},
+		{
+			name: "path with scion-volumes prefix but different directory is filtered",
+			path: "/scion-volumes-other/data.txt",
+			want: "",
+		},
+		{
+			name: "path with workspace prefix no separator is filtered",
+			path: "/workspacefoo",
+			want: "",
+		},
 	}
 
 	for _, tc := range tests {

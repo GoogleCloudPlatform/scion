@@ -837,7 +837,8 @@ func resolveAttachmentPath(p string) string {
 	}
 	p = filepath.Clean(p)
 
-	if strings.HasPrefix(p, "/workspace") || strings.HasPrefix(p, "/scion-volumes") {
+	if strings.HasPrefix(p, "/workspace/") || p == "/workspace" ||
+		strings.HasPrefix(p, "/scion-volumes/") || p == "/scion-volumes" {
 		return p
 	}
 
@@ -863,9 +864,10 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
-
 	_, err = io.Copy(dstFile, srcFile)
+	if closeErr := dstFile.Close(); err == nil {
+		err = closeErr
+	}
 	return err
 }
 
