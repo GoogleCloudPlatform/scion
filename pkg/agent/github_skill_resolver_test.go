@@ -1392,9 +1392,9 @@ func TestTokenForRef_ConventionKeys(t *testing.T) {
 		r := &GitHubSkillResolver{
 			token: "default-token",
 			provisionCredentials: map[string]string{
-				"MY_EXPLICIT":                          "explicit-value",
-				"GH_OWNER__REPO":                      "convention-repo-value",
-				"GH_OWNER":                            "convention-owner-value",
+				"MY_EXPLICIT":    "explicit-value",
+				"GH_OWNER__REPO": "convention-repo-value",
+				"GH_OWNER":       "convention-owner-value",
 			},
 		}
 		ref := &GitHubSkillRef{
