@@ -4,8 +4,7 @@ When to delete an agent, when to stop one, and who may authorize it.
 
 ## Default: delete when done
 
-`scion delete <name> --non-interactive` frees system resources. `scion list` silently
-truncates at 50 agents — stopped agents count against that ceiling. **Delete is the
+`scion delete <name> --non-interactive` frees system resources.  **Delete is the
 default disposition for a completed agent.** Add `--preserve-branch` to keep the branch
 for later review — but the flag does not push; confirm the branch is on the remote first.
 

@@ -79,7 +79,7 @@ do not improvise quoting.
 To start an agent with a specific model (overriding the harness default), use the `--model` flag:
 
 ```bash
-scion start <name> --non-interactive --model claude-sonnet-4-20250514
+scion start <name> --non-interactive --model medium
 ```
 
 **Do NOT use `--harness-config` for this** — that flag expects a named harness configuration registered in the hub, not a model name.
