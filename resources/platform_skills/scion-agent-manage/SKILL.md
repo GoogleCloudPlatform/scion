@@ -39,6 +39,28 @@ The best and most current reference for the CLI commands is available from `scio
 
 6. **Preserve branches**: Use `--preserve-branch` to keep the branch after deletion for later review. The flag does not push — confirm the branch is on the remote first.
 
+7. **Agent state**: Do not attempt to resume an agent unless you were the one who stopped it. An 'idle' agent may still be working.
+
+## Creating Agents
+
+To translate a natural-language request into a `scion start` command, map intent to flags:
+
+| Intent | Flag | Example |
+|---|---|---|
+| Agent role | `-t` / `--type` | `-t developer`, `-t researcher`, `-t code-reviewer` |
+| LLM interface | `--harness` | `--harness claude`, `--harness gemini-cli` |
+| Model override | `--model` | `--model claude-sonnet-4-20250514` |
+
+Example — "have a claude xl developer write a file":
+
+```bash
+scion start file-writer -t developer --harness claude --model xl \
+  --non-interactive \
+  "Read your brief at /scion-volumes/scratchpad/briefs/file-writer.md and follow it."
+```
+
+Additional options like `--thinking-level` (0–100) can tune agent reasoning depth. Run `scion start --help` for the full flag reference.
+
 ## Briefing
 
 Every agent you create needs a brief. Write the brief to a **shared scratchpad file and
