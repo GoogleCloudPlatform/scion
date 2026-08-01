@@ -164,7 +164,7 @@ func TestAgentPortClearedOnTunnelDisconnect(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got.ExposedPorts, 1)
 
-	// Simulate tunnel disconnect by calling onDisconnect directly
+	// Simulate tunnel disconnect by calling clearExposedPortsForAgent directly
 	srv.clearExposedPortsForAgent(context.Background(), agent.ID)
 
 	// Verify ports are cleared
@@ -227,6 +227,19 @@ func TestAgentPortSweepClearsStaleRegistrations(t *testing.T) {
 		{Port: 3000, Label: "stale", Host: "127.0.0.1", Mode: "rw", ExposedAt: time.Now(), ExposedBy: "agent"},
 	}))
 
+	// Create an errored agent with ports (should also be cleared)
+	erroredAgent := &store.Agent{
+		ID:        tid("pf-errored-agent"),
+		Slug:      "pf-errored-agent",
+		Name:      "Errored Agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseError),
+	}
+	require.NoError(t, s.CreateAgent(ctx, erroredAgent))
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, erroredAgent.ID, []store.ExposedPort{
+		{Port: 5000, Label: "error-stale", Host: "127.0.0.1", Mode: "rw", ExposedAt: time.Now(), ExposedBy: "agent"},
+	}))
+
 	// Create a running agent with ports (should not be cleared)
 	runningAgent := &store.Agent{
 		ID:        tid("pf-running-agent"),
@@ -248,6 +261,11 @@ func TestAgentPortSweepClearsStaleRegistrations(t *testing.T) {
 	got, err := s.GetAgent(ctx, stoppedAgent.ID)
 	require.NoError(t, err)
 	assert.Empty(t, got.ExposedPorts, "stopped agent should have ports cleared")
+
+	// Errored agent's ports should be cleared
+	got, err = s.GetAgent(ctx, erroredAgent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.ExposedPorts, "errored agent should have ports cleared")
 
 	// Running agent's ports should remain
 	got, err = s.GetAgent(ctx, runningAgent.ID)

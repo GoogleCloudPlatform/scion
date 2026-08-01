@@ -86,7 +86,8 @@ func (m *PortTunnelManager) Register(agentID string, conn *websocket.Conn, remot
 
 	go s.readLoop(func() {
 		m.mu.Lock()
-		if m.sessions[agentID] == s {
+		isCurrent := m.sessions[agentID] == s
+		if isCurrent {
 			delete(m.sessions, agentID)
 		}
 		onDisconnect := m.onDisconnect
@@ -94,7 +95,7 @@ func (m *PortTunnelManager) Register(agentID string, conn *websocket.Conn, remot
 
 		slog.Info("Port-forward tunnel disconnected", "agent_id", agentID)
 
-		if onDisconnect != nil {
+		if isCurrent && onDisconnect != nil {
 			onDisconnect(agentID)
 		}
 	})
