@@ -265,7 +265,7 @@ type SkillCollisionEntry struct {
 //
 // Returns the deduplicated list (preserving winner order of first appearance)
 // and a slice of collision entries for diagnostics.
-func deduplicateByDestName(skills []ResolvedSkill) ([]ResolvedSkill, []SkillCollisionEntry) {
+func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]ResolvedSkill, []SkillCollisionEntry) {
 	type candidate struct {
 		index int
 		skill ResolvedSkill
@@ -315,7 +315,7 @@ func deduplicateByDestName(skills []ResolvedSkill) ([]ResolvedSkill, []SkillColl
 
 		// Log at appropriate level: Debug for optional losers, Warn otherwise.
 		if loser.Optional {
-			slog.Debug("skill destination-name collision resolved (optional skill dropped)",
+			slog.DebugContext(ctx, "skill destination-name collision resolved (optional skill dropped)",
 				"dest_name", dest,
 				"winner_uri", winner.URI,
 				"winner_scope", winner.Scope,
@@ -323,7 +323,7 @@ func deduplicateByDestName(skills []ResolvedSkill) ([]ResolvedSkill, []SkillColl
 				"dropped_scope", loser.Scope,
 			)
 		} else {
-			slog.Warn("skill destination-name collision resolved",
+			slog.WarnContext(ctx, "skill destination-name collision resolved",
 				"dest_name", dest,
 				"winner_uri", winner.URI,
 				"winner_scope", winner.Scope,
@@ -366,7 +366,7 @@ func installResolvedSkills(
 	// S6: Resolve destination-name collisions via scope-based precedence.
 	// Previously this was a hard error; now collisions are resolved by dropping
 	// the lower-scope skill and logging a warning.
-	skills, collisions := deduplicateByDestName(skills)
+	skills, collisions := deduplicateByDestName(ctx, skills)
 
 	if err := os.MkdirAll(skillsDest, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create skills directory: %w", err)

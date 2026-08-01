@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -31,11 +32,14 @@ import (
 
 // collectHandler is a slog.Handler that collects records for test assertions.
 type collectHandler struct {
+	mu      sync.Mutex
 	records *[]slog.Record
 }
 
 func (h *collectHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
 func (h *collectHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	*h.records = append(*h.records, r)
 	return nil
 }
@@ -969,7 +973,7 @@ func TestDeduplicateByDestName_ProjectWinsOverTemplate(t *testing.T) {
 		{Name: "my-skill", URI: "gh://org/repo/skills/my-skill", Scope: "project"},
 	}
 
-	deduped, collisions := deduplicateByDestName(skills)
+	deduped, collisions := deduplicateByDestName(context.Background(), skills)
 
 	if len(deduped) != 1 {
 		t.Fatalf("expected 1 skill after dedup, got %d", len(deduped))
@@ -996,7 +1000,7 @@ func TestDeduplicateByDestName_SameScopeLaterWins(t *testing.T) {
 		{Name: "my-skill", URI: "skill://scion/core/my-skill@2.0", Scope: "template"},
 	}
 
-	deduped, collisions := deduplicateByDestName(skills)
+	deduped, collisions := deduplicateByDestName(context.Background(), skills)
 
 	if len(deduped) != 1 {
 		t.Fatalf("expected 1 skill after dedup, got %d", len(deduped))
@@ -1021,7 +1025,7 @@ func TestDeduplicateByDestName_NoCollision(t *testing.T) {
 		{Name: "skill-c", URI: "gh://org/repo/skills/skill-c", Scope: "hub"},
 	}
 
-	deduped, collisions := deduplicateByDestName(skills)
+	deduped, collisions := deduplicateByDestName(context.Background(), skills)
 
 	if len(deduped) != 3 {
 		t.Fatalf("expected 3 skills (no collision), got %d", len(deduped))
@@ -1104,7 +1108,7 @@ func TestDeduplicateByDestName_OptionalLoserUsesDebugLevel(t *testing.T) {
 		{Name: "my-skill", URI: "skill://scion/core/my-skill@2.0", Scope: "project"},
 	}
 
-	deduped, collisions := deduplicateByDestName(skills)
+	deduped, collisions := deduplicateByDestName(context.Background(), skills)
 
 	if len(deduped) != 1 {
 		t.Fatalf("expected 1 skill after dedup, got %d", len(deduped))
@@ -1147,7 +1151,7 @@ func TestDeduplicateByDestName_FullPrecedenceOrder(t *testing.T) {
 				{Name: "test-skill", URI: "skill://higher/test-skill@2.0", Scope: higher},
 			}
 
-			deduped, collisions := deduplicateByDestName(skills)
+			deduped, collisions := deduplicateByDestName(context.Background(), skills)
 
 			if len(deduped) != 1 {
 				t.Fatalf("expected 1 skill, got %d", len(deduped))
@@ -1174,7 +1178,7 @@ func TestDeduplicateByDestName_DestNameErrorPassthrough(t *testing.T) {
 		{Name: "INVALID", URI: "skill://scion/core/bad@1.0", Scope: "project"}, // invalid name
 	}
 
-	deduped, collisions := deduplicateByDestName(skills)
+	deduped, collisions := deduplicateByDestName(context.Background(), skills)
 
 	// Both should be in the output: good-skill via the winners map, bad via passthrough.
 	if len(deduped) != 2 {
@@ -1216,7 +1220,7 @@ func TestDeduplicateByDestName_ThreeWayCollision(t *testing.T) {
 		{Name: "shared", URI: "skill://project/shared@3.0", Scope: "project"},
 	}
 
-	deduped, collisions := deduplicateByDestName(skills)
+	deduped, collisions := deduplicateByDestName(context.Background(), skills)
 
 	if len(deduped) != 1 {
 		t.Fatalf("expected 1 skill after three-way dedup, got %d", len(deduped))
@@ -1251,7 +1255,7 @@ func TestDeduplicateByDestName_AsAlias(t *testing.T) {
 		{Name: "my-skill", URI: "gh://org/repo/skills/my-skill", Scope: "project", As: "my-skill-alt"},
 	}
 
-	deduped, collisions := deduplicateByDestName(skills)
+	deduped, collisions := deduplicateByDestName(context.Background(), skills)
 
 	if len(deduped) != 2 {
 		t.Fatalf("expected 2 skills (alias avoids collision), got %d", len(deduped))

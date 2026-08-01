@@ -483,14 +483,25 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 			}
 		}
 	}
+	// Copy the slice to avoid mutating the original SkillReference values.
+	if len(projectRefs) > 0 {
+		copied := make([]api.SkillReference, len(projectRefs))
+		copy(copied, projectRefs)
+		projectRefs = copied
+	}
 	for i := range projectRefs {
 		projectRefs[i].Scope = "project"
 	}
 
 	// Template refs are already in InlineConfig.Skills (highest precedence).
-	templateRefs := agent.AppliedConfig.InlineConfig.Skills
-	for i := range templateRefs {
-		templateRefs[i].Scope = "template"
+	// Copy the slice to avoid mutating the caller's InlineConfig.Skills in place.
+	var templateRefs []api.SkillReference
+	if len(agent.AppliedConfig.InlineConfig.Skills) > 0 {
+		templateRefs = make([]api.SkillReference, len(agent.AppliedConfig.InlineConfig.Skills))
+		copy(templateRefs, agent.AppliedConfig.InlineConfig.Skills)
+		for i := range templateRefs {
+			templateRefs[i].Scope = "template"
+		}
 	}
 
 	// Merge: hub → user → project → template (lowest to highest precedence).
