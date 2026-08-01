@@ -1094,6 +1094,9 @@ export class ScionInjectedSkillsPanel extends LitElement {
    * (last path segment) is always fully visible.
    */
   private renderMiddleTruncatedUri(uri: string) {
+    if (!uri) {
+      return nothing;
+    }
     const lastSlash = uri.lastIndexOf('/');
     if (lastSlash === -1 || lastSlash === uri.length - 1) {
       // No path separator or trailing slash — show the whole URI as-is
