@@ -515,8 +515,14 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	// auth method correctly on both create and resume; the config
 	// metadata may be empty or stale, causing the container-side
 	// provisioner to auto-detect and potentially pick a wrong method.
+	//
+	// Guard: reject harness implementation names that may have leaked
+	// into SCION_HARNESS_SELECTED_AUTH via a prior data-corruption bug
+	// (the run.go backfill incorrectly wrote resolved.Method instead of
+	// the auth type). These are never valid auth types and would crash
+	// the container-side provisioner.
 	explicitType := c.entry.AuthSelectedType
-	if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" {
+	if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" && !isHarnessImplementationName(st) {
 		explicitType = st
 	}
 
@@ -534,6 +540,18 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 		return fmt.Errorf("marshal auth candidates: %w", err)
 	}
 	return c.stageInputFile(agentHome, "auth-candidates.json", data)
+}
+
+// isHarnessImplementationName returns true if s is a known harness
+// implementation/method name rather than a valid auth type. These values
+// can leak into SCION_HARNESS_SELECTED_AUTH via data-corruption bugs and
+// must never be passed through as explicit_type.
+func isHarnessImplementationName(s string) bool {
+	switch s {
+	case "container-script", "generic", "builtin":
+		return true
+	}
+	return false
 }
 
 // stageFileSecretFiles reads the content of each FileMapping whose ContainerPath

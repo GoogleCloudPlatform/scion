@@ -369,6 +369,112 @@ func TestContainerScriptHarness_ApplyAuthSettings_ExplicitTypeFallsBackToEntry(t
 	}
 }
 
+func TestContainerScriptHarness_ApplyAuthSettings_RejectsHarnessImplementationName(t *testing.T) {
+	// Regression test for data-corruption bug: if a prior backfill incorrectly
+	// wrote the harness implementation name ("container-script") into
+	// SCION_HARNESS_SELECTED_AUTH, ApplyAuthSettings must discard it and fall
+	// back to c.entry.AuthSelectedType rather than propagating it as
+	// explicit_type — which would crash the container-side provisioner with
+	// "unknown auth type 'container-script'".
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: testharness\nimage: scion-test:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+	entry := config.HarnessConfigEntry{
+		Harness:          "testharness",
+		Image:            "scion-test:latest",
+		AuthSelectedType: "vertex-ai",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	agentHome := t.TempDir()
+	// Simulate corrupted state: SCION_HARNESS_SELECTED_AUTH contains the
+	// harness implementation name instead of a valid auth type.
+	resolved := &api.ResolvedAuth{
+		Method: "container-script",
+		EnvVars: map[string]string{
+			"SCION_HARNESS_SELECTED_AUTH": "container-script",
+			"ANTHROPIC_API_KEY":           "sk-test",
+		},
+	}
+	if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	// Must fall back to c.entry.AuthSelectedType, NOT use "container-script".
+	if payload["explicit_type"] != "vertex-ai" {
+		t.Errorf("explicit_type=%v, want vertex-ai (should reject container-script)", payload["explicit_type"])
+	}
+}
+
+func TestContainerScriptHarness_ApplyAuthSettings_RejectsAllImplementationNames(t *testing.T) {
+	// Verify that all known harness implementation names are rejected.
+	for _, implName := range []string{"container-script", "generic", "builtin"} {
+		t.Run(implName, func(t *testing.T) {
+			h, _ := newTestContainerScriptHarness(t)
+			agentHome := t.TempDir()
+			resolved := &api.ResolvedAuth{
+				Method: "container-script",
+				EnvVars: map[string]string{
+					"SCION_HARNESS_SELECTED_AUTH": implName,
+				},
+			}
+			if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]interface{}
+			if err := json.Unmarshal(data, &payload); err != nil {
+				t.Fatalf("invalid JSON: %v", err)
+			}
+			// explicit_type must NOT be the implementation name.
+			if payload["explicit_type"] == implName {
+				t.Errorf("explicit_type=%v — should have been rejected", implName)
+			}
+		})
+	}
+}
+
+func TestIsHarnessImplementationName(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"container-script", true},
+		{"generic", true},
+		{"builtin", true},
+		{"vertex-ai", false},
+		{"api-key", false},
+		{"oauth-token", false},
+		{"auth-file", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isHarnessImplementationName(tt.name); got != tt.want {
+				t.Errorf("isHarnessImplementationName(%q)=%v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestContainerScriptHarness_ApplyAuthSettings_StagesFileSecrets(t *testing.T) {
 	// Harness entry with a required_files declaration matching Codex auth-file.
 	dir := t.TempDir()
