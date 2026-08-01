@@ -724,6 +724,20 @@ func TestLoadEffectiveSettings_WarnOnIgnoredSettingsFile(t *testing.T) {
 				"comment-only file should not produce schema_version warning")
 		}
 	})
+
+	t.Run("legacy format file does not produce warning", func(t *testing.T) {
+		// Write a file with harnesses key (legacy format)
+		settingsPath := filepath.Join(projectDir, "settings.yaml")
+		require.NoError(t, os.WriteFile(settingsPath, []byte("harnesses:\n  claude:\n    image: test\n"), 0644))
+		defer os.Remove(settingsPath)
+
+		_, warnings, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err)
+		for _, w := range warnings {
+			assert.NotContains(t, w, "no schema_version field",
+				"legacy format file should not produce schema_version warning")
+		}
+	})
 }
 
 // --- Default settings compatibility tests ---
