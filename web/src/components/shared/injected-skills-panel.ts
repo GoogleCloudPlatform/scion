@@ -291,6 +291,9 @@ export class ScionInjectedSkillsPanel extends LitElement {
         color: var(--scion-text-muted, #64748b);
         margin-top: 0.125rem;
         display: inline-flex;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         max-width: 300px;
       }
 
