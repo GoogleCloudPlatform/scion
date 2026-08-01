@@ -505,7 +505,7 @@ func TestContainerScriptHarness_ResolveAuth_VertexAICredentialTranslation(t *tes
 	h := newClaudeHarness(t)
 
 	resolved, err := h.ResolveAuth(api.AuthConfig{
-		SelectedType:     "vertex-ai",
+		SelectedType:       "vertex-ai",
 		GoogleCloudProject: "my-project",
 		GoogleCloudRegion:  "us-central1",
 	})
@@ -559,7 +559,7 @@ func TestContainerScriptHarness_ResolveAuth_NoVertexTranslationForNonClaude(t *t
 	h, _ := newTestContainerScriptHarness(t) // harness name is "testharness"
 
 	resolved, err := h.ResolveAuth(api.AuthConfig{
-		SelectedType:     "vertex-ai",
+		SelectedType:       "vertex-ai",
 		GoogleCloudProject: "my-project",
 		GoogleCloudRegion:  "us-central1",
 	})
