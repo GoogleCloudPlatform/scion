@@ -1978,7 +1978,7 @@ func detectHierarchyFormat(projectPath string) (hasVersioned bool, missingSchema
 }
 
 // settingsCandidateDirs returns the directories that may contain user settings
-// files (global and project), used to scan for silently-ignored content.
+// files (global and project), used to scan for files missing schema_version.
 func settingsCandidateDirs(projectPath string) []string {
 	var dirs []string
 	if globalDir, _ := GetGlobalDir(); globalDir != "" {
@@ -2013,8 +2013,8 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 	}
 
 	// Before falling through to the legacy path, check if any settings file
-	// has real content that is being silently ignored because it lacks
-	// schema_version, harnesses key, and v1 runtime indicators.
+	// has real content but lacks schema_version, harnesses key, and v1 runtime
+	// indicators — such files may not load correctly in future versions.
 	var warnings []string
 	for _, dir := range settingsCandidateDirs(projectPath) {
 		path := GetSettingsPath(dir)
