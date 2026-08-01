@@ -21,13 +21,14 @@ import (
 // RegistrationHandler manages the hub-verified code-based registration flow
 // for Discord users.
 type RegistrationHandler struct {
-	store      Store
-	session    *discordgo.Session
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	httpClient *http.Client
-	log        *slog.Logger
+	store       Store
+	session     *discordgo.Session
+	hubURL      string
+	registerURL string // external URL for user-facing registration links; falls back to hubURL
+	hmacKey     string
+	brokerID    string
+	httpClient  *http.Client
+	log         *slog.Logger
 
 	mu      sync.Mutex
 	pending map[string]*pendingLinkReg // discordUserID -> pending registration
@@ -70,8 +71,10 @@ const (
 )
 
 // NewRegistrationHandler creates a new RegistrationHandler.
+// If registerURL is non-empty it is used for user-facing registration links;
+// otherwise hubURL is used as a fallback.
 // If httpClient is nil, a default client with a 15s timeout is used.
-func NewRegistrationHandler(store Store, session *discordgo.Session, hubURL, hmacKey, brokerID string, httpClient *http.Client, log *slog.Logger) *RegistrationHandler {
+func NewRegistrationHandler(store Store, session *discordgo.Session, hubURL, registerURL, hmacKey, brokerID string, httpClient *http.Client, log *slog.Logger) *RegistrationHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -79,14 +82,15 @@ func NewRegistrationHandler(store Store, session *discordgo.Session, hubURL, hma
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &RegistrationHandler{
-		store:      store,
-		session:    session,
-		hubURL:     hubURL,
-		hmacKey:    hmacKey,
-		brokerID:   brokerID,
-		httpClient: httpClient,
-		log:        log,
-		pending:    make(map[string]*pendingLinkReg),
+		store:       store,
+		session:     session,
+		hubURL:      hubURL,
+		registerURL: registerURL,
+		hmacKey:     hmacKey,
+		brokerID:    brokerID,
+		httpClient:  httpClient,
+		log:         log,
+		pending:     make(map[string]*pendingLinkReg),
 	}
 }
 
@@ -158,9 +162,13 @@ func (h *RegistrationHandler) HandleRegister(s *discordgo.Session, i *discordgo.
 	h.pending[discordUserID] = reg
 	h.mu.Unlock()
 
-	// Build the link URL.
-	hubLink := fmt.Sprintf("%s/profile/discord?code=%s&user_name=%s",
-		strings.TrimRight(h.hubURL, "/"), code, discordUsername)
+	// Build the link URL. Prefer registerURL (the public-facing address)
+	// when configured; fall back to hubURL for backward compatibility.
+	baseURL := h.hubURL
+	if h.registerURL != "" {
+		baseURL = h.registerURL
+	}
+	hubLink := formatRegistrationLink(baseURL, code, discordUsername)
 
 	// Send follow-up with a URL button.
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
@@ -411,6 +419,13 @@ func interactionUsername(i *discordgo.InteractionCreate) string {
 		return i.User.Username
 	}
 	return ""
+}
+
+// formatRegistrationLink builds the user-facing registration URL from a base
+// URL, linking code, and Discord username.
+func formatRegistrationLink(baseURL, code, discordUsername string) string {
+	return fmt.Sprintf("%s/profile/discord?code=%s&user_name=%s",
+		strings.TrimRight(baseURL, "/"), code, discordUsername)
 }
 
 // generateLinkingCode creates a 6-character alphanumeric code using a
