@@ -91,7 +91,8 @@ else
         -d '*.${DOMAIN}' \
         --email ${EMAIL} \
         --non-interactive \
-        --agree-tos"
+        --agree-tos \
+        --deploy-hook 'chown root:caddy /etc/letsencrypt/live /etc/letsencrypt/archive && chmod g+x /etc/letsencrypt/live /etc/letsencrypt/archive && chown -R root:caddy /etc/letsencrypt/live/\${RENEWED_DOMAINS%%,*} /etc/letsencrypt/archive/\${RENEWED_DOMAINS%%,*} && chmod -R g+rX /etc/letsencrypt/live/\${RENEWED_DOMAINS%%,*} /etc/letsencrypt/archive/\${RENEWED_DOMAINS%%,*} && (systemctl reload caddy || caddy reload --config /etc/caddy/Caddyfile)'"
 fi
 
 # 5. Reload Caddy if it's installed to pick up new/renewed certificates
