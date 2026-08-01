@@ -33,6 +33,7 @@ func TestRequireImageRegistryForBroker_NoRegistry(t *testing.T) {
 	// Point HOME at an empty temp dir so settings.yaml is absent.
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Chdir(tmpHome)
 
 	err := requireImageRegistryForBroker()
 	assert.Error(t, err)
@@ -60,16 +61,17 @@ func TestRequireImageRegistryForBroker_MaintenanceEnvVar(t *testing.T) {
 }
 
 func TestRequireImageRegistryForBroker_Settings(t *testing.T) {
-	// Unset (not just empty) the env vars so the koanf env loader does not
+	// Use t.Setenv to register cleanup (restores original values when test
+	// ends), then unset the env vars so the koanf env loader does not
 	// override the settings file value with an empty string.
-	origImageReg := os.Getenv("SCION_IMAGE_REGISTRY")
-	origMaintReg := os.Getenv("SCION_MAINTENANCE_IMAGE_REGISTRY")
-	os.Unsetenv("SCION_IMAGE_REGISTRY")
-	os.Unsetenv("SCION_MAINTENANCE_IMAGE_REGISTRY")
-	defer func() {
-		os.Setenv("SCION_IMAGE_REGISTRY", origImageReg)
-		os.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", origMaintReg)
-	}()
+	t.Setenv("SCION_IMAGE_REGISTRY", "")
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+	if err := os.Unsetenv("SCION_IMAGE_REGISTRY"); err != nil {
+		t.Fatalf("failed to unsetenv SCION_IMAGE_REGISTRY: %v", err)
+	}
+	if err := os.Unsetenv("SCION_MAINTENANCE_IMAGE_REGISTRY"); err != nil {
+		t.Fatalf("failed to unsetenv SCION_MAINTENANCE_IMAGE_REGISTRY: %v", err)
+	}
 
 	// Create a temp home with settings.yaml containing image_registry.
 	tmpHome := t.TempDir()

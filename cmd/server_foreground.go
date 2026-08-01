@@ -2576,7 +2576,7 @@ func requireImageRegistryForBroker() error {
 		"image pulls will fail. To fix this:\n\n" +
 		"  Option 1: scion config set --global image_registry <your-registry>\n" +
 		"  Option 2: export SCION_IMAGE_REGISTRY=<your-registry>\n\n" +
-		"See image-build/README.md for instructions on building and pushing images.")
+		"See image-build/README.md for instructions on building and pushing images")
 }
 
 // migrateInlineSecrets performs a one-shot migration of secret config keys found
