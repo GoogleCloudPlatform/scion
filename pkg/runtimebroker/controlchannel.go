@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -554,6 +555,7 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 	// prevent crashing the broker process. Send a 400 error back instead.
 	defer func() {
 		if r := recover(); r != nil {
+			span.SetStatus(codes.Error, fmt.Sprintf("panic: %v", r))
 			c.log.Error("Panic in control channel request handler", "panic", r, "method", req.Method, "path", req.Path)
 			resp := wsprotocol.NewResponseEnvelope(req.RequestID, http.StatusBadRequest, nil, []byte(fmt.Sprintf(`{"error":"request caused panic: %v"}`, r)))
 			if writeErr := conn.WriteJSON(resp); writeErr != nil {
@@ -601,6 +603,7 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 	resp := wsprotocol.NewResponseEnvelope(req.RequestID, result.StatusCode, headers, respBody)
 
 	if err := conn.WriteJSON(resp); err != nil {
+		span.SetStatus(codes.Error, "failed to send response: "+err.Error())
 		c.log.Error("Failed to send response", "error", err, "requestID", req.RequestID)
 	}
 }

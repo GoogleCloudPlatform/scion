@@ -1353,6 +1353,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" && opts.ProjectPath == "" {
 		agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
 		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to list agents: "+err.Error())
 			return
 		}
