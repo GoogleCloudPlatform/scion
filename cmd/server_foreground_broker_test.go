@@ -16,12 +16,84 @@ package cmd
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestRequireImageRegistryForBroker_NoRegistry(t *testing.T) {
+	// Ensure no env vars provide a registry.
+	t.Setenv("SCION_IMAGE_REGISTRY", "")
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+
+	// Point HOME at an empty temp dir so settings.yaml is absent.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	err := requireImageRegistryForBroker()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "image_registry is not configured")
+	assert.Contains(t, err.Error(), "SCION_IMAGE_REGISTRY")
+}
+
+func TestRequireImageRegistryForBroker_EnvVar(t *testing.T) {
+	t.Setenv("SCION_IMAGE_REGISTRY", "ghcr.io/test")
+
+	err := requireImageRegistryForBroker()
+	assert.NoError(t, err)
+}
+
+func TestRequireImageRegistryForBroker_MaintenanceEnvVar(t *testing.T) {
+	t.Setenv("SCION_IMAGE_REGISTRY", "")
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "ghcr.io/test-maintenance")
+
+	// Point HOME at an empty temp dir so settings.yaml is absent.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	err := requireImageRegistryForBroker()
+	assert.NoError(t, err)
+}
+
+func TestRequireImageRegistryForBroker_Settings(t *testing.T) {
+	// Unset (not just empty) the env vars so the koanf env loader does not
+	// override the settings file value with an empty string.
+	origImageReg := os.Getenv("SCION_IMAGE_REGISTRY")
+	origMaintReg := os.Getenv("SCION_MAINTENANCE_IMAGE_REGISTRY")
+	os.Unsetenv("SCION_IMAGE_REGISTRY")
+	os.Unsetenv("SCION_MAINTENANCE_IMAGE_REGISTRY")
+	defer func() {
+		os.Setenv("SCION_IMAGE_REGISTRY", origImageReg)
+		os.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", origMaintReg)
+	}()
+
+	// Create a temp home with settings.yaml containing image_registry.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	scionDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatalf("failed to create test .scion dir: %v", err)
+	}
+	settingsContent := "schema_version: \"1\"\nimage_registry: ghcr.io/from-settings\n"
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		t.Fatalf("failed to write test settings: %v", err)
+	}
+
+	// Change to the temp home so LoadEffectiveSettings doesn't find
+	// the workspace project root's .scion directory.
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(tmpHome); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	err := requireImageRegistryForBroker()
+	assert.NoError(t, err)
+}
 
 func TestCloudRunLogicalBrokerIDIsDeterministic(t *testing.T) {
 	settings := &config.VersionedSettings{

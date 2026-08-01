@@ -374,6 +374,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	// 13. Start Broker
 	if cfg.RuntimeBroker.Enabled {
+		if err := requireImageRegistryForBroker(); err != nil {
+			return err
+		}
 		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, devAuthToken, brokerSettings, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
 			return err
 		}
@@ -2542,6 +2545,35 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 
 	return mc
+}
+
+// requireImageRegistryForBroker checks that an image registry is available from
+// at least one source before starting the runtime broker. The broker needs a
+// registry to pull agent container images; without one, image pulls fail with
+// opaque 404 errors at dispatch time. This check fails fast at startup with an
+// actionable error instead.
+//
+// Sources checked (in priority order):
+//  1. SCION_IMAGE_REGISTRY env var
+//  2. SCION_MAINTENANCE_IMAGE_REGISTRY env var
+//  3. image_registry in versioned settings (settings.yaml)
+func requireImageRegistryForBroker() error {
+	if v := os.Getenv("SCION_IMAGE_REGISTRY"); v != "" {
+		return nil
+	}
+	if v := os.Getenv("SCION_MAINTENANCE_IMAGE_REGISTRY"); v != "" {
+		return nil
+	}
+	vs, _, err := config.LoadEffectiveSettings("")
+	if err == nil && vs != nil && vs.IsImageRegistryConfigured("") {
+		return nil
+	}
+	return fmt.Errorf("image_registry is not configured, but the runtime broker requires it.\n\n" +
+		"The runtime broker pulls container images to run agents. Without a registry,\n" +
+		"image pulls will fail. To fix this:\n\n" +
+		"  Option 1: scion config set --global image_registry <your-registry>\n" +
+		"  Option 2: export SCION_IMAGE_REGISTRY=<your-registry>\n\n" +
+		"See image-build/README.md for instructions on building and pushing images.")
 }
 
 // migrateInlineSecrets performs a one-shot migration of secret config keys found
