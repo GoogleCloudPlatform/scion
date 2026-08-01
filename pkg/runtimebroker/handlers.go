@@ -682,6 +682,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		markAttemptFailed(http.StatusInternalServerError, err.Error())
+		span.SetStatus(codes.Error, err.Error())
 		if sce, ok := err.(*startContextError); ok && sce.IsHubError {
 			if templatecache.IsHubConnectivityError(sce.OriginalErr) {
 				HubUnreachableError(w, sce.OriginalErr.Error())
@@ -690,7 +691,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			TemplateError(w, err.Error())
 			return
 		}
-		span.SetStatus(codes.Error, err.Error())
 		RuntimeError(w, err.Error())
 		return
 	}
