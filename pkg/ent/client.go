@@ -6468,9 +6468,8 @@ type (
 		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
 		Message, Notification, NotificationSubscription, PolicyBinding, Project,
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RuntimeBroker,
-		Schedule, ScheduledEvent,
-		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, Template, User, UserAccessToken []ent.Hook
+		Schedule, ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry,
+		SkillVersion, SubscriptionTemplate, Template, User, UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
@@ -6480,8 +6479,8 @@ type (
 		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
 		Message, Notification, NotificationSubscription, PolicyBinding, Project,
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RuntimeBroker,
-		Schedule, ScheduledEvent,
-		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, Template, User, UserAccessToken []ent.Interceptor
+		Schedule, ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry,
+		SkillVersion, SubscriptionTemplate, Template, User,
+		UserAccessToken []ent.Interceptor
 	}
 )

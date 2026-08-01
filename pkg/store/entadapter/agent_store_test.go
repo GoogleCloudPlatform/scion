@@ -307,6 +307,40 @@ func TestAgentStore_UpdateAgentStatus(t *testing.T) {
 	assert.ErrorIs(t, s.UpdateAgentStatus(ctx, uuid.NewString(), store.AgentStatusUpdate{Phase: "running"}), store.ErrNotFound)
 }
 
+func TestAgentStore_UpdateAgentExposedPorts(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "ports")
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	exposedAt := time.Now().UTC().Truncate(time.Second)
+	ports := []store.ExposedPort{{
+		Port:      3000,
+		Label:     "dev",
+		Host:      "127.0.0.1",
+		Mode:      "rw",
+		ExposedAt: exposedAt,
+		ExposedBy: "agent",
+	}}
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, a.ID, ports))
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ExposedPorts, 1)
+	assert.Equal(t, ports[0].Port, got.ExposedPorts[0].Port)
+	assert.Equal(t, ports[0].Label, got.ExposedPorts[0].Label)
+	assert.Equal(t, ports[0].Host, got.ExposedPorts[0].Host)
+	assert.Equal(t, ports[0].Mode, got.ExposedPorts[0].Mode)
+	assert.Equal(t, ports[0].ExposedBy, got.ExposedPorts[0].ExposedBy)
+
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, a.ID, nil))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.ExposedPorts)
+	assert.ErrorIs(t, s.UpdateAgentExposedPorts(ctx, uuid.NewString(), ports), store.ErrNotFound)
+}
+
 // TestAgentStore_TerminalPhaseClearsStalledActivity verifies that transitioning
 // to a terminal phase (stopped/error) without an explicit activity clears a
 // lingering live activity such as "stalled", while preserving terminal

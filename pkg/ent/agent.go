@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -70,6 +71,8 @@ type Agent struct {
 	RuntimeBrokerID string `json:"runtime_broker_id,omitempty"`
 	// WebPtyEnabled holds the value of the "web_pty_enabled" field.
 	WebPtyEnabled bool `json:"web_pty_enabled,omitempty"`
+	// ExposedPorts holds the value of the "exposed_ports" field.
+	ExposedPorts []store.ExposedPort `json:"exposed_ports,omitempty"`
 	// TaskSummary holds the value of the "task_summary" field.
 	TaskSummary string `json:"task_summary,omitempty"`
 	// Message holds the value of the "message" field.
@@ -147,7 +150,7 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case agent.FieldCreatedBy, agent.FieldOwnerID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldAncestry:
+		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldExposedPorts, agent.FieldAncestry:
 			values[i] = new([]byte)
 		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled:
 			values[i] = new(sql.NullBool)
@@ -335,6 +338,14 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field web_pty_enabled", values[i])
 			} else if value.Valid {
 				_m.WebPtyEnabled = value.Bool
+			}
+		case agent.FieldExposedPorts:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field exposed_ports", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.ExposedPorts); err != nil {
+					return fmt.Errorf("unmarshal field exposed_ports: %w", err)
+				}
 			}
 		case agent.FieldTaskSummary:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -537,6 +548,9 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("web_pty_enabled=")
 	builder.WriteString(fmt.Sprintf("%v", _m.WebPtyEnabled))
+	builder.WriteString(", ")
+	builder.WriteString("exposed_ports=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ExposedPorts))
 	builder.WriteString(", ")
 	builder.WriteString("task_summary=")
 	builder.WriteString(_m.TaskSummary)

@@ -107,6 +107,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		Runtime:             a.Runtime,
 		RuntimeBrokerID:     a.RuntimeBrokerID,
 		WebPTYEnabled:       a.WebPtyEnabled,
+		ExposedPorts:        a.ExposedPorts,
 		TaskSummary:         a.TaskSummary,
 		Message:             a.Message,
 		Created:             a.Created,
@@ -178,6 +179,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		SetRuntime(a.Runtime).
 		SetRuntimeBrokerID(a.RuntimeBrokerID).
 		SetWebPtyEnabled(a.WebPTYEnabled).
+		SetExposedPorts(a.ExposedPorts).
 		SetTaskSummary(a.TaskSummary).
 		SetMessage(a.Message).
 		SetCreated(now).
@@ -296,6 +298,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetRuntime(a.Runtime).
 		SetRuntimeBrokerID(a.RuntimeBrokerID).
 		SetWebPtyEnabled(a.WebPTYEnabled).
+		SetExposedPorts(a.ExposedPorts).
 		SetTaskSummary(a.TaskSummary).
 		SetMessage(a.Message).
 		SetVisibility(a.Visibility).
@@ -635,6 +638,29 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return mapError(err)
 	}
 	return tx.Commit()
+}
+
+// UpdateAgentExposedPorts applies a partial exposed-port update without using
+// the whole-record optimistic-lock path. Port registration must not race with
+// high-frequency status writes.
+func (s *AgentStore) UpdateAgentExposedPorts(ctx context.Context, id string, ports []store.ExposedPort) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+
+	affected, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid)).
+		SetExposedPorts(ports).
+		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.

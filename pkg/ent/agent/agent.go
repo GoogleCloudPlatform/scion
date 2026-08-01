@@ -66,6 +66,8 @@ const (
 	FieldRuntimeBrokerID = "runtime_broker_id"
 	// FieldWebPtyEnabled holds the string denoting the web_pty_enabled field in the database.
 	FieldWebPtyEnabled = "web_pty_enabled"
+	// FieldExposedPorts holds the string denoting the exposed_ports field in the database.
+	FieldExposedPorts = "exposed_ports"
 	// FieldTaskSummary holds the string denoting the task_summary field in the database.
 	FieldTaskSummary = "task_summary"
 	// FieldMessage holds the string denoting the message field in the database.
@@ -147,6 +149,7 @@ var Columns = []string{
 	FieldRuntime,
 	FieldRuntimeBrokerID,
 	FieldWebPtyEnabled,
+	FieldExposedPorts,
 	FieldTaskSummary,
 	FieldMessage,
 	FieldAppliedConfig,

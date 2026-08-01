@@ -1506,6 +1506,16 @@ func WebPtyEnabledNEQ(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldNEQ(FieldWebPtyEnabled, v))
 }
 
+// ExposedPortsIsNil applies the IsNil predicate on the "exposed_ports" field.
+func ExposedPortsIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldExposedPorts))
+}
+
+// ExposedPortsNotNil applies the NotNil predicate on the "exposed_ports" field.
+func ExposedPortsNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldExposedPorts))
+}
+
 // TaskSummaryEQ applies the EQ predicate on the "task_summary" field.
 func TaskSummaryEQ(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldTaskSummary, v))

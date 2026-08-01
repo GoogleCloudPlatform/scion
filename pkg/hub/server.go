@@ -637,6 +637,7 @@ type Server struct {
 	auditLogger            AuditLogger             // Audit logger for security events
 	metrics                MetricsRecorder         // Metrics recorder for broker auth
 	controlChannel         *ControlChannelManager  // WebSocket control channel for runtime brokers
+	portTunnels            *PortTunnelManager      // Agent-held port-forward tunnels
 	authzService           *AuthzService           // Authorization service for policy evaluation
 	events                 EventPublisher          // Event publisher for real-time SSE updates
 	commandBus             CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
@@ -797,6 +798,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		workstation: cfg.Workstation,
 		ctx:         srvCtx,
 		ctxCancel:   srvCancel,
+		portTunnels: NewPortTunnelManager(),
 
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("hub.agent-lifecycle"),
@@ -2014,7 +2016,7 @@ func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string
 		return "", fmt.Errorf("agent token service not initialized")
 	}
 
-	scopes := []AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify}
+	scopes := []AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify, ScopeAgentPortForward}
 
 	// In dev-auth mode, auto-grant agent creation and lifecycle scopes
 	// so agents can create sub-agents without explicit template configuration.

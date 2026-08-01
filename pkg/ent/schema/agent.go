@@ -21,6 +21,7 @@ import (
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -108,6 +109,8 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.Bool("web_pty_enabled").
 			Default(false),
+		field.JSON("exposed_ports", []store.ExposedPort{}).
+			Optional(),
 		field.String("task_summary").
 			Optional(),
 		field.String("message").

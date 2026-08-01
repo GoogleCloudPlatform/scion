@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -468,6 +469,24 @@ func (_u *AgentUpdate) SetNillableWebPtyEnabled(v *bool) *AgentUpdate {
 	if v != nil {
 		_u.SetWebPtyEnabled(*v)
 	}
+	return _u
+}
+
+// SetExposedPorts sets the "exposed_ports" field.
+func (_u *AgentUpdate) SetExposedPorts(v []store.ExposedPort) *AgentUpdate {
+	_u.mutation.SetExposedPorts(v)
+	return _u
+}
+
+// AppendExposedPorts appends value to the "exposed_ports" field.
+func (_u *AgentUpdate) AppendExposedPorts(v []store.ExposedPort) *AgentUpdate {
+	_u.mutation.AppendExposedPorts(v)
+	return _u
+}
+
+// ClearExposedPorts clears the value of the "exposed_ports" field.
+func (_u *AgentUpdate) ClearExposedPorts() *AgentUpdate {
+	_u.mutation.ClearExposedPorts()
 	return _u
 }
 
@@ -937,6 +956,17 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ExposedPorts(); ok {
+		_spec.SetField(agent.FieldExposedPorts, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedExposedPorts(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldExposedPorts, value)
+		})
+	}
+	if _u.mutation.ExposedPortsCleared() {
+		_spec.ClearField(agent.FieldExposedPorts, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.TaskSummary(); ok {
 		_spec.SetField(agent.FieldTaskSummary, field.TypeString, value)
@@ -1577,6 +1607,24 @@ func (_u *AgentUpdateOne) SetNillableWebPtyEnabled(v *bool) *AgentUpdateOne {
 	return _u
 }
 
+// SetExposedPorts sets the "exposed_ports" field.
+func (_u *AgentUpdateOne) SetExposedPorts(v []store.ExposedPort) *AgentUpdateOne {
+	_u.mutation.SetExposedPorts(v)
+	return _u
+}
+
+// AppendExposedPorts appends value to the "exposed_ports" field.
+func (_u *AgentUpdateOne) AppendExposedPorts(v []store.ExposedPort) *AgentUpdateOne {
+	_u.mutation.AppendExposedPorts(v)
+	return _u
+}
+
+// ClearExposedPorts clears the value of the "exposed_ports" field.
+func (_u *AgentUpdateOne) ClearExposedPorts() *AgentUpdateOne {
+	_u.mutation.ClearExposedPorts()
+	return _u
+}
+
 // SetTaskSummary sets the "task_summary" field.
 func (_u *AgentUpdateOne) SetTaskSummary(v string) *AgentUpdateOne {
 	_u.mutation.SetTaskSummary(v)
@@ -2073,6 +2121,17 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if value, ok := _u.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ExposedPorts(); ok {
+		_spec.SetField(agent.FieldExposedPorts, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedExposedPorts(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldExposedPorts, value)
+		})
+	}
+	if _u.mutation.ExposedPortsCleared() {
+		_spec.ClearField(agent.FieldExposedPorts, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.TaskSummary(); ok {
 		_spec.SetField(agent.FieldTaskSummary, field.TypeString, value)
