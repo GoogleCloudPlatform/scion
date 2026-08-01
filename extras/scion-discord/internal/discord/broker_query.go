@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
@@ -152,7 +153,7 @@ func (b *DiscordBroker) queryListChannels(ctx context.Context, params json.RawMe
 			ProjectSlug:  link.ProjectSlug,
 			DefaultAgent: link.DefaultAgent,
 			Active:       link.Active,
-			LinkedAt:     link.LinkedAt.Format("2006-01-02T15:04:05Z"),
+			LinkedAt:     link.LinkedAt.UTC().Format(time.RFC3339),
 		})
 	}
 

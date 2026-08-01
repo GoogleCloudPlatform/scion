@@ -832,6 +832,65 @@ func TestThreadDefaultCRUD(t *testing.T) {
 	})
 }
 
+func TestListThreadDefaultsForChannel(t *testing.T) {
+	t.Run("EmptyResult", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		defaults, err := store.ListThreadDefaultsForChannel(ctx, "chan-empty")
+		require.NoError(t, err)
+		assert.Empty(t, defaults)
+	})
+
+	t.Run("SingleResult", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.SetThreadDefault(ctx, "ch1", "thread1", "agent-a"))
+
+		defaults, err := store.ListThreadDefaultsForChannel(ctx, "ch1")
+		require.NoError(t, err)
+		require.Len(t, defaults, 1)
+		assert.Equal(t, "ch1", defaults[0].ChannelID)
+		assert.Equal(t, "thread1", defaults[0].ThreadID)
+		assert.Equal(t, "agent-a", defaults[0].AgentSlug)
+	})
+
+	t.Run("MultipleResults", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.SetThreadDefault(ctx, "ch1", "thread1", "agent-a"))
+		require.NoError(t, store.SetThreadDefault(ctx, "ch1", "thread2", "agent-b"))
+		require.NoError(t, store.SetThreadDefault(ctx, "ch1", "thread3", "agent-c"))
+
+		defaults, err := store.ListThreadDefaultsForChannel(ctx, "ch1")
+		require.NoError(t, err)
+		assert.Len(t, defaults, 3)
+	})
+
+	t.Run("ChannelIsolation", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.SetThreadDefault(ctx, "ch1", "thread1", "agent-a"))
+		require.NoError(t, store.SetThreadDefault(ctx, "ch1", "thread2", "agent-b"))
+		require.NoError(t, store.SetThreadDefault(ctx, "ch2", "thread3", "agent-c"))
+
+		defaults, err := store.ListThreadDefaultsForChannel(ctx, "ch1")
+		require.NoError(t, err)
+		assert.Len(t, defaults, 2)
+		for _, td := range defaults {
+			assert.Equal(t, "ch1", td.ChannelID, "should only return ch1 thread defaults")
+		}
+
+		defaults2, err := store.ListThreadDefaultsForChannel(ctx, "ch2")
+		require.NoError(t, err)
+		assert.Len(t, defaults2, 1)
+		assert.Equal(t, "ch2", defaults2[0].ChannelID)
+	})
+}
+
 func TestDeleteChannelLinkCascade(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
