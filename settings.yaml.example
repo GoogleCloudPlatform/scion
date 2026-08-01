@@ -218,6 +218,16 @@ server:
   #       config: {}
 
   # -------------------------------------------------------------------------
+  # Layer 0 — Scheduler (restart required)
+  # Controls the Hub's background task scheduler. On resource-constrained
+  # deployments (small CloudSQL, few replicas), increase the interval or
+  # limit concurrency to reduce DB connection pressure.
+  # -------------------------------------------------------------------------
+  # scheduler:
+  #   interval_seconds: 60               # Root ticker interval (default 60s)
+  #   max_concurrency: 2                 # Max simultaneous handlers (default 2)
+
+  # -------------------------------------------------------------------------
   # Layer 1 — GitHub App (section: github_app)
   # Note: private_key and webhook_secret belong in the secret backend.
   # webhooks_enabled has a Go zero-value limitation: false is

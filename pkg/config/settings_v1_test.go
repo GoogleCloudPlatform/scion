@@ -4000,8 +4000,88 @@ func TestWorkspaceStorageConfig_BackendUnset_IsLocal(t *testing.T) {
 	assert.Nil(t, ws.NFS, "no NFS block when backend is local/empty")
 }
 
+// ============================================================================
+// Scheduler Config Tests
+// ============================================================================
+
+func TestConvertV1ServerToGlobalConfig_Scheduler(t *testing.T) {
+	v1 := &V1ServerConfig{
+		Scheduler: &V1SchedulerConfig{
+			IntervalSeconds: 120,
+			MaxConcurrency:  intPtr(3),
+		},
+	}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, 120, gc.Scheduler.IntervalSeconds)
+	require.NotNil(t, gc.Scheduler.MaxConcurrency)
+	assert.Equal(t, 3, *gc.Scheduler.MaxConcurrency)
+}
+
+func TestConvertV1ServerToGlobalConfig_SchedulerNil(t *testing.T) {
+	v1 := &V1ServerConfig{}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, 0, gc.Scheduler.IntervalSeconds, "nil scheduler should leave defaults (zero)")
+	assert.Nil(t, gc.Scheduler.MaxConcurrency, "nil scheduler should leave MaxConcurrency nil (use scheduler default)")
+}
+
+func TestConvertGlobalToV1ServerConfig_Scheduler(t *testing.T) {
+	gc := DefaultGlobalConfig()
+	gc.Scheduler.IntervalSeconds = 180
+	gc.Scheduler.MaxConcurrency = intPtr(2)
+	v1 := ConvertGlobalToV1ServerConfig(&gc)
+	require.NotNil(t, v1.Scheduler)
+	assert.Equal(t, 180, v1.Scheduler.IntervalSeconds)
+	require.NotNil(t, v1.Scheduler.MaxConcurrency)
+	assert.Equal(t, 2, *v1.Scheduler.MaxConcurrency)
+}
+
+func TestConvertGlobalToV1ServerConfig_SchedulerZeroOmitted(t *testing.T) {
+	gc := DefaultGlobalConfig()
+	// Zero/nil values — scheduler block should not be emitted
+	v1 := ConvertGlobalToV1ServerConfig(&gc)
+	assert.Nil(t, v1.Scheduler, "zero-value scheduler should be omitted in V1")
+}
+
+func TestSchedulerMaxConcurrency_ExplicitZeroRoundTrips(t *testing.T) {
+	// Regression: explicit max_concurrency=0 (unlimited) must survive the
+	// V1 → Global → V1 round-trip and not be confused with "unset".
+	v1 := &V1ServerConfig{
+		Scheduler: &V1SchedulerConfig{
+			MaxConcurrency: intPtr(0),
+		},
+	}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	require.NotNil(t, gc.Scheduler.MaxConcurrency, "explicit 0 must not be nil")
+	assert.Equal(t, 0, *gc.Scheduler.MaxConcurrency)
+
+	v1Out := ConvertGlobalToV1ServerConfig(gc)
+	require.NotNil(t, v1Out.Scheduler, "scheduler block must be emitted for explicit 0")
+	require.NotNil(t, v1Out.Scheduler.MaxConcurrency)
+	assert.Equal(t, 0, *v1Out.Scheduler.MaxConcurrency)
+}
+
+func TestVersionedEnvKeyMapper_Scheduler(t *testing.T) {
+	tests := []struct {
+		env  string
+		want string
+	}{
+		{"SCION_SERVER_SCHEDULER_INTERVAL_SECONDS", "server.scheduler.interval_seconds"},
+		{"SCION_SERVER_SCHEDULER_MAX_CONCURRENCY", "server.scheduler.max_concurrency"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.env, func(t *testing.T) {
+			got := versionedEnvKeyMapper(tt.env)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // --- Helper ---
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+func intPtr(i int) *int {
+	return &i
 }

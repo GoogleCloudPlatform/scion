@@ -355,6 +355,19 @@ type GlobalConfig struct {
 
 	// GitHub App settings
 	GitHubApp GitHubAppConfig `json:"githubApp" yaml:"githubApp" koanf:"githubApp"`
+
+	// Scheduler settings
+	Scheduler SchedulerConfig `json:"scheduler" yaml:"scheduler" koanf:"scheduler"`
+}
+
+// SchedulerConfig holds configuration for the Hub background task scheduler.
+type SchedulerConfig struct {
+	// IntervalSeconds is the root ticker interval in seconds. Default: 60.
+	IntervalSeconds int `json:"intervalSeconds,omitempty" yaml:"intervalSeconds,omitempty" koanf:"intervalSeconds"`
+	// MaxConcurrency limits simultaneous recurring handlers per tick.
+	// When nil (unset), the scheduler uses its built-in default of 2.
+	// Set to 0 for unlimited (pre-fix behavior).
+	MaxConcurrency *int `json:"maxConcurrency,omitempty" yaml:"maxConcurrency,omitempty" koanf:"maxConcurrency"`
 }
 
 // GitHubAppConfig holds configuration for the Hub's GitHub App integration.

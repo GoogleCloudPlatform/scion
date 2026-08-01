@@ -1564,3 +1564,277 @@ func TestSingletonGuard_SkipsWhenHeldByAnother(t *testing.T) {
 		t.Fatalf("handler ran %d times while lock held by another replica; expected 0", got)
 	}
 }
+
+// ============================================================================
+// Configurable Interval & Concurrency Tests
+// ============================================================================
+
+func TestWithTickInterval(t *testing.T) {
+	// Default interval is 1 minute.
+	s := NewScheduler(nil, slog.Default())
+	if s.tickInterval != 1*time.Minute {
+		t.Fatalf("expected default tick interval 1m, got %v", s.tickInterval)
+	}
+
+	// Custom interval via option.
+	s = NewScheduler(nil, slog.Default(), WithTickInterval(2*time.Minute))
+	if s.tickInterval != 2*time.Minute {
+		t.Fatalf("expected tick interval 2m, got %v", s.tickInterval)
+	}
+
+	// Zero/negative interval should be ignored — default preserved.
+	s = NewScheduler(nil, slog.Default(), WithTickInterval(0))
+	if s.tickInterval != 1*time.Minute {
+		t.Fatalf("expected default tick interval 1m for zero input, got %v", s.tickInterval)
+	}
+	s = NewScheduler(nil, slog.Default(), WithTickInterval(-5*time.Second))
+	if s.tickInterval != 1*time.Minute {
+		t.Fatalf("expected default tick interval 1m for negative input, got %v", s.tickInterval)
+	}
+}
+
+func TestWithMaxConcurrency(t *testing.T) {
+	// Default is 2 (conservative limit for issue #367).
+	s := NewScheduler(nil, slog.Default())
+	if s.MaxConcurrency != 2 {
+		t.Fatalf("expected default MaxConcurrency 2, got %d", s.MaxConcurrency)
+	}
+
+	// Custom concurrency via option.
+	s = NewScheduler(nil, slog.Default(), WithMaxConcurrency(3))
+	if s.MaxConcurrency != 3 {
+		t.Fatalf("expected MaxConcurrency 3, got %d", s.MaxConcurrency)
+	}
+
+	// Zero explicitly disables the limit (unlimited).
+	s = NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
+	if s.MaxConcurrency != 0 {
+		t.Fatalf("expected MaxConcurrency 0 (unlimited) for zero input, got %d", s.MaxConcurrency)
+	}
+
+	// Negative should be ignored — default preserved.
+	s = NewScheduler(nil, slog.Default(), WithMaxConcurrency(-1))
+	if s.MaxConcurrency != 2 {
+		t.Fatalf("expected default MaxConcurrency 2 for negative input, got %d", s.MaxConcurrency)
+	}
+}
+
+func TestSchedulerCustomTickInterval(t *testing.T) {
+	// Use a custom fast tick interval and verify handlers fire at the right cadence.
+	s := NewScheduler(nil, slog.Default(), WithTickInterval(30*time.Millisecond))
+	s.MaxJitter = 0 // deterministic
+
+	var called atomic.Int32
+	s.RegisterRecurring("fast-ticker", 1, func(_ context.Context) {
+		called.Add(1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+	s.Stop()
+
+	// With 30ms interval and 100ms sleep, expect ~3-4 ticks (tick 0, 1, 2, 3)
+	if got := called.Load(); got < 2 {
+		t.Errorf("expected at least 2 handler invocations with fast tick, got %d", got)
+	}
+}
+
+func TestSchedulerMaxConcurrencyLimitsParallelism(t *testing.T) {
+	// Register 4 handlers that all fire every tick, but limit concurrency to 2.
+	// Each handler holds a slot for a short time. We verify that no more than 2
+	// are running simultaneously.
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(2))
+	s.tickInterval = 1 * time.Second // Long enough that only tick 0 fires
+	s.MaxJitter = 0
+
+	var (
+		peakConcurrency atomic.Int32
+		currentRunning  atomic.Int32
+	)
+
+	for i := 0; i < 4; i++ {
+		name := fmt.Sprintf("handler-%d", i)
+		s.RegisterRecurring(name, 1, func(_ context.Context) {
+			cur := currentRunning.Add(1)
+			// Track peak
+			for {
+				old := peakConcurrency.Load()
+				if cur <= old || peakConcurrency.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+			currentRunning.Add(-1)
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	// Wait for all handlers to run (each takes 50ms, with concurrency=2
+	// they'll take ~100ms for 4 handlers)
+	time.Sleep(300 * time.Millisecond)
+	s.Stop()
+
+	peak := peakConcurrency.Load()
+	if peak > 2 {
+		t.Errorf("peak concurrency was %d, expected at most 2 (MaxConcurrency limit)", peak)
+	}
+	if peak == 0 {
+		t.Error("no handlers ran — peak concurrency should be > 0")
+	}
+}
+
+func TestSchedulerMaxConcurrencyAcrossTicks(t *testing.T) {
+	// Regression: the semaphore must be shared across ticks. If a handler from
+	// tick N is still running when tick N+1 fires, the total running handlers
+	// must not exceed MaxConcurrency. A per-tick local semaphore would allow
+	// each tick to independently reach MaxConcurrency, blowing past the limit.
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(2))
+	s.tickInterval = 40 * time.Millisecond // Ticks faster than handler duration
+	s.MaxJitter = 0
+
+	var (
+		peakConcurrency atomic.Int32
+		currentRunning  atomic.Int32
+	)
+
+	// Register 2 handlers that each take 80ms — longer than the tick interval.
+	// Without cross-tick limiting, tick 0 and tick 1 would each run 2 handlers
+	// (peak = 4). With a shared semaphore, peak must stay ≤ 2.
+	for i := 0; i < 2; i++ {
+		name := fmt.Sprintf("slow-handler-%d", i)
+		s.RegisterRecurring(name, 1, func(_ context.Context) {
+			cur := currentRunning.Add(1)
+			for {
+				old := peakConcurrency.Load()
+				if cur <= old || peakConcurrency.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+			time.Sleep(80 * time.Millisecond)
+			currentRunning.Add(-1)
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	// Let several ticks fire while handlers are still running from previous ticks.
+	time.Sleep(250 * time.Millisecond)
+	s.Stop()
+
+	peak := peakConcurrency.Load()
+	if peak > 2 {
+		t.Errorf("peak concurrency across ticks was %d, expected at most 2 (shared semaphore)", peak)
+	}
+	if peak == 0 {
+		t.Error("no handlers ran")
+	}
+}
+
+func TestSchedulerUnlimitedConcurrency(t *testing.T) {
+	// With MaxConcurrency=0 (unlimited), all handlers should run concurrently.
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
+	s.tickInterval = 1 * time.Second
+	s.MaxJitter = 0
+
+	var (
+		peakConcurrency atomic.Int32
+		currentRunning  atomic.Int32
+	)
+
+	for i := 0; i < 4; i++ {
+		name := fmt.Sprintf("handler-%d", i)
+		s.RegisterRecurring(name, 1, func(_ context.Context) {
+			cur := currentRunning.Add(1)
+			for {
+				old := peakConcurrency.Load()
+				if cur <= old || peakConcurrency.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+			currentRunning.Add(-1)
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	s.Stop()
+
+	peak := peakConcurrency.Load()
+	if peak < 3 {
+		t.Errorf("peak concurrency was %d, expected at least 3 with unlimited concurrency", peak)
+	}
+}
+
+func TestSchedulerJitter(t *testing.T) {
+	// Verify that MaxJitter > 0 causes handlers to start at different times.
+	// We can't test randomness precisely, but we can verify that:
+	// 1. Handlers run when MaxJitter > 0 (they don't get stuck)
+	// 2. They complete within a reasonable window
+	s := NewScheduler(nil, slog.Default())
+	s.tickInterval = 1 * time.Second
+	s.MaxJitter = 100 * time.Millisecond // Short jitter for testing
+
+	var called atomic.Int32
+	s.RegisterRecurring("jittered", 1, func(_ context.Context) {
+		called.Add(1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	// Wait for tick 0 handler + jitter to complete
+	time.Sleep(300 * time.Millisecond)
+	s.Stop()
+
+	if got := called.Load(); got < 1 {
+		t.Errorf("jittered handler should have been called at least once, got %d", got)
+	}
+}
+
+func TestSchedulerStatusIncludesMaxConcurrency(t *testing.T) {
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(5))
+
+	status := s.Status()
+	if status.MaxConcurrency != 5 {
+		t.Errorf("expected MaxConcurrency 5 in status, got %d", status.MaxConcurrency)
+	}
+	if status.TickInterval != "1m0s" {
+		t.Errorf("expected TickInterval '1m0s', got %q", status.TickInterval)
+	}
+}
+
+func TestSchedulerStatusDefault(t *testing.T) {
+	s := NewScheduler(nil, slog.Default())
+
+	status := s.Status()
+	if status.MaxConcurrency != 2 {
+		t.Errorf("expected default MaxConcurrency 2 in status, got %d", status.MaxConcurrency)
+	}
+}
+
+func TestSchedulerMultipleOptions(t *testing.T) {
+	// Apply both options at once.
+	s := NewScheduler(nil, slog.Default(),
+		WithTickInterval(5*time.Minute),
+		WithMaxConcurrency(3),
+	)
+	if s.tickInterval != 5*time.Minute {
+		t.Errorf("expected tick interval 5m, got %v", s.tickInterval)
+	}
+	if s.MaxConcurrency != 3 {
+		t.Errorf("expected MaxConcurrency 3, got %d", s.MaxConcurrency)
+	}
+}

@@ -208,6 +208,16 @@ type ServerConfig struct {
 	// TransportMinter mints transport-layer OIDC tokens for agents.
 	// Nil when TransportMode == "none" or unset.
 	TransportMinter TransportTokenMinter
+	// SchedulerIntervalSeconds is the root ticker interval for the background
+	// scheduler, in seconds. Default: 60. Increasing this reduces DB connection
+	// pressure on small deployments.
+	SchedulerIntervalSeconds int
+	// SchedulerMaxConcurrency limits the number of recurring handlers that may
+	// run simultaneously in a single tick. When nil (unset), the scheduler
+	// uses its built-in default of 2 so the fix for issue #367 is active
+	// out-of-the-box. Pointer-to-0 explicitly means unlimited.
+	SchedulerMaxConcurrency *int
+
 	// Workstation indicates non-production, single-user mode (e.g. local laptop).
 	// When true, /api/v1/system/* and other workstation-only endpoints are enabled.
 	Workstation bool
@@ -2600,8 +2610,17 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	}
 	s.mu.Unlock()
 
-	// Initialize and start the scheduler
-	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"))
+	// Initialize and start the scheduler. Interval and concurrency are
+	// configurable via server.scheduler in settings.yaml to let operators
+	// tune background load to match their DB capacity (see issue #367).
+	var schedOpts []SchedulerOption
+	if s.config.SchedulerIntervalSeconds > 0 {
+		schedOpts = append(schedOpts, WithTickInterval(time.Duration(s.config.SchedulerIntervalSeconds)*time.Second))
+	}
+	if s.config.SchedulerMaxConcurrency != nil {
+		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
+	}
+	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	// Recurring sweeps are cluster-wide-once work: under multi-replica Postgres
 	// they must run on a single replica per tick (gated by an advisory lock),
 	// otherwise every replica would publish duplicate offline/stalled events and

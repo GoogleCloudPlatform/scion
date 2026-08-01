@@ -29,8 +29,8 @@ import (
 type EventHandler func(ctx context.Context, evt store.ScheduledEvent) error
 
 // Scheduler manages recurring and one-shot timers within the Hub server.
-// A single root ticker fires every 1 minute and drives all registered
-// recurring handlers based on their configured interval.
+// A single root ticker fires at a configurable interval (default 1 minute) and
+// drives all registered recurring handlers based on their configured interval.
 //
 // One-shot timers are persisted in the database and scheduled in memory
 // via time.AfterFunc. On startup, expired timers fire immediately; future
@@ -50,6 +50,20 @@ type Scheduler struct {
 	// "thundering herd" where all background tasks hit the DB simultaneously.
 	// Defaults to 30 s in production; tests can set it to 0 for determinism.
 	MaxJitter time.Duration
+
+	// MaxConcurrency limits the number of recurring handlers that may execute
+	// simultaneously. Defaults to defaultMaxConcurrency (2) to prevent all
+	// handlers from competing for DB connections at once — the original
+	// issue (#367) showed 6+ handlers saturating a small DB's connection
+	// pool. Set to 0 for unlimited (pre-#367 behavior).
+	MaxConcurrency int
+
+	// sem is the concurrency-limiting semaphore, initialized once in
+	// NewScheduler and shared across all ticks. This ensures the limit
+	// applies globally — slow handlers from tick N still hold slots when
+	// tick N+1 fires, preventing cross-tick concurrency blow-up. Nil when
+	// MaxConcurrency == 0 (unlimited).
+	sem chan struct{}
 
 	// Recurring handlers
 	recurring []RecurringHandler
@@ -89,18 +103,58 @@ type scheduledTimer struct {
 	Cancel context.CancelFunc
 }
 
-// NewScheduler creates a new Scheduler with a 1-minute root ticker interval
-// and a 30-second max jitter to desynchronize recurring handlers.
-func NewScheduler(st store.Store, log *slog.Logger) *Scheduler {
-	return &Scheduler{
-		store:         st,
-		tickInterval:  1 * time.Minute,
-		MaxJitter:     maxJitter,
-		timers:        make(map[string]*scheduledTimer),
-		eventHandlers: make(map[string]EventHandler),
-		log:           log,
-		stopCh:        make(chan struct{}),
+// SchedulerOption configures optional Scheduler parameters.
+type SchedulerOption func(*Scheduler)
+
+// WithTickInterval overrides the default 1-minute root ticker interval.
+func WithTickInterval(d time.Duration) SchedulerOption {
+	return func(s *Scheduler) {
+		if d > 0 {
+			s.tickInterval = d
+		}
 	}
+}
+
+// WithMaxConcurrency limits simultaneous recurring handler goroutines per tick.
+// Values > 0 set the limit; 0 explicitly disables the limit (unlimited).
+// Negative values are ignored (default preserved).
+func WithMaxConcurrency(n int) SchedulerOption {
+	return func(s *Scheduler) {
+		if n >= 0 {
+			s.MaxConcurrency = n
+		}
+	}
+}
+
+// defaultMaxConcurrency is the out-of-the-box limit on simultaneous recurring
+// handlers per tick. Set to 2 so the fix for issue #367 (6+ handlers
+// saturating a small DB's connection pool) is active without configuration.
+const defaultMaxConcurrency = 2
+
+// NewScheduler creates a new Scheduler with a 1-minute root ticker interval,
+// a 30-second max jitter, and a default max concurrency of 2 to prevent
+// overwhelming small DB connection pools.
+// Optional SchedulerOption values can override the defaults.
+func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Scheduler {
+	s := &Scheduler{
+		store:          st,
+		tickInterval:   1 * time.Minute,
+		MaxJitter:      maxJitter,
+		MaxConcurrency: defaultMaxConcurrency,
+		timers:         make(map[string]*scheduledTimer),
+		eventHandlers:  make(map[string]EventHandler),
+		log:            log,
+		stopCh:         make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	// Initialize the semaphore once so it is shared across all ticks.
+	// Slow handlers from tick N still hold slots when tick N+1 fires.
+	if s.MaxConcurrency > 0 {
+		s.sem = make(chan struct{}, s.MaxConcurrency)
+	}
+	return s
 }
 
 // RegisterEventHandler registers a handler for a specific event type.
@@ -254,45 +308,79 @@ const maxJitter = 30 * time.Second
 
 // runRecurringHandlers invokes all handlers whose interval divides the current
 // tick count. Each handler runs in its own goroutine with a timeout context.
-// A random jitter (0–30 s) is added before each invocation so background tasks
-// desynchronize and avoid saturating the DB connection pool.
+//
+// The execution pipeline is: jitter sleep → semaphore acquire → handler work.
+// Jitter runs BEFORE the semaphore so handlers don't hold concurrency slots
+// during dead sleep time — the jitter spreads arrivals at the semaphore over
+// the MaxJitter window, and only actual DB work counts against the limit.
+// The semaphore (s.sem) is shared across all ticks, so slow handlers from a
+// previous tick still count against the concurrency limit.
+//
+// When MaxConcurrency > 0 (default: 2), s.sem (initialized once in
+// NewScheduler) limits the number of handlers doing real work simultaneously
+// across ALL ticks — slow handlers from tick N still hold slots when tick N+1
+// fires, preventing cross-tick concurrency blow-up.
 func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
+	// Collect eligible handlers for this tick.
+	var eligible []RecurringHandler
 	for _, h := range s.recurring {
 		if s.tickCount%uint64(h.Interval) == 0 {
-			handler := h // capture loop variable
-			go func() {
-				// Stagger start: sleep a random 0–MaxJitter so tasks that fire on
-				// the same tick don't all compete for DB connections at once.
-				jitter := time.Duration(0)
-				if s.MaxJitter > 0 {
-					jitter = time.Duration(rand.Int63n(int64(s.MaxJitter)))
-				}
+			eligible = append(eligible, h)
+		}
+	}
+	if len(eligible) == 0 {
+		return
+	}
+
+	for _, h := range eligible {
+		handler := h // capture loop variable
+		go func() {
+			// Stagger start: sleep a random 0–MaxJitter BEFORE acquiring a
+			// semaphore slot. This spreads arrivals at the semaphore over the
+			// jitter window so handlers don't hold concurrency slots during
+			// dead sleep time.
+			jitter := time.Duration(0)
+			if s.MaxJitter > 0 {
+				jitter = time.Duration(rand.Int63n(int64(s.MaxJitter)))
+			}
+			if jitter > 0 {
 				select {
 				case <-time.After(jitter):
 				case <-ctx.Done():
 					return
 				}
+			}
 
-				handlerCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
-				defer cancel()
+			// Acquire semaphore slot if concurrency is limited.
+			// s.sem is shared across all ticks (initialized once in NewScheduler).
+			if s.sem != nil {
+				select {
+				case s.sem <- struct{}{}:
+					defer func() { <-s.sem }()
+				case <-ctx.Done():
+					return
+				}
+			}
 
-				start := time.Now()
-				s.log.Debug("Scheduler: running recurring handler", "name", handler.Name, "tick", s.tickCount)
+			handlerCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
+			defer cancel()
 
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							s.log.Error("Scheduler: recurring handler panicked",
-								"name", handler.Name, "panic", r)
-						}
-					}()
-					handler.Fn(handlerCtx)
+			start := time.Now()
+			s.log.Debug("Scheduler: running recurring handler", "name", handler.Name, "tick", s.tickCount)
+
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.log.Error("Scheduler: recurring handler panicked",
+							"name", handler.Name, "panic", r)
+					}
 				}()
-
-				s.log.Debug("Scheduler: recurring handler completed",
-					"name", handler.Name, "duration", time.Since(start))
+				handler.Fn(handlerCtx)
 			}()
-		}
+
+			s.log.Debug("Scheduler: recurring handler completed",
+				"name", handler.Name, "duration", time.Since(start))
+		}()
 	}
 }
 
@@ -465,11 +553,12 @@ func (s *Scheduler) ScheduleEvent(ctx context.Context, evt store.ScheduledEvent)
 
 // SchedulerStatus holds a point-in-time snapshot of the scheduler's state.
 type SchedulerStatus struct {
-	TickCount     uint64                 `json:"tickCount"`
-	TickInterval  string                 `json:"tickInterval"`
-	Recurring     []RecurringHandlerInfo `json:"recurringHandlers"`
-	EventHandlers []string               `json:"eventHandlers"`
-	ActiveTimers  int                    `json:"activeTimers"`
+	TickCount      uint64                 `json:"tickCount"`
+	TickInterval   string                 `json:"tickInterval"`
+	MaxConcurrency int                    `json:"maxConcurrency"`
+	Recurring      []RecurringHandlerInfo `json:"recurringHandlers"`
+	EventHandlers  []string               `json:"eventHandlers"`
+	ActiveTimers   int                    `json:"activeTimers"`
 }
 
 // RecurringHandlerInfo is the public view of a registered recurring handler.
@@ -498,11 +587,12 @@ func (s *Scheduler) Status() SchedulerStatus {
 	s.mu.Unlock()
 
 	return SchedulerStatus{
-		TickCount:     s.tickCount,
-		TickInterval:  s.tickInterval.String(),
-		Recurring:     recurring,
-		EventHandlers: eventHandlers,
-		ActiveTimers:  activeTimers,
+		TickCount:      s.tickCount,
+		TickInterval:   s.tickInterval.String(),
+		MaxConcurrency: s.MaxConcurrency,
+		Recurring:      recurring,
+		EventHandlers:  eventHandlers,
+		ActiveTimers:   activeTimers,
 	}
 }
 

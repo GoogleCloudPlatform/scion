@@ -329,6 +329,9 @@ type V1ServerConfig struct {
 
 	// GitHubApp configures the Hub's GitHub App integration for agent git authentication.
 	GitHubApp *V1GitHubAppConfig `json:"github_app,omitempty" yaml:"github_app,omitempty" koanf:"github_app"`
+
+	// Scheduler configures the Hub background task scheduler.
+	Scheduler *V1SchedulerConfig `json:"scheduler,omitempty" yaml:"scheduler,omitempty" koanf:"scheduler"`
 }
 
 // V1GitHubAppConfig holds the GitHub App configuration in settings.yaml format.
@@ -340,6 +343,22 @@ type V1GitHubAppConfig struct {
 	APIBaseURL      string `json:"api_base_url,omitempty" yaml:"api_base_url,omitempty" koanf:"api_base_url"`
 	WebhooksEnabled bool   `json:"webhooks_enabled,omitempty" yaml:"webhooks_enabled,omitempty" koanf:"webhooks_enabled"`
 	InstallationURL string `json:"installation_url,omitempty" yaml:"installation_url,omitempty" koanf:"installation_url"`
+}
+
+// V1SchedulerConfig holds configuration for the Hub background task scheduler.
+// Controls the tick interval and concurrency of recurring maintenance tasks
+// to allow operators to tune scheduler load to match DB capacity.
+type V1SchedulerConfig struct {
+	// IntervalSeconds is the root ticker interval in seconds. All recurring
+	// handlers fire at multiples of this interval. Default: 60 (1 minute).
+	// Increasing this value reduces DB connection pressure on small deployments.
+	IntervalSeconds int `json:"interval_seconds,omitempty" yaml:"interval_seconds,omitempty" koanf:"interval_seconds"`
+	// MaxConcurrency limits the number of recurring handlers that may run
+	// simultaneously in a single tick. When nil (unset), the scheduler uses
+	// its built-in default of 2, so the fix for issue #367 (DB connection
+	// pool saturation) is active out-of-the-box. Set to 0 for unlimited
+	// (pre-fix behavior), or a higher value for larger deployments.
+	MaxConcurrency *int `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty" koanf:"max_concurrency"`
 }
 
 // V1NotificationChannelConfig holds configuration for an external notification channel.
@@ -1040,6 +1059,8 @@ var knownCompoundFields = []string{
 	"soft_delete_retention",
 	"authorized_domains",
 	"platform_auth_sa",
+	"interval_seconds",
+	"max_concurrency",
 	"oidc_audience",
 	"jwks_url",
 	"broker_nickname",
@@ -1134,7 +1155,8 @@ func mapEnvKeyRecursive(key string) string {
 func isSectionName(name string) bool {
 	switch name {
 	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
-		"web", "cli", "device", "google", "github", "proxy", "iap", "transport":
+		"web", "cli", "device", "google", "github", "proxy", "iap", "transport",
+		"scheduler":
 		return true
 	}
 	return false
@@ -1512,6 +1534,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.GitHubApp.InstallationURL = v1.GitHubApp.InstallationURL
 	}
 
+	// Scheduler
+	if v1.Scheduler != nil {
+		gc.Scheduler.IntervalSeconds = v1.Scheduler.IntervalSeconds
+		gc.Scheduler.MaxConcurrency = v1.Scheduler.MaxConcurrency // both are *int; nil propagates
+	}
+
 	return &gc
 }
 
@@ -1663,6 +1691,14 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			APIBaseURL:      gc.GitHubApp.APIBaseURL,
 			WebhooksEnabled: gc.GitHubApp.WebhooksEnabled,
 			InstallationURL: gc.GitHubApp.InstallationURL,
+		}
+	}
+
+	// Scheduler config
+	if gc.Scheduler.IntervalSeconds != 0 || gc.Scheduler.MaxConcurrency != nil {
+		v1.Scheduler = &V1SchedulerConfig{
+			IntervalSeconds: gc.Scheduler.IntervalSeconds,
+			MaxConcurrency:  gc.Scheduler.MaxConcurrency,
 		}
 	}
 
