@@ -389,6 +389,7 @@ func (s *Server) createAgentInProject(
 	ctx := r.Context()
 	ctx, span := tracer.Start(ctx, "hub.agent.create")
 	defer span.End()
+	// Note: HTTP error status is recorded by the otelhttp parent span.
 	span.SetAttributes(
 		attribute.String("scion.agent.name", req.Name),
 		attribute.String("scion.project.id", projectID),
@@ -1776,6 +1777,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	ctx := r.Context()
 	ctx, span := tracer.Start(ctx, "hub.agent.delete")
 	defer span.End()
+	// Note: HTTP error status is recorded by the otelhttp parent span.
 	span.SetAttributes(
 		attribute.String("scion.agent.id", agent.ID),
 	)
@@ -1939,8 +1941,9 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		return
 	}
 
-	ctx, span := tracer.Start(r.Context(), "hub.agent."+action)
+	ctx, span := tracer.Start(r.Context(), "hub.agent.action")
 	defer span.End()
+	// Note: HTTP error status is recorded by the otelhttp parent span.
 	span.SetAttributes(
 		attribute.String("scion.agent.id", id),
 		attribute.String("scion.agent.action", action),

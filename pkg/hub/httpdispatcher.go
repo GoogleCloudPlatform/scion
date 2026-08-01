@@ -1473,6 +1473,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
