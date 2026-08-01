@@ -769,8 +769,11 @@ export class ScionInjectedSkillsPanel extends LitElement {
         this.dialogError = 'Please select a skill from the search results';
         return;
       }
-      // Build a skill bank URI from the skill's slug
-      uri = `skill://${this.dialogSelectedSkill.slug}`;
+      // Build a canonical skill bank URI: skill://scion/<slug>
+      // A single-segment form (skill://<slug>) is now accepted by
+      // ParseSkillURI, but the two-segment form is the canonical stored
+      // shape and avoids ambiguity with the registry field.
+      uri = `skill://scion/${this.dialogSelectedSkill.slug}`;
     } else {
       const raw = this.dialogUri.trim();
       if (!raw) {

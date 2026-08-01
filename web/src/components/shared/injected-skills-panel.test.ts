@@ -869,3 +869,92 @@ describe('injected-skills-panel — discovery state lifecycle', () => {
     expect(el.skippedSkillNames).toEqual([]);
   });
 });
+
+// ── Picker (search-mode) URI generation ───────────────────────────────────
+//
+// Regression test for https://github.com/ptone/scion/issues/582:
+// The skill picker previously generated `skill://<slug>` which was rejected
+// by ParseSkillURI (treated the single segment as a registry, not a name).
+// The fix generates `skill://scion/<slug>` — the canonical two-segment form.
+
+describe('injected-skills-panel — search-mode picker URI', () => {
+  beforeAll(async () => {
+    await import('./injected-skills-panel.js');
+  });
+
+  afterEach(cleanup);
+
+  it('generates skill://scion/<slug> when adding a skill from the picker', async () => {
+    const calls: Call[] = [];
+    const el = await createPanel('project', calls);
+
+    // Simulate selecting a skill in the search dialog.
+    el.dialogOpen = true;
+    el.dialogMode = 'search';
+    el.dialogSelectedSkill = {
+      id: 'test-id',
+      name: 'Security Audit',
+      slug: 'security-audit',
+      scope: 'core',
+      status: 'active',
+      visibility: 'public',
+      created: '2026-01-01',
+      updated: '2026-01-01',
+    };
+    await el.updateComplete;
+
+    // Trigger handleAddSkill via the method (it expects an Event with
+    // preventDefault).
+    await el.handleAddSkill(new Event('submit', { cancelable: true }));
+
+    // The POST must contain the canonical two-segment URI.
+    const posts = calls.filter((c: Call) => c.method === 'POST');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body.skillUri).toBe('skill://scion/security-audit');
+  });
+
+  it('does NOT generate the old skill://<slug> form (regression guard)', async () => {
+    const calls: Call[] = [];
+    const el = await createPanel('hub', calls);
+
+    el.dialogOpen = true;
+    el.dialogMode = 'search';
+    el.dialogSelectedSkill = {
+      id: 'test-id-2',
+      name: 'Code Review',
+      slug: 'code-review',
+      scope: 'core',
+      status: 'active',
+      visibility: 'public',
+      created: '2026-01-01',
+      updated: '2026-01-01',
+    };
+    await el.updateComplete;
+
+    await el.handleAddSkill(new Event('submit', { cancelable: true }));
+
+    // Hub scope uses PUT. The user_defined array must contain the canonical URI.
+    const puts = calls.filter((c: Call) => c.method === 'PUT');
+    expect(puts).toHaveLength(1);
+    const uris: string[] = puts[0].body.user_defined.map((r: any) => r.uri);
+    expect(uris).toContain('skill://scion/code-review');
+    // The old form must NOT appear.
+    expect(uris).not.toContain('skill://code-review');
+  });
+
+  it('sets dialogError when no skill is selected', async () => {
+    const calls: Call[] = [];
+    const el = await createPanel('project', calls);
+
+    el.dialogOpen = true;
+    el.dialogMode = 'search';
+    el.dialogSelectedSkill = null;
+    await el.updateComplete;
+
+    await el.handleAddSkill(new Event('submit', { cancelable: true }));
+
+    expect(el.dialogError).toBe('Please select a skill from the search results');
+    // No network calls should have been made.
+    expect(calls.filter((c: Call) => c.method === 'POST')).toHaveLength(0);
+  });
+});

@@ -496,6 +496,45 @@ func TestAddProjectInjectedSkill_RejectsInvalidScheme(t *testing.T) {
 	}
 }
 
+// TestSetProjectInjectedSkills_AcceptsLegacySingleSegmentSkillURI verifies that
+// a bulk PUT containing a legacy skill://<slug> entry (single segment after
+// skill://) does not 400. ParseSkillURI's single-segment heuristic treats this
+// as skill://scion/<slug>. Regression test for ptone/scion#582.
+func TestSetProjectInjectedSkills_AcceptsLegacySingleSegmentSkillURI(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Pre-seed a legacy entry in the store (mimics what the old web picker stored).
+	legacy := &store.SkillInjection{
+		Scope:    store.SkillInjectionScopeProject,
+		ScopeID:  project.ID,
+		SkillURI: "skill://scion-process",
+	}
+	require.NoError(t, s.AddSkillInjection(ctx, legacy))
+
+	// Bulk PUT the same list back (this is what save/reorder does).
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "skill://scion-process"},
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/projects/"+project.ID+"/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, "legacy skill://<slug> must not 400; body: %s", rec.Body.String())
+
+	var resp api.SkillInjectionList
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "skill://scion-process", resp.Entries[0].SkillURI,
+		"legacy URI must be accepted and returned as-is")
+
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 1)
+	assert.Equal(t, "skill://scion-process", sis[0].SkillURI,
+		"stored URI must match the legacy form")
+}
+
 // =============================================================================
 // Project-scope: delete
 // =============================================================================
