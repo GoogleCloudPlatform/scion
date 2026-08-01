@@ -65,7 +65,7 @@ func NewPortTunnelManager() *PortTunnelManager {
 	return &PortTunnelManager{sessions: make(map[string]*PortTunnelSession)}
 }
 
-func (m *PortTunnelManager) Register(agentID string, conn *websocket.Conn) *PortTunnelSession {
+func (m *PortTunnelManager) Register(agentID string, conn *websocket.Conn, remoteAddr string) *PortTunnelSession {
 	conn.SetReadLimit(96 << 20)
 	s := &PortTunnelSession{
 		agentID:  agentID,
@@ -82,6 +82,8 @@ func (m *PortTunnelManager) Register(agentID string, conn *websocket.Conn) *Port
 	m.sessions[agentID] = s
 	m.mu.Unlock()
 
+	slog.Info("Port-forward tunnel connected", "agent_id", agentID, "remote_addr", remoteAddr)
+
 	go s.readLoop(func() {
 		m.mu.Lock()
 		if m.sessions[agentID] == s {
@@ -89,6 +91,9 @@ func (m *PortTunnelManager) Register(agentID string, conn *websocket.Conn) *Port
 		}
 		onDisconnect := m.onDisconnect
 		m.mu.Unlock()
+
+		slog.Info("Port-forward tunnel disconnected", "agent_id", agentID)
+
 		if onDisconnect != nil {
 			onDisconnect(agentID)
 		}
@@ -313,6 +318,7 @@ func (s *Server) registerAgentPort(w http.ResponseWriter, r *http.Request, agent
 	if updated, err := s.store.GetAgent(r.Context(), agent.ID); err == nil {
 		s.events.PublishAgentPorts(r.Context(), updated)
 	}
+	slog.Info("Port registered", "agent_id", agent.ID, "port", req.Port, "label", req.Label, "caller", identityStringFromContext(r.Context()))
 	writeJSON(w, http.StatusCreated, exposedPortResponses(agent.ID, ports)[len(ports)-1])
 }
 
@@ -342,6 +348,7 @@ func (s *Server) deleteAgentPort(w http.ResponseWriter, r *http.Request, agentID
 	if updated, err := s.store.GetAgent(r.Context(), agent.ID); err == nil {
 		s.events.PublishAgentPorts(r.Context(), updated)
 	}
+	slog.Info("Port deregistered", "agent_id", agent.ID, "port", port, "caller", identityStringFromContext(r.Context()))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -350,6 +357,7 @@ func (s *Server) clearAgentPorts(w http.ResponseWriter, r *http.Request, agentID
 	if !ok {
 		return
 	}
+	portCount := len(agent.ExposedPorts)
 	if err := s.store.UpdateAgentExposedPorts(r.Context(), agent.ID, nil); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -358,10 +366,12 @@ func (s *Server) clearAgentPorts(w http.ResponseWriter, r *http.Request, agentID
 	if updated, err := s.store.GetAgent(r.Context(), agent.ID); err == nil {
 		s.events.PublishAgentPorts(r.Context(), updated)
 	}
+	slog.Info("All ports cleared", "agent_id", agent.ID, "caller", identityStringFromContext(r.Context()), "count", portCount)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID string, port int, proxyPath string) {
+	start := time.Now()
 	agent, ok := s.authorizePortAccess(w, r, agentID, ActionPortAccess)
 	if !ok {
 		return
@@ -422,6 +432,15 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	}
 	w.WriteHeader(resp.Status)
 	_, _ = w.Write(resp.Body)
+	slog.Info("Proxy request",
+		"agent_id", agent.ID,
+		"port", port,
+		"caller", identityStringFromContext(r.Context()),
+		"method", r.Method,
+		"path", reqPath,
+		"status", resp.Status,
+		"duration", time.Since(start),
+	)
 }
 
 func (s *Server) handleAgentPortTunnel(w http.ResponseWriter, r *http.Request, agentID string) {
@@ -437,7 +456,7 @@ func (s *Server) handleAgentPortTunnel(w http.ResponseWriter, r *http.Request, a
 	if err != nil {
 		return
 	}
-	session := s.portTunnels.Register(agent.ID, conn)
+	session := s.portTunnels.Register(agent.ID, conn, r.RemoteAddr)
 	<-session.done
 }
 
@@ -553,6 +572,18 @@ func sensitiveHeader(k string) bool {
 	default:
 		return false
 	}
+}
+
+// identityStringFromContext returns a human-readable identity string for the
+// authenticated caller in the request context, for use in audit log entries.
+func identityStringFromContext(ctx context.Context) string {
+	if agent := GetAgentIdentityFromContext(ctx); agent != nil {
+		return "agent:" + agent.ID()
+	}
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		return "user:" + user.ID()
+	}
+	return "unknown"
 }
 
 // clearExposedPortsForAgent removes all exposed port registrations for an agent.

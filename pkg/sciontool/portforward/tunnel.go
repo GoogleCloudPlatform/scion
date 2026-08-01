@@ -58,8 +58,13 @@ func (m *Manager) Run(ctx context.Context) {
 		return
 	}
 	for {
-		if err := m.runOnce(ctx); err != nil && ctx.Err() == nil {
-			log.Error("Port-forward tunnel disconnected: %v", err)
+		err := m.runOnce(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Info("Port-forward tunnel disconnected: context cancelled")
+			} else {
+				log.Error("Port-forward tunnel disconnected: %v", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -150,6 +155,7 @@ func (m *Manager) doLocalRequest(req *wire.Request) *wire.Response {
 	if len(body) > maxLocalResponseBody {
 		return &wire.Response{StreamID: req.StreamID, Error: "local response body too large"}
 	}
+	log.Debug("Local request forwarded: port=%d method=%s path=%s status=%d", req.Port, req.Method, req.Path, resp.StatusCode)
 	return &wire.Response{
 		StreamID: req.StreamID,
 		Status:   resp.StatusCode,
