@@ -56,6 +56,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -1533,6 +1534,8 @@ type AgentMutation struct {
 	runtime                *string
 	runtime_broker_id      *string
 	web_pty_enabled        *bool
+	exposed_ports          *[]store.ExposedPort
+	appendexposed_ports    []store.ExposedPort
 	task_summary           *string
 	message                *string
 	applied_config         *string
@@ -2799,6 +2802,71 @@ func (m *AgentMutation) ResetWebPtyEnabled() {
 	m.web_pty_enabled = nil
 }
 
+// SetExposedPorts sets the "exposed_ports" field.
+func (m *AgentMutation) SetExposedPorts(sp []store.ExposedPort) {
+	m.exposed_ports = &sp
+	m.appendexposed_ports = nil
+}
+
+// ExposedPorts returns the value of the "exposed_ports" field in the mutation.
+func (m *AgentMutation) ExposedPorts() (r []store.ExposedPort, exists bool) {
+	v := m.exposed_ports
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExposedPorts returns the old "exposed_ports" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldExposedPorts(ctx context.Context) (v []store.ExposedPort, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExposedPorts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExposedPorts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExposedPorts: %w", err)
+	}
+	return oldValue.ExposedPorts, nil
+}
+
+// AppendExposedPorts adds sp to the "exposed_ports" field.
+func (m *AgentMutation) AppendExposedPorts(sp []store.ExposedPort) {
+	m.appendexposed_ports = append(m.appendexposed_ports, sp...)
+}
+
+// AppendedExposedPorts returns the list of values that were appended to the "exposed_ports" field in this mutation.
+func (m *AgentMutation) AppendedExposedPorts() ([]store.ExposedPort, bool) {
+	if len(m.appendexposed_ports) == 0 {
+		return nil, false
+	}
+	return m.appendexposed_ports, true
+}
+
+// ClearExposedPorts clears the value of the "exposed_ports" field.
+func (m *AgentMutation) ClearExposedPorts() {
+	m.exposed_ports = nil
+	m.appendexposed_ports = nil
+	m.clearedFields[agent.FieldExposedPorts] = struct{}{}
+}
+
+// ExposedPortsCleared returns if the "exposed_ports" field was cleared in this mutation.
+func (m *AgentMutation) ExposedPortsCleared() bool {
+	_, ok := m.clearedFields[agent.FieldExposedPorts]
+	return ok
+}
+
+// ResetExposedPorts resets all changes to the "exposed_ports" field.
+func (m *AgentMutation) ResetExposedPorts() {
+	m.exposed_ports = nil
+	m.appendexposed_ports = nil
+	delete(m.clearedFields, agent.FieldExposedPorts)
+}
+
 // SetTaskSummary sets the "task_summary" field.
 func (m *AgentMutation) SetTaskSummary(s string) {
 	m.task_summary = &s
@@ -3504,7 +3572,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 36)
+	fields := make([]string, 0, 37)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -3579,6 +3647,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.web_pty_enabled != nil {
 		fields = append(fields, agent.FieldWebPtyEnabled)
+	}
+	if m.exposed_ports != nil {
+		fields = append(fields, agent.FieldExposedPorts)
 	}
 	if m.task_summary != nil {
 		fields = append(fields, agent.FieldTaskSummary)
@@ -3671,6 +3742,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.RuntimeBrokerID()
 	case agent.FieldWebPtyEnabled:
 		return m.WebPtyEnabled()
+	case agent.FieldExposedPorts:
+		return m.ExposedPorts()
 	case agent.FieldTaskSummary:
 		return m.TaskSummary()
 	case agent.FieldMessage:
@@ -3752,6 +3825,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRuntimeBrokerID(ctx)
 	case agent.FieldWebPtyEnabled:
 		return m.OldWebPtyEnabled(ctx)
+	case agent.FieldExposedPorts:
+		return m.OldExposedPorts(ctx)
 	case agent.FieldTaskSummary:
 		return m.OldTaskSummary(ctx)
 	case agent.FieldMessage:
@@ -3958,6 +4033,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetWebPtyEnabled(v)
 		return nil
+	case agent.FieldExposedPorts:
+		v, ok := value.([]store.ExposedPort)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExposedPorts(v)
+		return nil
 	case agent.FieldTaskSummary:
 		v, ok := value.(string)
 		if !ok {
@@ -4149,6 +4231,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldRuntimeBrokerID) {
 		fields = append(fields, agent.FieldRuntimeBrokerID)
 	}
+	if m.FieldCleared(agent.FieldExposedPorts) {
+		fields = append(fields, agent.FieldExposedPorts)
+	}
 	if m.FieldCleared(agent.FieldTaskSummary) {
 		fields = append(fields, agent.FieldTaskSummary)
 	}
@@ -4231,6 +4316,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldRuntimeBrokerID:
 		m.ClearRuntimeBrokerID()
+		return nil
+	case agent.FieldExposedPorts:
+		m.ClearExposedPorts()
 		return nil
 	case agent.FieldTaskSummary:
 		m.ClearTaskSummary()
@@ -4338,6 +4426,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldWebPtyEnabled:
 		m.ResetWebPtyEnabled()
+		return nil
+	case agent.FieldExposedPorts:
+		m.ResetExposedPorts()
 		return nil
 	case agent.FieldTaskSummary:
 		m.ResetTaskSummary()

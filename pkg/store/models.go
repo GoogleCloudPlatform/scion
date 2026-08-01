@@ -56,13 +56,14 @@ type Agent struct {
 	StalledFromActivity string `json:"stalledFromActivity,omitempty"` // Activity before stalled; empty when not stalled
 
 	// Runtime configuration
-	Image           string `json:"image,omitempty"`
-	Detached        bool   `json:"detached"`
-	Runtime         string `json:"runtime,omitempty"`         // docker, kubernetes, apple
-	RuntimeBrokerID string `json:"runtimeBrokerId,omitempty"` // FK to RuntimeBroker.ID
-	WebPTYEnabled   bool   `json:"webPtyEnabled,omitempty"`
-	TaskSummary     string `json:"taskSummary,omitempty"`
-	Message         string `json:"message,omitempty"`
+	Image           string        `json:"image,omitempty"`
+	Detached        bool          `json:"detached"`
+	Runtime         string        `json:"runtime,omitempty"`         // docker, kubernetes, apple
+	RuntimeBrokerID string        `json:"runtimeBrokerId,omitempty"` // FK to RuntimeBroker.ID
+	WebPTYEnabled   bool          `json:"webPtyEnabled,omitempty"`
+	ExposedPorts    []ExposedPort `json:"exposedPorts,omitempty"`
+	TaskSummary     string        `json:"taskSummary,omitempty"`
+	Message         string        `json:"message,omitempty"`
 
 	// Enriched fields (populated by Hub when returning data, not persisted)
 	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
@@ -92,6 +93,17 @@ type Agent struct {
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion"`
+}
+
+// ExposedPort is a Hub-registered local port that may be reached through an
+// authenticated agent-held tunnel.
+type ExposedPort struct {
+	Port      int       `json:"port"`
+	Label     string    `json:"label,omitempty"`
+	Host      string    `json:"host,omitempty"`
+	Mode      string    `json:"mode,omitempty"`
+	ExposedAt time.Time `json:"exposedAt"`
+	ExposedBy string    `json:"exposedBy"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.
@@ -1439,34 +1451,36 @@ const UATPrefix = "scion_pat_"
 
 // UAT scope constants define the allowed capability scopes.
 const (
-	UATScopeProjectRead   = "project:read"
-	UATScopeProjectUpdate = "project:update"
-	UATScopeAgentCreate   = "agent:create"
-	UATScopeAgentRead     = "agent:read"
-	UATScopeAgentList     = "agent:list"
-	UATScopeAgentStart    = "agent:start"
-	UATScopeAgentStop     = "agent:stop"
-	UATScopeAgentDelete   = "agent:delete"
-	UATScopeAgentMessage  = "agent:message"
-	UATScopeAgentAttach   = "agent:attach"
-	UATScopeAgentDispatch = "agent:dispatch"
-	UATScopeAgentManage   = "agent:manage" // Convenience alias
+	UATScopeProjectRead     = "project:read"
+	UATScopeProjectUpdate   = "project:update"
+	UATScopeAgentCreate     = "agent:create"
+	UATScopeAgentRead       = "agent:read"
+	UATScopeAgentList       = "agent:list"
+	UATScopeAgentStart      = "agent:start"
+	UATScopeAgentStop       = "agent:stop"
+	UATScopeAgentDelete     = "agent:delete"
+	UATScopeAgentMessage    = "agent:message"
+	UATScopeAgentAttach     = "agent:attach"
+	UATScopeAgentPortAccess = "agent:port_access"
+	UATScopeAgentDispatch   = "agent:dispatch"
+	UATScopeAgentManage     = "agent:manage" // Convenience alias
 )
 
 // UATValidScopes is the set of all valid UAT scope strings.
 var UATValidScopes = map[string]bool{
-	UATScopeProjectRead:   true,
-	UATScopeProjectUpdate: true,
-	UATScopeAgentCreate:   true,
-	UATScopeAgentRead:     true,
-	UATScopeAgentList:     true,
-	UATScopeAgentStart:    true,
-	UATScopeAgentStop:     true,
-	UATScopeAgentDelete:   true,
-	UATScopeAgentMessage:  true,
-	UATScopeAgentAttach:   true,
-	UATScopeAgentDispatch: true,
-	UATScopeAgentManage:   true,
+	UATScopeProjectRead:     true,
+	UATScopeProjectUpdate:   true,
+	UATScopeAgentCreate:     true,
+	UATScopeAgentRead:       true,
+	UATScopeAgentList:       true,
+	UATScopeAgentStart:      true,
+	UATScopeAgentStop:       true,
+	UATScopeAgentDelete:     true,
+	UATScopeAgentMessage:    true,
+	UATScopeAgentAttach:     true,
+	UATScopeAgentPortAccess: true,
+	UATScopeAgentDispatch:   true,
+	UATScopeAgentManage:     true,
 }
 
 // UATManageScopes are the scopes expanded from the agent:manage alias.
@@ -1477,6 +1491,7 @@ var UATManageScopes = []string{
 	UATScopeAgentStart,
 	UATScopeAgentStop,
 	UATScopeAgentDelete,
+	UATScopeAgentPortAccess,
 	UATScopeAgentDispatch,
 }
 

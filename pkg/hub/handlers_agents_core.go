@@ -1469,6 +1469,12 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle agent port-forward registration, tunnel, and proxy routes.
+	if action == "ports" || strings.HasPrefix(action, "ports/") {
+		s.handleAgentPorts(w, r, id, strings.TrimPrefix(strings.TrimPrefix(action, "ports"), "/"))
+		return
+	}
+
 	// Handle agent logs relay (GET, proxied to broker)
 	if action == "logs" {
 		s.handleAgentLogs(w, r, id)
@@ -1805,6 +1811,9 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	if !isManagedAgentRuntime(agent.Runtime) && !force && !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
+
+	// Clear exposed ports — the agent is being deleted so its ports are unreachable.
+	s.clearExposedPortsForAgent(ctx, agent.ID)
 
 	now := time.Now()
 

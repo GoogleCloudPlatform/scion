@@ -77,6 +77,11 @@ const (
 	// Only the replica that acquires this lock performs the seed; others skip.
 	LockHubSettingsSeed AdvisoryLockKey = 0x5C10000B
 
+	// LockExposedPortsSweep guards the periodic exposed-ports cleanup sweep
+	// that removes stale port registrations for agents that are no longer
+	// running (stopped, deleted, etc.).
+	LockExposedPortsSweep AdvisoryLockKey = 0x5C10000C
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant

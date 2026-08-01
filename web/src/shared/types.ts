@@ -181,6 +181,18 @@ export function isWorktreeWorkspace(project: Project): boolean {
 }
 
 /**
+ * Exposed port registered by an agent for port forwarding.
+ */
+export interface ExposedPort {
+  port: number;
+  label?: string;
+  host?: string;
+  mode?: string;
+  exposedAt: string;
+  exposedBy: string;
+}
+
+/**
  * Agent lifecycle phase (from canonical agent state model)
  */
 export type AgentPhase =
@@ -441,6 +453,9 @@ export interface Agent {
 
   // Cloud Logging capability (from hub)
   cloudLogging?: boolean;
+
+  // Port forwarding
+  exposedPorts?: ExposedPort[];
 }
 
 /**

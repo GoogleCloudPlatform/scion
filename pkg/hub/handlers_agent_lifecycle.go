@@ -231,6 +231,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 	case api.AgentActionStop:
 		newPhase = string(state.PhaseStopped)
+		// Clear exposed ports — the agent is stopping so its ports are unreachable.
+		s.clearExposedPortsForAgent(ctx, agent.ID)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
 			// Before stopping, sync workspace back for hub-managed projects on remote brokers.
 			// This is best-effort: failures are logged but don't block the stop.

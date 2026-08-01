@@ -164,6 +164,9 @@ type AgentStore interface {
 	// This is a partial update that doesn't require version checking.
 	UpdateAgentStatus(ctx context.Context, id string, status AgentStatusUpdate) error
 
+	// UpdateAgentExposedPorts updates only exposed port registrations.
+	UpdateAgentExposedPorts(ctx context.Context, id string, ports []ExposedPort) error
+
 	// PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.
 	// Returns the number of agents purged.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)

@@ -38,6 +38,7 @@ const (
 	ActionStop         Action = "stop"
 	ActionMessage      Action = "message"
 	ActionAttach       Action = "attach"
+	ActionPortAccess   Action = "port_access"
 	ActionRegister     Action = "register"
 	ActionAddMember    Action = "addMember"
 	ActionRemoveMember Action = "removeMember"

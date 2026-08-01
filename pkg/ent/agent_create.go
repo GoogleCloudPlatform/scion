@@ -16,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -334,6 +335,12 @@ func (_c *AgentCreate) SetNillableWebPtyEnabled(v *bool) *AgentCreate {
 	if v != nil {
 		_c.SetWebPtyEnabled(*v)
 	}
+	return _c
+}
+
+// SetExposedPorts sets the "exposed_ports" field.
+func (_c *AgentCreate) SetExposedPorts(v []store.ExposedPort) *AgentCreate {
+	_c.mutation.SetExposedPorts(v)
 	return _c
 }
 
@@ -803,6 +810,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
 		_node.WebPtyEnabled = value
+	}
+	if value, ok := _c.mutation.ExposedPorts(); ok {
+		_spec.SetField(agent.FieldExposedPorts, field.TypeJSON, value)
+		_node.ExposedPorts = value
 	}
 	if value, ok := _c.mutation.TaskSummary(); ok {
 		_spec.SetField(agent.FieldTaskSummary, field.TypeString, value)
@@ -1348,6 +1359,24 @@ func (u *AgentUpsert) SetWebPtyEnabled(v bool) *AgentUpsert {
 // UpdateWebPtyEnabled sets the "web_pty_enabled" field to the value that was provided on create.
 func (u *AgentUpsert) UpdateWebPtyEnabled() *AgentUpsert {
 	u.SetExcluded(agent.FieldWebPtyEnabled)
+	return u
+}
+
+// SetExposedPorts sets the "exposed_ports" field.
+func (u *AgentUpsert) SetExposedPorts(v []store.ExposedPort) *AgentUpsert {
+	u.Set(agent.FieldExposedPorts, v)
+	return u
+}
+
+// UpdateExposedPorts sets the "exposed_ports" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateExposedPorts() *AgentUpsert {
+	u.SetExcluded(agent.FieldExposedPorts)
+	return u
+}
+
+// ClearExposedPorts clears the value of the "exposed_ports" field.
+func (u *AgentUpsert) ClearExposedPorts() *AgentUpsert {
+	u.SetNull(agent.FieldExposedPorts)
 	return u
 }
 
@@ -2042,6 +2071,27 @@ func (u *AgentUpsertOne) SetWebPtyEnabled(v bool) *AgentUpsertOne {
 func (u *AgentUpsertOne) UpdateWebPtyEnabled() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateWebPtyEnabled()
+	})
+}
+
+// SetExposedPorts sets the "exposed_ports" field.
+func (u *AgentUpsertOne) SetExposedPorts(v []store.ExposedPort) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetExposedPorts(v)
+	})
+}
+
+// UpdateExposedPorts sets the "exposed_ports" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateExposedPorts() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateExposedPorts()
+	})
+}
+
+// ClearExposedPorts clears the value of the "exposed_ports" field.
+func (u *AgentUpsertOne) ClearExposedPorts() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearExposedPorts()
 	})
 }
 
@@ -2932,6 +2982,27 @@ func (u *AgentUpsertBulk) SetWebPtyEnabled(v bool) *AgentUpsertBulk {
 func (u *AgentUpsertBulk) UpdateWebPtyEnabled() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateWebPtyEnabled()
+	})
+}
+
+// SetExposedPorts sets the "exposed_ports" field.
+func (u *AgentUpsertBulk) SetExposedPorts(v []store.ExposedPort) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetExposedPorts(v)
+	})
+}
+
+// UpdateExposedPorts sets the "exposed_ports" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateExposedPorts() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateExposedPorts()
+	})
+}
+
+// ClearExposedPorts clears the value of the "exposed_ports" field.
+func (u *AgentUpsertBulk) ClearExposedPorts() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearExposedPorts()
 	})
 }
 

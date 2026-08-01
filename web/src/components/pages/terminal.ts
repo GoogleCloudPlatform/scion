@@ -24,7 +24,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Agent, AgentPhase, AgentActivity } from '../../shared/types.js';
+import type { PageData, Agent, AgentPhase, AgentActivity, ExposedPort } from '../../shared/types.js';
 import { isTerminalAvailable } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -93,6 +93,9 @@ export class ScionPageTerminal extends LitElement {
 
   @state()
   private agent: Agent | null = null;
+
+  @state()
+  private exposedPorts: ExposedPort[] = [];
 
   @state()
   private captureAuthLoading = false;
@@ -355,6 +358,93 @@ export class ScionPageTerminal extends LitElement {
     .error-state button:hover {
       background: #2563eb;
     }
+
+    /* Port forwarding buttons */
+    .port-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      background: transparent;
+      border: 1px solid #2a5d2a;
+      color: #4ade80;
+      padding: 0.25rem 0.75rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      text-decoration: none;
+      white-space: nowrap;
+      transition: border-color 0.15s, background 0.15s;
+      animation: port-appear 0.3s ease-out;
+      cursor: pointer;
+    }
+
+    .port-btn:hover {
+      border-color: #22c55e;
+      background: rgba(34, 197, 94, 0.1);
+      color: #22c55e;
+    }
+
+    @keyframes port-appear {
+      from { opacity: 0; transform: scale(0.9); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+
+    /* Port dropdown for 4+ ports */
+    .port-dropdown {
+      position: relative;
+      display: inline-flex;
+    }
+
+    .port-dropdown-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      background: transparent;
+      border: 1px solid #2a5d2a;
+      color: #4ade80;
+      padding: 0.25rem 0.75rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .port-dropdown-trigger:hover {
+      border-color: #22c55e;
+      background: rgba(34, 197, 94, 0.1);
+      color: #22c55e;
+    }
+
+    .port-dropdown-menu {
+      display: none;
+      position: absolute;
+      top: 100%;
+      right: 0;
+      margin-top: 4px;
+      background: var(--card-bg, #1a1a2e);
+      border: 1px solid var(--border-color, #333);
+      border-radius: 6px;
+      padding: 0.25rem 0;
+      min-width: 180px;
+      z-index: 100;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    .port-dropdown.open .port-dropdown-menu {
+      display: block;
+    }
+
+    .port-dropdown-menu a {
+      display: block;
+      padding: 0.5rem 0.75rem;
+      color: #4ade80;
+      text-decoration: none;
+      font-size: 0.8rem;
+      white-space: nowrap;
+    }
+
+    .port-dropdown-menu a:hover {
+      background: rgba(34, 197, 94, 0.1);
+    }
   `;
 
   override connectedCallback(): void {
@@ -394,6 +484,7 @@ export class ScionPageTerminal extends LitElement {
       this.projectId = agent.projectId ?? '';
       this.agentPhase = agent.phase;
       this.agentActivity = agent.activity ?? '';
+      this.exposedPorts = agent.exposedPorts ?? [];
       dispatchPageTitle(this, 'Terminal', agent.name || this.agentId);
       this.connectSSE();
 
@@ -433,6 +524,11 @@ export class ScionPageTerminal extends LitElement {
       const { subject, data } = e.detail;
       // Only handle events for this agent
       if (!subject.startsWith(`agent.${this.agentId}.`)) return;
+      if (subject.endsWith('.ports')) {
+        const portsData = data as { ports: ExposedPort[] };
+        this.exposedPorts = portsData.ports ?? [];
+        return;
+      }
       const delta = data as Partial<Agent>;
       if (delta.phase) this.agentPhase = delta.phase;
       if (delta.activity !== undefined) this.agentActivity = delta.activity ?? '';
@@ -775,6 +871,63 @@ export class ScionPageTerminal extends LitElement {
     this.terminal?.focus();
   }
 
+  private renderPortButtons() {
+    if (this.exposedPorts.length === 0) return nothing;
+
+    if (this.exposedPorts.length <= 3) {
+      return this.exposedPorts.map(
+        (p) => html`
+          <a
+            class="port-btn"
+            href="/api/v1/agents/${this.agentId}/ports/${p.port}/proxy/"
+            target="_blank"
+            rel="noopener"
+            title=${p.label || `Port ${p.port}`}
+          >
+            Open :${p.port}
+          </a>
+        `
+      );
+    }
+
+    // 4+ ports: dropdown
+    return html`
+      <div class="port-dropdown">
+        <button
+          class="port-dropdown-trigger"
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            const el = (e.currentTarget as HTMLElement).parentElement!;
+            const isOpen = el.classList.toggle('open');
+            if (isOpen) {
+              const close = () => {
+                el.classList.remove('open');
+                document.removeEventListener('click', close);
+              };
+              // Use setTimeout to avoid the current click triggering the close
+              setTimeout(() => document.addEventListener('click', close), 0);
+            }
+          }}
+        >
+          Ports (${this.exposedPorts.length}) ▾
+        </button>
+        <div class="port-dropdown-menu">
+          ${this.exposedPorts.map(
+            (p) => html`
+              <a
+                href="/api/v1/agents/${this.agentId}/ports/${p.port}/proxy/"
+                target="_blank"
+                rel="noopener"
+              >
+                :${p.port}${p.label ? ` — ${p.label}` : ''}
+              </a>
+            `
+          )}
+        </div>
+      </div>
+    `;
+  }
+
   private get showCaptureAuth(): boolean {
     const agent = this.agent;
     if (!agent) return false;
@@ -954,6 +1107,7 @@ export class ScionPageTerminal extends LitElement {
           >${this.renderTerminalIcon()}</button>
         </div>
         <div class="spacer"></div>
+        ${this.renderPortButtons()}
         ${this.showCaptureAuth
           ? html`
               <button
