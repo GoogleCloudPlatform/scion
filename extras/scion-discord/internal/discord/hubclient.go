@@ -25,17 +25,20 @@ type httpHubClient struct {
 // If httpClient is nil, a default client with a 15s timeout is used.
 // A separate longHTTPClient with no global timeout is created for long-running
 // operations like CreateAgent (which synchronously dispatches container create+start
-// and routinely takes 30–120s).
+// and routinely takes 30–120s). The longHTTPClient inherits the Transport from
+// httpClient so that IAP-authenticated transport is preserved on long-running calls.
 func NewHTTPHubClient(hubURL, hmacKey, brokerID string, httpClient *http.Client) HubClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &httpHubClient{
-		hubURL:         hubURL,
-		hmacKey:        hmacKey,
-		brokerID:       brokerID,
-		httpClient:     httpClient,
-		longHTTPClient: &http.Client{}, // no global timeout; per-call context controls deadline
+		hubURL:     hubURL,
+		hmacKey:    hmacKey,
+		brokerID:   brokerID,
+		httpClient: httpClient,
+		longHTTPClient: &http.Client{
+			Transport: httpClient.Transport, // inherit IAP/transport auth
+		},
 	}
 }
 
