@@ -1689,6 +1689,55 @@ func TestSchedulerMaxConcurrencyLimitsParallelism(t *testing.T) {
 	}
 }
 
+func TestSchedulerMaxConcurrencyAcrossTicks(t *testing.T) {
+	// Regression: the semaphore must be shared across ticks. If a handler from
+	// tick N is still running when tick N+1 fires, the total running handlers
+	// must not exceed MaxConcurrency. A per-tick local semaphore would allow
+	// each tick to independently reach MaxConcurrency, blowing past the limit.
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(2))
+	s.tickInterval = 40 * time.Millisecond // Ticks faster than handler duration
+	s.MaxJitter = 0
+
+	var (
+		peakConcurrency atomic.Int32
+		currentRunning  atomic.Int32
+	)
+
+	// Register 2 handlers that each take 80ms — longer than the tick interval.
+	// Without cross-tick limiting, tick 0 and tick 1 would each run 2 handlers
+	// (peak = 4). With a shared semaphore, peak must stay ≤ 2.
+	for i := 0; i < 2; i++ {
+		name := fmt.Sprintf("slow-handler-%d", i)
+		s.RegisterRecurring(name, 1, func(_ context.Context) {
+			cur := currentRunning.Add(1)
+			for {
+				old := peakConcurrency.Load()
+				if cur <= old || peakConcurrency.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+			time.Sleep(80 * time.Millisecond)
+			currentRunning.Add(-1)
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	// Let several ticks fire while handlers are still running from previous ticks.
+	time.Sleep(250 * time.Millisecond)
+	s.Stop()
+
+	peak := peakConcurrency.Load()
+	if peak > 2 {
+		t.Errorf("peak concurrency across ticks was %d, expected at most 2 (shared semaphore)", peak)
+	}
+	if peak == 0 {
+		t.Error("no handlers ran")
+	}
+}
+
 func TestSchedulerUnlimitedConcurrency(t *testing.T) {
 	// With MaxConcurrency=0 (unlimited), all handlers should run concurrently.
 	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))

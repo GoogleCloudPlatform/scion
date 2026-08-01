@@ -52,11 +52,18 @@ type Scheduler struct {
 	MaxJitter time.Duration
 
 	// MaxConcurrency limits the number of recurring handlers that may execute
-	// simultaneously in a single tick. Defaults to defaultMaxConcurrency (2)
-	// to prevent all handlers from competing for DB connections at once —
-	// the original issue (#367) showed 6+ handlers saturating a small DB's
-	// connection pool. Set to 0 for unlimited (pre-#367 behavior).
+	// simultaneously. Defaults to defaultMaxConcurrency (2) to prevent all
+	// handlers from competing for DB connections at once — the original
+	// issue (#367) showed 6+ handlers saturating a small DB's connection
+	// pool. Set to 0 for unlimited (pre-#367 behavior).
 	MaxConcurrency int
+
+	// sem is the concurrency-limiting semaphore, initialized once in
+	// NewScheduler and shared across all ticks. This ensures the limit
+	// applies globally — slow handlers from tick N still hold slots when
+	// tick N+1 fires, preventing cross-tick concurrency blow-up. Nil when
+	// MaxConcurrency == 0 (unlimited).
+	sem chan struct{}
 
 	// Recurring handlers
 	recurring []RecurringHandler
@@ -141,6 +148,11 @@ func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Sc
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	// Initialize the semaphore once so it is shared across all ticks.
+	// Slow handlers from tick N still hold slots when tick N+1 fires.
+	if s.MaxConcurrency > 0 {
+		s.sem = make(chan struct{}, s.MaxConcurrency)
 	}
 	return s
 }
@@ -301,10 +313,13 @@ const maxJitter = 30 * time.Second
 // Jitter runs BEFORE the semaphore so handlers don't hold concurrency slots
 // during dead sleep time — the jitter spreads arrivals at the semaphore over
 // the MaxJitter window, and only actual DB work counts against the limit.
+// The semaphore (s.sem) is shared across all ticks, so slow handlers from a
+// previous tick still count against the concurrency limit.
 //
-// When MaxConcurrency > 0 (default: 2), a semaphore limits the number of
-// handlers doing real work simultaneously, preventing resource-constrained
-// deployments from being overwhelmed by concurrent background tasks.
+// When MaxConcurrency > 0 (default: 2), s.sem (initialized once in
+// NewScheduler) limits the number of handlers doing real work simultaneously
+// across ALL ticks — slow handlers from tick N still hold slots when tick N+1
+// fires, preventing cross-tick concurrency blow-up.
 func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 	// Collect eligible handlers for this tick.
 	var eligible []RecurringHandler
@@ -315,12 +330,6 @@ func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 	}
 	if len(eligible) == 0 {
 		return
-	}
-
-	// Build an optional concurrency-limiting semaphore.
-	var sem chan struct{}
-	if s.MaxConcurrency > 0 {
-		sem = make(chan struct{}, s.MaxConcurrency)
 	}
 
 	for _, h := range eligible {
@@ -343,10 +352,11 @@ func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 			}
 
 			// Acquire semaphore slot if concurrency is limited.
-			if sem != nil {
+			// s.sem is shared across all ticks (initialized once in NewScheduler).
+			if s.sem != nil {
 				select {
-				case sem <- struct{}{}:
-					defer func() { <-sem }()
+				case s.sem <- struct{}{}:
+					defer func() { <-s.sem }()
 				case <-ctx.Done():
 					return
 				}
