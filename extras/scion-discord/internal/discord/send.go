@@ -102,8 +102,9 @@ var globalSendPaths = newSendPathStore()
 
 // fileMatch holds a matched file path and its modification time for sorting.
 type fileMatch struct {
-	Path    string
-	ModTime time.Time
+	Path        string    // resolved (EvalSymlinks) absolute path
+	DisplayName string    // original filename for button labels (non-empty only for symlinks)
+	ModTime     time.Time
 }
 
 // safeResolve cleans the path, verifies it is under root using filepath.Rel,
@@ -315,31 +316,71 @@ func (h *CommandHandler) resolveSearchRoots(s *discordgo.Session, i *discordgo.I
 		roots = append([]string{h.searchRoot}, roots...)
 	}
 
-	// Fallback: if no project roots were found, use the configured root or
-	// the default search root as a last resort.
+	// Fallback: if no project roots were found, use the default search root.
+	// Note: when configuredOverride is true, h.searchRoot was already prepended
+	// above, so len(roots) >= 1 and this branch is only reachable without an override.
 	if len(roots) == 0 {
-		if configuredOverride {
-			return []string{h.searchRoot}
-		}
 		return []string{DefaultSearchRoot}
 	}
 
-	return roots
+	return deduplicateRoots(roots)
+}
+
+// deduplicateRoots removes exact duplicates (after filepath.Clean) and roots
+// that are subdirectories of other roots in the list, since the parent root's
+// search will already cover the subdirectory.
+func deduplicateRoots(roots []string) []string {
+	seen := make(map[string]bool)
+	var unique []string
+	for _, r := range roots {
+		cleaned := filepath.Clean(r)
+		if !seen[cleaned] {
+			seen[cleaned] = true
+			unique = append(unique, cleaned)
+		}
+	}
+	// Remove roots that are subdirectories of other roots.
+	var filtered []string
+	for _, r := range unique {
+		isChild := false
+		for _, other := range unique {
+			if r != other {
+				rel, err := filepath.Rel(other, r)
+				if err == nil && !strings.HasPrefix(rel, "..") {
+					isChild = true
+					break
+				}
+			}
+		}
+		if !isChild {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
+}
+
+// displayBase returns the display name for a match. If DisplayName is set
+// (symlink matches), it is returned; otherwise filepath.Base of Path is used.
+func (m fileMatch) displayBase() string {
+	if m.DisplayName != "" {
+		return m.DisplayName
+	}
+	return filepath.Base(m.Path)
 }
 
 // buildButtonLabels returns a label for each match. When multiple matches
-// share the same basename, the parent directory is prepended to disambiguate.
+// share the same display name, the parent directory is prepended to disambiguate.
 func buildButtonLabels(matches []fileMatch) []string {
 	labels := make([]string, len(matches))
 
-	// Count how many times each basename appears.
+	// Count how many times each display name appears.
 	baseCounts := make(map[string]int)
 	for _, m := range matches {
-		baseCounts[filepath.Base(m.Path)]++
+		baseCounts[m.displayBase()]++
 	}
 
 	for idx, m := range matches {
-		base := filepath.Base(m.Path)
+		base := m.displayBase()
 		if baseCounts[base] > 1 {
 			parent := filepath.Base(filepath.Dir(m.Path))
 			label := parent + "/" + base
@@ -429,10 +470,13 @@ func searchFiles(root, query string) []fileMatch {
 				if err != nil || targetInfo.IsDir() {
 					return nil
 				}
-				// Use target file ModTime for symlinks.
+				// Store the resolved target path (defense-in-depth against
+				// TOCTOU symlink retargeting) and preserve the original
+				// symlink name for button labels via DisplayName.
 				matches = append(matches, fileMatch{
-					Path:    path,
-					ModTime: targetInfo.ModTime(),
+					Path:        resolved,
+					DisplayName: filepath.Base(path),
+					ModTime:     targetInfo.ModTime(),
 				})
 			} else {
 				// Regular file: no symlink resolution needed.

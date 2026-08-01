@@ -478,6 +478,87 @@ func TestProjectSearchRoots_NothingExists(t *testing.T) {
 	assert.Empty(t, roots)
 }
 
+// --- searchFiles symlink resolved path tests ---
+
+func TestSearchFiles_SymlinkStoresResolvedPath(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a real file.
+	realFile := filepath.Join(dir, "real-data.txt")
+	require.NoError(t, os.WriteFile(realFile, []byte("data"), 0o644))
+
+	// Create a symlink to the real file within the same root.
+	symlinkPath := filepath.Join(dir, "link-to-data.txt")
+	require.NoError(t, os.Symlink(realFile, symlinkPath))
+
+	matches := searchFiles(dir, "link-to-data")
+	require.Len(t, matches, 1)
+
+	// Path should be the resolved (real) path, not the symlink.
+	assert.Equal(t, realFile, matches[0].Path)
+	// DisplayName should preserve the original symlink basename.
+	assert.Equal(t, "link-to-data.txt", matches[0].DisplayName)
+}
+
+func TestSearchFiles_RegularFileNoDisplayName(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "plain.txt"), []byte("x"), 0o644))
+
+	matches := searchFiles(dir, "plain")
+	require.Len(t, matches, 1)
+	assert.Empty(t, matches[0].DisplayName, "regular files should not set DisplayName")
+}
+
+// --- buildButtonLabels with DisplayName ---
+
+func TestBuildButtonLabels_UsesDisplayName(t *testing.T) {
+	matches := []fileMatch{
+		{Path: "/resolved/target/real.txt", DisplayName: "my-link.txt"},
+		{Path: "/scion-volumes/b/bar.txt"},
+	}
+	labels := buildButtonLabels(matches)
+	assert.Equal(t, "my-link.txt", labels[0])
+	assert.Equal(t, "bar.txt", labels[1])
+}
+
+// --- deduplicateRoots tests ---
+
+func TestDeduplicateRoots_ExactDuplicates(t *testing.T) {
+	roots := []string{"/a/b", "/c/d", "/a/b"}
+	result := deduplicateRoots(roots)
+	assert.Equal(t, []string{"/a/b", "/c/d"}, result)
+}
+
+func TestDeduplicateRoots_SubdirectoryRemoved(t *testing.T) {
+	roots := []string{"/a", "/a/b/c"}
+	result := deduplicateRoots(roots)
+	assert.Equal(t, []string{"/a"}, result)
+}
+
+func TestDeduplicateRoots_NoOverlap(t *testing.T) {
+	roots := []string{"/a", "/b", "/c"}
+	result := deduplicateRoots(roots)
+	assert.Equal(t, []string{"/a", "/b", "/c"}, result)
+}
+
+func TestDeduplicateRoots_CleansPaths(t *testing.T) {
+	roots := []string{"/a/b/", "/a/b"}
+	result := deduplicateRoots(roots)
+	assert.Len(t, result, 1)
+	assert.Equal(t, "/a/b", result[0])
+}
+
+func TestDeduplicateRoots_SingleRoot(t *testing.T) {
+	roots := []string{"/only"}
+	result := deduplicateRoots(roots)
+	assert.Equal(t, []string{"/only"}, result)
+}
+
+func TestDeduplicateRoots_Empty(t *testing.T) {
+	result := deduplicateRoots(nil)
+	assert.Nil(t, result)
+}
+
 // --- test helpers ---
 
 // setupSearchTestDir creates a temporary directory structure for search tests.
