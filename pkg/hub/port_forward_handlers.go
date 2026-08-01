@@ -432,7 +432,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	}
 	w.WriteHeader(resp.Status)
 	_, _ = w.Write(resp.Body)
-	slog.Info("Proxy request",
+	slog.Debug("Proxy request",
 		"agent_id", agent.ID,
 		"port", port,
 		"caller", identityStringFromContext(r.Context()),
@@ -602,7 +602,10 @@ func (s *Server) clearExposedPortsForAgent(ctx context.Context, agentID string) 
 		slog.Warn("clearExposedPortsForAgent: failed to clear ports", "agent_id", agentID, "error", err)
 		return
 	}
-	s.events.PublishAgentPorts(ctx, agent)
+	// Re-read agent for committed state (matches HTTP handler pattern)
+	if updated, err := s.store.GetAgent(ctx, agentID); err == nil {
+		s.events.PublishAgentPorts(ctx, updated)
+	}
 	slog.Info("Cleared exposed ports for agent", "agent_id", agentID, "count", len(agent.ExposedPorts))
 }
 
@@ -618,6 +621,9 @@ func (s *Server) exposedPortsSweepHandler() func(ctx context.Context) {
 		defer cancel()
 
 		// List all agents including soft-deleted ones so we catch every stale registration.
+		// Limit: 500 is a deliberate bound — sufficient for typical deployments since
+		// port-forwarding agents are a small subset of total agents. The sweep runs
+		// every 5 minutes, so any overflow is caught on subsequent runs.
 		result, err := s.store.ListAgents(ctx, store.AgentFilter{IncludeDeleted: true}, store.ListOptions{Limit: 500})
 		if err != nil {
 			slog.Error("Scheduler: exposed-ports sweep failed to list agents", "error", err)
@@ -645,7 +651,10 @@ func (s *Server) exposedPortsSweepHandler() func(ctx context.Context) {
 					"agent_id", agent.ID, "error", err)
 				continue
 			}
-			s.events.PublishAgentPorts(ctx, &agent)
+			// Re-read agent for committed state (matches HTTP handler pattern)
+			if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+				s.events.PublishAgentPorts(ctx, updated)
+			}
 			cleared++
 		}
 
