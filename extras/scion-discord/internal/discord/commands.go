@@ -598,7 +598,11 @@ func (h *CommandHandler) HandleSetup(s *discordgo.Session, i *discordgo.Interact
 
 	// If running in a thread/forum topic, resolve the parent channel.
 	var link *ChannelLink
-	parentID := threadParentID(s, i.ChannelID)
+	parentID, ok := threadParentID(s, i.ChannelID)
+	if !ok {
+		h.followup(s, i, "Failed to resolve channel details due to a Discord API error. Please try again.")
+		return
+	}
 	if parentID != "" {
 		link, err = h.store.GetChannelLink(ctx, parentID)
 		if err != nil {
@@ -831,7 +835,11 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 	}
 
 	// Detect thread context for default info display.
-	statusParentID := threadParentID(s, i.ChannelID)
+	statusParentID, ok := threadParentID(s, i.ChannelID)
+	if !ok {
+		h.followup(s, i, "Failed to resolve channel details due to a Discord API error. Please try again.")
+		return
+	}
 
 	for _, agent := range agents {
 		if agent.Slug == agentSlug {
@@ -1028,7 +1036,11 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 	}
 
 	// Detect thread context.
-	parentID := threadParentID(s, i.ChannelID)
+	parentID, ok := threadParentID(s, i.ChannelID)
+	if !ok {
+		h.followup(s, i, "Failed to resolve channel details due to a Discord API error. Please try again.")
+		return
+	}
 	isThread := parentID != ""
 	threadID := ""
 	if isThread {
@@ -1236,7 +1248,11 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	// If invoked from inside a thread, create a sibling in the parent channel
 	// (decision 1a). If in a regular channel, use the current channel.
 	channelID := i.ChannelID
-	parentID := threadParentID(s, channelID)
+	parentID, ok := threadParentID(s, channelID)
+	if !ok {
+		h.followup(s, i, "Failed to resolve channel details due to a Discord API error. Please try again.")
+		return
+	}
 	if parentID != "" {
 		// We are inside a thread — create sibling in parent channel.
 		channelID = parentID
@@ -1708,9 +1724,14 @@ var (
 	threadParents   = make(map[string]string)
 )
 
-// threadParentID returns the parent channel ID if channelID is a thread,
-// or empty string if it is not a thread or the lookup fails.
-func threadParentID(s *discordgo.Session, channelID string) string {
+// threadParentID returns the parent channel ID if channelID is a thread.
+//
+// Return values:
+//   - (parentID, true)  — channelID is a thread; parentID is its parent.
+//   - ("", true)        — channelID is confirmed NOT a thread.
+//   - ("", false)       — lookup failed (e.g. transient REST error); caller
+//     should NOT cache the result so the next call can retry.
+func threadParentID(s *discordgo.Session, channelID string) (string, bool) {
 	var ch *discordgo.Channel
 	var err error
 	if s.State != nil {
@@ -1719,15 +1740,15 @@ func threadParentID(s *discordgo.Session, channelID string) string {
 	if ch == nil || err != nil {
 		ch, err = s.Channel(channelID)
 		if err != nil {
-			return ""
+			return "", false // lookup failed — do not cache
 		}
 	}
 	if ch.Type == discordgo.ChannelTypeGuildPublicThread ||
 		ch.Type == discordgo.ChannelTypeGuildPrivateThread ||
 		ch.Type == discordgo.ChannelTypeGuildNewsThread {
-		return ch.ParentID
+		return ch.ParentID, true
 	}
-	return ""
+	return "", true // confirmed not a thread
 }
 
 // resolveChannelLink looks up a ChannelLink for channelID. If no active link
@@ -1743,10 +1764,16 @@ func resolveChannelLink(ctx context.Context, s *discordgo.Session, store Store, 
 		threadParentsMu.Unlock()
 
 		if !cached {
-			parentID = threadParentID(s, channelID)
-			threadParentsMu.Lock()
-			threadParents[channelID] = parentID
-			threadParentsMu.Unlock()
+			var ok bool
+			parentID, ok = threadParentID(s, channelID)
+			if ok {
+				// Only cache when the lookup succeeded. On failure (!ok)
+				// we leave the entry absent so the next call retries,
+				// avoiding negative-cache poisoning from transient errors.
+				threadParentsMu.Lock()
+				threadParents[channelID] = parentID
+				threadParentsMu.Unlock()
+			}
 		}
 
 		if parentID != "" {

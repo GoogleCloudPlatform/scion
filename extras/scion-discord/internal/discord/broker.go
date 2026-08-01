@@ -1638,6 +1638,11 @@ func (b *DiscordBroker) resolveThreadParent(channelID string) (parentID string, 
 	if ch == nil || err != nil {
 		ch, err = session.Channel(channelID)
 		if err != nil {
+			// Intentionally NOT cached: a transient REST failure must not
+			// poison the cache. Returning ("", false) lets the caller
+			// retry on the next lookup. Compare with the fix in
+			// commands.go's resolveChannelLink (issue #576).
+			b.log.Error("Failed to resolve thread parent", "channel_id", channelID, "error", err)
 			return "", false
 		}
 	}
