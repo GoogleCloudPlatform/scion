@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type brokerRequestSigner interface {
@@ -70,7 +71,8 @@ type brokerHTTPTransport struct {
 func newBrokerHTTPTransport(debug bool, signer brokerRequestSigner) *brokerHTTPTransport {
 	return &brokerHTTPTransport{
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
+			Timeout:   120 * time.Second,
 		},
 		debug:  debug,
 		signer: signer,

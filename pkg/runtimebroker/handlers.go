@@ -40,7 +40,12 @@ import (
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
+
+var tracer = otel.Tracer("scion-broker")
 
 // matchesAgent checks whether an agent matches the given id and optional projectID.
 // When projectID is provided, it must match for uniqueness across projects.
@@ -372,6 +377,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+
+	ctx, span := tracer.Start(ctx, "broker.agent.create")
+	defer span.End()
+	span.SetAttributes(attribute.String("scion.agent.name", req.Name))
 
 	// Validate required fields
 	if req.Name == "" {
@@ -1138,6 +1147,14 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID 
 
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
+
+	ctx, span := tracer.Start(ctx, "broker.agent.delete")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.agent.id", id),
+		attribute.String("scion.project.id", projectID),
+	)
+
 	query := r.URL.Query()
 
 	deleteFiles := query.Get("deleteFiles") == "true"
@@ -1193,6 +1210,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 
 	_, err = mgr.Delete(ctx, id, deleteFiles, projectPath, removeBranch)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		if strings.Contains(err.Error(), "not found") {
 			NotFound(w, "Agent")
 			return
@@ -1251,6 +1269,13 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
+
+	ctx, span := tracer.Start(ctx, "broker.agent.start")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.agent.id", id),
+		attribute.String("scion.project.id", projectID),
+	)
 
 	// Read optional task, projectPath, projectSlug, harnessConfig, and resolvedEnv from request body
 	var startReq struct {
@@ -1318,6 +1343,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		HTTPRequest:     r,
 	})
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		RuntimeError(w, err.Error())
 		return
 	}
@@ -1367,6 +1393,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	mgr := s.resolveManagerForOpts(opts)
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		s.agentLifecycleLog.Error("Agent start failed",
 			"agent_id", id, "error", err)
 		if errors.Is(err, agent.ErrContainerNameInUse) {
@@ -1494,6 +1521,13 @@ func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) 
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
+	ctx, span := tracer.Start(ctx, "broker.agent.stop")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.agent.id", id),
+		attribute.String("scion.project.id", projectID),
+	)
+
 	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 
 	// Resolve the project-scoped container so that same-slug agents in
@@ -1520,6 +1554,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 				"agent_id", id,
 				"phase", string(state.PhaseStopped))
 		} else {
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to stop agent: "+err.Error())
 			return
 		}
@@ -1630,6 +1665,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
+	ctx, span := tracer.Start(ctx, "broker.message.inject")
+	defer span.End()
+	span.SetAttributes(attribute.String("scion.agent.id", id))
+
 	var req MessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -1654,6 +1693,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	isRaw := req.StructuredMessage != nil && req.StructuredMessage.Raw
 	if isRaw {
 		if err := mgr.MessageRaw(ctx, id, projectID, deliveryText); err != nil {
+			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "not found") {
 				NotFound(w, "Agent")
 				return
@@ -1663,6 +1703,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 		}
 	} else {
 		if err := mgr.Message(ctx, id, projectID, deliveryText, req.Interrupt); err != nil {
+			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "not found") {
 				NotFound(w, "Agent")
 				return

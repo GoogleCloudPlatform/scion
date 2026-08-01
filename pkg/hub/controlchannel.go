@@ -28,8 +28,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // ControlChannelConfig holds configuration for the control channel.
@@ -499,6 +501,18 @@ func (m *ControlChannelManager) TunnelRequest(ctx context.Context, brokerID stri
 		attribute.String("scion.broker.id", brokerID),
 		attribute.String("scion.request.method", req.Method),
 	)
+
+	// Inject trace context into the request envelope headers for cross-component propagation.
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	if req.Headers == nil {
+		req.Headers = make(map[string]string)
+	}
+	for _, key := range []string{"traceparent", "tracestate"} {
+		if v := carrier.Get(key); v != "" {
+			req.Headers[key] = v
+		}
+	}
 
 	hc := m.GetConnection(brokerID)
 	if hc == nil {
