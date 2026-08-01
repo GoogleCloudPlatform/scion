@@ -115,6 +115,9 @@ type Client interface {
 	// HubPreStartHooks returns the hub-scoped pre-start hook service.
 	HubPreStartHooks() HubPreStartHookService
 
+	// Discord returns the Discord operations interface scoped to a project.
+	Discord(projectID string) DiscordService
+
 	// DiscoverSkillsDirectory calls POST /api/v1/skills/discover-directory and returns
 	// the list of skills found at the given GitHub directory URL.
 	DiscoverSkillsDirectory(ctx context.Context, req DiscoverSkillsDirectoryRequest) (*DiscoverSkillsDirectoryResponse, error)
@@ -306,6 +309,11 @@ func (c *client) Schedules(projectID string) ScheduleService {
 // Scope now travels with the individual call.
 func (c *client) GCPServiceAccounts() GCPServiceAccountService {
 	return &gcpServiceAccountService{c: c}
+}
+
+// Discord returns the Discord operations interface scoped to a project.
+func (c *client) Discord(projectID string) DiscordService {
+	return &discordService{c: c, projectID: projectID}
 }
 
 // Messages returns the user message inbox operations interface.
