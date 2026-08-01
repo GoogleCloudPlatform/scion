@@ -159,7 +159,7 @@ func tunnelURL(hubURL, agentID string) (string, error) {
 func cloneForwardHeaders(in http.Header) http.Header {
 	out := make(http.Header, len(in))
 	for k, vals := range in {
-		if hopByHopHeader(k) {
+		if hopByHopHeader(k) || sensitiveHeader(k) {
 			continue
 		}
 		out[k] = append([]string(nil), vals...)
@@ -170,6 +170,15 @@ func cloneForwardHeaders(in http.Header) http.Header {
 func hopByHopHeader(k string) bool {
 	switch strings.ToLower(k) {
 	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	default:
+		return false
+	}
+}
+
+func sensitiveHeader(k string) bool {
+	switch strings.ToLower(k) {
+	case "authorization", "cookie", "x-scion-agent-token", "x-scion-broker-id", "x-scion-broker-hmac":
 		return true
 	default:
 		return false

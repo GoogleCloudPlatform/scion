@@ -298,7 +298,6 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		SetRuntime(a.Runtime).
 		SetRuntimeBrokerID(a.RuntimeBrokerID).
 		SetWebPtyEnabled(a.WebPTYEnabled).
-		SetExposedPorts(a.ExposedPorts).
 		SetTaskSummary(a.TaskSummary).
 		SetMessage(a.Message).
 		SetVisibility(a.Visibility).

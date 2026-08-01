@@ -37,13 +37,17 @@ const (
 	maxExposedPortsPerAgent = 10
 	maxProxyRequestBody     = 32 << 20
 	portForwardTimeout      = 60 * time.Second
+	maxConcurrentStreams     = 64
 )
 
 var deniedExposedPorts = map[int]string{
+	8080:  "scion web server",
+	9810:  "scion hub API",
 	18380: "scion metadata server",
 }
 
-var errNoPortTunnel = errors.New("no active port-forward tunnel")
+var errNoPortTunnel     = errors.New("no active port-forward tunnel")
+var errTunnelBusy       = errors.New("too many concurrent port-forward requests")
 
 var portTunnelUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -59,11 +63,13 @@ func NewPortTunnelManager() *PortTunnelManager {
 }
 
 func (m *PortTunnelManager) Register(agentID string, conn *websocket.Conn) *PortTunnelSession {
+	conn.SetReadLimit(96 << 20)
 	s := &PortTunnelSession{
-		agentID: agentID,
-		conn:    conn,
-		pending: make(map[string]chan portforward.Response),
-		done:    make(chan struct{}),
+		agentID:  agentID,
+		conn:     conn,
+		pending:  make(map[string]chan portforward.Response),
+		inflight: make(chan struct{}, maxConcurrentStreams),
+		done:     make(chan struct{}),
 	}
 
 	m.mu.Lock()
@@ -94,13 +100,14 @@ func (m *PortTunnelManager) Do(ctx context.Context, agentID string, req portforw
 }
 
 type PortTunnelSession struct {
-	agentID string
-	conn    *websocket.Conn
-	writeMu sync.Mutex
-	mu      sync.Mutex
-	pending map[string]chan portforward.Response
-	done    chan struct{}
-	once    sync.Once
+	agentID  string
+	conn     *websocket.Conn
+	writeMu  sync.Mutex
+	mu       sync.Mutex
+	pending  map[string]chan portforward.Response
+	inflight chan struct{}
+	done     chan struct{}
+	once     sync.Once
 }
 
 func (s *PortTunnelSession) close() {
@@ -144,6 +151,13 @@ func (s *PortTunnelSession) readLoop(onClose func()) {
 }
 
 func (s *PortTunnelSession) do(ctx context.Context, req portforward.Request) (*portforward.Response, error) {
+	select {
+	case s.inflight <- struct{}{}:
+		defer func() { <-s.inflight }()
+	default:
+		return nil, errTunnelBusy
+	}
+
 	ch := make(chan portforward.Response, 1)
 	s.mu.Lock()
 	select {
@@ -376,6 +390,10 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 			writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, "No active port-forward tunnel for this agent", nil)
 			return
 		}
+		if errors.Is(err, errTunnelBusy) {
+			writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, err.Error(), nil)
+			return
+		}
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Port-forward tunnel failed: "+err.Error(), nil)
 		return
 	}
@@ -503,7 +521,7 @@ func isLoopbackHost(host string) bool {
 func cloneForwardHeaders(in http.Header) http.Header {
 	out := make(http.Header, len(in))
 	for k, vals := range in {
-		if hopByHopHeader(k) {
+		if hopByHopHeader(k) || sensitiveHeader(k) {
 			continue
 		}
 		out[k] = append([]string(nil), vals...)
@@ -514,6 +532,15 @@ func cloneForwardHeaders(in http.Header) http.Header {
 func hopByHopHeader(k string) bool {
 	switch strings.ToLower(k) {
 	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	default:
+		return false
+	}
+}
+
+func sensitiveHeader(k string) bool {
+	switch strings.ToLower(k) {
+	case "authorization", "cookie", "x-scion-agent-token", "x-scion-broker-id", "x-scion-broker-hmac":
 		return true
 	default:
 		return false
