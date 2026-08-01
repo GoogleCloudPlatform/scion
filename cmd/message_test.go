@@ -921,10 +921,15 @@ func TestAttachFlagValidation_OutsideAllowedRoots(t *testing.T) {
 }
 
 func TestAttachFlagValidation_Directory(t *testing.T) {
+	if _, err := os.Stat("/workspace"); os.IsNotExist(err) {
+		t.Skip("skipping: /workspace not available")
+	}
+
 	orig := saveMessageTestState()
 	defer orig.restore()
 
-	// Create a temporary directory under /workspace to use as an attachment
+	// Create a temporary directory under /workspace so it passes
+	// resolveAttachmentPath's allowed-roots check.
 	testDir := filepath.Join("/workspace", ".test-attach-dir-validation")
 	err := os.MkdirAll(testDir, 0755)
 	require.NoError(t, err)
