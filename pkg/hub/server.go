@@ -34,6 +34,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -3053,6 +3055,11 @@ func (s *Server) registerRoutes() {
 
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
+	// OTel HTTP tracing (outermost - wraps all other middleware)
+	h = otelhttp.NewHandler(h, "hub",
+		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
+	)
+
 	// Apply middleware in reverse order (last applied runs first)
 	h = s.recoveryMiddleware(h)
 	if s.requestLogger != nil {
