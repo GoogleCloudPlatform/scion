@@ -86,19 +86,16 @@ func FormatForDelivery(msg *StructuredMessage) string {
 }
 
 // filterMetadata returns a copy of m containing only the keys in
-// deliveryMetadataAllowlist. Returns nil when the result would be empty.
+// deliveryMetadataAllowlist. Returns nil when no keys match.
 func filterMetadata(m map[string]string) map[string]string {
-	if len(m) == 0 {
-		return nil
-	}
-	filtered := make(map[string]string)
+	var filtered map[string]string
 	for k, v := range m {
 		if deliveryMetadataAllowlist[k] {
+			if filtered == nil {
+				filtered = make(map[string]string)
+			}
 			filtered[k] = v
 		}
-	}
-	if len(filtered) == 0 {
-		return nil
 	}
 	return filtered
 }
