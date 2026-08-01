@@ -775,11 +775,12 @@ authDone:
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
 		cfgData, marshalErr := json.MarshalIndent(finalScionCfg, "", "  ")
-		if marshalErr == nil {
-			configPath := filepath.Join(agentDir, "scion-agent.json")
-			if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
-				return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
-			}
+		if marshalErr != nil {
+			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
+		}
+		configPath := filepath.Join(agentDir, "scion-agent.json")
+		if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+			return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
 		}
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
 		// Active corruption repair: clear the corrupted value and rewrite.
