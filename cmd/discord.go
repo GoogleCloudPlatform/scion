@@ -149,6 +149,13 @@ var discordHistoryCmd = &cobra.Command{
 func runDiscordHistory(cmd *cobra.Command, args []string) error {
 	channelID := args[0]
 
+	if historyLimit > 100 {
+		historyLimit = 100
+	}
+	if historyLimit < 0 {
+		historyLimit = 25
+	}
+
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
 		return err

@@ -17,8 +17,8 @@ package hub
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
@@ -43,6 +43,10 @@ func (s *Server) handleProjectDiscord(w http.ResponseWriter, r *http.Request, pr
 		// Extract channelId from "channels/{channelId}/history"
 		trimmed := strings.TrimPrefix(discordPath, "channels/")
 		channelID := strings.TrimSuffix(trimmed, "/history")
+		if channelID == "" {
+			writeError(w, http.StatusBadRequest, "missing_channel_id", "channel_id is required in the URL path", nil)
+			return
+		}
 		s.handleDiscordHistory(w, r, projectID, channelID, mgr)
 	case discordPath == "dm" && r.Method == http.MethodPost:
 		s.handleDiscordDM(w, r, projectID, mgr)
@@ -95,6 +99,10 @@ func (s *Server) handleDiscordSetDefault(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, "invalid_body", "invalid request body", nil)
 		return
 	}
+	if body.ChannelID == "" || body.AgentSlug == "" {
+		writeError(w, http.StatusBadRequest, "missing_fields", "channel_id and agent_slug are required", nil)
+		return
+	}
 
 	reqMap := map[string]string{
 		"project_id": projectID,
@@ -124,8 +132,11 @@ func (s *Server) handleDiscordHistory(w http.ResponseWriter, r *http.Request, pr
 		"channel_id": channelID,
 	}
 	if v := q.Get("limit"); v != "" {
-		var limit int
-		fmt.Sscanf(v, "%d", &limit)
+		limit, err := strconv.Atoi(v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_limit", "limit must be a valid integer", nil)
+			return
+		}
 		reqMap["limit"] = limit
 	}
 	if v := q.Get("before"); v != "" {
@@ -195,6 +206,6 @@ func (s *Server) writeDiscordError(w http.ResponseWriter, err error) {
 	case errors.Is(err, plugin.ErrForbidden):
 		writeError(w, http.StatusForbidden, "forbidden", err.Error(), nil)
 	default:
-		writeError(w, http.StatusInternalServerError, "internal", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "internal", "internal server error", nil)
 	}
 }

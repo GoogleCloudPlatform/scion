@@ -130,10 +130,7 @@ func (s *discordService) ChannelHistory(ctx context.Context, channelID string, o
 	if opts.HumansOnly {
 		query.Set("humans_only", "true")
 	}
-	if len(query) > 0 {
-		path += "?" + query.Encode()
-	}
-	resp, err := s.c.get(ctx, path, nil)
+	resp, err := s.c.getWithQuery(ctx, path, query, nil)
 	if err != nil {
 		return nil, err
 	}
