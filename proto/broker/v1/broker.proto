@@ -98,11 +98,11 @@ message GetInfoResponse {
 }
 
 message BrokerQueryRequest {
-    string operation = 1;
-    bytes params = 2;  // JSON-encoded operation parameters
+  string operation = 1;
+  bytes params = 2;  // JSON-encoded operation parameters
 }
 
 message BrokerQueryResponse {
-    bytes result = 1;  // JSON-encoded response
-    string error = 2;  // non-empty if the plugin returned an error
+  bytes result = 1;  // JSON-encoded response
+  string error = 2;  // non-empty if the plugin returned an error
 }

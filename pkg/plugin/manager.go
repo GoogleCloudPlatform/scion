@@ -791,7 +791,7 @@ func (m *Manager) BrokerInfo(name string) (version, channelID string, capabiliti
 
 // BrokerQuery dispatches a named query/action to a broker plugin.
 // It checks gRPC adapters first, then falls back to net/rpc.
-func (m *Manager) BrokerQuery(name string, ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error) {
+func (m *Manager) BrokerQuery(ctx context.Context, name string, operation string, params json.RawMessage) (json.RawMessage, error) {
 	key := PluginTypeBroker + ":" + name
 	m.mu.RLock()
 	adapter, isGRPC := m.grpcAdapters[key]

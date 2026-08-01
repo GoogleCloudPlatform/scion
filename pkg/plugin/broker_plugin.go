@@ -75,8 +75,8 @@ type BrokerQueryArgs struct {
 	Params    json.RawMessage
 }
 
-// BrokerQueryReply holds the response from BrokerQuery RPC call.
-type BrokerQueryReply struct {
+// BrokerQueryResponse holds the response from BrokerQuery RPC call.
+type BrokerQueryResponse struct {
 	Result json.RawMessage
 	Error  string // non-empty if the plugin returned an error
 }
@@ -277,7 +277,7 @@ func (s *BrokerRPCServer) HealthCheck(_ struct{}, resp *HealthCheckResponse) err
 	return nil
 }
 
-func (s *BrokerRPCServer) BrokerQuery(args *BrokerQueryArgs, resp *BrokerQueryReply) error {
+func (s *BrokerRPCServer) BrokerQuery(args *BrokerQueryArgs, resp *BrokerQueryResponse) error {
 	result, err := s.Impl.BrokerQuery(context.Background(), args.Operation, args.Params)
 	if err != nil {
 		resp.Error = err.Error()
@@ -354,7 +354,7 @@ func (c *BrokerRPCClient) HealthCheck() (*HealthStatus, error) {
 // BrokerQuery sends a named query to the plugin.
 // If the plugin does not implement BrokerQuery (older protocol), returns ErrUnsupportedOperation.
 func (c *BrokerRPCClient) BrokerQuery(ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error) {
-	var resp BrokerQueryReply
+	var resp BrokerQueryResponse
 	err := c.client.Call("Plugin.BrokerQuery", &BrokerQueryArgs{
 		Operation: operation,
 		Params:    params,
