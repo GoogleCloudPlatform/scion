@@ -52,11 +52,12 @@ func TestResolution_PlainEnvVar(t *testing.T) {
 
 	// Store a plain env var at user scope
 	_, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
-		ID:      api.NewUUID(),
-		Key:     "MY_API_KEY",
-		Value:   "plain-api-key-value",
-		Scope:   "user",
-		ScopeID: "user-res-1",
+		ID:            api.NewUUID(),
+		Key:           "MY_API_KEY",
+		Value:         "plain-api-key-value",
+		Scope:         "user",
+		ScopeID:       "user-res-1",
+		InjectionMode: store.InjectionModeAlways,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -114,11 +115,12 @@ func TestResolution_SecretUserScope(t *testing.T) {
 	// Store a secret via the local backend
 	backend := secret.NewLocalBackend(memStore, "test-hub-id")
 	_, _, err := backend.Set(ctx, &secret.SetSecretInput{
-		Name:       "SECRET_KEY",
-		Value:      "secret-key-value",
-		SecretType: secret.TypeEnvironment,
-		Scope:      secret.ScopeUser,
-		ScopeID:    "user-res-2",
+		Name:          "SECRET_KEY",
+		Value:         "secret-key-value",
+		SecretType:    secret.TypeEnvironment,
+		Scope:         secret.ScopeUser,
+		ScopeID:       "user-res-2",
+		InjectionMode: store.InjectionModeAlways,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -189,11 +191,12 @@ func TestResolution_ProjectEnvVar(t *testing.T) {
 
 	// Store a project-scoped env var
 	_, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
-		ID:      api.NewUUID(),
-		Key:     "GROVE_VAR",
-		Value:   "project-var-value",
-		Scope:   "project",
-		ScopeID: tid("project-res-3"),
+		ID:            api.NewUUID(),
+		Key:           "GROVE_VAR",
+		Value:         "project-var-value",
+		Scope:         "project",
+		ScopeID:       tid("project-res-3"),
+		InjectionMode: store.InjectionModeAlways,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -267,11 +270,12 @@ func TestResolution_SecretPromotedEnvVar(t *testing.T) {
 
 	// Promote to secret
 	_, _, err = backend.Set(ctx, &secret.SetSecretInput{
-		Name:       "GEMINI_API_KEY",
-		Value:      "secret-gemini-value",
-		SecretType: secret.TypeEnvironment,
-		Scope:      secret.ScopeUser,
-		ScopeID:    "user-res-4",
+		Name:          "GEMINI_API_KEY",
+		Value:         "secret-gemini-value",
+		SecretType:    secret.TypeEnvironment,
+		Scope:         secret.ScopeUser,
+		ScopeID:       "user-res-4",
+		InjectionMode: store.InjectionModeAlways,
 	})
 	if err != nil {
 		t.Fatal(err)

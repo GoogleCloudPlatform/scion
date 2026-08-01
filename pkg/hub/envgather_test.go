@@ -325,6 +325,7 @@ func TestEnvGather_FinalizeReplay_MergePrecedence(t *testing.T) {
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
 		ID: tid("env-prec-1"), Key: "API_KEY", Value: "storage-value",
 		Scope: "project", ScopeID: tid("project-prec"),
+		InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -779,11 +780,12 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 
 	// Store env vars in project scope
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      tid("env-1"),
-		Key:     "GROVE_API_KEY",
-		Value:   "project-key-value",
-		Scope:   "project",
-		ScopeID: tid("project-env"),
+		ID:            tid("env-1"),
+		Key:           "GROVE_API_KEY",
+		Value:         "project-key-value",
+		Scope:         "project",
+		ScopeID:       tid("project-env"),
+		InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1510,11 +1512,12 @@ func TestProjectRoute_ResolvesUserScopedEnvVars(t *testing.T) {
 
 	// Store a user-scoped env var for the dev-user (dev auth identity)
 	if err := st.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      tid("env-owner-1"),
-		Key:     "GEMINI_API_KEY",
-		Value:   "user-scoped-gemini-key",
-		Scope:   "user",
-		ScopeID: DevUserID,
+		ID:            tid("env-owner-1"),
+		Key:           "GEMINI_API_KEY",
+		Value:         "user-scoped-gemini-key",
+		Scope:         "user",
+		ScopeID:       DevUserID,
+		InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1598,11 +1601,12 @@ func TestProjectRoute_ResolvesUserScopedSecrets(t *testing.T) {
 	// Store a user-scoped secret for the dev-user
 	backend := secret.NewLocalBackend(st, "test-hub-id")
 	_, _, err := backend.Set(ctx, &secret.SetSecretInput{
-		Name:       "GEMINI_API_KEY",
-		Value:      "secret-gemini-key",
-		SecretType: secret.TypeEnvironment,
-		Scope:      secret.ScopeUser,
-		ScopeID:    DevUserID,
+		Name:          "GEMINI_API_KEY",
+		Value:         "secret-gemini-key",
+		SecretType:    secret.TypeEnvironment,
+		Scope:         secret.ScopeUser,
+		ScopeID:       DevUserID,
+		InjectionMode: store.InjectionModeAlways,
 	})
 	if err != nil {
 		t.Fatal(err)

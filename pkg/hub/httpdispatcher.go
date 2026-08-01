@@ -1388,6 +1388,9 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 			d.log.Debug("resolveEnvFromStorage: scope", "scope", filter.Scope, "scope_id", filter.ScopeID, "count", len(vars), "keys", keys)
 		}
 		for _, v := range vars {
+			if v.InjectionMode == store.InjectionModeAsNeeded {
+				continue
+			}
 			result[v.Key] = v.Value
 		}
 	}
@@ -1417,6 +1420,9 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 		}
 		label := envScopeSourceLabel(filter.Scope)
 		for _, v := range vars {
+			if v.InjectionMode == store.InjectionModeAsNeeded {
+				continue
+			}
 			if _, inResolved := resolvedEnv[v.Key]; inResolved {
 				sources[v.Key] = label
 			}
@@ -2221,16 +2227,19 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	if err != nil {
 		return nil, err
 	}
-	result := make([]ResolvedSecret, len(resolved))
-	for i, sv := range resolved {
-		result[i] = ResolvedSecret{
+	result := make([]ResolvedSecret, 0, len(resolved))
+	for _, sv := range resolved {
+		if sv.InjectionMode == store.InjectionModeAsNeeded {
+			continue
+		}
+		result = append(result, ResolvedSecret{
 			Name:   sv.Name,
 			Type:   sv.SecretType,
 			Target: sv.Target,
 			Value:  sv.Value,
 			Source: sv.Scope,
 			Ref:    sv.SecretRef,
-		}
+		})
 	}
 	if d.debug {
 		names := make([]string, len(result))

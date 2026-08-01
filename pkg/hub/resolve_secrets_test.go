@@ -38,6 +38,7 @@ func TestResolveSecrets(t *testing.T) {
 		Target:         "API_KEY",
 		Scope:          store.ScopeUser,
 		ScopeID:        tid("user-1"),
+		InjectionMode:  store.InjectionModeAlways,
 	}
 	projectSecret := &store.Secret{
 		ID:             tid("s2"),
@@ -47,6 +48,7 @@ func TestResolveSecrets(t *testing.T) {
 		Target:         "DATABASE_PASSWORD",
 		Scope:          store.ScopeProject,
 		ScopeID:        tid("project-1"),
+		InjectionMode:  store.InjectionModeAlways,
 	}
 	// Project-level override of user API_KEY
 	projectOverride := &store.Secret{
@@ -57,6 +59,7 @@ func TestResolveSecrets(t *testing.T) {
 		Target:         "API_KEY",
 		Scope:          store.ScopeProject,
 		ScopeID:        tid("project-1"),
+		InjectionMode:  store.InjectionModeAlways,
 	}
 	fileSecret := &store.Secret{
 		ID:             tid("s4"),
@@ -66,6 +69,7 @@ func TestResolveSecrets(t *testing.T) {
 		Target:         "/etc/ssl/cert.pem",
 		Scope:          store.ScopeUser,
 		ScopeID:        tid("user-1"),
+		InjectionMode:  store.InjectionModeAlways,
 	}
 	varSecret := &store.Secret{
 		ID:             tid("s5"),
@@ -75,6 +79,7 @@ func TestResolveSecrets(t *testing.T) {
 		Target:         "config",
 		Scope:          store.ScopeUser,
 		ScopeID:        tid("user-1"),
+		InjectionMode:  store.InjectionModeAlways,
 	}
 
 	for _, s := range []*store.Secret{userSecret, projectSecret, projectOverride, fileSecret, varSecret} {
@@ -172,6 +177,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 			Target:         "API_KEY",
 			Scope:          store.ScopeUser,
 			ScopeID:        tid("user-1"),
+			InjectionMode:  store.InjectionModeAlways,
 		},
 		{
 			ID:             tid("s2"),
@@ -181,6 +187,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 			Target:         "API_KEY",
 			Scope:          store.ScopeProject,
 			ScopeID:        tid("project-1"),
+			InjectionMode:  store.InjectionModeAlways,
 		},
 		{
 			ID:             tid("s3"),
@@ -190,6 +197,7 @@ func TestResolveSecrets_WithBackend(t *testing.T) {
 			Target:         "DATABASE_PASSWORD",
 			Scope:          store.ScopeProject,
 			ScopeID:        tid("project-1"),
+			InjectionMode:  store.InjectionModeAlways,
 		},
 	} {
 		if err := memStore.CreateSecret(ctx, s); err != nil {
@@ -283,6 +291,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		Target:         "ORG_API_KEY",
 		Scope:          store.ScopeHub,
 		ScopeID:        "test-hub-id",
+		InjectionMode:  store.InjectionModeAlways,
 	}
 	// Create a hub secret that will be overridden by user scope
 	hubOverridden := &store.Secret{
@@ -293,9 +302,10 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		Target:         "API_KEY",
 		Scope:          store.ScopeHub,
 		ScopeID:        "test-hub-id",
+		InjectionMode:  store.InjectionModeAlways,
 	}
 	// Create user secret that overrides hub
-	userSecret := &store.Secret{
+	userSecret2 := &store.Secret{
 		ID:             tid("su1"),
 		Key:            "API_KEY",
 		EncryptedValue: "user-personal-api-key",
@@ -303,6 +313,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		Target:         "API_KEY",
 		Scope:          store.ScopeUser,
 		ScopeID:        tid("user-1"),
+		InjectionMode:  store.InjectionModeAlways,
 	}
 	// Create a hub secret overridden by project scope
 	hubProjectOverridden := &store.Secret{
@@ -313,6 +324,7 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		Target:         "DB_PASS",
 		Scope:          store.ScopeHub,
 		ScopeID:        "test-hub-id",
+		InjectionMode:  store.InjectionModeAlways,
 	}
 	projectSecret := &store.Secret{
 		ID:             tid("sg1"),
@@ -322,9 +334,10 @@ func TestResolveSecrets_HubScope(t *testing.T) {
 		Target:         "DB_PASS",
 		Scope:          store.ScopeProject,
 		ScopeID:        tid("project-1"),
+		InjectionMode:  store.InjectionModeAlways,
 	}
 
-	for _, s := range []*store.Secret{hubSecret, hubOverridden, userSecret, hubProjectOverridden, projectSecret} {
+	for _, s := range []*store.Secret{hubSecret, hubOverridden, userSecret2, hubProjectOverridden, projectSecret} {
 		if err := memStore.CreateSecret(ctx, s); err != nil {
 			t.Fatalf("failed to create test secret %s (scope=%s): %v", s.Key, s.Scope, err)
 		}

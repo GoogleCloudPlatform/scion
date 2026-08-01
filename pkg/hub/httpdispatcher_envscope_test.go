@@ -72,11 +72,12 @@ func newEnvScopeDispatcher(t *testing.T, key string, valuesByScope map[string]st
 
 	for scope, value := range valuesByScope {
 		if _, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
-			ID:      api.NewUUID(),
-			Key:     key,
-			Value:   value,
-			Scope:   scope,
-			ScopeID: envScopeTestScopeID(t, scope),
+			ID:            api.NewUUID(),
+			Key:           key,
+			Value:         value,
+			Scope:         scope,
+			ScopeID:       envScopeTestScopeID(t, scope),
+			InjectionMode: store.InjectionModeAlways,
 		}); err != nil {
 			t.Fatalf("seeding %s-scoped env var: %v", scope, err)
 		}

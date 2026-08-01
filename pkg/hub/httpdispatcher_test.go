@@ -1377,22 +1377,24 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 
 	// Store an env var in project scope (simulating API key stored in hub)
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      tid("ev-project-1"),
-		Key:     "GEMINI_API_KEY",
-		Value:   "test-api-key-123",
-		Scope:   "project",
-		ScopeID: tid("project-env"),
+		ID:            tid("ev-project-1"),
+		Key:           "GEMINI_API_KEY",
+		Value:         "test-api-key-123",
+		Scope:         "project",
+		ScopeID:       tid("project-env"),
+		InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
 		t.Fatalf("failed to set env var: %v", err)
 	}
 
 	// Store a user-scoped env var
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      tid("ev-user-1"),
-		Key:     "CUSTOM_VAR",
-		Value:   "user-value",
-		Scope:   "user",
-		ScopeID: "owner-1",
+		ID:            tid("ev-user-1"),
+		Key:           "CUSTOM_VAR",
+		Value:         "user-value",
+		Scope:         "user",
+		ScopeID:       "owner-1",
+		InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
 		t.Fatalf("failed to set env var: %v", err)
 	}
@@ -1470,11 +1472,12 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 
 	// Store an env var that conflicts with config env
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      tid("ev-prec-1"),
-		Key:     "API_KEY",
-		Value:   "storage-value",
-		Scope:   "project",
-		ScopeID: tid("project-prec"),
+		ID:            tid("ev-prec-1"),
+		Key:           "API_KEY",
+		Value:         "storage-value",
+		Scope:         "project",
+		ScopeID:       tid("project-prec"),
+		InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
 		t.Fatalf("failed to set env var: %v", err)
 	}
@@ -1533,11 +1536,12 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 
 	// Store an env var that should override the empty config value
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      tid("ev-empty-1"),
-		Key:     "GEMINI_API_KEY",
-		Value:   "stored-api-key",
-		Scope:   "project",
-		ScopeID: tid("project-empty-env"),
+		ID:            tid("ev-empty-1"),
+		Key:           "GEMINI_API_KEY",
+		Value:         "stored-api-key",
+		Scope:         "project",
+		ScopeID:       tid("project-empty-env"),
+		InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
 		t.Fatalf("failed to set env var: %v", err)
 	}
@@ -2248,11 +2252,12 @@ func TestBuildCreateRequest_ResolvesStorageEnvVars(t *testing.T) {
 
 	// Store a user-scoped env var
 	envVar := &store.EnvVar{
-		ID:      tid("ev-1"),
-		Key:     "GEMINI_API_KEY",
-		Value:   "stored-key-value",
-		Scope:   "user",
-		ScopeID: tid("user-1"),
+		ID:            tid("ev-1"),
+		Key:           "GEMINI_API_KEY",
+		Value:         "stored-key-value",
+		Scope:         "user",
+		ScopeID:       tid("user-1"),
+		InjectionMode: store.InjectionModeAlways,
 	}
 	if err := memStore.CreateEnvVar(ctx, envVar); err != nil {
 		t.Fatalf("failed to create env var: %v", err)
@@ -2301,11 +2306,12 @@ func TestBuildCreateRequest_ConfigEnvOverridesStorage(t *testing.T) {
 
 	// Store a user-scoped env var with the same key as config env
 	envVar := &store.EnvVar{
-		ID:      tid("ev-1"),
-		Key:     "MY_KEY",
-		Value:   "storage-value",
-		Scope:   "user",
-		ScopeID: tid("user-1"),
+		ID:            tid("ev-1"),
+		Key:           "MY_KEY",
+		Value:         "storage-value",
+		Scope:         "user",
+		ScopeID:       tid("user-1"),
+		InjectionMode: store.InjectionModeAlways,
 	}
 	if err := memStore.CreateEnvVar(ctx, envVar); err != nil {
 		t.Fatalf("failed to create env var: %v", err)
@@ -2365,11 +2371,12 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 
 	// Store a project-scoped env var
 	projectEnv := &store.EnvVar{
-		ID:      tid("ev-project"),
-		Key:     "SHARED_KEY",
-		Value:   "project-value",
-		Scope:   "project",
-		ScopeID: tid("project-1"),
+		ID:            tid("ev-project"),
+		Key:           "SHARED_KEY",
+		Value:         "project-value",
+		Scope:         "project",
+		ScopeID:       tid("project-1"),
+		InjectionMode: store.InjectionModeAlways,
 	}
 	if err := memStore.CreateEnvVar(ctx, projectEnv); err != nil {
 		t.Fatalf("failed to create project env var: %v", err)
@@ -2377,11 +2384,12 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 
 	// Store a user-scoped env var with the same key (higher precedence)
 	userEnv := &store.EnvVar{
-		ID:      tid("ev-user"),
-		Key:     "SHARED_KEY",
-		Value:   "user-value",
-		Scope:   "user",
-		ScopeID: tid("user-1"),
+		ID:            tid("ev-user"),
+		Key:           "SHARED_KEY",
+		Value:         "user-value",
+		Scope:         "user",
+		ScopeID:       tid("user-1"),
+		InjectionMode: store.InjectionModeAlways,
 	}
 	if err := memStore.CreateEnvVar(ctx, userEnv); err != nil {
 		t.Fatalf("failed to create user env var: %v", err)
@@ -2389,11 +2397,12 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 
 	// Store a project-only env var
 	projectOnly := &store.EnvVar{
-		ID:      tid("ev-project-only"),
-		Key:     "GROVE_ONLY_KEY",
-		Value:   "project-only-value",
-		Scope:   "project",
-		ScopeID: tid("project-1"),
+		ID:            tid("ev-project-only"),
+		Key:           "GROVE_ONLY_KEY",
+		Value:         "project-only-value",
+		Scope:         "project",
+		ScopeID:       tid("project-1"),
+		InjectionMode: store.InjectionModeAlways,
 	}
 	if err := memStore.CreateEnvVar(ctx, projectOnly); err != nil {
 		t.Fatalf("failed to create project-only env var: %v", err)
@@ -2446,11 +2455,12 @@ func TestDispatchAgentCreate_IncludesStorageEnvVars(t *testing.T) {
 
 	// Store user-scoped env vars
 	envVar := &store.EnvVar{
-		ID:      tid("ev-1"),
-		Key:     "API_TOKEN",
-		Value:   "secret-token-123",
-		Scope:   "user",
-		ScopeID: tid("user-1"),
+		ID:            tid("ev-1"),
+		Key:           "API_TOKEN",
+		Value:         "secret-token-123",
+		Scope:         "user",
+		ScopeID:       tid("user-1"),
+		InjectionMode: store.InjectionModeAlways,
 	}
 	if err := memStore.CreateEnvVar(ctx, envVar); err != nil {
 		t.Fatalf("failed to create env var: %v", err)
