@@ -666,6 +666,66 @@ func TestLoadEffectiveSettings_NoUserFiles(t *testing.T) {
 	_ = warnings
 }
 
+func TestLoadEffectiveSettings_WarnOnIgnoredSettingsFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	t.Run("non-empty file without schema_version produces warning", func(t *testing.T) {
+		// Write settings with real keys but no schema_version, no harnesses,
+		// and no v1 runtime indicators — this file will be silently ignored.
+		settingsContent := "default_template: my-template\n"
+		settingsPath := filepath.Join(projectDir, "settings.yaml")
+		require.NoError(t, os.WriteFile(settingsPath, []byte(settingsContent), 0644))
+		defer os.Remove(settingsPath)
+
+		_, warnings, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err)
+
+		found := false
+		for _, w := range warnings {
+			if strings.Contains(w, "no schema_version field") && strings.Contains(w, settingsPath) {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "expected warning about missing schema_version, got warnings: %v", warnings)
+	})
+
+	t.Run("empty file does not produce warning", func(t *testing.T) {
+		settingsPath := filepath.Join(projectDir, "settings.yaml")
+		require.NoError(t, os.WriteFile(settingsPath, []byte(""), 0644))
+		defer os.Remove(settingsPath)
+
+		_, warnings, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err)
+
+		for _, w := range warnings {
+			assert.NotContains(t, w, "no schema_version field",
+				"empty file should not produce schema_version warning")
+		}
+	})
+
+	t.Run("file with only comments does not produce warning", func(t *testing.T) {
+		settingsPath := filepath.Join(projectDir, "settings.yaml")
+		require.NoError(t, os.WriteFile(settingsPath, []byte("# just a comment\n"), 0644))
+		defer os.Remove(settingsPath)
+
+		_, warnings, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err)
+
+		for _, w := range warnings {
+			assert.NotContains(t, w, "no schema_version field",
+				"comment-only file should not produce schema_version warning")
+		}
+	})
+}
+
 // --- Default settings compatibility tests ---
 
 func TestGetDefaultSettingsData_ProducesSameEffectiveDefaults(t *testing.T) {
