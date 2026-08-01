@@ -92,7 +92,7 @@ else
         --email ${EMAIL} \
         --non-interactive \
         --agree-tos \
-        --deploy-hook 'chown -R root:caddy /etc/letsencrypt/live /etc/letsencrypt/archive && chmod -R g+rX /etc/letsencrypt/live /etc/letsencrypt/archive && systemctl reload caddy'"
+        --deploy-hook 'chown -R root:caddy /etc/letsencrypt/live /etc/letsencrypt/archive && chmod -R g+rX /etc/letsencrypt/live /etc/letsencrypt/archive && (systemctl reload caddy || caddy reload --config /etc/caddy/Caddyfile)'"
 fi
 
 # 5. Reload Caddy if it's installed to pick up new/renewed certificates
