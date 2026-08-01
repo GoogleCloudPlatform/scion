@@ -113,14 +113,16 @@ func (m *Manager) handleRequest(conn *websocket.Conn, req *wire.Request) {
 	}
 }
 
-func (m *Manager) doLocalRequest(req *wire.Request) *wire.Response {
-	isLoopback := strings.ToLower(strings.TrimSpace(req.Host)) == "localhost"
-	if !isLoopback {
-		if ip := net.ParseIP(req.Host); ip != nil && ip.IsLoopback() {
-			isLoopback = true
-		}
+func isLoopbackHost(host string) bool {
+	if strings.ToLower(strings.TrimSpace(host)) == "localhost" {
+		return true
 	}
-	if !isLoopback {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (m *Manager) doLocalRequest(req *wire.Request) *wire.Response {
+	if !isLoopbackHost(req.Host) {
 		return &wire.Response{StreamID: req.StreamID, Error: "unauthorized host: only loopback addresses are allowed"}
 	}
 	target := url.URL{
