@@ -1638,11 +1638,6 @@ func (s *Server) registerRoutes() {
 
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
-	// OTel HTTP tracing (outermost - wraps all other middleware)
-	h = otelhttp.NewHandler(h, "broker",
-		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
-	)
-
 	// Apply middleware in reverse order (last applied runs first)
 	h = s.recoveryMiddleware(h)
 	if s.requestLogger != nil {
@@ -1657,6 +1652,10 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.brokerAuthMiddleware != nil {
 		h = s.brokerAuthMiddleware.Middleware(h)
 	}
+
+	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
+	h = otelhttp.NewHandler(h, "broker")
+
 	return h
 }
 

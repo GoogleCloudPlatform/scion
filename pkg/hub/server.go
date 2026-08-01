@@ -3055,11 +3055,6 @@ func (s *Server) registerRoutes() {
 
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
-	// OTel HTTP tracing (outermost - wraps all other middleware)
-	h = otelhttp.NewHandler(h, "hub",
-		otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
-	)
-
 	// Apply middleware in reverse order (last applied runs first)
 	h = s.recoveryMiddleware(h)
 	if s.requestLogger != nil {
@@ -3094,6 +3089,10 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)
 	}
+
+	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
+	h = otelhttp.NewHandler(h, "hub")
+
 	return h
 }
 

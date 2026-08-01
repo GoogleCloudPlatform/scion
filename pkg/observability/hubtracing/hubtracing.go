@@ -50,7 +50,7 @@ func WithHubName(name string) Option {
 	return func(o *options) { o.hubName = name }
 }
 
-// WithServiceName overrides the default service name ("scion-hub").
+// WithServiceName overrides the default service name ("scion-server").
 func WithServiceName(name string) Option {
 	return func(o *options) { o.serviceName = name }
 }
@@ -69,7 +69,7 @@ func NewTracerProvider(ctx context.Context, gcpProjectID string, opts ...Option)
 		return nil, fmt.Errorf("GCP project ID is required for hub tracing export")
 	}
 
-	o := &options{serviceName: "scion-hub"}
+	o := &options{serviceName: "scion-server"}
 	for _, fn := range opts {
 		fn(o)
 	}
