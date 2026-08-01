@@ -322,6 +322,30 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 		})
 	}
 
+	// For the Claude harness with vertex-ai auth, translate GCP env vars into
+	// the Anthropic-specific env vars that Claude Code requires. This is
+	// normally done by the Python provisioner (provision.py), but when the
+	// provisioner type is "builtin" (no command), the Python script never
+	// runs and the translation must happen here on the Go side.
+	if c.entry.Harness == "claude" {
+		selectedAuth := auth.SelectedType
+		if selectedAuth == "" {
+			// Infer vertex-ai from presence of GCP project credential
+			if auth.GoogleCloudProject != "" {
+				selectedAuth = "vertex-ai"
+			}
+		}
+		if selectedAuth == "vertex-ai" {
+			if proj := resolved.EnvVars["GOOGLE_CLOUD_PROJECT"]; proj != "" {
+				resolved.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"] = proj
+			}
+			if region := resolved.EnvVars["GOOGLE_CLOUD_REGION"]; region != "" {
+				resolved.EnvVars["CLOUD_ML_REGION"] = region
+			}
+			resolved.EnvVars["CLAUDE_CODE_USE_VERTEX"] = "1"
+		}
+	}
+
 	// The auth_candidates manifest written during Provision() captures the full
 	// candidate set for the script. ResolveAuth provides the env/file material
 	// the runtime needs to project secrets into the container.

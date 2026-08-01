@@ -147,7 +147,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.InlineConfig != nil {
 		startInlineConfig = opts.InlineConfig
 	}
-	if opts.HarnessAuth != "" {
+	if opts.HarnessAuth != "" && !harness.IsHarnessImplementationName(opts.HarnessAuth) {
 		if startInlineConfig == nil {
 			startInlineConfig = &api.ScionConfig{}
 		}
@@ -490,7 +490,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		harness.OverlaySettings(&auth, h, agentDir)
 		// Apply CLI harness auth override (--harness-auth) before resolution.
 		// This has highest priority, overriding settings, templates, and harness configs.
-		if opts.HarnessAuth != "" {
+		if opts.HarnessAuth != "" && !harness.IsHarnessImplementationName(opts.HarnessAuth) {
 			auth.SelectedType = opts.HarnessAuth
 		}
 		util.Debugf("auth: after overlay — selectedType=%q", auth.SelectedType)
@@ -569,6 +569,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 		}
 
+		// If opts.HarnessAuth is still a harness implementation name (e.g.
+		// "container-script" from a corrupted scion-agent.json), clear it so
+		// it does not leak into persistence or other downstream logic.
+		if harness.IsHarnessImplementationName(opts.HarnessAuth) {
+			opts.HarnessAuth = ""
+		}
+
 		// Surface resolved auth method so CLI can display it
 		authDetail := resolved.Method
 		if nativeType, ok := resolved.EnvVars["GEMINI_DEFAULT_AUTH_TYPE"]; ok {
@@ -577,6 +584,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		warnings = append(warnings, fmt.Sprintf("Auth: resolved as %s", authDetail))
 	}
 authDone:
+
+	// Unconditionally clear corrupted opts.HarnessAuth. This runs even when
+	// NoAuth is true (the auth block is skipped) to prevent re-persisting
+	// a corrupted value from a prior run's scion-agent.json.
+	if harness.IsHarnessImplementationName(opts.HarnessAuth) {
+		opts.HarnessAuth = ""
+	}
 
 	// 4. Launch container
 	detached := true
@@ -751,11 +765,25 @@ authDone:
 
 	// Persist harness auth override to scion-agent.json so sciontool inside the container sees it.
 	// The actual auth resolution override is applied earlier in the auth gathering block.
+	//
+	// When opts.HarnessAuth is empty but finalScionCfg carries a corrupted
+	// auth_selectedType (harness implementation name from a prior bug), clear
+	// it and rewrite the file to break the self-perpetuating corruption cycle.
 	if opts.HarnessAuth != "" {
 		if finalScionCfg == nil {
 			finalScionCfg = &api.ScionConfig{}
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
+		cfgData, marshalErr := json.MarshalIndent(finalScionCfg, "", "  ")
+		if marshalErr == nil {
+			configPath := filepath.Join(agentDir, "scion-agent.json")
+			if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+				return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
+			}
+		}
+	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
+		// Active corruption repair: clear the corrupted value and rewrite.
+		finalScionCfg.AuthSelectedType = ""
 		cfgData, marshalErr := json.MarshalIndent(finalScionCfg, "", "  ")
 		if marshalErr == nil {
 			configPath := filepath.Join(agentDir, "scion-agent.json")
