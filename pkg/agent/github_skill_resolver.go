@@ -302,12 +302,14 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 	bundleHash := transfer.ComputeContentHash(fileInfos)
 
 	resolved := &ResolvedSkill{
-		Name:    ghRef.SkillName,
-		URI:     ghRef.Raw,
-		As:      ref.As,
-		Version: commitSHA[:12],
-		Hash:    bundleHash,
-		Files:   resolvedFiles,
+		Name:     ghRef.SkillName,
+		URI:      ghRef.Raw,
+		As:       ref.As,
+		Version:  commitSHA[:12],
+		Hash:     bundleHash,
+		Scope:    ref.Scope,
+		Files:    resolvedFiles,
+		Optional: ref.Optional,
 	}
 
 	// Store in resolution cache under the token-hashed key.

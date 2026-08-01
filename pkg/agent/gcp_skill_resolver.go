@@ -168,12 +168,14 @@ func (r *GCPSkillResolver) resolveOne(ctx context.Context, gcpRef *GCPSkillRef, 
 	bundleHash := transfer.ComputeContentHash(fileInfos)
 
 	return &ResolvedSkill{
-		Name:    gcpRef.SkillID,
-		URI:     gcpRef.Raw,
-		As:      ref.As,
-		Version: skill.Version,
-		Hash:    bundleHash,
-		Files:   resolvedFiles,
+		Name:     gcpRef.SkillID,
+		URI:      gcpRef.Raw,
+		As:       ref.As,
+		Version:  skill.Version,
+		Hash:     bundleHash,
+		Scope:    ref.Scope,
+		Files:    resolvedFiles,
+		Optional: ref.Optional,
 	}, nil
 }
 

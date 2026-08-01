@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -73,10 +74,12 @@ type ResolvedSkill struct {
 	As                 string
 	Version            string
 	Hash               string // Bundle content hash (sha256:...)
+	Scope              string // Injection scope (hub, user, project, template, platform, "")
 	Files              []ResolvedFile
 	Deprecated         bool   `json:"-"`
 	DeprecationMessage string `json:"-"`
 	ReplacementURI     string `json:"-"`
+	Optional           bool   `json:"-"` // Propagated from SkillReference for collision log level
 }
 
 // DestName returns the directory name to use when installing this skill.
@@ -200,6 +203,7 @@ type SkillResolutionRecord struct {
 	ResolvedAt string                 `json:"resolvedAt"`
 	Resolver   string                 `json:"resolver"`
 	Skills     []SkillResolutionEntry `json:"skills"`
+	Collisions []SkillCollisionEntry  `json:"collisions,omitempty"`
 }
 
 // SkillResolutionEntry records a single installed skill.
@@ -224,6 +228,131 @@ type FileEntry struct {
 	Hash string `json:"hash"`
 }
 
+// --- Destination-name collision resolution ---
+
+// scopeRank defines the precedence order for skill scopes when resolving
+// destination-name collisions. Higher rank wins.
+//
+// Precedence (highest to lowest): project > template > user > hub > platform > (unset)
+//
+// Rationale: project-level settings take precedence for destination-name
+// collisions, as approved in #654. Note: hub-side base-URI dedup
+// (mergeSkillRefs) uses the opposite order (template > project); the two
+// dedup passes operate on different dimensions (base URI vs dest name).
+var scopeRank = map[string]int{
+	"":         0,
+	"platform": 1,
+	"hub":      2,
+	"user":     3,
+	"template": 4,
+	"project":  5,
+}
+
+// SkillCollisionEntry records a single destination-name collision that was
+// resolved during skill installation. Persisted in resolved-skills.json.
+type SkillCollisionEntry struct {
+	DestName     string `json:"destName"`
+	WinnerURI    string `json:"winnerUri"`
+	WinnerScope  string `json:"winnerScope"`
+	DroppedURI   string `json:"droppedUri"`
+	DroppedScope string `json:"droppedScope"`
+}
+
+// deduplicateByDestName resolves destination-name collisions among resolved
+// skills using scope-based precedence. When two skills produce the same
+// DestName(), the skill with the higher scope rank wins. On equal scope,
+// the later entry wins (last-writer-wins, consistent with mergeSkillRefs).
+//
+// Returns the deduplicated list (preserving winner order of first appearance)
+// and a slice of collision entries for diagnostics.
+func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]ResolvedSkill, []SkillCollisionEntry) {
+	type candidate struct {
+		index int
+		skill ResolvedSkill
+		dest  string
+	}
+
+	winners := map[string]*candidate{} // destName → winning candidate
+	var collisions []SkillCollisionEntry
+	var passthrough []ResolvedSkill // skills with DestName errors; cannot participate in dedup
+
+	for i, skill := range skills {
+		dest, err := skill.DestName()
+		if err != nil {
+			// Cannot participate in dedup; pass through so the install loop
+			// surfaces the DestName error with a clear diagnostic.
+			passthrough = append(passthrough, skill)
+			continue
+		}
+
+		existing, exists := winners[dest]
+		if !exists {
+			winners[dest] = &candidate{index: i, skill: skill, dest: dest}
+			continue
+		}
+
+		// Resolve collision: higher scope wins; on tie, later entry wins.
+		newRank := scopeRank[skill.Scope]
+		existingRank := scopeRank[existing.skill.Scope]
+
+		var winner, loser ResolvedSkill
+		if newRank >= existingRank {
+			winner = skill
+			loser = existing.skill
+			winners[dest] = &candidate{index: i, skill: skill, dest: dest}
+		} else {
+			winner = existing.skill
+			loser = skill
+		}
+
+		collisions = append(collisions, SkillCollisionEntry{
+			DestName:     dest,
+			WinnerURI:    winner.URI,
+			WinnerScope:  winner.Scope,
+			DroppedURI:   loser.URI,
+			DroppedScope: loser.Scope,
+		})
+
+		// Log at appropriate level: Debug for optional losers, Warn otherwise.
+		if loser.Optional {
+			slog.DebugContext(ctx, "skill destination-name collision resolved (optional skill dropped)",
+				"dest_name", dest,
+				"winner_uri", winner.URI,
+				"winner_scope", winner.Scope,
+				"dropped_uri", loser.URI,
+				"dropped_scope", loser.Scope,
+			)
+		} else {
+			slog.WarnContext(ctx, "skill destination-name collision resolved",
+				"dest_name", dest,
+				"winner_uri", winner.URI,
+				"winner_scope", winner.Scope,
+				"dropped_uri", loser.URI,
+				"dropped_scope", loser.Scope,
+			)
+		}
+	}
+
+	// Build deduplicated list preserving original order of winners.
+	// Collect and sort by first-appearance index so the output is deterministic.
+	sorted := make([]*candidate, 0, len(winners))
+	for _, c := range winners {
+		sorted = append(sorted, c)
+	}
+	slices.SortFunc(sorted, func(a, b *candidate) int {
+		return a.index - b.index
+	})
+	deduplicated := make([]ResolvedSkill, 0, len(sorted)+len(passthrough))
+	for _, c := range sorted {
+		deduplicated = append(deduplicated, c.skill)
+	}
+	// Append skills with DestName errors so installResolvedSkills surfaces
+	// the error rather than silently dropping the skill.
+	deduplicated = append(deduplicated, passthrough...)
+
+	return deduplicated, collisions
+}
+
 // --- Download, stage, verify, install ---
 
 // installResolvedSkills downloads, verifies, and installs resolved skills
@@ -234,20 +363,10 @@ func installResolvedSkills(
 	skillsDest string,
 	agentHome string,
 ) (*SkillResolutionRecord, error) {
-	// S6: Detect duplicate destinations
-	destMap := make(map[string]string) // destName → URI
-	for _, skill := range skills {
-		dest, err := skill.DestName()
-		if err != nil {
-			return nil, err
-		}
-		if existing, ok := destMap[dest]; ok {
-			return nil, fmt.Errorf(
-				"skill resolution conflict: two skills resolve to the same destination directory %q:\n  - %s\n  - %s",
-				dest, existing, skill.URI)
-		}
-		destMap[dest] = skill.URI
-	}
+	// S6: Resolve destination-name collisions via scope-based precedence.
+	// Previously this was a hard error; now collisions are resolved by dropping
+	// the lower-scope skill and logging a warning.
+	skills, collisions := deduplicateByDestName(ctx, skills)
 
 	if err := os.MkdirAll(skillsDest, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create skills directory: %w", err)
@@ -256,10 +375,14 @@ func installResolvedSkills(
 	record := &SkillResolutionRecord{
 		ResolvedAt: time.Now().UTC().Format(time.RFC3339),
 		Resolver:   "mock",
+		Collisions: collisions,
 	}
 
 	for _, skill := range skills {
-		dest, _ := skill.DestName() // already validated above
+		dest, err := skill.DestName()
+		if err != nil {
+			return nil, fmt.Errorf("skill %q has invalid destination name: %w", skill.URI, err)
+		}
 
 		entry, err := installOneSkill(ctx, skill, dest, skillsDest)
 		if err != nil {
@@ -425,10 +548,13 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 
 // buildSkillEntry creates a SkillResolutionEntry for a successfully installed skill.
 func buildSkillEntry(skill ResolvedSkill, dest, skillsDest string) (*SkillResolutionEntry, error) {
-	var scope string
-	parsed, err := api.ParseSkillURI(skill.URI)
-	if err == nil {
-		scope = parsed.Scope
+	scope := skill.Scope
+	if scope == "" {
+		// Fall back to URI-derived scope when the injection scope is not set.
+		parsed, err := api.ParseSkillURI(skill.URI)
+		if err == nil {
+			scope = parsed.Scope
+		}
 	}
 
 	var fileEntries []FileEntry

@@ -684,6 +684,10 @@ type SkillReference struct {
 	URI      string `json:"uri" yaml:"uri" koanf:"uri"`
 	As       string `json:"as,omitempty" yaml:"as,omitempty" koanf:"as"`
 	Optional bool   `json:"optional,omitempty" yaml:"optional,omitempty" koanf:"optional"`
+	// Scope indicates the injection source of this skill reference.
+	// Valid values: "hub", "user", "project", "template", "platform", "" (empty = lowest precedence).
+	// Used for destination-name collision resolution: higher-scope skills win.
+	Scope string `json:"scope,omitempty" yaml:"scope,omitempty" koanf:"scope"`
 }
 
 // SkillInjectionEntry is the API representation of one injected-skills list entry.
