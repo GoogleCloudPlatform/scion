@@ -1,7 +1,6 @@
 package discord
 
 import (
-	"bytes"
 	"crypto/rand"
 	"fmt"
 	"io/fs"
@@ -105,19 +104,30 @@ type fileMatch struct {
 	ModTime time.Time
 }
 
+// safeResolve cleans the path, verifies it starts with searchRoot, resolves
+// symlinks, and re-verifies the resolved path is still under searchRoot.
+// It returns the resolved path or an error if any check fails.
+func safeResolve(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if !strings.HasPrefix(cleaned, searchRoot) {
+		return "", fmt.Errorf("path %q does not start with %q", cleaned, searchRoot)
+	}
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(resolved, searchRoot) {
+		return "", fmt.Errorf("resolved path %q does not start with %q", resolved, searchRoot)
+	}
+	return resolved, nil
+}
+
 // isUnderSearchRoot checks that a cleaned, resolved path is under searchRoot.
 // Both the cleaned path and its symlink-resolved form must be under searchRoot
 // to prevent directory traversal and symlink escape attacks.
 func isUnderSearchRoot(path string) bool {
-	cleaned := filepath.Clean(path)
-	if !strings.HasPrefix(cleaned, searchRoot) {
-		return false
-	}
-	resolved, err := filepath.EvalSymlinks(cleaned)
-	if err != nil {
-		return false
-	}
-	return strings.HasPrefix(resolved, searchRoot)
+	_, err := safeResolve(path)
+	return err == nil
 }
 
 // HandleSend handles the /scion send <path> command.
@@ -132,12 +142,13 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 	}
 
 	// Case 1: Absolute path pointing to an existing file, confined to searchRoot.
-	if filepath.IsAbs(pathArg) && isUnderSearchRoot(pathArg) {
-		resolved, _ := filepath.EvalSymlinks(filepath.Clean(pathArg))
-		info, err := os.Stat(resolved)
-		if err == nil && !info.IsDir() {
-			h.sendFile(s, i, resolved, info)
-			return
+	if filepath.IsAbs(pathArg) {
+		if resolved, err := safeResolve(pathArg); err == nil {
+			info, err := os.Stat(resolved)
+			if err == nil && !info.IsDir() {
+				h.sendFile(s, i, resolved, info)
+				return
+			}
 		}
 	}
 
@@ -208,15 +219,18 @@ func buildButtonLabels(matches []fileMatch) []string {
 		if baseCounts[base] > 1 {
 			parent := filepath.Base(filepath.Dir(m.Path))
 			label := parent + "/" + base
-			// Discord button labels max 80 chars.
-			if len(label) > 80 {
-				label = label[:80]
+			// Discord button labels max 80 chars; use rune slicing
+			// to avoid cutting multi-byte UTF-8 characters.
+			runes := []rune(label)
+			if len(runes) > 80 {
+				label = string(runes[:80])
 			}
 			labels[idx] = label
 		} else {
 			label := base
-			if len(label) > 80 {
-				label = label[:80]
+			runes := []rune(label)
+			if len(runes) > 80 {
+				label = string(runes[:80])
 			}
 			labels[idx] = label
 		}
@@ -232,17 +246,18 @@ func (h *CommandHandler) sendFile(s *discordgo.Session, i *discordgo.Interaction
 		return
 	}
 
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
-		h.log.Error("Failed to read file for send", "path", path, "error", err)
+		h.log.Error("Failed to open file for send", "path", path, "error", err)
 		h.followup(s, i, fmt.Sprintf("Could not read file: %s", filepath.Base(path)))
 		return
 	}
+	defer file.Close()
 
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content: fmt.Sprintf("📎 `%s`", filepath.Base(path)),
 		Files: []*discordgo.File{
-			{Name: filepath.Base(path), Reader: bytes.NewReader(data)},
+			{Name: filepath.Base(path), Reader: file},
 		},
 	})
 	if err != nil {
@@ -279,20 +294,33 @@ func searchFiles(root, query string) []fileMatch {
 
 		// Match file paths case-insensitively.
 		if strings.Contains(strings.ToLower(path), lowerQuery) {
-			// Resolve symlinks and verify target is still under root.
-			resolved, err := filepath.EvalSymlinks(path)
-			if err != nil || !strings.HasPrefix(resolved, root) {
-				return nil
+			if d.Type()&fs.ModeSymlink != 0 {
+				// Symlink: resolve and verify target is still under root.
+				resolved, err := filepath.EvalSymlinks(path)
+				if err != nil || !strings.HasPrefix(resolved, root) {
+					return nil
+				}
+				// Filter out symlinks pointing to directories.
+				targetInfo, err := os.Stat(resolved)
+				if err != nil || targetInfo.IsDir() {
+					return nil
+				}
+				// Use target file ModTime for symlinks.
+				matches = append(matches, fileMatch{
+					Path:    path,
+					ModTime: targetInfo.ModTime(),
+				})
+			} else {
+				// Regular file: no symlink resolution needed.
+				info, err := d.Info()
+				if err != nil {
+					return nil
+				}
+				matches = append(matches, fileMatch{
+					Path:    path,
+					ModTime: info.ModTime(),
+				})
 			}
-
-			info, err := d.Info()
-			if err != nil {
-				return nil
-			}
-			matches = append(matches, fileMatch{
-				Path:    path,
-				ModTime: info.ModTime(),
-			})
 		}
 
 		return nil
@@ -311,13 +339,13 @@ func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate
 	}
 
 	// Verify path is still confined to searchRoot (resolves symlinks).
-	if !isUnderSearchRoot(path) {
-		log.Warn("Send callback path failed confinement check", "path", path)
+	resolved, err := safeResolve(path)
+	if err != nil {
+		log.Warn("Send callback path failed confinement check", "path", path, "error", err)
 		respondSendUpdate(s, i, "This file is no longer accessible.", log)
 		return
 	}
 
-	resolved, _ := filepath.EvalSymlinks(filepath.Clean(path))
 	info, err := os.Stat(resolved)
 	if err != nil {
 		log.Error("Failed to stat file for send callback", "path", resolved, "error", err)
@@ -336,12 +364,13 @@ func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate
 		return
 	}
 
-	data, err := os.ReadFile(resolved)
+	file, err := os.Open(resolved)
 	if err != nil {
-		log.Error("Failed to read file for send callback", "path", resolved, "error", err)
+		log.Error("Failed to open file for send callback", "path", resolved, "error", err)
 		respondSendUpdate(s, i, fmt.Sprintf("Could not read file: %s", filepath.Base(path)), log)
 		return
 	}
+	defer file.Close()
 
 	// N2: Edit original button message to indicate which file was sent.
 	sentContent := fmt.Sprintf("Sent file: `%s`", filepath.Base(path))
@@ -351,7 +380,7 @@ func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content: fmt.Sprintf("📎 `%s`", filepath.Base(path)),
 		Files: []*discordgo.File{
-			{Name: filepath.Base(path), Reader: bytes.NewReader(data)},
+			{Name: filepath.Base(path), Reader: file},
 		},
 	})
 	if err != nil {

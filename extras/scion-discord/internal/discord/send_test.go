@@ -140,6 +140,59 @@ func TestSearchFiles_SymlinkOutsideRoot(t *testing.T) {
 	assert.Empty(t, matches, "symlinks pointing outside search root should be excluded")
 }
 
+// --- safeResolve tests ---
+
+func TestSafeResolve_ValidPath(t *testing.T) {
+	if _, err := os.Stat(searchRoot); os.IsNotExist(err) {
+		t.Skip("searchRoot does not exist on this host")
+	}
+
+	tmpFile, err := os.CreateTemp(searchRoot, "test-send-*.txt")
+	if err != nil {
+		t.Skip("cannot create temp file in searchRoot")
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	resolved, err := safeResolve(tmpFile.Name())
+	assert.NoError(t, err)
+	assert.Equal(t, tmpFile.Name(), resolved)
+}
+
+func TestSafeResolve_RejectsOutsidePath(t *testing.T) {
+	_, err := safeResolve("/etc/passwd")
+	assert.Error(t, err)
+	_, err = safeResolve("/tmp/something")
+	assert.Error(t, err)
+}
+
+func TestSafeResolve_RejectsTraversal(t *testing.T) {
+	_, err := safeResolve("/scion-volumes/../etc/passwd")
+	assert.Error(t, err)
+	_, err = safeResolve("/scion-volumes/./../../etc/shadow")
+	assert.Error(t, err)
+}
+
+func TestSafeResolve_RejectsSymlinkEscape(t *testing.T) {
+	if _, err := os.Stat(searchRoot); os.IsNotExist(err) {
+		t.Skip("searchRoot does not exist on this host")
+	}
+
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	require.NoError(t, os.WriteFile(outsideFile, []byte("secret"), 0o644))
+
+	symlinkPath := filepath.Join(searchRoot, "test-escape-link-"+randomKey(4))
+	err := os.Symlink(outsideFile, symlinkPath)
+	if err != nil {
+		t.Skip("cannot create symlink in searchRoot")
+	}
+	defer os.Remove(symlinkPath)
+
+	_, resolveErr := safeResolve(symlinkPath)
+	assert.Error(t, resolveErr, "symlink inside searchRoot pointing outside should be rejected")
+}
+
 // --- isUnderSearchRoot tests ---
 
 func TestIsUnderSearchRoot_ValidPath(t *testing.T) {
