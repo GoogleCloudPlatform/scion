@@ -423,7 +423,7 @@ func TestContainerScriptHarness_ApplyAuthSettings_RejectsHarnessImplementationNa
 
 func TestContainerScriptHarness_ApplyAuthSettings_RejectsAllImplementationNames(t *testing.T) {
 	// Verify that all known harness implementation names are rejected.
-	for _, implName := range []string{"container-script", "generic", "builtin"} {
+	for _, implName := range []string{"container-script", "generic", "builtin", "passthrough"} {
 		t.Run(implName, func(t *testing.T) {
 			h, _ := newTestContainerScriptHarness(t)
 			agentHome := t.TempDir()
@@ -460,6 +460,7 @@ func TestIsHarnessImplementationName(t *testing.T) {
 		{"container-script", true},
 		{"generic", true},
 		{"builtin", true},
+		{"passthrough", true},
 		{"vertex-ai", false},
 		{"api-key", false},
 		{"oauth-token", false},
@@ -468,8 +469,8 @@ func TestIsHarnessImplementationName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isHarnessImplementationName(tt.name); got != tt.want {
-				t.Errorf("isHarnessImplementationName(%q)=%v, want %v", tt.name, got, tt.want)
+			if got := IsHarnessImplementationName(tt.name); got != tt.want {
+				t.Errorf("IsHarnessImplementationName(%q)=%v, want %v", tt.name, got, tt.want)
 			}
 		})
 	}

@@ -522,7 +522,7 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	// the auth type). These are never valid auth types and would crash
 	// the container-side provisioner.
 	explicitType := c.entry.AuthSelectedType
-	if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" && !isHarnessImplementationName(st) {
+	if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" && !IsHarnessImplementationName(st) {
 		explicitType = st
 	}
 
@@ -542,13 +542,17 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	return c.stageInputFile(agentHome, "auth-candidates.json", data)
 }
 
-// isHarnessImplementationName returns true if s is a known harness
-// implementation/method name rather than a valid auth type. These values
-// can leak into SCION_HARNESS_SELECTED_AUTH via data-corruption bugs and
-// must never be passed through as explicit_type.
-func isHarnessImplementationName(s string) bool {
+// IsHarnessImplementationName returns true if s is a known harness
+// implementation or method name rather than a valid auth type. These
+// values can leak into SCION_HARNESS_SELECTED_AUTH via data-corruption
+// bugs and must never be used as an auth type or explicit_type.
+//
+// The list covers both Implementation values ("container-script",
+// "generic") and Method values ("container-script", "passthrough"),
+// plus the legacy "builtin" provisioner type.
+func IsHarnessImplementationName(s string) bool {
 	switch s {
-	case "container-script", "generic", "builtin":
+	case "container-script", "generic", "builtin", "passthrough":
 		return true
 	}
 	return false
