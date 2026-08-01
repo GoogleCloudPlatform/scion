@@ -559,8 +559,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// resolved.Method, which for container-script harnesses is always
 		// "container-script" — an implementation name, not a valid auth type.
 		// Both branches reject harness implementation names so that
-		// already-corrupted scion-agent.json data is cleared on resume
-		// rather than re-persisted indefinitely.
+		// already-corrupted scion-agent.json data is not re-persisted
+		// on resume (opts.HarnessAuth stays empty → no write-back).
 		if opts.HarnessAuth == "" {
 			if authType := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; authType != "" && !harness.IsHarnessImplementationName(authType) {
 				opts.HarnessAuth = authType
