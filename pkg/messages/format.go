@@ -24,19 +24,34 @@ const (
 	deliveryIntro  = "You are receiving a message from the orchestration system:"
 )
 
+// deliveryMetadataAllowlist defines the metadata keys that are forwarded to
+// agents during delivery. Platform-specific keys (e.g. telegram_chat_id) are
+// excluded to avoid leaking implementation details.
+//
+// "channel" and "thread_id" duplicate first-class fields on deliveryMessage
+// but are included here for completeness — callers may set them as metadata
+// instead of (or in addition to) the top-level fields.
+var deliveryMetadataAllowlist = map[string]bool{
+	"mention_source":   true,
+	"mention_position": true,
+	"channel":          true,
+	"thread_id":        true,
+}
+
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.
 // The recipient and version fields are stripped to save tokens.
 type deliveryMessage struct {
-	Timestamp   string   `json:"timestamp"`
-	Sender      string   `json:"sender"`
-	Recipients  string   `json:"recipients,omitempty"`
-	Msg         string   `json:"msg"`
-	Type        string   `json:"type"`
-	Urgent      bool     `json:"urgent,omitempty"`
-	Broadcasted bool     `json:"broadcasted,omitempty"`
-	Attachments []string `json:"attachments,omitempty"`
-	Channel     string   `json:"channel,omitempty"`
-	ThreadID    string   `json:"thread_id,omitempty"`
+	Timestamp   string            `json:"timestamp"`
+	Sender      string            `json:"sender"`
+	Recipients  string            `json:"recipients,omitempty"`
+	Msg         string            `json:"msg"`
+	Type        string            `json:"type"`
+	Urgent      bool              `json:"urgent,omitempty"`
+	Broadcasted bool              `json:"broadcasted,omitempty"`
+	Attachments []string          `json:"attachments,omitempty"`
+	Channel     string            `json:"channel,omitempty"`
+	ThreadID    string            `json:"thread_id,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // FormatForDelivery formats a structured message for delivery to an agent via tmux.
@@ -58,6 +73,7 @@ func FormatForDelivery(msg *StructuredMessage) string {
 		Attachments: msg.Attachments,
 		Channel:     msg.Channel,
 		ThreadID:    msg.ThreadID,
+		Metadata:    filterMetadata(msg.Metadata),
 	}
 
 	jsonBytes, err := json.MarshalIndent(dm, "", "  ")
@@ -67,4 +83,19 @@ func FormatForDelivery(msg *StructuredMessage) string {
 	}
 
 	return deliveryIntro + "\n\n" + beginDelimiter + "\n" + string(jsonBytes) + "\n" + endDelimiter
+}
+
+// filterMetadata returns a copy of m containing only the keys in
+// deliveryMetadataAllowlist. Returns nil when no keys match.
+func filterMetadata(m map[string]string) map[string]string {
+	var filtered map[string]string
+	for k, v := range m {
+		if deliveryMetadataAllowlist[k] {
+			if filtered == nil {
+				filtered = make(map[string]string)
+			}
+			filtered[k] = v
+		}
+	}
+	return filtered
 }

@@ -168,6 +168,107 @@ func TestFormatForDelivery_OmitsEmptyRecipients(t *testing.T) {
 	}
 }
 
+func TestFormatForDelivery_MentionMetadata(t *testing.T) {
+	msg := NewMention("user:alice", "agent:observer", "check the design", "agent:primary-dev")
+
+	result := FormatForDelivery(msg)
+
+	// Should contain mention_source in the JSON output
+	if !strings.Contains(result, `"mention_source": "agent:primary-dev"`) {
+		t.Error("missing mention_source in delivery output")
+	}
+
+	// Should contain mention_position in the JSON output
+	if !strings.Contains(result, `"mention_position": "body"`) {
+		t.Error("missing mention_position in delivery output")
+	}
+
+	// Should still have the correct type
+	if !strings.Contains(result, `"type": "mention"`) {
+		t.Error("missing mention type in delivery output")
+	}
+}
+
+func TestFormatForDelivery_NoMetadataRegression(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-03-07T14:30:00Z",
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "do the thing",
+		Type:      TypeInstruction,
+	}
+
+	result := FormatForDelivery(msg)
+
+	// Messages without metadata should not include a metadata field
+	if strings.Contains(result, `"metadata"`) {
+		t.Error("metadata should be omitted when empty/nil")
+	}
+
+	// Should still format correctly
+	if !strings.Contains(result, `"sender": "user:alice"`) {
+		t.Error("missing sender in output")
+	}
+}
+
+func TestFormatForDelivery_MetadataFiltersNonAllowlisted(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-06-01T10:00:00Z",
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "hello from telegram",
+		Type:      TypeMention,
+		Metadata: map[string]string{
+			"mention_source":   "agent:primary",
+			"mention_position": "body",
+			"telegram_chat_id": "123456789",
+			"platform_token":   "secret-token",
+		},
+	}
+
+	result := FormatForDelivery(msg)
+
+	// Allowlisted keys should be present
+	if !strings.Contains(result, `"mention_source": "agent:primary"`) {
+		t.Error("missing allowlisted mention_source in delivery output")
+	}
+	if !strings.Contains(result, `"mention_position": "body"`) {
+		t.Error("missing allowlisted mention_position in delivery output")
+	}
+
+	// Non-allowlisted keys must be excluded
+	if strings.Contains(result, "telegram_chat_id") {
+		t.Error("non-allowlisted telegram_chat_id should be filtered from delivery output")
+	}
+	if strings.Contains(result, "platform_token") {
+		t.Error("non-allowlisted platform_token should be filtered from delivery output")
+	}
+}
+
+func TestFormatForDelivery_AllMetadataFiltered(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-06-01T10:00:00Z",
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "platform-only metadata",
+		Type:      TypeInstruction,
+		Metadata: map[string]string{
+			"telegram_chat_id": "123456789",
+			"internal_flag":    "true",
+		},
+	}
+
+	result := FormatForDelivery(msg)
+
+	// When all metadata keys are non-allowlisted, metadata should be omitted entirely
+	if strings.Contains(result, `"metadata"`) {
+		t.Error("metadata should be omitted when all keys are filtered out")
+	}
+}
+
 func TestFormatForDelivery_WithAttachments(t *testing.T) {
 	msg := &StructuredMessage{
 		Version:     Version,
