@@ -85,11 +85,7 @@ func TestRequireImageRegistryForBroker_Settings(t *testing.T) {
 
 	// Change to the temp home so LoadEffectiveSettings doesn't find
 	// the workspace project root's .scion directory.
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmpHome); err != nil {
-		t.Fatalf("failed to chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(origDir) }()
+	t.Chdir(tmpHome)
 
 	err := requireImageRegistryForBroker()
 	assert.NoError(t, err)

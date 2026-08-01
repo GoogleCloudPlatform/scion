@@ -2565,6 +2565,9 @@ func requireImageRegistryForBroker() error {
 		return nil
 	}
 	vs, _, err := config.LoadEffectiveSettings("")
+	if err != nil {
+		slog.Debug("Failed to load settings while checking image registry", "error", err)
+	}
 	if err == nil && vs != nil && vs.IsImageRegistryConfigured("") {
 		return nil
 	}
