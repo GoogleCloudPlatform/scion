@@ -553,6 +553,16 @@ export class ScionPageAgentDetail extends LitElement {
       margin-bottom: 1rem;
     }
 
+    /* ---- Port link ---- */
+    .port-link {
+      color: #4ade80;
+      text-decoration: none;
+    }
+    .port-link:hover {
+      text-decoration: underline;
+      color: #22c55e;
+    }
+
     /* ---- Visibility badge ---- */
     .visibility-badge {
       display: inline-flex;
@@ -1174,6 +1184,7 @@ export class ScionPageAgentDetail extends LitElement {
     return html`
       ${this.renderCurrentStateCard(agent)} ${this.renderCurrentTaskCard(agent)}
       ${this.renderLimitsUsageCard(agent)} ${this.renderConnectivityCard(agent)}
+      ${this.renderExposedPortsCard(agent)}
       ${this.renderNotificationsCard()}
     `;
   }
@@ -1357,6 +1368,38 @@ export class ScionPageAgentDetail extends LitElement {
                 </div>
               `
             : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderExposedPortsCard(agent: Agent) {
+    const ports = agent.exposedPorts;
+    if (!ports || ports.length === 0) return nothing;
+
+    return html`
+      <div class="card">
+        <h3 class="card-title">Exposed Ports</h3>
+        <div class="info-grid">
+          ${ports.map(
+            (p) => html`
+              <div class="info-item">
+                <span class="info-label">
+                  :${p.port}${p.label ? ` (${p.label})` : ''}
+                </span>
+                <span class="info-value">
+                  <a
+                    href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
+                    target="_blank"
+                    rel="noopener"
+                    class="port-link"
+                  >
+                    Open in new tab
+                  </a>
+                </span>
+              </div>
+            `
+          )}
         </div>
       </div>
     `;
