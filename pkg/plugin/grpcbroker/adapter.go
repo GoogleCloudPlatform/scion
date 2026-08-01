@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -365,6 +366,44 @@ func (a *GRPCBrokerAdapter) GetInfo() (*plugin.PluginInfo, error) {
 		return nil, err
 	}
 	return ProtoToPluginInfo(resp), nil
+}
+
+// BrokerQuery sends a named query to the remote broker plugin.
+func (a *GRPCBrokerAdapter) BrokerQuery(ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return nil, fmt.Errorf("adapter is closed")
+	}
+
+	if err := a.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	resp, err := a.client.BrokerQuery(ctx, &brokerv1.BrokerQueryRequest{
+		Operation: operation,
+		Params:    []byte(params),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp.GetError() != "" {
+		// Map known error strings back to sentinel errors
+		switch resp.GetError() {
+		case plugin.ErrUnsupportedOperation.Error():
+			return nil, plugin.ErrUnsupportedOperation
+		case plugin.ErrNotFound.Error():
+			return nil, plugin.ErrNotFound
+		case plugin.ErrForbidden.Error():
+			return nil, plugin.ErrForbidden
+		case plugin.ErrRateLimited.Error():
+			return nil, plugin.ErrRateLimited
+		default:
+			return nil, fmt.Errorf("%s", resp.GetError())
+		}
+	}
+	return json.RawMessage(resp.GetResult()), nil
 }
 
 // HealthCheck retrieves health status from the remote broker.

@@ -19,6 +19,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -144,6 +145,8 @@ type GRPCBrokerClient interface {
 	GetInfo() (*PluginInfo, error)
 	// HealthCheck retrieves health status.
 	HealthCheck() (*HealthStatus, error)
+	// BrokerQuery sends a named query/action to the remote broker.
+	BrokerQuery(ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error)
 	// OnReconnect registers a callback invoked after a successful reconnect.
 	OnReconnect(fn func())
 }

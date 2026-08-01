@@ -27,6 +27,7 @@ service BrokerService {
   rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse);
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
   rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+  rpc BrokerQuery(BrokerQueryRequest) returns (BrokerQueryResponse);
 }
 
 // StructuredMessage mirrors pkg/messages.StructuredMessage.
@@ -94,4 +95,14 @@ message GetInfoResponse {
   string min_scion_version = 3;
   string channel_id = 4;
   repeated string capabilities = 5;
+}
+
+message BrokerQueryRequest {
+    string operation = 1;
+    bytes params = 2;  // JSON-encoded operation parameters
+}
+
+message BrokerQueryResponse {
+    bytes result = 1;  // JSON-encoded response
+    string error = 2;  // non-empty if the plugin returned an error
 }

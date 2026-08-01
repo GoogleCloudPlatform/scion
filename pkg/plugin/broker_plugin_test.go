@@ -16,6 +16,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/rpc"
 	"testing"
@@ -72,6 +73,10 @@ func (m *mockBrokerPlugin) HealthCheck() (*HealthStatus, error) {
 		Message: "mock broker is healthy",
 		Details: map[string]string{"test": "true"},
 	}, nil
+}
+
+func (m *mockBrokerPlugin) BrokerQuery(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	return nil, ErrUnsupportedOperation
 }
 
 // startTestRPCServer starts an RPC server with the mock broker plugin and returns a client.

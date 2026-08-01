@@ -768,6 +768,110 @@ func (x *GetInfoResponse) GetCapabilities() []string {
 	return nil
 }
 
+type BrokerQueryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Operation     string                 `protobuf:"bytes,1,opt,name=operation,proto3" json:"operation,omitempty"`
+	Params        []byte                 `protobuf:"bytes,2,opt,name=params,proto3" json:"params,omitempty"` // JSON-encoded operation parameters
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BrokerQueryRequest) Reset() {
+	*x = BrokerQueryRequest{}
+	mi := &file_broker_v1_broker_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BrokerQueryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BrokerQueryRequest) ProtoMessage() {}
+
+func (x *BrokerQueryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_broker_v1_broker_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BrokerQueryRequest.ProtoReflect.Descriptor instead.
+func (*BrokerQueryRequest) Descriptor() ([]byte, []int) {
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *BrokerQueryRequest) GetOperation() string {
+	if x != nil {
+		return x.Operation
+	}
+	return ""
+}
+
+func (x *BrokerQueryRequest) GetParams() []byte {
+	if x != nil {
+		return x.Params
+	}
+	return nil
+}
+
+type BrokerQueryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Result        []byte                 `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"` // JSON-encoded response
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`   // non-empty if the plugin returned an error
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BrokerQueryResponse) Reset() {
+	*x = BrokerQueryResponse{}
+	mi := &file_broker_v1_broker_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BrokerQueryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BrokerQueryResponse) ProtoMessage() {}
+
+func (x *BrokerQueryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_broker_v1_broker_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BrokerQueryResponse.ProtoReflect.Descriptor instead.
+func (*BrokerQueryResponse) Descriptor() ([]byte, []int) {
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *BrokerQueryResponse) GetResult() []byte {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+func (x *BrokerQueryResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 var File_broker_v1_broker_proto protoreflect.FileDescriptor
 
 const file_broker_v1_broker_proto_rawDesc = "" +
@@ -833,14 +937,21 @@ const file_broker_v1_broker_proto_rawDesc = "" +
 	"\x11min_scion_version\x18\x03 \x01(\tR\x0fminScionVersion\x12\x1d\n" +
 	"\n" +
 	"channel_id\x18\x04 \x01(\tR\tchannelId\x12\"\n" +
-	"\fcapabilities\x18\x05 \x03(\tR\fcapabilities2\x87\x04\n" +
+	"\fcapabilities\x18\x05 \x03(\tR\fcapabilities\"J\n" +
+	"\x12BrokerQueryRequest\x12\x1c\n" +
+	"\toperation\x18\x01 \x01(\tR\toperation\x12\x16\n" +
+	"\x06params\x18\x02 \x01(\fR\x06params\"C\n" +
+	"\x13BrokerQueryResponse\x12\x16\n" +
+	"\x06result\x18\x01 \x01(\fR\x06result\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error2\xe1\x04\n" +
 	"\rBrokerService\x12R\n" +
 	"\tConfigure\x12!.scion.broker.v1.ConfigureRequest\x1a\".scion.broker.v1.ConfigureResponse\x12L\n" +
 	"\aPublish\x12\x1f.scion.broker.v1.PublishRequest\x1a .scion.broker.v1.PublishResponse\x12R\n" +
 	"\tSubscribe\x12!.scion.broker.v1.SubscribeRequest\x1a\".scion.broker.v1.SubscribeResponse\x12X\n" +
 	"\vUnsubscribe\x12#.scion.broker.v1.UnsubscribeRequest\x1a$.scion.broker.v1.UnsubscribeResponse\x12X\n" +
 	"\vHealthCheck\x12#.scion.broker.v1.HealthCheckRequest\x1a$.scion.broker.v1.HealthCheckResponse\x12L\n" +
-	"\aGetInfo\x12\x1f.scion.broker.v1.GetInfoRequest\x1a .scion.broker.v1.GetInfoResponseB?Z=github.com/GoogleCloudPlatform/scion/proto/broker/v1;brokerv1b\x06proto3"
+	"\aGetInfo\x12\x1f.scion.broker.v1.GetInfoRequest\x1a .scion.broker.v1.GetInfoResponse\x12X\n" +
+	"\vBrokerQuery\x12#.scion.broker.v1.BrokerQueryRequest\x1a$.scion.broker.v1.BrokerQueryResponseB?Z=github.com/GoogleCloudPlatform/scion/proto/broker/v1;brokerv1b\x06proto3"
 
 var (
 	file_broker_v1_broker_proto_rawDescOnce sync.Once
@@ -854,7 +965,7 @@ func file_broker_v1_broker_proto_rawDescGZIP() []byte {
 	return file_broker_v1_broker_proto_rawDescData
 }
 
-var file_broker_v1_broker_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_broker_v1_broker_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_broker_v1_broker_proto_goTypes = []any{
 	(*StructuredMessage)(nil),   // 0: scion.broker.v1.StructuredMessage
 	(*ConfigureRequest)(nil),    // 1: scion.broker.v1.ConfigureRequest
@@ -869,29 +980,33 @@ var file_broker_v1_broker_proto_goTypes = []any{
 	(*HealthCheckResponse)(nil), // 10: scion.broker.v1.HealthCheckResponse
 	(*GetInfoRequest)(nil),      // 11: scion.broker.v1.GetInfoRequest
 	(*GetInfoResponse)(nil),     // 12: scion.broker.v1.GetInfoResponse
-	nil,                         // 13: scion.broker.v1.StructuredMessage.MetadataEntry
-	nil,                         // 14: scion.broker.v1.ConfigureRequest.ConfigEntry
-	nil,                         // 15: scion.broker.v1.HealthCheckResponse.DetailsEntry
+	(*BrokerQueryRequest)(nil),  // 13: scion.broker.v1.BrokerQueryRequest
+	(*BrokerQueryResponse)(nil), // 14: scion.broker.v1.BrokerQueryResponse
+	nil,                         // 15: scion.broker.v1.StructuredMessage.MetadataEntry
+	nil,                         // 16: scion.broker.v1.ConfigureRequest.ConfigEntry
+	nil,                         // 17: scion.broker.v1.HealthCheckResponse.DetailsEntry
 }
 var file_broker_v1_broker_proto_depIdxs = []int32{
-	13, // 0: scion.broker.v1.StructuredMessage.metadata:type_name -> scion.broker.v1.StructuredMessage.MetadataEntry
-	14, // 1: scion.broker.v1.ConfigureRequest.config:type_name -> scion.broker.v1.ConfigureRequest.ConfigEntry
+	15, // 0: scion.broker.v1.StructuredMessage.metadata:type_name -> scion.broker.v1.StructuredMessage.MetadataEntry
+	16, // 1: scion.broker.v1.ConfigureRequest.config:type_name -> scion.broker.v1.ConfigureRequest.ConfigEntry
 	0,  // 2: scion.broker.v1.PublishRequest.message:type_name -> scion.broker.v1.StructuredMessage
-	15, // 3: scion.broker.v1.HealthCheckResponse.details:type_name -> scion.broker.v1.HealthCheckResponse.DetailsEntry
+	17, // 3: scion.broker.v1.HealthCheckResponse.details:type_name -> scion.broker.v1.HealthCheckResponse.DetailsEntry
 	1,  // 4: scion.broker.v1.BrokerService.Configure:input_type -> scion.broker.v1.ConfigureRequest
 	3,  // 5: scion.broker.v1.BrokerService.Publish:input_type -> scion.broker.v1.PublishRequest
 	5,  // 6: scion.broker.v1.BrokerService.Subscribe:input_type -> scion.broker.v1.SubscribeRequest
 	7,  // 7: scion.broker.v1.BrokerService.Unsubscribe:input_type -> scion.broker.v1.UnsubscribeRequest
 	9,  // 8: scion.broker.v1.BrokerService.HealthCheck:input_type -> scion.broker.v1.HealthCheckRequest
 	11, // 9: scion.broker.v1.BrokerService.GetInfo:input_type -> scion.broker.v1.GetInfoRequest
-	2,  // 10: scion.broker.v1.BrokerService.Configure:output_type -> scion.broker.v1.ConfigureResponse
-	4,  // 11: scion.broker.v1.BrokerService.Publish:output_type -> scion.broker.v1.PublishResponse
-	6,  // 12: scion.broker.v1.BrokerService.Subscribe:output_type -> scion.broker.v1.SubscribeResponse
-	8,  // 13: scion.broker.v1.BrokerService.Unsubscribe:output_type -> scion.broker.v1.UnsubscribeResponse
-	10, // 14: scion.broker.v1.BrokerService.HealthCheck:output_type -> scion.broker.v1.HealthCheckResponse
-	12, // 15: scion.broker.v1.BrokerService.GetInfo:output_type -> scion.broker.v1.GetInfoResponse
-	10, // [10:16] is the sub-list for method output_type
-	4,  // [4:10] is the sub-list for method input_type
+	13, // 10: scion.broker.v1.BrokerService.BrokerQuery:input_type -> scion.broker.v1.BrokerQueryRequest
+	2,  // 11: scion.broker.v1.BrokerService.Configure:output_type -> scion.broker.v1.ConfigureResponse
+	4,  // 12: scion.broker.v1.BrokerService.Publish:output_type -> scion.broker.v1.PublishResponse
+	6,  // 13: scion.broker.v1.BrokerService.Subscribe:output_type -> scion.broker.v1.SubscribeResponse
+	8,  // 14: scion.broker.v1.BrokerService.Unsubscribe:output_type -> scion.broker.v1.UnsubscribeResponse
+	10, // 15: scion.broker.v1.BrokerService.HealthCheck:output_type -> scion.broker.v1.HealthCheckResponse
+	12, // 16: scion.broker.v1.BrokerService.GetInfo:output_type -> scion.broker.v1.GetInfoResponse
+	14, // 17: scion.broker.v1.BrokerService.BrokerQuery:output_type -> scion.broker.v1.BrokerQueryResponse
+	11, // [11:18] is the sub-list for method output_type
+	4,  // [4:11] is the sub-list for method input_type
 	4,  // [4:4] is the sub-list for extension type_name
 	4,  // [4:4] is the sub-list for extension extendee
 	0,  // [0:4] is the sub-list for field type_name
@@ -908,7 +1023,7 @@ func file_broker_v1_broker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_broker_v1_broker_proto_rawDesc), len(file_broker_v1_broker_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
