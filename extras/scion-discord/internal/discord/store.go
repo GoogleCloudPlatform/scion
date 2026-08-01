@@ -37,6 +37,7 @@ type Store interface {
 	SetThreadDefault(ctx context.Context, channelID, threadID, agentSlug string) error
 	DeleteThreadDefault(ctx context.Context, channelID, threadID string) error
 	DeleteThreadDefaultsForChannel(ctx context.Context, channelID string) error
+	ListThreadDefaultsForChannel(ctx context.Context, channelID string) ([]ThreadDefault, error)
 
 	// User mappings (Discord user <-> Scion identity)
 	CreateUserMapping(ctx context.Context, mapping *DiscordUserMapping) error
@@ -103,6 +104,13 @@ type DiscordUserMapping struct {
 	ScionUserID     string
 	ScionEmail      string
 	LinkedAt        time.Time
+}
+
+// ThreadDefault represents a thread-to-agent routing override.
+type ThreadDefault struct {
+	ChannelID string
+	ThreadID  string
+	AgentSlug string
 }
 
 // ConversationContext tracks the last chat context for a user+project+agent tuple.
@@ -408,6 +416,23 @@ func (s *sqliteStore) DeleteThreadDefault(ctx context.Context, channelID, thread
 func (s *sqliteStore) DeleteThreadDefaultsForChannel(ctx context.Context, channelID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM thread_defaults WHERE channel_id = ?`, channelID)
 	return err
+}
+
+func (s *sqliteStore) ListThreadDefaultsForChannel(ctx context.Context, channelID string) ([]ThreadDefault, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT channel_id, thread_id, agent_slug FROM thread_defaults WHERE channel_id = ?", channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var defaults []ThreadDefault
+	for rows.Next() {
+		var td ThreadDefault
+		if err := rows.Scan(&td.ChannelID, &td.ThreadID, &td.AgentSlug); err != nil {
+			return nil, err
+		}
+		defaults = append(defaults, td)
+	}
+	return defaults, rows.Err()
 }
 
 // --- User mappings ---

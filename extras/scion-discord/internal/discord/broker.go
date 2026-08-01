@@ -892,9 +892,15 @@ func (b *DiscordBroker) GetInfo() (*plugin.PluginInfo, error) {
 }
 
 // BrokerQuery handles named query/action operations.
-// TODO(#672): Phase 2 will implement list-channels and list-threads.
 func (b *DiscordBroker) BrokerQuery(ctx context.Context, operation string, params json.RawMessage) (json.RawMessage, error) {
-	return nil, plugin.ErrUnsupportedOperation
+	switch operation {
+	case "list-channels":
+		return b.queryListChannels(ctx, params)
+	case "list-threads":
+		return b.queryListThreads(ctx, params)
+	default:
+		return nil, plugin.ErrUnsupportedOperation
+	}
 }
 
 // HealthCheck returns the runtime health of the Discord broker.

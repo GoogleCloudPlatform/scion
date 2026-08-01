@@ -257,6 +257,23 @@ func (s *postgresStore) DeleteThreadDefaultsForChannel(ctx context.Context, chan
 	return err
 }
 
+func (s *postgresStore) ListThreadDefaultsForChannel(ctx context.Context, channelID string) ([]ThreadDefault, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT channel_id, thread_id, agent_slug FROM discord_thread_defaults WHERE channel_id = $1", channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var defaults []ThreadDefault
+	for rows.Next() {
+		var td ThreadDefault
+		if err := rows.Scan(&td.ChannelID, &td.ThreadID, &td.AgentSlug); err != nil {
+			return nil, err
+		}
+		defaults = append(defaults, td)
+	}
+	return defaults, rows.Err()
+}
+
 // --- User mappings ---
 
 func (s *postgresStore) CreateUserMapping(ctx context.Context, mapping *DiscordUserMapping) error {
