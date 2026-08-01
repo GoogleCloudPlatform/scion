@@ -275,6 +275,28 @@ func TestIsUnderSearchRoot_CustomRoot(t *testing.T) {
 	assert.False(t, isUnderSearchRoot("/etc/passwd", root))
 }
 
+func TestSafeResolve_CustomRoot_NoTrailingSlash(t *testing.T) {
+	root := t.TempDir() // no trailing slash
+	outside := root + "-evil"
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	secret := filepath.Join(outside, "secret.txt")
+	require.NoError(t, os.WriteFile(secret, []byte("x"), 0o644))
+
+	_, err := safeResolve(secret, root)
+	assert.Error(t, err, "must not accept a file under a sibling with a shared prefix")
+}
+
+func TestIsUnderSearchRoot_CustomRoot_NoTrailingSlash(t *testing.T) {
+	root := t.TempDir() // no trailing slash
+	outside := root + "-evil"
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	secret := filepath.Join(outside, "secret.txt")
+	require.NoError(t, os.WriteFile(secret, []byte("x"), 0o644))
+
+	assert.False(t, isUnderSearchRoot(secret, root),
+		"must not accept a file under a sibling with a shared prefix")
+}
+
 // --- buildButtonLabels tests ---
 
 func TestBuildButtonLabels_UniqueBasenames(t *testing.T) {

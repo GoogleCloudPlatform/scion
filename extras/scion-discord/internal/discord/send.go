@@ -108,7 +108,11 @@ type fileMatch struct {
 // safeResolve cleans the path, verifies it starts with root, resolves
 // symlinks, and re-verifies the resolved path is still under root.
 // It returns the resolved path or an error if any check fails.
+//
+// root is normalised to end with a path separator so that a root of
+// "/scion-volumes" cannot be prefix-confused with "/scion-volumes-evil".
 func safeResolve(path, root string) (string, error) {
+	root = filepath.Clean(root) + string(filepath.Separator)
 	cleaned := filepath.Clean(path)
 	if !strings.HasPrefix(cleaned, root) {
 		return "", fmt.Errorf("path %q does not start with %q", cleaned, root)
