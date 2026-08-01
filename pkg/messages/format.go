@@ -24,6 +24,16 @@ const (
 	deliveryIntro  = "You are receiving a message from the orchestration system:"
 )
 
+// deliveryMetadataAllowlist defines the metadata keys that are forwarded to
+// agents during delivery. Platform-specific keys (e.g. telegram_chat_id) are
+// excluded to avoid leaking implementation details.
+var deliveryMetadataAllowlist = map[string]bool{
+	"mention_source":   true,
+	"mention_position": true,
+	"channel":          true,
+	"thread_id":        true,
+}
+
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.
 // The recipient and version fields are stripped to save tokens.
 type deliveryMessage struct {
@@ -59,7 +69,7 @@ func FormatForDelivery(msg *StructuredMessage) string {
 		Attachments: msg.Attachments,
 		Channel:     msg.Channel,
 		ThreadID:    msg.ThreadID,
-		Metadata:    msg.Metadata,
+		Metadata:    filterMetadata(msg.Metadata),
 	}
 
 	jsonBytes, err := json.MarshalIndent(dm, "", "  ")
@@ -69,4 +79,22 @@ func FormatForDelivery(msg *StructuredMessage) string {
 	}
 
 	return deliveryIntro + "\n\n" + beginDelimiter + "\n" + string(jsonBytes) + "\n" + endDelimiter
+}
+
+// filterMetadata returns a copy of m containing only the keys in
+// deliveryMetadataAllowlist. Returns nil when the result would be empty.
+func filterMetadata(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	filtered := make(map[string]string)
+	for k, v := range m {
+		if deliveryMetadataAllowlist[k] {
+			filtered[k] = v
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }

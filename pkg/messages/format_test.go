@@ -212,6 +212,63 @@ func TestFormatForDelivery_NoMetadataRegression(t *testing.T) {
 	}
 }
 
+func TestFormatForDelivery_MetadataFiltersNonAllowlisted(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-06-01T10:00:00Z",
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "hello from telegram",
+		Type:      TypeMention,
+		Metadata: map[string]string{
+			"mention_source":   "agent:primary",
+			"mention_position": "body",
+			"telegram_chat_id": "123456789",
+			"platform_token":   "secret-token",
+		},
+	}
+
+	result := FormatForDelivery(msg)
+
+	// Allowlisted keys should be present
+	if !strings.Contains(result, `"mention_source": "agent:primary"`) {
+		t.Error("missing allowlisted mention_source in delivery output")
+	}
+	if !strings.Contains(result, `"mention_position": "body"`) {
+		t.Error("missing allowlisted mention_position in delivery output")
+	}
+
+	// Non-allowlisted keys must be excluded
+	if strings.Contains(result, "telegram_chat_id") {
+		t.Error("non-allowlisted telegram_chat_id should be filtered from delivery output")
+	}
+	if strings.Contains(result, "platform_token") {
+		t.Error("non-allowlisted platform_token should be filtered from delivery output")
+	}
+}
+
+func TestFormatForDelivery_AllMetadataFiltered(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-06-01T10:00:00Z",
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "platform-only metadata",
+		Type:      TypeInstruction,
+		Metadata: map[string]string{
+			"telegram_chat_id": "123456789",
+			"internal_flag":    "true",
+		},
+	}
+
+	result := FormatForDelivery(msg)
+
+	// When all metadata keys are non-allowlisted, metadata should be omitted entirely
+	if strings.Contains(result, `"metadata"`) {
+		t.Error("metadata should be omitted when all keys are filtered out")
+	}
+}
+
 func TestFormatForDelivery_WithAttachments(t *testing.T) {
 	msg := &StructuredMessage{
 		Version:     Version,
