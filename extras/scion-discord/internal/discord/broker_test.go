@@ -1062,3 +1062,181 @@ func TestPublish_ObserveFilter_StateChangeThreadResolvesParentLink(t *testing.T)
 		})
 	}
 }
+
+// --- threadParentID / resolveChannelLink cache-poisoning tests (issue #576) ---
+
+// failingTransport returns HTTP 500 for every Discord REST call, simulating a
+// transient API outage.
+type failingTransport struct{}
+
+func (ft *failingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Body:       io.NopCloser(strings.NewReader(`{"message":"internal server error"}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// newFailingSession returns a Session whose REST calls always return 500 and
+// whose state cache is empty.
+func newFailingSession(t *testing.T) *discordgo.Session {
+	t.Helper()
+	s, err := discordgo.New("Bot test-token")
+	require.NoError(t, err)
+	s.Client = &http.Client{Transport: &failingTransport{}}
+	s.MaxRestRetries = 0
+	s.ShouldRetryOnRateLimit = false
+	return s
+}
+
+func TestThreadParentID_DistinguishesFailureFromNonThread(t *testing.T) {
+	t.Run("confirmed thread returns parentID and ok=true", func(t *testing.T) {
+		s := stubSession([]*discordgo.Channel{
+			{
+				ID:       "thread-1",
+				Type:     discordgo.ChannelTypeGuildPublicThread,
+				ParentID: "parent-1",
+			},
+		})
+		parentID, ok := threadParentID(s, "thread-1")
+		assert.True(t, ok, "lookup succeeded — ok must be true")
+		assert.Equal(t, "parent-1", parentID)
+	})
+
+	t.Run("confirmed non-thread returns empty and ok=true", func(t *testing.T) {
+		s := stubSession([]*discordgo.Channel{
+			{ID: "text-chan", Type: discordgo.ChannelTypeGuildText},
+		})
+		parentID, ok := threadParentID(s, "text-chan")
+		assert.True(t, ok, "lookup succeeded — ok must be true")
+		assert.Equal(t, "", parentID)
+	})
+
+	t.Run("REST failure returns empty and ok=false", func(t *testing.T) {
+		s := newFailingSession(t)
+		parentID, ok := threadParentID(s, "unknown-chan")
+		assert.False(t, ok, "REST failed — ok must be false")
+		assert.Equal(t, "", parentID)
+	})
+}
+
+func TestResolveChannelLink_NoCachePoisoningOnRESTFailure(t *testing.T) {
+	ctx := context.Background()
+
+	parentID := "parent-nocache"
+	threadID := "thread-nocache"
+	t.Cleanup(func() {
+		threadParentsMu.Lock()
+		delete(threadParents, threadID)
+		threadParentsMu.Unlock()
+	})
+
+	store := newTestBrokerStore(t)
+
+	// --- Phase 1: REST is failing — resolveChannelLink must NOT cache. ---
+	failSession := newFailingSession(t)
+
+	link, err := resolveChannelLink(ctx, failSession, store, threadID)
+	require.NoError(t, err)
+	// No channel link exists anywhere, so link should be nil.
+	assert.Nil(t, link, "no link exists yet")
+
+	// Verify the cache was NOT poisoned.
+	threadParentsMu.Lock()
+	_, cached := threadParents[threadID]
+	threadParentsMu.Unlock()
+	assert.False(t, cached, "failed lookup must not be cached")
+
+	// --- Phase 2: REST recovers — resolveChannelLink retries and caches. ---
+	goodSession, _ := newRecordingSession(t, []*discordgo.Channel{
+		{ID: parentID, Type: discordgo.ChannelTypeGuildText},
+		{
+			ID:       threadID,
+			Type:     discordgo.ChannelTypeGuildPublicThread,
+			ParentID: parentID,
+		},
+	})
+
+	// Create a channel link on the parent so the fallback succeeds.
+	require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID:   parentID,
+		GuildID:     testGuildID,
+		ProjectID:   "proj-nc",
+		ProjectSlug: "nc",
+		Active:      true,
+		LinkedAt:    time.Now(),
+	}))
+
+	link, err = resolveChannelLink(ctx, goodSession, store, threadID)
+	require.NoError(t, err)
+	require.NotNil(t, link, "parent link must be resolved through thread")
+	assert.Equal(t, parentID, link.ChannelID)
+
+	// Verify the cache now contains the correct parent.
+	threadParentsMu.Lock()
+	cachedParent, cached := threadParents[threadID]
+	threadParentsMu.Unlock()
+	assert.True(t, cached, "successful lookup must be cached")
+	assert.Equal(t, parentID, cachedParent)
+}
+
+func TestResolveChannelLink_CachesConfirmedNonThread(t *testing.T) {
+	ctx := context.Background()
+
+	channelID := "text-cached"
+	t.Cleanup(func() {
+		threadParentsMu.Lock()
+		delete(threadParents, channelID)
+		threadParentsMu.Unlock()
+	})
+
+	session, _ := newRecordingSession(t, []*discordgo.Channel{
+		{ID: channelID, Type: discordgo.ChannelTypeGuildText},
+	})
+
+	store := newTestBrokerStore(t)
+
+	_, err := resolveChannelLink(ctx, session, store, channelID)
+	require.NoError(t, err)
+
+	// Confirmed non-thread should be cached (empty string = not a thread).
+	threadParentsMu.Lock()
+	cachedParent, cached := threadParents[channelID]
+	threadParentsMu.Unlock()
+	assert.True(t, cached, "confirmed non-thread must be cached")
+	assert.Equal(t, "", cachedParent)
+}
+
+func TestResolveChannelLink_CachesConfirmedThread(t *testing.T) {
+	ctx := context.Background()
+
+	parentID := "parent-cached"
+	threadID := "thread-cached"
+	t.Cleanup(func() {
+		threadParentsMu.Lock()
+		delete(threadParents, threadID)
+		threadParentsMu.Unlock()
+	})
+
+	session, _ := newRecordingSession(t, []*discordgo.Channel{
+		{ID: parentID, Type: discordgo.ChannelTypeGuildText},
+		{
+			ID:       threadID,
+			Type:     discordgo.ChannelTypeGuildPublicThread,
+			ParentID: parentID,
+		},
+	})
+
+	store := newTestBrokerStore(t)
+
+	_, err := resolveChannelLink(ctx, session, store, threadID)
+	require.NoError(t, err)
+
+	// Confirmed thread should be cached with parent ID.
+	threadParentsMu.Lock()
+	cachedParent, cached := threadParents[threadID]
+	threadParentsMu.Unlock()
+	assert.True(t, cached, "confirmed thread must be cached")
+	assert.Equal(t, parentID, cachedParent)
+}
