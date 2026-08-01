@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -54,8 +56,9 @@ var portTunnelUpgrader = websocket.Upgrader{
 }
 
 type PortTunnelManager struct {
-	mu       sync.RWMutex
-	sessions map[string]*PortTunnelSession
+	mu           sync.RWMutex
+	sessions     map[string]*PortTunnelSession
+	onDisconnect func(agentID string) // called when a tunnel session disconnects
 }
 
 func NewPortTunnelManager() *PortTunnelManager {
@@ -84,7 +87,11 @@ func (m *PortTunnelManager) Register(agentID string, conn *websocket.Conn) *Port
 		if m.sessions[agentID] == s {
 			delete(m.sessions, agentID)
 		}
+		onDisconnect := m.onDisconnect
 		m.mu.Unlock()
+		if onDisconnect != nil {
+			onDisconnect(agentID)
+		}
 	})
 	return s
 }
@@ -545,5 +552,74 @@ func sensitiveHeader(k string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// clearExposedPortsForAgent removes all exposed port registrations for an agent.
+// It is best-effort: failures are logged but do not propagate, because the
+// caller (stop, delete, tunnel disconnect) should not be blocked by cleanup.
+func (s *Server) clearExposedPortsForAgent(ctx context.Context, agentID string) {
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		slog.Debug("clearExposedPortsForAgent: agent lookup failed", "agent_id", agentID, "error", err)
+		return
+	}
+	if len(agent.ExposedPorts) == 0 {
+		return
+	}
+	if err := s.store.UpdateAgentExposedPorts(ctx, agentID, nil); err != nil {
+		slog.Warn("clearExposedPortsForAgent: failed to clear ports", "agent_id", agentID, "error", err)
+		return
+	}
+	s.events.PublishAgentPorts(ctx, agent)
+	slog.Info("Cleared exposed ports for agent", "agent_id", agentID, "count", len(agent.ExposedPorts))
+}
+
+// exposedPortsSweepHandler returns a recurring handler that cleans up stale
+// exposed-port registrations. It lists all agents, identifies those with
+// non-empty ExposedPorts whose phase is terminal (stopped, error) or that
+// have been soft-deleted, and clears their port registrations. This catches
+// any ports that were not cleared by active teardown (tunnel disconnect,
+// explicit stop/delete).
+func (s *Server) exposedPortsSweepHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		// List all agents including soft-deleted ones so we catch every stale registration.
+		result, err := s.store.ListAgents(ctx, store.AgentFilter{IncludeDeleted: true}, store.ListOptions{Limit: 500})
+		if err != nil {
+			slog.Error("Scheduler: exposed-ports sweep failed to list agents", "error", err)
+			return
+		}
+
+		cleared := 0
+		for _, agent := range result.Items {
+			if len(agent.ExposedPorts) == 0 {
+				continue
+			}
+
+			// An agent's ports are stale if the agent is soft-deleted or in a
+			// terminal phase (stopped, error). We are generous: running,
+			// suspended, provisioning, starting, etc. are left alone.
+			isDeleted := !agent.DeletedAt.IsZero()
+			isTerminal := agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseError)
+
+			if !isDeleted && !isTerminal {
+				continue
+			}
+
+			if err := s.store.UpdateAgentExposedPorts(ctx, agent.ID, nil); err != nil {
+				slog.Warn("Scheduler: exposed-ports sweep failed to clear ports",
+					"agent_id", agent.ID, "error", err)
+				continue
+			}
+			s.events.PublishAgentPorts(ctx, &agent)
+			cleared++
+		}
+
+		if cleared > 0 {
+			slog.Info("Scheduler: exposed-ports sweep cleared stale registrations", "count", cleared)
+		}
 	}
 }

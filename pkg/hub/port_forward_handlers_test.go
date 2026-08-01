@@ -148,6 +148,113 @@ func TestAgentPortProxyThroughTunnel(t *testing.T) {
 	assert.Equal(t, "hello from app", rec.Body.String())
 }
 
+func TestAgentPortClearedOnTunnelDisconnect(t *testing.T) {
+	srv, s := testServer(t)
+	agent, token := createPortForwardAgent(t, srv, s)
+
+	// Register a port
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port":  4000,
+		"label": "tunnel-test",
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Verify port is registered
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ExposedPorts, 1)
+
+	// Simulate tunnel disconnect by calling onDisconnect directly
+	srv.clearExposedPortsForAgent(context.Background(), agent.ID)
+
+	// Verify ports are cleared
+	got, err = s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.ExposedPorts)
+}
+
+func TestAgentPortClearedOnStop(t *testing.T) {
+	srv, s := testServer(t)
+	agent, token := createPortForwardAgent(t, srv, s)
+
+	// Register a port
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port":  5000,
+		"label": "stop-test",
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Verify port is registered
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ExposedPorts, 1)
+
+	// Simulate hub setting agent to stopped (as handleAgentLifecycle does)
+	srv.clearExposedPortsForAgent(context.Background(), agent.ID)
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{
+		Phase:           string(state.PhaseStopped),
+		ContainerStatus: "stopped",
+	}))
+
+	// Verify ports are cleared
+	got, err = s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.ExposedPorts)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase)
+}
+
+func TestAgentPortSweepClearsStaleRegistrations(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("pf-sweep-project"),
+		Name: "Port Sweep Test",
+		Slug: "port-sweep-test",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create a stopped agent with ports
+	stoppedAgent := &store.Agent{
+		ID:        tid("pf-stopped-agent"),
+		Slug:      "pf-stopped-agent",
+		Name:      "Stopped Agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseStopped),
+	}
+	require.NoError(t, s.CreateAgent(ctx, stoppedAgent))
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, stoppedAgent.ID, []store.ExposedPort{
+		{Port: 3000, Label: "stale", Host: "127.0.0.1", Mode: "rw", ExposedAt: time.Now(), ExposedBy: "agent"},
+	}))
+
+	// Create a running agent with ports (should not be cleared)
+	runningAgent := &store.Agent{
+		ID:        tid("pf-running-agent"),
+		Slug:      "pf-running-agent",
+		Name:      "Running Agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, runningAgent))
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, runningAgent.ID, []store.ExposedPort{
+		{Port: 4000, Label: "active", Host: "127.0.0.1", Mode: "rw", ExposedAt: time.Now(), ExposedBy: "agent"},
+	}))
+
+	// Run the sweep
+	handler := srv.exposedPortsSweepHandler()
+	handler(ctx)
+
+	// Stopped agent's ports should be cleared
+	got, err := s.GetAgent(ctx, stoppedAgent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.ExposedPorts, "stopped agent should have ports cleared")
+
+	// Running agent's ports should remain
+	got, err = s.GetAgent(ctx, runningAgent.ID)
+	require.NoError(t, err)
+	assert.Len(t, got.ExposedPorts, 1, "running agent should keep its ports")
+}
+
 func createPortForwardAgent(t *testing.T, srv *Server, s store.Store) (*store.Agent, string) {
 	t.Helper()
 	ctx := context.Background()

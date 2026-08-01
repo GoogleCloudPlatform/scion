@@ -1812,6 +1812,9 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
+	// Clear exposed ports — the agent is being deleted so its ports are unreachable.
+	s.clearExposedPortsForAgent(ctx, agent.ID)
+
 	now := time.Now()
 
 	// If a dispatcher is available, dispatch the deletion to the runtime broker

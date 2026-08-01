@@ -811,6 +811,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		maintenanceLog:    logging.Subsystem("hub.maintenance"),
 	}
 
+	// Wire tunnel disconnect handler: when an agent's port-forward tunnel
+	// closes (readLoop exits), clear its exposed port registrations so stale
+	// ports are not advertised.
+	srv.portTunnels.onDisconnect = func(agentID string) {
+		srv.clearExposedPortsForAgent(context.Background(), agentID)
+	}
+
 	// Shared federation HTTP client: no redirect following to prevent
 	// credential leakage via Authorization header on cross-origin redirects.
 	srv.federationClient = &http.Client{
@@ -2623,6 +2630,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 5, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 
 	// Register GitHub resolution cache TTL eviction (every 10 minutes)
 	if s.ghResolutionStore != nil {

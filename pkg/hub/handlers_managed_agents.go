@@ -215,6 +215,7 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 		newPhase = string("running")
 	case "stop":
 		newPhase = string("stopped")
+		s.clearExposedPortsForAgent(ctx, agent.ID)
 		actionErr = s.managedAgentStop(ctx, agent)
 	case "restart":
 		_ = s.managedAgentStop(ctx, agent)
