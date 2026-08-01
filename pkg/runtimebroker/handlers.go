@@ -470,6 +470,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to resolve global dir")
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to get global dir: "+err.Error())
 			return
 		}
@@ -649,6 +650,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// N1-7: Ensure NFS shares are mounted before dispatch (no-op when backend=local).
 	if err := s.ensureNFSMountsReady(); err != nil {
 		markAttemptFailed(http.StatusServiceUnavailable, "NFS mount check failed: "+err.Error())
+		span.SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
 		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
 			"NFS workspace storage is not available: "+err.Error(), nil)
 		return
@@ -688,6 +690,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			TemplateError(w, err.Error())
 			return
 		}
+		span.SetStatus(codes.Error, err.Error())
 		RuntimeError(w, err.Error())
 		return
 	}
@@ -704,6 +707,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			globalDir, err := config.GetGlobalDir()
 			if err != nil {
 				markAttemptFailed(http.StatusInternalServerError, "failed to resolve global dir")
+				span.SetStatus(codes.Error, err.Error())
 				RuntimeError(w, "Failed to get global dir: "+err.Error())
 				return
 			}
@@ -720,6 +724,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to create workspace directory")
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to create workspace directory: "+err.Error())
 			return
 		}
@@ -727,6 +732,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		bucket := s.config.StorageBucket
 		if bucket == "" {
 			markAttemptFailed(http.StatusInternalServerError, "storage bucket not configured")
+			span.SetStatus(codes.Error, "storage bucket not configured")
 			RuntimeError(w, "Storage bucket not configured for workspace bootstrap")
 			return
 		}
@@ -742,6 +748,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 		if err := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to download workspace from GCS")
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
 			return
 		}
@@ -815,6 +822,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		cfg, err := sc.Manager.Provision(ctx, opts)
 		if err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to provision agent: "+err.Error())
 			return
 		}
@@ -874,6 +882,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
 			}
 		}
+		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, agent.ErrContainerNameInUse) {
 			Conflict(w, err.Error())
 		} else {
