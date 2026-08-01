@@ -552,11 +552,21 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 		}
 
-		// Persist the resolved auth method so it can be reported to the Hub.
+		// Persist the resolved auth type so it can be reported to the Hub.
 		// For auto-detected auth, opts.HarnessAuth may be empty; capture the
-		// actual method the harness selected (e.g. "api-key", "vertex-ai").
-		if opts.HarnessAuth == "" && resolved.Method != "" {
-			opts.HarnessAuth = resolved.Method
+		// actual auth type (e.g. "api-key", "vertex-ai").
+		// Prefer SCION_HARNESS_SELECTED_AUTH (the true auth type) over
+		// resolved.Method, which for container-script harnesses is always
+		// "container-script" — an implementation name, not a valid auth type.
+		// Both branches reject harness implementation names so that
+		// already-corrupted scion-agent.json data is not re-persisted
+		// on resume (opts.HarnessAuth stays empty → no write-back).
+		if opts.HarnessAuth == "" {
+			if authType := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; authType != "" && !harness.IsHarnessImplementationName(authType) {
+				opts.HarnessAuth = authType
+			} else if resolved.Method != "" && !harness.IsHarnessImplementationName(resolved.Method) {
+				opts.HarnessAuth = resolved.Method
+			}
 		}
 
 		// Surface resolved auth method so CLI can display it
