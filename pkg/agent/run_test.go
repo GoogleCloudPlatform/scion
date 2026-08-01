@@ -1599,6 +1599,85 @@ profiles:
 	})
 }
 
+func TestHarnessAuthCorruptedValueNotPersisted(t *testing.T) {
+	// Regression test: when opts.HarnessAuth contains a harness implementation
+	// name (e.g. "container-script" from corrupted scion-agent.json), it must
+	// NOT be persisted to scion-agent.json. The guards at run.go:493 and
+	// run.go:754 prevent this.
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	for _, implName := range []string{"container-script", "generic", "builtin", "passthrough"} {
+		t.Run(implName, func(t *testing.T) {
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+					return "mock-id", nil
+				},
+			}
+
+			agentName := "corrupt-" + implName
+			agentDir := filepath.Join(projectScionDir, "agents", agentName)
+			_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+			// Simulate corrupted scion-agent.json with harness implementation name
+			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+				"harness": "gemini",
+				"auth_selectedType": "`+implName+`"
+			}`), 0644)
+
+			mgr := NewManager(mockRT)
+			_, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:        agentName,
+				ProjectPath: projectScionDir,
+				NoAuth:      true,
+				HarnessAuth: implName, // corrupted value from Hub
+			})
+			if err != nil {
+				t.Fatalf("Start failed: %v", err)
+			}
+
+			data, err := os.ReadFile(filepath.Join(agentDir, "scion-agent.json"))
+			if err != nil {
+				t.Fatalf("failed to read scion-agent.json: %v", err)
+			}
+			// The corrupted implementation name must NOT appear as auth_selectedType.
+			if strings.Contains(string(data), `"`+implName+`"`) {
+				t.Errorf("scion-agent.json still contains corrupted value %q: %s", implName, string(data))
+			}
+		})
+	}
+}
+
 func TestBuildAgentEnv_TelemetryNoOverrideExplicit(t *testing.T) {
 	// Explicit opts.Env values must not be overwritten by telemetry config.
 	enabled := true
