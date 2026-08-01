@@ -302,7 +302,7 @@ func searchFiles(root, query string) []fileMatch {
 			if d.Type()&fs.ModeSymlink != 0 {
 				// Symlink: resolve and verify target is still under root.
 				resolved, err := filepath.EvalSymlinks(path)
-				if err != nil || !strings.HasPrefix(resolved, root) {
+				if err != nil || !isUnderSearchRoot(resolved, root) {
 					return nil
 				}
 				// Filter out symlinks pointing to directories.

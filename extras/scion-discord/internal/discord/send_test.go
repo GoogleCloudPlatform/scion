@@ -140,6 +140,23 @@ func TestSearchFiles_SymlinkOutsideRoot(t *testing.T) {
 	assert.Empty(t, matches, "symlinks pointing outside search root should be excluded")
 }
 
+func TestSearchFiles_SymlinkPrefixConfusion(t *testing.T) {
+	// Create a root without trailing slash and a sibling with shared prefix.
+	root := t.TempDir() // e.g. /tmp/TestXYZ123
+	siblingDir := root + "-secrets"
+	require.NoError(t, os.MkdirAll(siblingDir, 0o755))
+	secretFile := filepath.Join(siblingDir, "key.pem")
+	require.NoError(t, os.WriteFile(secretFile, []byte("secret-key"), 0o644))
+
+	// Create a symlink inside root pointing to the sibling directory's file.
+	symlinkPath := filepath.Join(root, "sneaky-link.pem")
+	require.NoError(t, os.Symlink(secretFile, symlinkPath))
+
+	// Search with root that has no trailing slash — must not leak the sibling file.
+	matches := searchFiles(root, "sneaky-link")
+	assert.Empty(t, matches, "symlinks resolving to a sibling dir with shared prefix must be excluded")
+}
+
 // --- safeResolve tests ---
 
 func TestSafeResolve_ValidPath(t *testing.T) {
