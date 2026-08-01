@@ -27,7 +27,7 @@
 
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
-import type { Agent, Project, RuntimeBroker } from '../shared/types.js';
+import type { Agent, ExposedPort, Project, RuntimeBroker } from '../shared/types.js';
 
 /** Activities that should not be overwritten by working/empty transitions */
 const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exceeded']);
@@ -271,6 +271,15 @@ export class StateManager extends EventTarget {
       this.state.agents.delete(agentId);
       this.state.deletedAgentIds.add(agentId);
       this.pendingAgentDeltas.delete(agentId);
+    } else if (eventType === 'ports') {
+      const portsData = data as { ports: ExposedPort[] };
+      const existing = this.state.agents.get(agentId);
+      if (existing) {
+        const updated = { ...existing, exposedPorts: portsData.ports ?? [] };
+        this.state.agents.set(agentId, updated as Agent);
+      }
+      this.notify('agents-updated');
+      return;
     } else {
       const existing = this.state.agents.get(agentId);
       if (!existing && eventType !== 'created') {
