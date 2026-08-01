@@ -920,6 +920,24 @@ func TestAttachFlagValidation_OutsideAllowedRoots(t *testing.T) {
 	assert.Contains(t, err.Error(), "outside allowed roots")
 }
 
+func TestAttachFlagValidation_Directory(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	// Create a temporary directory under /workspace to use as an attachment
+	testDir := filepath.Join("/workspace", ".test-attach-dir-validation")
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(testDir) }()
+
+	msgAttach = []string{testDir}
+	defer func() { msgAttach = nil }()
+
+	err = messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is a directory, not a regular file")
+}
+
 func TestSendGroupMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()

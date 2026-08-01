@@ -196,8 +196,12 @@ Examples:
 			if resolved == "" {
 				return fmt.Errorf("attachment %q: path is outside allowed roots (/workspace, /scion-volumes)", p)
 			}
-			if _, err := os.Stat(resolved); err != nil {
+			info, err := os.Stat(resolved)
+			if err != nil {
 				return fmt.Errorf("attachment %q: %w", p, err)
+			}
+			if info.IsDir() {
+				return fmt.Errorf("attachment %q: is a directory, not a regular file", p)
 			}
 		}
 
