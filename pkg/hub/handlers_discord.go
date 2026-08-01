@@ -17,7 +17,9 @@ package hub
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
@@ -35,6 +37,15 @@ func (s *Server) handleProjectDiscord(w http.ResponseWriter, r *http.Request, pr
 		s.handleDiscordChannels(w, r, projectID, mgr)
 	case discordPath == "threads" && r.Method == http.MethodGet:
 		s.handleDiscordThreads(w, r, projectID, mgr)
+	case discordPath == "default" && r.Method == http.MethodPut:
+		s.handleDiscordSetDefault(w, r, projectID, mgr)
+	case strings.HasPrefix(discordPath, "channels/") && strings.HasSuffix(discordPath, "/history") && r.Method == http.MethodGet:
+		// Extract channelId from "channels/{channelId}/history"
+		trimmed := strings.TrimPrefix(discordPath, "channels/")
+		channelID := strings.TrimSuffix(trimmed, "/history")
+		s.handleDiscordHistory(w, r, projectID, channelID, mgr)
+	case discordPath == "dm" && r.Method == http.MethodPost:
+		s.handleDiscordDM(w, r, projectID, mgr)
 	default:
 		NotFound(w, "discord endpoint")
 	}
@@ -64,6 +75,102 @@ func (s *Server) handleDiscordThreads(w http.ResponseWriter, r *http.Request, pr
 	params, _ := json.Marshal(reqMap)
 
 	result, err := mgr.BrokerQuery(r.Context(), "discord", "list-threads", params)
+	if err != nil {
+		s.writeDiscordError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(result)
+}
+
+func (s *Server) handleDiscordSetDefault(w http.ResponseWriter, r *http.Request, projectID string, mgr IntegrationManager) {
+	var body struct {
+		ChannelID string `json:"channel_id"`
+		ThreadID  string `json:"thread_id,omitempty"`
+		AgentSlug string `json:"agent_slug"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid request body", nil)
+		return
+	}
+
+	reqMap := map[string]string{
+		"project_id": projectID,
+		"channel_id": body.ChannelID,
+		"agent_slug": body.AgentSlug,
+	}
+	if body.ThreadID != "" {
+		reqMap["thread_id"] = body.ThreadID
+	}
+	params, _ := json.Marshal(reqMap)
+
+	result, err := mgr.BrokerQuery(r.Context(), "discord", "set-default", params)
+	if err != nil {
+		s.writeDiscordError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(result)
+}
+
+func (s *Server) handleDiscordHistory(w http.ResponseWriter, r *http.Request, projectID, channelID string, mgr IntegrationManager) {
+	q := r.URL.Query()
+	reqMap := map[string]interface{}{
+		"project_id": projectID,
+		"channel_id": channelID,
+	}
+	if v := q.Get("limit"); v != "" {
+		var limit int
+		fmt.Sscanf(v, "%d", &limit)
+		reqMap["limit"] = limit
+	}
+	if v := q.Get("before"); v != "" {
+		reqMap["before"] = v
+	}
+	if v := q.Get("after"); v != "" {
+		reqMap["after"] = v
+	}
+	if q.Get("humans_only") == "true" {
+		reqMap["humans_only"] = true
+	}
+	params, _ := json.Marshal(reqMap)
+
+	result, err := mgr.BrokerQuery(r.Context(), "discord", "channel-history", params)
+	if err != nil {
+		s.writeDiscordError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(result)
+}
+
+func (s *Server) handleDiscordDM(w http.ResponseWriter, r *http.Request, projectID string, mgr IntegrationManager) {
+	var body struct {
+		RecipientEmail string `json:"recipient_email"`
+		Message        string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid request body", nil)
+		return
+	}
+	if body.RecipientEmail == "" || body.Message == "" {
+		writeError(w, http.StatusBadRequest, "missing_fields", "recipient_email and message are required", nil)
+		return
+	}
+
+	params, _ := json.Marshal(map[string]string{
+		"project_id":      projectID,
+		"recipient_email": body.RecipientEmail,
+		"message":         body.Message,
+	})
+
+	result, err := mgr.BrokerQuery(r.Context(), "discord", "send-dm", params)
 	if err != nil {
 		s.writeDiscordError(w, err)
 		return
