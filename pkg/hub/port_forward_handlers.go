@@ -37,7 +37,7 @@ const (
 	maxExposedPortsPerAgent = 10
 	maxProxyRequestBody     = 32 << 20
 	portForwardTimeout      = 60 * time.Second
-	maxConcurrentStreams     = 64
+	maxConcurrentStreams    = 64
 )
 
 var deniedExposedPorts = map[int]string{
@@ -46,8 +46,8 @@ var deniedExposedPorts = map[int]string{
 	18380: "scion metadata server",
 }
 
-var errNoPortTunnel     = errors.New("no active port-forward tunnel")
-var errTunnelBusy       = errors.New("too many concurrent port-forward requests")
+var errNoPortTunnel = errors.New("no active port-forward tunnel")
+var errTunnelBusy = errors.New("too many concurrent port-forward requests")
 
 var portTunnelUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -170,6 +170,7 @@ func (s *PortTunnelSession) do(ctx context.Context, req portforward.Request) (*p
 	s.mu.Unlock()
 
 	s.writeMu.Lock()
+	_ = s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	err := s.conn.WriteJSON(portforward.Message{Type: portforward.MessageTypeRequest, Request: &req})
 	s.writeMu.Unlock()
 	if err != nil {

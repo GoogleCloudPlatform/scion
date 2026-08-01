@@ -70,7 +70,7 @@ func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string,
 func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                {}
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message)            {}
-func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)                {}
+func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)               {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)            {}
 func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)            {}
 func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)                   {}

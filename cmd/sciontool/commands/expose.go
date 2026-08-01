@@ -47,7 +47,7 @@ var exposeCmd = &cobra.Command{
 				return err
 			}
 			if len(ports) == 0 {
-				fmt.Fprintln(os.Stdout, "No ports exposed.")
+				_, _ = fmt.Fprintln(os.Stdout, "No ports exposed.")
 				return nil
 			}
 			for _, p := range ports {
@@ -55,7 +55,7 @@ var exposeCmd = &cobra.Command{
 				if label == "" {
 					label = "-"
 				}
-				fmt.Fprintf(os.Stdout, "%d\t%s\t%s\n", p.Port, label, p.URL)
+				_, _ = fmt.Fprintf(os.Stdout, "%d\t%s\t%s\n", p.Port, label, p.URL)
 			}
 			return nil
 		}
@@ -74,7 +74,7 @@ var exposeCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "Port %d exposed.\nURL: %s\nBase path: %s\n", resp.Port, resp.URL, resp.BasePath)
+		_, _ = fmt.Fprintf(os.Stdout, "Port %d exposed.\nURL: %s\nBase path: %s\n", resp.Port, resp.URL, resp.BasePath)
 		return nil
 	},
 }
@@ -97,7 +97,7 @@ var unexposeCmd = &cobra.Command{
 		if err := client.DeletePort(ctx, port); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "Port %d unexposed.\n", port)
+		_, _ = fmt.Fprintf(os.Stdout, "Port %d unexposed.\n", port)
 		return nil
 	},
 }

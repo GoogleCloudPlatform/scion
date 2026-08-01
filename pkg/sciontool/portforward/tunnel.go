@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,7 +54,7 @@ func NewManager(client *scionhub.Client) *Manager {
 }
 
 func (m *Manager) Run(ctx context.Context) {
-	if m == nil || !m.client.IsConfigured() {
+	if m == nil || m.client == nil || !m.client.IsConfigured() {
 		return
 	}
 	for {
@@ -80,6 +81,11 @@ func (m *Manager) runOnce(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
+	// Close the connection when the context is cancelled to unblock ReadJSON.
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
 	log.Info("Port-forward tunnel connected")
 	for {
 		var msg wire.Message
@@ -101,12 +107,22 @@ func (m *Manager) handleRequest(conn *websocket.Conn, req *wire.Request) {
 	}
 	m.writeMu.Lock()
 	defer m.writeMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := conn.WriteJSON(wire.Message{Type: msgType, Response: resp}); err != nil {
 		log.Error("Failed to write port-forward response: %v", err)
 	}
 }
 
 func (m *Manager) doLocalRequest(req *wire.Request) *wire.Response {
+	isLoopback := strings.ToLower(strings.TrimSpace(req.Host)) == "localhost"
+	if !isLoopback {
+		if ip := net.ParseIP(req.Host); ip != nil && ip.IsLoopback() {
+			isLoopback = true
+		}
+	}
+	if !isLoopback {
+		return &wire.Response{StreamID: req.StreamID, Error: "unauthorized host: only loopback addresses are allowed"}
+	}
 	target := url.URL{
 		Scheme:   "http",
 		Host:     fmt.Sprintf("%s:%d", req.Host, req.Port),
