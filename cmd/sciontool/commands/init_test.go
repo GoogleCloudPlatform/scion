@@ -648,6 +648,19 @@ func TestFormatCloneError(t *testing.T) {
 			t.Errorf("expected stderr in error, got: %v", err)
 		}
 	})
+
+	t.Run("unclassified error with token", func(t *testing.T) {
+		err := formatCloneError("fatal: disk full", "ghp_token123")
+		if strings.Contains(err.Error(), "GITHUB_TOKEN") {
+			t.Errorf("unclassified error should not mention GITHUB_TOKEN, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "unclassified error") {
+			t.Errorf("expected 'unclassified error' in message, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "fatal: disk full") {
+			t.Errorf("expected stderr in error, got: %v", err)
+		}
+	})
 }
 
 func TestIsClaude(t *testing.T) {

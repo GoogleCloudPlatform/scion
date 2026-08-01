@@ -1793,7 +1793,7 @@ func formatCloneError(sanitizedStderr, token string) error {
 	if guidance := gitErr.UserGuidance(); guidance != "" {
 		return fmt.Errorf("git clone failed (%s): %s", guidance, sanitizedStderr)
 	}
-	return fmt.Errorf("git clone failed (GITHUB_TOKEN may be invalid or lack Contents read access): %s", sanitizedStderr)
+	return fmt.Errorf("git clone failed (unclassified error): %s", sanitizedStderr)
 }
 
 // detectDefaultBranch uses `git ls-remote --symref origin HEAD` to discover
