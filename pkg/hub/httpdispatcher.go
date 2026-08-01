@@ -2227,7 +2227,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	if err != nil {
 		return nil, err
 	}
-	var result []ResolvedSecret
+	result := make([]ResolvedSecret, 0, len(resolved))
 	for _, sv := range resolved {
 		if sv.InjectionMode == store.InjectionModeAsNeeded {
 			continue

@@ -61,11 +61,11 @@ func TestResolveEnvFromStorage_InjectionMode(t *testing.T) {
 			InjectionMode: store.InjectionModeAsNeeded,
 		},
 		{
-			ID:            api.NewUUID(),
-			Key:           "DEFAULT_VAR",
-			Value:         "default-value",
-			Scope:         store.ScopeProject,
-			ScopeID:       agent.ProjectID,
+			ID:      api.NewUUID(),
+			Key:     "DEFAULT_VAR",
+			Value:   "default-value",
+			Scope:   store.ScopeProject,
+			ScopeID: agent.ProjectID,
 			// InjectionMode left empty — store normalises to "as_needed"
 		},
 	}
