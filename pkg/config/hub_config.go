@@ -364,7 +364,8 @@ type GlobalConfig struct {
 type SchedulerConfig struct {
 	// IntervalSeconds is the root ticker interval in seconds. Default: 60.
 	IntervalSeconds int `json:"intervalSeconds,omitempty" yaml:"intervalSeconds,omitempty" koanf:"intervalSeconds"`
-	// MaxConcurrency limits simultaneous recurring handlers per tick. Default: 0 (unlimited).
+	// MaxConcurrency limits simultaneous recurring handlers per tick.
+	// When 0 (unset), the scheduler uses its built-in default of 2.
 	MaxConcurrency int `json:"maxConcurrency,omitempty" yaml:"maxConcurrency,omitempty" koanf:"maxConcurrency"`
 }
 

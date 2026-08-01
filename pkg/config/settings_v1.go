@@ -354,9 +354,10 @@ type V1SchedulerConfig struct {
 	// Increasing this value reduces DB connection pressure on small deployments.
 	IntervalSeconds int `json:"interval_seconds,omitempty" yaml:"interval_seconds,omitempty" koanf:"interval_seconds"`
 	// MaxConcurrency limits the number of recurring handlers that may run
-	// simultaneously in a single tick. Default: 0 (unlimited).
-	// On resource-constrained deployments, setting this to 2-3 prevents
-	// all handlers from competing for DB connections at once.
+	// simultaneously in a single tick. When unset (0), the scheduler uses its
+	// built-in default of 2, so the fix for issue #367 (DB connection pool
+	// saturation) is active out-of-the-box. Set to a higher value to allow
+	// more parallel handlers on larger deployments.
 	MaxConcurrency int `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty" koanf:"max_concurrency"`
 }
 

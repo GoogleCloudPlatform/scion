@@ -52,10 +52,10 @@ type Scheduler struct {
 	MaxJitter time.Duration
 
 	// MaxConcurrency limits the number of recurring handlers that may execute
-	// simultaneously in a single tick. When set to 0 (the default), all
-	// eligible handlers run concurrently. On resource-constrained deployments,
-	// setting this to a small number (e.g. 2-3) prevents all handlers from
-	// competing for DB connections at once.
+	// simultaneously in a single tick. Defaults to defaultMaxConcurrency (2)
+	// to prevent all handlers from competing for DB connections at once —
+	// the original issue (#367) showed 6+ handlers saturating a small DB's
+	// connection pool. Set to 0 for unlimited (pre-#367 behavior).
 	MaxConcurrency int
 
 	// Recurring handlers
@@ -109,28 +109,35 @@ func WithTickInterval(d time.Duration) SchedulerOption {
 }
 
 // WithMaxConcurrency limits simultaneous recurring handler goroutines per tick.
-// Zero (the default) means unlimited.
+// Values > 0 set the limit; 0 explicitly disables the limit (unlimited).
+// Negative values are ignored (default preserved).
 func WithMaxConcurrency(n int) SchedulerOption {
 	return func(s *Scheduler) {
-		if n > 0 {
+		if n >= 0 {
 			s.MaxConcurrency = n
 		}
 	}
 }
 
-// NewScheduler creates a new Scheduler with a 1-minute root ticker interval
-// and a 30-second max jitter to desynchronize recurring handlers.
-// Optional SchedulerOption values can override the default interval and
-// concurrency limit.
+// defaultMaxConcurrency is the out-of-the-box limit on simultaneous recurring
+// handlers per tick. Set to 2 so the fix for issue #367 (6+ handlers
+// saturating a small DB's connection pool) is active without configuration.
+const defaultMaxConcurrency = 2
+
+// NewScheduler creates a new Scheduler with a 1-minute root ticker interval,
+// a 30-second max jitter, and a default max concurrency of 2 to prevent
+// overwhelming small DB connection pools.
+// Optional SchedulerOption values can override the defaults.
 func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Scheduler {
 	s := &Scheduler{
-		store:         st,
-		tickInterval:  1 * time.Minute,
-		MaxJitter:     maxJitter,
-		timers:        make(map[string]*scheduledTimer),
-		eventHandlers: make(map[string]EventHandler),
-		log:           log,
-		stopCh:        make(chan struct{}),
+		store:          st,
+		tickInterval:   1 * time.Minute,
+		MaxJitter:      maxJitter,
+		MaxConcurrency: defaultMaxConcurrency,
+		timers:         make(map[string]*scheduledTimer),
+		eventHandlers:  make(map[string]EventHandler),
+		log:            log,
+		stopCh:         make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -289,12 +296,15 @@ const maxJitter = 30 * time.Second
 
 // runRecurringHandlers invokes all handlers whose interval divides the current
 // tick count. Each handler runs in its own goroutine with a timeout context.
-// A random jitter (0–MaxJitter) is added before each invocation so background
-// tasks desynchronize and avoid saturating the DB connection pool.
 //
-// When MaxConcurrency > 0, a semaphore limits the number of handlers running
-// simultaneously, preventing resource-constrained deployments from being
-// overwhelmed by concurrent background work.
+// The execution pipeline is: jitter sleep → semaphore acquire → handler work.
+// Jitter runs BEFORE the semaphore so handlers don't hold concurrency slots
+// during dead sleep time — the jitter spreads arrivals at the semaphore over
+// the MaxJitter window, and only actual DB work counts against the limit.
+//
+// When MaxConcurrency > 0 (default: 2), a semaphore limits the number of
+// handlers doing real work simultaneously, preventing resource-constrained
+// deployments from being overwhelmed by concurrent background tasks.
 func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 	// Collect eligible handlers for this tick.
 	var eligible []RecurringHandler
@@ -316,6 +326,22 @@ func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 	for _, h := range eligible {
 		handler := h // capture loop variable
 		go func() {
+			// Stagger start: sleep a random 0–MaxJitter BEFORE acquiring a
+			// semaphore slot. This spreads arrivals at the semaphore over the
+			// jitter window so handlers don't hold concurrency slots during
+			// dead sleep time.
+			jitter := time.Duration(0)
+			if s.MaxJitter > 0 {
+				jitter = time.Duration(rand.Int63n(int64(s.MaxJitter)))
+			}
+			if jitter > 0 {
+				select {
+				case <-time.After(jitter):
+				case <-ctx.Done():
+					return
+				}
+			}
+
 			// Acquire semaphore slot if concurrency is limited.
 			if sem != nil {
 				select {
@@ -324,18 +350,6 @@ func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				}
-			}
-
-			// Stagger start: sleep a random 0–MaxJitter so tasks that fire on
-			// the same tick don't all compete for DB connections at once.
-			jitter := time.Duration(0)
-			if s.MaxJitter > 0 {
-				jitter = time.Duration(rand.Int63n(int64(s.MaxJitter)))
-			}
-			select {
-			case <-time.After(jitter):
-			case <-ctx.Done():
-				return
 			}
 
 			handlerCtx, cancel := context.WithTimeout(ctx, 55*time.Second)

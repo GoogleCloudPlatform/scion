@@ -213,9 +213,9 @@ type ServerConfig struct {
 	// pressure on small deployments.
 	SchedulerIntervalSeconds int
 	// SchedulerMaxConcurrency limits the number of recurring handlers that may
-	// run simultaneously in a single tick. Default: 0 (unlimited). Setting this
-	// to 2-3 prevents all handlers from competing for DB connections at once on
-	// resource-constrained deployments.
+	// run simultaneously in a single tick. When 0 (unset), the scheduler uses
+	// its built-in default of 2 so the fix for issue #367 is active
+	// out-of-the-box.
 	SchedulerMaxConcurrency int
 
 	// Workstation indicates non-production, single-user mode (e.g. local laptop).

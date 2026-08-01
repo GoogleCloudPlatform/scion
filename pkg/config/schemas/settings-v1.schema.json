@@ -958,8 +958,8 @@
         "max_concurrency": {
           "type": "integer",
           "minimum": 0,
-          "default": 0,
-          "description": "Maximum number of recurring handlers that may run simultaneously in a single tick. 0 means unlimited. Setting to 2-3 prevents all handlers from competing for DB connections at once.",
+          "default": 2,
+          "description": "Maximum number of recurring handlers that may run simultaneously in a single tick. Default 2 to prevent DB connection pool saturation on small deployments. Set to 0 for unlimited (pre-fix behavior).",
           "x-env-var": "SCION_SERVER_SCHEDULER_MAX_CONCURRENCY",
           "x-since": "1"
         }

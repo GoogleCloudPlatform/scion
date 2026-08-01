@@ -225,7 +225,7 @@ server:
   # -------------------------------------------------------------------------
   # scheduler:
   #   interval_seconds: 60               # Root ticker interval (default 60s)
-  #   max_concurrency: 0                 # Max simultaneous handlers (0 = unlimited)
+  #   max_concurrency: 2                 # Max simultaneous handlers (default 2)
 
   # -------------------------------------------------------------------------
   # Layer 1 — GitHub App (section: github_app)

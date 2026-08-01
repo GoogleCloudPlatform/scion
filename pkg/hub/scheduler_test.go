@@ -1594,10 +1594,10 @@ func TestWithTickInterval(t *testing.T) {
 }
 
 func TestWithMaxConcurrency(t *testing.T) {
-	// Default is 0 (unlimited).
+	// Default is 2 (conservative limit for issue #367).
 	s := NewScheduler(nil, slog.Default())
-	if s.MaxConcurrency != 0 {
-		t.Fatalf("expected default MaxConcurrency 0, got %d", s.MaxConcurrency)
+	if s.MaxConcurrency != 2 {
+		t.Fatalf("expected default MaxConcurrency 2, got %d", s.MaxConcurrency)
 	}
 
 	// Custom concurrency via option.
@@ -1606,14 +1606,16 @@ func TestWithMaxConcurrency(t *testing.T) {
 		t.Fatalf("expected MaxConcurrency 3, got %d", s.MaxConcurrency)
 	}
 
-	// Zero/negative should be ignored — default preserved.
+	// Zero explicitly disables the limit (unlimited).
 	s = NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
 	if s.MaxConcurrency != 0 {
-		t.Fatalf("expected default MaxConcurrency 0 for zero input, got %d", s.MaxConcurrency)
+		t.Fatalf("expected MaxConcurrency 0 (unlimited) for zero input, got %d", s.MaxConcurrency)
 	}
+
+	// Negative should be ignored — default preserved.
 	s = NewScheduler(nil, slog.Default(), WithMaxConcurrency(-1))
-	if s.MaxConcurrency != 0 {
-		t.Fatalf("expected default MaxConcurrency 0 for negative input, got %d", s.MaxConcurrency)
+	if s.MaxConcurrency != 2 {
+		t.Fatalf("expected default MaxConcurrency 2 for negative input, got %d", s.MaxConcurrency)
 	}
 }
 
@@ -1689,7 +1691,7 @@ func TestSchedulerMaxConcurrencyLimitsParallelism(t *testing.T) {
 
 func TestSchedulerUnlimitedConcurrency(t *testing.T) {
 	// With MaxConcurrency=0 (unlimited), all handlers should run concurrently.
-	s := NewScheduler(nil, slog.Default()) // default: unlimited
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
 	s.tickInterval = 1 * time.Second
 	s.MaxJitter = 0
 
@@ -1765,12 +1767,12 @@ func TestSchedulerStatusIncludesMaxConcurrency(t *testing.T) {
 	}
 }
 
-func TestSchedulerStatusUnlimited(t *testing.T) {
+func TestSchedulerStatusDefault(t *testing.T) {
 	s := NewScheduler(nil, slog.Default())
 
 	status := s.Status()
-	if status.MaxConcurrency != 0 {
-		t.Errorf("expected MaxConcurrency 0 (unlimited) in status, got %d", status.MaxConcurrency)
+	if status.MaxConcurrency != 2 {
+		t.Errorf("expected default MaxConcurrency 2 in status, got %d", status.MaxConcurrency)
 	}
 }
 
