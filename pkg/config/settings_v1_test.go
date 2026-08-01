@@ -682,7 +682,7 @@ func TestLoadEffectiveSettings_WarnOnIgnoredSettingsFile(t *testing.T) {
 		settingsContent := "default_template: my-template\n"
 		settingsPath := filepath.Join(projectDir, "settings.yaml")
 		require.NoError(t, os.WriteFile(settingsPath, []byte(settingsContent), 0644))
-		defer os.Remove(settingsPath)
+		defer func() { _ = os.Remove(settingsPath) }()
 
 		_, warnings, err := LoadEffectiveSettings(projectDir)
 		require.NoError(t, err)
@@ -700,7 +700,7 @@ func TestLoadEffectiveSettings_WarnOnIgnoredSettingsFile(t *testing.T) {
 	t.Run("empty file does not produce warning", func(t *testing.T) {
 		settingsPath := filepath.Join(projectDir, "settings.yaml")
 		require.NoError(t, os.WriteFile(settingsPath, []byte(""), 0644))
-		defer os.Remove(settingsPath)
+		defer func() { _ = os.Remove(settingsPath) }()
 
 		_, warnings, err := LoadEffectiveSettings(projectDir)
 		require.NoError(t, err)
@@ -714,7 +714,7 @@ func TestLoadEffectiveSettings_WarnOnIgnoredSettingsFile(t *testing.T) {
 	t.Run("file with only comments does not produce warning", func(t *testing.T) {
 		settingsPath := filepath.Join(projectDir, "settings.yaml")
 		require.NoError(t, os.WriteFile(settingsPath, []byte("# just a comment\n"), 0644))
-		defer os.Remove(settingsPath)
+		defer func() { _ = os.Remove(settingsPath) }()
 
 		_, warnings, err := LoadEffectiveSettings(projectDir)
 		require.NoError(t, err)
@@ -729,7 +729,7 @@ func TestLoadEffectiveSettings_WarnOnIgnoredSettingsFile(t *testing.T) {
 		// Write a file with harnesses key (legacy format)
 		settingsPath := filepath.Join(projectDir, "settings.yaml")
 		require.NoError(t, os.WriteFile(settingsPath, []byte("harnesses:\n  claude:\n    image: test\n"), 0644))
-		defer os.Remove(settingsPath)
+		defer func() { _ = os.Remove(settingsPath) }()
 
 		_, warnings, err := LoadEffectiveSettings(projectDir)
 		require.NoError(t, err)

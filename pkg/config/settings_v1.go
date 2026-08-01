@@ -2036,7 +2036,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 			continue
 		}
 		warnings = append(warnings, fmt.Sprintf(
-			"settings file %s has no schema_version field and no recognized format indicators — its content is being ignored. Add 'schema_version: \"1\"' as the first line to enable versioned settings loading.",
+			"settings file %s has no schema_version field and no recognized format indicators. Add 'schema_version: \"1\"' as the first line for reliable versioned settings loading; without it, settings may not load correctly in future versions.",
 			path,
 		))
 	}
