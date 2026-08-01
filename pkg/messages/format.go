@@ -27,16 +27,17 @@ const (
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.
 // The recipient and version fields are stripped to save tokens.
 type deliveryMessage struct {
-	Timestamp   string   `json:"timestamp"`
-	Sender      string   `json:"sender"`
-	Recipients  string   `json:"recipients,omitempty"`
-	Msg         string   `json:"msg"`
-	Type        string   `json:"type"`
-	Urgent      bool     `json:"urgent,omitempty"`
-	Broadcasted bool     `json:"broadcasted,omitempty"`
-	Attachments []string `json:"attachments,omitempty"`
-	Channel     string   `json:"channel,omitempty"`
-	ThreadID    string   `json:"thread_id,omitempty"`
+	Timestamp   string            `json:"timestamp"`
+	Sender      string            `json:"sender"`
+	Recipients  string            `json:"recipients,omitempty"`
+	Msg         string            `json:"msg"`
+	Type        string            `json:"type"`
+	Urgent      bool              `json:"urgent,omitempty"`
+	Broadcasted bool              `json:"broadcasted,omitempty"`
+	Attachments []string          `json:"attachments,omitempty"`
+	Channel     string            `json:"channel,omitempty"`
+	ThreadID    string            `json:"thread_id,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // FormatForDelivery formats a structured message for delivery to an agent via tmux.
@@ -58,6 +59,7 @@ func FormatForDelivery(msg *StructuredMessage) string {
 		Attachments: msg.Attachments,
 		Channel:     msg.Channel,
 		ThreadID:    msg.ThreadID,
+		Metadata:    msg.Metadata,
 	}
 
 	jsonBytes, err := json.MarshalIndent(dm, "", "  ")

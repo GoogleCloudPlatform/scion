@@ -168,6 +168,50 @@ func TestFormatForDelivery_OmitsEmptyRecipients(t *testing.T) {
 	}
 }
 
+func TestFormatForDelivery_MentionMetadata(t *testing.T) {
+	msg := NewMention("user:alice", "agent:observer", "check the design", "agent:primary-dev")
+
+	result := FormatForDelivery(msg)
+
+	// Should contain mention_source in the JSON output
+	if !strings.Contains(result, `"mention_source": "agent:primary-dev"`) {
+		t.Error("missing mention_source in delivery output")
+	}
+
+	// Should contain mention_position in the JSON output
+	if !strings.Contains(result, `"mention_position": "body"`) {
+		t.Error("missing mention_position in delivery output")
+	}
+
+	// Should still have the correct type
+	if !strings.Contains(result, `"type": "mention"`) {
+		t.Error("missing mention type in delivery output")
+	}
+}
+
+func TestFormatForDelivery_NoMetadataRegression(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-03-07T14:30:00Z",
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "do the thing",
+		Type:      TypeInstruction,
+	}
+
+	result := FormatForDelivery(msg)
+
+	// Messages without metadata should not include a metadata field
+	if strings.Contains(result, `"metadata"`) {
+		t.Error("metadata should be omitted when empty/nil")
+	}
+
+	// Should still format correctly
+	if !strings.Contains(result, `"sender": "user:alice"`) {
+		t.Error("missing sender in output")
+	}
+}
+
 func TestFormatForDelivery_WithAttachments(t *testing.T) {
 	msg := &StructuredMessage{
 		Version:     Version,
