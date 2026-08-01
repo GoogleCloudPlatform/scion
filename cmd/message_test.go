@@ -895,6 +895,54 @@ func TestAttachFlagValidation(t *testing.T) {
 	}
 }
 
+func TestAttachFlagValidation_NonExistentFile(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	msgAttach = []string{"/workspace/this-file-does-not-exist-xyz.go"}
+	defer func() { msgAttach = nil }()
+
+	err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "this-file-does-not-exist-xyz.go")
+	assert.Contains(t, err.Error(), "attachment")
+}
+
+func TestAttachFlagValidation_OutsideAllowedRoots(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	msgAttach = []string{"/etc/passwd"}
+	defer func() { msgAttach = nil }()
+
+	err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside allowed roots")
+}
+
+func TestAttachFlagValidation_Directory(t *testing.T) {
+	if _, err := os.Stat("/workspace"); os.IsNotExist(err) {
+		t.Skip("skipping: /workspace not available")
+	}
+
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	// Create a temporary directory under /workspace so it passes
+	// resolveAttachmentPath's allowed-roots check.
+	testDir := filepath.Join("/workspace", ".test-attach-dir-validation")
+	err := os.MkdirAll(testDir, 0755)
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(testDir) }()
+
+	msgAttach = []string{testDir}
+	defer func() { msgAttach = nil }()
+
+	err = messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is a directory, not a regular file")
+}
+
 func TestSendGroupMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()

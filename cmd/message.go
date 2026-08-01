@@ -190,6 +190,24 @@ Examples:
 			return fmt.Errorf("--attach cannot be combined with --in or --at")
 		}
 
+		// Validate attachment file paths exist
+		for _, p := range msgAttach {
+			resolved := resolveAttachmentPath(p)
+			if resolved == "" {
+				return fmt.Errorf("attachment %q: path is outside allowed roots (/workspace, /scion-volumes)", p)
+			}
+			info, err := os.Stat(resolved)
+			if err != nil {
+				return fmt.Errorf("attachment %q: %w", p, err)
+			}
+			if !info.Mode().IsRegular() {
+				if info.IsDir() {
+					return fmt.Errorf("attachment %q: is a directory, not a regular file", p)
+				}
+				return fmt.Errorf("attachment %q: is not a regular file", p)
+			}
+		}
+
 		// Check if Hub should be used
 		var hubCtx *HubContext
 		var err error
