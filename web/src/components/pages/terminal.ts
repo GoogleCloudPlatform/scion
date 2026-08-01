@@ -896,8 +896,17 @@ export class ScionPageTerminal extends LitElement {
         <button
           class="port-dropdown-trigger"
           @click=${(e: Event) => {
+            e.stopPropagation();
             const el = (e.currentTarget as HTMLElement).parentElement!;
-            el.classList.toggle('open');
+            const isOpen = el.classList.toggle('open');
+            if (isOpen) {
+              const close = () => {
+                el.classList.remove('open');
+                document.removeEventListener('click', close);
+              };
+              // Use setTimeout to avoid the current click triggering the close
+              setTimeout(() => document.addEventListener('click', close), 0);
+            }
           }}
         >
           Ports (${this.exposedPorts.length}) ▾
@@ -910,7 +919,7 @@ export class ScionPageTerminal extends LitElement {
                 target="_blank"
                 rel="noopener"
               >
-                :${p.port}${p.label ? ` - ${p.label}` : ''}
+                :${p.port}${p.label ? ` — ${p.label}` : ''}
               </a>
             `
           )}

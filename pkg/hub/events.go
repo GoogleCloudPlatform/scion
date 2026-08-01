@@ -147,6 +147,7 @@ type AgentDeletedEvent struct {
 type AgentPortsEvent struct {
 	AgentID   string              `json:"agentId"`
 	ProjectID string              `json:"projectId"`
+	GroveID   string              `json:"groveId"`
 	Ports     []store.ExposedPort `json:"ports"`
 }
 
@@ -431,18 +432,17 @@ func (p *eventBuilder) PublishAgentDeleted(_ context.Context, agentID, projectID
 }
 
 // PublishAgentPorts publishes an agent ports event when the exposed ports change.
-func (b *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) {
+func (p *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) {
 	evt := AgentPortsEvent{
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
+		GroveID:   agent.ProjectID,
 		Ports:     agent.ExposedPorts,
 	}
-	b.sink("agent."+agent.ID+".ports", evt)
+	p.sink("agent."+agent.ID+".ports", evt)
 	if agent.ProjectID != "" {
-		b.sink("project."+agent.ProjectID+".agent.ports", evt)
-	}
-	if agent.ProjectID != "" {
-		b.sink("grove."+agent.ProjectID+".agent.ports", evt)
+		p.sink("project."+agent.ProjectID+".agent.ports", evt)
+		p.sink("grove."+agent.ProjectID+".agent.ports", evt)
 	}
 }
 
