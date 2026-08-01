@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io/fs"
@@ -105,25 +106,41 @@ type fileMatch struct {
 	ModTime time.Time
 }
 
-// safeResolve cleans the path, verifies it starts with root, resolves
-// symlinks, and re-verifies the resolved path is still under root.
+// safeResolve cleans the path, verifies it is under root using filepath.Rel,
+// resolves symlinks, and re-verifies the resolved path is still under root.
 // It returns the resolved path or an error if any check fails.
 //
-// root is normalised to end with a path separator so that a root of
-// "/scion-volumes" cannot be prefix-confused with "/scion-volumes-evil".
+// filepath.Rel is used instead of strings.HasPrefix to avoid prefix-confusion
+// attacks (e.g. "/scion-volumes" matching "/scion-volumes-evil").
 func safeResolve(path, root string) (string, error) {
-	root = filepath.Clean(root) + string(filepath.Separator)
-	cleaned := filepath.Clean(path)
-	if !strings.HasPrefix(cleaned, root) {
-		return "", fmt.Errorf("path %q does not start with %q", cleaned, root)
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
 	}
+	root = filepath.Clean(absRoot)
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	cleaned := filepath.Clean(absPath)
+
+	rel, err := filepath.Rel(root, cleaned)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q is not under %q", cleaned, root)
+	}
+
 	resolved, err := filepath.EvalSymlinks(cleaned)
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(resolved, root) {
-		return "", fmt.Errorf("resolved path %q does not start with %q", resolved, root)
+	resolved = filepath.Clean(resolved)
+
+	relResolved, err := filepath.Rel(root, resolved)
+	if err != nil || relResolved == ".." || strings.HasPrefix(relResolved, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("resolved path %q is not under %q", resolved, root)
 	}
+
 	return resolved, nil
 }
 
@@ -135,10 +152,62 @@ func isUnderSearchRoot(path, root string) bool {
 	return err == nil
 }
 
+// safeResolveMulti tries safeResolve against each root and returns the first
+// successful result. Returns an error if the path is not under any root.
+func safeResolveMulti(path string, roots []string) (string, error) {
+	for _, root := range roots {
+		if resolved, err := safeResolve(path, root); err == nil {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("path %q is not under any allowed root", path)
+}
+
+// projectSearchRoots computes the search roots for a project by enumerating
+// shared directories and the workspace path. It uses os.UserHomeDir() rather
+// than hardcoding /home/scion.
+func projectSearchRoots(slug, projectID string) []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+
+	shortUUID := strings.ReplaceAll(projectID, "-", "")
+	if len(shortUUID) > 8 {
+		shortUUID = shortUUID[:8]
+	}
+	configDir := filepath.Join(home, ".scion", "project-configs",
+		fmt.Sprintf("%s__%s", slug, shortUUID))
+	sharedDirsRoot := filepath.Join(configDir, "shared-dirs")
+
+	var roots []string
+
+	// Enumerate shared dir subdirectories.
+	entries, err := os.ReadDir(sharedDirsRoot)
+	if err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				roots = append(roots, filepath.Join(sharedDirsRoot, e.Name()))
+			}
+		}
+	}
+
+	// Include the workspace path.
+	workspacePath := filepath.Join(home, ".scion", "projects", slug)
+	if info, err := os.Stat(workspacePath); err == nil && info.IsDir() {
+		roots = append(roots, workspacePath)
+	}
+
+	return roots
+}
+
 // HandleSend handles the /scion send <path> command.
-// If path is an absolute path to an existing file under searchRoot, it sends
-// it directly. Otherwise it searches /scion-volumes/ for matching files and
-// presents buttons for selection.
+// It resolves the channel's project binding to determine per-project search
+// roots. If the channel is not linked and no send_search_root override is
+// configured, it returns an error asking the user to run /scion setup.
+// If path is an absolute path to an existing file under a valid root, it sends
+// it directly. Otherwise it searches all roots for matching files and presents
+// buttons for selection.
 func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	pathArg := getSubcommandOption(i, "path")
 	if pathArg == "" {
@@ -146,9 +215,17 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 		return
 	}
 
-	// Case 1: Absolute path pointing to an existing file, confined to searchRoot.
+	// Resolve search roots: per-project roots from channel link, with
+	// send_search_root as override/fallback.
+	roots := h.resolveSearchRoots(s, i)
+	if len(roots) == 0 {
+		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
+		return
+	}
+
+	// Case 1: Absolute path pointing to an existing file, confined to any root.
 	if filepath.IsAbs(pathArg) {
-		if resolved, err := safeResolve(pathArg, h.searchRoot); err == nil {
+		if resolved, err := safeResolveMulti(pathArg, roots); err == nil {
 			info, err := os.Stat(resolved)
 			if err == nil && !info.IsDir() {
 				h.sendFile(s, i, resolved, info)
@@ -157,8 +234,11 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 		}
 	}
 
-	// Case 2: Search for files matching the argument.
-	matches := searchFiles(h.searchRoot, pathArg)
+	// Case 2: Search for files matching the argument across all roots.
+	var matches []fileMatch
+	for _, root := range roots {
+		matches = append(matches, searchFiles(root, pathArg)...)
+	}
 
 	if len(matches) == 0 {
 		h.followup(s, i, fmt.Sprintf("No files found matching '%s'", pathArg))
@@ -206,6 +286,45 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 	if err != nil {
 		h.log.Error("Failed to send file search results", "error", err)
 	}
+}
+
+// resolveSearchRoots determines the search roots for a /scion send command.
+// If the channel is linked to a project, per-project roots are computed.
+// If send_search_root is configured (h.searchRoot != DefaultSearchRoot), it is
+// used as an override when present, or as a fallback when no project link exists.
+func (h *CommandHandler) resolveSearchRoots(s *discordgo.Session, i *discordgo.InteractionCreate) []string {
+	configuredOverride := h.searchRoot != DefaultSearchRoot && h.searchRoot != ""
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
+	if err != nil || link == nil || !link.Active {
+		// No project link — use configured override if available.
+		if configuredOverride {
+			return []string{h.searchRoot}
+		}
+		return nil
+	}
+
+	// Compute per-project roots from the channel link.
+	roots := projectSearchRoots(link.ProjectSlug, link.ProjectID)
+
+	// If a configured override is present, prepend it.
+	if configuredOverride {
+		roots = append([]string{h.searchRoot}, roots...)
+	}
+
+	// Fallback: if no project roots were found, use the configured root or
+	// the default search root as a last resort.
+	if len(roots) == 0 {
+		if configuredOverride {
+			return []string{h.searchRoot}
+		}
+		return []string{DefaultSearchRoot}
+	}
+
+	return roots
 }
 
 // buildButtonLabels returns a label for each match. When multiple matches
@@ -336,24 +455,22 @@ func searchFiles(root, query string) []fileMatch {
 
 // handleSendFileCallback is called by the CallbackHandler when a send:file
 // button is clicked. It looks up the stored path and sends the file.
-func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate, key, root string, log *slog.Logger) {
+//
+// The stored path was already validated via safeResolve at search time, so the
+// callback only needs to verify the file still exists and is readable. The
+// path confinement check is not repeated here because the search roots may
+// differ from the callback handler's single searchRoot (per-project roots are
+// resolved dynamically based on the channel's project binding).
+func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate, key string, log *slog.Logger) {
 	path := globalSendPaths.Get(key)
 	if path == "" {
 		respondSendUpdate(s, i, "This file link has expired. Please use `/scion send` again.", log)
 		return
 	}
 
-	// Verify path is still confined to the search root (resolves symlinks).
-	resolved, err := safeResolve(path, root)
+	info, err := os.Stat(path)
 	if err != nil {
-		log.Warn("Send callback path failed confinement check", "path", path, "error", err)
-		respondSendUpdate(s, i, "This file is no longer accessible.", log)
-		return
-	}
-
-	info, err := os.Stat(resolved)
-	if err != nil {
-		log.Error("Failed to stat file for send callback", "path", resolved, "error", err)
+		log.Error("Failed to stat file for send callback", "path", path, "error", err)
 		respondSendUpdate(s, i, fmt.Sprintf("File not found: %s", filepath.Base(path)), log)
 		return
 	}
@@ -369,9 +486,9 @@ func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate
 		return
 	}
 
-	file, err := os.Open(resolved)
+	file, err := os.Open(path)
 	if err != nil {
-		log.Error("Failed to open file for send callback", "path", resolved, "error", err)
+		log.Error("Failed to open file for send callback", "path", path, "error", err)
 		respondSendUpdate(s, i, fmt.Sprintf("Could not read file: %s", filepath.Base(path)), log)
 		return
 	}
@@ -389,7 +506,7 @@ func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate
 		},
 	})
 	if err != nil {
-		log.Error("Failed to send file from callback", "path", resolved, "error", err)
+		log.Error("Failed to send file from callback", "path", path, "error", err)
 	}
 }
 

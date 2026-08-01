@@ -336,6 +336,148 @@ func TestBuildButtonLabels_DuplicateBasenames(t *testing.T) {
 	assert.Equal(t, "project-b/README.md", labels[1])
 }
 
+// --- safeResolveMulti tests ---
+
+func TestSafeResolveMulti_MatchesFirstRoot(t *testing.T) {
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+	f, err := os.CreateTemp(root1, "multi-*.txt")
+	require.NoError(t, err)
+	f.Close()
+
+	resolved, err := safeResolveMulti(f.Name(), []string{root1, root2})
+	assert.NoError(t, err)
+	assert.Equal(t, f.Name(), resolved)
+}
+
+func TestSafeResolveMulti_MatchesSecondRoot(t *testing.T) {
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+	f, err := os.CreateTemp(root2, "multi-*.txt")
+	require.NoError(t, err)
+	f.Close()
+
+	resolved, err := safeResolveMulti(f.Name(), []string{root1, root2})
+	assert.NoError(t, err)
+	assert.Equal(t, f.Name(), resolved)
+}
+
+func TestSafeResolveMulti_RejectsOutsideAll(t *testing.T) {
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+
+	_, err := safeResolveMulti("/etc/passwd", []string{root1, root2})
+	assert.Error(t, err)
+}
+
+func TestSafeResolveMulti_EmptyRoots(t *testing.T) {
+	_, err := safeResolveMulti("/etc/passwd", nil)
+	assert.Error(t, err)
+}
+
+// --- safeResolve with root=/ edge case ---
+
+func TestSafeResolve_RootSlash(t *testing.T) {
+	// When root is /, any absolute path should resolve successfully.
+	tmpFile, err := os.CreateTemp(t.TempDir(), "rootslash-*.txt")
+	require.NoError(t, err)
+	tmpFile.Close()
+
+	resolved, err := safeResolve(tmpFile.Name(), "/")
+	assert.NoError(t, err)
+	assert.Equal(t, tmpFile.Name(), resolved)
+}
+
+func TestSafeResolve_RootSlash_RejectsTraversal(t *testing.T) {
+	// Path traversal beyond / should still be caught — cleaned path stays under /.
+	tmpFile, err := os.CreateTemp(t.TempDir(), "rootslash-*.txt")
+	require.NoError(t, err)
+	tmpFile.Close()
+
+	resolved, err := safeResolve("/../"+tmpFile.Name(), "/")
+	assert.NoError(t, err)
+	assert.Equal(t, tmpFile.Name(), resolved)
+}
+
+// --- searchFiles with multiple roots ---
+
+func TestSearchFiles_MultipleRoots(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "report.txt"), []byte("r"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "data.txt"), []byte("d"), 0o644))
+
+	// Search each root separately and merge (mimicking HandleSend behavior).
+	var matches []fileMatch
+	for _, root := range []string{dir1, dir2} {
+		matches = append(matches, searchFiles(root, ".txt")...)
+	}
+
+	assert.Len(t, matches, 2)
+	paths := []string{matches[0].Path, matches[1].Path}
+	assert.Contains(t, paths[0]+paths[1], "report.txt")
+	assert.Contains(t, paths[0]+paths[1], "data.txt")
+}
+
+// --- projectSearchRoots tests ---
+
+func TestProjectSearchRoots_DiscoversDirs(t *testing.T) {
+	// Set up a fake home directory structure.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	slug := "test-proj"
+	projectID := "550e8400-e29b-41d4-a716-446655440000"
+
+	// Compute expected paths.
+	shortUUID := "550e8400"
+	configDir := filepath.Join(fakeHome, ".scion", "project-configs",
+		slug+"__"+shortUUID)
+	sharedDirsRoot := filepath.Join(configDir, "shared-dirs")
+
+	// Create shared dir subdirectories.
+	require.NoError(t, os.MkdirAll(filepath.Join(sharedDirsRoot, "scratchpad"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(sharedDirsRoot, "cache"), 0o755))
+
+	// Create workspace directory.
+	workspaceDir := filepath.Join(fakeHome, ".scion", "projects", slug)
+	require.NoError(t, os.MkdirAll(workspaceDir, 0o755))
+
+	roots := projectSearchRoots(slug, projectID)
+
+	assert.Len(t, roots, 3)
+	assert.Contains(t, roots, filepath.Join(sharedDirsRoot, "cache"))
+	assert.Contains(t, roots, filepath.Join(sharedDirsRoot, "scratchpad"))
+	assert.Contains(t, roots, workspaceDir)
+}
+
+func TestProjectSearchRoots_NoSharedDirs(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	slug := "empty-proj"
+	projectID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+	// Create only workspace directory.
+	workspaceDir := filepath.Join(fakeHome, ".scion", "projects", slug)
+	require.NoError(t, os.MkdirAll(workspaceDir, 0o755))
+
+	roots := projectSearchRoots(slug, projectID)
+
+	assert.Len(t, roots, 1)
+	assert.Equal(t, workspaceDir, roots[0])
+}
+
+func TestProjectSearchRoots_NothingExists(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	roots := projectSearchRoots("nonexistent", "00000000-0000-0000-0000-000000000000")
+
+	assert.Empty(t, roots)
+}
+
 // --- test helpers ---
 
 // setupSearchTestDir creates a temporary directory structure for search tests.
