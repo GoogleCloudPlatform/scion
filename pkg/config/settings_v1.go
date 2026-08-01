@@ -1981,12 +1981,13 @@ func detectHierarchyFormat(projectPath string) (hasVersioned bool, missingSchema
 // files (global and project), used to scan for files missing schema_version.
 func settingsCandidateDirs(projectPath string) []string {
 	var dirs []string
-	if globalDir, _ := GetGlobalDir(); globalDir != "" {
+	globalDir, _ := GetGlobalDir()
+	if globalDir != "" {
 		dirs = append(dirs, globalDir)
 	}
 	if effectiveProjectPath := resolveEffectiveProjectPath(projectPath); effectiveProjectPath != "" {
 		// Avoid duplicates if project path == global dir.
-		if len(dirs) == 0 || dirs[0] != effectiveProjectPath {
+		if effectiveProjectPath != globalDir {
 			dirs = append(dirs, effectiveProjectPath)
 		}
 	}
