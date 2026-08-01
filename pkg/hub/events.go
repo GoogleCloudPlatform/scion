@@ -38,6 +38,7 @@ type EventPublisher interface {
 	PublishBrokerStatus(ctx context.Context, brokerID, status string)
 	PublishNotification(ctx context.Context, notif *store.Notification)
 	PublishUserMessage(ctx context.Context, msg *store.Message)
+	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
 	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
 	// PublishDispatchDone emits a slim completion event on
@@ -69,6 +70,7 @@ func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string,
 func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                {}
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message)            {}
+func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)                {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)            {}
 func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)            {}
 func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)                   {}
@@ -139,6 +141,13 @@ type AgentDeletedEvent struct {
 	AgentID   string `json:"agentId"`
 	ProjectID string `json:"projectId"`
 	GroveID   string `json:"groveId"`
+}
+
+// AgentPortsEvent is published when an agent's exposed ports change.
+type AgentPortsEvent struct {
+	AgentID   string              `json:"agentId"`
+	ProjectID string              `json:"projectId"`
+	Ports     []store.ExposedPort `json:"ports"`
 }
 
 // ProjectCreatedEvent is published when a project is created.
@@ -418,6 +427,22 @@ func (p *eventBuilder) PublishAgentDeleted(_ context.Context, agentID, projectID
 	if projectID != "" {
 		p.sink("project."+projectID+".agent.deleted", evt)
 		p.sink("grove."+projectID+".agent.deleted", evt)
+	}
+}
+
+// PublishAgentPorts publishes an agent ports event when the exposed ports change.
+func (b *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) {
+	evt := AgentPortsEvent{
+		AgentID:   agent.ID,
+		ProjectID: agent.ProjectID,
+		Ports:     agent.ExposedPorts,
+	}
+	b.sink("agent."+agent.ID+".ports", evt)
+	if agent.ProjectID != "" {
+		b.sink("project."+agent.ProjectID+".agent.ports", evt)
+	}
+	if agent.ProjectID != "" {
+		b.sink("grove."+agent.ProjectID+".agent.ports", evt)
 	}
 }
 

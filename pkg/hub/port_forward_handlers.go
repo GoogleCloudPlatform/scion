@@ -287,6 +287,10 @@ func (s *Server) registerAgentPort(w http.ResponseWriter, r *http.Request, agent
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	// Re-read agent for committed state
+	if updated, err := s.store.GetAgent(r.Context(), agent.ID); err == nil {
+		s.events.PublishAgentPorts(r.Context(), updated)
+	}
 	writeJSON(w, http.StatusCreated, exposedPortResponses(agent.ID, ports)[len(ports)-1])
 }
 
@@ -312,6 +316,10 @@ func (s *Server) deleteAgentPort(w http.ResponseWriter, r *http.Request, agentID
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	// Re-read agent for committed state
+	if updated, err := s.store.GetAgent(r.Context(), agent.ID); err == nil {
+		s.events.PublishAgentPorts(r.Context(), updated)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -323,6 +331,10 @@ func (s *Server) clearAgentPorts(w http.ResponseWriter, r *http.Request, agentID
 	if err := s.store.UpdateAgentExposedPorts(r.Context(), agent.ID, nil); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	// Re-read agent for committed state
+	if updated, err := s.store.GetAgent(r.Context(), agent.ID); err == nil {
+		s.events.PublishAgentPorts(r.Context(), updated)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
