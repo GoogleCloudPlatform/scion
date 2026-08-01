@@ -102,8 +102,8 @@ var globalSendPaths = newSendPathStore()
 
 // fileMatch holds a matched file path and its modification time for sorting.
 type fileMatch struct {
-	Path        string    // resolved (EvalSymlinks) absolute path
-	DisplayName string    // original filename for button labels (non-empty only for symlinks)
+	Path        string // resolved (EvalSymlinks) absolute path
+	DisplayName string // original filename for button labels (non-empty only for symlinks)
 	ModTime     time.Time
 }
 
