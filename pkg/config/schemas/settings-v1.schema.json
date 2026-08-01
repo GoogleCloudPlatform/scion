@@ -76,7 +76,8 @@
           "default": "text",
           "x-env-var": "SCION_SERVER_LOG_FORMAT",
           "x-since": "1"
-        }
+        },
+        "scheduler": { "$ref": "#/$defs/serverScheduler" }
       },
       "additionalProperties": false
     },
@@ -940,6 +941,30 @@
         "gcp_project_id": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPPROJECTID" },
         "gcp_credentials": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPCREDENTIALS" }
       }
+    },
+    "serverScheduler": {
+      "type": "object",
+      "description": "Hub background task scheduler settings. Controls tick frequency and concurrency to tune DB load.",
+      "x-since": "1",
+      "properties": {
+        "interval_seconds": {
+          "type": "integer",
+          "minimum": 10,
+          "default": 60,
+          "description": "Root ticker interval in seconds. All recurring handlers fire at multiples of this interval. Increasing this value reduces DB connection pressure on small deployments.",
+          "x-env-var": "SCION_SERVER_SCHEDULER_INTERVAL_SECONDS",
+          "x-since": "1"
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Maximum number of recurring handlers that may run simultaneously in a single tick. 0 means unlimited. Setting to 2-3 prevents all handlers from competing for DB connections at once.",
+          "x-env-var": "SCION_SERVER_SCHEDULER_MAX_CONCURRENCY",
+          "x-since": "1"
+        }
+      },
+      "additionalProperties": false
     },
     "telemetryConfig": {
       "type": "object",

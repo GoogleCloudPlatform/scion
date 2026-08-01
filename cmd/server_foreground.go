@@ -1315,6 +1315,8 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
+		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
+		SchedulerMaxConcurrency:      cfg.Scheduler.MaxConcurrency,
 		Workstation:                  !hostedMode,
 		DevUserConfig: hub.DevUserConfig{
 			Username:    cfg.Auth.Username,
