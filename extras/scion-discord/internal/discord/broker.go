@@ -898,6 +898,12 @@ func (b *DiscordBroker) BrokerQuery(ctx context.Context, operation string, param
 		return b.queryListChannels(ctx, params)
 	case "list-threads":
 		return b.queryListThreads(ctx, params)
+	case "set-default":
+		return b.querySetDefault(ctx, params)
+	case "channel-history":
+		return b.queryChannelHistory(ctx, params)
+	case "send-dm":
+		return b.querySendDM(ctx, params)
 	default:
 		return nil, plugin.ErrUnsupportedOperation
 	}

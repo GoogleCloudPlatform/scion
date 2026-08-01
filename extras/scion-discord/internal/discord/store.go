@@ -104,6 +104,7 @@ type DiscordUserMapping struct {
 	ScionUserID     string
 	ScionEmail      string
 	LinkedAt        time.Time
+	DMEnabled       bool // Whether this user accepts DMs from agents. Default true.
 }
 
 // ThreadDefault represents a thread-to-agent routing override.
@@ -283,6 +284,7 @@ func (s *sqliteStore) migrateSchema() {
 	migrations := []string{
 		`ALTER TABLE channel_links ADD COLUMN show_state_changes INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE channel_links ADD COLUMN guild_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE user_mappings ADD COLUMN dm_enabled INTEGER NOT NULL DEFAULT 1`,
 	}
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
@@ -439,32 +441,33 @@ func (s *sqliteStore) ListThreadDefaultsForChannel(ctx context.Context, channelI
 
 func (s *sqliteStore) CreateUserMapping(ctx context.Context, mapping *DiscordUserMapping) error {
 	const q = `
-INSERT INTO user_mappings (discord_user_id, discord_username, scion_user_id, scion_email, linked_at)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO user_mappings (discord_user_id, discord_username, scion_user_id, scion_email, linked_at, dm_enabled)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(discord_user_id) DO UPDATE SET
 	discord_username=excluded.discord_username, scion_user_id=excluded.scion_user_id,
-	scion_email=excluded.scion_email, linked_at=excluded.linked_at`
+	scion_email=excluded.scion_email, linked_at=excluded.linked_at, dm_enabled=excluded.dm_enabled`
 	_, err := s.db.ExecContext(ctx, q,
 		mapping.DiscordUserID, mapping.DiscordUsername,
 		mapping.ScionUserID, mapping.ScionEmail,
-		mapping.LinkedAt.UTC().Format(time.RFC3339))
+		mapping.LinkedAt.UTC().Format(time.RFC3339),
+		boolToInt(mapping.DMEnabled))
 	return err
 }
 
 func (s *sqliteStore) GetUserMapping(ctx context.Context, discordUserID string) (*DiscordUserMapping, error) {
-	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at FROM user_mappings WHERE discord_user_id = ?`
+	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at, dm_enabled FROM user_mappings WHERE discord_user_id = ?`
 	row := s.db.QueryRowContext(ctx, q, discordUserID)
 	return scanUserMapping(row)
 }
 
 func (s *sqliteStore) GetUserMappingByEmail(ctx context.Context, email string) (*DiscordUserMapping, error) {
-	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at FROM user_mappings WHERE scion_email = ?`
+	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at, dm_enabled FROM user_mappings WHERE scion_email = ?`
 	row := s.db.QueryRowContext(ctx, q, email)
 	return scanUserMapping(row)
 }
 
 func (s *sqliteStore) GetUserMappingByScionUserID(ctx context.Context, userID string) (*DiscordUserMapping, error) {
-	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at FROM user_mappings WHERE scion_user_id = ?`
+	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at, dm_enabled FROM user_mappings WHERE scion_user_id = ?`
 	row := s.db.QueryRowContext(ctx, q, userID)
 	return scanUserMapping(row)
 }
@@ -771,7 +774,8 @@ func scanChannelLinks(rows *sql.Rows) ([]*ChannelLink, error) {
 func scanUserMapping(row *sql.Row) (*DiscordUserMapping, error) {
 	var m DiscordUserMapping
 	var linkedAt string
-	err := row.Scan(&m.DiscordUserID, &m.DiscordUsername, &m.ScionUserID, &m.ScionEmail, &linkedAt)
+	var dmEnabled int
+	err := row.Scan(&m.DiscordUserID, &m.DiscordUsername, &m.ScionUserID, &m.ScionEmail, &linkedAt, &dmEnabled)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -782,6 +786,7 @@ func scanUserMapping(row *sql.Row) (*DiscordUserMapping, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse linked_at: %w", err)
 	}
+	m.DMEnabled = dmEnabled != 0
 	return &m, nil
 }
 

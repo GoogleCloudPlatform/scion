@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS discord_thread_defaults (
 func (s *postgresStore) migrateSchema() {
 	migrations := []string{
 		`ALTER TABLE discord_channel_links ADD COLUMN IF NOT EXISTS guild_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE discord_user_mappings ADD COLUMN IF NOT EXISTS dm_enabled BOOLEAN NOT NULL DEFAULT true`,
 	}
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
@@ -278,32 +279,32 @@ func (s *postgresStore) ListThreadDefaultsForChannel(ctx context.Context, channe
 
 func (s *postgresStore) CreateUserMapping(ctx context.Context, mapping *DiscordUserMapping) error {
 	const q = `
-INSERT INTO discord_user_mappings (discord_user_id, discord_username, scion_user_id, scion_email, linked_at)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO discord_user_mappings (discord_user_id, discord_username, scion_user_id, scion_email, linked_at, dm_enabled)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT(discord_user_id) DO UPDATE SET
 	discord_username=EXCLUDED.discord_username, scion_user_id=EXCLUDED.scion_user_id,
-	scion_email=EXCLUDED.scion_email, linked_at=EXCLUDED.linked_at`
+	scion_email=EXCLUDED.scion_email, linked_at=EXCLUDED.linked_at, dm_enabled=EXCLUDED.dm_enabled`
 	_, err := s.db.ExecContext(ctx, q,
 		mapping.DiscordUserID, mapping.DiscordUsername,
 		mapping.ScionUserID, mapping.ScionEmail,
-		mapping.LinkedAt.UTC())
+		mapping.LinkedAt.UTC(), mapping.DMEnabled)
 	return err
 }
 
 func (s *postgresStore) GetUserMapping(ctx context.Context, discordUserID string) (*DiscordUserMapping, error) {
-	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at FROM discord_user_mappings WHERE discord_user_id = $1`
+	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at, dm_enabled FROM discord_user_mappings WHERE discord_user_id = $1`
 	row := s.db.QueryRowContext(ctx, q, discordUserID)
 	return pgScanUserMapping(row)
 }
 
 func (s *postgresStore) GetUserMappingByEmail(ctx context.Context, email string) (*DiscordUserMapping, error) {
-	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at FROM discord_user_mappings WHERE scion_email = $1`
+	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at, dm_enabled FROM discord_user_mappings WHERE scion_email = $1`
 	row := s.db.QueryRowContext(ctx, q, email)
 	return pgScanUserMapping(row)
 }
 
 func (s *postgresStore) GetUserMappingByScionUserID(ctx context.Context, userID string) (*DiscordUserMapping, error) {
-	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at FROM discord_user_mappings WHERE scion_user_id = $1`
+	const q = `SELECT discord_user_id, discord_username, scion_user_id, scion_email, linked_at, dm_enabled FROM discord_user_mappings WHERE scion_user_id = $1`
 	row := s.db.QueryRowContext(ctx, q, userID)
 	return pgScanUserMapping(row)
 }
@@ -593,7 +594,7 @@ func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (bool, *
 
 func pgScanUserMapping(row *sql.Row) (*DiscordUserMapping, error) {
 	var m DiscordUserMapping
-	err := row.Scan(&m.DiscordUserID, &m.DiscordUsername, &m.ScionUserID, &m.ScionEmail, &m.LinkedAt)
+	err := row.Scan(&m.DiscordUserID, &m.DiscordUsername, &m.ScionUserID, &m.ScionEmail, &m.LinkedAt, &m.DMEnabled)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
