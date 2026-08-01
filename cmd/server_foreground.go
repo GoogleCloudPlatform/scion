@@ -1316,7 +1316,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
-		SchedulerMaxConcurrency:      cfg.Scheduler.MaxConcurrency,
+		SchedulerMaxConcurrency:      cfg.Scheduler.MaxConcurrency, // *int: nil = use default, *0 = unlimited
 		Workstation:                  !hostedMode,
 		DevUserConfig: hub.DevUserConfig{
 			Username:    cfg.Auth.Username,

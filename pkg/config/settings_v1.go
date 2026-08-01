@@ -354,11 +354,11 @@ type V1SchedulerConfig struct {
 	// Increasing this value reduces DB connection pressure on small deployments.
 	IntervalSeconds int `json:"interval_seconds,omitempty" yaml:"interval_seconds,omitempty" koanf:"interval_seconds"`
 	// MaxConcurrency limits the number of recurring handlers that may run
-	// simultaneously in a single tick. When unset (0), the scheduler uses its
-	// built-in default of 2, so the fix for issue #367 (DB connection pool
-	// saturation) is active out-of-the-box. Set to a higher value to allow
-	// more parallel handlers on larger deployments.
-	MaxConcurrency int `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty" koanf:"max_concurrency"`
+	// simultaneously in a single tick. When nil (unset), the scheduler uses
+	// its built-in default of 2, so the fix for issue #367 (DB connection
+	// pool saturation) is active out-of-the-box. Set to 0 for unlimited
+	// (pre-fix behavior), or a higher value for larger deployments.
+	MaxConcurrency *int `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty" koanf:"max_concurrency"`
 }
 
 // V1NotificationChannelConfig holds configuration for an external notification channel.
@@ -1537,7 +1537,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	// Scheduler
 	if v1.Scheduler != nil {
 		gc.Scheduler.IntervalSeconds = v1.Scheduler.IntervalSeconds
-		gc.Scheduler.MaxConcurrency = v1.Scheduler.MaxConcurrency
+		gc.Scheduler.MaxConcurrency = v1.Scheduler.MaxConcurrency // both are *int; nil propagates
 	}
 
 	return &gc
@@ -1695,7 +1695,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	// Scheduler config
-	if gc.Scheduler.IntervalSeconds != 0 || gc.Scheduler.MaxConcurrency != 0 {
+	if gc.Scheduler.IntervalSeconds != 0 || gc.Scheduler.MaxConcurrency != nil {
 		v1.Scheduler = &V1SchedulerConfig{
 			IntervalSeconds: gc.Scheduler.IntervalSeconds,
 			MaxConcurrency:  gc.Scheduler.MaxConcurrency,

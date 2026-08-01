@@ -213,10 +213,10 @@ type ServerConfig struct {
 	// pressure on small deployments.
 	SchedulerIntervalSeconds int
 	// SchedulerMaxConcurrency limits the number of recurring handlers that may
-	// run simultaneously in a single tick. When 0 (unset), the scheduler uses
-	// its built-in default of 2 so the fix for issue #367 is active
-	// out-of-the-box.
-	SchedulerMaxConcurrency int
+	// run simultaneously in a single tick. When nil (unset), the scheduler
+	// uses its built-in default of 2 so the fix for issue #367 is active
+	// out-of-the-box. Pointer-to-0 explicitly means unlimited.
+	SchedulerMaxConcurrency *int
 
 	// Workstation indicates non-production, single-user mode (e.g. local laptop).
 	// When true, /api/v1/system/* and other workstation-only endpoints are enabled.
@@ -2617,8 +2617,8 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.config.SchedulerIntervalSeconds > 0 {
 		schedOpts = append(schedOpts, WithTickInterval(time.Duration(s.config.SchedulerIntervalSeconds)*time.Second))
 	}
-	if s.config.SchedulerMaxConcurrency > 0 {
-		schedOpts = append(schedOpts, WithMaxConcurrency(s.config.SchedulerMaxConcurrency))
+	if s.config.SchedulerMaxConcurrency != nil {
+		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
 	}
 	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	// Recurring sweeps are cluster-wide-once work: under multi-replica Postgres

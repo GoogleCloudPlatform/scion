@@ -365,8 +365,9 @@ type SchedulerConfig struct {
 	// IntervalSeconds is the root ticker interval in seconds. Default: 60.
 	IntervalSeconds int `json:"intervalSeconds,omitempty" yaml:"intervalSeconds,omitempty" koanf:"intervalSeconds"`
 	// MaxConcurrency limits simultaneous recurring handlers per tick.
-	// When 0 (unset), the scheduler uses its built-in default of 2.
-	MaxConcurrency int `json:"maxConcurrency,omitempty" yaml:"maxConcurrency,omitempty" koanf:"maxConcurrency"`
+	// When nil (unset), the scheduler uses its built-in default of 2.
+	// Set to 0 for unlimited (pre-fix behavior).
+	MaxConcurrency *int `json:"maxConcurrency,omitempty" yaml:"maxConcurrency,omitempty" koanf:"maxConcurrency"`
 }
 
 // GitHubAppConfig holds configuration for the Hub's GitHub App integration.
