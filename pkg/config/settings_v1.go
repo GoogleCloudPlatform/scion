@@ -1977,6 +1977,23 @@ func detectHierarchyFormat(projectPath string) (hasVersioned bool, missingSchema
 	return false, false
 }
 
+// settingsCandidateDirs returns the directories that may contain user settings
+// files (global and project), used to scan for files missing schema_version.
+func settingsCandidateDirs(projectPath string) []string {
+	var dirs []string
+	globalDir, _ := GetGlobalDir()
+	if globalDir != "" {
+		dirs = append(dirs, globalDir)
+	}
+	if effectiveProjectPath := resolveEffectiveProjectPath(projectPath); effectiveProjectPath != "" {
+		// Avoid duplicates if project path == global dir.
+		if effectiveProjectPath != globalDir {
+			dirs = append(dirs, effectiveProjectPath)
+		}
+	}
+	return dirs
+}
+
 // LoadEffectiveSettings is a unified entry point that detects the settings format
 // and loads using the appropriate path.
 // - If any user file is versioned → uses LoadVersionedSettings
@@ -1996,12 +2013,42 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 		return vs, warnings, nil
 	}
 
+	// Before falling through to the legacy path, check if any settings file
+	// has real content but lacks schema_version, harnesses key, and v1 runtime
+	// indicators — such files may not load correctly in future versions.
+	var warnings []string
+	for _, dir := range settingsCandidateDirs(projectPath) {
+		path := GetSettingsPath(dir)
+		if path == "" {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		version, isLegacy := DetectSettingsFormat(data)
+		if version != "" || isLegacy {
+			// File was recognized — not silently ignored.
+			continue
+		}
+		// Parse to check for real keys.
+		var raw map[string]interface{}
+		if err := yamlv3.Unmarshal(data, &raw); err != nil || len(raw) == 0 {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"settings file %s has no schema_version field and no recognized format indicators. Add 'schema_version: \"1\"' as the first line for reliable versioned settings loading; without it, settings may not load correctly in future versions.",
+			path,
+		))
+	}
+
 	// Legacy path: load via existing loader, then adapt
 	legacy, err := LoadSettingsKoanf(projectPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading legacy settings: %w", err)
 	}
-	vs, warnings := AdaptLegacySettings(legacy)
+	vs, legacyWarnings := AdaptLegacySettings(legacy)
+	warnings = append(warnings, legacyWarnings...)
 	return vs, warnings, nil
 }
 
