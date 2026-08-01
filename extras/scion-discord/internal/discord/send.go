@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	// searchRoot is the base directory for file searches.
-	searchRoot = "/scion-volumes/"
+	// DefaultSearchRoot is the default base directory for file searches
+	// when no send_search_root is configured.
+	DefaultSearchRoot = "/scion-volumes/"
 
 	// maxDiscordFileSize is the Discord attachment size limit (25 MB).
 	maxDiscordFileSize = 25 * 1024 * 1024
@@ -104,29 +105,29 @@ type fileMatch struct {
 	ModTime time.Time
 }
 
-// safeResolve cleans the path, verifies it starts with searchRoot, resolves
-// symlinks, and re-verifies the resolved path is still under searchRoot.
+// safeResolve cleans the path, verifies it starts with root, resolves
+// symlinks, and re-verifies the resolved path is still under root.
 // It returns the resolved path or an error if any check fails.
-func safeResolve(path string) (string, error) {
+func safeResolve(path, root string) (string, error) {
 	cleaned := filepath.Clean(path)
-	if !strings.HasPrefix(cleaned, searchRoot) {
-		return "", fmt.Errorf("path %q does not start with %q", cleaned, searchRoot)
+	if !strings.HasPrefix(cleaned, root) {
+		return "", fmt.Errorf("path %q does not start with %q", cleaned, root)
 	}
 	resolved, err := filepath.EvalSymlinks(cleaned)
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(resolved, searchRoot) {
-		return "", fmt.Errorf("resolved path %q does not start with %q", resolved, searchRoot)
+	if !strings.HasPrefix(resolved, root) {
+		return "", fmt.Errorf("resolved path %q does not start with %q", resolved, root)
 	}
 	return resolved, nil
 }
 
-// isUnderSearchRoot checks that a cleaned, resolved path is under searchRoot.
-// Both the cleaned path and its symlink-resolved form must be under searchRoot
+// isUnderSearchRoot checks that a cleaned, resolved path is under root.
+// Both the cleaned path and its symlink-resolved form must be under root
 // to prevent directory traversal and symlink escape attacks.
-func isUnderSearchRoot(path string) bool {
-	_, err := safeResolve(path)
+func isUnderSearchRoot(path, root string) bool {
+	_, err := safeResolve(path, root)
 	return err == nil
 }
 
@@ -143,7 +144,7 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 
 	// Case 1: Absolute path pointing to an existing file, confined to searchRoot.
 	if filepath.IsAbs(pathArg) {
-		if resolved, err := safeResolve(pathArg); err == nil {
+		if resolved, err := safeResolve(pathArg, h.searchRoot); err == nil {
 			info, err := os.Stat(resolved)
 			if err == nil && !info.IsDir() {
 				h.sendFile(s, i, resolved, info)
@@ -153,7 +154,7 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 	}
 
 	// Case 2: Search for files matching the argument.
-	matches := searchFiles(searchRoot, pathArg)
+	matches := searchFiles(h.searchRoot, pathArg)
 
 	if len(matches) == 0 {
 		h.followup(s, i, fmt.Sprintf("No files found matching '%s'", pathArg))
@@ -331,15 +332,15 @@ func searchFiles(root, query string) []fileMatch {
 
 // handleSendFileCallback is called by the CallbackHandler when a send:file
 // button is clicked. It looks up the stored path and sends the file.
-func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate, key string, log *slog.Logger) {
+func handleSendFileCallback(s *discordgo.Session, i *discordgo.InteractionCreate, key, root string, log *slog.Logger) {
 	path := globalSendPaths.Get(key)
 	if path == "" {
 		respondSendUpdate(s, i, "This file link has expired. Please use `/scion send` again.", log)
 		return
 	}
 
-	// Verify path is still confined to searchRoot (resolves symlinks).
-	resolved, err := safeResolve(path)
+	// Verify path is still confined to the search root (resolves symlinks).
+	resolved, err := safeResolve(path, root)
 	if err != nil {
 		log.Warn("Send callback path failed confinement check", "path", path, "error", err)
 		respondSendUpdate(s, i, "This file is no longer accessible.", log)

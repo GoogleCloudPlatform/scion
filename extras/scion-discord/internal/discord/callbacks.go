@@ -24,19 +24,27 @@ type CallbackHandler struct {
 	// deliverInbound delivers a StructuredMessage to the hub on the given topic.
 	// Injected by the broker so callbacks can route responses back to agents.
 	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError
+
+	searchRoot string // base directory for /scion send file searches
 }
 
 // NewCallbackHandler creates a new CallbackHandler.
 // deliverInbound is a function that posts a StructuredMessage to the hub.
-func NewCallbackHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage) *hubError, log *slog.Logger) *CallbackHandler {
+// searchRoot sets the base directory for /scion send file searches; when
+// empty it defaults to DefaultSearchRoot.
+func NewCallbackHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage) *hubError, searchRoot string, log *slog.Logger) *CallbackHandler {
 	if log == nil {
 		log = slog.Default()
+	}
+	if searchRoot == "" {
+		searchRoot = DefaultSearchRoot
 	}
 	return &CallbackHandler{
 		store:          store,
 		session:        session,
 		hubClient:      hubClient,
 		deliverInbound: deliverInbound,
+		searchRoot:     searchRoot,
 		log:            log,
 	}
 }
@@ -617,7 +625,7 @@ func (h *CallbackHandler) handleSendCallback(s *discordgo.Session, i *discordgo.
 		return
 	}
 	key := parts[2]
-	handleSendFileCallback(s, i, key, h.log)
+	handleSendFileCallback(s, i, key, h.searchRoot, h.log)
 }
 
 // --- Notification callback handlers ---
