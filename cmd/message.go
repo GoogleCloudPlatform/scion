@@ -200,8 +200,11 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("attachment %q: %w", p, err)
 			}
-			if info.IsDir() {
-				return fmt.Errorf("attachment %q: is a directory, not a regular file", p)
+			if !info.Mode().IsRegular() {
+				if info.IsDir() {
+					return fmt.Errorf("attachment %q: is a directory, not a regular file", p)
+				}
+				return fmt.Errorf("attachment %q: is not a regular file", p)
 			}
 		}
 
