@@ -27,6 +27,10 @@ const (
 // deliveryMetadataAllowlist defines the metadata keys that are forwarded to
 // agents during delivery. Platform-specific keys (e.g. telegram_chat_id) are
 // excluded to avoid leaking implementation details.
+//
+// "channel" and "thread_id" duplicate first-class fields on deliveryMessage
+// but are included here for completeness — callers may set them as metadata
+// instead of (or in addition to) the top-level fields.
 var deliveryMetadataAllowlist = map[string]bool{
 	"mention_source":   true,
 	"mention_position": true,
