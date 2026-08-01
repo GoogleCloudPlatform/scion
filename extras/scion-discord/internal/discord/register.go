@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -94,6 +95,15 @@ func NewRegistrationHandler(store Store, session *discordgo.Session, hubURL, reg
 	}
 }
 
+// registrationBaseURL returns the base URL for user-facing registration links.
+// It prefers registerURL when configured; otherwise it falls back to hubURL.
+func (h *RegistrationHandler) registrationBaseURL() string {
+	if h.registerURL != "" {
+		return h.registerURL
+	}
+	return h.hubURL
+}
+
 // HandleRegister handles the /scion register command. It generates a short
 // linking code, registers it with the hub, and sends the user a link button.
 func (h *RegistrationHandler) HandleRegister(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -162,13 +172,7 @@ func (h *RegistrationHandler) HandleRegister(s *discordgo.Session, i *discordgo.
 	h.pending[discordUserID] = reg
 	h.mu.Unlock()
 
-	// Build the link URL. Prefer registerURL (the public-facing address)
-	// when configured; fall back to hubURL for backward compatibility.
-	baseURL := h.hubURL
-	if h.registerURL != "" {
-		baseURL = h.registerURL
-	}
-	hubLink := formatRegistrationLink(baseURL, code, discordUsername)
+	hubLink := formatRegistrationLink(h.registrationBaseURL(), code, discordUsername)
 
 	// Send follow-up with a URL button.
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
@@ -425,7 +429,7 @@ func interactionUsername(i *discordgo.InteractionCreate) string {
 // URL, linking code, and Discord username.
 func formatRegistrationLink(baseURL, code, discordUsername string) string {
 	return fmt.Sprintf("%s/profile/discord?code=%s&user_name=%s",
-		strings.TrimRight(baseURL, "/"), code, discordUsername)
+		strings.TrimRight(baseURL, "/"), code, url.QueryEscape(discordUsername))
 }
 
 // generateLinkingCode creates a 6-character alphanumeric code using a

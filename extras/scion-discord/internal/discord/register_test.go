@@ -44,53 +44,31 @@ func TestNewRegistrationHandler_RegisterURL(t *testing.T) {
 }
 
 func TestRegistrationHandler_LinkURL(t *testing.T) {
-	// Test the URL construction logic by verifying the baseURL selection.
-	// We can't easily test HandleRegister end-to-end without mocking the full
-	// Discord session and store, so we test the baseURL fallback logic directly.
-
 	t.Run("uses registerURL for link when set", func(t *testing.T) {
 		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "https://public.example.com", "", "", nil, testLogger())
-
-		baseURL := h.hubURL
-		if h.registerURL != "" {
-			baseURL = h.registerURL
-		}
-		assert.Equal(t, "https://public.example.com", baseURL)
+		assert.Equal(t, "https://public.example.com", h.registrationBaseURL())
 	})
 
 	t.Run("falls back to hubURL when registerURL is empty", func(t *testing.T) {
 		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "", "", "", nil, testLogger())
-
-		baseURL := h.hubURL
-		if h.registerURL != "" {
-			baseURL = h.registerURL
-		}
-		assert.Equal(t, "http://localhost:8080", baseURL)
+		assert.Equal(t, "http://localhost:8080", h.registrationBaseURL())
 	})
 
 	t.Run("registerURL with trailing slash is trimmed in link", func(t *testing.T) {
 		h := NewRegistrationHandler(nil, nil, "http://localhost:8080", "https://public.example.com/", "", "", nil, testLogger())
-
-		baseURL := h.hubURL
-		if h.registerURL != "" {
-			baseURL = h.registerURL
-		}
-
-		// Simulate the same formatting as HandleRegister
-		link := formatRegistrationLink(baseURL, "ABC123", "testuser")
+		link := formatRegistrationLink(h.registrationBaseURL(), "ABC123", "testuser")
 		assert.Equal(t, "https://public.example.com/profile/discord?code=ABC123&user_name=testuser", link)
 	})
 
 	t.Run("hubURL with trailing slash is trimmed in link", func(t *testing.T) {
 		h := NewRegistrationHandler(nil, nil, "http://localhost:8080/", "", "", "", nil, testLogger())
-
-		baseURL := h.hubURL
-		if h.registerURL != "" {
-			baseURL = h.registerURL
-		}
-
-		link := formatRegistrationLink(baseURL, "ABC123", "testuser")
+		link := formatRegistrationLink(h.registrationBaseURL(), "ABC123", "testuser")
 		assert.Equal(t, "http://localhost:8080/profile/discord?code=ABC123&user_name=testuser", link)
+	})
+
+	t.Run("special characters in username are URL-escaped", func(t *testing.T) {
+		link := formatRegistrationLink("https://example.com", "ABC123", "user name&foo")
+		assert.Equal(t, "https://example.com/profile/discord?code=ABC123&user_name=user+name%26foo", link)
 	})
 }
 
