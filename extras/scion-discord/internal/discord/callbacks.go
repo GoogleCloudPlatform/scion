@@ -185,7 +185,11 @@ func (h *CallbackHandler) saveChannelLink(ctx context.Context, i *discordgo.Inte
 	guildID := i.GuildID
 
 	channelID := i.ChannelID
-	if parentID, _ := threadParentID(h.session, channelID); parentID != "" {
+	parentID, ok := threadParentID(h.session, channelID)
+	if !ok {
+		h.log.Error("Failed to resolve thread parent during saveChannelLink", "channel_id", channelID)
+	}
+	if parentID != "" {
 		channelID = parentID
 	}
 

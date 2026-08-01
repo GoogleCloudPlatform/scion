@@ -598,7 +598,11 @@ func (h *CommandHandler) HandleSetup(s *discordgo.Session, i *discordgo.Interact
 
 	// If running in a thread/forum topic, resolve the parent channel.
 	var link *ChannelLink
-	parentID, _ := threadParentID(s, i.ChannelID)
+	parentID, ok := threadParentID(s, i.ChannelID)
+	if !ok {
+		h.followup(s, i, "Failed to resolve channel details due to a Discord API error. Please try again.")
+		return
+	}
 	if parentID != "" {
 		link, err = h.store.GetChannelLink(ctx, parentID)
 		if err != nil {
@@ -831,7 +835,11 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 	}
 
 	// Detect thread context for default info display.
-	statusParentID, _ := threadParentID(s, i.ChannelID)
+	statusParentID, ok := threadParentID(s, i.ChannelID)
+	if !ok {
+		h.followup(s, i, "Failed to resolve channel details due to a Discord API error. Please try again.")
+		return
+	}
 
 	for _, agent := range agents {
 		if agent.Slug == agentSlug {
@@ -1028,7 +1036,11 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 	}
 
 	// Detect thread context.
-	parentID, _ := threadParentID(s, i.ChannelID)
+	parentID, ok := threadParentID(s, i.ChannelID)
+	if !ok {
+		h.followup(s, i, "Failed to resolve channel details due to a Discord API error. Please try again.")
+		return
+	}
 	isThread := parentID != ""
 	threadID := ""
 	if isThread {
@@ -1236,7 +1248,11 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	// If invoked from inside a thread, create a sibling in the parent channel
 	// (decision 1a). If in a regular channel, use the current channel.
 	channelID := i.ChannelID
-	parentID, _ := threadParentID(s, channelID)
+	parentID, ok := threadParentID(s, channelID)
+	if !ok {
+		h.followup(s, i, "Failed to resolve channel details due to a Discord API error. Please try again.")
+		return
+	}
 	if parentID != "" {
 		// We are inside a thread — create sibling in parent channel.
 		channelID = parentID
