@@ -345,7 +345,8 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			appID = b.config.ApplicationID
 			guildIDs = b.config.GuildIDs
 		}
-		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, b.deliverInbound, appID, guildIDs, b.agentCacheTTL, b.log)
+		sendSearchRoot := config["send_search_root"]
+		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, b.deliverInbound, appID, guildIDs, b.agentCacheTTL, sendSearchRoot, b.log)
 		b.callbacks = NewCallbackHandler(b.store, b.session, b.hubClient, b.deliverInbound, b.log)
 		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, b.hmacKey, b.brokerID, b.httpClient, b.log)
 

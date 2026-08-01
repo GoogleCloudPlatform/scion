@@ -81,14 +81,20 @@ type CommandHandler struct {
 	appID          string
 	guildIDs       []string // empty = global commands
 	agentCacheTTL  time.Duration
+	searchRoot     string // base directory for /scion send file searches
 	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError
 }
 
 // NewCommandHandler creates a new CommandHandler. agentCacheTTL controls how
-// long agent lists are cached before refreshing from the Hub API.
-func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage) *hubError, appID string, guildIDs []string, agentCacheTTL time.Duration, log *slog.Logger) *CommandHandler {
+// long agent lists are cached before refreshing from the Hub API. searchRoot
+// sets the base directory for /scion send file searches; when empty it
+// defaults to DefaultSearchRoot.
+func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage) *hubError, appID string, guildIDs []string, agentCacheTTL time.Duration, searchRoot string, log *slog.Logger) *CommandHandler {
 	if log == nil {
 		log = slog.Default()
+	}
+	if searchRoot == "" {
+		searchRoot = DefaultSearchRoot
 	}
 	return &CommandHandler{
 		store:          store,
@@ -99,6 +105,7 @@ func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubCli
 		appID:          appID,
 		guildIDs:       guildIDs,
 		agentCacheTTL:  agentCacheTTL,
+		searchRoot:     searchRoot,
 	}
 }
 
