@@ -58,6 +58,7 @@ type CompositeStore struct {
 	*HubSettingStore
 	*SkillInjectionStore
 	*ProjectPreStartHookStore
+	*AgentSessionMetricsStore
 
 	client *ent.Client
 }
@@ -93,6 +94,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		HubSettingStore:          NewHubSettingStore(client),
 		SkillInjectionStore:      NewSkillInjectionStore(client),
 		ProjectPreStartHookStore: NewProjectPreStartHookStore(client),
+		AgentSessionMetricsStore: NewAgentSessionMetricsStore(client),
 		client:                   client,
 	}
 }

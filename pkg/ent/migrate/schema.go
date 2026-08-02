@@ -96,6 +96,48 @@ var (
 			},
 		},
 	}
+	// AgentSessionMetricsColumns holds the columns for the "agent_session_metrics" table.
+	AgentSessionMetricsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "grove_id", Type: field.TypeString},
+		{Name: "session_id", Type: field.TypeString},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "ended_at", Type: field.TypeTime, Nullable: true},
+		{Name: "status", Type: field.TypeString, Nullable: true},
+		{Name: "turn_count", Type: field.TypeInt, Nullable: true, Default: 0},
+		{Name: "model", Type: field.TypeString, Nullable: true},
+		{Name: "tokens_input", Type: field.TypeInt64, Nullable: true, Default: 0},
+		{Name: "tokens_output", Type: field.TypeInt64, Nullable: true, Default: 0},
+		{Name: "tokens_cached", Type: field.TypeInt64, Nullable: true, Default: 0},
+		{Name: "tokens_reasoning", Type: field.TypeInt64, Nullable: true, Default: 0},
+		{Name: "tool_calls", Type: field.TypeJSON, Nullable: true},
+		{Name: "languages", Type: field.TypeJSON, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// AgentSessionMetricsTable holds the schema information for the "agent_session_metrics" table.
+	AgentSessionMetricsTable = &schema.Table{
+		Name:       "agent_session_metrics",
+		Columns:    AgentSessionMetricsColumns,
+		PrimaryKey: []*schema.Column{AgentSessionMetricsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentsessionmetrics_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentSessionMetricsColumns[1]},
+			},
+			{
+				Name:    "agentsessionmetrics_grove_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentSessionMetricsColumns[2]},
+			},
+			{
+				Name:    "agentsessionmetrics_started_at",
+				Unique:  false,
+				Columns: []*schema.Column{AgentSessionMetricsColumns[4]},
+			},
+		},
+	}
 	// AllowListColumns holds the columns for the "allow_list" table.
 	AllowListColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1384,6 +1426,7 @@ var (
 	Tables = []*schema.Table{
 		AccessPoliciesTable,
 		AgentsTable,
+		AgentSessionMetricsTable,
 		AllowListTable,
 		APIKeysTable,
 		BrokerDispatchTable,
@@ -1430,6 +1473,9 @@ var (
 
 func init() {
 	AgentsTable.ForeignKeys[0].RefTable = ProjectsTable
+	AgentSessionMetricsTable.Annotation = &entsql.Annotation{
+		Table: "agent_session_metrics",
+	}
 	AllowListTable.Annotation = &entsql.Annotation{
 		Table: "allow_list",
 	}

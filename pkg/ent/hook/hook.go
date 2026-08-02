@@ -33,6 +33,18 @@ func (f AgentFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentMutation", m)
 }
 
+// The AgentSessionMetricsFunc type is an adapter to allow the use of ordinary
+// function as AgentSessionMetrics mutator.
+type AgentSessionMetricsFunc func(context.Context, *ent.AgentSessionMetricsMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentSessionMetricsFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentSessionMetricsMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentSessionMetricsMutation", m)
+}
+
 // The AllowListEntryFunc type is an adapter to allow the use of ordinary
 // function as AllowListEntry mutator.
 type AllowListEntryFunc func(context.Context, *ent.AllowListEntryMutation) (ent.Value, error)

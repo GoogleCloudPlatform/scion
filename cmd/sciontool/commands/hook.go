@@ -233,6 +233,10 @@ func processHookData(data []byte) error {
 		}
 
 		telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
+		// Note: OnSessionEnd is not wired here. In per-invocation mode
+		// (hook.go), the hub client is not available and the process is
+		// short-lived. Metrics reporting to the Hub requires daemon mode
+		// (init.go), where the long-lived hub client wires the callback.
 		processor.AddHandler(telemetryHandler.Handle)
 	}
 

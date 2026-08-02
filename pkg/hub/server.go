@@ -747,6 +747,7 @@ type Server struct {
 	resourceLog       *slog.Logger
 	templateLog       *slog.Logger
 	workspaceLog      *slog.Logger
+	agentMetricsLog   *slog.Logger
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
@@ -845,6 +846,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		resourceLog:       logging.Subsystem("hub.resources"),
 		templateLog:       logging.Subsystem("hub.templates"),
 		workspaceLog:      logging.Subsystem("hub.workspace"),
+		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
 
 	// Wire tunnel disconnect handler: when an agent's port-forward tunnel

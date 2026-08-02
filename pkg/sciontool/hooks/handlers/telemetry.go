@@ -58,6 +58,14 @@ type TelemetryHandler struct {
 	metricsDebug bool
 	spanStore    sync.Map // map[string]*inProgressSpan - keyed by spanKey
 
+	// Aggregator accumulates session-level metrics for Hub reporting.
+	aggregator *telemetry.Aggregator
+
+	// OnSessionEnd is called with the finalized session summary when a
+	// session-end event is processed. Set by the daemon to wire up Hub
+	// reporting without creating a circular dependency.
+	OnSessionEnd func(summary telemetry.SessionSummary)
+
 	// Metric instruments
 	tokensInput  metric.Int64Counter
 	tokensOutput metric.Int64Counter
@@ -85,6 +93,7 @@ func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, red
 		tracer:       tracer,
 		redactor:     redactor,
 		metricsDebug: telemetry.MetricsDebugEnabled(),
+		aggregator:   telemetry.NewAggregator(),
 	}
 
 	if lp != nil {
@@ -193,6 +202,9 @@ func (h *TelemetryHandler) Handle(event *hooks.Event) error {
 		// Unknown event type - skip
 		return nil
 	}
+
+	// Update the in-memory aggregator for Hub reporting.
+	h.updateAggregator(event)
 
 	// Handle start/end pairing for tool calls and model calls
 	switch event.Name {
@@ -658,6 +670,45 @@ func (h *TelemetryHandler) Flush() {
 		h.spanStore.Delete(key)
 		return true
 	})
+}
+
+// updateAggregator feeds event data into the in-memory aggregator that
+// accumulates session-level metrics for Hub reporting.
+func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
+	if h.aggregator == nil {
+		return
+	}
+
+	switch event.Name {
+	case hooks.EventSessionStart:
+		h.aggregator.StartSession(event.Data.SessionID)
+
+	case hooks.EventToolEnd:
+		h.aggregator.RecordToolEnd(event.Data.ToolName, event.Data.Error)
+
+	case hooks.EventModelEnd:
+		h.aggregator.RecordModelEnd(
+			event.Data.InputTokens,
+			event.Data.OutputTokens,
+			event.Data.CachedTokens,
+			event.Data.ReasoningTokens,
+		)
+
+	case hooks.EventAgentEnd:
+		h.aggregator.RecordTurn()
+
+	case hooks.EventSessionEnd:
+		summary := h.aggregator.Finalize(
+			event.Data.InputTokens,
+			event.Data.OutputTokens,
+			event.Data.CachedTokens,
+			event.Data.ReasoningTokens,
+			event.Data.Error,
+		)
+		if h.OnSessionEnd != nil {
+			h.OnSessionEnd(summary)
+		}
+	}
 }
 
 func isMetricRelevantEvent(name string) bool {

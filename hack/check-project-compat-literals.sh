@@ -206,6 +206,7 @@ allowed_paths=(
   "^pkg/sciontool/telemetry/gcp_exporter.go$"
   "^pkg/sciontool/telemetry/providers.go$"
   "^pkg/storage/storage.go$"
+  "^pkg/store/entadapter/agent_session_metrics_store.go$"
   "^pkg/store/entadapter/composite.go$"
   "^pkg/store/models.go$"
   "^pkg/store/storetest/domains_project_broker.go$"
