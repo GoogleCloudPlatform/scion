@@ -668,8 +668,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 
 	// Collect project-scope secrets for provision-time credential resolution.
 	// These are NOT merged into ResolvedEnv and will not appear in the container env.
-	// Skipped for NoAuth agents just as ResolvedSecrets are skipped.
-	if !noAuth && agent.ProjectID != "" && d.secretBackend != nil {
+	// NOT gated on noAuth: provisionCredentials serve skill resolution (gh://
+	// convention tokens like GH_{OWNER}), not harness auth. Suppressing them under
+	// noAuth starves the GitHubSkillResolver of credentials for private repos.
+	if agent.ProjectID != "" && d.secretBackend != nil {
 		projectSecrets, listErr := d.secretBackend.List(ctx, secret.Filter{
 			Scope:   secret.ScopeProject,
 			ScopeID: agent.ProjectID,

@@ -3378,6 +3378,89 @@ func TestBuildCreateRequest_NoAuth_SkipsSecrets(t *testing.T) {
 	})
 }
 
+// mockProvisionCredsBackend extends mockSecretBackend with List and Get support
+// for testing provisionCredentials collection.
+type mockProvisionCredsBackend struct {
+	mockSecretBackend
+	projectSecrets []secret.SecretMeta
+	secretValues   map[string]*secret.SecretWithValue
+}
+
+func (m *mockProvisionCredsBackend) List(_ context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	if filter.Scope == secret.ScopeProject {
+		return m.projectSecrets, nil
+	}
+	return nil, nil
+}
+
+func (m *mockProvisionCredsBackend) Get(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	if sv, ok := m.secretValues[name]; ok {
+		return sv, nil
+	}
+	return nil, nil
+}
+
+func TestBuildCreateRequest_NoAuth_ProvisionCredentialsSurvive(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("host-1"),
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetSecretBackend(&mockProvisionCredsBackend{
+		mockSecretBackend: mockSecretBackend{
+			secrets: []secret.SecretWithValue{
+				{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json"}, Value: "secret-data"},
+			},
+		},
+		projectSecrets: []secret.SecretMeta{
+			{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject},
+		},
+		secretValues: map[string]*secret.SecretWithValue{
+			"GH_EXAMPLE": {SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment"}, Value: "ghp_token123"},
+		},
+	})
+
+	agent := &store.Agent{
+		ID:              tid("agent-noauth-prov"),
+		Name:            "noauth-prov-agent",
+		Slug:            "noauth-prov-agent",
+		OwnerID:         tid("user-1"),
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
+		AppliedConfig:   &store.AgentAppliedConfig{NoAuth: true},
+	}
+
+	req, err := dispatcher.buildCreateRequest(ctx, agent, "TestNoAuthProvisionCreds")
+	if err != nil {
+		t.Fatalf("buildCreateRequest failed: %v", err)
+	}
+
+	// ProvisionCredentials must be populated even under NoAuth — they serve
+	// skill resolution (gh:// tokens), not harness auth.
+	if req.ProvisionCredentials == nil {
+		t.Fatal("expected ProvisionCredentials to be non-nil with NoAuth=true")
+	}
+	if req.ProvisionCredentials["GH_EXAMPLE"] != "ghp_token123" {
+		t.Errorf("expected ProvisionCredentials[GH_EXAMPLE]=%q, got %q", "ghp_token123", req.ProvisionCredentials["GH_EXAMPLE"])
+	}
+
+	// ResolvedSecrets must still be suppressed under NoAuth.
+	if len(req.ResolvedSecrets) != 0 {
+		t.Errorf("expected no resolved secrets with NoAuth=true, got %d", len(req.ResolvedSecrets))
+	}
+}
+
 func TestHTTPAgentDispatcher_DispatchAgentCreate_AppliesImageRegistry(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
