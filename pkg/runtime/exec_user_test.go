@@ -51,7 +51,7 @@ func TestExecAsUserCmd_Shape(t *testing.T) {
 	// The script body itself is fixed and references $1/$2 — it
 	// must not leak the user or cmd values into its text.
 	script := got[2]
-	if !strings.Contains(script, `[ "$(whoami)" = "$1" ]`) {
+	if !strings.Contains(script, `[ "$(/usr/bin/whoami)" = "$1" ]`) {
 		t.Errorf("expected script to compare whoami against $1, got: %s", script)
 	}
 	if !strings.Contains(script, `exec sh -c "$2"`) {
