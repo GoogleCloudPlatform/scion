@@ -49,6 +49,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/admin/users': 'Users',
   '/admin/groups': 'Groups',
   '/admin/server-config': 'Server Config',
+  '/admin/integrations': 'Integrations',
   '/metrics': 'Metrics',
   '/admin/skill-registries': 'Skill Registries',
   '/skills': 'Skills',
@@ -348,6 +349,9 @@ export class ScionApp extends LitElement {
     }
     if (this.currentPath === '/admin/maintenance') {
       return 'Maintenance';
+    }
+    if (this.currentPath.match(/^\/admin\/integrations\/[^/]+$/)) {
+      return 'Integration';
     }
     if (this.currentPath === '/skills/new') {
       return 'Create Skill';
