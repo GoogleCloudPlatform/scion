@@ -31,8 +31,8 @@ import (
 var ErrNoSecretBackend = errors.New("secret storage requires a configured secrets backend; set SCION_SERVER_SECRETS_BACKEND=gcpsm")
 
 // PermissionError indicates that a secret backend operation failed due to
-// insufficient permissions (e.g., the Hub service account lacks
-// secretmanager.secrets.create). Handlers should translate this to HTTP 403.
+// insufficient permissions (e.g., the Hub service account lacks a required
+// Secret Manager permission). Handlers should translate this to HTTP 403.
 type PermissionError struct {
 	Operation string // e.g., "create secret", "access secret version"
 	Err       error  // the underlying error
@@ -40,7 +40,7 @@ type PermissionError struct {
 
 func (e *PermissionError) Error() string {
 	return fmt.Sprintf("failed to %s: the Hub service account lacks the required Secret Manager permission. "+
-		"Grant roles/secretmanager.admin or a role with secretmanager.secrets.create to the Hub service account", e.Operation)
+		"Grant roles/secretmanager.admin to the Hub Runner service account", e.Operation)
 }
 
 func (e *PermissionError) Unwrap() error {

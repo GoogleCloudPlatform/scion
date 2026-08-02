@@ -722,6 +722,66 @@ func TestGCPBackend_Set_PermissionDenied(t *testing.T) {
 	if !strings.Contains(permErr.Error(), "roles/secretmanager.admin") {
 		t.Errorf("error message should mention the required role, got: %v", permErr.Error())
 	}
+	// Must NOT contain a granular permission name — the message should be
+	// operation-agnostic so it is correct for create, get, delete, etc.
+	if strings.Contains(permErr.Error(), "secretmanager.secrets.") {
+		t.Errorf("error message should not contain a granular permission name, got: %v", permErr.Error())
+	}
+}
+
+func TestGCPBackend_Set_GetSecretPermissionDenied(t *testing.T) {
+	// When GetSecret (the existence check) returns PermissionDenied,
+	// Set should surface a *PermissionError rather than a generic error.
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+
+	// Use a client that returns PermissionDenied on GetSecret (not just CreateSecret).
+	mock := &getPermDeniedSMClient{
+		mockSMClient: mockSMClient{
+			secrets:  make(map[string]*smpb.Secret),
+			versions: make(map[string][]byte),
+		},
+	}
+	backend := NewGCPBackendWithClient(s, mock, "test-project", "test-hub-id")
+
+	ctx := context.Background()
+	input := &SetSecretInput{
+		Name:       "API_KEY",
+		Value:      "sk-test-123",
+		SecretType: TypeEnvironment,
+		Target:     "API_KEY",
+		Scope:      ScopeUser,
+		ScopeID:    "user-1",
+	}
+
+	_, _, err = backend.Set(ctx, input)
+	if err == nil {
+		t.Fatal("expected error from Set when GetSecret returns PermissionDenied")
+	}
+
+	var permErr *PermissionError
+	if !errors.As(err, &permErr) {
+		t.Fatalf("expected *PermissionError, got %T: %v", err, err)
+	}
+	if permErr.Operation != "check secret" {
+		t.Errorf("expected operation %q, got %q", "check secret", permErr.Operation)
+	}
+}
+
+// getPermDeniedSMClient returns PermissionDenied specifically for GetSecret,
+// exercising the "check secret" branch in Set that is not covered by
+// permDeniedSMClient (which leaves GetSecret as the base NotFound mock).
+type getPermDeniedSMClient struct {
+	mockSMClient
+}
+
+func (m *getPermDeniedSMClient) GetSecret(_ context.Context, _ *smpb.GetSecretRequest) (*smpb.Secret, error) {
+	return nil, status.Errorf(codes.PermissionDenied, "caller does not have permission secretmanager.secrets.get")
 }
 
 func TestGCPBackend_Get_PermissionDenied(t *testing.T) {

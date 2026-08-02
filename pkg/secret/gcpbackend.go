@@ -506,9 +506,9 @@ func buildLabels(input *SetSecretInput, target, hubName string) map[string]strin
 	return labels
 }
 
-// wrapGCPError checks whether err is a gRPC PermissionDenied or NotFound error
-// and returns a more descriptive error. PermissionDenied becomes a *PermissionError
-// so that HTTP handlers can return 403 instead of 500.
+// wrapGCPError checks whether err is a gRPC PermissionDenied error and returns
+// a *PermissionError so that HTTP handlers can return 403 instead of 500.
+// Other error codes are returned unchanged.
 func wrapGCPError(err error, operation string) error {
 	if err == nil {
 		return nil
