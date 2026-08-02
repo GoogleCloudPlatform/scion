@@ -99,7 +99,7 @@ export function showConfirm(
     dialog.addEventListener('keydown', (e: KeyboardEvent) => {
       if (e.key === 'Enter') {
         const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-        if (tag === 'textarea' || tag === 'input' || tag === 'sl-textarea' || tag === 'sl-input') {
+        if (tag === 'textarea' || tag === 'input' || tag === 'sl-textarea' || tag === 'sl-input' || tag === 'button' || tag === 'sl-button') {
           return;
         }
         e.preventDefault();
