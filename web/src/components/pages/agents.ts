@@ -614,7 +614,7 @@ export class ScionPageAgents extends LitElement {
           cmp = (a.created || '').localeCompare(b.created || '');
           break;
         case 'updated':
-          cmp = (a.lastActivityEvent || a.updated || '').localeCompare(b.lastActivityEvent || b.updated || '');
+          cmp = ((a.lastActivityEvent && !a.lastActivityEvent.startsWith('0001')) ? a.lastActivityEvent : (a.updated || '')).localeCompare((b.lastActivityEvent && !b.lastActivityEvent.startsWith('0001')) ? b.lastActivityEvent : (b.updated || ''));
           break;
       }
       return this.sortDir === 'asc' ? cmp : -cmp;
@@ -1116,7 +1116,7 @@ export class ScionPageAgents extends LitElement {
             size="small"
           ></scion-status-badge>
         </td>
-        <td class="hide-mobile">${(agent.lastActivityEvent || agent.updated) ? this.formatRelativeTime((agent.lastActivityEvent || agent.updated)!) : '\u2014'}</td>
+        <td class="hide-mobile">${((agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) || agent.updated) ? this.formatRelativeTime(((agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ? agent.lastActivityEvent : agent.updated)!) : '\u2014'}</td>
         <td class="hide-mobile">
           <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
         </td>
