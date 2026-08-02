@@ -1023,7 +1023,17 @@
           "x-since": "1"
         },
         "tls": { "$ref": "#/$defs/telemetryTLS" },
-        "batch": { "$ref": "#/$defs/telemetryBatch" }
+        "batch": { "$ref": "#/$defs/telemetryBatch" },
+        "provider": {
+          "type": "string",
+          "description": "Cloud telemetry provider (e.g., 'gcp' for GCP-native export).",
+          "x-since": "1"
+        },
+        "gcp_project_id": {
+          "type": "string",
+          "description": "GCP project ID for telemetry (Cloud Monitoring). Overrides auto-detection from SA credentials.",
+          "x-since": "1"
+        }
       },
       "additionalProperties": false
     },

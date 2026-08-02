@@ -372,13 +372,14 @@ type TelemetryConfig struct {
 
 // TelemetryCloudConfig holds cloud OTLP forwarding settings.
 type TelemetryCloudConfig struct {
-	Enabled  *bool             `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Endpoint string            `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
-	Protocol string            `json:"protocol,omitempty" yaml:"protocol,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
-	TLS      *TelemetryTLS     `json:"tls,omitempty" yaml:"tls,omitempty"`
-	Batch    *TelemetryBatch   `json:"batch,omitempty" yaml:"batch,omitempty"`
-	Provider string            `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Enabled      *bool             `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Endpoint     string            `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	Protocol     string            `json:"protocol,omitempty" yaml:"protocol,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	TLS          *TelemetryTLS     `json:"tls,omitempty" yaml:"tls,omitempty"`
+	Batch        *TelemetryBatch   `json:"batch,omitempty" yaml:"batch,omitempty"`
+	Provider     string            `json:"provider,omitempty" yaml:"provider,omitempty"`
+	GCPProjectID *string           `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty"`
 }
 
 // TelemetryTLS holds TLS settings for OTLP export.

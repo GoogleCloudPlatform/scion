@@ -692,13 +692,14 @@ type V1TelemetryConfig struct {
 
 // V1TelemetryCloudConfig holds cloud OTLP forwarding settings.
 type V1TelemetryCloudConfig struct {
-	Enabled  *bool                   `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
-	Endpoint string                  `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
-	Protocol string                  `json:"protocol,omitempty" yaml:"protocol,omitempty" koanf:"protocol"`
-	Headers  map[string]string       `json:"headers,omitempty" yaml:"headers,omitempty" koanf:"headers"`
-	TLS      *V1TelemetryTLSConfig   `json:"tls,omitempty" yaml:"tls,omitempty" koanf:"tls"`
-	Batch    *V1TelemetryBatchConfig `json:"batch,omitempty" yaml:"batch,omitempty" koanf:"batch"`
-	Provider string                  `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
+	Enabled      *bool                   `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	Endpoint     string                  `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
+	Protocol     string                  `json:"protocol,omitempty" yaml:"protocol,omitempty" koanf:"protocol"`
+	Headers      map[string]string       `json:"headers,omitempty" yaml:"headers,omitempty" koanf:"headers"`
+	TLS          *V1TelemetryTLSConfig   `json:"tls,omitempty" yaml:"tls,omitempty" koanf:"tls"`
+	Batch        *V1TelemetryBatchConfig `json:"batch,omitempty" yaml:"batch,omitempty" koanf:"batch"`
+	Provider     string                  `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
+	GCPProjectID *string                 `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
 }
 
 // V1TelemetryTLSConfig holds TLS settings for cloud OTLP export.

@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/knadh/koanf/v2"
@@ -1394,6 +1395,23 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	if hostedMode && hubCfg.SharedSigningSecret == "" {
 		log.Println("WARNING: hosted mode is enabled but no session secret is configured. " +
 			"Set --session-secret or SCION_SERVER_SESSION_SECRET to avoid cross-replica session failures.")
+	}
+
+	// Derive TelemetryProjectID using a priority chain:
+	// 1. Explicit telemetry.cloud.gcp_project_id setting (highest priority)
+	// 2. Derived from scion-telemetry-gcp-credentials SA key JSON
+	// 3. Existing GCPProjectID fallback (SA minting project, handled in server.go)
+	if cfg.TelemetryConfig != nil && cfg.TelemetryConfig.Cloud != nil && cfg.TelemetryConfig.Cloud.GCPProjectID != nil && *cfg.TelemetryConfig.Cloud.GCPProjectID != "" {
+		hubCfg.TelemetryProjectID = *cfg.TelemetryConfig.Cloud.GCPProjectID
+		log.Printf("Telemetry project ID from settings: %s", hubCfg.TelemetryProjectID)
+	}
+	if hubCfg.TelemetryProjectID == "" && secretBackend != nil {
+		if sw, err := secretBackend.Get(ctx, "scion-telemetry-gcp-credentials", secret.ScopeHub, cfg.Hub.ResolveHubID()); err == nil && sw != nil && sw.Value != "" {
+			if pid := gcputil.ParseProjectID([]byte(sw.Value)); pid != "" {
+				hubCfg.TelemetryProjectID = pid
+				log.Printf("Telemetry project ID derived from SA credentials: %s", pid)
+			}
+		}
 	}
 
 	// Construct proxy authenticator when auth mode is "proxy"
