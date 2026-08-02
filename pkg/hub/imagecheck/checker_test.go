@@ -269,3 +269,62 @@ func TestParseImageRef_Empty(t *testing.T) {
 		t.Error("expected error for empty image reference")
 	}
 }
+
+func TestChecker_CheckAll_LocalError(t *testing.T) {
+	runtimeErr := fmt.Errorf("daemon not running")
+	c := NewChecker(
+		WithLocalChecker(&mockLocalChecker{exists: false, err: runtimeErr}),
+		WithHTTPClient(newMockHTTPClient(http.StatusOK, nil)),
+	)
+	result := c.CheckAll(context.Background(), "myimage:latest", "ghcr.io/myorg/myimage:latest")
+	// When the local checker returns an error, neither local result should
+	// report the image as existing.
+	if result.LocalShort.Exists {
+		t.Error("expected LocalShort.Exists=false when local checker errors")
+	}
+	if result.LocalLong.Exists {
+		t.Error("expected LocalLong.Exists=false when local checker errors")
+	}
+}
+
+func TestChecker_CheckAll_NoError(t *testing.T) {
+	c := NewChecker(
+		WithLocalChecker(&mockLocalChecker{exists: true}),
+		WithHTTPClient(newMockHTTPClient(http.StatusOK, nil)),
+	)
+	result := c.CheckAll(context.Background(), "myimage:latest", "ghcr.io/myorg/myimage:latest")
+	if !result.LocalShort.Exists {
+		t.Error("expected LocalShort.Exists=true")
+	}
+	if !result.LocalLong.Exists {
+		t.Error("expected LocalLong.Exists=true")
+	}
+}
+
+func TestChecker_Check_LocalErrorPropagation(t *testing.T) {
+	runtimeErr := fmt.Errorf("permission denied")
+	c := NewChecker(
+		WithLocalChecker(&mockLocalChecker{exists: false, err: runtimeErr}),
+		WithHTTPClient(newMockHTTPClient(http.StatusOK, nil)),
+	)
+	// For a registry-qualified image, the local error should be captured and
+	// the check should fall through to the remote registry.
+	result := c.Check(context.Background(), "ghcr.io/myorg/myimage:latest")
+	if result.Status != "valid" {
+		t.Errorf("expected remote fallback to produce status=valid, got %s", result.Status)
+	}
+}
+
+func TestChecker_Check_BareImageLocalError(t *testing.T) {
+	runtimeErr := fmt.Errorf("daemon unreachable")
+	c := NewChecker(
+		WithLocalChecker(&mockLocalChecker{exists: false, err: runtimeErr}),
+	)
+	result := c.Check(context.Background(), "myimage:latest")
+	if result.Status != "error" {
+		t.Errorf("expected status=error for bare image with local failure, got %s", result.Status)
+	}
+	if !strings.Contains(result.Error, "daemon unreachable") {
+		t.Errorf("expected error to contain runtime failure detail, got %s", result.Error)
+	}
+}

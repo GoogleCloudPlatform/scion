@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -520,6 +521,35 @@ func resolveContainerID(agents []api.AgentInfo, id string) string {
 
 // runtimeLog is the structured logger for runtime command execution.
 var runtimeLog = slog.Default().With(slog.String("subsystem", "runtime"))
+
+// isExitError reports whether err (possibly wrapped by runSimpleCommand's
+// fmt.Errorf) contains an *exec.ExitError, meaning the command executed but
+// returned a non-zero exit code.  This distinguishes "command ran but failed"
+// from fundamental failures like a missing binary or a cancelled context.
+func isExitError(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
+}
+
+// isImageNotFoundOutput checks whether the combined stdout/stderr output from
+// an `image inspect` command indicates that the image was simply not found, as
+// opposed to some other failure (daemon unreachable, permission denied, etc.).
+//
+// When the container daemon is down, the CLI binary still exits with a non-zero
+// code (exec.ExitError), but the output contains a connection error rather than
+// a "not found" message. Callers should only treat the result as "image not
+// found" when this function returns true.
+//
+// Known patterns:
+//   - Docker:          "No such image"
+//   - Podman:          "image not known"
+//   - Apple Container: "image not found"
+func isImageNotFoundOutput(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "no such image") ||
+		strings.Contains(lower, "image not known") ||
+		strings.Contains(lower, "image not found")
+}
 
 func runSimpleCommand(ctx context.Context, command string, args ...string) (string, error) {
 	cmdStr := command + " " + strings.Join(args, " ")

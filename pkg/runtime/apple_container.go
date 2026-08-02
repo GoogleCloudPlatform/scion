@@ -286,8 +286,20 @@ func (r *AppleContainerRuntime) Attach(ctx context.Context, id string) error {
 }
 
 func (r *AppleContainerRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
-	_, err := runSimpleCommand(ctx, r.Command, "image", "inspect", image)
-	return err == nil, nil
+	out, err := runSimpleCommand(ctx, r.Command, "image", "inspect", image)
+	if err == nil {
+		return true, nil
+	}
+	// Exit-code errors could mean "image not found" OR a daemon-level failure
+	// (e.g. daemon unreachable). Both produce exec.ExitError with a non-zero
+	// exit code, so we inspect the command output to distinguish the two.
+	if isExitError(err) {
+		if isImageNotFoundOutput(out) {
+			return false, nil
+		}
+		return false, err
+	}
+	return false, err
 }
 
 func (r *AppleContainerRuntime) ImageID(ctx context.Context, image string) (string, error) {
