@@ -303,7 +303,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		brokerID = settings.Hub.BrokerID
 	}
 
-	// Prefer hub.groveId (explicit link to a hub project) over project_id
+	// Prefer hub.projectId (explicit link to a hub project) over project_id
 	// (deterministic local identity). For hub API calls, we need the ID
 	// the hub knows the project by.
 	effectiveProjectID := projectID
@@ -415,7 +415,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			return nil, fmt.Errorf("failed to reload settings: %w", err)
 		}
 		hubCtx.Settings = settings
-		// Prefer hub.groveId (explicit link) over project_id (deterministic local ID)
+		// Prefer hub.projectId (explicit link) over project_id (deterministic local ID)
 		if hgid := settings.GetHubProjectID(); hgid != "" {
 			hubCtx.ProjectID = hgid
 		} else {
