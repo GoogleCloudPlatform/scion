@@ -81,6 +81,10 @@ type CloudHandler struct {
 	version   string
 	attrs     []slog.Attr
 	groups    []string
+
+	// logHook, when non-nil, receives each entry instead of sending
+	// it to the Cloud Logging API. Used only in tests.
+	logHook func(gcplog.Entry)
 }
 
 // NewCloudHandler creates a new CloudHandler that sends logs to Cloud Logging.
@@ -244,6 +248,10 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 		delete(payload, "message")
 	}
 
+	if h.logHook != nil {
+		h.logHook(entry)
+		return nil
+	}
 	h.logger.Log(entry)
 	return nil
 }
@@ -264,6 +272,7 @@ func (h *CloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		version:   h.version,
 		attrs:     newAttrs,
 		groups:    h.groups,
+		logHook:   h.logHook,
 	}
 }
 
@@ -283,6 +292,7 @@ func (h *CloudHandler) WithGroup(name string) slog.Handler {
 		version:   h.version,
 		attrs:     h.attrs,
 		groups:    newGroups,
+		logHook:   h.logHook,
 	}
 }
 

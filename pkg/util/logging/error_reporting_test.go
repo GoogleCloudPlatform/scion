@@ -16,10 +16,14 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
+
+	gcplog "cloud.google.com/go/logging"
 )
 
 // TestGCPHandler_ServiceContextOnInfo verifies that serviceContext is present
@@ -243,6 +247,144 @@ func TestGCPHandler_ServiceContextOnDebug(t *testing.T) {
 	}
 	if _, ok := data["@type"]; ok {
 		t.Error("@type should NOT be present on DEBUG entries")
+	}
+}
+
+// --- CloudHandler Handle()-level tests ---
+// These use the logHook to capture the actual Cloud Logging entry and
+// inspect the payload built by Handle().
+
+// newTestCloudHandler returns a CloudHandler wired to capture entries via logHook.
+func newTestCloudHandler(component, ver string, level slog.Level, captured *[]gcplog.Entry) *CloudHandler {
+	return &CloudHandler{
+		level:     level,
+		component: component,
+		version:   ver,
+		logHook: func(e gcplog.Entry) {
+			*captured = append(*captured, e)
+		},
+	}
+}
+
+// TestCloudHandler_HandleServiceContextOnInfo exercises Handle() on an
+// INFO-level record and verifies serviceContext appears in the payload.
+func TestCloudHandler_HandleServiceContextOnInfo(t *testing.T) {
+	var entries []gcplog.Entry
+	h := newTestCloudHandler("scion-hub", "v0.8.1", slog.LevelInfo, &entries)
+
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "healthy", 0)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	payload, ok := entries[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatal("payload is not map[string]any")
+	}
+
+	sc, ok := payload["serviceContext"].(map[string]any)
+	if !ok {
+		t.Fatal("serviceContext not found in payload")
+	}
+	if sc["service"] != "scion-hub" {
+		t.Errorf("serviceContext.service = %v, want scion-hub", sc["service"])
+	}
+	if sc["version"] != "v0.8.1" {
+		t.Errorf("serviceContext.version = %v, want v0.8.1", sc["version"])
+	}
+
+	// stack_trace and @type must NOT be present on INFO
+	if _, ok := payload["stack_trace"]; ok {
+		t.Error("stack_trace should NOT appear in CloudHandler INFO payload")
+	}
+	if _, ok := payload["@type"]; ok {
+		t.Error("@type should NOT appear in CloudHandler INFO payload")
+	}
+}
+
+// TestCloudHandler_HandleErrorReportingFieldsOnError exercises Handle()
+// on an ERROR-level record and verifies stack_trace and @type appear.
+func TestCloudHandler_HandleErrorReportingFieldsOnError(t *testing.T) {
+	var entries []gcplog.Entry
+	h := newTestCloudHandler("scion-server", "abc1234", slog.LevelInfo, &entries)
+
+	r := slog.NewRecord(time.Now(), slog.LevelError, "db connection lost", 0)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	payload, ok := entries[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatal("payload is not map[string]any")
+	}
+
+	// serviceContext must be present
+	sc, ok := payload["serviceContext"].(map[string]any)
+	if !ok {
+		t.Fatal("serviceContext not found in ERROR payload")
+	}
+	if sc["service"] != "scion-server" {
+		t.Errorf("serviceContext.service = %v, want scion-server", sc["service"])
+	}
+	if sc["version"] != "abc1234" {
+		t.Errorf("serviceContext.version = %v, want abc1234", sc["version"])
+	}
+
+	// stack_trace must be present and look like a Go stack trace
+	st, ok := payload["stack_trace"].(string)
+	if !ok || st == "" {
+		t.Fatal("stack_trace not found or empty in ERROR payload")
+	}
+	if !strings.Contains(st, "goroutine") {
+		t.Errorf("stack_trace does not look like a Go stack trace: %.100s", st)
+	}
+
+	// @type must match
+	atType, ok := payload["@type"].(string)
+	if !ok {
+		t.Fatal("@type not found in ERROR payload")
+	}
+	if atType != errorReportingType {
+		t.Errorf("@type = %s, want %s", atType, errorReportingType)
+	}
+}
+
+// TestCloudHandler_HandleNoStackTraceOnWarn exercises Handle() on a
+// WARN-level record and verifies stack_trace and @type are absent.
+func TestCloudHandler_HandleNoStackTraceOnWarn(t *testing.T) {
+	var entries []gcplog.Entry
+	h := newTestCloudHandler("scion-broker", "v1.0.0", slog.LevelDebug, &entries)
+
+	r := slog.NewRecord(time.Now(), slog.LevelWarn, "disk space low", 0)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	payload, ok := entries[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatal("payload is not map[string]any")
+	}
+
+	// serviceContext should still be present
+	if _, ok := payload["serviceContext"]; !ok {
+		t.Error("serviceContext should be present on WARN entries")
+	}
+
+	// Error-only fields must be absent
+	if _, ok := payload["stack_trace"]; ok {
+		t.Error("stack_trace should NOT appear in CloudHandler WARN payload")
+	}
+	if _, ok := payload["@type"]; ok {
+		t.Error("@type should NOT appear in CloudHandler WARN payload")
 	}
 }
 
