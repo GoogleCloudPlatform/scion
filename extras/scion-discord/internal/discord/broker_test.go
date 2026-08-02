@@ -77,7 +77,14 @@ func TestUnknownMentionRouting(t *testing.T) {
 		assert.True(t, hasUnknownStartMention,
 			"error path must detect unknown start mention")
 
-		unresolved := extractUnresolvedMentions(content, botUserID, knownAgents)
+		// Extract unresolved names directly from classified.StartMentions
+		// (mirrors the production code path in broker.go).
+		var unresolved []string
+		for _, sm := range classified.StartMentions {
+			if sm.Kind == "unknown" {
+				unresolved = append(unresolved, sm.Name)
+			}
+		}
 		assert.Equal(t, []string{"not-an-agent"}, unresolved,
 			"unresolved mentions should be detected for error feedback")
 
@@ -95,7 +102,13 @@ func TestUnknownMentionRouting(t *testing.T) {
 		assert.Equal(t, 0, countAgentStartMentions(classified))
 		assert.Len(t, classified.StartMentions, 2)
 
-		unresolved := extractUnresolvedMentions(content, botUserID, knownAgents)
+		// Extract unresolved names directly from classified.StartMentions.
+		var unresolved []string
+		for _, sm := range classified.StartMentions {
+			if sm.Kind == "unknown" {
+				unresolved = append(unresolved, sm.Name)
+			}
+		}
 		assert.Equal(t, []string{"foo", "bar"}, unresolved)
 
 		errMsg := fmt.Sprintf("Unknown agent: %s. Use `/scion agents` to see available agents.",
@@ -189,7 +202,13 @@ func TestUnknownMentionRouting(t *testing.T) {
 		assert.Equal(t, []string{"coder"}, filteredTargets,
 			"known agent should remain in targets after filtering")
 
-		unresolved := extractUnresolvedMentions(content, botUserID, knownAgents)
+		// Verify no unknown start mentions exist (error path would not fire).
+		var unresolved []string
+		for _, sm := range classified.StartMentions {
+			if sm.Kind == "unknown" {
+				unresolved = append(unresolved, sm.Name)
+			}
+		}
 		assert.Empty(t, unresolved)
 	})
 
