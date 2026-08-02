@@ -368,7 +368,7 @@ func (s *MetricsDashboardService) querySum(ctx context.Context, metricName strin
 		},
 		Aggregation: &monitoringpb.Aggregation{
 			AlignmentPeriod:    durationpb.New(end.Sub(start).Truncate(time.Second)),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
+			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_SUM,
 			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
 		},
 	}
@@ -406,7 +406,7 @@ func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metr
 		},
 		Aggregation: &monitoringpb.Aggregation{
 			AlignmentPeriod:    durationpb.New(time.Duration(alignmentDay) * time.Second),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
+			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_SUM,
 			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
 		},
 	}
@@ -455,7 +455,7 @@ func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, me
 		},
 		Aggregation: &monitoringpb.Aggregation{
 			AlignmentPeriod:    durationpb.New(time.Duration(alignmentDay) * time.Second),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
+			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_SUM,
 			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
 			GroupByFields:      []string{groupByLabel},
 		},
@@ -514,7 +514,7 @@ func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricN
 		},
 		Aggregation: &monitoringpb.Aggregation{
 			AlignmentPeriod:    durationpb.New(end.Sub(start).Truncate(time.Second)),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
+			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_SUM,
 			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
 			GroupByFields:      []string{groupByLabel},
 		},
@@ -556,7 +556,7 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 		},
 		Aggregation: &monitoringpb.Aggregation{
 			AlignmentPeriod:    durationpb.New(time.Duration(alignmentDay) * time.Second),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
+			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_SUM,
 			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
 			GroupByFields:      []string{groupByLabel},
 		},
