@@ -668,7 +668,7 @@ type V1HubClientConfig struct {
 	Enabled   *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	Linked    *bool  `json:"linked,omitempty" yaml:"linked,omitempty" koanf:"linked"`
 	Endpoint  string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
-	ProjectID string `json:"grove_id,omitempty" yaml:"grove_id,omitempty" koanf:"grove_id"`
+	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	LocalOnly *bool  `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
 }
 
@@ -988,17 +988,18 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		if projectPath != globalDir {
 			if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
 				_ = k.Load(confmap.Provider(map[string]interface{}{
-					projectcompat.ConfigHubGroveIDKey: projectID,
+					projectcompat.ConfigHubProjectIDKey: projectID,
 				}, "."), nil)
 			}
 		}
 	}
 
-	// Remap hub.project_id to hub.grove_id for backward compatibility with V1 structs.
-	// SCION_HUB_PROJECT_ID maps to hub.project_id via versionedEnvKeyMapper.
-	if k.Exists(projectcompat.ConfigHubProjectIDKey) && !k.Exists(projectcompat.ConfigHubGroveIDKey) {
+	// Remap hub.grove_id to hub.project_id for backward compatibility.
+	// Old settings files may still use grove_id; the V1HubClientConfig struct
+	// now uses koanf:"project_id", so grove_id values must be copied across.
+	if k.Exists(projectcompat.ConfigHubGroveIDKey) && !k.Exists(projectcompat.ConfigHubProjectIDKey) {
 		_ = k.Load(confmap.Provider(map[string]interface{}{
-			projectcompat.ConfigHubGroveIDKey: k.String(projectcompat.ConfigHubProjectIDKey),
+			projectcompat.ConfigHubProjectIDKey: k.String(projectcompat.ConfigHubGroveIDKey),
 		}, "."), nil)
 	}
 
@@ -1024,7 +1025,7 @@ func versionedEnvKeyMapper(s string) string {
 	}
 	key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
 
-	// Handle nested hub keys (single level: hub.endpoint, hub.grove_id, etc.)
+	// Handle nested hub keys (single level: hub.endpoint, hub.project_id, etc.)
 	if strings.HasPrefix(key, "hub_") {
 		return "hub." + strings.TrimPrefix(key, "hub_")
 	}
@@ -2097,6 +2098,23 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 	// Ensure schema_version is set
 	if vs.SchemaVersion == "" {
 		vs.SchemaVersion = "1"
+	}
+
+	// Backward compatibility: old settings files may use hub.grove_id instead of
+	// hub.project_id. Since the struct yaml tag is now "project_id", grove_id
+	// values are not unmarshaled automatically. Check the raw YAML and remap.
+	if vs.Hub == nil || vs.Hub.ProjectID == "" {
+		var raw map[string]interface{}
+		if err := yamlv3.Unmarshal(data, &raw); err == nil {
+			if hub, ok := raw["hub"].(map[string]interface{}); ok {
+				if gid, ok := hub["grove_id"].(string); ok && gid != "" {
+					if vs.Hub == nil {
+						vs.Hub = &V1HubClientConfig{}
+					}
+					vs.Hub.ProjectID = gid
+				}
+			}
+		}
 	}
 
 	return &vs, nil
