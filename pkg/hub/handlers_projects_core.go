@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -378,10 +377,10 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			UpdatedBy:     project.CreatedBy,
 		}
 		if _, _, err := s.secretBackend.Set(ctx, tokenInput); err != nil {
-			slog.Error("failed to save GitHub token as project secret",
+			s.projectsLogger().Error("failed to save GitHub token as project secret",
 				"project_id", project.ID, "error", err)
 			if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
-				slog.Warn("failed to clean up project record after secret save failure",
+				s.projectsLogger().Warn("failed to clean up project record after secret save failure",
 					"project_id", project.ID, "error", delErr)
 			}
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -395,16 +394,16 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		// Shared-workspace git project: clone the repository into the workspace.
 		// Clone failure is a creation failure — clean up the project record.
 		if err := s.cloneSharedWorkspaceProject(ctx, project); err != nil {
-			slog.Error("shared workspace clone failed, rolling back project creation",
+			s.projectsLogger().Error("shared workspace clone failed, rolling back project creation",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
 			if req.GitHubToken != "" && s.secretBackend != nil && project.GitRemote != "" {
 				if delErr := s.secretBackend.Delete(ctx, "GITHUB_TOKEN", secret.ScopeProject, project.ID); delErr != nil {
-					slog.Warn("failed to clean up project secret after clone failure",
+					s.projectsLogger().Warn("failed to clean up project secret after clone failure",
 						"project_id", project.ID, "error", delErr)
 				}
 			}
 			if delErr := s.store.DeleteProject(ctx, project.ID); delErr != nil {
-				slog.Warn("failed to clean up project record after clone failure",
+				s.projectsLogger().Warn("failed to clean up project record after clone failure",
 					"project_id", project.ID, "error", delErr)
 			}
 			// Use appropriate HTTP status based on the error kind
@@ -429,7 +428,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	} else if project.GitRemote == "" {
 		// Hub-native project (no git remote): create workspace directory.
 		if err := s.initHubManagedProject(project); err != nil {
-			slog.Warn("failed to initialize project workspace",
+			s.projectsLogger().Warn("failed to initialize project workspace",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
 		}
 	}
@@ -458,20 +457,20 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 	}
 	if err := s.store.CreateGroup(ctx, projectGroup); err != nil {
 		if !errors.Is(err, store.ErrAlreadyExists) {
-			slog.Warn("failed to create project group", "project_id", project.ID, "error", err.Error())
+			s.projectsLogger().Warn("failed to create project group", "project_id", project.ID, "error", err.Error())
 			return
 		}
 		// Slug conflict — look it up and ensure project_id is current
 		existing, lookupErr := s.store.GetGroupBySlug(ctx, agentsSlug)
 		if lookupErr != nil {
-			slog.Warn("failed to look up existing project agents group by slug",
+			s.projectsLogger().Warn("failed to look up existing project agents group by slug",
 				"project_id", project.ID, "slug", agentsSlug, "error", lookupErr.Error())
 			return
 		}
 		if existing.ProjectID != project.ID {
 			existing.ProjectID = project.ID
 			if updateErr := s.store.UpdateGroup(ctx, existing); updateErr != nil {
-				slog.Warn("failed to update existing project agents group",
+				s.projectsLogger().Warn("failed to update existing project agents group",
 					"project_id", project.ID, "slug", agentsSlug, "error", updateErr.Error())
 			}
 		}
@@ -488,7 +487,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project *store.Project, callerUserID ...string) {
 	membersSlug := "project:" + project.Slug + ":members"
 
-	slog.Debug("ensuring project members group",
+	s.projectsLogger().Debug("ensuring project members group",
 		"project_id", project.ID, "slug", project.Slug, "membersSlug", membersSlug)
 
 	// Create project members group, or look up the existing one
@@ -507,20 +506,20 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		// when authentication uses proxy headers without provisioning a DB user record
 		// (e.g. legacy trusted-proxy auth on a fresh Postgres deployment). Retry
 		// without OwnerID so the group and its associated policy are still created.
-		slog.Warn("project members group owner not found, retrying without owner",
+		s.projectsLogger().Warn("project members group owner not found, retrying without owner",
 			"project_id", project.ID, "owner_id", membersGroup.OwnerID, "error", createErr.Error())
 		membersGroup.OwnerID = ""
 		createErr = s.store.CreateGroup(ctx, membersGroup)
 	}
 	if createErr != nil {
 		if !errors.Is(createErr, store.ErrAlreadyExists) {
-			slog.Warn("failed to create project members group", "project_id", project.ID, "error", createErr.Error())
+			s.projectsLogger().Warn("failed to create project members group", "project_id", project.ID, "error", createErr.Error())
 			return
 		}
 		// Slug conflict — look up existing group
 		existing, lookupErr := s.store.GetGroupBySlug(ctx, membersSlug)
 		if lookupErr != nil {
-			slog.Warn("failed to look up existing project members group by slug",
+			s.projectsLogger().Warn("failed to look up existing project members group by slug",
 				"project_id", project.ID, "slug", membersSlug, "error", lookupErr.Error())
 			return
 		}
@@ -538,12 +537,12 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		}
 		if needsUpdate {
 			if updateErr := s.store.UpdateGroup(ctx, membersGroup); updateErr != nil {
-				slog.Warn("failed to update existing project members group",
+				s.projectsLogger().Warn("failed to update existing project members group",
 					"project_id", project.ID, "slug", membersSlug, "error", updateErr.Error())
 			}
 		}
 	} else {
-		slog.Info("created project members group",
+		s.projectsLogger().Info("created project members group",
 			"project_id", project.ID, "group", membersGroup.ID, "slug", membersSlug)
 	}
 
@@ -555,7 +554,7 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 			MemberID:   project.CreatedBy,
 			Role:       store.GroupMemberRoleOwner,
 		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			slog.Warn("failed to add creator as owner of project members group",
+			s.projectsLogger().Warn("failed to add creator as owner of project members group",
 				"project_id", project.ID, "user", project.CreatedBy, "error", err.Error())
 		}
 	}
@@ -569,7 +568,7 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 			MemberID:   callerUserID[0],
 			Role:       store.GroupMemberRoleOwner,
 		}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			slog.Warn("failed to add caller as owner of project members group",
+			s.projectsLogger().Warn("failed to add caller as owner of project members group",
 				"project_id", project.ID, "user", callerUserID[0], "error", err.Error())
 		}
 	}
@@ -583,10 +582,10 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		if err == nil && len(members) == 1 && members[0].MemberType == store.GroupMemberTypeUser {
 			if promoteErr := s.store.UpdateGroupMemberRole(ctx, membersGroup.ID,
 				members[0].MemberType, members[0].MemberID, store.GroupMemberRoleOwner); promoteErr != nil {
-				slog.Warn("failed to promote sole member to owner",
+				s.projectsLogger().Warn("failed to promote sole member to owner",
 					"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID, "error", promoteErr.Error())
 			} else {
-				slog.Info("promoted sole project member to owner",
+				s.projectsLogger().Info("promoted sole project member to owner",
 					"project_id", project.ID, "group", membersGroup.ID, "user", members[0].MemberID)
 			}
 		}
@@ -606,7 +605,7 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	}
 	if err := s.store.CreatePolicy(ctx, policy); err != nil {
 		if !errors.Is(err, store.ErrAlreadyExists) {
-			slog.Warn("failed to create project member policy",
+			s.projectsLogger().Warn("failed to create project member policy",
 				"project_id", project.ID, "policy", policyName, "error", err.Error())
 			return
 		}
@@ -614,7 +613,7 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		// project was recreated. Also ensure the binding to the current members group.
 		existing, lookupErr := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
 		if lookupErr != nil || len(existing.Items) == 0 {
-			slog.Warn("failed to look up existing project member policy",
+			s.projectsLogger().Warn("failed to look up existing project member policy",
 				"project_id", project.ID, "policy", policyName, "error", lookupErr)
 			return
 		}
@@ -638,7 +637,7 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		}
 		if needsUpdate {
 			if updateErr := s.store.UpdatePolicy(ctx, policy); updateErr != nil {
-				slog.Warn("failed to update existing project member policy",
+				s.projectsLogger().Warn("failed to update existing project member policy",
 					"project_id", project.ID, "policy", policyName, "error", updateErr.Error())
 			}
 		}
@@ -650,7 +649,7 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		PrincipalType: "group",
 		PrincipalID:   membersGroup.ID,
 	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.Warn("failed to bind project member policy",
+		s.projectsLogger().Warn("failed to bind project member policy",
 			"project_id", project.ID, "policy", policyName, "error", err.Error())
 	}
 }
@@ -738,7 +737,7 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
-			slog.Warn("failed to update hub-managed project setting",
+			s.projectsLogger().Warn("failed to update hub-managed project setting",
 				"project_id", project.ID, "key", key, "error", err.Error())
 		}
 	}
@@ -779,7 +778,7 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Seed the .scion project on top of the cloned workspace
 	scionDir := filepath.Join(workspacePath, ".scion")
 	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
-		slog.Warn("failed to initialize .scion in cloned workspace",
+		s.projectsLogger().Warn("failed to initialize .scion in cloned workspace",
 			"project_id", project.ID, "error", err.Error())
 	}
 
@@ -792,7 +791,7 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	}
 	for key, value := range settingsUpdates {
 		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
-			slog.Warn("failed to update shared-workspace project setting",
+			s.projectsLogger().Warn("failed to update shared-workspace project setting",
 				"project_id", project.ID, "key", key, "error", err.Error())
 		}
 	}
@@ -814,7 +813,7 @@ func (s *Server) autoAssociateGitHubInstallation(ctx context.Context, project *s
 		Status: store.GitHubInstallationStatusActive,
 	})
 	if err != nil {
-		slog.Warn("failed to list GitHub App installations for auto-association",
+		s.projectsLogger().Warn("failed to list GitHub App installations for auto-association",
 			"project_id", project.ID, "error", err)
 		return
 	}
@@ -830,10 +829,10 @@ func (s *Server) autoAssociateGitHubInstallation(ctx context.Context, project *s
 					LastChecked: timeNow(),
 				}
 				if err := s.store.UpdateProject(ctx, project); err != nil {
-					slog.Warn("failed to persist GitHub App installation association",
+					s.projectsLogger().Warn("failed to persist GitHub App installation association",
 						"project_id", project.ID, "installation_id", installID, "error", err)
 				} else {
-					slog.Info("auto-associated project with GitHub App installation at creation time",
+					s.projectsLogger().Info("auto-associated project with GitHub App installation at creation time",
 						"project_id", project.ID, "project_name", project.Name,
 						"installation_id", installID, "account", inst.AccountLogin)
 					s.events.PublishProjectUpdated(ctx, project)
@@ -857,7 +856,7 @@ func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) 
 			return token
 		}
 		if err != nil {
-			slog.Warn("failed to mint GitHub App token for clone, trying secrets",
+			s.projectsLogger().Warn("failed to mint GitHub App token for clone, trying secrets",
 				"project_id", project.ID, "error", err.Error())
 		}
 	}
@@ -873,7 +872,7 @@ func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) 
 		if project.CreatedBy != "" {
 			sv, err = s.secretBackend.Get(ctx, "GITHUB_TOKEN", "user", project.CreatedBy)
 			if err == nil && sv != nil && sv.Value != "" {
-				slog.Info("using creator's GitHub token for project clone",
+				s.projectsLogger().Info("using creator's GitHub token for project clone",
 					"project_id", project.ID, "user_id", project.CreatedBy)
 				return sv.Value
 			}
@@ -1074,7 +1073,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			callerID = user.ID()
 		}
-		slog.Debug("ensuring groups for existing project during register",
+		s.projectsLogger().Debug("ensuring groups for existing project during register",
 			"project_id", project.ID, "slug", project.Slug, "caller", callerID)
 		s.createProjectGroup(ctx, project)
 		s.createProjectMembersGroupAndPolicy(ctx, project, callerID)
@@ -1130,7 +1129,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		if localPath != "" {
 			scionDir := filepath.Join(localPath, ".scion")
 			if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
-				slog.Warn("failed to initialize .scion in linked project",
+				s.projectsLogger().Warn("failed to initialize .scion in linked project",
 					"project_id", project.ID, "localPath", localPath, "error", err.Error())
 			}
 		}
@@ -2005,7 +2004,7 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionAttach)
 			if !decision.Allowed {
-				slog.Warn("agent authz check failed",
+				s.projectsLogger().Warn("agent authz check failed",
 					"agent_id", agent.ID,
 					"agent_slug", agent.Slug,
 					"agent_owner_id", agent.OwnerID,
@@ -2207,11 +2206,11 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 		group.Slug = newAgentsSlug
 		group.Name = project.Name + " Agents"
 		if err := s.store.UpdateGroup(ctx, group); err != nil {
-			slog.Warn("failed to migrate project agents group slug",
+			s.projectsLogger().Warn("failed to migrate project agents group slug",
 				"project_id", project.ID, "old_slug", oldAgentsSlug, "new_slug", newAgentsSlug, "error", err)
 		}
 	} else if err != store.ErrNotFound {
-		slog.Warn("failed to retrieve project agents group for migration",
+		s.projectsLogger().Warn("failed to retrieve project agents group for migration",
 			"project_id", project.ID, "old_slug", oldAgentsSlug, "error", err)
 	}
 
@@ -2222,11 +2221,11 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 		group.Slug = newMembersSlug
 		group.Name = project.Name + " Members"
 		if err := s.store.UpdateGroup(ctx, group); err != nil {
-			slog.Warn("failed to migrate project members group slug",
+			s.projectsLogger().Warn("failed to migrate project members group slug",
 				"project_id", project.ID, "old_slug", oldMembersSlug, "new_slug", newMembersSlug, "error", err)
 		}
 	} else if err != store.ErrNotFound {
-		slog.Warn("failed to retrieve project members group for migration",
+		s.projectsLogger().Warn("failed to retrieve project members group for migration",
 			"project_id", project.ID, "old_slug", oldMembersSlug, "error", err)
 	}
 
@@ -2237,11 +2236,11 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 		policy := &policies.Items[0]
 		policy.Name = newPolicyName
 		if err := s.store.UpdatePolicy(ctx, policy); err != nil {
-			slog.Warn("failed to migrate project member policy name",
+			s.projectsLogger().Warn("failed to migrate project member policy name",
 				"project_id", project.ID, "old_policy", oldPolicyName, "new_policy", newPolicyName, "error", err)
 		}
 	} else if err != nil {
-		slog.Warn("failed to retrieve project member policy for migration",
+		s.projectsLogger().Warn("failed to retrieve project member policy for migration",
 			"project_id", project.ID, "old_policy", oldPolicyName, "error", err)
 	}
 
@@ -2252,7 +2251,7 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 			newPath := filepath.Join(filepath.Dir(oldPath), newSlug)
 			if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
 				if err := os.Rename(oldPath, newPath); err != nil {
-					slog.Warn("failed to rename project workspace directory",
+					s.projectsLogger().Warn("failed to rename project workspace directory",
 						"project_id", project.ID, "old_path", oldPath, "new_path", newPath, "error", err)
 				}
 			}
@@ -2276,7 +2275,7 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 				if _, statErr := os.Stat(newConfigDir); os.IsNotExist(statErr) {
 					if err := os.MkdirAll(filepath.Dir(newConfigDir), 0755); err == nil {
 						if err := os.Rename(oldConfigDir, newConfigDir); err != nil {
-							slog.Warn("failed to rename project config directory",
+							s.projectsLogger().Warn("failed to rename project config directory",
 								"project_id", project.ID, "old_path", oldConfigDir, "new_path", newConfigDir, "error", err)
 						}
 					}
@@ -2314,7 +2313,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	if projectGroups, err := s.store.ListGroups(ctx, store.GroupFilter{ProjectID: id}, store.ListOptions{Limit: 100}); err == nil {
 		for _, g := range projectGroups.Items {
 			if delErr := s.store.DeleteGroup(ctx, g.ID); delErr != nil {
-				slog.Warn("failed to delete project group", "project_id", id, "group", g.ID, "slug", g.Slug, "error", delErr.Error())
+				s.projectsLogger().Warn("failed to delete project group", "project_id", id, "group", g.ID, "slug", g.Slug, "error", delErr.Error())
 			}
 		}
 	}
@@ -2323,7 +2322,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	if projectPolicies, err := s.store.ListPolicies(ctx, store.PolicyFilter{ScopeType: "project", ScopeID: id}, store.ListOptions{Limit: 100}); err == nil {
 		for _, p := range projectPolicies.Items {
 			if delErr := s.store.DeletePolicy(ctx, p.ID); delErr != nil {
-				slog.Warn("failed to delete project policy", "project_id", id, "policy", p.ID, "name", p.Name, "error", delErr.Error())
+				s.projectsLogger().Warn("failed to delete project policy", "project_id", id, "policy", p.ID, "name", p.Name, "error", delErr.Error())
 			}
 		}
 	}
@@ -2331,24 +2330,24 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// Clean up project-scoped env vars (best-effort).
 	// These use scope/scope_id without FK cascade.
 	if n, err := s.store.DeleteEnvVarsByScope(ctx, store.ScopeProject, id); err != nil {
-		slog.Warn("failed to delete project env vars", "project_id", id, "error", err)
+		s.projectsLogger().Warn("failed to delete project env vars", "project_id", id, "error", err)
 	} else if n > 0 {
-		slog.Info("deleted project env vars", "project_id", id, "count", n)
+		s.projectsLogger().Info("deleted project env vars", "project_id", id, "count", n)
 	}
 
 	// Clean up project-scoped secrets (best-effort).
 	if n, err := s.store.DeleteSecretsByScope(ctx, store.ScopeProject, id); err != nil {
-		slog.Warn("failed to delete project secrets", "project_id", id, "error", err)
+		s.projectsLogger().Warn("failed to delete project secrets", "project_id", id, "error", err)
 	} else if n > 0 {
-		slog.Info("deleted project secrets", "project_id", id, "count", n)
+		s.projectsLogger().Info("deleted project secrets", "project_id", id, "count", n)
 	}
 
 	// Clean up project-scoped skill injections (best-effort).
 	// These use scope/scope_id without FK cascade.
 	if n, err := s.store.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, id); err != nil {
-		slog.Warn("failed to delete project skill injections", "project_id", id, "error", err)
+		s.projectsLogger().Warn("failed to delete project skill injections", "project_id", id, "error", err)
 	} else if n > 0 {
-		slog.Info("deleted project skill injections", "project_id", id, "count", n)
+		s.projectsLogger().Info("deleted project skill injections", "project_id", id, "count", n)
 	}
 
 	// Warn about retained managed GCP service accounts (best-effort).
@@ -2362,7 +2361,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	}); err == nil {
 		for _, sa := range sas {
 			if delErr := s.store.DeleteGCPServiceAccount(ctx, sa.ID); delErr != nil {
-				slog.Warn("failed to delete project GCP service account registration",
+				s.projectsLogger().Warn("failed to delete project GCP service account registration",
 					"project_id", id, "sa_id", sa.ID, "email", sa.Email, "error", delErr.Error())
 			}
 		}
@@ -2390,7 +2389,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
 		if projectPath, err := hubManagedProjectPath(project.Slug); err == nil {
 			if err := util.RemoveAllSafe(projectPath); err != nil {
-				slog.Warn("failed to remove hub-managed project directory",
+				s.projectsLogger().Warn("failed to remove hub-managed project directory",
 					"project_id", id, "slug", project.Slug, "path", projectPath, "error", err)
 			}
 		}
@@ -2409,7 +2408,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 			// remove the parent (<slug__uuid>) directory.
 			projectConfigDir := filepath.Dir(configPath)
 			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
-				slog.Warn("failed to remove project config directory",
+				s.projectsLogger().Warn("failed to remove project config directory",
 					"project_id", id, "slug", project.Slug, "path", projectConfigDir, "error", err)
 			}
 		}
@@ -2457,12 +2456,12 @@ func (s *Server) deleteProjectTemplates(ctx context.Context, projectID string) {
 		ScopeID: projectID,
 	}, store.ListOptions{Limit: 1000})
 	if err != nil {
-		slog.Warn("failed to list project templates for deletion", "project_id", projectID, "error", err)
+		s.projectsLogger().Warn("failed to list project templates for deletion", "project_id", projectID, "error", err)
 	} else if stor := s.GetStorage(); stor != nil {
 		for _, tmpl := range templates.Items {
 			if tmpl.StoragePath != "" {
 				if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
-					slog.Warn("failed to delete template storage files",
+					s.projectsLogger().Warn("failed to delete template storage files",
 						"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 				}
 			}
@@ -2470,9 +2469,9 @@ func (s *Server) deleteProjectTemplates(ctx context.Context, projectID string) {
 	}
 
 	if n, err := s.store.DeleteTemplatesByScope(ctx, store.ScopeProject, projectID); err != nil {
-		slog.Warn("failed to delete project templates", "project_id", projectID, "error", err)
+		s.projectsLogger().Warn("failed to delete project templates", "project_id", projectID, "error", err)
 	} else if n > 0 {
-		slog.Info("deleted project templates", "project_id", projectID, "count", n)
+		s.projectsLogger().Info("deleted project templates", "project_id", projectID, "count", n)
 	}
 }
 
@@ -2486,12 +2485,12 @@ func (s *Server) warnManagedGCPServiceAccounts(ctx context.Context, projectID st
 		Managed: &managed,
 	})
 	if err != nil {
-		slog.Warn("failed to list managed GCP SAs for project deletion warning",
+		s.projectsLogger().Warn("failed to list managed GCP SAs for project deletion warning",
 			"project_id", projectID, "error", err)
 		return
 	}
 	for _, sa := range sas {
-		slog.Warn("project deletion: managed GCP service account retained in GCP — manual cleanup may be required",
+		s.projectsLogger().Warn("project deletion: managed GCP service account retained in GCP — manual cleanup may be required",
 			"project_id", projectID, "sa_email", sa.Email, "sa_id", sa.ID, "project_id", sa.ProjectID)
 	}
 }
@@ -2506,12 +2505,12 @@ func (s *Server) deleteProjectHarnessConfigs(ctx context.Context, projectID stri
 		ScopeID: projectID,
 	}, store.ListOptions{Limit: 1000})
 	if err != nil {
-		slog.Warn("failed to list project harness configs for deletion", "project_id", projectID, "error", err)
+		s.projectsLogger().Warn("failed to list project harness configs for deletion", "project_id", projectID, "error", err)
 	} else if stor := s.GetStorage(); stor != nil {
 		for _, hc := range configs.Items {
 			if hc.StoragePath != "" {
 				if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
-					slog.Warn("failed to delete harness config storage files",
+					s.projectsLogger().Warn("failed to delete harness config storage files",
 						"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
 				}
 			}
@@ -2519,9 +2518,9 @@ func (s *Server) deleteProjectHarnessConfigs(ctx context.Context, projectID stri
 	}
 
 	if n, err := s.store.DeleteHarnessConfigsByScope(ctx, store.ScopeProject, projectID); err != nil {
-		slog.Warn("failed to delete project harness configs", "project_id", projectID, "error", err)
+		s.projectsLogger().Warn("failed to delete project harness configs", "project_id", projectID, "error", err)
 	} else if n > 0 {
-		slog.Info("deleted project harness configs", "project_id", projectID, "count", n)
+		s.projectsLogger().Info("deleted project harness configs", "project_id", projectID, "count", n)
 	}
 }
 
@@ -2536,7 +2535,7 @@ func (s *Server) cleanupBrokerProjectDirectories(ctx context.Context, project *s
 
 	providers, err := s.store.GetProjectProviders(ctx, project.ID)
 	if err != nil {
-		slog.Warn("failed to get project providers for cleanup", "project_id", project.ID, "error", err)
+		s.projectsLogger().Warn("failed to get project providers for cleanup", "project_id", project.ID, "error", err)
 		return
 	}
 
@@ -2552,7 +2551,7 @@ func (s *Server) cleanupBrokerProjectDirectories(ctx context.Context, project *s
 		}
 	}
 	if client == nil {
-		slog.Warn("no RuntimeBrokerClient available for project cleanup dispatch", "project_id", project.ID)
+		s.projectsLogger().Warn("no RuntimeBrokerClient available for project cleanup dispatch", "project_id", project.ID)
 		return
 	}
 
@@ -2564,13 +2563,13 @@ func (s *Server) cleanupBrokerProjectDirectories(ctx context.Context, project *s
 
 		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
 		if err != nil {
-			slog.Warn("failed to get broker for project cleanup",
+			s.projectsLogger().Warn("failed to get broker for project cleanup",
 				"project_id", project.ID, "broker", provider.BrokerID, "error", err)
 			continue
 		}
 
 		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug, project.ID); err != nil {
-			slog.Warn("failed to cleanup project on broker",
+			s.projectsLogger().Warn("failed to cleanup project on broker",
 				"project_id", project.ID, "slug", project.Slug,
 				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
 		}

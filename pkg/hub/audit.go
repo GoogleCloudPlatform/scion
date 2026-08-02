@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // BrokerAuthEventType defines the type of broker authentication event.
@@ -187,6 +189,7 @@ type AuditLogger interface {
 type LogAuditLogger struct {
 	prefix string
 	debug  bool
+	log    *slog.Logger
 }
 
 // NewLogAuditLogger creates a new log-based audit logger.
@@ -197,7 +200,17 @@ func NewLogAuditLogger(prefix string, debug bool) *LogAuditLogger {
 	return &LogAuditLogger{
 		prefix: prefix,
 		debug:  debug,
+		log:    logging.Subsystem("hub.audit"),
 	}
+}
+
+// logger returns the audit subsystem logger, falling back to slog.Default()
+// when the field is nil (e.g. in tests that construct LogAuditLogger directly).
+func (l *LogAuditLogger) logger() *slog.Logger {
+	if l.log != nil {
+		return l.log
+	}
+	return slog.Default()
 }
 
 // LogBrokerAuthEvent is a no-op implementation satisfying the AuditLogger interface.
@@ -239,7 +252,7 @@ func (l *LogAuditLogger) LogInviteAuditEvent(ctx context.Context, event *InviteA
 		attrs = append(attrs, slog.String(k, v))
 	}
 
-	slog.LogAttrs(ctx, level, "authz: "+string(event.EventType), attrs...)
+	l.logger().LogAttrs(ctx, level, "authz: "+string(event.EventType), attrs...)
 
 	return nil
 }
@@ -263,7 +276,7 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
 
-	slog.LogAttrs(ctx, level, "GCP token audit event", attrs...)
+	l.logger().LogAttrs(ctx, level, "GCP token audit event", attrs...)
 
 	return nil
 }
@@ -286,7 +299,7 @@ func (l *LogAuditLogger) LogLifecycleHookEvent(ctx context.Context, event *Lifec
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
 
-	slog.LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
+	l.logger().LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
 
 	return nil
 }
@@ -317,7 +330,7 @@ func (l *LogAuditLogger) LogLifecycleHookExecutionEvent(ctx context.Context, eve
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
 
-	slog.LogAttrs(ctx, level, "lifecycle hook execution event", attrs...)
+	l.logger().LogAttrs(ctx, level, "lifecycle hook execution event", attrs...)
 
 	return nil
 }

@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // EventPublisher defines the interface for publishing Hub events.
@@ -255,12 +256,24 @@ type ChannelEventPublisher struct {
 	mu          sync.RWMutex
 	subscribers map[string][]chan Event
 	closed      bool
+	log         *slog.Logger
+}
+
+// logger returns the events subsystem logger, falling back to slog.Default()
+// when the field is nil (e.g. in tests that construct ChannelEventPublisher
+// directly).
+func (p *ChannelEventPublisher) logger() *slog.Logger {
+	if p.log != nil {
+		return p.log
+	}
+	return slog.Default()
 }
 
 // NewChannelEventPublisher creates a new ChannelEventPublisher.
 func NewChannelEventPublisher() *ChannelEventPublisher {
 	p := &ChannelEventPublisher{
 		subscribers: make(map[string][]chan Event),
+		log:         logging.Subsystem("hub.events"),
 	}
 	p.sink = p.publish
 	return p
@@ -300,7 +313,7 @@ func (p *ChannelEventPublisher) Subscribe(patterns ...string) (<-chan Event, fun
 func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 	data, err := json.Marshal(event)
 	if err != nil {
-		slog.Error("Failed to marshal event", "subject", subject, "error", err)
+		p.logger().Error("Failed to marshal event", "subject", subject, "error", err)
 		return
 	}
 

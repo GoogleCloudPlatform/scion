@@ -738,13 +738,15 @@ type Server struct {
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
-	messageLog        *slog.Logger
 	authLog           *slog.Logger
 	envSecretLog      *slog.Logger
-	templateLog       *slog.Logger
-	resourceLog       *slog.Logger
-	workspaceLog      *slog.Logger
+	groupsLog         *slog.Logger
 	maintenanceLog    *slog.Logger
+	messageLog        *slog.Logger
+	projectsLog       *slog.Logger
+	resourceLog       *slog.Logger
+	templateLog       *slog.Logger
+	workspaceLog      *slog.Logger
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
@@ -777,6 +779,25 @@ type Server struct {
 
 	// ghResolutionStore is the DB-backed GitHub skill resolution cache (nil when entClient is nil).
 	ghResolutionStore *GitHubResolutionStore
+}
+
+// groupsLogger returns the groups subsystem logger, falling back to
+// slog.Default() when the field is nil (e.g. in tests that construct Server
+// directly without the constructor).
+func (s *Server) groupsLogger() *slog.Logger {
+	if s.groupsLog != nil {
+		return s.groupsLog
+	}
+	return slog.Default()
+}
+
+// projectsLogger returns the projects subsystem logger, falling back to
+// slog.Default() when the field is nil.
+func (s *Server) projectsLogger() *slog.Logger {
+	if s.projectsLog != nil {
+		return s.projectsLog
+	}
+	return slog.Default()
 }
 
 func newInstanceID() string {
@@ -815,13 +836,15 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("hub.agent-lifecycle"),
-		messageLog:        logging.Subsystem("hub.messages"),
 		authLog:           logging.Subsystem("hub.auth"),
 		envSecretLog:      logging.Subsystem("hub.env-secrets"),
-		templateLog:       logging.Subsystem("hub.templates"),
-		resourceLog:       logging.Subsystem("hub.resources"),
-		workspaceLog:      logging.Subsystem("hub.workspace"),
+		groupsLog:         logging.Subsystem("hub.groups"),
 		maintenanceLog:    logging.Subsystem("hub.maintenance"),
+		messageLog:        logging.Subsystem("hub.messages"),
+		projectsLog:       logging.Subsystem("hub.projects"),
+		resourceLog:       logging.Subsystem("hub.resources"),
+		templateLog:       logging.Subsystem("hub.templates"),
+		workspaceLog:      logging.Subsystem("hub.workspace"),
 	}
 
 	// Wire tunnel disconnect handler: when an agent's port-forward tunnel
