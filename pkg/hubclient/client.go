@@ -325,7 +325,7 @@ func (c *client) get(ctx context.Context, path string, headers http.Header) (*ht
 func (c *client) getWithQuery(ctx context.Context, path string, query url.Values, headers http.Header) (*http.Response, error) {
 	resp, err := c.transport.GetWithQuery(ctx, path, query, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := resp.Header.Get("Content-Type")
+		ct := strings.ToLower(resp.Header.Get("Content-Type"))
 		if !strings.Contains(ct, "application/json") {
 			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 			_ = resp.Body.Close()
@@ -341,7 +341,7 @@ func (c *client) getWithQuery(ctx context.Context, path string, query url.Values
 func (c *client) post(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	resp, err := c.transport.Post(ctx, path, body, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := resp.Header.Get("Content-Type")
+		ct := strings.ToLower(resp.Header.Get("Content-Type"))
 		if !strings.Contains(ct, "application/json") {
 			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 			_ = resp.Body.Close()
@@ -357,7 +357,7 @@ func (c *client) post(ctx context.Context, path string, body interface{}, header
 func (c *client) put(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	resp, err := c.transport.Put(ctx, path, body, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := resp.Header.Get("Content-Type")
+		ct := strings.ToLower(resp.Header.Get("Content-Type"))
 		if !strings.Contains(ct, "application/json") {
 			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 			_ = resp.Body.Close()
@@ -373,7 +373,7 @@ func (c *client) put(ctx context.Context, path string, body interface{}, headers
 func (c *client) patch(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	resp, err := c.transport.Patch(ctx, path, body, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := resp.Header.Get("Content-Type")
+		ct := strings.ToLower(resp.Header.Get("Content-Type"))
 		if !strings.Contains(ct, "application/json") {
 			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 			_ = resp.Body.Close()
@@ -389,7 +389,7 @@ func (c *client) patch(ctx context.Context, path string, body interface{}, heade
 func (c *client) delete(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	resp, err := c.transport.Delete(ctx, path, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := resp.Header.Get("Content-Type")
+		ct := strings.ToLower(resp.Header.Get("Content-Type"))
 		if !strings.Contains(ct, "application/json") {
 			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
 			_ = resp.Body.Close()
