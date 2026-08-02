@@ -1788,7 +1788,7 @@ func resolveChannelLink(ctx context.Context, s *discordgo.Session, store Store, 
 // Activity takes priority when present; phase is the fallback.
 func agentStatusEmoji(activity, phase string) string {
 	// Activity icons (priority)
-	switch activity {
+	switch strings.ToLower(activity) {
 	case "working":
 		return "⚙️" // gear
 	case "thinking":
@@ -1812,7 +1812,7 @@ func agentStatusEmoji(activity, phase string) string {
 	}
 
 	// Phase icons (fallback)
-	switch phase {
+	switch strings.ToLower(phase) {
 	case "created":
 		return "\U0001f4e6" // package
 	case "provisioning":

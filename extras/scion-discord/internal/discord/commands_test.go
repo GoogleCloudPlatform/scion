@@ -69,6 +69,22 @@ func TestAgentStatusEmoji_ActivityPriorityOverPhase(t *testing.T) {
 	assert.Equal(t, "✅", got, "completed activity should take priority over running phase")
 }
 
+func TestAgentStatusEmoji_MixedCaseInput(t *testing.T) {
+	// Activity matching should be case-insensitive.
+	got := agentStatusEmoji("Working", "")
+	assert.Equal(t, "⚙️", got, "mixed-case activity 'Working' should return gear icon")
+
+	got = agentStatusEmoji("BLOCKED", "")
+	assert.Equal(t, "\U0001f6a7", got, "upper-case activity 'BLOCKED' should return construction icon")
+
+	// Phase matching should be case-insensitive.
+	got = agentStatusEmoji("", "Running")
+	assert.Equal(t, "▶️", got, "mixed-case phase 'Running' should return play icon")
+
+	got = agentStatusEmoji("", "STOPPED")
+	assert.Equal(t, "⏹️", got, "upper-case phase 'STOPPED' should return stop button icon")
+}
+
 func TestAgentStatusEmoji_EmptyBothDefaultsToPlay(t *testing.T) {
 	got := agentStatusEmoji("", "")
 	assert.Equal(t, "▶️", got, "empty activity and phase should return default play icon")
