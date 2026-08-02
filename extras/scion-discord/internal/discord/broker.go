@@ -88,6 +88,8 @@ func (e *hubError) userFacingMessage() string {
 		return "Target agent not found. Use `/scion agents` to see available agents."
 	case "forbidden":
 		return "You don't have permission to message this agent."
+	case "agent_not_running":
+		return "Agent is not running. It may be stopped, suspended, or in error state."
 	case "broker_auth_failed", "unauthorized":
 		return "Authentication error — please contact an administrator."
 	default:

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -143,6 +144,28 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 				})
 			return
 		}
+	}
+
+	// Reject messages to non-running agents.
+	switch state.Phase(agent.Phase) {
+	case state.PhaseRunning:
+		// OK — proceed to dispatch
+	case state.PhaseSuspended:
+		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+			fmt.Sprintf("Agent %q is suspended.", agent.Slug), nil)
+		return
+	case state.PhaseStopped:
+		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+			fmt.Sprintf("Agent %q is stopped.", agent.Slug), nil)
+		return
+	case state.PhaseError:
+		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+			fmt.Sprintf("Agent %q is in error state.", agent.Slug), nil)
+		return
+	default:
+		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+			fmt.Sprintf("Agent %q is not yet running (phase: %s).", agent.Slug, agent.Phase), nil)
+		return
 	}
 
 	// A leading "!" in the message body acts as an inline interrupt signal:

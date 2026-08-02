@@ -98,6 +98,11 @@ func TestHubError_UserFacingMessage(t *testing.T) {
 			contains: "Authentication error",
 		},
 		{
+			name:     "agent not running",
+			err:      hubError{StatusCode: 409, Code: "agent_not_running", Message: "Agent is in error state"},
+			contains: "Agent is not running",
+		},
+		{
 			name:     "server error",
 			err:      hubError{StatusCode: 502, Code: "runtime_error", Message: "agent unreachable"},
 			contains: "try again or contact",
