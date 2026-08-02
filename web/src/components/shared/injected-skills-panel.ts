@@ -35,6 +35,7 @@ import type { Skill } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
+import { showConfirm } from './confirm-dialog.js';
 
 export type InjectedSkillsScope = 'project' | 'user' | 'hub';
 
@@ -1249,11 +1250,11 @@ export class ScionInjectedSkillsPanel extends LitElement {
 
   private async handleDeleteRow(row: SkillRow, rowIndex: number): Promise<void> {
     const label = row.skillName || row.uri;
-    if (!confirm(`Remove skill "${label}" from this ${this.scope === 'hub' ? 'hub' : this.scope === 'project' ? 'project' : 'profile'}?`)) {
+    if (!(await showConfirm(`Remove skill "${label}" from this ${this.scope === 'hub' ? 'hub' : this.scope === 'project' ? 'project' : 'profile'}?`))) {
       return;
     }
     // Guard against stale rowIndex: a concurrent drag-reorder between the click
-    // and the confirm() call could shift row positions. Re-find the row by its
+    // and the showConfirm() call could shift row positions. Re-find the row by its
     // stable identity (URI + id) before committing the delete.
     let resolvedIndex = rowIndex;
     const currentAtIndex = this.rows[rowIndex];

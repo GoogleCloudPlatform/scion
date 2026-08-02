@@ -29,6 +29,7 @@ import type { Project } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
+import { showConfirm } from './confirm-dialog.js';
 
 interface AccessToken {
   id: string;
@@ -344,7 +345,7 @@ export class ScionTokenList extends LitElement {
   // ── Revoke / Delete ────────────────────────────────────────────────
 
   private async handleRevoke(token: AccessToken): Promise<void> {
-    if (!confirm(`Revoke token "${token.name}"? It will no longer be usable for authentication.`)) {
+    if (!(await showConfirm(`Revoke token "${token.name}"? It will no longer be usable for authentication.`))) {
       return;
     }
 
@@ -368,7 +369,7 @@ export class ScionTokenList extends LitElement {
   }
 
   private async handleDelete(token: AccessToken): Promise<void> {
-    if (!confirm(`Permanently delete token "${token.name}"? This cannot be undone.`)) {
+    if (!(await showConfirm(`Permanently delete token "${token.name}"? This cannot be undone.`))) {
       return;
     }
 

@@ -31,6 +31,7 @@ import '../shared/status-badge.js';
 import '../shared/hash-display.js';
 import '../shared/skill-publish-dialog.js';
 import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 @customElement('scion-page-skill-detail')
 export class ScionPageSkillDetail extends LitElement {
@@ -495,7 +496,7 @@ export class ScionPageSkillDetail extends LitElement {
   // -- Archive --
 
   private async handleArchive(): Promise<void> {
-    if (!confirm('Are you sure you want to archive this skill?')) return;
+    if (!(await showConfirm('Are you sure you want to archive this skill?'))) return;
     this.actionLoading = { ...this.actionLoading, archive: true };
 
     try {

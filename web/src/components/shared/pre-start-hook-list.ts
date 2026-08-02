@@ -38,6 +38,7 @@ import type { PreStartHook, PreStartHookSummary } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
+import { showConfirm } from './confirm-dialog.js';
 
 /** Maximum script size accepted by the hub API (64 KB). */
 const SCRIPT_MAX_BYTES = 64 * 1024;
@@ -440,7 +441,7 @@ export class ScionPreStartHookList extends LitElement {
     const message =
       `Delete pre-start hook "${hook.name}"? This cannot be undone. ` +
       'Existing agents that inherited this hook will continue to run it until recreated.';
-    if (!confirm(message)) {
+    if (!(await showConfirm(message))) {
       return;
     }
     this.busyId = hook.id;

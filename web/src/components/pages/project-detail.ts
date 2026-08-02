@@ -42,6 +42,7 @@ import type { FileBrowserDataSource } from '../shared/file-browser.js';
 import { WorkspaceFileEditorDataSource, SharedDirFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
 type SortDir = 'asc' | 'desc';
@@ -1082,7 +1083,7 @@ export class ScionPageProjectDetail extends LitElement {
     event?: MouseEvent
   ): Promise<void> {
     if (action === 'delete') {
-      if (!event?.altKey && !confirm('Are you sure you want to delete this agent?')) {
+      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, [agentId]: true };
@@ -1294,7 +1295,7 @@ export class ScionPageProjectDetail extends LitElement {
     const confirmMsg = isProjectAdmin
       ? 'Are you sure you want to stop all running agents in this project?'
       : 'Are you sure you want to stop all of your running agents in this project?';
-    if (!confirm(confirmMsg)) {
+    if (!(await showConfirm(confirmMsg))) {
       return;
     }
 

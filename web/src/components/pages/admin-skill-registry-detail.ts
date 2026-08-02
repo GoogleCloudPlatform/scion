@@ -28,6 +28,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 interface PinnedHash {
   uri: string;
@@ -400,7 +401,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
   // -- Delete --
 
   private async handleDelete(): Promise<void> {
-    if (!confirm('Are you sure you want to delete this registry?')) return;
+    if (!(await showConfirm('Are you sure you want to delete this registry?'))) return;
     this.actionLoading = { ...this.actionLoading, delete: true };
     try {
       const res = await apiFetch(`/api/v1/skill-registries/${this.registryId}`, { method: 'DELETE' });
@@ -442,7 +443,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
   }
 
   private async handleUnpin(uri: string): Promise<void> {
-    if (!confirm(`Unpin "${uri}"?`)) return;
+    if (!(await showConfirm(`Unpin "${uri}"?`))) return;
     try {
       const res = await apiFetch(`/api/v1/skill-registries/${this.registryId}/unpin`, {
         method: 'POST',

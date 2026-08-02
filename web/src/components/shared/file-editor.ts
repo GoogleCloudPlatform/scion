@@ -34,6 +34,7 @@ import { getLanguageFromPath } from './code-editor.js';
 // Ensure sub-components are registered
 import './code-editor.js';
 import './markdown-preview.js';
+import { showConfirm } from './confirm-dialog.js';
 
 // ────────────────────────────────────────────────────────────
 // Types
@@ -434,9 +435,9 @@ export class ScionFileEditor extends LitElement {
     }
   }
 
-  private handleRevert(): void {
+  private async handleRevert(): Promise<void> {
     if (!this.dirty) return;
-    if (!confirm('Discard unsaved changes?')) return;
+    if (!(await showConfirm('Discard unsaved changes?'))) return;
     this.currentContent = this.originalContent;
     this.error = null;
   }
@@ -445,9 +446,9 @@ export class ScionFileEditor extends LitElement {
     this.showPreview = !this.showPreview;
   }
 
-  private handleClose(): void {
+  private async handleClose(): Promise<void> {
     if (this.dirty) {
-      if (!confirm('You have unsaved changes. Close anyway?')) return;
+      if (!(await showConfirm('You have unsaved changes. Close anyway?'))) return;
     }
 
     this.dispatchEvent(

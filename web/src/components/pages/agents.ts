@@ -38,6 +38,7 @@ import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/quick-message-dialog.js';
 import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 @customElement('scion-page-agents')
 export class ScionPageAgents extends LitElement {
@@ -475,7 +476,7 @@ export class ScionPageAgents extends LitElement {
     event?: MouseEvent
   ): Promise<void> {
     if (action === 'delete') {
-      if (!event?.altKey && !confirm('Are you sure you want to delete this agent?')) {
+      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
         return;
       }
       // Show per-button spinner for delete; don't optimistically remove
@@ -546,7 +547,7 @@ export class ScionPageAgents extends LitElement {
   }
 
   private async handleStopAll(): Promise<void> {
-    if (!confirm('Are you sure you want to stop all running agents?')) {
+    if (!(await showConfirm('Are you sure you want to stop all running agents?'))) {
       return;
     }
 

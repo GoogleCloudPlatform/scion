@@ -29,6 +29,7 @@ import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
+import { showConfirm } from './confirm-dialog.js';
 
 @customElement('scion-gcp-service-account-list')
 export class ScionGCPServiceAccountList extends LitElement {
@@ -357,7 +358,7 @@ export class ScionGCPServiceAccountList extends LitElement {
   private async handleDelete(account: GCPServiceAccount, event?: MouseEvent): Promise<void> {
     if (
       !event?.altKey &&
-      !confirm(`Delete service account "${account.email}"? This cannot be undone.`)
+      !(await showConfirm(`Delete service account "${account.email}"? This cannot be undone.`))
     ) {
       return;
     }

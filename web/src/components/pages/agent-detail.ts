@@ -58,6 +58,7 @@ import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js'
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -777,7 +778,7 @@ export class ScionPageAgentDetail extends LitElement {
     if (!this.agent) return;
 
     if (action === 'delete') {
-      if (!event?.altKey && !confirm('Are you sure you want to delete this agent?')) {
+      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, delete: true };
