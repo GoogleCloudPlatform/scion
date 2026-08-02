@@ -1157,10 +1157,16 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// denies, so "forgot to wire it" and "chose to switch it off" cannot be
 	// confused for one another. See NewDisabledCallerPermissionChecker.
 	gcpIAMMode := cfg.GCPIAMCheckMode
-	if gcpIAMMode == SAAssignCheckEnforce {
+	switch gcpIAMMode {
+	case SAAssignCheckEnforce:
 		srv.saAssignCheckMode = SAAssignCheckEnforce
 		srv.hookIdentityCheckMode = SAAssignCheckEnforce
-	} else {
+	case SAAssignCheckOff, "":
+		srv.saAssignCheckMode = SAAssignCheckOff
+		srv.hookIdentityCheckMode = SAAssignCheckOff
+	default:
+		slog.Warn("unrecognised gcpIamCheckMode value, defaulting to off",
+			"value", gcpIAMMode)
 		srv.saAssignCheckMode = SAAssignCheckOff
 		srv.hookIdentityCheckMode = SAAssignCheckOff
 	}
