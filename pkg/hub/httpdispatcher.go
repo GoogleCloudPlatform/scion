@@ -993,20 +993,36 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		}
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
-		return d.deferredCreateWithGather(ctx, agent)
-	}
-	if err != nil {
+		envReqs, err = d.deferredCreateWithGather(ctx, agent)
+		if err != nil {
+			return nil, err
+		}
+		// Fall through to the second-pass as_needed resolution below.
+	} else if err != nil {
 		return nil, err
-	}
-
-	if envReqs != nil {
-		return envReqs, nil
-	}
-
-	if resp != nil {
+	} else if resp != nil {
 		d.applyBrokerResponse(agent, resp)
 	}
-	return nil, nil
+
+	// Second pass: if the broker reported needed keys, check whether any can
+	// be satisfied by as_needed env vars or secrets. If so, finalize them
+	// transparently without requiring CLI intervention.
+	if envReqs != nil && len(envReqs.Needs) > 0 {
+		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs)
+		if len(asNeededEnv) > 0 {
+			err := d.DispatchFinalizeEnv(ctx, agent, asNeededEnv)
+			if err == nil {
+				return nil, nil // All needs satisfied by as_needed entries
+			}
+			var stillMissing *ErrEnvStillMissing
+			if errors.As(err, &stillMissing) {
+				return stillMissing.Requirements, nil // Partial; remaining needs returned
+			}
+			return nil, err
+		}
+	}
+
+	return envReqs, nil
 }
 
 // deferredCreateWithGather handles a cross-node create-with-gather via durable dispatch.
