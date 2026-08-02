@@ -19,6 +19,7 @@ package autoexpose
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -117,9 +118,11 @@ func parseLocalAddress(s string, ipv6 bool) (port int, bindAddr string, err erro
 
 	// Parse port (always 4 hex digits).
 	var p int
-	if _, err := fmt.Sscanf(hexPort, "%X", &p); err != nil {
+	portVal, err := strconv.ParseUint(hexPort, 16, 16)
+	if err != nil {
 		return 0, "", fmt.Errorf("invalid port hex %q: %w", hexPort, err)
 	}
+	p = int(portVal)
 
 	// Parse IP address.
 	addr, err := parseHexIP(hexIP, ipv6)
@@ -146,8 +149,8 @@ func parseHexIPv4(hex string) (string, error) {
 	}
 	var ip [4]byte
 	for i := 0; i < 4; i++ {
-		var b int
-		if _, err := fmt.Sscanf(hex[i*2:i*2+2], "%02X", &b); err != nil {
+		b, err := strconv.ParseUint(hex[i*2:i*2+2], 16, 8)
+		if err != nil {
 			return "", err
 		}
 		// /proc/net/tcp stores IPv4 in little-endian order: byte 0 is rightmost.
@@ -170,8 +173,8 @@ func parseHexIPv6(hex string) (string, error) {
 		// Read the 4 bytes, then reverse for little-endian.
 		var bytes [4]byte
 		for i := 0; i < 4; i++ {
-			var b int
-			if _, err := fmt.Sscanf(chunk[i*2:i*2+2], "%02X", &b); err != nil {
+			b, err := strconv.ParseUint(chunk[i*2:i*2+2], 16, 8)
+			if err != nil {
 				return "", err
 			}
 			bytes[i] = byte(b)

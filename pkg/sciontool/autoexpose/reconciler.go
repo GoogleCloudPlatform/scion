@@ -16,7 +16,7 @@ package autoexpose
 
 import (
 	"context"
-	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -189,11 +189,18 @@ func (r *Reconciler) filterPorts(sockets []ListenSocket) map[int]bool {
 
 // diffToExpose returns ports that are wanted but not yet registered.
 func (r *Reconciler) diffToExpose(wanted map[int]bool, registered map[int]string) []int {
+	// Sort wanted ports for deterministic exposure order when exceeding MaxPorts.
+	sorted := make([]int, 0, len(wanted))
+	for port := range wanted {
+		sorted = append(sorted, port)
+	}
+	sort.Ints(sorted)
+
 	// Count currently auto-exposed ports.
 	autoCount := len(r.autoExposed)
 
 	var result []int
-	for port := range wanted {
+	for _, port := range sorted {
 		if _, exists := registered[port]; exists {
 			continue
 		}
@@ -282,5 +289,5 @@ func isConflictError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), fmt.Sprintf("error %d:", 409))
+	return strings.Contains(err.Error(), "error 409:")
 }
