@@ -2454,7 +2454,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 		// two-pass env-gather flow). File-type and variable-type secrets
 		// should always be placed regardless of injection mode — the
 		// as_needed concept does not apply to them.
-		if sv.InjectionMode == store.InjectionModeAsNeeded && sv.SecretType == store.SecretTypeEnvironment {
+		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
 			continue
 		}
 		result = append(result, ResolvedSecret{
