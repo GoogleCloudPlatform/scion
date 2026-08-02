@@ -472,19 +472,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if !opts.NoAuth {
 		auth = harness.GatherAuthWithEnv(authEnvOverlay, !opts.BrokerMode, authMeta)
 		if opts.BrokerMode {
-			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets)
+			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets, authMeta)
 		}
-		util.Debugf("auth: gathered credentials — selectedType=%q, hasGeminiKey=%t, hasGoogleKey=%t, hasOAuth=%t, hasADC=%t, hasAnthropicKey=%t, hasClaudeOAuthToken=%t, hasClaudeAuthFile=%t, cloudProject=%q, gcpMetadataMode=%q, brokerMode=%t",
+		util.Debugf("auth: gathered credentials — selectedType=%q, hasADC=%t, cloudProject=%q, gcpMetadataMode=%q, envVarCount=%d, fileCount=%d, brokerMode=%t",
 			auth.SelectedType,
-			auth.GeminiAPIKey != "",
-			auth.GoogleAPIKey != "",
-			auth.OAuthCreds != "",
 			auth.GoogleAppCredentials != "",
-			auth.AnthropicAPIKey != "",
-			auth.ClaudeOAuthToken != "",
-			auth.ClaudeAuthFile != "",
 			auth.GoogleCloudProject,
 			auth.GCPMetadataMode,
+			len(auth.EnvVars),
+			len(auth.Files),
 			opts.BrokerMode,
 		)
 		harness.OverlaySettings(&auth, h, agentDir)
@@ -1348,28 +1344,23 @@ func secretEnvTarget(s api.ResolvedSecret) string {
 }
 
 func isAuthEnvKey(key string, extraAuthKeys ...map[string]struct{}) bool {
+	// GCP shared fields are always auth-related regardless of harness config
 	switch key {
-	case "GEMINI_API_KEY",
-		"GOOGLE_API_KEY",
-		"ANTHROPIC_API_KEY",
-		"CLAUDE_CODE_OAUTH_TOKEN",
-		"OPENAI_API_KEY",
-		"CODEX_API_KEY",
-		"GOOGLE_CLOUD_PROJECT",
+	case "GOOGLE_CLOUD_PROJECT",
 		"GCP_PROJECT",
 		"ANTHROPIC_VERTEX_PROJECT_ID",
 		"GOOGLE_CLOUD_REGION",
 		"CLOUD_ML_REGION",
 		"GOOGLE_CLOUD_LOCATION":
 		return true
-	default:
-		for _, extra := range extraAuthKeys {
-			if _, ok := extra[key]; ok {
-				return true
-			}
-		}
-		return false
 	}
+	// All other auth env keys come from the config-driven key set
+	for _, extra := range extraAuthKeys {
+		if _, ok := extra[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // configAuthEnvKeySet builds a set of env var keys declared across all auth

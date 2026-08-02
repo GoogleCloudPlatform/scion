@@ -499,24 +499,14 @@ func (c *ScionConfig) IsDetached() bool {
 }
 
 type AuthConfig struct {
-	// Google/Gemini auth
-	GeminiAPIKey         string
-	GoogleAPIKey         string
+	// GCP shared fields — used across vertex-ai harnesses and have
+	// special handling. These remain as first-class fields because they
+	// participate in multi-source fallback resolution (e.g.
+	// GOOGLE_CLOUD_PROJECT | GCP_PROJECT | ANTHROPIC_VERTEX_PROJECT_ID)
+	// and are referenced by ResolveAuth for vertex-ai credential translation.
 	GoogleAppCredentials string
 	GoogleCloudProject   string
 	GoogleCloudRegion    string
-	OAuthCreds           string
-
-	// Anthropic auth
-	AnthropicAPIKey  string
-	ClaudeOAuthToken string // CLAUDE_CODE_OAUTH_TOKEN (long-lived, from `claude setup-token`)
-	ClaudeAuthFile   string // ~/.claude/.credentials.json path (rotating refresh-token store)
-
-	// OpenAI/Codex auth
-	OpenAIAPIKey     string
-	CodexAPIKey      string
-	CodexAuthFile    string
-	OpenCodeAuthFile string
 
 	// GCP metadata server mode ("block", "passthrough", "assign").
 	// When "assign", a GCP service account is available via the metadata
@@ -528,9 +518,15 @@ type AuthConfig struct {
 
 	// EnvVars holds config-driven auth env vars gathered from harness
 	// config metadata (auth.types[*].required_env). These flow through
-	// the auth pipeline alongside the hardcoded fields above, enabling
-	// new harnesses to declare auth requirements without Go code changes.
+	// the auth pipeline as the sole source of per-provider credentials,
+	// enabling harnesses to declare auth requirements without Go code changes.
 	EnvVars map[string]string
+
+	// Files holds config-driven file-based auth credentials gathered from
+	// harness config metadata (auth.types[*].required_files). Each entry
+	// maps a field name (e.g. "ClaudeAuthFile") to the host path of the
+	// credential file. These replace the former per-provider file fields.
+	Files map[string]string
 }
 
 // ResolvedAuth represents the single best auth method selected by a harness's

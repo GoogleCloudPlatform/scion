@@ -852,8 +852,8 @@ func TestClaudeContainerScriptResolveAuthShape(t *testing.T) {
 	// Pass both an Anthropic key and an auth file; the container-script
 	// wrapper must surface BOTH so the in-container script can choose.
 	resolved, err := scripted.ResolveAuth(api.AuthConfig{
-		AnthropicAPIKey: "sk-ant-xx",
-		ClaudeAuthFile:  "/tmp/credentials.json",
+		EnvVars: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-xx"},
+		Files:   map[string]string{"ClaudeAuthFile": "/tmp/credentials.json"},
 	})
 	if err != nil {
 		t.Fatalf("ResolveAuth: %v", err)

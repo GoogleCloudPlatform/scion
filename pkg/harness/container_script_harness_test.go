@@ -246,8 +246,7 @@ func TestContainerScriptHarness_StagesBundle(t *testing.T) {
 func TestContainerScriptHarness_ResolveAuth_StagesCandidateEnv(t *testing.T) {
 	h, _ := newTestContainerScriptHarness(t)
 	resolved, err := h.ResolveAuth(api.AuthConfig{
-		AnthropicAPIKey: "sk-ant-xxx",
-		ClaudeAuthFile:  "/tmp/.credentials.json",
+		EnvVars: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-xxx"},
 	})
 	if err != nil {
 		t.Fatalf("ResolveAuth: %v", err)
@@ -257,9 +256,6 @@ func TestContainerScriptHarness_ResolveAuth_StagesCandidateEnv(t *testing.T) {
 	}
 	if resolved.EnvVars["ANTHROPIC_API_KEY"] != "sk-ant-xxx" {
 		t.Errorf("missing ANTHROPIC_API_KEY in env")
-	}
-	if len(resolved.Files) != 1 || !strings.Contains(resolved.Files[0].ContainerPath, ".claude/.credentials.json") {
-		t.Errorf("unexpected file mappings: %+v", resolved.Files)
 	}
 }
 
@@ -585,8 +581,8 @@ func TestContainerScriptHarness_ResolveAuth_NoVertexTranslationForAPIKey(t *test
 	h := newClaudeHarness(t)
 
 	resolved, err := h.ResolveAuth(api.AuthConfig{
-		SelectedType:    "api-key",
-		AnthropicAPIKey: "sk-ant-test",
+		SelectedType: "api-key",
+		EnvVars:      map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test"},
 	})
 	if err != nil {
 		t.Fatalf("ResolveAuth: %v", err)

@@ -25,8 +25,74 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-func TestGatherAuth_EnvVars(t *testing.T) {
-	// Set up all env vars
+// testMultiHarnessAuthMeta returns auth metadata that exercises multiple
+// provider env-var groups (Gemini, OpenAI, Codex, etc.) — used by tests
+// that verify config-driven env-var gathering across provider types.
+func testMultiHarnessAuthMeta() *config.HarnessAuthMetadata {
+	return &config.HarnessAuthMetadata{
+		DefaultType: "api-key",
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"api-key": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"}},
+					{AnyOf: []string{"ANTHROPIC_API_KEY"}},
+					{AnyOf: []string{"CLAUDE_CODE_OAUTH_TOKEN"}},
+					{AnyOf: []string{"OPENAI_API_KEY"}},
+					{AnyOf: []string{"CODEX_API_KEY"}},
+				},
+			},
+		},
+	}
+}
+
+// testFileDiscoveryAuthMeta returns auth metadata with file credential
+// entries for OAuth, Codex, OpenCode, and Claude — used by file discovery
+// tests.
+func testFileDiscoveryAuthMeta() *config.HarnessAuthMetadata {
+	return &config.HarnessAuthMetadata{
+		DefaultType: "api-key",
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"auth-file": {
+				RequiredFiles: []config.HarnessAuthFileRequirement{
+					{Name: "GEMINI_OAUTH_CREDS", Type: "file", TargetSuffix: "/.gemini/oauth_creds.json", Field: "OAuthCreds"},
+					{Name: "CODEX_AUTH", Type: "file", TargetSuffix: "/.codex/auth.json", Field: "CodexAuthFile"},
+					{Name: "OPENCODE_AUTH", Type: "file", TargetSuffix: "/.local/share/opencode/auth.json", Field: "OpenCodeAuthFile"},
+					{Name: "CLAUDE_AUTH", Type: "file", TargetSuffix: "/.claude/.credentials.json", Field: "ClaudeAuthFile"},
+				},
+			},
+		},
+	}
+}
+
+func TestGatherAuth_GCPSharedFields(t *testing.T) {
+	// GatherAuth() with nil authMeta only populates GCP shared fields.
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "my-project")
+	t.Setenv("GOOGLE_CLOUD_REGION", "us-central1")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json")
+
+	auth := GatherAuth()
+
+	if auth.GoogleCloudProject != "my-project" {
+		t.Errorf("GoogleCloudProject = %q, want %q", auth.GoogleCloudProject, "my-project")
+	}
+	if auth.GoogleCloudRegion != "us-central1" {
+		t.Errorf("GoogleCloudRegion = %q, want %q", auth.GoogleCloudRegion, "us-central1")
+	}
+	if auth.GoogleAppCredentials != "/path/to/creds.json" {
+		t.Errorf("GoogleAppCredentials = %q, want %q", auth.GoogleAppCredentials, "/path/to/creds.json")
+	}
+
+	// With nil authMeta, EnvVars and Files are not populated.
+	if auth.EnvVars != nil {
+		t.Errorf("EnvVars should be nil with nil authMeta, got %v", auth.EnvVars)
+	}
+	if auth.Files != nil {
+		t.Errorf("Files should be nil with nil authMeta, got %v", auth.Files)
+	}
+}
+
+func TestGatherAuthWithEnv_ConfigDrivenEnvVarsFromProcess(t *testing.T) {
+	// With non-nil authMeta, per-provider env vars are gathered into EnvVars.
 	t.Setenv("GEMINI_API_KEY", "gemini-key")
 	t.Setenv("GOOGLE_API_KEY", "google-key")
 	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
@@ -37,26 +103,10 @@ func TestGatherAuth_EnvVars(t *testing.T) {
 	t.Setenv("GOOGLE_CLOUD_REGION", "us-central1")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json")
 
-	auth := GatherAuth()
+	meta := testMultiHarnessAuthMeta()
+	auth := GatherAuthWithEnv(nil, true, meta)
 
-	if auth.GeminiAPIKey != "gemini-key" {
-		t.Errorf("GeminiAPIKey = %q, want %q", auth.GeminiAPIKey, "gemini-key")
-	}
-	if auth.GoogleAPIKey != "google-key" {
-		t.Errorf("GoogleAPIKey = %q, want %q", auth.GoogleAPIKey, "google-key")
-	}
-	if auth.AnthropicAPIKey != "anthropic-key" {
-		t.Errorf("AnthropicAPIKey = %q, want %q", auth.AnthropicAPIKey, "anthropic-key")
-	}
-	if auth.ClaudeOAuthToken != "claude-oauth-tok" {
-		t.Errorf("ClaudeOAuthToken = %q, want %q", auth.ClaudeOAuthToken, "claude-oauth-tok")
-	}
-	if auth.OpenAIAPIKey != "openai-key" {
-		t.Errorf("OpenAIAPIKey = %q, want %q", auth.OpenAIAPIKey, "openai-key")
-	}
-	if auth.CodexAPIKey != "codex-key" {
-		t.Errorf("CodexAPIKey = %q, want %q", auth.CodexAPIKey, "codex-key")
-	}
+	// GCP shared fields are always populated directly.
 	if auth.GoogleCloudProject != "my-project" {
 		t.Errorf("GoogleCloudProject = %q, want %q", auth.GoogleCloudProject, "my-project")
 	}
@@ -65,6 +115,24 @@ func TestGatherAuth_EnvVars(t *testing.T) {
 	}
 	if auth.GoogleAppCredentials != "/path/to/creds.json" {
 		t.Errorf("GoogleAppCredentials = %q, want %q", auth.GoogleAppCredentials, "/path/to/creds.json")
+	}
+
+	// Per-provider env vars are now in EnvVars.
+	if auth.EnvVars == nil {
+		t.Fatal("EnvVars should not be nil when authMeta is provided")
+	}
+	checks := map[string]string{
+		"GEMINI_API_KEY":          "gemini-key",
+		"GOOGLE_API_KEY":          "google-key",
+		"ANTHROPIC_API_KEY":       "anthropic-key",
+		"CLAUDE_CODE_OAUTH_TOKEN": "claude-oauth-tok",
+		"OPENAI_API_KEY":          "openai-key",
+		"CODEX_API_KEY":           "codex-key",
+	}
+	for key, want := range checks {
+		if got := auth.EnvVars[key]; got != want {
+			t.Errorf("EnvVars[%q] = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -149,28 +217,31 @@ func TestGatherAuth_FileDiscovery(t *testing.T) {
 	_ = os.MkdirAll(filepath.Dir(claudeCredsPath), 0755)
 	_ = os.WriteFile(claudeCredsPath, []byte(`{"claudeAiOauth":{"accessToken":"rotating"}}`), 0644)
 
-	auth := GatherAuth()
+	// Use GatherAuthWithEnv with file-discovery authMeta so that per-harness
+	// file credentials flow through auth.Files.
+	meta := testFileDiscoveryAuthMeta()
+	auth := GatherAuthWithEnv(nil, true, meta)
 
+	// ADC is still a first-class GCP shared field.
 	if auth.GoogleAppCredentials != adcPath {
 		t.Errorf("GoogleAppCredentials = %q, want %q", auth.GoogleAppCredentials, adcPath)
 	}
-	if auth.OAuthCreds != oauthPath {
-		t.Errorf("OAuthCreds = %q, want %q", auth.OAuthCreds, oauthPath)
+
+	// Per-harness file credentials are now in auth.Files.
+	if auth.Files == nil {
+		t.Fatal("Files should not be nil when authMeta has file requirements")
 	}
-	if auth.CodexAuthFile != codexPath {
-		t.Errorf("CodexAuthFile = %q, want %q", auth.CodexAuthFile, codexPath)
+	if auth.Files["OAuthCreds"] != oauthPath {
+		t.Errorf("Files[OAuthCreds] = %q, want %q", auth.Files["OAuthCreds"], oauthPath)
 	}
-	if auth.OpenCodeAuthFile != opencodePath {
-		t.Errorf("OpenCodeAuthFile = %q, want %q", auth.OpenCodeAuthFile, opencodePath)
+	if auth.Files["CodexAuthFile"] != codexPath {
+		t.Errorf("Files[CodexAuthFile] = %q, want %q", auth.Files["CodexAuthFile"], codexPath)
 	}
-	if auth.ClaudeAuthFile != claudeCredsPath {
-		t.Errorf("ClaudeAuthFile = %q, want %q", auth.ClaudeAuthFile, claudeCredsPath)
+	if auth.Files["OpenCodeAuthFile"] != opencodePath {
+		t.Errorf("Files[OpenCodeAuthFile] = %q, want %q", auth.Files["OpenCodeAuthFile"], opencodePath)
 	}
-	// The file must be treated opaquely — we must NOT have read/parsed
-	// any content out of it into ClaudeOAuthToken. That field only comes
-	// from the CLAUDE_CODE_OAUTH_TOKEN env var.
-	if auth.ClaudeOAuthToken != "" {
-		t.Errorf("ClaudeOAuthToken = %q, want empty (must not scrape from credentials file)", auth.ClaudeOAuthToken)
+	if auth.Files["ClaudeAuthFile"] != claudeCredsPath {
+		t.Errorf("Files[ClaudeAuthFile] = %q, want %q", auth.Files["ClaudeAuthFile"], claudeCredsPath)
 	}
 }
 
@@ -210,22 +281,18 @@ func TestGatherAuth_NoFiles(t *testing.T) {
 	t.Setenv("CLOUD_ML_REGION", "")
 	t.Setenv("GOOGLE_CLOUD_LOCATION", "")
 
+	// With nil authMeta, no file scanning occurs for per-harness files.
 	auth := GatherAuth()
 
 	if auth.GoogleAppCredentials != "" {
 		t.Errorf("GoogleAppCredentials = %q, want empty", auth.GoogleAppCredentials)
 	}
-	if auth.OAuthCreds != "" {
-		t.Errorf("OAuthCreds = %q, want empty", auth.OAuthCreds)
-	}
-	if auth.CodexAuthFile != "" {
-		t.Errorf("CodexAuthFile = %q, want empty", auth.CodexAuthFile)
-	}
-	if auth.OpenCodeAuthFile != "" {
-		t.Errorf("OpenCodeAuthFile = %q, want empty", auth.OpenCodeAuthFile)
-	}
-	if auth.ClaudeAuthFile != "" {
-		t.Errorf("ClaudeAuthFile = %q, want empty", auth.ClaudeAuthFile)
+
+	// With authMeta but no files on disk, Files should be nil.
+	meta := testFileDiscoveryAuthMeta()
+	auth2 := GatherAuthWithEnv(nil, true, meta)
+	if auth2.Files != nil {
+		t.Errorf("Files = %v, want nil (no files on disk)", auth2.Files)
 	}
 }
 
@@ -348,22 +415,23 @@ func TestValidateAuth_EmptyEnvVarsAndFiles(t *testing.T) {
 
 func TestGatherAuthWithEnv_OverlayTakesPrecedence(t *testing.T) {
 	// Set process env vars
-	t.Setenv("GEMINI_API_KEY", "process-gemini")
 	t.Setenv("ANTHROPIC_API_KEY", "process-anthropic")
+	t.Setenv("GEMINI_API_KEY", "process-gemini")
 
 	// Overlay should win over process env
 	overlay := map[string]string{
 		"GEMINI_API_KEY": "overlay-gemini",
 	}
 
-	auth := GatherAuthWithEnv(overlay, true, nil)
+	meta := testMultiHarnessAuthMeta()
+	auth := GatherAuthWithEnv(overlay, true, meta)
 
-	if auth.GeminiAPIKey != "overlay-gemini" {
-		t.Errorf("GeminiAPIKey = %q, want %q (overlay should take precedence)", auth.GeminiAPIKey, "overlay-gemini")
+	if auth.EnvVars["GEMINI_API_KEY"] != "overlay-gemini" {
+		t.Errorf("EnvVars[GEMINI_API_KEY] = %q, want %q (overlay should take precedence)", auth.EnvVars["GEMINI_API_KEY"], "overlay-gemini")
 	}
 	// Non-overlaid key should fall back to process env
-	if auth.AnthropicAPIKey != "process-anthropic" {
-		t.Errorf("AnthropicAPIKey = %q, want %q (should fall back to process env)", auth.AnthropicAPIKey, "process-anthropic")
+	if auth.EnvVars["ANTHROPIC_API_KEY"] != "process-anthropic" {
+		t.Errorf("EnvVars[ANTHROPIC_API_KEY] = %q, want %q (should fall back to process env)", auth.EnvVars["ANTHROPIC_API_KEY"], "process-anthropic")
 	}
 }
 
@@ -371,326 +439,15 @@ func TestGatherAuthWithEnv_NilOverlay(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "process-gemini")
 	t.Setenv("OPENAI_API_KEY", "process-openai")
 
-	// nil overlay should behave identically to GatherAuth
-	auth := GatherAuthWithEnv(nil, true, nil)
+	meta := testMultiHarnessAuthMeta()
+	// nil overlay should behave identically to GatherAuth (with authMeta)
+	auth := GatherAuthWithEnv(nil, true, meta)
 
-	if auth.GeminiAPIKey != "process-gemini" {
-		t.Errorf("GeminiAPIKey = %q, want %q", auth.GeminiAPIKey, "process-gemini")
+	if auth.EnvVars["GEMINI_API_KEY"] != "process-gemini" {
+		t.Errorf("EnvVars[GEMINI_API_KEY] = %q, want %q", auth.EnvVars["GEMINI_API_KEY"], "process-gemini")
 	}
-	if auth.OpenAIAPIKey != "process-openai" {
-		t.Errorf("OpenAIAPIKey = %q, want %q", auth.OpenAIAPIKey, "process-openai")
-	}
-}
-
-func TestRequiredAuthEnvKeys(t *testing.T) {
-	tests := []struct {
-		name     string
-		harness  string
-		authType string
-		want     [][]string
-	}{
-		// Claude
-		{"claude api-key", "claude", "api-key", [][]string{{"ANTHROPIC_API_KEY"}}},
-		{"claude oauth-token", "claude", "oauth-token", [][]string{{"CLAUDE_CODE_OAUTH_TOKEN"}}},
-		{"claude auth-file", "claude", "auth-file", nil},
-		{"claude vertex-ai", "claude", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}},
-
-		// Gemini
-		{"gemini api-key", "gemini", "api-key", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
-		{"gemini auth-file", "gemini", "auth-file", nil},
-		{"gemini vertex-ai", "gemini", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}},
-
-		// Gemini-CLI (mirrors gemini)
-		{"gemini-cli api-key", "gemini-cli", "api-key", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
-		{"gemini-cli auth-file", "gemini-cli", "auth-file", nil},
-		{"gemini-cli vertex-ai", "gemini-cli", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}},
-
-		// OpenCode
-		{"opencode api-key", "opencode", "api-key", [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}},
-		{"opencode auth-file", "opencode", "auth-file", nil},
-
-		// Codex
-		{"codex api-key", "codex", "api-key", [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}},
-		{"codex auth-file", "codex", "auth-file", nil},
-
-		// Generic
-		{"generic api-key", "generic", "api-key", nil},
-		{"generic vertex-ai", "generic", "vertex-ai", nil},
-
-		// Empty authType defaults to api-key
-		{"claude empty auth type", "claude", "", [][]string{{"ANTHROPIC_API_KEY"}}},
-		{"gemini empty auth type", "gemini", "", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
-		{"gemini-cli empty auth type", "gemini-cli", "", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
-		{"opencode empty auth type", "opencode", "", [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}},
-		{"codex empty auth type", "codex", "", [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}},
-
-		// Unknown/empty
-		{"empty harness", "", "api-key", nil},
-		{"both empty", "", "", nil},
-		{"unknown harness", "unknown", "api-key", nil},
-		{"unknown auth type", "claude", "unknown", nil},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := RequiredAuthEnvKeys(tt.harness, tt.authType)
-			if tt.want == nil {
-				if got != nil {
-					t.Errorf("RequiredAuthEnvKeys(%q, %q) = %v, want nil", tt.harness, tt.authType, got)
-				}
-				return
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("RequiredAuthEnvKeys(%q, %q) returned %d groups, want %d", tt.harness, tt.authType, len(got), len(tt.want))
-			}
-			for i, group := range got {
-				if len(group) != len(tt.want[i]) {
-					t.Errorf("group %d: got %v, want %v", i, group, tt.want[i])
-					continue
-				}
-				for j, key := range group {
-					if key != tt.want[i][j] {
-						t.Errorf("group %d key %d: got %q, want %q", i, j, key, tt.want[i][j])
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestRequiredAuthSecrets(t *testing.T) {
-	tests := []struct {
-		name          string
-		harness       string
-		authType      string
-		gcpSAAssigned bool
-		wantNil       bool
-		wantKey       string
-		wantType      string
-	}{
-		{"claude vertex-ai", "claude", "vertex-ai", false, false, "gcloud-adc", "file"},
-		{"gemini vertex-ai", "gemini", "vertex-ai", false, false, "gcloud-adc", "file"},
-		{"gemini-cli vertex-ai", "gemini-cli", "vertex-ai", false, false, "gcloud-adc", "file"},
-		{"opencode vertex-ai", "opencode", "vertex-ai", false, false, "gcloud-adc", "file"},
-		{"codex vertex-ai", "codex", "vertex-ai", false, false, "gcloud-adc", "file"},
-		{"claude api-key", "claude", "api-key", false, true, "", ""},
-		{"gemini api-key", "gemini", "api-key", false, true, "", ""},
-		{"gemini-cli api-key", "gemini-cli", "api-key", false, true, "", ""},
-		{"claude empty auth type", "claude", "", false, true, "", ""},
-		{"gemini empty auth type", "gemini", "", false, true, "", ""},
-		{"gemini-cli empty auth type", "gemini-cli", "", false, true, "", ""},
-		{"generic vertex-ai", "generic", "vertex-ai", false, true, "", ""},
-		{"unknown harness", "unknown", "vertex-ai", false, true, "", ""},
-		{"empty harness", "", "vertex-ai", false, true, "", ""},
-		{"both empty", "", "", false, true, "", ""},
-		// GCP SA assigned — ADC not required
-		{"claude vertex-ai with GCP SA", "claude", "vertex-ai", true, true, "", ""},
-		{"gemini vertex-ai with GCP SA", "gemini", "vertex-ai", true, true, "", ""},
-		{"gemini-cli vertex-ai with GCP SA", "gemini-cli", "vertex-ai", true, true, "", ""},
-		{"opencode vertex-ai with GCP SA", "opencode", "vertex-ai", true, true, "", ""},
-		{"codex vertex-ai with GCP SA", "codex", "vertex-ai", true, true, "", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := RequiredAuthSecrets(tt.harness, tt.authType, tt.gcpSAAssigned)
-			if tt.wantNil {
-				if got != nil {
-					t.Errorf("RequiredAuthSecrets(%q, %q, %t) = %v, want nil", tt.harness, tt.authType, tt.gcpSAAssigned, got)
-				}
-				return
-			}
-			if len(got) != 1 {
-				t.Fatalf("RequiredAuthSecrets(%q, %q, %t) returned %d secrets, want 1", tt.harness, tt.authType, tt.gcpSAAssigned, len(got))
-			}
-			if got[0].Key != tt.wantKey {
-				t.Errorf("Key = %q, want %q", got[0].Key, tt.wantKey)
-			}
-			if got[0].Type != tt.wantType {
-				t.Errorf("Type = %q, want %q", got[0].Type, tt.wantType)
-			}
-			if got[0].Description == "" {
-				t.Error("Description should not be empty")
-			}
-			// vertex-ai secrets should list GOOGLE_APPLICATION_CREDENTIALS as alternative
-			if tt.authType == "vertex-ai" && !tt.gcpSAAssigned {
-				if len(got[0].AlternativeEnvKeys) != 1 || got[0].AlternativeEnvKeys[0] != "GOOGLE_APPLICATION_CREDENTIALS" {
-					t.Errorf("AlternativeEnvKeys = %v, want [GOOGLE_APPLICATION_CREDENTIALS]", got[0].AlternativeEnvKeys)
-				}
-			}
-		})
-	}
-}
-
-func TestDetectAuthTypeFromGCPIdentity(t *testing.T) {
-	tests := []struct {
-		name          string
-		harness       string
-		gcpSAAssigned bool
-		wantType      string
-	}{
-		{"claude with GCP SA", "claude", true, "vertex-ai"},
-		{"gemini with GCP SA", "gemini", true, "vertex-ai"},
-		{"gemini-cli with GCP SA", "gemini-cli", true, "vertex-ai"},
-		{"claude without GCP SA", "claude", false, ""},
-		{"gemini without GCP SA", "gemini", false, ""},
-		{"gemini-cli without GCP SA", "gemini-cli", false, ""},
-		{"opencode with GCP SA", "opencode", true, ""},
-		{"codex with GCP SA", "codex", true, ""},
-		{"generic with GCP SA", "generic", true, ""},
-		{"unknown with GCP SA", "unknown", true, ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := DetectAuthTypeFromGCPIdentity(tt.harness, tt.gcpSAAssigned)
-			if got != tt.wantType {
-				t.Errorf("DetectAuthTypeFromGCPIdentity(%q, %t) = %q, want %q", tt.harness, tt.gcpSAAssigned, got, tt.wantType)
-			}
-		})
-	}
-}
-
-func TestDetectAuthTypeFromEnvVars(t *testing.T) {
-	tests := []struct {
-		name     string
-		harness  string
-		envKeys  map[string]struct{}
-		wantType string
-	}{
-		{"claude with GAC", "claude", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, "vertex-ai"},
-		{"claude with GOOGLE_CLOUD_PROJECT", "claude", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, "vertex-ai"},
-		{"claude with CLAUDE_CODE_OAUTH_TOKEN", "claude", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}}, "oauth-token"},
-		{"claude prefers OAuth token over GAC", "claude", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, "oauth-token"},
-		{"claude prefers OAuth token over GCP", "claude", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}, "GOOGLE_CLOUD_PROJECT": {}}, "oauth-token"},
-		{"gemini with GAC", "gemini", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, "vertex-ai"},
-		{"gemini with GOOGLE_CLOUD_PROJECT", "gemini", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, "vertex-ai"},
-		{"gemini with CLAUDE_CODE_OAUTH_TOKEN", "gemini", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}}, ""},
-		{"gemini-cli with GAC", "gemini-cli", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, "vertex-ai"},
-		{"gemini-cli with GOOGLE_CLOUD_PROJECT", "gemini-cli", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, "vertex-ai"},
-		{"claude without GAC", "claude", map[string]struct{}{}, ""},
-		{"gemini without GAC", "gemini", map[string]struct{}{}, ""},
-		{"gemini-cli without GAC", "gemini-cli", map[string]struct{}{}, ""},
-		{"opencode with GAC", "opencode", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
-		{"opencode with GOOGLE_CLOUD_PROJECT", "opencode", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, ""},
-		{"codex with GAC", "codex", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
-		{"generic with GAC", "generic", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
-		{"claude with unrelated env", "claude", map[string]struct{}{"SOME_OTHER_VAR": {}}, ""},
-		{"claude API key wins over GAC", "claude", map[string]struct{}{"ANTHROPIC_API_KEY": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
-		{"claude API key wins over GCP project", "claude", map[string]struct{}{"ANTHROPIC_API_KEY": {}, "GOOGLE_CLOUD_PROJECT": {}}, ""},
-		{"claude API key alone", "claude", map[string]struct{}{"ANTHROPIC_API_KEY": {}}, ""},
-		{"gemini API key wins over GAC", "gemini", map[string]struct{}{"GEMINI_API_KEY": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
-		{"gemini API key wins over GCP project", "gemini", map[string]struct{}{"GEMINI_API_KEY": {}, "GOOGLE_CLOUD_PROJECT": {}}, ""},
-		{"gemini GOOGLE_API_KEY wins over GAC", "gemini", map[string]struct{}{"GOOGLE_API_KEY": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
-		{"gemini API key alone", "gemini", map[string]struct{}{"GEMINI_API_KEY": {}}, ""},
-		{"gemini-cli API key wins over GAC", "gemini-cli", map[string]struct{}{"GEMINI_API_KEY": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
-		{"gemini-cli API key wins over GCP project", "gemini-cli", map[string]struct{}{"GEMINI_API_KEY": {}, "GOOGLE_CLOUD_PROJECT": {}}, ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := DetectAuthTypeFromEnvVars(tt.harness, tt.envKeys)
-			if got != tt.wantType {
-				t.Errorf("DetectAuthTypeFromEnvVars(%q, ...) = %q, want %q", tt.harness, got, tt.wantType)
-			}
-		})
-	}
-}
-
-func TestDetectAuthTypeFromFileSecrets(t *testing.T) {
-	tests := []struct {
-		name     string
-		harness  string
-		secrets  map[string]struct{}
-		wantType string
-	}{
-		{
-			"gemini with GEMINI_OAUTH_CREDS",
-			"gemini",
-			map[string]struct{}{"GEMINI_OAUTH_CREDS": {}},
-			"auth-file",
-		},
-		{
-			"gemini with gcloud-adc",
-			"gemini",
-			map[string]struct{}{"gcloud-adc": {}},
-			"vertex-ai",
-		},
-		{
-			"gemini with both OAuth and ADC prefers OAuth",
-			"gemini",
-			map[string]struct{}{"GEMINI_OAUTH_CREDS": {}, "gcloud-adc": {}},
-			"auth-file",
-		},
-		{
-			"gemini with no file secrets",
-			"gemini",
-			map[string]struct{}{},
-			"",
-		},
-		{
-			"gemini-cli with gcloud-adc",
-			"gemini-cli",
-			map[string]struct{}{"gcloud-adc": {}},
-			"vertex-ai",
-		},
-		{
-			"gemini-cli with GEMINI_OAUTH_CREDS",
-			"gemini-cli",
-			map[string]struct{}{"GEMINI_OAUTH_CREDS": {}},
-			"auth-file",
-		},
-		{
-			"codex with CODEX_AUTH",
-			"codex",
-			map[string]struct{}{"CODEX_AUTH": {}},
-			"auth-file",
-		},
-		{
-			"opencode with OPENCODE_AUTH",
-			"opencode",
-			map[string]struct{}{"OPENCODE_AUTH": {}},
-			"auth-file",
-		},
-		{
-			"claude with gcloud-adc",
-			"claude",
-			map[string]struct{}{"gcloud-adc": {}},
-			"vertex-ai",
-		},
-		{
-			"claude with CLAUDE_AUTH",
-			"claude",
-			map[string]struct{}{"CLAUDE_AUTH": {}},
-			"auth-file",
-		},
-		{
-			"claude prefers CLAUDE_AUTH over gcloud-adc",
-			"claude",
-			map[string]struct{}{"CLAUDE_AUTH": {}, "gcloud-adc": {}},
-			"auth-file",
-		},
-		{
-			"claude with no file secrets",
-			"claude",
-			map[string]struct{}{},
-			"",
-		},
-		{
-			"unknown harness",
-			"unknown",
-			map[string]struct{}{"GEMINI_OAUTH_CREDS": {}},
-			"",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := DetectAuthTypeFromFileSecrets(tt.harness, tt.secrets)
-			if got != tt.wantType {
-				t.Errorf("DetectAuthTypeFromFileSecrets(%q, ...) = %q, want %q", tt.harness, got, tt.wantType)
-			}
-		})
+	if auth.EnvVars["OPENAI_API_KEY"] != "process-openai" {
+		t.Errorf("EnvVars[OPENAI_API_KEY] = %q, want %q", auth.EnvVars["OPENAI_API_KEY"], "process-openai")
 	}
 }
 
@@ -702,10 +459,11 @@ func TestGatherAuthWithEnv_EmptyOverlayValueFallsThrough(t *testing.T) {
 		"GEMINI_API_KEY": "",
 	}
 
-	auth := GatherAuthWithEnv(overlay, true, nil)
+	meta := testMultiHarnessAuthMeta()
+	auth := GatherAuthWithEnv(overlay, true, meta)
 
-	if auth.GeminiAPIKey != "process-gemini" {
-		t.Errorf("GeminiAPIKey = %q, want %q (empty overlay should fall through)", auth.GeminiAPIKey, "process-gemini")
+	if auth.EnvVars["GEMINI_API_KEY"] != "process-gemini" {
+		t.Errorf("EnvVars[GEMINI_API_KEY] = %q, want %q (empty overlay should fall through)", auth.EnvVars["GEMINI_API_KEY"], "process-gemini")
 	}
 }
 
@@ -753,23 +511,10 @@ func TestGatherAuthWithEnv_OverlayAllKeys(t *testing.T) {
 		"GOOGLE_APPLICATION_CREDENTIALS": "/ov/creds.json",
 	}
 
-	auth := GatherAuthWithEnv(overlay, true, nil)
+	meta := testMultiHarnessAuthMeta()
+	auth := GatherAuthWithEnv(overlay, true, meta)
 
-	if auth.GeminiAPIKey != "ov-gemini" {
-		t.Errorf("GeminiAPIKey = %q, want %q", auth.GeminiAPIKey, "ov-gemini")
-	}
-	if auth.GoogleAPIKey != "ov-google" {
-		t.Errorf("GoogleAPIKey = %q, want %q", auth.GoogleAPIKey, "ov-google")
-	}
-	if auth.AnthropicAPIKey != "ov-anthropic" {
-		t.Errorf("AnthropicAPIKey = %q, want %q", auth.AnthropicAPIKey, "ov-anthropic")
-	}
-	if auth.OpenAIAPIKey != "ov-openai" {
-		t.Errorf("OpenAIAPIKey = %q, want %q", auth.OpenAIAPIKey, "ov-openai")
-	}
-	if auth.CodexAPIKey != "ov-codex" {
-		t.Errorf("CodexAPIKey = %q, want %q", auth.CodexAPIKey, "ov-codex")
-	}
+	// GCP shared fields
 	if auth.GoogleCloudProject != "ov-project" {
 		t.Errorf("GoogleCloudProject = %q, want %q", auth.GoogleCloudProject, "ov-project")
 	}
@@ -778,6 +523,23 @@ func TestGatherAuthWithEnv_OverlayAllKeys(t *testing.T) {
 	}
 	if auth.GoogleAppCredentials != "/ov/creds.json" {
 		t.Errorf("GoogleAppCredentials = %q, want %q", auth.GoogleAppCredentials, "/ov/creds.json")
+	}
+
+	// Per-provider env vars via EnvVars
+	envChecks := map[string]string{
+		"GEMINI_API_KEY":    "ov-gemini",
+		"GOOGLE_API_KEY":    "ov-google",
+		"ANTHROPIC_API_KEY": "ov-anthropic",
+		"OPENAI_API_KEY":    "ov-openai",
+		"CODEX_API_KEY":     "ov-codex",
+	}
+	if auth.EnvVars == nil {
+		t.Fatal("EnvVars should not be nil")
+	}
+	for key, want := range envChecks {
+		if got := auth.EnvVars[key]; got != want {
+			t.Errorf("EnvVars[%q] = %q, want %q", key, got, want)
+		}
 	}
 }
 
@@ -873,35 +635,32 @@ func TestGatherAuthWithEnv_BrokerMode(t *testing.T) {
 	_ = os.MkdirAll(filepath.Dir(adcPath), 0755)
 	_ = os.WriteFile(adcPath, []byte(`{"type":"authorized_user"}`), 0644)
 
-	oauthPath := filepath.Join(tmpHome, ".gemini", "oauth_creds.json")
-	_ = os.MkdirAll(filepath.Dir(oauthPath), 0755)
-	_ = os.WriteFile(oauthPath, []byte(`{"dummy":"oauth"}`), 0644)
-
 	// Call with localSources=false and an overlay that provides one key
 	overlay := map[string]string{
 		"ANTHROPIC_API_KEY": "hub-anthropic",
 	}
-	auth := GatherAuthWithEnv(overlay, false, nil)
+	meta := testMultiHarnessAuthMeta()
+	auth := GatherAuthWithEnv(overlay, false, meta)
 
-	// Overlay key should be present
-	if auth.AnthropicAPIKey != "hub-anthropic" {
-		t.Errorf("AnthropicAPIKey = %q, want %q (from overlay)", auth.AnthropicAPIKey, "hub-anthropic")
+	// Overlay key should be present in EnvVars
+	if auth.EnvVars == nil {
+		t.Fatal("EnvVars should not be nil")
+	}
+	if auth.EnvVars["ANTHROPIC_API_KEY"] != "hub-anthropic" {
+		t.Errorf("EnvVars[ANTHROPIC_API_KEY] = %q, want %q (from overlay)", auth.EnvVars["ANTHROPIC_API_KEY"], "hub-anthropic")
 	}
 
 	// Broker env should NOT leak through
-	if auth.GeminiAPIKey != "" {
-		t.Errorf("GeminiAPIKey = %q, want empty (broker env should not leak)", auth.GeminiAPIKey)
+	if _, ok := auth.EnvVars["GEMINI_API_KEY"]; ok {
+		t.Errorf("EnvVars[GEMINI_API_KEY] should not be set (broker env should not leak)")
 	}
 
 	// Filesystem creds should NOT be discovered
 	if auth.GoogleAppCredentials != "" {
 		t.Errorf("GoogleAppCredentials = %q, want empty (filesystem should not be scanned)", auth.GoogleAppCredentials)
 	}
-	if auth.OAuthCreds != "" {
-		t.Errorf("OAuthCreds = %q, want empty (filesystem should not be scanned)", auth.OAuthCreds)
-	}
-	if auth.ClaudeAuthFile != "" {
-		t.Errorf("ClaudeAuthFile = %q, want empty (filesystem should not be scanned)", auth.ClaudeAuthFile)
+	if auth.Files != nil {
+		t.Errorf("Files should be nil in broker mode (filesystem should not be scanned)")
 	}
 }
 
@@ -934,24 +693,24 @@ func TestOverlayFileSecrets(t *testing.T) {
 			},
 		},
 		{
-			name: "OAuth by name",
+			name: "OAuth by target suffix",
 			secrets: []api.ResolvedSecret{
-				{Name: "GEMINI_OAUTH_CREDS", Type: "file", Target: "/home/gemini/.gemini/oauth_creds.json"},
+				{Name: "my-oauth", Type: "file", Target: "/home/gemini/.gemini/oauth_creds.json"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
-				if auth.OAuthCreds != "/home/gemini/.gemini/oauth_creds.json" {
-					t.Errorf("OAuthCreds = %q, want oauth path", auth.OAuthCreds)
+				if auth.Files == nil || auth.Files["OAuthCreds"] != "/home/gemini/.gemini/oauth_creds.json" {
+					t.Errorf("Files[OAuthCreds] = %q, want oauth path", auth.Files["OAuthCreds"])
 				}
 			},
 		},
 		{
-			name: "Codex by name",
+			name: "Codex by target suffix",
 			secrets: []api.ResolvedSecret{
-				{Name: "CODEX_AUTH", Type: "file", Target: "/home/gemini/.codex/auth.json"},
+				{Name: "my-codex", Type: "file", Target: "/home/gemini/.codex/auth.json"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
-				if auth.CodexAuthFile != "/home/gemini/.codex/auth.json" {
-					t.Errorf("CodexAuthFile = %q, want codex path", auth.CodexAuthFile)
+				if auth.Files == nil || auth.Files["CodexAuthFile"] != "/home/gemini/.codex/auth.json" {
+					t.Errorf("Files[CodexAuthFile] = %q, want codex path", auth.Files["CodexAuthFile"])
 				}
 			},
 		},
@@ -961,19 +720,8 @@ func TestOverlayFileSecrets(t *testing.T) {
 				{Name: "my-opencode", Type: "file", Target: "/home/gemini/.local/share/opencode/auth.json"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
-				if auth.OpenCodeAuthFile != "/home/gemini/.local/share/opencode/auth.json" {
-					t.Errorf("OpenCodeAuthFile = %q, want opencode path", auth.OpenCodeAuthFile)
-				}
-			},
-		},
-		{
-			name: "Claude credentials by name",
-			secrets: []api.ResolvedSecret{
-				{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
-			},
-			check: func(t *testing.T, auth api.AuthConfig) {
-				if auth.ClaudeAuthFile != "/home/agent/.claude/.credentials.json" {
-					t.Errorf("ClaudeAuthFile = %q, want credentials path", auth.ClaudeAuthFile)
+				if auth.Files == nil || auth.Files["OpenCodeAuthFile"] != "/home/gemini/.local/share/opencode/auth.json" {
+					t.Errorf("Files[OpenCodeAuthFile] = %q, want opencode path", auth.Files["OpenCodeAuthFile"])
 				}
 			},
 		},
@@ -983,8 +731,8 @@ func TestOverlayFileSecrets(t *testing.T) {
 				{Name: "my-claude-creds", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
-				if auth.ClaudeAuthFile == "" {
-					t.Error("ClaudeAuthFile should be set from target suffix match")
+				if auth.Files == nil || auth.Files["ClaudeAuthFile"] == "" {
+					t.Error("Files[ClaudeAuthFile] should be set from target suffix match")
 				}
 			},
 		},
@@ -1004,13 +752,13 @@ func TestOverlayFileSecrets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			auth := api.AuthConfig{}
-			OverlayFileSecrets(&auth, tt.secrets)
+			OverlayFileSecrets(&auth, tt.secrets, nil)
 			tt.check(t, auth)
 		})
 	}
 }
 
-func TestOverlayFileSecretsFromConfig(t *testing.T) {
+func TestOverlayFileSecrets_WithAuthMeta(t *testing.T) {
 	claudeAuthMeta := &config.HarnessAuthMetadata{
 		DefaultType: "api-key",
 		Types: map[string]config.HarnessAuthTypeMetadata{
@@ -1040,8 +788,20 @@ func TestOverlayFileSecretsFromConfig(t *testing.T) {
 				{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
-				if auth.ClaudeAuthFile != "/home/agent/.claude/.credentials.json" {
-					t.Errorf("ClaudeAuthFile = %q, want credentials path", auth.ClaudeAuthFile)
+				if auth.Files == nil || auth.Files["ClaudeAuthFile"] != "/home/agent/.claude/.credentials.json" {
+					t.Errorf("Files[ClaudeAuthFile] = %q, want credentials path", auth.Files["ClaudeAuthFile"])
+				}
+			},
+		},
+		{
+			name: "config-driven field mapping for gcloud-adc (first-class field)",
+			meta: claudeAuthMeta,
+			secrets: []api.ResolvedSecret{
+				{Name: "gcloud-adc", Type: "file", Target: "/home/agent/.config/gcloud/application_default_credentials.json"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				if auth.GoogleAppCredentials != "/home/agent/.config/gcloud/application_default_credentials.json" {
+					t.Errorf("GoogleAppCredentials = %q, want ADC path", auth.GoogleAppCredentials)
 				}
 			},
 		},
@@ -1052,24 +812,8 @@ func TestOverlayFileSecretsFromConfig(t *testing.T) {
 				{Name: "my-custom-claude-creds", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
-				if auth.ClaudeAuthFile != "/home/agent/.claude/.credentials.json" {
-					t.Errorf("ClaudeAuthFile = %q, want credentials path from suffix fallback", auth.ClaudeAuthFile)
-				}
-			},
-		},
-		{
-			name: "config-driven matches hardcoded behavior",
-			meta: claudeAuthMeta,
-			secrets: []api.ResolvedSecret{
-				{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
-			},
-			check: func(t *testing.T, auth api.AuthConfig) {
-				hardcoded := api.AuthConfig{}
-				OverlayFileSecrets(&hardcoded, []api.ResolvedSecret{
-					{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
-				})
-				if auth.ClaudeAuthFile != hardcoded.ClaudeAuthFile {
-					t.Errorf("config-driven ClaudeAuthFile = %q, hardcoded = %q", auth.ClaudeAuthFile, hardcoded.ClaudeAuthFile)
+				if auth.Files == nil || auth.Files["ClaudeAuthFile"] != "/home/agent/.claude/.credentials.json" {
+					t.Errorf("Files[ClaudeAuthFile] = %q, want credentials path from suffix fallback", auth.Files["ClaudeAuthFile"])
 				}
 			},
 		},
@@ -1080,8 +824,8 @@ func TestOverlayFileSecretsFromConfig(t *testing.T) {
 				{Name: "CLAUDE_AUTH", Type: "environment", Target: "CLAUDE_AUTH", Value: "some-value"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
-				if auth.ClaudeAuthFile != "" {
-					t.Errorf("ClaudeAuthFile = %q, want empty (env-type should be skipped)", auth.ClaudeAuthFile)
+				if auth.Files != nil && auth.Files["ClaudeAuthFile"] != "" {
+					t.Errorf("Files[ClaudeAuthFile] = %q, want empty (env-type should be skipped)", auth.Files["ClaudeAuthFile"])
 				}
 			},
 		},
@@ -1092,8 +836,8 @@ func TestOverlayFileSecretsFromConfig(t *testing.T) {
 				{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
 			},
 			check: func(t *testing.T, auth api.AuthConfig) {
-				if auth.ClaudeAuthFile != "/home/agent/.claude/.credentials.json" {
-					t.Errorf("ClaudeAuthFile = %q, want credentials path from suffix fallback", auth.ClaudeAuthFile)
+				if auth.Files == nil || auth.Files["ClaudeAuthFile"] != "/home/agent/.claude/.credentials.json" {
+					t.Errorf("Files[ClaudeAuthFile] = %q, want credentials path from suffix fallback", auth.Files["ClaudeAuthFile"])
 				}
 			},
 		},
@@ -1102,7 +846,7 @@ func TestOverlayFileSecretsFromConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			auth := api.AuthConfig{}
-			OverlayFileSecretsFromConfig(&auth, tt.secrets, tt.meta)
+			OverlayFileSecrets(&auth, tt.secrets, tt.meta)
 			tt.check(t, auth)
 		})
 	}

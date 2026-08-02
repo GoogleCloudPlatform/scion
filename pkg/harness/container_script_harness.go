@@ -263,63 +263,63 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 		resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"] = auth.SelectedType
 	}
 
-	// Forward any explicit auth env vars to the container. The script may
-	// move them into final harness-native files. Harness-config metadata
-	// could also drive this declaratively, but keeping it permissive at the
-	// staging layer matches the design's "stage all candidates" guidance.
-	addIfPresent := func(key, val string) {
-		if val != "" {
-			resolved.EnvVars[key] = val
-		}
+	// Forward GCP shared fields that have multi-source fallback resolution.
+	if auth.GoogleCloudProject != "" {
+		resolved.EnvVars["GOOGLE_CLOUD_PROJECT"] = auth.GoogleCloudProject
 	}
-	addIfPresent("ANTHROPIC_API_KEY", auth.AnthropicAPIKey)
-	addIfPresent("CLAUDE_CODE_OAUTH_TOKEN", auth.ClaudeOAuthToken)
-	addIfPresent("OPENAI_API_KEY", auth.OpenAIAPIKey)
-	addIfPresent("GEMINI_API_KEY", auth.GeminiAPIKey)
-	addIfPresent("GOOGLE_API_KEY", auth.GoogleAPIKey)
-	addIfPresent("GOOGLE_CLOUD_PROJECT", auth.GoogleCloudProject)
-	addIfPresent("GOOGLE_CLOUD_REGION", auth.GoogleCloudRegion)
-	addIfPresent("CODEX_API_KEY", auth.CodexAPIKey)
+	if auth.GoogleCloudRegion != "" {
+		resolved.EnvVars["GOOGLE_CLOUD_REGION"] = auth.GoogleCloudRegion
+	}
 
-	// Forward config-driven auth env vars. These come from harness config
-	// metadata (auth.types[*].required_env) and are gathered by
-	// GatherAuthWithEnv. They are additive — hardcoded fields above take
-	// precedence if the same key appears in both.
+	// Forward all config-driven auth env vars gathered from harness config
+	// metadata (auth.types[*].required_env).
 	for k, v := range auth.EnvVars {
 		if _, exists := resolved.EnvVars[k]; !exists {
 			resolved.EnvVars[k] = v
 		}
 	}
 
+	// GCP ADC file (first-class GCP shared field)
 	if auth.GoogleAppCredentials != "" {
 		resolved.Files = append(resolved.Files, api.FileMapping{
 			SourcePath:    auth.GoogleAppCredentials,
 			ContainerPath: "~/.config/gcloud/application_default_credentials.json",
 		})
 	}
-	if auth.ClaudeAuthFile != "" {
-		resolved.Files = append(resolved.Files, api.FileMapping{
-			SourcePath:    auth.ClaudeAuthFile,
-			ContainerPath: "~/.claude/.credentials.json",
-		})
-	}
-	if auth.CodexAuthFile != "" {
-		resolved.Files = append(resolved.Files, api.FileMapping{
-			SourcePath:    auth.CodexAuthFile,
-			ContainerPath: "~/.codex/auth.json",
-		})
-	}
-	if auth.OpenCodeAuthFile != "" {
-		resolved.Files = append(resolved.Files, api.FileMapping{
-			SourcePath:    auth.OpenCodeAuthFile,
-			ContainerPath: "~/.local/share/opencode/auth.json",
-		})
-	}
-	if auth.OAuthCreds != "" {
-		resolved.Files = append(resolved.Files, api.FileMapping{
-			SourcePath:    auth.OAuthCreds,
-			ContainerPath: "~/.scion/oauth_creds.json",
-		})
+
+	// Forward config-driven file credentials. The Files map uses field names
+	// as keys (e.g. "ClaudeAuthFile") and host paths as values. We map the
+	// field names to their container target paths using the harness config's
+	// required_files entries. A seen set keyed by Field prevents duplicate
+	// mappings when the same field appears in multiple auth types.
+	if c.entry.Auth != nil {
+		seenFields := make(map[string]struct{})
+		for _, authType := range c.entry.Auth.Types {
+			for _, rf := range authType.RequiredFiles {
+				if rf.Field == "" || rf.TargetSuffix == "" {
+					continue
+				}
+				if _, dup := seenFields[rf.Field]; dup {
+					continue
+				}
+				seenFields[rf.Field] = struct{}{}
+				hostPath := auth.Files[rf.Field]
+				if hostPath == "" {
+					continue
+				}
+				// Normalize TargetSuffix to ensure it starts with "/" before
+				// prepending "~" (e.g. ".claude/foo" → "~/.claude/foo").
+				suffix := rf.TargetSuffix
+				if !strings.HasPrefix(suffix, "/") {
+					suffix = "/" + suffix
+				}
+				containerPath := "~" + suffix
+				resolved.Files = append(resolved.Files, api.FileMapping{
+					SourcePath:    hostPath,
+					ContainerPath: containerPath,
+				})
+			}
+		}
 	}
 
 	// For the Claude harness with vertex-ai auth, translate GCP env vars into

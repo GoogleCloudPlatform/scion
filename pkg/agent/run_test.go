@@ -1869,17 +1869,20 @@ func TestFilterResolvedSecretsForResolvedAuth(t *testing.T) {
 	}
 }
 
-func TestIsAuthEnvKey_BuiltinKeys(t *testing.T) {
-	builtins := []string{
-		"GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY",
-		"CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
+func TestIsAuthEnvKey_GCPSharedKeys(t *testing.T) {
+	// GCP shared fields are always auth-related regardless of config
+	gcpKeys := []string{
 		"GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "ANTHROPIC_VERTEX_PROJECT_ID",
 		"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION",
 	}
-	for _, key := range builtins {
+	for _, key := range gcpKeys {
 		if !isAuthEnvKey(key) {
 			t.Errorf("isAuthEnvKey(%q) = false, want true", key)
 		}
+	}
+	// Per-provider keys are no longer built-in — they come from config
+	if isAuthEnvKey("GEMINI_API_KEY") {
+		t.Error("isAuthEnvKey(GEMINI_API_KEY) without config = true, want false")
 	}
 	if isAuthEnvKey("RANDOM_ENV_VAR") {
 		t.Error("isAuthEnvKey(RANDOM_ENV_VAR) = true, want false")
@@ -1891,6 +1894,7 @@ func TestIsAuthEnvKey_ConfigDrivenKeys(t *testing.T) {
 		"COPILOT_GITHUB_TOKEN": {},
 		"GH_TOKEN":             {},
 		"GITHUB_TOKEN":         {},
+		"GEMINI_API_KEY":       {},
 	}
 
 	if !isAuthEnvKey("COPILOT_GITHUB_TOKEN", configKeys) {
@@ -1899,9 +1903,13 @@ func TestIsAuthEnvKey_ConfigDrivenKeys(t *testing.T) {
 	if !isAuthEnvKey("GH_TOKEN", configKeys) {
 		t.Error("isAuthEnvKey(GH_TOKEN, configKeys) = false, want true")
 	}
-	// Built-in keys still work with config keys present
+	// Config-declared per-provider keys work with config keys present
 	if !isAuthEnvKey("GEMINI_API_KEY", configKeys) {
 		t.Error("isAuthEnvKey(GEMINI_API_KEY, configKeys) = false, want true")
+	}
+	// GCP shared keys always work
+	if !isAuthEnvKey("GOOGLE_CLOUD_PROJECT", configKeys) {
+		t.Error("isAuthEnvKey(GOOGLE_CLOUD_PROJECT, configKeys) = false, want true")
 	}
 	// Unknown key is still not auth
 	if isAuthEnvKey("RANDOM_VAR", configKeys) {
