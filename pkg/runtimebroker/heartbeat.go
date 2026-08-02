@@ -179,12 +179,12 @@ func (s *HeartbeatService) run(ctx context.Context) {
 
 // sendHeartbeat sends a single heartbeat to the Hub.
 func (s *HeartbeatService) sendHeartbeat(ctx context.Context) error {
-	heartbeat := s.buildHeartbeat()
+	heartbeat := s.buildHeartbeat(ctx)
 	return s.client.Heartbeat(ctx, s.brokerID, heartbeat)
 }
 
 // buildHeartbeat constructs the heartbeat payload from current state.
-func (s *HeartbeatService) buildHeartbeat() *hubclient.BrokerHeartbeat {
+func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.BrokerHeartbeat {
 	status := "online"
 
 	heartbeat := &hubclient.BrokerHeartbeat{
@@ -193,7 +193,7 @@ func (s *HeartbeatService) buildHeartbeat() *hubclient.BrokerHeartbeat {
 
 	// If we have a manager, gather per-project agent counts
 	if s.manager != nil {
-		projectAgents := s.gatherProjectAgents()
+		projectAgents := s.gatherProjectAgents(ctx)
 		if len(projectAgents) > 0 {
 			heartbeat.Projects = projectAgents
 		}
@@ -203,7 +203,7 @@ func (s *HeartbeatService) buildHeartbeat() *hubclient.BrokerHeartbeat {
 }
 
 // gatherProjectAgents collects agent information grouped by project.
-func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
+func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.ProjectHeartbeat {
 	if s.manager == nil {
 		return nil
 	}
@@ -211,7 +211,7 @@ func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 	// List all agents managed by this broker (default runtime).
 	// If the default manager fails (e.g. its runtime binary is missing),
 	// log a warning and continue — auxiliary managers may still work.
-	agents, err := s.manager.List(context.Background(), nil)
+	agents, err := s.manager.List(ctx, nil)
 	if err != nil {
 		s.log.Warn("Default runtime agent listing failed for heartbeat, trying auxiliary runtimes", "error", err)
 		agents = nil
@@ -231,7 +231,7 @@ func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 			seen[heartbeatAgentKey(ag)] = true
 		}
 		for _, auxMgr := range s.auxiliaryManagers() {
-			auxAgents, auxErr := auxMgr.List(context.Background(), nil)
+			auxAgents, auxErr := auxMgr.List(ctx, nil)
 			if auxErr != nil {
 				continue
 			}
