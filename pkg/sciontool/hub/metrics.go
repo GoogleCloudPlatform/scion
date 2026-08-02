@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
 
 // SessionMetrics holds session-level information in a MetricsPayload.
@@ -128,4 +130,38 @@ func (c *Client) ReportMetrics(ctx context.Context, payload MetricsPayload) erro
 	}
 
 	return fmt.Errorf("request failed after %d attempts: %w", attempts, lastErr)
+}
+
+// SummaryToMetricsPayload converts a telemetry.SessionSummary (produced by the
+// aggregator on session-end) into a MetricsPayload suitable for ReportMetrics.
+func SummaryToMetricsPayload(s telemetry.SessionSummary) MetricsPayload {
+	tools := make(map[string]ToolStats, len(s.ToolCalls))
+	for name, tc := range s.ToolCalls {
+		tools[name] = ToolStats{
+			Calls:   tc.Calls,
+			Success: tc.Success,
+			Error:   tc.Error,
+		}
+	}
+
+	return MetricsPayload{
+		Type:      "session_metrics",
+		AgentID:   s.AgentID,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Session: SessionMetrics{
+			ID:        s.SessionID,
+			StartedAt: s.StartedAt.UTC().Format(time.RFC3339),
+			EndedAt:   s.EndedAt.UTC().Format(time.RFC3339),
+			Status:    s.Status,
+			TurnCount: s.TurnCount,
+			Model:     s.Model,
+		},
+		Tokens: TokenMetrics{
+			Input:     s.TokensInput,
+			Output:    s.TokensOutput,
+			Cached:    s.TokensCached,
+			Reasoning: s.TokensReasoning,
+		},
+		Tools: tools,
+	}
 }

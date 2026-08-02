@@ -691,6 +691,7 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 			event.Data.InputTokens,
 			event.Data.OutputTokens,
 			event.Data.CachedTokens,
+			event.Data.ReasoningTokens,
 		)
 
 	case hooks.EventAgentEnd:
@@ -701,6 +702,7 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 			event.Data.InputTokens,
 			event.Data.OutputTokens,
 			event.Data.CachedTokens,
+			event.Data.ReasoningTokens,
 			event.Data.Error,
 		)
 		if h.OnSessionEnd != nil {

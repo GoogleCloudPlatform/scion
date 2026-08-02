@@ -1946,6 +1946,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	// (self-access), we require user or agent authentication
 	// with appropriate scopes. Self-access endpoints enforce their own auth checks.
 	if action != api.AgentActionStatus &&
+		action != api.AgentActionMetrics &&
 		action != api.AgentActionTokenRefresh &&
 		action != api.AgentActionRefreshToken &&
 		action != api.AgentActionOutboundMessage {

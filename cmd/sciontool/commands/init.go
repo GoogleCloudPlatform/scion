@@ -420,6 +420,22 @@ func runInit(args []string) int {
 	// can use it without data races or startup race conditions.
 	hubClient := hub.NewClient()
 
+	// Wire the OnSessionEnd callback so the aggregator sends finalized
+	// session metrics to the Hub when a session completes. The closure
+	// captures hubClient, which is already initialized above.
+	if telemetryHandler != nil && hubClient != nil && hubClient.IsConfigured() {
+		telemetryHandler.OnSessionEnd = func(summary telemetry.SessionSummary) {
+			payload := hub.SummaryToMetricsPayload(summary)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := hubClient.ReportMetrics(ctx, payload); err != nil {
+				log.Error("Failed to report session metrics to hub: %v", err)
+			} else {
+				log.Info("Session metrics reported to hub for session %s", summary.SessionID)
+			}
+		}
+	}
+
 	// Start GCP metadata server if configured
 	var metadataServer *metadata.Server
 	if metaCfg := metadata.ConfigFromEnv(); metaCfg != nil {

@@ -170,5 +170,7 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 		"tokens_output", req.Tokens.Output,
 	)
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]string{"id": metrics.ID})
 }

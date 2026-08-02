@@ -39,10 +39,11 @@ type SessionSummary struct {
 	Model        string
 	TurnCount    int
 	APICallCount int
-	TokensInput  int64
-	TokensOutput int64
-	TokensCached int64
-	ToolCalls    map[string]ToolCallStats
+	TokensInput     int64
+	TokensOutput    int64
+	TokensCached    int64
+	TokensReasoning int64
+	ToolCalls       map[string]ToolCallStats
 }
 
 // Aggregator accumulates session-level metrics from hook events. It is
@@ -57,10 +58,11 @@ type Aggregator struct {
 	model        string
 	turnCount    int
 	apiCallCount int
-	tokensInput  int64
-	tokensOutput int64
-	tokensCached int64
-	toolCalls    map[string]*ToolCallStats
+	tokensInput     int64
+	tokensOutput    int64
+	tokensCached    int64
+	tokensReasoning int64
+	toolCalls       map[string]*ToolCallStats
 }
 
 // NewAggregator creates a new Aggregator pre-populated with agent and project
@@ -94,6 +96,7 @@ func (a *Aggregator) StartSession(sessionID string) {
 	a.tokensInput = 0
 	a.tokensOutput = 0
 	a.tokensCached = 0
+	a.tokensReasoning = 0
 	a.toolCalls = make(map[string]*ToolCallStats)
 }
 
@@ -117,7 +120,7 @@ func (a *Aggregator) RecordToolEnd(toolName string, errMsg string) {
 
 // RecordModelEnd records a completed model/API call and accumulates token
 // counts reported on the event.
-func (a *Aggregator) RecordModelEnd(inputTokens, outputTokens, cachedTokens int64) {
+func (a *Aggregator) RecordModelEnd(inputTokens, outputTokens, cachedTokens, reasoningTokens int64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -125,6 +128,7 @@ func (a *Aggregator) RecordModelEnd(inputTokens, outputTokens, cachedTokens int6
 	a.tokensInput += inputTokens
 	a.tokensOutput += outputTokens
 	a.tokensCached += cachedTokens
+	a.tokensReasoning += reasoningTokens
 }
 
 // RecordTurn records an agent turn (agent-end event).
@@ -139,7 +143,7 @@ func (a *Aggregator) RecordTurn() {
 // counts from the session-end event. If the session-end event provides token
 // totals they override the running accumulation (they represent the harness's
 // authoritative totals).
-func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens int64, errMsg string) SessionSummary {
+func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoningTokens int64, errMsg string) SessionSummary {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -148,15 +152,15 @@ func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens int64, err
 		status = "error"
 	}
 
-	// If session-end carries cumulative totals, prefer them.
-	if inputTokens > 0 {
+	// If session-end carries cumulative totals, prefer them. We use a group
+	// gate: if any session-end token total is non-zero, all values are
+	// treated as authoritative (so legitimate zeros override accumulated
+	// values).
+	if inputTokens > 0 || outputTokens > 0 || cachedTokens > 0 || reasoningTokens > 0 {
 		a.tokensInput = inputTokens
-	}
-	if outputTokens > 0 {
 		a.tokensOutput = outputTokens
-	}
-	if cachedTokens > 0 {
 		a.tokensCached = cachedTokens
+		a.tokensReasoning = reasoningTokens
 	}
 
 	toolCalls := make(map[string]ToolCallStats, len(a.toolCalls))
@@ -165,18 +169,19 @@ func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens int64, err
 	}
 
 	return SessionSummary{
-		SessionID:    a.sessionID,
-		AgentID:      a.agentID,
-		ProjectID:    a.projectID,
-		StartedAt:    a.startedAt,
-		EndedAt:      time.Now(),
-		Status:       status,
-		Model:        a.model,
-		TurnCount:    a.turnCount,
-		APICallCount: a.apiCallCount,
-		TokensInput:  a.tokensInput,
-		TokensOutput: a.tokensOutput,
-		TokensCached: a.tokensCached,
-		ToolCalls:    toolCalls,
+		SessionID:       a.sessionID,
+		AgentID:         a.agentID,
+		ProjectID:       a.projectID,
+		StartedAt:       a.startedAt,
+		EndedAt:         time.Now(),
+		Status:          status,
+		Model:           a.model,
+		TurnCount:       a.turnCount,
+		APICallCount:    a.apiCallCount,
+		TokensInput:     a.tokensInput,
+		TokensOutput:    a.tokensOutput,
+		TokensCached:    a.tokensCached,
+		TokensReasoning: a.tokensReasoning,
+		ToolCalls:       toolCalls,
 	}
 }

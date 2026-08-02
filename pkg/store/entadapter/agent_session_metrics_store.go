@@ -127,13 +127,19 @@ func (s *AgentSessionMetricsStore) GetAgentSessionMetrics(ctx context.Context, i
 	return entAgentSessionMetricsToStore(e), nil
 }
 
-// ListAgentSessionMetricsByAgent returns all session metrics for an agent,
-// ordered by started_at descending.
+// defaultMetricsListLimit caps unbounded list queries to prevent runaway
+// responses for long-lived agents. Pagination via ListOptions can be added
+// in a future milestone.
+const defaultMetricsListLimit = 100
+
+// ListAgentSessionMetricsByAgent returns session metrics for an agent,
+// ordered by started_at descending, capped at defaultMetricsListLimit.
 func (s *AgentSessionMetricsStore) ListAgentSessionMetricsByAgent(ctx context.Context, agentID string) ([]*store.AgentSessionMetrics, error) {
 	entities, err := s.client.AgentSessionMetrics.
 		Query().
 		Where(entasm.AgentIDEQ(agentID)).
 		Order(ent.Desc(entasm.FieldStartedAt)).
+		Limit(defaultMetricsListLimit).
 		All(ctx)
 	if err != nil {
 		return nil, mapError(err)
