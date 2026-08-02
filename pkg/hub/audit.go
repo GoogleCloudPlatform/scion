@@ -204,6 +204,15 @@ func NewLogAuditLogger(prefix string, debug bool) *LogAuditLogger {
 	}
 }
 
+// logger returns the audit subsystem logger, falling back to slog.Default()
+// when the field is nil (e.g. in tests that construct LogAuditLogger directly).
+func (l *LogAuditLogger) logger() *slog.Logger {
+	if l.log != nil {
+		return l.log
+	}
+	return slog.Default()
+}
+
 // LogBrokerAuthEvent is a no-op implementation satisfying the AuditLogger interface.
 func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAuthEvent) error {
 	return nil
@@ -243,7 +252,7 @@ func (l *LogAuditLogger) LogInviteAuditEvent(ctx context.Context, event *InviteA
 		attrs = append(attrs, slog.String(k, v))
 	}
 
-	l.log.LogAttrs(ctx, level, "authz: "+string(event.EventType), attrs...)
+	l.logger().LogAttrs(ctx, level, "authz: "+string(event.EventType), attrs...)
 
 	return nil
 }
@@ -267,7 +276,7 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
 
-	l.log.LogAttrs(ctx, level, "GCP token audit event", attrs...)
+	l.logger().LogAttrs(ctx, level, "GCP token audit event", attrs...)
 
 	return nil
 }
@@ -290,7 +299,7 @@ func (l *LogAuditLogger) LogLifecycleHookEvent(ctx context.Context, event *Lifec
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
 
-	l.log.LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
+	l.logger().LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
 
 	return nil
 }
@@ -321,7 +330,7 @@ func (l *LogAuditLogger) LogLifecycleHookExecutionEvent(ctx context.Context, eve
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
 
-	l.log.LogAttrs(ctx, level, "lifecycle hook execution event", attrs...)
+	l.logger().LogAttrs(ctx, level, "lifecycle hook execution event", attrs...)
 
 	return nil
 }

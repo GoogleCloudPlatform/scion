@@ -218,7 +218,7 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 			Role:       store.GroupMemberRoleOwner,
 		}); err != nil && err != store.ErrAlreadyExists {
 			// Log but don't fail the group creation
-			s.groupsLog.Warn("failed to add creator as owner of new group",
+			s.groupsLogger().Warn("failed to add creator as owner of new group",
 				"group", group.ID, "user", createdBy, "error", err)
 		}
 	}

@@ -259,6 +259,16 @@ type ChannelEventPublisher struct {
 	log         *slog.Logger
 }
 
+// logger returns the events subsystem logger, falling back to slog.Default()
+// when the field is nil (e.g. in tests that construct ChannelEventPublisher
+// directly).
+func (p *ChannelEventPublisher) logger() *slog.Logger {
+	if p.log != nil {
+		return p.log
+	}
+	return slog.Default()
+}
+
 // NewChannelEventPublisher creates a new ChannelEventPublisher.
 func NewChannelEventPublisher() *ChannelEventPublisher {
 	p := &ChannelEventPublisher{
@@ -303,7 +313,7 @@ func (p *ChannelEventPublisher) Subscribe(patterns ...string) (<-chan Event, fun
 func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 	data, err := json.Marshal(event)
 	if err != nil {
-		p.log.Error("Failed to marshal event", "subject", subject, "error", err)
+		p.logger().Error("Failed to marshal event", "subject", subject, "error", err)
 		return
 	}
 

@@ -411,6 +411,15 @@ type spaShellData struct {
 	InitialData template.JS
 }
 
+// logger returns the web subsystem logger, falling back to slog.Default()
+// when the field is nil (e.g. in tests that construct WebServer directly).
+func (ws *WebServer) logger() *slog.Logger {
+	if ws.log != nil {
+		return ws.log
+	}
+	return slog.Default()
+}
+
 // NewWebServer creates a new web frontend server.
 func NewWebServer(cfg WebServerConfig) *WebServer {
 	if cfg.Port == 0 {
@@ -433,10 +442,10 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		// Generate a random key for development/testing
 		b := make([]byte, 32)
 		if _, err := rand.Read(b); err != nil {
-			ws.log.Error("Failed to generate session secret", "error", err)
+			ws.logger().Error("Failed to generate session secret", "error", err)
 		}
 		sessionKey = hex.EncodeToString(b)
-		ws.log.Warn("No session secret configured, using random key (sessions will not persist across restarts)")
+		ws.logger().Warn("No session secret configured, using random key (sessions will not persist across restarts)")
 	}
 
 	// Use an encrypted, signed cookie session store so that NO session state
@@ -481,27 +490,27 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	// Resolve asset source
 	if cfg.AssetsDir != "" {
 		ws.assetsDisk = cfg.AssetsDir
-		ws.log.Info("Web server using filesystem assets", "dir", cfg.AssetsDir)
+		ws.logger().Info("Web server using filesystem assets", "dir", cfg.AssetsDir)
 	} else if web.AssetsEmbedded {
 		sub, err := fs.Sub(web.ClientAssets, "dist/client")
 		if err != nil {
-			ws.log.Error("Failed to create sub-filesystem from embedded assets. Run 'make web && make build' to rebuild with web assets included, or use --web-assets-dir.", "error", err)
+			ws.logger().Error("Failed to create sub-filesystem from embedded assets. Run 'make web && make build' to rebuild with web assets included, or use --web-assets-dir.", "error", err)
 		} else if _, err := fs.Stat(sub, "assets/main.js"); err != nil {
-			ws.log.Warn("Embedded web assets directory exists but main.js is missing. Run 'make all' (or 'make web && make build') to rebuild with web assets included, or use --web-assets-dir.")
+			ws.logger().Warn("Embedded web assets directory exists but main.js is missing. Run 'make all' (or 'make web && make build') to rebuild with web assets included, or use --web-assets-dir.")
 		} else {
 			ws.assets = sub
 		}
 		if ws.assets != nil {
-			ws.log.Info("Web server using embedded assets")
+			ws.logger().Info("Web server using embedded assets")
 		}
 	} else {
-		ws.log.Warn("No web assets available: build with embedded assets or use --web-assets-dir")
+		ws.logger().Warn("No web assets available: build with embedded assets or use --web-assets-dir")
 	}
 
 	// Parse SPA shell template
 	tmpl, err := template.New("spa-shell").Parse(spaShellTemplate)
 	if err != nil {
-		ws.log.Error("Failed to parse SPA shell template", "error", err)
+		ws.logger().Error("Failed to parse SPA shell template", "error", err)
 	}
 	ws.shellTmpl = tmpl
 
@@ -626,10 +635,10 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 					session.Values[sessKeyHubRefreshToken] = newRefresh
 					session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
 					if err := session.Save(r, w); err != nil {
-						ws.log.Warn("Failed to persist refreshed Hub token to session", "error", err)
+						ws.logger().Warn("Failed to persist refreshed Hub token to session", "error", err)
 					}
 				} else {
-					ws.log.Debug("Failed to refresh Hub token", "error", err)
+					ws.logger().Debug("Failed to refresh Hub token", "error", err)
 				}
 			}
 		}
@@ -637,14 +646,14 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		// If token is still invalid after refresh attempt, the signing
 		// key was likely rotated. Clear the session and force re-login.
 		if !tokenValid {
-			ws.log.Info("Hub token irrecoverably invalid, clearing session",
+			ws.logger().Info("Hub token irrecoverably invalid, clearing session",
 				"user", session.Values[sessKeyUserEmail])
 			for key := range session.Values {
 				delete(session.Values, key)
 			}
 			session.Options.MaxAge = -1
 			if err := session.Save(r, w); err != nil {
-				ws.log.Warn("Failed to clear invalid session", "error", err)
+				ws.logger().Warn("Failed to clear invalid session", "error", err)
 			}
 
 			if isBrowserRequest(r) {
@@ -675,7 +684,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 						session.Values[sessKeyHubRefreshToken] = newRefresh
 						session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
 						if err := session.Save(r, w); err != nil {
-							ws.log.Warn("Failed to persist refreshed Hub token to session", "error", err)
+							ws.logger().Warn("Failed to persist refreshed Hub token to session", "error", err)
 						}
 					}
 				}
@@ -925,7 +934,7 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 
 	raw, err := json.Marshal(envelope)
 	if err != nil {
-		ws.log.Error("Failed to marshal SSR page data", "error", err)
+		ws.logger().Error("Failed to marshal SSR page data", "error", err)
 		return template.JS("{}")
 	}
 
@@ -976,7 +985,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			InitialData:     ws.prefetchPageData(r),
 		}
 		if err := ws.shellTmpl.Execute(w, data); err != nil {
-			ws.log.Error("Failed to render SPA shell", "error", err)
+			ws.logger().Error("Failed to render SPA shell", "error", err)
 		}
 	}
 }
@@ -1048,7 +1057,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// causing reconnection churn and wasted connection-pool slots.
 	rc := http.NewResponseController(w)
 	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
-		ws.log.Debug("Failed to clear write deadline for SSE", "error", err)
+		ws.logger().Debug("Failed to clear write deadline for SSE", "error", err)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -1264,7 +1273,7 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		if err := session.Save(r, w); err != nil {
-			ws.log.Error("Failed to save dev-auth session", "error", err)
+			ws.logger().Error("Failed to save dev-auth session", "error", err)
 		}
 
 		ctx := context.WithValue(r.Context(), webUserContextKey{}, devUser)
@@ -1324,7 +1333,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
-				ws.log.Info("Session role updated",
+				ws.logger().Info("Session role updated",
 					"email", email,
 					"old_role", currentRole,
 					"new_role", expectedRole,
@@ -1342,11 +1351,11 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 						session.Values[sessKeyHubRefreshToken] = refreshToken
 						session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
 					} else {
-						ws.log.Warn("Failed to regenerate Hub tokens for role change", "error", err)
+						ws.logger().Warn("Failed to regenerate Hub tokens for role change", "error", err)
 					}
 				}
 				if err := session.Save(r, w); err != nil {
-					ws.log.Error("Failed to save session after role update", "error", err)
+					ws.logger().Error("Failed to save session after role update", "error", err)
 				}
 			}
 			next.ServeHTTP(w, r)
@@ -1358,7 +1367,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		if proxyErr != nil {
 			// Assertion present but invalid — reject. Log the real error
 			// internally but return a generic message to avoid information disclosure.
-			ws.log.Warn("Proxy auth rejected in web middleware",
+			ws.logger().Warn("Proxy auth rejected in web middleware",
 				"provider", ws.config.ProxyAuthenticator.Name(),
 				"error", proxyErr,
 				"path", r.URL.Path)
@@ -1375,13 +1384,13 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// Verified proxy identity — check authorization and provision/lookup user
 		ctx := r.Context()
 		if ws.store == nil {
-			ws.log.Error("Proxy auth: store not configured")
+			ws.logger().Error("Proxy auth: store not configured")
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
 		if !checkUserAuthorized(ctx, proxyUser.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails, ws.config.UserAccessMode, ws.store) {
-			ws.log.Warn("Proxy auth: user not authorized", "email", proxyUser.Email)
+			ws.logger().Warn("Proxy auth: user not authorized", "email", proxyUser.Email)
 			http.Error(w, "access denied: email not authorized", http.StatusForbidden)
 			return
 		}
@@ -1390,7 +1399,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		user, err := ws.store.GetUserByEmail(ctx, proxyUser.Email)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			// Genuine DB error — don't treat as "create new user"
-			ws.log.Error("Proxy auth: failed to look up user", "email", proxyUser.Email, "error", err)
+			ws.logger().Error("Proxy auth: failed to look up user", "email", proxyUser.Email, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -1408,15 +1417,15 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				LastLogin:   time.Now(),
 			}
 			if err := ws.store.CreateUser(ctx, user); err != nil {
-				ws.log.Error("Proxy auth: failed to create user", "email", proxyUser.Email, "error", err)
+				ws.logger().Error("Proxy auth: failed to create user", "email", proxyUser.Email, "error", err)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
-			ws.log.Info("Proxy auth: created new user", "email", proxyUser.Email, "user_id", user.ID)
+			ws.logger().Info("Proxy auth: created new user", "email", proxyUser.Email, "user_id", user.ID)
 		} else {
 			// Reject suspended users
 			if user.Status == "suspended" {
-				ws.log.Warn("Proxy auth: user is suspended", "email", proxyUser.Email, "user_id", user.ID)
+				ws.logger().Warn("Proxy auth: user is suspended", "email", proxyUser.Email, "user_id", user.ID)
 				http.Error(w, "access denied: user account is suspended", http.StatusForbidden)
 				return
 			}
@@ -1427,11 +1436,11 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			}
 			// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
 			if newRole := determineUserRole(proxyUser.Email, ws.config.AdminEmails); user.Role != newRole {
-				ws.log.Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", user.Role, "new_role", newRole)
+				ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", user.Role, "new_role", newRole)
 				user.Role = newRole
 			}
 			if err := ws.store.UpdateUser(ctx, user); err != nil {
-				ws.log.Warn("Failed to update user via proxy auth", "email", proxyUser.Email, "error", err)
+				ws.logger().Warn("Failed to update user via proxy auth", "email", proxyUser.Email, "error", err)
 			}
 		}
 
@@ -1448,7 +1457,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				session.Values[sessKeyHubRefreshToken] = refreshToken
 				session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
 			} else {
-				ws.log.Warn("Proxy auth: failed to generate Hub tokens", "error", err)
+				ws.logger().Warn("Proxy auth: failed to generate Hub tokens", "error", err)
 			}
 		}
 
@@ -1460,10 +1469,10 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		session.Values[sessKeyUserRole] = user.Role
 
 		if err := session.Save(r, w); err != nil {
-			ws.log.Error("Proxy auth: failed to save session", "error", err)
+			ws.logger().Error("Proxy auth: failed to save session", "error", err)
 		}
 
-		ws.log.Info("Proxy auth: session created",
+		ws.logger().Info("Proxy auth: session created",
 			"provider", ws.config.ProxyAuthenticator.Name(),
 			"email", user.Email,
 			"user_id", user.ID)
@@ -1587,7 +1596,7 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	session.Values[sessKeyOAuthState] = state
 	if err := session.Save(r, w); err != nil {
-		ws.log.Error("Failed to save OAuth state to session", "error", err)
+		ws.logger().Error("Failed to save OAuth state to session", "error", err)
 		http.Error(w, "session error", http.StatusInternalServerError)
 		return
 	}
@@ -1598,7 +1607,7 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	// Get authorization URL
 	authURL, err := ws.oauthService.GetAuthorizationURLForClient(OAuthClientTypeWeb, provider, redirectURI, state)
 	if err != nil {
-		ws.log.Error("Failed to generate OAuth URL", "provider", provider, "error", err)
+		ws.logger().Error("Failed to generate OAuth URL", "provider", provider, "error", err)
 		http.Error(w, "failed to generate auth URL", http.StatusInternalServerError)
 		return
 	}
@@ -1626,7 +1635,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Load session
 	session, err := ws.sessionStore.Get(r, webSessionName)
 	if err != nil {
-		ws.log.Error("Failed to load session for callback", "error", err)
+		ws.logger().Error("Failed to load session for callback", "error", err)
 		http.Redirect(w, r, "/login?error=session_error", http.StatusFound)
 		return
 	}
@@ -1635,7 +1644,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	expectedState, _ := session.Values[sessKeyOAuthState].(string)
 	actualState := r.URL.Query().Get("state")
 	if expectedState == "" || !apiclient.ValidateDevToken(actualState, expectedState) {
-		ws.log.Warn("OAuth state mismatch", "provider", provider)
+		ws.logger().Warn("OAuth state mismatch", "provider", provider)
 		http.Redirect(w, r, "/login?error=state_mismatch", http.StatusFound)
 		return
 	}
@@ -1645,7 +1654,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 	// Check for error from provider
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
-		ws.log.Warn("OAuth provider returned error", "provider", provider, "error", errParam)
+		ws.logger().Warn("OAuth provider returned error", "provider", provider, "error", errParam)
 		http.Redirect(w, r, "/login?error="+errParam, http.StatusFound)
 		return
 	}
@@ -1663,14 +1672,14 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	ctx := r.Context()
 	userInfo, err := ws.oauthService.ExchangeCodeForClient(ctx, OAuthClientTypeWeb, provider, code, redirectURI)
 	if err != nil {
-		ws.log.Error("OAuth code exchange failed", "provider", provider, "error", err)
+		ws.logger().Error("OAuth code exchange failed", "provider", provider, "error", err)
 		http.Redirect(w, r, "/login?error=exchange_failed", http.StatusFound)
 		return
 	}
 
 	// Check if user is authorized (admin bypass, domain check, access mode)
 	if !checkUserAuthorized(ctx, userInfo.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails, ws.config.UserAccessMode, ws.store) {
-		ws.log.Warn("Unauthorized user", "email", userInfo.Email)
+		ws.logger().Warn("Unauthorized user", "email", userInfo.Email)
 		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return
 	}
@@ -1691,7 +1700,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			LastLogin:   time.Now(),
 		}
 		if err := ws.store.CreateUser(ctx, user); err != nil {
-			ws.log.Error("Failed to create user", "email", userInfo.Email, "error", err)
+			ws.logger().Error("Failed to create user", "email", userInfo.Email, "error", err)
 			http.Redirect(w, r, "/login?error=user_create_failed", http.StatusFound)
 			return
 		}
@@ -1707,11 +1716,11 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		// Re-evaluate admin status on every login
 		newRole := determineUserRole(userInfo.Email, ws.config.AdminEmails)
 		if user.Role != newRole {
-			ws.log.Info("User role changed on login", "email", userInfo.Email, "old_role", user.Role, "new_role", newRole)
+			ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", user.Role, "new_role", newRole)
 			user.Role = newRole
 		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {
-			ws.log.Warn("Failed to update user on login", "email", userInfo.Email, "error", err)
+			ws.logger().Warn("Failed to update user on login", "email", userInfo.Email, "error", err)
 		}
 	}
 
@@ -1724,7 +1733,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
 		)
 		if err != nil {
-			ws.log.Warn("Failed to generate Hub tokens", "error", err)
+			ws.logger().Warn("Failed to generate Hub tokens", "error", err)
 		} else {
 			session.Values[sessKeyHubAccessToken] = accessToken
 			session.Values[sessKeyHubRefreshToken] = refreshToken
@@ -1744,7 +1753,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	delete(session.Values, sessKeyReturnTo)
 
 	if err := session.Save(r, w); err != nil {
-		ws.log.Error("Failed to save session after OAuth callback", "error", err)
+		ws.logger().Error("Failed to save session after OAuth callback", "error", err)
 		http.Redirect(w, r, "/login?error=session_error", http.StatusFound)
 		return
 	}
@@ -1787,7 +1796,7 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	session.Options.MaxAge = -1 // Delete cookie
 	if err := session.Save(r, w); err != nil {
-		ws.log.Error("Failed to clear session on logout", "error", err)
+		ws.logger().Error("Failed to clear session on logout", "error", err)
 	}
 
 	if isBrowserRequest(r) {
@@ -1935,7 +1944,7 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(wrapped, r)
 
 		if ws.config.Debug || wrapped.statusCode >= 400 {
-			ws.log.Info("Web request",
+			ws.logger().Info("Web request",
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", wrapped.statusCode),
@@ -1996,7 +2005,7 @@ func (ws *WebServer) Start(ctx context.Context) error {
 		WriteTimeout: 60 * time.Second,
 	}
 
-	ws.log.Info("Web frontend server starting", "host", ws.config.Host, "port", ws.config.Port, "h2c", true)
+	ws.logger().Info("Web frontend server starting", "host", ws.config.Host, "port", ws.config.Port, "h2c", true)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -2020,12 +2029,12 @@ func (ws *WebServer) Shutdown(ctx context.Context) error {
 		return nil
 	}
 
-	ws.log.Info("Web frontend server shutting down...")
+	ws.logger().Info("Web frontend server shutting down...")
 
 	// Clean up mounted Hub resources (control channels, broker auth, event publisher)
 	if ws.hubShutdown != nil {
 		if err := ws.hubShutdown(ctx); err != nil {
-			ws.log.Error("Failed to clean up Hub resources during web server shutdown", "error", err)
+			ws.logger().Error("Failed to clean up Hub resources during web server shutdown", "error", err)
 		}
 	}
 

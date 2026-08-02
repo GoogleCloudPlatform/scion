@@ -781,6 +781,25 @@ type Server struct {
 	ghResolutionStore *GitHubResolutionStore
 }
 
+// groupsLogger returns the groups subsystem logger, falling back to
+// slog.Default() when the field is nil (e.g. in tests that construct Server
+// directly without the constructor).
+func (s *Server) groupsLogger() *slog.Logger {
+	if s.groupsLog != nil {
+		return s.groupsLog
+	}
+	return slog.Default()
+}
+
+// projectsLogger returns the projects subsystem logger, falling back to
+// slog.Default() when the field is nil.
+func (s *Server) projectsLogger() *slog.Logger {
+	if s.projectsLog != nil {
+		return s.projectsLog
+	}
+	return slog.Default()
+}
+
 func newInstanceID() string {
 	if podName := os.Getenv("POD_NAME"); podName != "" {
 		return podName + "-" + uuid.NewString()
