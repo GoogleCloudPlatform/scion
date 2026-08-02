@@ -105,13 +105,14 @@ type AgentDetail struct {
 
 // AgentStatusEvent is published when an agent's status changes.
 type AgentStatusEvent struct {
-	AgentID         string       `json:"agentId"`
-	ProjectID       string       `json:"projectId"`
-	GroveID         string       `json:"groveId"`
-	Phase           string       `json:"phase,omitempty"`
-	Activity        string       `json:"activity,omitempty"`
-	Detail          *AgentDetail `json:"detail,omitempty"`
-	ContainerStatus string       `json:"containerStatus,omitempty"`
+	AgentID           string       `json:"agentId"`
+	ProjectID         string       `json:"projectId"`
+	GroveID           string       `json:"groveId"`
+	Phase             string       `json:"phase,omitempty"`
+	Activity          string       `json:"activity,omitempty"`
+	Detail            *AgentDetail `json:"detail,omitempty"`
+	ContainerStatus   string       `json:"containerStatus,omitempty"`
+	LastActivityEvent string       `json:"lastActivityEvent,omitempty"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -376,6 +377,9 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		Phase:           agent.Phase,
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
+	}
+	if !agent.LastActivityEvent.IsZero() {
+		evt.LastActivityEvent = agent.LastActivityEvent.Format("2006-01-02T15:04:05Z07:00")
 	}
 
 	detail := AgentDetail{

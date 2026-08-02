@@ -52,6 +52,7 @@ type Agent struct {
 	Created           time.Time         `json:"created"`
 	Updated           time.Time         `json:"updated"`
 	LastSeen          time.Time         `json:"lastSeen,omitempty"`
+	LastActivityEvent time.Time         `json:"lastActivityEvent,omitempty"`
 	DeletedAt         time.Time         `json:"deletedAt,omitempty"`
 	CreatedBy         string            `json:"createdBy,omitempty"`
 	OwnerID           string            `json:"ownerId,omitempty"`

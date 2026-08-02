@@ -589,10 +589,11 @@ type AgentInfo struct {
 	Warnings   []string          `json:"warnings,omitempty"`
 
 	// Timestamps
-	Created   time.Time `json:"created,omitempty"`   // When the agent was created
-	Updated   time.Time `json:"updated,omitempty"`   // Last modification timestamp
-	LastSeen  time.Time `json:"lastSeen,omitempty"`  // Last heartbeat/status report
-	DeletedAt time.Time `json:"deletedAt,omitempty"` // When the agent was soft-deleted
+	Created           time.Time `json:"created,omitempty"`           // When the agent was created
+	Updated           time.Time `json:"updated,omitempty"`           // Last modification timestamp
+	LastSeen          time.Time `json:"lastSeen,omitempty"`          // Last heartbeat/status report
+	LastActivityEvent time.Time `json:"lastActivityEvent,omitempty"` // Last meaningful activity change
+	DeletedAt         time.Time `json:"deletedAt,omitempty"`         // When the agent was soft-deleted
 
 	// Ownership & access
 	CreatedBy  string   `json:"createdBy,omitempty"`  // User/system that created the agent
