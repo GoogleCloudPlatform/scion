@@ -1865,10 +1865,56 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		return err
 	}
 
-	// Build resolved env with fresh auth token and identity vars so the
-	// restarted container retains Hub connectivity. Without this, the
-	// broker's restartAgent handler has no token to inject.
+	// Build resolved env with all env vars, secrets, and a fresh auth token
+	// so the restarted container has full credentials and Hub connectivity.
+	// This mirrors the resolution in DispatchAgentStart — without it, env vars
+	// like GOOGLE_CLOUD_PROJECT are missing and auth provisioning fails.
 	resolvedEnv := make(map[string]string)
+
+	// Start with agent's applied config env (template/config-level vars) —
+	// same as DispatchAgentStart.
+	if agent.AppliedConfig != nil {
+		for k, v := range agent.AppliedConfig.Env {
+			resolvedEnv[k] = v
+		}
+	}
+
+	injectModelEnv(resolvedEnv, agent.AppliedConfig)
+	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
+
+	// Merge env vars from Hub storage; storage vars fill in keys not already
+	// set (with a non-empty value) — same precedence as DispatchAgentStart.
+	envFromStorage, err := d.resolveEnvFromStorage(ctx, agent)
+	if err != nil {
+		if d.debug {
+			d.log.Warn("DispatchAgentRestart: failed to resolve env from storage", "error", err)
+		}
+	} else if len(envFromStorage) > 0 {
+		for k, v := range envFromStorage {
+			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
+				resolvedEnv[k] = v
+			}
+		}
+	}
+
+	// Resolve type-aware secrets and inject environment-type secrets —
+	// same as DispatchAgentStart.
+	resolvedSecrets, secretErr := d.resolveSecrets(ctx, agent)
+	if secretErr != nil {
+		if d.debug {
+			d.log.Warn("DispatchAgentRestart: failed to resolve secrets", "error", secretErr)
+		}
+	} else {
+		for _, s := range resolvedSecrets {
+			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
+				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
+					resolvedEnv[s.Target] = s.Value
+				}
+			}
+		}
+	}
+
+	// Identity vars at highest precedence (set after storage/secrets merge).
 	if agent.ID != "" {
 		resolvedEnv["SCION_AGENT_ID"] = agent.ID
 	}
@@ -1903,8 +1949,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		}
 	}
 
-	injectModelEnv(resolvedEnv, agent.AppliedConfig)
-	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
+	// Inject GCP identity env vars so the broker can configure the
+	// metadata-server sidecar correctly on restart — same as DispatchAgentStart.
+	if agent.AppliedConfig != nil {
+		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
+			resolvedEnv["SCION_METADATA_MODE"] = gcpID.MetadataMode
+			if gcpID.MetadataMode == store.GCPMetadataModeAssign {
+				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
+				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
+			}
+		}
+	}
 
 	if d.tokenGenerator != nil {
 		var additionalScopes []AgentTokenScope
@@ -1939,6 +1994,42 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 			if d.transportMode != "" {
 				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			}
+		}
+	}
+
+	// GitHub App token minting for agent restart — same as DispatchAgentStart.
+	if d.githubAppMinter != nil && agent.ProjectID != "" {
+		project, projectErr := d.store.GetProject(ctx, agent.ProjectID)
+		if projectErr == nil {
+			mintProject := project
+			if project.GitHubInstallationID == nil {
+				if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
+					if sg, sgErr := d.store.GetProject(ctx, sourceProjectID); sgErr == nil && sg.GitHubInstallationID != nil {
+						mintProject = sg
+					}
+				}
+			}
+			if mintProject.GitHubInstallationID != nil {
+				if resolvedEnv["GITHUB_TOKEN"] == "" {
+					token, expiry, mintErr := d.githubAppMinter.MintGitHubAppTokenForProject(ctx, mintProject)
+					if mintErr != nil {
+						if d.debug {
+							d.log.Warn("DispatchAgentRestart: GitHub App token minting failed",
+								"error", mintErr, "project_id", agent.ProjectID)
+						}
+					} else if token != "" {
+						resolvedEnv["GITHUB_TOKEN"] = token
+						resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+						resolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
+						resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
+					}
+				} else {
+					d.log.Warn("DispatchAgentRestart: user GITHUB_TOKEN takes precedence over GitHub App token — user token will be used for gh CLI, GitHub App for git credential helper",
+						"project_id", agent.ProjectID)
+					resolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
+					resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
+				}
 			}
 		}
 	}

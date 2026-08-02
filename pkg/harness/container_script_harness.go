@@ -528,6 +528,25 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	if err != nil {
 		return err
 	}
+
+	// Discover existing secrets on disk to preserve them across restarts.
+	// File-type secrets (CODEX_AUTH, CLAUDE_AUTH) are always merged when not
+	// already overridden by the new resolution, because they may not be
+	// re-resolved on restart. Env-type secrets are only merged when the new
+	// resolution produced none, to prevent stale credentials from leaking
+	// during credential rotation. See issue #723.
+	existingEnvSecrets, existingFileSecrets := c.discoverExistingSecretFiles(agentHome)
+	if len(envSecretFiles) == 0 {
+		for k, v := range existingEnvSecrets {
+			envSecretFiles[k] = v
+		}
+	}
+	for k, v := range existingFileSecrets {
+		if _, exists := fileSecretFiles[k]; !exists {
+			fileSecretFiles[k] = v
+		}
+	}
+
 	// Remove staged-as-secret FileMappings from resolved so the runtime does
 	// not also bind-mount them (which would create a read-only overlay that
 	// prevents the container-side script from writing the file).
@@ -738,6 +757,60 @@ func isSafeEnvName(name string) bool {
 		}
 	}
 	return true
+}
+
+// discoverExistingSecretFiles scans the secrets directory for files left by a
+// previous successful ApplyAuthSettings call. It returns two maps of secret
+// name to container-relative path: one for env-type secrets and one for
+// file-type secrets (distinguished via isRequiredFileSecret). This enables
+// auth-candidates.json to reference existing secrets when the current auth
+// resolution produced empty env vars (e.g. on restart).
+func (c *ContainerScriptHarness) discoverExistingSecretFiles(agentHome string) (map[string]string, map[string]string) {
+	dir := filepath.Join(agentHome, ".scion", "harness", "secrets")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil
+	}
+	envSecrets := map[string]string{}
+	fileSecrets := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !isSafeEnvName(name) {
+			continue
+		}
+		// Verify the file has non-empty content
+		info, err := e.Info()
+		if err != nil || info.Size() == 0 {
+			continue
+		}
+		path := "$HOME/.scion/harness/secrets/" + name
+		if c.isRequiredFileSecret(name) {
+			fileSecrets[name] = path
+		} else {
+			envSecrets[name] = path
+		}
+	}
+	return envSecrets, fileSecrets
+}
+
+// isRequiredFileSecret returns true if name matches a required_files
+// declaration in any auth type of the harness config. These are file-type
+// secrets (e.g. CODEX_AUTH, CLAUDE_AUTH) as opposed to env-type secrets.
+func (c *ContainerScriptHarness) isRequiredFileSecret(name string) bool {
+	if c.entry.Auth == nil {
+		return false
+	}
+	for _, authType := range c.entry.Auth.Types {
+		for _, rf := range authType.RequiredFiles {
+			if rf.Name == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ApplyMCPSettings stages the universal mcp_servers map into

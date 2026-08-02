@@ -1091,3 +1091,71 @@ func TestResolve_LegacyBuiltinCodexNoDir(t *testing.T) {
 		t.Errorf("Implementation=%q want generic", resolved.Implementation)
 	}
 }
+
+// TestDiscoverExistingSecretFiles verifies that discoverExistingSecretFiles
+// returns two maps (env-type and file-type) of secret name to container-relative
+// path for non-empty files in the secrets directory, correctly categorised via
+// the harness auth config's required_files declarations.
+func TestDiscoverExistingSecretFiles(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+
+	// No secrets dir yet — should return nil, nil
+	envSecrets, fileSecrets := h.discoverExistingSecretFiles(agentHome)
+	if envSecrets != nil {
+		t.Errorf("expected nil env secrets for missing secrets dir, got %v", envSecrets)
+	}
+	if fileSecrets != nil {
+		t.Errorf("expected nil file secrets for missing secrets dir, got %v", fileSecrets)
+	}
+
+	// Set up auth config with a file-type secret so categorisation can be tested.
+	h.entry.Auth = &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"claude": {
+				RequiredFiles: []config.HarnessAuthFileRequirement{
+					{Name: "CLAUDE_AUTH"},
+				},
+			},
+		},
+	}
+
+	// Create secrets dir with env-type, file-type, and empty files
+	secretDir := filepath.Join(agentHome, ".scion", "harness", "secrets")
+	if err := os.MkdirAll(secretDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(secretDir, "GOOGLE_CLOUD_PROJECT"), []byte("my-project"), 0600)
+	_ = os.WriteFile(filepath.Join(secretDir, "GOOGLE_CLOUD_REGION"), []byte("us-central1"), 0600)
+	_ = os.WriteFile(filepath.Join(secretDir, "CLAUDE_AUTH"), []byte("auth-token"), 0600)
+	_ = os.WriteFile(filepath.Join(secretDir, "EMPTY_SECRET"), []byte(""), 0600) // empty — should be skipped
+
+	envSecrets, fileSecrets = h.discoverExistingSecretFiles(agentHome)
+
+	// Env-type: GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_REGION
+	if len(envSecrets) != 2 {
+		t.Fatalf("expected 2 env secrets, got %d: %v", len(envSecrets), envSecrets)
+	}
+	if envSecrets["GOOGLE_CLOUD_PROJECT"] != "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_PROJECT" {
+		t.Errorf("GOOGLE_CLOUD_PROJECT path = %q", envSecrets["GOOGLE_CLOUD_PROJECT"])
+	}
+	if envSecrets["GOOGLE_CLOUD_REGION"] != "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_REGION" {
+		t.Errorf("GOOGLE_CLOUD_REGION path = %q", envSecrets["GOOGLE_CLOUD_REGION"])
+	}
+
+	// File-type: CLAUDE_AUTH (matches required_files in auth config)
+	if len(fileSecrets) != 1 {
+		t.Fatalf("expected 1 file secret, got %d: %v", len(fileSecrets), fileSecrets)
+	}
+	if fileSecrets["CLAUDE_AUTH"] != "$HOME/.scion/harness/secrets/CLAUDE_AUTH" {
+		t.Errorf("CLAUDE_AUTH path = %q", fileSecrets["CLAUDE_AUTH"])
+	}
+
+	// Empty secret should not appear in either map
+	if _, ok := envSecrets["EMPTY_SECRET"]; ok {
+		t.Error("empty secret file should not be included in env secrets")
+	}
+	if _, ok := fileSecrets["EMPTY_SECRET"]; ok {
+		t.Error("empty secret file should not be included in file secrets")
+	}
+}

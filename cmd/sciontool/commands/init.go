@@ -278,10 +278,25 @@ func runInit(args []string) int {
 	if err := lifecycleManager.RunPreStart(); err != nil {
 		log.Error("Pre-start hooks failed: %v", err)
 		if harnessReq.Required || projectHookStaged {
-			log.Error("Pre-start provisioning is required; aborting startup")
-			_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-			_ = statusHandler.SetMessage(fmt.Sprintf("pre-start hook failed: %v", err))
-			return 1
+			// On restart, check for an existing env overlay from a previous
+			// successful run. If it exists, we can fall through and let
+			// LoadEnvOverlay use the existing file instead of aborting.
+			// This makes restarts resilient to transient provisioner failures
+			// while still requiring success on first creation.
+			var fallbackExists bool
+			if harnessReq.EnvOverlayPath != "" {
+				existingOverlay := hooks.ResolveContainerPath(harnessReq.EnvOverlayPath, agentHome)
+				if _, statErr := os.Stat(existingOverlay); statErr == nil {
+					log.Info("WARNING: Pre-start provisioning failed but previous env overlay exists at %s, using fallback", existingOverlay)
+					fallbackExists = true
+				}
+			}
+			if !fallbackExists {
+				log.Error("Pre-start provisioning is required; aborting startup")
+				_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
+				_ = statusHandler.SetMessage(fmt.Sprintf("pre-start hook failed: %v", err))
+				return 1
+			}
 		}
 		// Continue anyway — non-required harness hooks failing shouldn't prevent startup
 	}
