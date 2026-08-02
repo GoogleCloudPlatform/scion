@@ -73,6 +73,12 @@ RUN if [ -f /usr/bin/gh ]; then \
       chmod +x /usr/bin/gh; \
     fi
 
+# Install whoami shim that delegates to scion whoami.
+# The shim is placed in /usr/local/bin so it shadows /usr/bin/whoami via PATH
+# ordering. The system whoami remains accessible at its original path.
+RUN printf '#!/bin/sh\nexec scion whoami "$@"\n' > /usr/local/bin/whoami && \
+    chmod +x /usr/local/bin/whoami
+
 # Create dev-override bin directory at highest PATH priority.
 # When SCION_DEV_BINARIES is set, this directory is bind-mounted with
 # locally-built binaries, allowing rapid iteration without image rebuilds.
