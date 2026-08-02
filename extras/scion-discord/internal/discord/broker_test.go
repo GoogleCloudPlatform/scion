@@ -1520,6 +1520,56 @@ func TestDownloadDiscordAttachment_CustomDownloadsPath(t *testing.T) {
 	assert.Equal(t, fileContent, data)
 }
 
+func TestDownloadDiscordAttachment_ProjectSlugPlaceholder(t *testing.T) {
+	fileContent := []byte("slug-placeholder-test")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(fileContent)
+	}))
+	defer srv.Close()
+
+	baseDir := t.TempDir()
+	b := &DiscordBroker{
+		log:           discardLogger(),
+		httpClient:    srv.Client(),
+		downloadsPath: filepath.Join(baseDir, "{project_slug}"),
+	}
+
+	att := &discordgo.MessageAttachment{
+		ID:          "att-slug-001",
+		Filename:    "photo.jpg",
+		URL:         srv.URL + "/photo.jpg",
+		Size:        len(fileContent),
+		ContentType: "image/jpeg",
+	}
+
+	projectSlug := "my-cool-project"
+	ctx := context.Background()
+	agentPath, placeholder, err := b.downloadDiscordAttachment(ctx, att, projectSlug)
+	require.NoError(t, err)
+
+	// Host directory should have the slug expanded (file written there).
+	expandedDir := filepath.Join(baseDir, projectSlug)
+	entries, err := os.ReadDir(expandedDir)
+	require.NoError(t, err, "expanded slug directory should exist")
+	require.Len(t, entries, 1, "should contain exactly one downloaded file")
+
+	// Agent path should use the expanded slug, not the literal placeholder.
+	assert.True(t, strings.HasPrefix(agentPath, expandedDir),
+		"agentPath %q should start with expanded dir %q", agentPath, expandedDir)
+	assert.NotContains(t, agentPath, "{project_slug}",
+		"agentPath should not contain literal {project_slug}")
+
+	// File on disk should match.
+	data, err := os.ReadFile(agentPath)
+	require.NoError(t, err)
+	assert.Equal(t, fileContent, data)
+
+	// Placeholder should describe the attachment.
+	assert.Contains(t, placeholder, "photo.jpg")
+	assert.Contains(t, placeholder, "image/jpeg")
+}
+
 func TestDownloadDiscordAttachment_EmptyProjectSlug(t *testing.T) {
 	b := &DiscordBroker{
 		log:        discardLogger(),

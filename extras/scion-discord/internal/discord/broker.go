@@ -2024,7 +2024,7 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	// Use configured downloads_path if set; otherwise default to project dir.
 	var hostDir string
 	if b.downloadsPath != "" {
-		hostDir = b.downloadsPath
+		hostDir = strings.ReplaceAll(b.downloadsPath, "{project_slug}", projectSlug)
 	} else {
 		hostDir = filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
 	}
@@ -2049,7 +2049,7 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	// When a custom downloads_path is configured, the agent sees that path
 	// directly; otherwise it sees the conventional /workspace/downloads mount.
 	if b.downloadsPath != "" {
-		agentPath = filepath.Join(b.downloadsPath, destName)
+		agentPath = filepath.Join(strings.ReplaceAll(b.downloadsPath, "{project_slug}", projectSlug), destName)
 	} else {
 		agentPath = filepath.Join("/workspace/downloads", destName)
 	}

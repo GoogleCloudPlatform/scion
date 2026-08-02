@@ -70,7 +70,7 @@ func main() {
 	fmt.Println("  send_queue_size  Max queued messages per channel (default: 100)")
 	fmt.Println("  send_min_delay   Minimum delay between sends (default: 50ms)")
 	fmt.Println("  agent_cache_ttl  TTL for cached agent list (default: 5m)")
-	fmt.Println("  downloads_path   Override directory for inbound attachment downloads (default: /workspace/downloads)")
+	fmt.Println("  downloads_path   Override directory for inbound attachment downloads (default: /workspace/downloads, supports {project_slug} placeholder)")
 	fmt.Println("  register_url     Public URL for user-facing registration links (default: hub_url)")
 	os.Exit(0)
 }
