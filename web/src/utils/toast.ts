@@ -77,12 +77,17 @@ export function showToast(
     duration,
   });
 
-  // Build inner HTML with icon + escaped message text.
+  // Build icon element via DOM API to avoid interpolating into innerHTML.
+  const iconEl = document.createElement('sl-icon');
+  iconEl.setAttribute('name', icon);
+  iconEl.setAttribute('slot', 'icon');
+  alert.appendChild(iconEl);
+
+  // Append escaped message text.
   const escaped = escapeHtml(message);
-  alert.innerHTML = `
-    <sl-icon name="${icon}" slot="icon"></sl-icon>
-    ${escaped}
-  `;
+  const span = document.createElement('span');
+  span.innerHTML = escaped;
+  alert.appendChild(span);
 
   document.body.appendChild(alert);
   void (alert as HTMLElement & { toast(): Promise<void> }).toast();

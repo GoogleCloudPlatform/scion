@@ -59,11 +59,12 @@ export function showConfirm(
     const dialog = document.createElement('sl-dialog');
     dialog.label = title;
 
-    // Prevent closing on overlay click — user must choose a button.
+    // Intercept all close requests so cleanup() owns the close exclusively.
     dialog.addEventListener('sl-request-close', (e: Event) => {
+      e.preventDefault();
       const detail = (e as CustomEvent<{ source: string }>).detail;
       if (detail?.source === 'overlay') {
-        e.preventDefault();
+        // Prevent closing on overlay click — user must choose a button.
         return;
       }
       // Escape key or close button → treat as cancel
