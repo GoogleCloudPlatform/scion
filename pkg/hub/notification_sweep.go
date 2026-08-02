@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -49,6 +48,12 @@ func (s *Server) notificationDispatchSweepHandler() func(ctx context.Context) {
 		s.agentLifecycleLog.Info("notification-dispatch-sweep: found undispatched",
 			"count", len(notifs))
 
+		// Notifications are processed sequentially under the handler's 30s
+		// timeout. This is acceptable because: (1) the batch is capped at 100,
+		// (2) each RetryDispatch is fast when the broker is reachable (CAS +
+		// one RPC), and (3) the sweep is a backstop — the broker-connect hook
+		// handles the latency-sensitive path. If sequential processing becomes
+		// a bottleneck under sustained load, consider bounded concurrency.
 		for i := range notifs {
 			s.notificationDispatcher.RetryDispatch(ctx, &notifs[i])
 		}
@@ -155,6 +160,7 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 	}
 
 	// 6. Build and deliver.
+	// N.B. notif.Status is already uppercase (set by storeAndDispatch).
 	msgType := notificationMessageType(notif.Status)
 	structuredMsg := messages.NewNotification(
 		"agent:"+watchedAgent.Slug,
@@ -164,12 +170,11 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 	)
 	structuredMsg.SenderID = watchedAgent.ID
 	structuredMsg.RecipientID = subscriber.ID
-	structuredMsg.Status = strings.ToUpper(notif.Status)
+	structuredMsg.Status = notif.Status
 
-	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer retryCancel()
-
-	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
+	// Use the caller's context directly — the sweep/drain handler already
+	// sets a 30s timeout, and dispatchWithBrokerRetry respects ctx.Done().
+	if err := dispatchWithBrokerRetry(ctx, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
 		nd.log.Error("retry: delivery failed, leaving claimed",
 			"notificationID", notif.ID, "subscriberID", sub.SubscriberID, "error", err)
 		// Leave claimed (dispatched=true). The delivery attempt was made; the
