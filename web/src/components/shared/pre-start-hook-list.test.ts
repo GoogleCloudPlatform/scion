@@ -242,12 +242,27 @@ describe('scion-pre-start-hook-list', () => {
   it('deletes a hook after confirmation', async () => {
     const calls: RecordedCall[] = [];
     const el = await createComponent([HOOK_ACTIVE, HOOK_ARCHIVED], calls);
-    vi.stubGlobal(
-      'confirm',
-      vi.fn(() => true)
-    );
 
-    await el.handleDelete(HOOK_ARCHIVED);
+    // Start the delete — don't await yet, it blocks on the confirm dialog.
+    const deletePromise = el.handleDelete(HOOK_ARCHIVED);
+
+    // Let requestAnimationFrame fire so the dialog opens.
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Find the confirm dialog that showConfirm() appended to document.body.
+    const dialog = document.body.querySelector('sl-dialog') as HTMLElement;
+    expect(dialog).toBeTruthy();
+
+    // Click the confirm button (second sl-button in the dialog footer).
+    const buttons = dialog.querySelectorAll('sl-button');
+    const confirmBtn = buttons[1] as HTMLElement;
+    confirmBtn.click();
+
+    // happy-dom doesn't fire sl-after-hide automatically — dispatch it so
+    // showConfirm's cleanup completes and the Promise resolves.
+    dialog.dispatchEvent(new Event('sl-after-hide'));
+
+    await deletePromise;
 
     const del = calls.find((c) => c.method === 'DELETE');
     expect(del?.url).toBe('/api/v1/projects/proj-1/pre-start-hooks/hook-2');
@@ -256,12 +271,22 @@ describe('scion-pre-start-hook-list', () => {
   it('does not delete when the confirmation is dismissed', async () => {
     const calls: RecordedCall[] = [];
     const el = await createComponent([HOOK_ACTIVE, HOOK_ARCHIVED], calls);
-    vi.stubGlobal(
-      'confirm',
-      vi.fn(() => false)
-    );
 
-    await el.handleDelete(HOOK_ARCHIVED);
+    const deletePromise = el.handleDelete(HOOK_ARCHIVED);
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    const dialog = document.body.querySelector('sl-dialog') as HTMLElement;
+    expect(dialog).toBeTruthy();
+
+    // Click the cancel button (first sl-button in the dialog footer).
+    const buttons = dialog.querySelectorAll('sl-button');
+    const cancelBtn = buttons[0] as HTMLElement;
+    cancelBtn.click();
+
+    dialog.dispatchEvent(new Event('sl-after-hide'));
+
+    await deletePromise;
 
     expect(calls.some((c) => c.method === 'DELETE')).toBe(false);
   });
