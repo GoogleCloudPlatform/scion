@@ -7,12 +7,13 @@ Copyright 2025 The Scion Authors.
 package telemetry
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 )
 
 // Environment variable names for telemetry configuration.
@@ -181,7 +182,7 @@ func LoadConfig() *Config {
 
 	// Auto-resolve project ID from GCP credentials file if not explicitly set
 	if cfg.ProjectID == "" && cfg.GCPCredentialsFile != "" {
-		cfg.ProjectID = readProjectIDFromCredentials(cfg.GCPCredentialsFile)
+		cfg.ProjectID = gcp.ExtractProjectID(cfg.GCPCredentialsFile)
 	}
 
 	// Apply default exclude list if not explicitly set
@@ -243,22 +244,6 @@ func (c *Config) IsCloudConfigured() bool {
 // Default Credentials (ADC). An explicit credentials file is not required.
 func (c *Config) IsGCP() bool {
 	return c != nil && c.CloudProvider == "gcp"
-}
-
-// readProjectIDFromCredentials reads the project_id field from a GCP service
-// account credentials JSON file. Returns empty string on any error.
-func readProjectIDFromCredentials(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	var creds struct {
-		ProjectID string `json:"project_id"`
-	}
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return ""
-	}
-	return creds.ProjectID
 }
 
 // parseBoolEnv parses a boolean environment variable with a default value.

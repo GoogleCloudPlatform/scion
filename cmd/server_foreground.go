@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/knadh/koanf/v2"
@@ -1396,6 +1397,21 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			"Set --session-secret or SCION_SERVER_SESSION_SECRET to avoid cross-replica session failures.")
 	}
 
+	// Derive TelemetryProjectID using a priority chain:
+	// 1. Explicit telemetry.cloud.gcp_project_id setting (highest priority)
+	// 2. Derived from scion-telemetry-gcp-credentials SA key JSON
+	// 3. Existing GCPProjectID fallback (SA minting project, handled in server.go)
+	if pid := telemetryGCPProjectFromSettings(cfg); pid != "" {
+		hubCfg.TelemetryProjectID = pid
+		log.Printf("Telemetry project ID from settings: %s", pid)
+	}
+	if hubCfg.TelemetryProjectID == "" && secretBackend != nil {
+		if pid := telemetryGCPProjectFromSecret(ctx, secretBackend, cfg.Hub.ResolveHubID()); pid != "" {
+			hubCfg.TelemetryProjectID = pid
+			log.Printf("Telemetry project ID derived from SA credentials: %s", pid)
+		}
+	}
+
 	// Construct proxy authenticator when auth mode is "proxy"
 	if cfg.Auth.Mode == "proxy" && cfg.Auth.Proxy != nil {
 		switch cfg.Auth.Proxy.Provider {
@@ -2692,4 +2708,26 @@ func injectPluginSecretsIntoConfig(ctx context.Context, sb secret.SecretBackend,
 		cfg[m.ConfigKey] = sv.Value
 	}
 	return cfg
+}
+
+// telemetryGCPProjectFromSettings returns the explicit telemetry.cloud.gcp_project_id
+// setting value, or "" if not configured.
+func telemetryGCPProjectFromSettings(cfg *config.GlobalConfig) string {
+	if cfg.TelemetryConfig == nil || cfg.TelemetryConfig.Cloud == nil {
+		return ""
+	}
+	if cfg.TelemetryConfig.Cloud.GCPProjectID == nil {
+		return ""
+	}
+	return *cfg.TelemetryConfig.Cloud.GCPProjectID
+}
+
+// telemetryGCPProjectFromSecret reads the scion-telemetry-gcp-credentials hub
+// secret and extracts the project_id from the SA key JSON.
+func telemetryGCPProjectFromSecret(ctx context.Context, sb secret.SecretBackend, hubID string) string {
+	sw, err := sb.Get(ctx, "scion-telemetry-gcp-credentials", secret.ScopeHub, hubID)
+	if err != nil || sw == nil || sw.Value == "" {
+		return ""
+	}
+	return gcputil.ParseProjectID([]byte(sw.Value))
 }

@@ -37,11 +37,12 @@ func ConvertV1TelemetryToAPI(v1 *V1TelemetryConfig) *api.TelemetryConfig {
 
 	if v1.Cloud != nil {
 		result.Cloud = &api.TelemetryCloudConfig{
-			Enabled:  v1.Cloud.Enabled,
-			Endpoint: v1.Cloud.Endpoint,
-			Protocol: v1.Cloud.Protocol,
-			Headers:  v1.Cloud.Headers,
-			Provider: v1.Cloud.Provider,
+			Enabled:      v1.Cloud.Enabled,
+			Endpoint:     v1.Cloud.Endpoint,
+			Protocol:     v1.Cloud.Protocol,
+			Headers:      v1.Cloud.Headers,
+			Provider:     v1.Cloud.Provider,
+			GCPProjectID: v1.Cloud.GCPProjectID,
 		}
 		if v1.Cloud.TLS != nil {
 			result.Cloud.TLS = &api.TelemetryTLS{
@@ -148,6 +149,9 @@ func TelemetryConfigToEnv(cfg *api.TelemetryConfig) map[string]string {
 		}
 		if cfg.Cloud.Provider != "" {
 			env["SCION_TELEMETRY_CLOUD_PROVIDER"] = cfg.Cloud.Provider
+		}
+		if cfg.Cloud.GCPProjectID != nil && *cfg.Cloud.GCPProjectID != "" {
+			env["SCION_GCP_PROJECT_ID"] = *cfg.Cloud.GCPProjectID
 		}
 	}
 
