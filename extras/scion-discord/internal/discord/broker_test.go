@@ -104,6 +104,37 @@ func TestUnknownMentionRouting(t *testing.T) {
 			"error message should list all unresolved mentions")
 	})
 
+	t.Run("mixed known and unknown start mentions delivers to known agent", func(t *testing.T) {
+		// R2: "@coder @not-an-agent fix this" should deliver to coder,
+		// not show an error. The error path must not fire when there are
+		// valid agent start mentions alongside unknown ones.
+		content := "@coder @not-an-agent fix this"
+
+		msg := newMockMessage(content, nil)
+		targets, _ := resolveTargetAgents(msg, botUserID, "coder", knownAgents)
+		assert.Equal(t, []string{"coder"}, targets)
+
+		classified := classifyMentions(content, botUserID, knownAgents, noopResolver)
+		// Has both agent and unknown start mentions.
+		assert.Equal(t, 1, countAgentStartMentions(classified))
+		assert.Len(t, classified.StartMentions, 2)
+
+		// Error path should NOT fire because there are valid agent start mentions.
+		// The guard: hasUnknownStartMention && countAgentStartMentions(classified) == 0
+		// ensures mixed cases are delivered, not blocked.
+		hasUnknownStartMention := false
+		for _, sm := range classified.StartMentions {
+			if sm.Kind == "unknown" {
+				hasUnknownStartMention = true
+				break
+			}
+		}
+		assert.True(t, hasUnknownStartMention,
+			"unknown mention should be detected")
+		assert.True(t, countAgentStartMentions(classified) > 0,
+			"mixed case must not trigger error path — known agent should receive message")
+	})
+
 	t.Run("unknown mention without default agent returns early", func(t *testing.T) {
 		// Without a default, targets stays empty and the function returns
 		// at the early exit (line ~1226). The error feedback at that point

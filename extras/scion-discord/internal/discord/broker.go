@@ -1265,7 +1265,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 				break
 			}
 		}
-		if hasUnknownStartMention {
+		if hasUnknownStartMention && countAgentStartMentions(classified) == 0 {
 			unresolved := extractUnresolvedMentions(m.Content, botUserID, agents)
 			if len(unresolved) > 0 {
 				errMsg := fmt.Sprintf("Unknown agent: %s. Use `/scion agents` to see available agents.", strings.Join(unresolved, ", "))
