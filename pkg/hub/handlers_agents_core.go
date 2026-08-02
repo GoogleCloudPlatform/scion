@@ -1187,6 +1187,15 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 				continue
 			}
 		}
+		// Check hub-scope env_vars
+		if hubID := s.HubID(); hubID != "" {
+			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "hub", ScopeID: hubID, Key: key})
+			if err == nil && len(vars) > 0 {
+				resp.HubWarnings = append(resp.HubWarnings,
+					fmt.Sprintf("%s is stored in Hub env storage (hub scope) but was not included in the dispatch — injection_mode may be as_needed", key))
+				continue
+			}
+		}
 		// Check secret backend
 		if s.secretBackend != nil {
 			if agent.OwnerID != "" {
@@ -1202,6 +1211,15 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 				if err == nil && len(metas) > 0 {
 					resp.HubWarnings = append(resp.HubWarnings,
 						fmt.Sprintf("%s is stored in Hub secrets (project scope) but was not included in the dispatch — this may indicate a resolution issue", key))
+					continue
+				}
+			}
+			// Check hub-scope secrets
+			if hubID := s.HubID(); hubID != "" {
+				metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "hub", ScopeID: hubID, Name: key})
+				if err == nil && len(metas) > 0 {
+					resp.HubWarnings = append(resp.HubWarnings,
+						fmt.Sprintf("%s is stored in Hub secrets (hub scope) but was not included in the dispatch — injection_mode may be as_needed", key))
 					continue
 				}
 			}
