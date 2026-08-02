@@ -162,7 +162,10 @@ func (c *Checker) CheckAll(ctx context.Context, shortImage, longImage string) Th
 
 	if c.local != nil {
 		if shortImage != "" {
-			shortExists, _ := c.local.ImageExists(ctx, shortImage)
+			shortExists, err := c.local.ImageExists(ctx, shortImage)
+			if err != nil {
+				slog.Warn("local image check failed", "image", shortImage, "error", err)
+			}
 			result.LocalShort.Exists = shortExists
 			if shortExists {
 				if ider, ok := c.local.(LocalImageIDer); ok {
@@ -174,7 +177,10 @@ func (c *Checker) CheckAll(ctx context.Context, shortImage, longImage string) Th
 		}
 
 		if longImage != "" {
-			longExists, _ := c.local.ImageExists(ctx, longImage)
+			longExists, err := c.local.ImageExists(ctx, longImage)
+			if err != nil {
+				slog.Warn("local image check failed", "image", longImage, "error", err)
+			}
 			result.LocalLong.Exists = longExists
 			if longExists {
 				if ider, ok := c.local.(LocalImageIDer); ok {

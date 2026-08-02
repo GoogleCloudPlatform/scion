@@ -269,7 +269,15 @@ func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
 
 func (r *DockerRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
 	_, err := runSimpleCommand(ctx, r.Command, "image", "inspect", image)
-	return err == nil, nil
+	if err == nil {
+		return true, nil
+	}
+	// Exit-code errors mean the command ran but the image was not found.
+	// Other errors (daemon unreachable, permission denied, etc.) are propagated.
+	if isExitError(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (r *DockerRuntime) ImageID(ctx context.Context, image string) (string, error) {

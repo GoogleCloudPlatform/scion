@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -520,6 +521,16 @@ func resolveContainerID(agents []api.AgentInfo, id string) string {
 
 // runtimeLog is the structured logger for runtime command execution.
 var runtimeLog = slog.Default().With(slog.String("subsystem", "runtime"))
+
+// isExitError reports whether err (possibly wrapped by runSimpleCommand's
+// fmt.Errorf) contains an *exec.ExitError, meaning the command executed but
+// returned a non-zero exit code.  This distinguishes "image not found"
+// (exit 1 from `image inspect`) from fundamental failures like a daemon that
+// is unreachable, permission denied, or a cancelled context.
+func isExitError(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
+}
 
 func runSimpleCommand(ctx context.Context, command string, args ...string) (string, error) {
 	cmdStr := command + " " + strings.Join(args, " ")
