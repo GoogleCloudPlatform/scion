@@ -45,7 +45,10 @@ const (
 
 // DefaultDeniedPorts are infrastructure ports that must never be auto-exposed.
 // Matches the hub-side deniedExposedPorts in port_forward_handlers.go.
-var DefaultDeniedPorts = []int{8080, 9810, 18380}
+// Port 8080 is intentionally excluded: the reverse tunnel architecture makes it
+// safe to expose, and in many deployments the hub API is served on a different
+// port behind a load balancer, making path-based forwarding on 8080 valid.
+var DefaultDeniedPorts = []int{9810, 18380}
 
 // Config holds the auto-expose configuration.
 type Config struct {

@@ -42,8 +42,12 @@ const (
 	maxConcurrentStreams    = 64
 )
 
+// deniedExposedPorts lists infrastructure ports that agents may not expose.
+// Port 8080 is intentionally excluded: the reverse tunnel architecture means
+// the agent-side port never collides with the hub listener, and in deployments
+// where the hub API is served behind a load balancer on a different port,
+// path-based forwarding on 8080 is valid.
 var deniedExposedPorts = map[int]string{
-	8080:  "scion web server",
 	9810:  "scion hub API",
 	18380: "scion metadata server",
 }

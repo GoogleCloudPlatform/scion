@@ -258,17 +258,18 @@ func TestReconciler_DeniedPortsFiltering(t *testing.T) {
 
 	sockets := []ListenSocket{
 		{Port: 3000, BindAddr: "0.0.0.0"},
-		{Port: 8080, BindAddr: "0.0.0.0"},  // denied
-		{Port: 9810, BindAddr: "0.0.0.0"},  // denied
-		{Port: 18380, BindAddr: "0.0.0.0"}, // denied
+		{Port: 8080, BindAddr: "0.0.0.0"},  // NOT denied — reverse tunnel makes it safe
+		{Port: 9810, BindAddr: "0.0.0.0"},  // denied (hub API)
+		{Port: 18380, BindAddr: "0.0.0.0"}, // denied (metadata server)
 	}
 
 	r := newTestReconciler(client, cfg, sockets)
 	r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
-	if len(ports) != 1 || ports[0] != 3000 {
-		t.Errorf("expected [3000] (denied ports filtered), got %v", ports)
+	// 8080 is no longer denied, so both 3000 and 8080 should be registered.
+	if len(ports) != 2 || ports[0] != 3000 || ports[1] != 8080 {
+		t.Errorf("expected [3000, 8080] (only infra ports denied), got %v", ports)
 	}
 }
 
@@ -413,16 +414,17 @@ func TestReconciler_FilterPorts_CombinedDeniedAndDenylist(t *testing.T) {
 	sockets := []ListenSocket{
 		{Port: 3000, BindAddr: "0.0.0.0"},
 		{Port: 4000, BindAddr: "0.0.0.0"}, // in denylist
-		{Port: 8080, BindAddr: "0.0.0.0"}, // in denied ports
-		{Port: 9810, BindAddr: "0.0.0.0"}, // in denied ports
+		{Port: 8080, BindAddr: "0.0.0.0"}, // NOT denied — reverse tunnel makes it safe
+		{Port: 9810, BindAddr: "0.0.0.0"}, // in denied ports (hub API)
 	}
 
 	r := newTestReconciler(client, cfg, sockets)
 	r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
-	if len(ports) != 1 || ports[0] != 3000 {
-		t.Errorf("expected [3000] with combined deny, got %v", ports)
+	// 8080 is no longer in denied ports, so 3000 and 8080 should be registered.
+	if len(ports) != 2 || ports[0] != 3000 || ports[1] != 8080 {
+		t.Errorf("expected [3000, 8080] with combined deny, got %v", ports)
 	}
 }
 

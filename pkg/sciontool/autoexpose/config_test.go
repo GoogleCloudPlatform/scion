@@ -48,8 +48,8 @@ func TestConfigFromEnv_Defaults(t *testing.T) {
 	if cfg.MinPort != DefaultMinPort {
 		t.Errorf("MinPort = %d, want %d", cfg.MinPort, DefaultMinPort)
 	}
-	if len(cfg.DeniedPorts) != 3 {
-		t.Errorf("DeniedPorts = %v, want 3 entries", cfg.DeniedPorts)
+	if len(cfg.DeniedPorts) != 2 {
+		t.Errorf("DeniedPorts = %v, want 2 entries (9810, 18380)", cfg.DeniedPorts)
 	}
 }
 
