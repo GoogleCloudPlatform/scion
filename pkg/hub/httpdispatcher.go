@@ -1400,6 +1400,114 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 	return result, nil
 }
 
+// resolveAsNeededForKeys resolves as_needed env vars and environment-type
+// secrets whose key/target matches one of the requested keys. It returns a
+// map suitable for passing to DispatchFinalizeEnv.
+//
+// This is the second pass of the two-pass env-gather resolution: the first
+// pass (resolveEnvFromStorage + resolveSecrets) skips as_needed entries, then
+// the broker reports which keys are still needed, and this function checks
+// whether any of those keys can be satisfied by as_needed entries.
+//
+// Known limitation: file-type as_needed secrets are not handled here because
+// DispatchFinalizeEnv only accepts a string key=value map. File-type secrets
+// that need on-demand injection would require a different mechanism.
+func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
+	ctx context.Context,
+	agent *store.Agent,
+	keys []string,
+) map[string]string {
+	result := make(map[string]string)
+	keySet := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		keySet[k] = struct{}{}
+	}
+
+	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
+	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+		vars, err := d.store.ListEnvVars(ctx, filter)
+		if err != nil {
+			if d.debug {
+				d.log.Warn("resolveAsNeededForKeys: failed to list env vars",
+					"scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
+			}
+			continue
+		}
+		for _, v := range vars {
+			if v.InjectionMode != store.InjectionModeAsNeeded {
+				continue
+			}
+			if _, needed := keySet[v.Key]; needed {
+				result[v.Key] = v.Value
+			}
+		}
+	}
+
+	// 2. Check secrets (all scopes via backend.Resolve).
+	// Only environment-type secrets can be mapped to env key=value pairs.
+	if d.secretBackend != nil {
+		var resolveOpts *secret.ResolveOpts
+		if len(agent.Ancestry) > 1 && d.authzService != nil {
+			agentID := agent.ID
+			ancestry := agent.Ancestry
+			resolveOpts = &secret.ResolveOpts{
+				AgentAncestry: ancestry,
+				AuthzCheck: func(s secret.SecretMeta) bool {
+					decision := d.authzService.CheckAccess(ctx, &agentIdentityWrapper{
+						AgentTokenClaims: &AgentTokenClaims{
+							Claims:    jwt.Claims{Subject: agentID},
+							ProjectID: agent.ProjectID,
+							Ancestry:  ancestry,
+						},
+					}, Resource{
+						Type: "secret",
+						ID:   s.ID,
+					}, ActionRead)
+					return decision.Allowed
+				},
+			}
+		}
+
+		resolved, err := d.secretBackend.Resolve(
+			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
+		if err != nil {
+			if d.debug {
+				d.log.Warn("resolveAsNeededForKeys: failed to resolve secrets", "error", err)
+			}
+		} else {
+			for _, sv := range resolved {
+				if sv.InjectionMode != store.InjectionModeAsNeeded {
+					continue
+				}
+				// Only environment-type secrets map to env vars.
+				if sv.SecretType != store.SecretTypeEnvironment && sv.SecretType != "" {
+					continue
+				}
+				target := sv.Target
+				if target == "" {
+					target = sv.Name
+				}
+				if _, needed := keySet[target]; needed {
+					if _, alreadySet := result[target]; !alreadySet {
+						result[target] = sv.Value
+					}
+				}
+			}
+		}
+	}
+
+	if d.debug && len(result) > 0 {
+		resolvedKeys := make([]string, 0, len(result))
+		for k := range result {
+			resolvedKeys = append(resolvedKeys, k)
+		}
+		d.log.Debug("resolveAsNeededForKeys: resolved as_needed entries",
+			"count", len(result), "keys", resolvedKeys)
+	}
+
+	return result
+}
+
 // buildEnvSources creates a map of env key -> scope for reporting to the CLI.
 //
 // It walks the same scopes in the same order as resolveEnvFromStorage, from the
