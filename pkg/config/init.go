@@ -513,7 +513,7 @@ func writeProjectSettings(externalPath, workspacePath, projectID string, opt Ini
 				hub = make(map[string]interface{})
 				settingsMap["hub"] = hub
 			}
-			hub["grove_id"] = projectID
+			hub["project_id"] = projectID
 		} else {
 			settingsMap["project_id"] = projectID
 		}
