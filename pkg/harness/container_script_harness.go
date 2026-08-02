@@ -524,6 +524,18 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 		return err
 	}
 
+	// When auth resolution produces empty env vars (e.g. on restart when
+	// credentials don't reach the auth overlay), preserve references to
+	// existing secret files from a previous successful run. This prevents
+	// overwriting a valid auth-candidates.json with one that has empty
+	// env_secret_files. See issue #723.
+	if len(envSecretFiles) == 0 {
+		existing := c.discoverExistingSecretFiles(agentHome)
+		if len(existing) > 0 {
+			envSecretFiles = existing
+		}
+	}
+
 	fileSecretFiles, remainingFiles, err := c.stageFileSecretFiles(agentHome, resolved.Files)
 	if err != nil {
 		return err
@@ -738,6 +750,36 @@ func isSafeEnvName(name string) bool {
 		}
 	}
 	return true
+}
+
+// discoverExistingSecretFiles scans the secrets directory for files left by a
+// previous successful ApplyAuthSettings call. It returns a map of env-var name
+// to container-relative path, matching the format produced by stageEnvSecretFiles.
+// This enables auth-candidates.json to reference existing secrets when the
+// current auth resolution produced empty env vars (e.g. on restart).
+func (c *ContainerScriptHarness) discoverExistingSecretFiles(agentHome string) map[string]string {
+	dir := filepath.Join(agentHome, ".scion", "harness", "secrets")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	result := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !isSafeEnvName(name) {
+			continue
+		}
+		// Verify the file has non-empty content
+		info, err := e.Info()
+		if err != nil || info.Size() == 0 {
+			continue
+		}
+		result[name] = "$HOME/.scion/harness/secrets/" + name
+	}
+	return result
 }
 
 // ApplyMCPSettings stages the universal mcp_servers map into

@@ -1091,3 +1091,40 @@ func TestResolve_LegacyBuiltinCodexNoDir(t *testing.T) {
 		t.Errorf("Implementation=%q want generic", resolved.Implementation)
 	}
 }
+
+// TestDiscoverExistingSecretFiles verifies that discoverExistingSecretFiles
+// returns a map of env-var name to container-relative path for non-empty files
+// in the secrets directory.
+func TestDiscoverExistingSecretFiles(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+
+	// No secrets dir yet — should return nil
+	result := h.discoverExistingSecretFiles(agentHome)
+	if result != nil {
+		t.Errorf("expected nil for missing secrets dir, got %v", result)
+	}
+
+	// Create secrets dir with some files
+	secretDir := filepath.Join(agentHome, ".scion", "harness", "secrets")
+	if err := os.MkdirAll(secretDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(secretDir, "GOOGLE_CLOUD_PROJECT"), []byte("my-project"), 0600)
+	_ = os.WriteFile(filepath.Join(secretDir, "GOOGLE_CLOUD_REGION"), []byte("us-central1"), 0600)
+	_ = os.WriteFile(filepath.Join(secretDir, "EMPTY_SECRET"), []byte(""), 0600) // empty — should be skipped
+
+	result = h.discoverExistingSecretFiles(agentHome)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 secrets, got %d: %v", len(result), result)
+	}
+	if result["GOOGLE_CLOUD_PROJECT"] != "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_PROJECT" {
+		t.Errorf("GOOGLE_CLOUD_PROJECT path = %q", result["GOOGLE_CLOUD_PROJECT"])
+	}
+	if result["GOOGLE_CLOUD_REGION"] != "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_REGION" {
+		t.Errorf("GOOGLE_CLOUD_REGION path = %q", result["GOOGLE_CLOUD_REGION"])
+	}
+	if _, ok := result["EMPTY_SECRET"]; ok {
+		t.Error("empty secret file should not be included")
+	}
+}
