@@ -1453,6 +1453,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		},
 		MaintenanceConfig: resolveMaintenanceConfig(cfg),
 		SecretBackend:     secretBackend,
+		GCPIAMCheckMode:   cfg.Hub.GCPIAMCheckMode,
 		GCPProjectID:      cfg.Hub.GCPProjectID,
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load

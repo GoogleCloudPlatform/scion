@@ -76,6 +76,17 @@ type HubServerConfig struct {
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string `json:"gcpProjectId,omitempty" yaml:"gcpProjectId,omitempty" koanf:"gcpProjectId"`
 
+	// GCPIAMCheckMode controls whether IAM actAs permission is checked when
+	// binding a GCP service account to an agent.
+	//
+	// "off"     — no check; any member who can see the SA can assign it (default)
+	// "enforce" — Policy Troubleshooter checks actAs; denials are enforced
+	//
+	// Default is "off" per Q1. When set to "enforce", the Hub SA must have
+	// roles/iam.securityReviewer on the org or project containing any SA
+	// that will be assigned. See the release notes for group-binding limitations.
+	GCPIAMCheckMode string `json:"gcpIamCheckMode,omitempty" yaml:"gcpIamCheckMode,omitempty" koanf:"gcpIamCheckMode"`
+
 	// AutoSuspendStalled controls whether stalled agents are automatically
 	// suspended (container stopped, phase set to "suspended"). Default: false.
 	AutoSuspendStalled bool `json:"autoSuspendStalled" yaml:"autoSuspendStalled" koanf:"autoSuspendStalled"`
@@ -811,6 +822,7 @@ var snakeCaseFields = map[string]string{
 	"devmode":          "dev_mode",
 	"devtoken":         "dev_token",
 	"devtokenfile":     "dev_token_file",
+	"gcpiamcheckmode":  "gcp_iam_check_mode",
 	"gcpprojectid":     "gcp_project_id",
 	"hubid":            "hub_id",
 	"logformat":        "log_format",
@@ -849,6 +861,7 @@ var camelCaseFields = map[string]string{
 	"disablelegacystoragefallback":  "disableLegacyStorageFallback",
 	"displayname":                   "displayName",
 	"gcpcredentials":                "gcpCredentials",
+	"gcpiamcheckmode":               "gcpIamCheckMode",
 	"gcpprojectid":                  "gcpProjectId",
 	"githubapp":                     "githubApp",
 	"hubendpoint":                   "hubEndpoint",

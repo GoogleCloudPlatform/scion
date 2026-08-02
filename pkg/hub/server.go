@@ -196,6 +196,10 @@ type ServerConfig struct {
 	SecretBackend secret.SecretBackend
 	// MaintenanceConfig holds configuration for routine maintenance operations.
 	MaintenanceConfig MaintenanceConfig
+	// GCPIAMCheckMode controls whether IAM actAs permission is checked when
+	// binding a GCP service account to an agent.
+	// "off" (default) or "enforce". See sa_assign_gate.go for the constants.
+	GCPIAMCheckMode string
 	// GCPProjectID is the GCP project ID used for minting service accounts.
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string
@@ -1144,16 +1148,22 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Wire the caller-permission checker for agent service-account assignment.
 	//
-	// ⚠️ INERT IN THIS RELEASE. svc-accnt Step 2 lands the gate, the plumbing
-	// and the audit record; the GCP prober that would answer CanActAs for real
-	// does not exist yet, so the mode is off and the disabled checker is
-	// installed. The Hub policy layer (ActionAssign) IS live and is doing the
-	// work today.
+	// GCP IAM check mode: read from config, default to "off" (Q1 ruling).
+	// When "enforce", the PT checker (wired later in server_foreground.go)
+	// gates SA assignment. The disabled checker installed here is the default
+	// until a real checker replaces it via SetSAAssignChecker.
 	//
 	// Installed explicitly rather than left nil on purpose: a nil checker
 	// denies, so "forgot to wire it" and "chose to switch it off" cannot be
 	// confused for one another. See NewDisabledCallerPermissionChecker.
-	srv.saAssignCheckMode = SAAssignCheckOff
+	gcpIAMMode := cfg.GCPIAMCheckMode
+	if gcpIAMMode == SAAssignCheckEnforce {
+		srv.saAssignCheckMode = SAAssignCheckEnforce
+		srv.hookIdentityCheckMode = SAAssignCheckEnforce
+	} else {
+		srv.saAssignCheckMode = SAAssignCheckOff
+		srv.hookIdentityCheckMode = SAAssignCheckOff
+	}
 	srv.saAssignChecker = store.NewDisabledCallerPermissionChecker()
 	if srv.saAssignCheckMode == SAAssignCheckOff {
 		// Names the SURFACE and what it degrades to, not the feature. The same
@@ -1164,18 +1174,24 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			"assignment is gated by Hub policy only, and no caller is checked for "+
 			store.PermissionActAs+" on the target account",
 			"surface", SurfaceAgentAssign, "mode", srv.saAssignCheckMode)
+	} else {
+		slog.Info("GCP caller-permission checking is ENFORCE for agent service-account assignment",
+			"surface", SurfaceAgentAssign, "mode", srv.saAssignCheckMode)
 	}
 
 	// Same wiring for the lifecycle-hook execution-identity surface, installed
 	// separately because it degrades to something strictly worse. See the
 	// field comment and SurfaceHookExecutionIdentity.
-	srv.hookIdentityCheckMode = SAAssignCheckOff
 	srv.hookIdentityChecker = store.NewDisabledCallerPermissionChecker()
 	if srv.hookIdentityCheckMode == SAAssignCheckOff {
 		slog.Warn("GCP caller-permission checking is OFF for lifecycle-hook execution identity: "+
 			"any caller who may write a hook may run it as any in-scope verified service account, "+
 			"and no caller is checked for "+store.PermissionActAs+" on it. Unlike agent "+
 			"service-account assignment, this surface has NO second policy layer to fall back on",
+			"surface", lifecyclehooks.SurfaceHookExecutionIdentity,
+			"mode", srv.hookIdentityCheckMode)
+	} else {
+		slog.Info("GCP caller-permission checking is ENFORCE for lifecycle-hook execution identity",
 			"surface", lifecyclehooks.SurfaceHookExecutionIdentity,
 			"mode", srv.hookIdentityCheckMode)
 	}
@@ -2002,6 +2018,24 @@ func (s *Server) SetGCPServiceAccountAdmin(a GCPServiceAccountAdmin) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gcpIAMAdmin = a
+}
+
+// SetSAAssignChecker replaces the caller-permission checker for the agent
+// service-account assignment surface. Both SetSAAssignChecker and
+// SetHookIdentityChecker should typically be called with the same cached
+// checker instance so that the two surfaces share one cache.
+func (s *Server) SetSAAssignChecker(c store.CallerPermissionChecker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saAssignChecker = c
+}
+
+// SetHookIdentityChecker replaces the caller-permission checker for the
+// lifecycle-hook execution-identity surface.
+func (s *Server) SetHookIdentityChecker(c store.CallerPermissionChecker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hookIdentityChecker = c
 }
 
 // SetGCPProjectID sets the GCP project ID used for minting service accounts.
