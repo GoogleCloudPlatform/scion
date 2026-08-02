@@ -257,7 +257,13 @@ func GetDefaultSettingsDataYAML() ([]byte, error) {
 	if goruntime.GOOS != "darwin" {
 		return getDefaultSettingsYAMLForRuntime("docker")
 	}
-	return getDefaultSettingsYAMLForRuntime("container")
+	// On macOS, detect the available runtime instead of hardcoding "container".
+	// This prevents failures when only podman is installed (no Apple Container CLI).
+	detected, err := DetectLocalRuntime()
+	if err != nil {
+		return getDefaultSettingsYAMLForRuntime("container") // fallback
+	}
+	return getDefaultSettingsYAMLForRuntime(detected)
 }
 
 // GetProjectDefaultSettingsYAML returns the embedded project-level default settings YAML.

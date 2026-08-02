@@ -208,11 +208,13 @@ func (s *HeartbeatService) gatherProjectAgents() []hubclient.ProjectHeartbeat {
 		return nil
 	}
 
-	// List all agents managed by this broker (default runtime)
+	// List all agents managed by this broker (default runtime).
+	// If the default manager fails (e.g. its runtime binary is missing),
+	// log a warning and continue — auxiliary managers may still work.
 	agents, err := s.manager.List(context.Background(), nil)
 	if err != nil {
-		s.log.Error("Failed to list agents for heartbeat", "error", err)
-		return nil
+		s.log.Warn("Default runtime agent listing failed for heartbeat, trying auxiliary runtimes", "error", err)
+		agents = nil
 	}
 
 	// Also include agents from auxiliary runtimes (e.g. Kubernetes).

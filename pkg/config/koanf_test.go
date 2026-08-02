@@ -15,8 +15,10 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -844,6 +846,89 @@ profiles:
 	require.True(t, ok, "local profile should exist")
 	assert.Equal(t, "container", profile.Runtime,
 		"in-repo settings should override global profiles.local.runtime")
+}
+
+func TestGetDefaultSettingsYAMLForRuntime_Docker(t *testing.T) {
+	data, err := getDefaultSettingsYAMLForRuntime("docker")
+	if err != nil {
+		t.Fatalf("getDefaultSettingsYAMLForRuntime failed: %v", err)
+	}
+	// Should contain "runtime: docker" instead of "runtime: container"
+	if !bytes.Contains(data, []byte("runtime: docker")) {
+		t.Error("expected YAML to contain 'runtime: docker'")
+	}
+	if bytes.Contains(data, []byte("runtime: container")) {
+		t.Error("expected YAML to NOT contain 'runtime: container' when docker is specified")
+	}
+}
+
+func TestGetDefaultSettingsYAMLForRuntime_Container(t *testing.T) {
+	data, err := getDefaultSettingsYAMLForRuntime("container")
+	if err != nil {
+		t.Fatalf("getDefaultSettingsYAMLForRuntime failed: %v", err)
+	}
+	// Should contain "runtime: container" (the embedded default, unchanged)
+	if !bytes.Contains(data, []byte("runtime: container")) {
+		t.Error("expected YAML to contain 'runtime: container'")
+	}
+}
+
+func TestGetDefaultSettingsYAMLForRuntime_Podman(t *testing.T) {
+	data, err := getDefaultSettingsYAMLForRuntime("podman")
+	if err != nil {
+		t.Fatalf("getDefaultSettingsYAMLForRuntime failed: %v", err)
+	}
+	// Should contain "runtime: podman" instead of "runtime: container"
+	if !bytes.Contains(data, []byte("runtime: podman")) {
+		t.Error("expected YAML to contain 'runtime: podman'")
+	}
+	if bytes.Contains(data, []byte("runtime: container")) {
+		t.Error("expected YAML to NOT contain 'runtime: container' when podman is specified")
+	}
+}
+
+func TestGetDefaultSettingsDataYAML_UsesDetectedRuntime(t *testing.T) {
+	// Mock runtime detection to return "podman" (simulating a macOS host
+	// with only podman installed, no Apple Container CLI).
+	mockRuntimeDetection(t, "podman")
+
+	data, err := GetDefaultSettingsDataYAML()
+	if err != nil {
+		t.Fatalf("GetDefaultSettingsDataYAML failed: %v", err)
+	}
+
+	// On non-darwin this will return "docker" regardless of detection;
+	// on darwin it should use the detected runtime ("podman").
+	if goruntime.GOOS == "darwin" {
+		if !bytes.Contains(data, []byte("runtime: podman")) {
+			t.Error("on macOS, expected detected runtime 'podman' in defaults")
+		}
+	} else {
+		if !bytes.Contains(data, []byte("runtime: docker")) {
+			t.Error("on Linux, expected 'docker' in defaults regardless of detection")
+		}
+	}
+}
+
+func TestGetDefaultSettingsDataYAML_FallsBackToContainerOnDetectFailure(t *testing.T) {
+	// Mock runtime detection to fail (no runtimes available)
+	mockRuntimeDetectionNone(t)
+
+	data, err := GetDefaultSettingsDataYAML()
+	if err != nil {
+		t.Fatalf("GetDefaultSettingsDataYAML failed: %v", err)
+	}
+
+	// On darwin with no runtimes detected, should fall back to "container"
+	if goruntime.GOOS == "darwin" {
+		if !bytes.Contains(data, []byte("runtime: container")) {
+			t.Error("on macOS with no runtimes, expected fallback to 'container'")
+		}
+	} else {
+		if !bytes.Contains(data, []byte("runtime: docker")) {
+			t.Error("on Linux, expected 'docker' regardless")
+		}
+	}
 }
 
 func TestLoadSettingsKoanf_ExternalOverridesInRepo(t *testing.T) {
