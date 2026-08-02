@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -283,6 +284,26 @@ func runInit(args []string) int {
 			return 1
 		}
 		// Continue anyway — non-required harness hooks failing shouldn't prevent startup
+	}
+
+	// After pre-start hooks, fix up ownership of any files provisioners
+	// created as root. Provisioning runs before privilege drop, so scripts
+	// may write files owned by root:root into the bind-mounted workspace
+	// or the agent home directory. The non-root broker cannot delete
+	// root-owned files later, so we chown them now.
+	if targetUID != 0 && os.Geteuid() == 0 {
+		workspacePath := os.Getenv("SCION_WORKSPACE_PATH")
+		if workspacePath == "" {
+			workspacePath = "/workspace"
+		}
+		for _, dir := range []string{workspacePath, agentHome} {
+			if dir == "" {
+				continue
+			}
+			if err := chownTreeRootOwned(dir, targetUID, targetGID); err != nil {
+				log.Error("Failed to chown %s after pre-start hooks: %v", dir, err)
+			}
+		}
 	}
 
 	// Load the env overlay produced by the pre-start provisioner. Resolve
@@ -1677,6 +1698,34 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 
 	log.Info("Git clone complete: %s on branch %s", normalizedURL, branchName)
 	return nil
+}
+
+// chownTreeRootOwned recursively chowns files owned by root (UID 0) to
+// the specified uid:gid. Files already owned by the target user are
+// skipped for efficiency. This is called after pre-start hooks to fix up
+// files created by provisioners running as root, which would otherwise be
+// undeletable by the non-root broker.
+func chownTreeRootOwned(root string, uid, gid int) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// Skip permission errors on walk (e.g., lost+found).
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return nil
+		}
+		if stat.Uid == 0 {
+			if chErr := os.Lchown(path, uid, gid); chErr != nil {
+				log.Error("chownTreeRootOwned: failed to chown %s: %v", path, chErr)
+			}
+		}
+		return nil
+	})
 }
 
 func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, chown func(string, int, int) error) {
