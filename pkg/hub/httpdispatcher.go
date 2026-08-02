@@ -1491,7 +1491,11 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				d.log.Warn("resolveAsNeededForKeys: failed to resolve secrets", "error", err)
 			}
 		} else {
-			for _, sv := range resolved {
+			// Iterate in reverse: resolved is ordered lowest-precedence first
+			// (hub < user < project < runtime_broker), so walking backwards
+			// lets higher-precedence secrets win.
+			for i := len(resolved) - 1; i >= 0; i-- {
+				sv := resolved[i]
 				if sv.InjectionMode != store.InjectionModeAsNeeded {
 					continue
 				}
