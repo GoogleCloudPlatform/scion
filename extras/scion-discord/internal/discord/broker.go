@@ -1273,8 +1273,17 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	// Filter targets to only start-mention agents, or exclude body-mention agents if no start-mentions exist.
 	// Body-mention agents will be handled by the TypeMention delivery loop.
 	if !isAll {
-		if len(classified.StartMentions) > 0 {
-			startMentionSet := make(map[string]bool, len(classified.StartMentions))
+		// Count only agent-kind start mentions for filtering.
+		// Unknown-kind start mentions (non-existent agents) must not
+		// trigger filtering, otherwise they empty the target list.
+		agentStartMentions := 0
+		for _, sm := range classified.StartMentions {
+			if sm.Kind == "agent" {
+				agentStartMentions++
+			}
+		}
+		if agentStartMentions > 0 {
+			startMentionSet := make(map[string]bool, agentStartMentions)
 			for _, sm := range classified.StartMentions {
 				if sm.Kind == "agent" {
 					startMentionSet[strings.ToLower(sm.Name)] = true
@@ -1309,11 +1318,22 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		}
 
 		// If body-mention filter emptied targets, restore default agent so instruction is delivered.
-		if len(targets) == 0 && len(classified.StartMentions) == 0 && effectiveDefault != "" && !hasNonBotMentions(m.Message, botUserID) {
+		if len(targets) == 0 && agentStartMentions == 0 && effectiveDefault != "" && !hasNonBotMentions(m.Message, botUserID) {
 			text := strings.TrimSpace(m.Content)
 			if text != "" && !strings.HasPrefix(text, "/") {
 				targets = []string{effectiveDefault}
 			}
+		}
+	}
+
+	// After all routing logic, if targets is empty and there were unresolved
+	// @mentions (non-existent agents), show an error to the user.
+	if len(targets) == 0 {
+		unresolved := extractUnresolvedMentions(m.Content, botUserID, agents)
+		if len(unresolved) > 0 {
+			errMsg := fmt.Sprintf("Unknown agent: %q. Use `/scion agents` to see available agents.", unresolved[0])
+			s.ChannelMessageSend(channelID, errMsg)
+			return
 		}
 	}
 
