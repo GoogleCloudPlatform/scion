@@ -27,6 +27,8 @@ import (
 
 	gcplog "cloud.google.com/go/logging"
 	logpb "cloud.google.com/go/logging/apiv2/loggingpb"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // Environment variable names for Cloud Logging configuration.
@@ -76,6 +78,7 @@ type CloudHandler struct {
 	hubName   string
 	hostname  string
 	projectID string
+	version   string
 	attrs     []slog.Attr
 	groups    []string
 }
@@ -128,6 +131,7 @@ func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.
 		hubName:   config.HubName,
 		hostname:  hostname,
 		projectID: projectID,
+		version:   version.Short(),
 	}
 
 	cleanup := func() {
@@ -181,6 +185,20 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 			Line:     int64(f.Line),
 			Function: f.Function,
 		}
+	}
+
+	// Add serviceContext for GCP Error Reporting (all levels)
+	payload["serviceContext"] = map[string]any{
+		"service": h.component,
+		"version": h.version,
+	}
+
+	// ERROR+ only: stack trace and @type for GCP Error Reporting
+	if r.Level >= slog.LevelError {
+		buf := make([]byte, 4096)
+		n := runtime.Stack(buf, false)
+		payload["stack_trace"] = string(buf[:n])
+		payload["@type"] = errorReportingType
 	}
 
 	// Map slog level to Cloud Logging severity
@@ -243,6 +261,7 @@ func (h *CloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
+		version:   h.version,
 		attrs:     newAttrs,
 		groups:    h.groups,
 	}
@@ -261,6 +280,7 @@ func (h *CloudHandler) WithGroup(name string) slog.Handler {
 		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
+		version:   h.version,
 		attrs:     h.attrs,
 		groups:    newGroups,
 	}
@@ -285,6 +305,7 @@ func NewCloudHandlerFromClient(client *gcplog.Client, logID, component, hubName 
 		hubName:   hubName,
 		hostname:  hostname,
 		projectID: resolveProjectID(),
+		version:   version.Short(),
 	}
 }
 

@@ -21,6 +21,8 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // GCP-specific keys for Cloud Logging LogEntry
@@ -32,6 +34,10 @@ const (
 	GCPKeySourceLocation = "logging.googleapis.com/sourceLocation"
 	GCPKeyTrace          = "logging.googleapis.com/trace"
 )
+
+// errorReportingType is the @type value that tells GCP Error Reporting
+// to pick up a log entry as a reportable error event.
+const errorReportingType = "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"
 
 // Map slog levels to GCP severity strings
 var levelToSeverity = map[slog.Level]string{
@@ -48,6 +54,7 @@ type GCPHandler struct {
 	hubName   string
 	hostname  string
 	projectID string
+	version   string
 	preAttrs  []slog.Attr // tracked for label promotion
 }
 
@@ -98,6 +105,7 @@ func NewGCPHandler(w io.Writer, opts *slog.HandlerOptions, component, hubName st
 		hubName:   hubName,
 		hostname:  hostname,
 		projectID: projectID,
+		version:   version.Short(),
 	}
 }
 
@@ -139,6 +147,22 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 		}))
 	}
 
+	// Add serviceContext for GCP Error Reporting (all levels)
+	r.AddAttrs(slog.Group("serviceContext",
+		slog.String("service", h.component),
+		slog.String("version", h.version),
+	))
+
+	// ERROR+ only: stack trace and @type for GCP Error Reporting
+	if r.Level >= slog.LevelError {
+		buf := make([]byte, 4096)
+		n := runtime.Stack(buf, false)
+		r.AddAttrs(
+			slog.String("stack_trace", string(buf[:n])),
+			slog.String("@type", errorReportingType),
+		)
+	}
+
 	return h.handler.Handle(ctx, r)
 }
 
@@ -152,6 +176,7 @@ func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
+		version:   h.version,
 		preAttrs:  newPreAttrs,
 	}
 }
@@ -163,6 +188,7 @@ func (h *GCPHandler) WithGroup(name string) slog.Handler {
 		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
+		version:   h.version,
 		preAttrs:  h.preAttrs,
 	}
 }
