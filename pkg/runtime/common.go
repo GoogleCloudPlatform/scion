@@ -543,12 +543,12 @@ func isExitError(err error) bool {
 // Known patterns:
 //   - Docker:          "No such image"
 //   - Podman:          "image not known"
-//   - Apple Container: "not found"
+//   - Apple Container: "image not found"
 func isImageNotFoundOutput(output string) bool {
 	lower := strings.ToLower(output)
 	return strings.Contains(lower, "no such image") ||
 		strings.Contains(lower, "image not known") ||
-		strings.Contains(lower, "not found")
+		strings.Contains(lower, "image not found")
 }
 
 func runSimpleCommand(ctx context.Context, command string, args ...string) (string, error) {
