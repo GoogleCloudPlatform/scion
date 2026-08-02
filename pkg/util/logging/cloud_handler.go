@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -199,10 +200,12 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 
 	// ERROR+ only: stack trace and @type for GCP Error Reporting
 	if r.Level >= slog.LevelError {
-		buf := make([]byte, 4096)
-		n := runtime.Stack(buf, false)
-		payload["stack_trace"] = string(buf[:n])
-		payload["@type"] = errorReportingType
+		if _, hasST := payload["stack_trace"]; !hasST {
+			payload["stack_trace"] = string(debug.Stack())
+		}
+		if _, hasType := payload["@type"]; !hasType {
+			payload["@type"] = errorReportingType
+		}
 	}
 
 	// Map slog level to Cloud Logging severity

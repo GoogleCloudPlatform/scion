@@ -388,6 +388,176 @@ func TestCloudHandler_HandleNoStackTraceOnWarn(t *testing.T) {
 	}
 }
 
+// TestGCPHandler_CallerStackTracePreserved verifies that when the caller
+// provides a custom stack_trace attribute, it is preserved (not overwritten).
+func TestGCPHandler_CallerStackTracePreserved(t *testing.T) {
+	var buf bytes.Buffer
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	handler := NewGCPHandler(&buf, opts, "scion-hub", "")
+	logger := slog.New(handler)
+
+	customStack := "custom goroutine stack from caller"
+	logger.Error("error with custom stack", slog.String("stack_trace", customStack))
+
+	var data map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &data); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+
+	st, ok := data["stack_trace"].(string)
+	if !ok || st == "" {
+		t.Fatal("stack_trace not found or empty on ERROR entry")
+	}
+	if st != customStack {
+		t.Errorf("stack_trace was overwritten: got %q, want %q", st, customStack)
+	}
+}
+
+// TestGCPHandler_CallerTypePreserved verifies that when the caller provides
+// a custom @type attribute, it is preserved (not overwritten).
+func TestGCPHandler_CallerTypePreserved(t *testing.T) {
+	var buf bytes.Buffer
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	handler := NewGCPHandler(&buf, opts, "scion-hub", "")
+	logger := slog.New(handler)
+
+	customType := "custom.error.type"
+	logger.Error("error with custom type",
+		slog.String("stack_trace", "custom stack"),
+		slog.String("@type", customType),
+	)
+
+	var data map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &data); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+
+	atType, ok := data["@type"].(string)
+	if !ok || atType == "" {
+		t.Fatal("@type not found or empty on ERROR entry")
+	}
+	if atType != customType {
+		t.Errorf("@type was overwritten: got %q, want %q", atType, customType)
+	}
+}
+
+// TestCloudHandler_HandleCallerStackTracePreserved verifies that CloudHandler
+// preserves a caller-provided stack_trace attribute on ERROR entries.
+func TestCloudHandler_HandleCallerStackTracePreserved(t *testing.T) {
+	var entries []gcplog.Entry
+	h := newTestCloudHandler("scion-server", "abc1234", slog.LevelInfo, &entries)
+
+	r := slog.NewRecord(time.Now(), slog.LevelError, "error with custom stack", 0)
+	customStack := "custom goroutine stack from caller"
+	r.AddAttrs(slog.String("stack_trace", customStack))
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	payload, ok := entries[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatal("payload is not map[string]any")
+	}
+
+	st, ok := payload["stack_trace"].(string)
+	if !ok || st == "" {
+		t.Fatal("stack_trace not found or empty in ERROR payload")
+	}
+	if st != customStack {
+		t.Errorf("stack_trace was overwritten: got %q, want %q", st, customStack)
+	}
+}
+
+// TestCloudHandler_HandleCallerTypePreserved verifies that CloudHandler
+// preserves a caller-provided @type attribute on ERROR entries.
+func TestCloudHandler_HandleCallerTypePreserved(t *testing.T) {
+	var entries []gcplog.Entry
+	h := newTestCloudHandler("scion-server", "abc1234", slog.LevelInfo, &entries)
+
+	r := slog.NewRecord(time.Now(), slog.LevelError, "error with custom type", 0)
+	customType := "custom.error.type"
+	r.AddAttrs(
+		slog.String("stack_trace", "custom stack"),
+		slog.String("@type", customType),
+	)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	payload, ok := entries[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatal("payload is not map[string]any")
+	}
+
+	atType, ok := payload["@type"].(string)
+	if !ok {
+		t.Fatal("@type not found in ERROR payload")
+	}
+	if atType != customType {
+		t.Errorf("@type was overwritten: got %q, want %q", atType, customType)
+	}
+}
+
+// TestGCPHandler_DebugStackOutput verifies that the auto-generated stack trace
+// uses debug.Stack() format (contains "goroutine" marker).
+func TestGCPHandler_DebugStackOutput(t *testing.T) {
+	var buf bytes.Buffer
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	handler := NewGCPHandler(&buf, opts, "scion-server", "")
+	logger := slog.New(handler)
+
+	logger.Error("auto stack trace test")
+
+	var data map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &data); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+
+	st, ok := data["stack_trace"].(string)
+	if !ok || st == "" {
+		t.Fatal("stack_trace not found or empty on ERROR entry")
+	}
+	// debug.Stack() output includes "goroutine" and the calling function
+	if !strings.Contains(st, "goroutine") {
+		t.Errorf("stack_trace does not look like debug.Stack() output: %.100s", st)
+	}
+}
+
+// TestCloudHandler_HandleDebugStackOutput verifies that the CloudHandler
+// auto-generated stack trace uses debug.Stack() format.
+func TestCloudHandler_HandleDebugStackOutput(t *testing.T) {
+	var entries []gcplog.Entry
+	h := newTestCloudHandler("scion-server", "abc1234", slog.LevelInfo, &entries)
+
+	r := slog.NewRecord(time.Now(), slog.LevelError, "auto stack test", 0)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	payload, ok := entries[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatal("payload is not map[string]any")
+	}
+
+	st, ok := payload["stack_trace"].(string)
+	if !ok || st == "" {
+		t.Fatal("stack_trace not found or empty in ERROR payload")
+	}
+	// debug.Stack() output includes "goroutine" and the calling function
+	if !strings.Contains(st, "goroutine") {
+		t.Errorf("stack_trace does not look like debug.Stack() output: %.100s", st)
+	}
+}
+
 // TestErrorReportingTypeConstant verifies the constant value is correct.
 func TestErrorReportingTypeConstant(t *testing.T) {
 	expected := "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"

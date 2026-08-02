@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
@@ -155,12 +156,36 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	// ERROR+ only: stack trace and @type for GCP Error Reporting
 	if r.Level >= slog.LevelError {
-		buf := make([]byte, 4096)
-		n := runtime.Stack(buf, false)
-		r.AddAttrs(
-			slog.String("stack_trace", string(buf[:n])),
-			slog.String("@type", errorReportingType),
-		)
+		hasST := false
+		hasType := false
+		for _, a := range h.preAttrs {
+			if a.Key == "stack_trace" {
+				hasST = true
+			}
+			if a.Key == "@type" {
+				hasType = true
+			}
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "stack_trace" {
+				hasST = true
+			}
+			if a.Key == "@type" {
+				hasType = true
+			}
+			return !hasST || !hasType
+		})
+
+		var attrs []slog.Attr
+		if !hasST {
+			attrs = append(attrs, slog.String("stack_trace", string(debug.Stack())))
+		}
+		if !hasType {
+			attrs = append(attrs, slog.String("@type", errorReportingType))
+		}
+		if len(attrs) > 0 {
+			r.AddAttrs(attrs...)
+		}
 	}
 
 	return h.handler.Handle(ctx, r)
