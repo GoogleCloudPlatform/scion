@@ -20,6 +20,7 @@ import (
 type AgentInfo struct {
 	Slug     string `json:"slug"`
 	Activity string `json:"activity,omitempty"`
+	Phase    string `json:"phase,omitempty"`
 }
 
 // ProjectOption holds a project's identifiers for display in selection UI.
@@ -747,7 +748,7 @@ func (h *CommandHandler) HandleAgents(s *discordgo.Session, i *discordgo.Interac
 
 	var lines []string
 	for _, agent := range agents {
-		emoji := activityEmoji(agent.Activity)
+		emoji := agentStatusEmoji(agent.Activity, agent.Phase)
 		label := agent.Slug
 		if agent.Activity != "" {
 			label += " -- " + agent.Activity
@@ -843,7 +844,7 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 
 	for _, agent := range agents {
 		if agent.Slug == agentSlug {
-			emoji := activityEmoji(agent.Activity)
+			emoji := agentStatusEmoji(agent.Activity, agent.Phase)
 			activity := agent.Activity
 			if activity == "" {
 				activity = "unknown"
@@ -1783,24 +1784,54 @@ func resolveChannelLink(ctx context.Context, s *discordgo.Session, store Store, 
 	return link, nil
 }
 
-// activityEmoji returns an emoji for an agent activity state.
-func activityEmoji(activity string) string {
-	switch strings.ToLower(activity) {
-	case "idle":
-		return "💤"
-	case "executing":
-		return "⚙️"
+// agentStatusEmoji returns an icon based on the agent's activity and phase.
+// Activity takes priority when present; phase is the fallback.
+func agentStatusEmoji(activity, phase string) string {
+	// Activity icons (priority)
+	switch activity {
+	case "working":
+		return "⚙️" // gear
 	case "thinking":
-		return "💭"
+		return "\U0001f4ad" // thought balloon
+	case "executing":
+		return "⚙️" // gear
+	case "waiting_for_input":
+		return "\U0001f514" // bell
 	case "blocked":
-		return "🚧"
+		return "\U0001f6a7" // construction
 	case "completed":
-		return "✅"
-	case "error":
-		return "❌"
+		return "✅" // check mark
+	case "limits_exceeded":
+		return "\U0001f6ab" // prohibited
 	case "stalled":
-		return "⏳"
-	default:
-		return "▶️"
+		return "⏳" // hourglass
+	case "offline":
+		return "\U0001f4e1" // satellite antenna
+	case "crashed":
+		return "\U0001f4a5" // collision/crash
 	}
+
+	// Phase icons (fallback)
+	switch phase {
+	case "created":
+		return "\U0001f4e6" // package
+	case "provisioning":
+		return "\U0001f504" // counterclockwise arrows
+	case "cloning":
+		return "\U0001f4e5" // inbox tray
+	case "starting":
+		return "\U0001f680" // rocket
+	case "running":
+		return "▶️" // play
+	case "suspended":
+		return "⏸️" // pause
+	case "stopping":
+		return "\U0001f6d1" // stop sign
+	case "stopped":
+		return "⏹️" // stop button
+	case "error":
+		return "❌" // cross mark
+	}
+
+	return "▶️" // play (default)
 }

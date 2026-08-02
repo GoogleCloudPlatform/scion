@@ -59,6 +59,7 @@ type hubAgentsResponse struct {
 type hubAgent struct {
 	Slug     string `json:"slug"`
 	Activity string `json:"activity"`
+	Phase    string `json:"phase"`
 }
 
 func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
@@ -204,7 +205,7 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 
 	agents := make([]AgentInfo, len(result.Agents))
 	for i, a := range result.Agents {
-		agents[i] = AgentInfo{Slug: a.Slug, Activity: a.Activity}
+		agents[i] = AgentInfo{Slug: a.Slug, Activity: a.Activity, Phase: a.Phase}
 	}
 	return agents, nil
 }
