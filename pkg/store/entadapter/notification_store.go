@@ -636,16 +636,35 @@ func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Contex
 
 	if brokerID != "" {
 		// Filter to notifications whose subscriber agent has this broker.
-		// Use a correlated EXISTS subquery against the agents table to avoid
-		// an Ent edge dependency.
+		// Use a raw WHERE predicate with a correlated EXISTS subquery
+		// against the agents table. sel.C() returns the properly-qualified
+		// and quoted column reference for the outer notifications table.
 		query = query.Where(func(sel *entsql.Selector) {
-			sub := entsql.Select("1").From(entsql.Table("agents")).
-				Where(entsql.And(
-					entsql.ColumnsEQ("agents.slug", sel.C(notification.FieldSubscriberID)),
-					entsql.ColumnsEQ("agents.project_id", sel.C(notification.FieldProjectID)),
-					entsql.EQ("agents.runtime_broker_id", brokerID),
-				))
-			sel.Where(entsql.Exists(sub))
+			subIDCol := sel.C(notification.FieldSubscriberID)
+			projIDCol := sel.C(notification.FieldProjectID)
+			sel.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("EXISTS (SELECT 1 FROM ")
+				b.Ident("agents")
+				b.WriteString(" WHERE ")
+				b.Ident("agents")
+				b.WriteString(".")
+				b.Ident("slug")
+				b.WriteString(" = ")
+				b.WriteString(subIDCol)
+				b.WriteString(" AND ")
+				b.Ident("agents")
+				b.WriteString(".")
+				b.Ident("project_id")
+				b.WriteString(" = ")
+				b.WriteString(projIDCol)
+				b.WriteString(" AND ")
+				b.Ident("agents")
+				b.WriteString(".")
+				b.Ident("runtime_broker_id")
+				b.WriteString(" = ")
+				b.Arg(brokerID)
+				b.WriteString(")")
+			}))
 		})
 	}
 
