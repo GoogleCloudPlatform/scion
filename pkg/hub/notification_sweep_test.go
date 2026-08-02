@@ -116,13 +116,16 @@ func TestRetryDispatch_NoBroker_Reverts(t *testing.T) {
 	env := setupRetryTest(t)
 	ctx := context.Background()
 
-	// Remove subscriber's broker
-	env.subscriber.RuntimeBrokerID = ""
-	require.NoError(t, env.store.UpdateAgent(ctx, env.subscriber))
-
+	// Fetch the notification while subscriber still has a broker (simulates
+	// the race where the sweep query ran before the broker disconnected).
 	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
 	require.NoError(t, err)
 	require.Len(t, notifs, 1)
+
+	// Now remove subscriber's broker (simulates broker disconnect between
+	// query time and dispatch time).
+	env.subscriber.RuntimeBrokerID = ""
+	require.NoError(t, env.store.UpdateAgent(ctx, env.subscriber))
 
 	// Retry — should claim, then revert because no broker
 	env.nd.RetryDispatch(ctx, &notifs[0])

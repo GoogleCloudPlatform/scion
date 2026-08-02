@@ -56,6 +56,9 @@ func (s *Server) notificationDispatchSweepHandler() func(ctx context.Context) {
 		// handles the latency-sensitive path. If sequential processing becomes
 		// a bottleneck under sustained load, consider bounded concurrency.
 		for i := range notifs {
+			if ctx.Err() != nil {
+				break
+			}
 			s.notificationDispatcher.RetryDispatch(ctx, &notifs[i])
 		}
 	}
@@ -86,6 +89,9 @@ func (s *Server) drainUndispatchedNotifications(ctx context.Context, brokerID st
 		"brokerID", brokerID, "count", len(notifs))
 
 	for i := range notifs {
+		if ctx.Err() != nil {
+			break
+		}
 		s.notificationDispatcher.RetryDispatch(ctx, &notifs[i])
 	}
 }
@@ -113,8 +119,20 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 	// 2. Look up subscription context.
 	sub, err := nd.store.GetNotificationSubscription(ctx, notif.SubscriptionID)
 	if err != nil {
-		nd.log.Warn("retry: subscription not found, leaving claimed",
-			"subscriptionID", notif.SubscriptionID, "notificationID", notif.ID, "error", err)
+		if errors.Is(err, store.ErrNotFound) {
+			// Subscription permanently deleted — leave claimed so the sweep
+			// does not retry this notification every 5 minutes forever.
+			nd.log.Warn("retry: subscription deleted, leaving claimed",
+				"subscriptionID", notif.SubscriptionID, "notificationID", notif.ID)
+		} else {
+			// Transient error (DB timeout, connection issue) — revert claim
+			// so a future sweep can retry once the store is reachable again.
+			nd.log.Warn("retry: subscription lookup failed, reverting claim",
+				"subscriptionID", notif.SubscriptionID, "notificationID", notif.ID, "error", err)
+			if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
+				nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
+			}
+		}
 		return
 	}
 
@@ -161,9 +179,18 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 	// 5. Resolve watched agent for the structured message.
 	watchedAgent, err := nd.store.GetAgent(ctx, notif.AgentID)
 	if err != nil {
-		nd.log.Warn("retry: watched agent not found, leaving claimed",
-			"agentID", notif.AgentID, "notificationID", notif.ID, "error", err)
-		// Agent may have been deleted — leave claimed (no point retrying).
+		if errors.Is(err, store.ErrNotFound) {
+			// Watched agent permanently deleted — leave claimed (no point retrying).
+			nd.log.Warn("retry: watched agent deleted, leaving claimed",
+				"agentID", notif.AgentID, "notificationID", notif.ID)
+		} else {
+			// Transient error — revert claim so a future sweep can retry.
+			nd.log.Warn("retry: watched agent lookup failed, reverting claim",
+				"agentID", notif.AgentID, "notificationID", notif.ID, "error", err)
+			if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
+				nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
+			}
+		}
 		return
 	}
 

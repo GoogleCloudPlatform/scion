@@ -425,6 +425,23 @@ func TestGetUndispatchedAgentNotifications_SweepMode(t *testing.T) {
 	projectID := uuid.New()
 	oldTime := time.Now().Add(-2 * time.Minute) // beyond 60s grace period
 
+	// Create project and agent records required for the sweep-mode EXISTS
+	// subquery (which filters for agents with a non-empty RuntimeBrokerID).
+	_, err := client.Project.Create().
+		SetID(projectID).
+		SetName("Sweep Project").
+		SetSlug("sweep-project").
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = client.Agent.Create().
+		SetID(uuid.New()).
+		SetSlug("agent-a").
+		SetName("Agent A").
+		SetProjectID(projectID).
+		SetRuntimeBrokerID("some-broker").
+		Save(ctx)
+	require.NoError(t, err)
+
 	// Create an old undispatched agent notification (beyond 60s grace period).
 	require.NoError(t, s.CreateNotification(ctx, &store.Notification{
 		ID:             uuid.NewString(),
