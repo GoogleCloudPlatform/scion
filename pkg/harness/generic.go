@@ -113,21 +113,7 @@ func (g *Generic) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 		EnvVars: make(map[string]string),
 	}
 
-	if auth.AnthropicAPIKey != "" {
-		result.EnvVars["ANTHROPIC_API_KEY"] = auth.AnthropicAPIKey
-	}
-	if auth.GeminiAPIKey != "" {
-		result.EnvVars["GEMINI_API_KEY"] = auth.GeminiAPIKey
-	}
-	if auth.GoogleAPIKey != "" {
-		result.EnvVars["GOOGLE_API_KEY"] = auth.GoogleAPIKey
-	}
-	if auth.OpenAIAPIKey != "" {
-		result.EnvVars["OPENAI_API_KEY"] = auth.OpenAIAPIKey
-	}
-	if auth.CodexAPIKey != "" {
-		result.EnvVars["CODEX_API_KEY"] = auth.CodexAPIKey
-	}
+	// GCP shared fields
 	if auth.GoogleCloudProject != "" {
 		result.EnvVars["GOOGLE_CLOUD_PROJECT"] = auth.GoogleCloudProject
 	}
@@ -135,35 +121,18 @@ func (g *Generic) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 		result.EnvVars["GOOGLE_CLOUD_REGION"] = auth.GoogleCloudRegion
 	}
 
+	// Forward all config-driven auth env vars
 	for k, v := range auth.EnvVars {
 		if _, exists := result.EnvVars[k]; !exists {
 			result.EnvVars[k] = v
 		}
 	}
 
+	// GCP ADC file
 	if auth.GoogleAppCredentials != "" {
-		adcContainerPath := "~/.config/gcloud/application_default_credentials.json"
 		result.Files = append(result.Files, api.FileMapping{
 			SourcePath:    auth.GoogleAppCredentials,
-			ContainerPath: adcContainerPath,
-		})
-	}
-	if auth.OAuthCreds != "" {
-		result.Files = append(result.Files, api.FileMapping{
-			SourcePath:    auth.OAuthCreds,
-			ContainerPath: "~/.scion/oauth_creds.json",
-		})
-	}
-	if auth.CodexAuthFile != "" {
-		result.Files = append(result.Files, api.FileMapping{
-			SourcePath:    auth.CodexAuthFile,
-			ContainerPath: "~/.codex/auth.json",
-		})
-	}
-	if auth.OpenCodeAuthFile != "" {
-		result.Files = append(result.Files, api.FileMapping{
-			SourcePath:    auth.OpenCodeAuthFile,
-			ContainerPath: "~/.local/share/opencode/auth.json",
+			ContainerPath: "~/.config/gcloud/application_default_credentials.json",
 		})
 	}
 

@@ -604,11 +604,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	if debugMode && !noAuth {
 		localAuth := harness.GatherAuth()
 		util.Debugf("[auth] local credential preview:")
-		util.Debugf("[auth]   hasGeminiAPIKey=%t, hasGoogleAPIKey=%t", localAuth.GeminiAPIKey != "", localAuth.GoogleAPIKey != "")
-		util.Debugf("[auth]   hasAnthropicAPIKey=%t", localAuth.AnthropicAPIKey != "")
-		util.Debugf("[auth]   hasOAuthCreds=%t (%s)", localAuth.OAuthCreds != "", localAuth.OAuthCreds)
 		util.Debugf("[auth]   hasGoogleAppCredentials=%t", localAuth.GoogleAppCredentials != "")
 		util.Debugf("[auth]   cloudProject=%q, cloudRegion=%q", localAuth.GoogleCloudProject, localAuth.GoogleCloudRegion)
+		util.Debugf("[auth]   envVarCount=%d, fileCount=%d", len(localAuth.EnvVars), len(localAuth.Files))
 	}
 
 	// We still might want to show some progress in the CLI
@@ -819,11 +817,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		// Preview auth credentials visible from the CLI host
 		localAuth := harness.GatherAuth()
 		util.Debugf("[auth] CLI-side credential preview (what the broker will see via env/secrets):")
-		util.Debugf("[auth]   hasGeminiAPIKey=%t, hasGoogleAPIKey=%t", localAuth.GeminiAPIKey != "", localAuth.GoogleAPIKey != "")
-		util.Debugf("[auth]   hasAnthropicAPIKey=%t", localAuth.AnthropicAPIKey != "")
-		util.Debugf("[auth]   hasOAuthCreds=%t (%s)", localAuth.OAuthCreds != "", localAuth.OAuthCreds)
 		util.Debugf("[auth]   hasGoogleAppCredentials=%t", localAuth.GoogleAppCredentials != "")
 		util.Debugf("[auth]   cloudProject=%q, cloudRegion=%q", localAuth.GoogleCloudProject, localAuth.GoogleCloudRegion)
+		util.Debugf("[auth]   envVarCount=%d, fileCount=%d", len(localAuth.EnvVars), len(localAuth.Files))
 	}
 
 	// Detect non-git project for workspace bootstrap.

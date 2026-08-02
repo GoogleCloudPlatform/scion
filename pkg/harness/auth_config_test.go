@@ -71,66 +71,93 @@ func TestAuthMetadataAvailable(t *testing.T) {
 	}
 }
 
-// TestRequiredAuthEnvKeysFromConfig_ParityWithCompiled verifies that the
-// config-driven preflight returns identical results to the compiled tables
-// for all built-in harnesses (claude, codex, gemini-cli).
-func TestRequiredAuthEnvKeysFromConfig_ParityWithCompiled(t *testing.T) {
+// TestRequiredAuthEnvKeysFromConfig_BuiltInHarnesses verifies that the
+// config-driven preflight returns correct results for all built-in harnesses.
+func TestRequiredAuthEnvKeysFromConfig_BuiltInHarnesses(t *testing.T) {
 	cases := []struct {
-		harness     string
-		compiledKey string
-		types       []string
+		harness  string
+		authType string
+		want     [][]string
 	}{
-		{"claude", "claude", []string{"", "api-key", "oauth-token", "auth-file", "vertex-ai", "unknown"}},
-		{"gemini-cli", "gemini-cli", []string{"", "api-key", "auth-file", "vertex-ai", "unknown"}},
-		{"codex", "codex", []string{"", "api-key", "auth-file", "unknown"}},
+		// Claude
+		{"claude", "", [][]string{{"ANTHROPIC_API_KEY"}}},
+		{"claude", "api-key", [][]string{{"ANTHROPIC_API_KEY"}}},
+		{"claude", "oauth-token", [][]string{{"CLAUDE_CODE_OAUTH_TOKEN"}}},
+		{"claude", "auth-file", nil},
+		{"claude", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}},
+		{"claude", "unknown", nil},
+
+		// Gemini-CLI
+		{"gemini-cli", "", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
+		{"gemini-cli", "api-key", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
+		{"gemini-cli", "auth-file", nil},
+		{"gemini-cli", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}},
+		{"gemini-cli", "unknown", nil},
+
+		// Codex
+		{"codex", "", [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}},
+		{"codex", "api-key", [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}},
+		{"codex", "auth-file", nil},
+		{"codex", "unknown", nil},
 	}
 	for _, tc := range cases {
-		authMeta := loadAuthMetaFromHarness(t, tc.harness)
-		for _, at := range tc.types {
-			t.Run(tc.harness+"/"+at, func(t *testing.T) {
-				wantGroups := RequiredAuthEnvKeys(tc.compiledKey, at)
-				gotGroups := RequiredAuthEnvKeysFromConfig(authMeta, at)
-				if !equalGroups(gotGroups, wantGroups) {
-					t.Errorf("config-driven=%v compiled=%v", gotGroups, wantGroups)
-				}
-			})
-		}
+		t.Run(tc.harness+"/"+tc.authType, func(t *testing.T) {
+			authMeta := loadAuthMetaFromHarness(t, tc.harness)
+			got := RequiredAuthEnvKeysFromConfig(authMeta, tc.authType)
+			if !equalGroups(got, tc.want) {
+				t.Errorf("got=%v want=%v", got, tc.want)
+			}
+		})
 	}
 }
 
-// TestRequiredAuthSecretsFromConfig_ParityWithCompiled verifies parity for
-// all built-in harnesses (claude, codex, gemini-cli).
-func TestRequiredAuthSecretsFromConfig_ParityWithCompiled(t *testing.T) {
+// TestRequiredAuthSecretsFromConfig_BuiltInHarnesses verifies correct results
+// for all built-in harnesses.
+func TestRequiredAuthSecretsFromConfig_BuiltInHarnesses(t *testing.T) {
 	cases := []struct {
-		harness     string
-		compiledKey string
-		types       []string
+		harness       string
+		authType      string
+		gcpSAAssigned bool
+		wantNil       bool
+		wantKey       string
 	}{
-		{"claude", "claude", []string{"", "api-key", "auth-file", "vertex-ai"}},
-		{"gemini-cli", "gemini-cli", []string{"", "api-key", "auth-file", "vertex-ai"}},
-		// Codex does not support vertex-ai (capabilities: vertex_ai: no), so
-		// the config-driven path correctly returns nil for vertex-ai. The
-		// compiled RequiredAuthSecrets was overly broad, returning gcloud-adc
-		// for codex+vertex-ai even though codex can't use it.
-		{"codex", "codex", []string{"", "api-key", "auth-file"}},
+		// Claude
+		{"claude", "", false, true, ""},
+		{"claude", "api-key", false, true, ""},
+		{"claude", "auth-file", false, true, ""},
+		{"claude", "vertex-ai", false, false, "gcloud-adc"},
+		{"claude", "vertex-ai", true, true, ""},
+
+		// Gemini-CLI
+		{"gemini-cli", "", false, true, ""},
+		{"gemini-cli", "api-key", false, true, ""},
+		{"gemini-cli", "auth-file", false, true, ""},
+		{"gemini-cli", "vertex-ai", false, false, "gcloud-adc"},
+		{"gemini-cli", "vertex-ai", true, true, ""},
+
+		// Codex (no vertex-ai support)
+		{"codex", "", false, true, ""},
+		{"codex", "api-key", false, true, ""},
+		{"codex", "auth-file", false, true, ""},
 	}
 	for _, tc := range cases {
-		authMeta := loadAuthMetaFromHarness(t, tc.harness)
-		for _, at := range tc.types {
-			for _, sa := range []bool{false, true} {
-				name := tc.harness + "/" + at
-				if sa {
-					name += "/sa-assigned"
-				}
-				t.Run(name, func(t *testing.T) {
-					want := RequiredAuthSecrets(tc.compiledKey, at, sa)
-					got := RequiredAuthSecretsFromConfig(authMeta, at, sa)
-					if !equalRequiredSecrets(got, want) {
-						t.Errorf("config-driven=%+v compiled=%+v", got, want)
-					}
-				})
-			}
+		name := tc.harness + "/" + tc.authType
+		if tc.gcpSAAssigned {
+			name += "/sa-assigned"
 		}
+		t.Run(name, func(t *testing.T) {
+			authMeta := loadAuthMetaFromHarness(t, tc.harness)
+			got := RequiredAuthSecretsFromConfig(authMeta, tc.authType, tc.gcpSAAssigned)
+			if tc.wantNil {
+				if got != nil {
+					t.Errorf("got %+v, want nil", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Key != tc.wantKey {
+				t.Errorf("got %+v, want key=%q", got, tc.wantKey)
+			}
+		})
 	}
 }
 
@@ -276,208 +303,164 @@ func TestRequiredAuthSecretsFromConfig_GCPSAAssignedSkips(t *testing.T) {
 	}
 }
 
-// TestDetectAuthTypeFromEnvVars_ParityWithCompiled verifies that for every
-// built-in harness the config-driven env-var detection produces the same
-// result as the compiled switch-case, across all env key combinations tested
-// in TestDetectAuthTypeFromEnvVars.
-func TestDetectAuthTypeFromEnvVars_ParityWithCompiled(t *testing.T) {
+// TestDetectAuthTypeFromEnvVarsFromConfig_BuiltInHarnesses verifies env-var
+// auto-detection for all built-in harnesses.
+func TestDetectAuthTypeFromEnvVarsFromConfig_BuiltInHarnesses(t *testing.T) {
 	cases := []struct {
-		harness     string
-		compiledKey string
-		envKeySets  [][]string
+		harness string
+		keys    []string
+		want    string
 	}{
-		{
-			"claude", "claude",
-			[][]string{
-				{},
-				{"ANTHROPIC_API_KEY"},
-				{"CLAUDE_CODE_OAUTH_TOKEN"},
-				{"GOOGLE_APPLICATION_CREDENTIALS"},
-				{"GOOGLE_CLOUD_PROJECT"},
-				{"CLAUDE_CODE_OAUTH_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS"},
-				{"CLAUDE_CODE_OAUTH_TOKEN", "GOOGLE_CLOUD_PROJECT"},
-				{"ANTHROPIC_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"},
-				{"ANTHROPIC_API_KEY", "GOOGLE_CLOUD_PROJECT"},
-				{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"},
-				{"SOME_OTHER_VAR"},
-			},
-		},
-		{
-			"gemini-cli", "gemini-cli",
-			[][]string{
-				{},
-				{"GEMINI_API_KEY"},
-				{"GOOGLE_API_KEY"},
-				{"GOOGLE_APPLICATION_CREDENTIALS"},
-				{"GOOGLE_CLOUD_PROJECT"},
-				{"GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"},
-				{"GEMINI_API_KEY", "GOOGLE_CLOUD_PROJECT"},
-				{"GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"},
-				{"GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJECT"},
-				{"CLAUDE_CODE_OAUTH_TOKEN"}, // should not affect gemini
-			},
-		},
-		{
-			"codex", "codex",
-			[][]string{
-				{},
-				{"CODEX_API_KEY"},
-				{"OPENAI_API_KEY"},
-				{"GOOGLE_APPLICATION_CREDENTIALS"},
-			},
-		},
+		// Claude
+		{"claude", nil, ""},
+		{"claude", []string{"ANTHROPIC_API_KEY"}, ""},
+		{"claude", []string{"CLAUDE_CODE_OAUTH_TOKEN"}, "oauth-token"},
+		{"claude", []string{"GOOGLE_APPLICATION_CREDENTIALS"}, "vertex-ai"},
+		{"claude", []string{"GOOGLE_CLOUD_PROJECT"}, "vertex-ai"},
+		{"claude", []string{"CLAUDE_CODE_OAUTH_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS"}, "oauth-token"},
+		{"claude", []string{"CLAUDE_CODE_OAUTH_TOKEN", "GOOGLE_CLOUD_PROJECT"}, "oauth-token"},
+		{"claude", []string{"ANTHROPIC_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"}, ""},
+		{"claude", []string{"ANTHROPIC_API_KEY", "GOOGLE_CLOUD_PROJECT"}, ""},
+		{"claude", []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}, ""},
+		{"claude", []string{"SOME_OTHER_VAR"}, ""},
+
+		// Gemini-CLI
+		{"gemini-cli", nil, ""},
+		{"gemini-cli", []string{"GEMINI_API_KEY"}, ""},
+		{"gemini-cli", []string{"GOOGLE_API_KEY"}, ""},
+		{"gemini-cli", []string{"GOOGLE_APPLICATION_CREDENTIALS"}, "vertex-ai"},
+		{"gemini-cli", []string{"GOOGLE_CLOUD_PROJECT"}, "vertex-ai"},
+		{"gemini-cli", []string{"GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"}, ""},
+		{"gemini-cli", []string{"GEMINI_API_KEY", "GOOGLE_CLOUD_PROJECT"}, ""},
+		{"gemini-cli", []string{"GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"}, ""},
+		{"gemini-cli", []string{"GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJECT"}, ""},
+		{"gemini-cli", []string{"CLAUDE_CODE_OAUTH_TOKEN"}, ""},
+
+		// Codex
+		{"codex", nil, ""},
+		{"codex", []string{"CODEX_API_KEY"}, ""},
+		{"codex", []string{"OPENAI_API_KEY"}, ""},
 	}
 	for _, tc := range cases {
-		authMeta := loadAuthMetaFromHarness(t, tc.harness)
-		for _, keys := range tc.envKeySets {
-			name := tc.harness + "/"
-			if len(keys) == 0 {
-				name += "empty"
-			} else {
-				for i, k := range keys {
-					if i > 0 {
-						name += "+"
-					}
-					name += k
+		name := tc.harness + "/"
+		if len(tc.keys) == 0 {
+			name += "empty"
+		} else {
+			for i, k := range tc.keys {
+				if i > 0 {
+					name += "+"
 				}
+				name += k
 			}
-			t.Run(name, func(t *testing.T) {
-				ks := keySet(keys)
-				want := DetectAuthTypeFromEnvVars(tc.compiledKey, ks)
-				got := DetectAuthTypeFromEnvVarsFromConfig(authMeta, ks)
-				if got != want {
-					t.Errorf("config-driven=%q compiled=%q", got, want)
-				}
-			})
 		}
+		t.Run(name, func(t *testing.T) {
+			authMeta := loadAuthMetaFromHarness(t, tc.harness)
+			got := DetectAuthTypeFromEnvVarsFromConfig(authMeta, keySet(tc.keys))
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-// TestDetectAuthTypeFromFileSecrets_ParityWithCompiled verifies that for every
-// built-in harness the config-driven file-secret detection produces the same
-// result as the compiled switch-case.
-func TestDetectAuthTypeFromFileSecrets_ParityWithCompiled(t *testing.T) {
+// TestDetectAuthTypeFromFileSecretsFromConfig_BuiltInHarnesses verifies file-secret
+// auto-detection for all built-in harnesses.
+func TestDetectAuthTypeFromFileSecretsFromConfig_BuiltInHarnesses(t *testing.T) {
 	cases := []struct {
-		harness     string
-		compiledKey string
-		fileSets    [][]string
+		harness string
+		files   []string
+		want    string
 	}{
-		{
-			"claude", "claude",
-			[][]string{
-				{},
-				{"CLAUDE_AUTH"},
-				{"gcloud-adc"},
-				{"CLAUDE_AUTH", "gcloud-adc"},
-			},
-		},
-		{
-			"gemini-cli", "gemini-cli",
-			[][]string{
-				{},
-				{"GEMINI_OAUTH_CREDS"},
-				{"gcloud-adc"},
-				{"GEMINI_OAUTH_CREDS", "gcloud-adc"},
-			},
-		},
-		{
-			"codex", "codex",
-			[][]string{
-				{},
-				{"CODEX_AUTH"},
-				{"gcloud-adc"}, // codex compiled doesn't handle gcloud-adc
-			},
-		},
+		// Claude
+		{"claude", nil, ""},
+		{"claude", []string{"CLAUDE_AUTH"}, "auth-file"},
+		{"claude", []string{"gcloud-adc"}, "vertex-ai"},
+		{"claude", []string{"CLAUDE_AUTH", "gcloud-adc"}, "auth-file"},
+
+		// Gemini-CLI
+		{"gemini-cli", nil, ""},
+		{"gemini-cli", []string{"GEMINI_OAUTH_CREDS"}, "auth-file"},
+		{"gemini-cli", []string{"gcloud-adc"}, "vertex-ai"},
+		{"gemini-cli", []string{"GEMINI_OAUTH_CREDS", "gcloud-adc"}, "auth-file"},
+
+		// Codex
+		{"codex", nil, ""},
+		{"codex", []string{"CODEX_AUTH"}, "auth-file"},
 	}
 	for _, tc := range cases {
-		authMeta := loadAuthMetaFromHarness(t, tc.harness)
-		for _, files := range tc.fileSets {
-			name := tc.harness + "/"
-			if len(files) == 0 {
-				name += "empty"
-			} else {
-				for i, f := range files {
-					if i > 0 {
-						name += "+"
-					}
-					name += f
+		name := tc.harness + "/"
+		if len(tc.files) == 0 {
+			name += "empty"
+		} else {
+			for i, f := range tc.files {
+				if i > 0 {
+					name += "+"
 				}
+				name += f
 			}
-			t.Run(name, func(t *testing.T) {
-				ks := keySet(files)
-				want := DetectAuthTypeFromFileSecrets(tc.compiledKey, ks)
-				got := DetectAuthTypeFromFileSecretsFromConfig(authMeta, ks)
-				if got != want {
-					t.Errorf("config-driven=%q compiled=%q", got, want)
-				}
-			})
 		}
+		t.Run(name, func(t *testing.T) {
+			authMeta := loadAuthMetaFromHarness(t, tc.harness)
+			got := DetectAuthTypeFromFileSecretsFromConfig(authMeta, keySet(tc.files))
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-// TestDetectAuthTypeFromGCPIdentity_ParityWithCompiled verifies that for every
-// built-in harness the config-driven GCP identity detection produces the same
-// result as the compiled switch-case.
-func TestDetectAuthTypeFromGCPIdentity_ParityWithCompiled(t *testing.T) {
+// TestDetectAuthTypeFromGCPIdentityFromConfig_BuiltInHarnesses verifies GCP
+// identity detection for all built-in harnesses.
+func TestDetectAuthTypeFromGCPIdentityFromConfig_BuiltInHarnesses(t *testing.T) {
 	cases := []struct {
-		harness     string
-		compiledKey string
+		harness  string
+		assigned bool
+		want     string
 	}{
-		{"claude", "claude"},
-		{"gemini-cli", "gemini-cli"},
-		{"codex", "codex"},
+		{"claude", true, "vertex-ai"},
+		{"claude", false, ""},
+		{"gemini-cli", true, "vertex-ai"},
+		{"gemini-cli", false, ""},
+		{"codex", true, ""},
+		{"codex", false, ""},
 	}
 	for _, tc := range cases {
-		authMeta := loadAuthMetaFromHarness(t, tc.harness)
-		for _, assigned := range []bool{false, true} {
-			name := tc.harness
-			if assigned {
-				name += "/sa-assigned"
-			}
-			t.Run(name, func(t *testing.T) {
-				want := DetectAuthTypeFromGCPIdentity(tc.compiledKey, assigned)
-				got := DetectAuthTypeFromGCPIdentityFromConfig(authMeta, assigned)
-				if got != want {
-					t.Errorf("config-driven=%q compiled=%q", got, want)
-				}
-			})
+		name := tc.harness
+		if tc.assigned {
+			name += "/sa-assigned"
 		}
+		t.Run(name, func(t *testing.T) {
+			authMeta := loadAuthMetaFromHarness(t, tc.harness)
+			got := DetectAuthTypeFromGCPIdentityFromConfig(authMeta, tc.assigned)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-// TestGatherConfigEnvVars_ParityWithCompiledLookup verifies that the
-// config-driven env var gathering from harness config metadata produces
-// the same set of keys as the compiled GatherAuthWithEnv hardcoded lookups
-// for built-in harnesses (when all env vars are set).
-func TestGatherConfigEnvVars_ParityWithCompiledLookup(t *testing.T) {
+// TestGatherConfigEnvVars_BuiltInHarnesses verifies that config-driven env
+// var gathering produces expected keys for built-in harnesses.
+func TestGatherConfigEnvVars_BuiltInHarnesses(t *testing.T) {
 	cases := []struct {
 		harness string
 		envVars map[string]string
-		// compiledFields are the hardcoded AuthConfig field values expected from
-		// the compiled path. The config-driven path stores the same values in
-		// AuthConfig.EnvVars. We check that every key present in the compiled
-		// fields is also in EnvVars with the same value.
-		compiledFields func(auth api.AuthConfig) map[string]string
+		// wantKeys are env var keys that should appear in AuthConfig.EnvVars
+		wantKeys map[string]string
 	}{
 		{
 			"claude",
 			map[string]string{
-				"ANTHROPIC_API_KEY":      "test-key",
+				"ANTHROPIC_API_KEY":       "test-key",
 				"CLAUDE_CODE_OAUTH_TOKEN": "test-token",
-				"GOOGLE_CLOUD_PROJECT":   "test-project",
-				"GOOGLE_CLOUD_REGION":    "us-central1",
-				"CLOUD_ML_REGION":        "ml-region",
-				"GOOGLE_CLOUD_LOCATION":  "location",
+				"GOOGLE_CLOUD_PROJECT":    "test-project",
+				"GOOGLE_CLOUD_REGION":     "us-central1",
 			},
-			func(auth api.AuthConfig) map[string]string {
-				m := map[string]string{}
-				if auth.AnthropicAPIKey != "" {
-					m["ANTHROPIC_API_KEY"] = auth.AnthropicAPIKey
-				}
-				if auth.ClaudeOAuthToken != "" {
-					m["CLAUDE_CODE_OAUTH_TOKEN"] = auth.ClaudeOAuthToken
-				}
-				return m
+			map[string]string{
+				"ANTHROPIC_API_KEY":       "test-key",
+				"CLAUDE_CODE_OAUTH_TOKEN": "test-token",
+				"GOOGLE_CLOUD_PROJECT":    "test-project",
+				"GOOGLE_CLOUD_REGION":     "us-central1",
 			},
 		},
 		{
@@ -486,36 +469,24 @@ func TestGatherConfigEnvVars_ParityWithCompiledLookup(t *testing.T) {
 				"CODEX_API_KEY":  "test-codex-key",
 				"OPENAI_API_KEY": "test-openai-key",
 			},
-			func(auth api.AuthConfig) map[string]string {
-				m := map[string]string{}
-				if auth.CodexAPIKey != "" {
-					m["CODEX_API_KEY"] = auth.CodexAPIKey
-				}
-				if auth.OpenAIAPIKey != "" {
-					m["OPENAI_API_KEY"] = auth.OpenAIAPIKey
-				}
-				return m
+			map[string]string{
+				"CODEX_API_KEY":  "test-codex-key",
+				"OPENAI_API_KEY": "test-openai-key",
 			},
 		},
 		{
 			"gemini-cli",
 			map[string]string{
-				"GEMINI_API_KEY":        "test-gemini-key",
-				"GOOGLE_API_KEY":        "test-google-key",
-				"GOOGLE_CLOUD_PROJECT":  "test-project",
-				"GOOGLE_CLOUD_REGION":   "us-central1",
-				"CLOUD_ML_REGION":       "ml-region",
-				"GOOGLE_CLOUD_LOCATION": "location",
+				"GEMINI_API_KEY":       "test-gemini-key",
+				"GOOGLE_API_KEY":       "test-google-key",
+				"GOOGLE_CLOUD_PROJECT": "test-project",
+				"GOOGLE_CLOUD_REGION":  "us-central1",
 			},
-			func(auth api.AuthConfig) map[string]string {
-				m := map[string]string{}
-				if auth.GeminiAPIKey != "" {
-					m["GEMINI_API_KEY"] = auth.GeminiAPIKey
-				}
-				if auth.GoogleAPIKey != "" {
-					m["GOOGLE_API_KEY"] = auth.GoogleAPIKey
-				}
-				return m
+			map[string]string{
+				"GEMINI_API_KEY":       "test-gemini-key",
+				"GOOGLE_API_KEY":       "test-google-key",
+				"GOOGLE_CLOUD_PROJECT": "test-project",
+				"GOOGLE_CLOUD_REGION":  "us-central1",
 			},
 		},
 	}
@@ -525,13 +496,11 @@ func TestGatherConfigEnvVars_ParityWithCompiledLookup(t *testing.T) {
 			authMeta := loadAuthMetaFromHarness(t, tc.harness)
 			auth := GatherAuthWithEnv(tc.envVars, false, authMeta)
 
-			// Check that config-driven EnvVars has every harness-specific env key
-			compiledFields := tc.compiledFields(auth)
-			for k, v := range compiledFields {
+			for k, v := range tc.wantKeys {
 				if got, ok := auth.EnvVars[k]; !ok {
-					t.Errorf("EnvVars missing key %q (compiled had value %q)", k, v)
+					t.Errorf("EnvVars missing key %q (want value %q)", k, v)
 				} else if got != v {
-					t.Errorf("EnvVars[%q] = %q, compiled = %q", k, got, v)
+					t.Errorf("EnvVars[%q] = %q, want %q", k, got, v)
 				}
 			}
 		})

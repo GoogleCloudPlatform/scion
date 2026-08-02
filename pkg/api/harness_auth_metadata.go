@@ -39,7 +39,7 @@ type HarnessAuthFileRequirement struct {
 	TargetSuffix string `json:"target_suffix,omitempty" yaml:"target_suffix,omitempty" koanf:"target_suffix"`
 	// Field maps this file requirement to the corresponding AuthConfig
 	// struct field name (e.g. "ClaudeAuthFile"). Used by
-	// OverlayFileSecretsFromConfig to set auth fields without hardcoded
+	// OverlayFileSecrets to set auth fields without hardcoded
 	// switch statements.
 	Field string `json:"field,omitempty" yaml:"field,omitempty" koanf:"field"`
 	// AlternativeEnvKeys lists env vars that satisfy this file requirement

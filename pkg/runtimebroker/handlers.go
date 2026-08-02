@@ -1962,8 +1962,8 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 // harness, auth type, and settings profile. It uses a multi-phase approach:
 //
 // Phase 1 (auth-aware): Resolves the harness type and auth_selected_type from
-// on-disk harness-config and settings, then calls RequiredAuthEnvKeys() to get
-// intrinsic credential requirements for the (harness, authType) pair.
+// on-disk harness-config and settings, then calls RequiredAuthEnvKeysFromConfig()
+// to get intrinsic credential requirements for the (harness, authType) pair.
 //
 // Phase 2 (settings-based): Extracts keys with empty values from settings
 // harness_configs[*].env and profiles[*].env, allowing users to declare custom
@@ -2117,10 +2117,8 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 		// defaulting to api-key. This mirrors the auto-detect priority in each
 		// harness's ResolveAuth.
 		//
-		// Phase 3: when the harness-config carries declarative auth metadata
-		// (authMeta != nil), the *FromConfig variants drive detection. Older
-		// configs without the `auth:` block still hit the compiled fallbacks.
-		useConfigDriven := harness.AuthMetadataAvailable(&config.HarnessConfigEntry{Auth: authMeta})
+		// All auth preflight uses the config-driven path. The *FromConfig
+		// functions are safe to call with nil authMeta (they return zero values).
 		if authType == "" {
 			fileSecretNames := make(map[string]struct{})
 			for _, sec := range req.ResolvedSecrets {
@@ -2128,13 +2126,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 					fileSecretNames[sec.Name] = struct{}{}
 				}
 			}
-			var detected string
-			if useConfigDriven {
-				detected = harness.DetectAuthTypeFromFileSecretsFromConfig(authMeta, fileSecretNames)
-			} else {
-				detected = harness.DetectAuthTypeFromFileSecrets(harnessType, fileSecretNames)
-			}
-			if detected != "" {
+			if detected := harness.DetectAuthTypeFromFileSecretsFromConfig(authMeta, fileSecretNames); detected != "" {
 				authType = detected
 			}
 		}
@@ -2156,35 +2148,18 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 					}
 				}
 			}
-			var detected string
-			if useConfigDriven {
-				detected = harness.DetectAuthTypeFromEnvVarsFromConfig(authMeta, resolvedEnvKeys)
-			} else {
-				detected = harness.DetectAuthTypeFromEnvVars(harnessType, resolvedEnvKeys)
-			}
-			if detected != "" {
+			if detected := harness.DetectAuthTypeFromEnvVarsFromConfig(authMeta, resolvedEnvKeys); detected != "" {
 				authType = detected
 			}
 		}
 		if authType == "" {
-			var detected string
-			if useConfigDriven {
-				detected = harness.DetectAuthTypeFromGCPIdentityFromConfig(authMeta, gcpSAAssigned)
-			} else {
-				detected = harness.DetectAuthTypeFromGCPIdentity(harnessType, gcpSAAssigned)
-			}
-			if detected != "" {
+			if detected := harness.DetectAuthTypeFromGCPIdentityFromConfig(authMeta, gcpSAAssigned); detected != "" {
 				authType = detected
 			}
 		}
 
 		// Resolve auth key groups and check satisfaction
-		var keyGroups [][]string
-		if useConfigDriven {
-			keyGroups = harness.RequiredAuthEnvKeysFromConfig(authMeta, authType)
-		} else {
-			keyGroups = harness.RequiredAuthEnvKeys(harnessType, authType)
-		}
+		keyGroups := harness.RequiredAuthEnvKeysFromConfig(authMeta, authType)
 		if len(keyGroups) > 0 {
 			// Build lookup of already-satisfied keys
 			envKeys := make(map[string]struct{})
@@ -2225,12 +2200,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 		// Phase 1b: Auth-required file secrets (e.g. ADC for vertex-ai).
 		// When a GCP service account is assigned, the metadata server provides
 		// credentials, so the ADC file is not required.
-		var authSecrets []api.RequiredSecret
-		if useConfigDriven {
-			authSecrets = harness.RequiredAuthSecretsFromConfig(authMeta, authType, gcpSAAssigned)
-		} else {
-			authSecrets = harness.RequiredAuthSecrets(harnessType, authType, gcpSAAssigned)
-		}
+		authSecrets := harness.RequiredAuthSecretsFromConfig(authMeta, authType, gcpSAAssigned)
 		if len(authSecrets) > 0 {
 			// Build lookup of file-type resolved secrets by Name and Target suffix
 			fileSecrets := make(map[string]struct{})

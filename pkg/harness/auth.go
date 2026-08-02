@@ -59,13 +59,7 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 	}
 
 	auth := api.AuthConfig{
-		// Env-var sourced fields
-		GeminiAPIKey:     lookup("GEMINI_API_KEY"),
-		GoogleAPIKey:     lookup("GOOGLE_API_KEY"),
-		AnthropicAPIKey:  lookup("ANTHROPIC_API_KEY"),
-		ClaudeOAuthToken: lookup("CLAUDE_CODE_OAUTH_TOKEN"),
-		OpenAIAPIKey:     lookup("OPENAI_API_KEY"),
-		CodexAPIKey:      lookup("CODEX_API_KEY"),
+		// GCP shared fields with multi-source fallback resolution
 		GoogleCloudProject: util.FirstNonEmpty(
 			lookup("GOOGLE_CLOUD_PROJECT"),
 			lookup("GCP_PROJECT"),
@@ -80,7 +74,9 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 		GCPMetadataMode:      lookup("SCION_METADATA_MODE"),
 	}
 
-	// File-sourced fields: check well-known paths (skip in broker mode)
+	// File-sourced fields: check well-known ADC path (skip in broker mode).
+	// Per-harness file discovery (OAuth, Codex, OpenCode, Claude credential
+	// files) is now handled via gatherConfigFiles below.
 	if localSources {
 		home, _ := os.UserHomeDir()
 
@@ -91,44 +87,54 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 			}
 		}
 
-		if home != "" {
-			oauthPath := filepath.Join(home, ".gemini", "oauth_creds.json")
-			if _, err := os.Stat(oauthPath); err == nil {
-				auth.OAuthCreds = oauthPath
-			}
-
-			codexPath := filepath.Join(home, ".codex", "auth.json")
-			if _, err := os.Stat(codexPath); err == nil {
-				auth.CodexAuthFile = codexPath
-			}
-
-			opencodePath := filepath.Join(home, ".local", "share", "opencode", "auth.json")
-			if _, err := os.Stat(opencodePath); err == nil {
-				auth.OpenCodeAuthFile = opencodePath
-			}
-
-			// Claude Code's rotating credentials store. Unlike Gemini/Codex/
-			// OpenCode we do NOT parse this file — we treat it as an opaque
-			// file to mount into the container so Claude Code can read and
-			// refresh it natively. The access token inside rotates; scraping
-			// it at gather time would hand the container a stale snapshot.
-			claudeCredsPath := filepath.Join(home, ".claude", ".credentials.json")
-			if _, err := os.Stat(claudeCredsPath); err == nil {
-				auth.ClaudeAuthFile = claudeCredsPath
-			}
+		// Gather harness-declared file credentials from well-known paths
+		if authMeta != nil && home != "" {
+			auth.Files = gatherConfigFiles(authMeta, home)
 		}
 	}
 
 	// Populate EnvVars from config-driven auth metadata. Every env key
 	// declared in any auth type's required_env groups is looked up; keys
-	// with non-empty values are included. This lets harness configs like
-	// copilot declare their own env requirements and have them flow through
-	// the auth pipeline without per-harness Go code.
+	// with non-empty values are included.
 	if authMeta != nil {
 		auth.EnvVars = gatherConfigEnvVars(lookup, authMeta)
 	}
 
 	return auth
+}
+
+// gatherConfigFiles discovers harness-declared file-based credentials from
+// well-known home directory paths. It reads the TargetSuffix from each
+// auth type's required_files entries, resolves the suffix against the user's
+// home directory, and records any files that exist. Returns nil when no
+// files are found.
+func gatherConfigFiles(authMeta *config.HarnessAuthMetadata, home string) map[string]string {
+	if authMeta == nil || len(authMeta.Types) == 0 || home == "" {
+		return nil
+	}
+	var result map[string]string
+	seen := make(map[string]struct{})
+	for _, authType := range authMeta.Types {
+		for _, rf := range authType.RequiredFiles {
+			if rf.Field == "" || rf.TargetSuffix == "" {
+				continue
+			}
+			if _, ok := seen[rf.Field]; ok {
+				continue
+			}
+			seen[rf.Field] = struct{}{}
+			// TargetSuffix starts with "/" (e.g. "/.claude/.credentials.json").
+			// Resolve against home to get the absolute path.
+			filePath := filepath.Join(home, rf.TargetSuffix)
+			if _, err := os.Stat(filePath); err == nil {
+				if result == nil {
+					result = make(map[string]string)
+				}
+				result[rf.Field] = filePath
+			}
+		}
+	}
+	return result
 }
 
 // gatherConfigEnvVars collects env var values for all keys declared in any
@@ -159,46 +165,13 @@ func gatherConfigEnvVars(lookup func(string) string, authMeta *config.HarnessAut
 }
 
 // OverlayFileSecrets bridges file-type ResolvedSecrets from the hub into
-// AuthConfig fields so that ResolveAuth can determine the correct auth method.
-// It maps well-known secret names/targets to the corresponding AuthConfig fields
-// using the target path as a sentinel value (the actual file content is projected
-// into the container by writeFileSecrets at launch time).
-func OverlayFileSecrets(auth *api.AuthConfig, secrets []api.ResolvedSecret) {
-	for _, s := range secrets {
-		if s.Type != "file" {
-			continue
-		}
-		target := s.Target
-		name := s.Name
-
-		switch {
-		case name == "gcloud-adc" ||
-			strings.HasSuffix(target, "/application_default_credentials.json"):
-			auth.GoogleAppCredentials = target
-		case name == "GEMINI_OAUTH_CREDS" ||
-			strings.HasSuffix(target, "/oauth_creds.json"):
-			auth.OAuthCreds = target
-		case name == "CODEX_AUTH" ||
-			strings.HasSuffix(target, "/.codex/auth.json"):
-			auth.CodexAuthFile = target
-		case name == "OPENCODE_AUTH" ||
-			strings.HasSuffix(target, "/opencode/auth.json"):
-			auth.OpenCodeAuthFile = target
-		case name == "CLAUDE_AUTH" ||
-			strings.HasSuffix(target, "/.claude/.credentials.json"):
-			auth.ClaudeAuthFile = target
-		}
-	}
-}
-
-// OverlayFileSecretsFromConfig is the config-driven counterpart of
-// OverlayFileSecrets. It reads field mappings from the harness config's
-// auth.types entries and sets the corresponding AuthConfig fields. When a
-// secret's Name matches a declared field mapping, the config-driven path is
-// used. For secrets that don't match any declared Name, it falls back to
-// target-path-suffix matching (preserving backward compatibility with secrets
-// created before field mappings were added to config.yaml).
-func OverlayFileSecretsFromConfig(auth *api.AuthConfig, secrets []api.ResolvedSecret, authMeta *config.HarnessAuthMetadata) {
+// AuthConfig using config-driven field mappings. It reads field mappings
+// from the harness config's auth.types entries and sets the corresponding
+// AuthConfig fields. When a secret's Name matches a declared field mapping,
+// the config-driven path is used. For secrets that don't match any declared
+// Name, it falls back to target-path-suffix matching (preserving backward
+// compatibility with secrets created before field mappings were added).
+func OverlayFileSecrets(auth *api.AuthConfig, secrets []api.ResolvedSecret, authMeta *config.HarnessAuthMetadata) {
 	fieldMap := buildFieldMap(authMeta)
 
 	for _, s := range secrets {
@@ -232,36 +205,34 @@ func buildFieldMap(authMeta *config.HarnessAuthMetadata) map[string]string {
 }
 
 // setAuthConfigField sets the named field on AuthConfig to the given value.
-// Field names must match AuthConfig struct fields exactly.
+// "GoogleAppCredentials" sets the first-class GCP shared field; all other
+// field names go into the Files map.
 func setAuthConfigField(auth *api.AuthConfig, field, value string) {
 	switch field {
 	case "GoogleAppCredentials":
 		auth.GoogleAppCredentials = value
-	case "OAuthCreds":
-		auth.OAuthCreds = value
-	case "CodexAuthFile":
-		auth.CodexAuthFile = value
-	case "OpenCodeAuthFile":
-		auth.OpenCodeAuthFile = value
-	case "ClaudeAuthFile":
-		auth.ClaudeAuthFile = value
+	default:
+		if auth.Files == nil {
+			auth.Files = make(map[string]string)
+		}
+		auth.Files[field] = value
 	}
 }
 
 // setAuthConfigFieldByTargetSuffix matches a file secret's target path to an
-// AuthConfig field using the same suffix rules as the original OverlayFileSecrets.
+// AuthConfig field using path suffix heuristics for backward compatibility.
 func setAuthConfigFieldByTargetSuffix(auth *api.AuthConfig, target string) {
 	switch {
 	case strings.HasSuffix(target, "/application_default_credentials.json"):
 		auth.GoogleAppCredentials = target
 	case strings.HasSuffix(target, "/oauth_creds.json"):
-		auth.OAuthCreds = target
+		setAuthConfigField(auth, "OAuthCreds", target)
 	case strings.HasSuffix(target, "/.codex/auth.json"):
-		auth.CodexAuthFile = target
+		setAuthConfigField(auth, "CodexAuthFile", target)
 	case strings.HasSuffix(target, "/opencode/auth.json"):
-		auth.OpenCodeAuthFile = target
+		setAuthConfigField(auth, "OpenCodeAuthFile", target)
 	case strings.HasSuffix(target, "/.claude/.credentials.json"):
-		auth.ClaudeAuthFile = target
+		setAuthConfigField(auth, "ClaudeAuthFile", target)
 	}
 }
 
@@ -326,202 +297,30 @@ func ValidateAuth(resolved *api.ResolvedAuth) error {
 	return nil
 }
 
-// RequiredAuthSecrets maps a (harnessName, authSelectedType) pair to
-// file-type secrets required by that combination. This is the file-secret
-// counterpart to RequiredAuthEnvKeys (which covers env var requirements).
-// For vertex-ai auth, the ADC credential file is required unless a GCP
-// service account is assigned (gcpSAAssigned), in which case the metadata
-// server provides credentials and no ADC file is needed.
-// Returns nil for auth methods that have no file-secret requirements.
-func RequiredAuthSecrets(harnessName, authSelectedType string, gcpSAAssigned bool) []api.RequiredSecret {
-	effectiveType := authSelectedType
-	if effectiveType == "" {
-		effectiveType = "api-key"
-	}
-
-	switch harnessName {
-	case "claude", "gemini", "gemini-cli", "opencode", "codex":
-		if effectiveType == "vertex-ai" && !gcpSAAssigned {
-			return []api.RequiredSecret{
-				{
-					Key:                "gcloud-adc",
-					Type:               "file",
-					Description:        "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication",
-					AlternativeEnvKeys: []string{"GOOGLE_APPLICATION_CREDENTIALS"},
-				},
-			}
-		}
-	}
-
-	return nil
-}
-
-// DetectAuthTypeFromFileSecrets checks whether resolved file secrets can
-// satisfy an alternative auth method for the given harness. This mirrors
-// the auto-detect priority in each harness's ResolveAuth: when no auth
-// type is explicitly selected, harnesses try API key first but fall back
-// to file-based auth (OAuth, ADC, etc.) when credentials are available.
-//
-// Returns the effective auth type (e.g., "auth-file", "vertex-ai") if
-// file secrets satisfy it, or "" if no file-based auth is possible.
-// The caller should use the returned type to override the default "api-key"
-// assumption during env-gather, preventing false requirements.
-func DetectAuthTypeFromFileSecrets(harnessName string, fileSecretNames map[string]struct{}) string {
-	switch harnessName {
-	case "gemini", "gemini-cli":
-		// Auto-detect priority: api-key → OAuth (auth-file) → ADC (vertex-ai)
-		if _, ok := fileSecretNames["GEMINI_OAUTH_CREDS"]; ok {
-			return "auth-file"
-		}
-		if _, ok := fileSecretNames["gcloud-adc"]; ok {
-			return "vertex-ai"
-		}
-	case "claude":
-		// Auto-detect priority: api-key → oauth-token (env) → auth-file → ADC (vertex-ai)
-		if _, ok := fileSecretNames["CLAUDE_AUTH"]; ok {
-			return "auth-file"
-		}
-		if _, ok := fileSecretNames["gcloud-adc"]; ok {
-			return "vertex-ai"
-		}
-	case "codex":
-		if _, ok := fileSecretNames["CODEX_AUTH"]; ok {
-			return "auth-file"
-		}
-	case "opencode":
-		if _, ok := fileSecretNames["OPENCODE_AUTH"]; ok {
-			return "auth-file"
-		}
-	}
-	return ""
-}
-
-// DetectAuthTypeFromEnvVars checks whether resolved env vars can satisfy
-// an alternative auth method for the given harness. For example,
-// GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_CLOUD_PROJECT signal that
-// GCP credentials are available, so vertex-ai auth can be used.
-func DetectAuthTypeFromEnvVars(harnessName string, envKeys map[string]struct{}) string {
-	_, hasGAC := envKeys["GOOGLE_APPLICATION_CREDENTIALS"]
-	_, hasGCP := envKeys["GOOGLE_CLOUD_PROJECT"]
-
-	switch harnessName {
-	case "claude":
-		if _, ok := envKeys["ANTHROPIC_API_KEY"]; ok {
-			return ""
-		}
-		if _, ok := envKeys["CLAUDE_CODE_OAUTH_TOKEN"]; ok {
-			return "oauth-token"
-		}
-		if hasGAC || hasGCP {
-			return "vertex-ai"
-		}
-	case "gemini", "gemini-cli":
-		_, hasGeminiKey := envKeys["GEMINI_API_KEY"]
-		_, hasGoogleKey := envKeys["GOOGLE_API_KEY"]
-		if hasGeminiKey || hasGoogleKey {
-			return ""
-		}
-		if hasGAC || hasGCP {
-			return "vertex-ai"
-		}
-	}
-	return ""
-}
-
-// DetectAuthTypeFromGCPIdentity returns "vertex-ai" when a GCP service
-// account is assigned to the agent. Harnesses that support vertex-ai auth
-// can use the metadata server for credentials instead of an ADC file.
-func DetectAuthTypeFromGCPIdentity(harnessName string, gcpSAAssigned bool) string {
-	if !gcpSAAssigned {
-		return ""
-	}
-	switch harnessName {
-	case "claude", "gemini", "gemini-cli":
-		return "vertex-ai"
-	}
-	return ""
-}
-
-// RequiredAuthEnvKeys maps a (harnessName, authSelectedType) pair to the
-// env var key groups required by that combination. Each inner slice is a
-// set of alternatives — any one key satisfying the group is sufficient
-// (e.g., GEMINI_API_KEY or GOOGLE_API_KEY for gemini api-key auth).
-// Returns nil for unknown/unset combinations or harnesses with no
-// intrinsic auth requirements (e.g., generic).
-func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
-	// When authType is empty (unset), default to api-key — it's the
-	// first-choice method in every harness's ResolveAuth(). This ensures
-	// env-gather detects missing keys and returns 202 so the CLI can
-	// collect them from the user's environment.
-	effectiveType := authSelectedType
-	if effectiveType == "" {
-		effectiveType = "api-key"
-	}
-
-	switch harnessName {
-	case "claude":
-		switch effectiveType {
-		case "api-key":
-			return [][]string{{"ANTHROPIC_API_KEY"}}
-		case "oauth-token":
-			return [][]string{{"CLAUDE_CODE_OAUTH_TOKEN"}}
-		case "auth-file":
-			return nil
-		case "vertex-ai":
-			return [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}
-		}
-	case "gemini", "gemini-cli":
-		switch effectiveType {
-		case "api-key":
-			return [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}
-		case "vertex-ai":
-			return [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}
-		}
-	case "opencode":
-		switch effectiveType {
-		case "api-key":
-			return [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}
-		}
-	case "codex":
-		switch effectiveType {
-		case "api-key":
-			return [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}
-		}
-	}
-
-	return nil
-}
-
 // Config-driven auth preflight.
 //
-// The functions below replace the compiled per-harness tables above with
-// logic that reads the declarative `auth:` block from a harness-config.yaml
-// (parsed into config.HarnessAuthMetadata in Phase 1). When a harness-config
-// supplies metadata, the runtime broker should prefer the *FromConfig
-// variants; the compiled fallbacks remain so legacy on-disk configs without
-// an `auth:` section keep working during migration.
+// The functions below read the declarative `auth:` block from a
+// harness-config.yaml (parsed into config.HarnessAuthMetadata) to drive
+// all auth preflight decisions: required env keys, required file secrets,
+// and auth-type auto-detection.
 //
 // Detection precedence
 // --------------------
-// When several env vars or file secrets are present at once, the original
-// compiled detectors had a fixed priority (e.g. Claude prefers oauth-token
-// over vertex-ai). To express that priority deterministically from a YAML
-// map (which has no inherent order), the *FromConfig functions use this
-// rule:
+// When several env vars or file secrets are present at once, the
+// functions use a deterministic precedence rule:
 //
 //   1. Build the candidate set: every auth type that any present key maps
 //      to via authMeta.Autodetect.{Env|Files}.
 //   2. If the harness's default_type appears in the candidate set, return
 //      "" — the caller is already on the default and no override is needed.
 //   3. Otherwise return the alphabetically-smallest candidate. For the
-//      built-in harness set this matches the legacy behavior: "auth-file"
-//      < "oauth-token" < "vertex-ai", which is also the operational
-//      preference order. Future harnesses with non-monotonic preferences
-//      should pick auth type names that sort in their preferred order.
+//      built-in harness set this matches the operational preference order:
+//      "auth-file" < "oauth-token" < "vertex-ai". Future harnesses with
+//      non-monotonic preferences should pick auth type names that sort in
+//      their preferred order.
 
 // AuthMetadataAvailable reports whether a HarnessConfigEntry carries the
-// declarative auth block needed by the *FromConfig functions. Callers use
-// this to decide between config-driven and legacy compiled preflight.
+// declarative auth block needed by the auth preflight functions.
 func AuthMetadataAvailable(entry *config.HarnessConfigEntry) bool {
 	if entry == nil || entry.Auth == nil {
 		return false
@@ -532,9 +331,8 @@ func AuthMetadataAvailable(entry *config.HarnessConfigEntry) bool {
 	return true
 }
 
-// RequiredAuthEnvKeysFromConfig is the config-driven counterpart of
-// RequiredAuthEnvKeys. It returns the env-var alternative groups for the
-// (auth-type) pair declared in authMeta.Types.
+// RequiredAuthEnvKeysFromConfig returns the env-var alternative groups for
+// the given auth type as declared in authMeta.Types.
 func RequiredAuthEnvKeysFromConfig(authMeta *config.HarnessAuthMetadata, authSelectedType string) [][]string {
 	if authMeta == nil {
 		return nil
@@ -567,8 +365,7 @@ func RequiredAuthEnvKeysFromConfig(authMeta *config.HarnessAuthMetadata, authSel
 	return groups
 }
 
-// RequiredAuthSecretsFromConfig is the config-driven counterpart of
-// RequiredAuthSecrets. It returns only file requirements explicitly marked
+// RequiredAuthSecretsFromConfig returns only file requirements explicitly marked
 // `required: true` — documentary files (e.g. CLAUDE_AUTH for Claude's
 // auth-file type, which the user mounts from a locally-resolved file) are
 // not preflight-enforced. File requirements with
@@ -617,9 +414,8 @@ func RequiredAuthSecretsFromConfig(authMeta *config.HarnessAuthMetadata, authSel
 	return out
 }
 
-// DetectAuthTypeFromFileSecretsFromConfig is the config-driven counterpart
-// of DetectAuthTypeFromFileSecrets. It uses authMeta.Autodetect.Files to map
-// each present file-secret name to a candidate auth type.
+// DetectAuthTypeFromFileSecretsFromConfig uses authMeta.Autodetect.Files to
+// map each present file-secret name to a candidate auth type.
 func DetectAuthTypeFromFileSecretsFromConfig(authMeta *config.HarnessAuthMetadata, fileSecretNames map[string]struct{}) string {
 	if authMeta == nil {
 		return ""
@@ -627,8 +423,8 @@ func DetectAuthTypeFromFileSecretsFromConfig(authMeta *config.HarnessAuthMetadat
 	return pickAutodetectCandidate(authMeta.DefaultType, authMeta.Autodetect.Files, fileSecretNames)
 }
 
-// DetectAuthTypeFromEnvVarsFromConfig is the config-driven counterpart of
-// DetectAuthTypeFromEnvVars.
+// DetectAuthTypeFromEnvVarsFromConfig detects auth type from env vars
+// using authMeta.Autodetect.Env mappings.
 func DetectAuthTypeFromEnvVarsFromConfig(authMeta *config.HarnessAuthMetadata, envKeys map[string]struct{}) string {
 	if authMeta == nil {
 		return ""
@@ -636,8 +432,7 @@ func DetectAuthTypeFromEnvVarsFromConfig(authMeta *config.HarnessAuthMetadata, e
 	return pickAutodetectCandidate(authMeta.DefaultType, authMeta.Autodetect.Env, envKeys)
 }
 
-// DetectAuthTypeFromGCPIdentityFromConfig is the config-driven counterpart
-// of DetectAuthTypeFromGCPIdentity. It returns "vertex-ai" only when the
+// DetectAuthTypeFromGCPIdentityFromConfig returns "vertex-ai" only when the
 // harness declares a vertex-ai auth type (so the metadata server actually
 // has a use) and gcpSAAssigned is true.
 func DetectAuthTypeFromGCPIdentityFromConfig(authMeta *config.HarnessAuthMetadata, gcpSAAssigned bool) string {
