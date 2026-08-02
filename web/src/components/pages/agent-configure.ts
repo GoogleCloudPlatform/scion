@@ -51,6 +51,12 @@ interface ScionConfigPayload {
   thinking_level?: number | null;
   env?: Record<string, string>;
   telemetry?: { enabled?: boolean };
+  auto_expose_ports?: {
+    enabled?: boolean;
+    mode?: string;
+    ports?: string;
+    interval?: string;
+  };
 }
 
 interface AppliedConfig {
@@ -92,6 +98,10 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private authMethod = '';
   @state() private harnessConfig = '';
   @state() private telemetryEnabled = false;
+  @state() private autoExposePortsEnabled = false;
+  @state() private autoExposePortsMode = 'allowlist';
+  @state() private autoExposePortsList = '';
+  @state() private autoExposePortsInterval = '3s';
 
   // Form fields — Task & Prompts
   @state() private task = '';
@@ -385,6 +395,7 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   private globalTelemetryDefault = false;
+  private globalAutoExposePortsDefault = false;
 
   private async loadAgent(): Promise<void> {
     this.loading = true;
@@ -397,8 +408,12 @@ export class ScionPageAgentConfigure extends LitElement {
       ]);
 
       if (settingsRes.ok) {
-        const data = (await settingsRes.json()) as { telemetryEnabled?: boolean };
+        const data = (await settingsRes.json()) as {
+          telemetryEnabled?: boolean;
+          autoExposePortsEnabled?: boolean;
+        };
         this.globalTelemetryDefault = data.telemetryEnabled ?? false;
+        this.globalAutoExposePortsDefault = data.autoExposePortsEnabled ?? false;
       }
 
       if (!agentRes.ok) {
@@ -448,6 +463,10 @@ export class ScionPageAgentConfigure extends LitElement {
     this.authMethod = ac?.harnessAuth || ic?.auth_selectedType || '';
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
     this.telemetryEnabled = ic?.telemetry?.enabled ?? this.globalTelemetryDefault;
+    this.autoExposePortsEnabled = ic?.auto_expose_ports?.enabled ?? this.globalAutoExposePortsDefault;
+    this.autoExposePortsMode = ic?.auto_expose_ports?.mode || 'allowlist';
+    this.autoExposePortsList = ic?.auto_expose_ports?.ports || '';
+    this.autoExposePortsInterval = ic?.auto_expose_ports?.interval || '3s';
 
     // Task & Prompts
     this.task = ac?.task || ic?.task || '';
@@ -532,6 +551,17 @@ export class ScionPageAgentConfigure extends LitElement {
     if (!this.isUnsupported(caps?.telemetry.enabled)) {
       config.telemetry = { enabled: this.telemetryEnabled };
     }
+
+    // Auto-expose ports
+    const aep: Record<string, unknown> = { enabled: this.autoExposePortsEnabled };
+    if (this.autoExposePortsEnabled) {
+      aep.mode = this.autoExposePortsMode;
+      if (this.autoExposePortsList) {
+        aep.ports = this.autoExposePortsList;
+      }
+      aep.interval = this.autoExposePortsInterval || '3s';
+    }
+    config.auto_expose_ports = aep;
 
     return config;
   }
@@ -996,6 +1026,68 @@ export class ScionPageAgentConfigure extends LitElement {
           <span class="help-badge">?</span>
         </sl-tooltip>
       </div>
+
+      <div class="notify-field">
+        <sl-checkbox
+          ?checked=${this.autoExposePortsEnabled}
+          @sl-change=${(e: Event) => { this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked; }}
+        >
+          Enable Auto-Expose Ports
+        </sl-checkbox>
+        <sl-tooltip
+          content="Automatically detect and expose TCP listening ports from this agent's container. The default reflects the global auto-expose setting."
+          hoist
+        >
+          <span class="help-badge">?</span>
+        </sl-tooltip>
+      </div>
+
+      ${this.autoExposePortsEnabled
+        ? html`
+            <div class="form-field">
+              <label for="auto-expose-mode">Port Filter Mode</label>
+              <sl-select
+                id="auto-expose-mode"
+                .value=${this.autoExposePortsMode}
+                @sl-change=${(e: Event) => {
+                  this.autoExposePortsMode = (e.target as HTMLElement & { value: string }).value;
+                }}
+              >
+                <sl-option value="allowlist">Allowlist</sl-option>
+                <sl-option value="denylist">Denylist</sl-option>
+              </sl-select>
+              <div class="hint">
+                ${this.autoExposePortsMode === 'allowlist'
+                  ? 'Only expose ports in the filter list below.'
+                  : 'Expose all ports except those in the filter list below.'}
+              </div>
+            </div>
+            <div class="form-field">
+              <label for="auto-expose-ports-list">Port Filter List</label>
+              <sl-input
+                id="auto-expose-ports-list"
+                placeholder="e.g. 3000,5173,8080"
+                .value=${this.autoExposePortsList}
+                @sl-input=${(e: Event) => {
+                  this.autoExposePortsList = (e.target as HTMLElement & { value: string }).value;
+                }}
+              ></sl-input>
+              <div class="hint">Comma-separated list of ports to ${this.autoExposePortsMode === 'allowlist' ? 'allow' : 'deny'}.</div>
+            </div>
+            <div class="form-field">
+              <label for="auto-expose-interval">Scan Interval</label>
+              <sl-input
+                id="auto-expose-interval"
+                placeholder="3s"
+                .value=${this.autoExposePortsInterval}
+                @sl-input=${(e: Event) => {
+                  this.autoExposePortsInterval = (e.target as HTMLElement & { value: string }).value;
+                }}
+              ></sl-input>
+              <div class="hint">How often to scan for new listening ports (e.g. 3s, 5s). Minimum 1s.</div>
+            </div>
+          `
+        : nothing}
     `;
   }
 
