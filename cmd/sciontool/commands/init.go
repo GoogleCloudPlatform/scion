@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -564,6 +565,12 @@ func runInit(args []string) int {
 
 			go scionportforward.NewManager(hubClient).Run(ctx)
 			log.Info("Started port-forward tunnel manager")
+
+			// Auto-expose: detect and register listening ports
+			if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled {
+				go autoexpose.NewReconciler(hubClient, autoExposeCfg).Run(ctx)
+				log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
+			}
 
 			// Read the agent token from the canonical token file (written by
 			// the host-side agent manager before the container started).
