@@ -58,6 +58,6 @@ func ExecAsUserCmd(user, cmd string) []string {
 	// error messages), arg1 becomes $1, etc. We label $0 as
 	// "exec-as-user" so any diagnostic that prints it is
 	// self-describing.
-	const script = `if [ "$(whoami)" = "$1" ]; then exec sh -c "$2"; else exec su - "$1" -c "$2"; fi`
+	const script = `if [ "$(/usr/bin/whoami)" = "$1" ]; then exec sh -c "$2"; else exec su - "$1" -c "$2"; fi`
 	return []string{"sh", "-c", script, "exec-as-user", user, cmd}
 }

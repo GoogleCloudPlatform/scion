@@ -73,6 +73,16 @@ RUN if [ -f /usr/bin/gh ]; then \
       chmod +x /usr/bin/gh; \
     fi
 
+# Install whoami shim that delegates to scion whoami.
+# The shim is placed in /usr/local/bin so it shadows /usr/bin/whoami via PATH
+# ordering. The system whoami remains accessible at its original path.
+# Guard: only delegate when Scion agent env vars are set. Otherwise fall back
+# to the real /usr/bin/whoami to preserve Unix-username detection (e.g.
+# ExecAsUserCmd) and avoid an infinite fork loop when scion whoami itself
+# calls exec.LookPath("whoami").
+RUN printf '#!/bin/sh\nif [ -n "${SCION_AGENT_SLUG:-}" ] || [ -n "${SCION_AGENT_NAME:-}" ]; then\n    exec scion whoami "$@"\nfi\nexec /usr/bin/whoami "$@"\n' > /usr/local/bin/whoami && \
+    chmod +x /usr/local/bin/whoami
+
 # Create dev-override bin directory at highest PATH priority.
 # When SCION_DEV_BINARIES is set, this directory is bind-mounted with
 # locally-built binaries, allowing rapid iteration without image rebuilds.
