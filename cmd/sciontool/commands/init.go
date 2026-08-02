@@ -283,18 +283,15 @@ func runInit(args []string) int {
 			// LoadEnvOverlay use the existing file instead of aborting.
 			// This makes restarts resilient to transient provisioner failures
 			// while still requiring success on first creation.
+			var fallbackExists bool
 			if harnessReq.EnvOverlayPath != "" {
 				existingOverlay := hooks.ResolveContainerPath(harnessReq.EnvOverlayPath, agentHome)
 				if _, statErr := os.Stat(existingOverlay); statErr == nil {
 					log.Info("WARNING: Pre-start provisioning failed but previous env overlay exists at %s, using fallback", existingOverlay)
-					// Fall through — LoadEnvOverlay below will read the existing file
-				} else {
-					log.Error("Pre-start provisioning is required; aborting startup")
-					_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-					_ = statusHandler.SetMessage(fmt.Sprintf("pre-start hook failed: %v", err))
-					return 1
+					fallbackExists = true
 				}
-			} else {
+			}
+			if !fallbackExists {
 				log.Error("Pre-start provisioning is required; aborting startup")
 				_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
 				_ = statusHandler.SetMessage(fmt.Sprintf("pre-start hook failed: %v", err))
