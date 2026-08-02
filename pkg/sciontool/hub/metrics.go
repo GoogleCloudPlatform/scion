@@ -145,7 +145,7 @@ func SummaryToMetricsPayload(s telemetry.SessionSummary) MetricsPayload {
 	}
 
 	return MetricsPayload{
-		Type:      "session_metrics",
+		Type:      "agent_metrics",
 		AgentID:   s.AgentID,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Session: SessionMetrics{
