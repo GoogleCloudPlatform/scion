@@ -28,6 +28,8 @@ import { customElement, state } from 'lit/decorators.js';
 import type { Project } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from './confirm-dialog.js';
 
 interface AccessToken {
   id: string;
@@ -343,7 +345,7 @@ export class ScionTokenList extends LitElement {
   // ── Revoke / Delete ────────────────────────────────────────────────
 
   private async handleRevoke(token: AccessToken): Promise<void> {
-    if (!confirm(`Revoke token "${token.name}"? It will no longer be usable for authentication.`)) {
+    if (!(await showConfirm(`Revoke token "${token.name}"? It will no longer be usable for authentication.`))) {
       return;
     }
 
@@ -360,14 +362,14 @@ export class ScionTokenList extends LitElement {
       await this.loadData();
     } catch (err) {
       console.error('Failed to revoke token:', err);
-      alert(err instanceof Error ? err.message : 'Failed to revoke');
+      showToast(err instanceof Error ? err.message : 'Failed to revoke');
     } finally {
       this.actionLoadingId = null;
     }
   }
 
   private async handleDelete(token: AccessToken): Promise<void> {
-    if (!confirm(`Permanently delete token "${token.name}"? This cannot be undone.`)) {
+    if (!(await showConfirm(`Permanently delete token "${token.name}"? This cannot be undone.`))) {
       return;
     }
 
@@ -384,7 +386,7 @@ export class ScionTokenList extends LitElement {
       await this.loadData();
     } catch (err) {
       console.error('Failed to delete token:', err);
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
       this.actionLoadingId = null;
     }

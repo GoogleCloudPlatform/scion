@@ -30,6 +30,8 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
 import '../shared/hash-display.js';
 import '../shared/skill-publish-dialog.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 @customElement('scion-page-skill-detail')
 export class ScionPageSkillDetail extends LitElement {
@@ -485,7 +487,7 @@ export class ScionPageSkillDetail extends LitElement {
       this.editing = false;
     } catch (err) {
       console.error('Failed to save skill:', err);
-      alert(err instanceof Error ? err.message : 'Failed to save skill');
+      showToast(err instanceof Error ? err.message : 'Failed to save skill');
     } finally {
       this.saving = false;
     }
@@ -494,7 +496,7 @@ export class ScionPageSkillDetail extends LitElement {
   // -- Archive --
 
   private async handleArchive(): Promise<void> {
-    if (!confirm('Are you sure you want to archive this skill?')) return;
+    if (!(await showConfirm('Are you sure you want to archive this skill?'))) return;
     this.actionLoading = { ...this.actionLoading, archive: true };
 
     try {
@@ -506,7 +508,7 @@ export class ScionPageSkillDetail extends LitElement {
       window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {
       console.error('Failed to archive skill:', err);
-      alert(err instanceof Error ? err.message : 'Failed to archive skill');
+      showToast(err instanceof Error ? err.message : 'Failed to archive skill');
     } finally {
       this.actionLoading = { ...this.actionLoading, archive: false };
     }
@@ -545,7 +547,7 @@ export class ScionPageSkillDetail extends LitElement {
       void this.loadData();
     } catch (err) {
       console.error('Failed to deprecate version:', err);
-      alert(err instanceof Error ? err.message : 'Failed to deprecate version');
+      showToast(err instanceof Error ? err.message : 'Failed to deprecate version');
     } finally {
       this.deprecateLoading = false;
     }

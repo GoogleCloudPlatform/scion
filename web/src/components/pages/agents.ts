@@ -37,6 +37,8 @@ import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/quick-message-dialog.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 @customElement('scion-page-agents')
 export class ScionPageAgents extends LitElement {
@@ -474,7 +476,7 @@ export class ScionPageAgents extends LitElement {
     event?: MouseEvent
   ): Promise<void> {
     if (action === 'delete') {
-      if (!event?.altKey && !confirm('Are you sure you want to delete this agent?')) {
+      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
         return;
       }
       // Show per-button spinner for delete; don't optimistically remove
@@ -495,7 +497,7 @@ export class ScionPageAgents extends LitElement {
         this.backgroundRefresh();
       } catch (err) {
         console.error('Failed to delete agent:', err);
-        alert(err instanceof Error ? err.message : 'Failed to delete agent');
+        showToast(err instanceof Error ? err.message : 'Failed to delete agent');
       } finally {
         this.actionLoading = { ...this.actionLoading, [agentId]: false };
       }
@@ -534,7 +536,7 @@ export class ScionPageAgents extends LitElement {
       this.backgroundRefresh();
     } catch (err) {
       console.error(`Failed to ${action} agent:`, err);
-      alert(err instanceof Error ? err.message : `Failed to ${action} agent`);
+      showToast(err instanceof Error ? err.message : `Failed to ${action} agent`);
       // Roll back optimistic update on failure
       this.backgroundRefresh();
     }
@@ -545,7 +547,7 @@ export class ScionPageAgents extends LitElement {
   }
 
   private async handleStopAll(): Promise<void> {
-    if (!confirm('Are you sure you want to stop all running agents?')) {
+    if (!(await showConfirm('Are you sure you want to stop all running agents?'))) {
       return;
     }
 
@@ -566,13 +568,13 @@ export class ScionPageAgents extends LitElement {
 
       const result = (await response.json()) as { stopped: number; failed: number };
       if (result.failed > 0) {
-        alert(`Stopped ${result.stopped} agents, ${result.failed} failed.`);
+        showToast(`Stopped ${result.stopped} agents, ${result.failed} failed.`, 'warning');
       }
 
       this.backgroundRefresh();
     } catch (err) {
       console.error('Failed to stop all agents:', err);
-      alert(err instanceof Error ? err.message : 'Failed to stop all agents');
+      showToast(err instanceof Error ? err.message : 'Failed to stop all agents');
       this.backgroundRefresh();
     } finally {
       this.stopAllLoading = false;

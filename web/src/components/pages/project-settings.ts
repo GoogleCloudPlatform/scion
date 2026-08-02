@@ -41,6 +41,8 @@ import '../shared/resource-list.js';
 import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 
 interface ProjectResourceSpec {
@@ -1200,9 +1202,9 @@ export class ScionPageProjectSettings extends LitElement {
 
     if (
       !event?.altKey &&
-      !confirm(
+      !(await showConfirm(
         `Are you sure you want to delete "${projectName}"?\n\nAll agents in this project will be stopped and deleted.\n\nThis action cannot be undone.`
-      )
+      ))
     ) {
       return;
     }
@@ -1223,7 +1225,7 @@ export class ScionPageProjectSettings extends LitElement {
       window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {
       console.error('Failed to delete project:', err);
-      alert(err instanceof Error ? err.message : 'Failed to delete project');
+      showToast(err instanceof Error ? err.message : 'Failed to delete project');
     } finally {
       this.deleteLoading = false;
     }
@@ -1543,7 +1545,7 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private async removeGitHubInstallation(): Promise<void> {
-    if (!confirm('Remove GitHub App installation from this project? Agents will fall back to PAT authentication.')) return;
+    if (!(await showConfirm('Remove GitHub App installation from this project? Agents will fall back to PAT authentication.'))) return;
     this.githubAppLoading = true;
     this.githubAppError = null;
     try {
@@ -2225,7 +2227,7 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private async handleRemoveBroker(brokerId: string, brokerName: string): Promise<void> {
-    const confirmed = confirm(`Remove broker "${brokerName}" from this project?`);
+    const confirmed = await showConfirm(`Remove broker "${brokerName}" from this project?`);
     if (!confirmed) return;
 
     try {

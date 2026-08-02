@@ -41,6 +41,8 @@ import { WorkspaceFileBrowserDataSource, SharedDirFileBrowserDataSource } from '
 import type { FileBrowserDataSource } from '../shared/file-browser.js';
 import { WorkspaceFileEditorDataSource, SharedDirFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
 type SortDir = 'asc' | 'desc';
@@ -1081,7 +1083,7 @@ export class ScionPageProjectDetail extends LitElement {
     event?: MouseEvent
   ): Promise<void> {
     if (action === 'delete') {
-      if (!event?.altKey && !confirm('Are you sure you want to delete this agent?')) {
+      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, [agentId]: true };
@@ -1101,7 +1103,7 @@ export class ScionPageProjectDetail extends LitElement {
         this.backgroundRefresh();
       } catch (err) {
         console.error('Failed to delete agent:', err);
-        alert(err instanceof Error ? err.message : 'Failed to delete agent');
+        showToast(err instanceof Error ? err.message : 'Failed to delete agent');
       } finally {
         this.actionLoading = { ...this.actionLoading, [agentId]: false };
       }
@@ -1140,7 +1142,7 @@ export class ScionPageProjectDetail extends LitElement {
       this.backgroundRefresh();
     } catch (err) {
       console.error(`Failed to ${action} agent:`, err);
-      alert(err instanceof Error ? err.message : `Failed to ${action} agent`);
+      showToast(err instanceof Error ? err.message : `Failed to ${action} agent`);
       this.backgroundRefresh();
     }
   }
@@ -1293,7 +1295,7 @@ export class ScionPageProjectDetail extends LitElement {
     const confirmMsg = isProjectAdmin
       ? 'Are you sure you want to stop all running agents in this project?'
       : 'Are you sure you want to stop all of your running agents in this project?';
-    if (!confirm(confirmMsg)) {
+    if (!(await showConfirm(confirmMsg))) {
       return;
     }
 
@@ -1314,13 +1316,13 @@ export class ScionPageProjectDetail extends LitElement {
 
       const result = (await response.json()) as { stopped: number; failed: number; scope?: string };
       if (result.failed > 0) {
-        alert(`Stopped ${result.stopped} agents, ${result.failed} failed.`);
+        showToast(`Stopped ${result.stopped} agents, ${result.failed} failed.`, 'warning');
       }
 
       this.backgroundRefresh();
     } catch (err) {
       console.error('Failed to stop agents:', err);
-      alert(err instanceof Error ? err.message : 'Failed to stop agents');
+      showToast(err instanceof Error ? err.message : 'Failed to stop agents');
       this.backgroundRefresh();
     } finally {
       this.stopAllLoading = false;

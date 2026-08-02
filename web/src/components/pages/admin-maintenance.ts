@@ -27,6 +27,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { showToast } from '../../utils/toast.js';
 
 interface MaintenanceOperation {
   id: string;
@@ -1026,7 +1027,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
       this.resetAuthAllResult = await response.json();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to reset auth for all agents');
+      showToast(err instanceof Error ? err.message : 'Failed to reset auth for all agents');
     } finally {
       this.resetAuthAllLoading = false;
     }

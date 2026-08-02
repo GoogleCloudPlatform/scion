@@ -29,6 +29,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { GroupMember, AdminGroup } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from './confirm-dialog.js';
 
 @customElement('scion-group-member-editor')
 export class ScionGroupMemberEditor extends LitElement {
@@ -575,7 +577,7 @@ export class ScionGroupMemberEditor extends LitElement {
 
   private async handleRemoveMember(member: GroupMember): Promise<void> {
     const displayName = member.displayName || member.memberId;
-    if (!confirm(`Remove ${member.memberType} "${displayName}" from this group?`)) {
+    if (!(await showConfirm(`Remove ${member.memberType} "${displayName}" from this group?`))) {
       return;
     }
 
@@ -595,7 +597,7 @@ export class ScionGroupMemberEditor extends LitElement {
       await this.loadMembers();
     } catch (err) {
       console.error('Failed to remove member:', err);
-      alert(err instanceof Error ? err.message : 'Failed to remove member');
+      showToast(err instanceof Error ? err.message : 'Failed to remove member');
     } finally {
       this.removingMember = null;
     }

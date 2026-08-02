@@ -30,6 +30,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { EnvVar, ResourceScope, InjectionMode } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from './confirm-dialog.js';
 
 @customElement('scion-env-var-list')
 export class ScionEnvVarList extends LitElement {
@@ -167,7 +169,7 @@ export class ScionEnvVarList extends LitElement {
   }
 
   private async handleDelete(envVar: EnvVar, event?: MouseEvent): Promise<void> {
-    if (!event?.altKey && !confirm(`Delete environment variable "${envVar.key}"? This cannot be undone.`)) {
+    if (!event?.altKey && !(await showConfirm(`Delete environment variable "${envVar.key}"? This cannot be undone.`))) {
       return;
     }
 
@@ -187,7 +189,7 @@ export class ScionEnvVarList extends LitElement {
       await this.loadEnvVars();
     } catch (err) {
       console.error('Failed to delete environment variable:', err);
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
       this.deletingKey = null;
     }

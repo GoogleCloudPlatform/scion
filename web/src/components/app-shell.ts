@@ -32,6 +32,7 @@ import './shared/debug-panel.js';
 
 import type { User } from '../shared/types.js';
 import type { AccessDeniedDetail } from '../client/api.js';
+import { showToast } from '../utils/toast.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
 
@@ -238,17 +239,7 @@ export class ScionApp extends LitElement {
     const action = detail.action || 'perform this action on';
     const message = `You don't have permission to ${action} this resource.`;
 
-    const alert = Object.assign(document.createElement('sl-alert'), {
-      variant: 'warning',
-      closable: true,
-      duration: 5000,
-    });
-    alert.innerHTML = `
-      <sl-icon name="exclamation-triangle" slot="icon"></sl-icon>
-      ${message}
-    `;
-    document.body.appendChild(alert);
-    void (alert as HTMLElement & { toast(): Promise<void> }).toast();
+    showToast(message, 'warning');
   }
 
   override render() {

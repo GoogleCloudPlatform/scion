@@ -30,6 +30,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { Secret, SecretType, ResourceScope, InjectionMode } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from './confirm-dialog.js';
 
 @customElement('scion-secret-list')
 export class ScionSecretList extends LitElement {
@@ -183,7 +185,7 @@ export class ScionSecretList extends LitElement {
   }
 
   private async handleDelete(secret: Secret, event?: MouseEvent): Promise<void> {
-    if (!event?.altKey && !confirm(`Delete secret "${secret.key}"? This cannot be undone.`)) {
+    if (!event?.altKey && !(await showConfirm(`Delete secret "${secret.key}"? This cannot be undone.`))) {
       return;
     }
 
@@ -203,7 +205,7 @@ export class ScionSecretList extends LitElement {
       await this.loadSecrets();
     } catch (err) {
       console.error('Failed to delete secret:', err);
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
       this.deletingKey = null;
     }

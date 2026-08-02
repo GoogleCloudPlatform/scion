@@ -57,6 +57,8 @@ import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -776,7 +778,7 @@ export class ScionPageAgentDetail extends LitElement {
     if (!this.agent) return;
 
     if (action === 'delete') {
-      if (!event?.altKey && !confirm('Are you sure you want to delete this agent?')) {
+      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, delete: true };
@@ -793,7 +795,7 @@ export class ScionPageAgentDetail extends LitElement {
         window.location.href = this.project ? `/projects/${this.project.id}` : '/agents';
       } catch (err) {
         console.error('Failed to delete agent:', err);
-        alert(err instanceof Error ? err.message : 'Failed to delete agent');
+        showToast(err instanceof Error ? err.message : 'Failed to delete agent');
       } finally {
         this.actionLoading = { ...this.actionLoading, delete: false };
       }
@@ -815,7 +817,7 @@ export class ScionPageAgentDetail extends LitElement {
         this.backgroundRefresh();
       } catch (err) {
         console.error('Failed to reset auth:', err);
-        alert(err instanceof Error ? err.message : 'Failed to reset auth');
+        showToast(err instanceof Error ? err.message : 'Failed to reset auth');
       } finally {
         this.actionLoading = { ...this.actionLoading, 'reset-auth': false };
       }
@@ -850,7 +852,7 @@ export class ScionPageAgentDetail extends LitElement {
       this.backgroundRefresh();
     } catch (err) {
       console.error(`Failed to ${action} agent:`, err);
-      alert(err instanceof Error ? err.message : `Failed to ${action} agent`);
+      showToast(err instanceof Error ? err.message : `Failed to ${action} agent`);
       this.backgroundRefresh();
     }
   }

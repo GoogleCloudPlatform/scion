@@ -29,6 +29,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { showConfirm } from './confirm-dialog.js';
 
 // ────────────────────────────────────────────────────────────
 // Types
@@ -921,7 +922,7 @@ export class ScionFileBrowser extends LitElement {
 
   private async handleDelete(filePath: string, event?: MouseEvent): Promise<void> {
     if (!this.dataSource) return;
-    if (!event?.altKey && !confirm(`Delete ${filePath}?`)) return;
+    if (!event?.altKey && !(await showConfirm(`Delete ${filePath}?`))) return;
 
     try {
       await this.dataSource.deleteFile(filePath);

@@ -29,6 +29,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { SharedDir } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from './confirm-dialog.js';
 
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
 
@@ -154,9 +156,9 @@ export class ScionSharedDirList extends LitElement {
   private async handleDelete(dir: SharedDir, event?: MouseEvent): Promise<void> {
     if (
       !event?.altKey &&
-      !confirm(
+      !(await showConfirm(
         `Remove shared directory "${dir.name}" from this project?\n\nThis removes the configuration. Host-side data may still exist.`
-      )
+      ))
     ) {
       return;
     }
@@ -176,7 +178,7 @@ export class ScionSharedDirList extends LitElement {
       await this.loadSharedDirs();
     } catch (err) {
       console.error('Failed to delete shared directory:', err);
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
       this.deletingName = null;
     }

@@ -27,6 +27,8 @@ import type { SkillRegistry } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
 import '../shared/hash-display.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 
 interface PinnedHash {
   uri: string;
@@ -367,7 +369,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
         void this.loadPinnedHashes();
       }
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save');
+      showToast(err instanceof Error ? err.message : 'Failed to save');
     } finally {
       this.saving = false;
     }
@@ -390,7 +392,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       }
       this.registry = (await res.json()) as SkillRegistry;
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to toggle status');
+      showToast(err instanceof Error ? err.message : 'Failed to toggle status');
     } finally {
       this.actionLoading = { ...this.actionLoading, toggle: false };
     }
@@ -399,7 +401,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
   // -- Delete --
 
   private async handleDelete(): Promise<void> {
-    if (!confirm('Are you sure you want to delete this registry?')) return;
+    if (!(await showConfirm('Are you sure you want to delete this registry?'))) return;
     this.actionLoading = { ...this.actionLoading, delete: true };
     try {
       const res = await apiFetch(`/api/v1/skill-registries/${this.registryId}`, { method: 'DELETE' });
@@ -409,7 +411,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       window.history.pushState({}, '', '/admin/skill-registries');
       window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
       this.actionLoading = { ...this.actionLoading, delete: false };
     }
@@ -434,14 +436,14 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       this.pinHash = '';
       void this.loadPinnedHashes();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to pin');
+      showToast(err instanceof Error ? err.message : 'Failed to pin');
     } finally {
       this.pinning = false;
     }
   }
 
   private async handleUnpin(uri: string): Promise<void> {
-    if (!confirm(`Unpin "${uri}"?`)) return;
+    if (!(await showConfirm(`Unpin "${uri}"?`))) return;
     try {
       const res = await apiFetch(`/api/v1/skill-registries/${this.registryId}/unpin`, {
         method: 'POST',
@@ -453,7 +455,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       }
       void this.loadPinnedHashes();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to unpin');
+      showToast(err instanceof Error ? err.message : 'Failed to unpin');
     }
   }
 

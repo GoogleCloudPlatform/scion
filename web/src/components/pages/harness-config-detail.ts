@@ -37,6 +37,7 @@ import type { FileBrowserDataSource } from '../shared/file-browser.js';
 import { HarnessConfigFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import '../shared/hash-display.js';
+import { showToast } from '../../utils/toast.js';
 
 @customElement('scion-page-harness-config-detail')
 export class ScionPageHarnessConfigDetail extends LitElement {
@@ -1024,7 +1025,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         this.imageStatus = await resp.json();
       } else {
         const msg = await extractApiError(resp, `HTTP ${resp.status}`);
-        alert(msg);
+        showToast(msg);
       }
     } finally {
       this.imageActionRunning = false;
@@ -1042,7 +1043,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         await this.recheckImage();
       } else {
         const msg = await extractApiError(resp, `HTTP ${resp.status}`);
-        alert(msg);
+        showToast(msg);
       }
     } finally {
       this.imageActionRunning = false;
@@ -1060,7 +1061,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         await this.recheckImage();
       } else {
         const msg = await extractApiError(resp, `HTTP ${resp.status}`);
-        alert(msg);
+        showToast(msg);
       }
     } finally {
       this.imageActionRunning = false;
