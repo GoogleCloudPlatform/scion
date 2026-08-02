@@ -617,7 +617,8 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+projectID+"/agents/my-agent/outbound-message":
+		case r.Method == http.MethodPost && (r.URL.Path == "/api/v1/projects/"+projectID+"/agents/my-agent/outbound-message" ||
+				r.URL.Path == "/api/v1/groves/"+projectID+"/agents/my-agent/outbound-message"):
 			var msg hubclient.OutboundMessageRequest
 			_ = json.NewDecoder(r.Body).Decode(&msg)
 			receivedMsg = &msg

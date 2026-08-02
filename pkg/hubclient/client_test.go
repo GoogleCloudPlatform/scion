@@ -364,6 +364,41 @@ func TestFallback(t *testing.T) {
 	}
 }
 
+func TestFallbackSkippedOnJSONNotFound(t *testing.T) {
+	var attempts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts = append(attempts, r.URL.Path)
+		if r.URL.Path == "/api/v1/projects/my-project" {
+			// Application-level 404: the route matched, but the resource doesn't exist.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "project not found"})
+			return
+		}
+		// The groves fallback should never be reached.
+		if r.URL.Path == "/api/v1/groves/my-project" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(Project{ID: "my-project", Name: "My Project"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	_, err := client.Projects().Get(context.Background(), "my-project")
+	if err == nil {
+		t.Fatal("expected an error for application-level 404, got nil")
+	}
+
+	if len(attempts) != 1 {
+		t.Errorf("expected 1 attempt (no fallback), got %d: %v", len(attempts), attempts)
+	}
+	if attempts[0] != "/api/v1/projects/my-project" {
+		t.Errorf("expected attempt to /api/v1/projects/my-project, got %s", attempts[0])
+	}
+}
+
 func TestWithBearerToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
