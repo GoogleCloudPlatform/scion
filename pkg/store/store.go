@@ -131,6 +131,9 @@ type Store interface {
 
 	// ProjectPreStartHook operations (Project-Level Pre-Start Customization Scripts)
 	ProjectPreStartHookStore
+
+	// AgentSessionMetrics operations (Hub Metrics Reporting)
+	AgentSessionMetricsStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1424,4 +1427,22 @@ type HubSettingStore interface {
 	// the origin field. Rows with updated_by="seed" get origin="seeded";
 	// all other non-_meta rows get origin="managed". Idempotent.
 	BackfillOrigin(ctx context.Context) error
+}
+
+// =============================================================================
+// Agent Session Metrics (Hub Metrics Reporting)
+// =============================================================================
+
+// AgentSessionMetricsStore defines operations for agent session metrics.
+type AgentSessionMetricsStore interface {
+	// CreateAgentSessionMetrics creates a new session metrics record.
+	CreateAgentSessionMetrics(ctx context.Context, m *AgentSessionMetrics) error
+
+	// GetAgentSessionMetrics retrieves a session metrics record by ID.
+	// Returns ErrNotFound if the record doesn't exist.
+	GetAgentSessionMetrics(ctx context.Context, id string) (*AgentSessionMetrics, error)
+
+	// ListAgentSessionMetricsByAgent returns all session metrics for an agent,
+	// ordered by started_at DESC.
+	ListAgentSessionMetricsByAgent(ctx context.Context, agentID string) ([]*AgentSessionMetrics, error)
 }

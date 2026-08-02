@@ -2167,3 +2167,58 @@ const (
 	SkillInjectionScopeProject = "project"
 	SkillInjectionScopeUser    = "user"
 )
+
+// =============================================================================
+// Agent Session Metrics (Hub Metrics Reporting)
+// =============================================================================
+
+// AgentSessionMetrics represents a pre-aggregated session-level telemetry
+// record reported by sciontool on session-end.
+type AgentSessionMetrics struct {
+	ID              string     `json:"id"`
+	AgentID         string     `json:"agentId"`
+	ProjectID       string     `json:"projectId"`
+	SessionID       string     `json:"sessionId"`
+	StartedAt       time.Time  `json:"startedAt"`
+	EndedAt         *time.Time `json:"endedAt,omitempty"`
+	Status          string     `json:"status,omitempty"`
+	TurnCount       int        `json:"turnCount,omitempty"`
+	Model           string     `json:"model,omitempty"`
+	TokensInput     int64      `json:"tokensInput,omitempty"`
+	TokensOutput    int64      `json:"tokensOutput,omitempty"`
+	TokensCached    int64      `json:"tokensCached,omitempty"`
+	TokensReasoning int64      `json:"tokensReasoning,omitempty"`
+	ToolCalls       string     `json:"toolCalls,omitempty"`  // JSON-encoded map[string]ToolCallStats
+	Languages       string     `json:"languages,omitempty"` // JSON-encoded []string
+	CreatedAt       time.Time  `json:"createdAt"`
+}
+
+// MarshalJSON implements custom marshaling to support legacy groveId field.
+func (m AgentSessionMetrics) MarshalJSON() ([]byte, error) {
+	type Alias AgentSessionMetrics
+	return json.Marshal(&struct {
+		Alias
+		GroveID string `json:"groveId"`
+	}{
+		Alias:   Alias(m),
+		GroveID: m.ProjectID,
+	})
+}
+
+// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
+func (m *AgentSessionMetrics) UnmarshalJSON(data []byte) error {
+	type Alias AgentSessionMetrics
+	aux := &struct {
+		GroveID string `json:"groveId"`
+		*Alias
+	}{
+		Alias: (*Alias)(m),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if m.ProjectID == "" && aux.GroveID != "" {
+		m.ProjectID = aux.GroveID
+	}
+	return nil
+}

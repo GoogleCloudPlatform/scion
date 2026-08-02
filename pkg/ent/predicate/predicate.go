@@ -12,6 +12,9 @@ type AccessPolicy func(*sql.Selector)
 // Agent is the predicate function for agent builders.
 type Agent func(*sql.Selector)
 
+// AgentSessionMetrics is the predicate function for agentsessionmetrics builders.
+type AgentSessionMetrics func(*sql.Selector)
+
 // AllowListEntry is the predicate function for allowlistentry builders.
 type AllowListEntry func(*sql.Selector)
 

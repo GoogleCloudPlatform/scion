@@ -2007,6 +2007,8 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		s.handleAgentGitHubTokenRefresh(w, r, id)
 	case api.AgentActionOutboundMessage:
 		s.handleAgentOutboundMessage(w, r, id)
+	case api.AgentActionMetrics:
+		s.handleAgentMetrics(w, r, id)
 	case api.AgentActionMessages:
 		// Defence-in-depth: this action is normally intercepted earlier in
 		// handleAgentRoute (before the POST-only gate) so that GET requests
