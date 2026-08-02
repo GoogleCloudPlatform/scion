@@ -276,7 +276,10 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 	// store round-trip and a consistency hazard if the link changes between calls.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	link, _ := resolveChannelLink(ctx, s, h.store, i.ChannelID)
+	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
+	if err != nil {
+		h.log.Error("Failed to resolve channel link", "channel_id", i.ChannelID, "error", err)
+	}
 	if link != nil && link.Active {
 		pathArg = translateContainerPath(pathArg, link.ProjectSlug, link.ProjectID)
 	}
@@ -345,7 +348,7 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 		}
 	}
 
-	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content:    fmt.Sprintf("Found %d file(s) matching '%s'. Select one to send:", len(matches), pathArg),
 		Components: rows,
 	})

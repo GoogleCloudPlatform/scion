@@ -426,6 +426,7 @@ func TestProjectSearchRoots_DiscoversDirs(t *testing.T) {
 	// Set up a fake home directory structure.
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	slug := "test-proj"
 	projectID := "550e8400-e29b-41d4-a716-446655440000"
@@ -455,6 +456,7 @@ func TestProjectSearchRoots_DiscoversDirs(t *testing.T) {
 func TestProjectSearchRoots_NoSharedDirs(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	slug := "empty-proj"
 	projectID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -472,6 +474,7 @@ func TestProjectSearchRoots_NoSharedDirs(t *testing.T) {
 func TestProjectSearchRoots_NothingExists(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	roots := projectSearchRoots("nonexistent", "00000000-0000-0000-0000-000000000000")
 
@@ -564,6 +567,7 @@ func TestDeduplicateRoots_Empty(t *testing.T) {
 func TestTranslateContainerPath_ScionVolumes(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	slug := "my-proj"
 	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
@@ -578,6 +582,7 @@ func TestTranslateContainerPath_ScionVolumes(t *testing.T) {
 func TestTranslateContainerPath_ScionVolumesNoRemainder(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	slug := "my-proj"
 	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
@@ -592,6 +597,7 @@ func TestTranslateContainerPath_ScionVolumesNoRemainder(t *testing.T) {
 func TestTranslateContainerPath_WorkspaceScionVolumes(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	slug := "my-proj"
 	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
