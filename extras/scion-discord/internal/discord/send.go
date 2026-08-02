@@ -214,7 +214,15 @@ var containerPathPrefixes = []string{
 // translateContainerPath converts a container-internal path to its host-side
 // equivalent. If the path doesn't start with /scion-volumes/ or
 // /workspace/.scion-volumes/, it is returned unchanged.
+//
+// The returned path is NOT validated for confinement; callers MUST pass it
+// through safeResolve or safeResolveMulti before use.
 func translateContainerPath(path, projectSlug, projectID string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+
 	for _, prefix := range containerPathPrefixes {
 		if !strings.HasPrefix(path, prefix) {
 			// Also match the prefix without trailing slash (bare shared dir name).
@@ -243,11 +251,6 @@ func translateContainerPath(path, projectSlug, projectID string) string {
 			sharedDirName = after
 		}
 
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return path
-		}
-
 		hostSharedDir := config.SharedDirHostPath(home, projectSlug, projectID, sharedDirName)
 		return filepath.Join(hostSharedDir, remainder)
 	}
@@ -268,18 +271,19 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 		return
 	}
 
-	// Resolve the channel link for project context. If available, translate
-	// container-internal paths (/scion-volumes/...) to host-side equivalents
-	// before file resolution.
+	// Resolve the channel link once for project context. The result is shared
+	// by both path translation and search-root resolution to avoid a duplicate
+	// store round-trip and a consistency hazard if the link changes between calls.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID); err == nil && link != nil && link.Active {
+	link, _ := resolveChannelLink(ctx, s, h.store, i.ChannelID)
+	if link != nil && link.Active {
 		pathArg = translateContainerPath(pathArg, link.ProjectSlug, link.ProjectID)
 	}
 
 	// Resolve search roots: per-project roots from channel link, with
 	// send_search_root as override/fallback.
-	roots := h.resolveSearchRoots(s, i)
+	roots := h.resolveSearchRoots(link)
 	if len(roots) == 0 {
 		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
 		return
@@ -354,14 +358,13 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 // If the channel is linked to a project, per-project roots are computed.
 // If send_search_root is configured (h.searchRoot != DefaultSearchRoot), it is
 // used as an override when present, or as a fallback when no project link exists.
-func (h *CommandHandler) resolveSearchRoots(s *discordgo.Session, i *discordgo.InteractionCreate) []string {
+//
+// The caller resolves the channel link once and passes it in so that the same
+// result is shared with path translation (avoiding a duplicate store round-trip).
+func (h *CommandHandler) resolveSearchRoots(link *ChannelLink) []string {
 	configuredOverride := h.searchRoot != DefaultSearchRoot && h.searchRoot != ""
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
-	if err != nil || link == nil || !link.Active {
+	if link == nil || !link.Active {
 		// No project link — use configured override if available.
 		if configuredOverride {
 			return []string{h.searchRoot}
