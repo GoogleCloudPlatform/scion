@@ -1228,7 +1228,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		if isBotMentioned(m, botUserID) {
 			unresolved := extractUnresolvedMentions(m.Content, botUserID, agents)
 			if len(unresolved) > 0 {
-				errMsg := fmt.Sprintf("Unknown agent: %q. Use `/scion agents` to see available agents.", unresolved[0])
+				errMsg := fmt.Sprintf("Unknown agent: %s. Use `/scion agents` to see available agents.", strings.Join(unresolved, ", "))
 				s.ChannelMessageSend(channelID, errMsg)
 			}
 		}
@@ -1255,6 +1255,24 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 			// User resolution via store mapping is not yet wired up.
 			return "", false
 		})
+
+		// If the user typed an unknown @mention at the start, show an error
+		// instead of silently routing to the default agent.
+		hasUnknownStartMention := false
+		for _, sm := range classified.StartMentions {
+			if sm.Kind == "unknown" {
+				hasUnknownStartMention = true
+				break
+			}
+		}
+		if hasUnknownStartMention {
+			unresolved := extractUnresolvedMentions(m.Content, botUserID, agents)
+			if len(unresolved) > 0 {
+				errMsg := fmt.Sprintf("Unknown agent: %s. Use `/scion agents` to see available agents.", strings.Join(unresolved, ", "))
+				s.ChannelMessageSend(channelID, errMsg)
+				return
+			}
+		}
 	}
 
 	// Determine which agent slugs are start-mentions (to strip from text).
@@ -1276,12 +1294,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		// Count only agent-kind start mentions for filtering.
 		// Unknown-kind start mentions (non-existent agents) must not
 		// trigger filtering, otherwise they empty the target list.
-		agentStartMentions := 0
-		for _, sm := range classified.StartMentions {
-			if sm.Kind == "agent" {
-				agentStartMentions++
-			}
-		}
+		agentStartMentions := countAgentStartMentions(classified)
 		if agentStartMentions > 0 {
 			startMentionSet := make(map[string]bool, agentStartMentions)
 			for _, sm := range classified.StartMentions {
@@ -1323,17 +1336,6 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 			if text != "" && !strings.HasPrefix(text, "/") {
 				targets = []string{effectiveDefault}
 			}
-		}
-	}
-
-	// After all routing logic, if targets is empty and there were unresolved
-	// @mentions (non-existent agents), show an error to the user.
-	if len(targets) == 0 {
-		unresolved := extractUnresolvedMentions(m.Content, botUserID, agents)
-		if len(unresolved) > 0 {
-			errMsg := fmt.Sprintf("Unknown agent: %q. Use `/scion agents` to see available agents.", unresolved[0])
-			s.ChannelMessageSend(channelID, errMsg)
-			return
 		}
 	}
 

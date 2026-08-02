@@ -176,6 +176,19 @@ func extractUnresolvedMentions(text string, botUserID string, knownAgents []stri
 	return unresolved
 }
 
+// countAgentStartMentions returns the number of start mentions with Kind == "agent"
+// in a ClassifiedMentions result. Unknown-kind start mentions (non-existent agents)
+// are excluded — they must not trigger the filtering branch.
+func countAgentStartMentions(classified ClassifiedMentions) int {
+	n := 0
+	for _, sm := range classified.StartMentions {
+		if sm.Kind == "agent" {
+			n++
+		}
+	}
+	return n
+}
+
 // Mention represents a classified @mention in a message.
 type Mention struct {
 	Name     string // agent slug or username (without @)

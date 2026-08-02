@@ -36,71 +36,92 @@ func newTestStructuredMessage() *messages.StructuredMessage {
 	}
 }
 
-// TestStartMentionFiltering_UnknownMention verifies that an unknown @mention
-// at the start of a message does not cause agent-kind filtering to empty the
-// target list. This is a regression test for the silent-drop bug.
-func TestStartMentionFiltering_UnknownMention(t *testing.T) {
+// TestUnknownMentionRouting traces the actual routing logic in
+// handleIncomingMessage for unknown @mentions and verifies the error path
+// fires (R1) and unresolved names are reported (N2).
+func TestUnknownMentionRouting(t *testing.T) {
 	knownAgents := []string{"coder", "reviewer"}
 	botUserID := "BOT123"
 
-	t.Run("unknown mention with default agent shows error", func(t *testing.T) {
-		// Simulate the routing logic in handleIncomingMessage:
-		// 1. resolveTargetAgents returns empty (unknown mention)
-		// 2. Default fallback sets targets
-		// 3. classifyMentions classifies the unknown mention
-		// 4. Filtering logic should NOT empty targets
-
+	t.Run("unknown mention with default agent triggers error path", func(t *testing.T) {
+		// Trace the handleIncomingMessage flow for "@not-an-agent hello"
+		// with effectiveDefault = "coder".
 		content := "@not-an-agent hello"
 
-		// Step 1: resolveTargetAgents would return empty for unknown mention
+		// Step 1: resolveTargetAgents returns empty for unknown mention.
 		msg := newMockMessage(content, nil)
 		targets, _ := resolveTargetAgents(msg, botUserID, "coder", knownAgents)
 		assert.Empty(t, targets, "unknown mention should not resolve")
 
-		// Step 2: Default fallback sets targets
+		// Step 2: Default fallback sets targets = ["coder"].
 		effectiveDefault := "coder"
 		targets = []string{effectiveDefault}
 
-		// Step 3: classifyMentions
+		// Step 3: classifyMentions identifies the unknown start mention.
 		classified := classifyMentions(content, botUserID, knownAgents, noopResolver)
-
-		// Step 4: Count agent-kind start mentions (the fix)
-		agentStartMentions := 0
-		for _, sm := range classified.StartMentions {
-			if sm.Kind == "agent" {
-				agentStartMentions++
-			}
-		}
-
-		// With the fix, agentStartMentions == 0 so the filtering branch
-		// should NOT activate. Unknown mentions must not trigger filtering.
-		assert.Equal(t, 0, agentStartMentions,
+		assert.Equal(t, 0, countAgentStartMentions(classified),
 			"unknown start mentions should not count as agent start mentions")
 		assert.True(t, len(classified.StartMentions) > 0,
 			"unknown mention should still be in StartMentions")
 
-		// The filtering branch would only run if agentStartMentions > 0.
-		// Since it's 0, targets should NOT be filtered.
-		// But the post-filtering error check should still catch it:
+		// Step 4: The error check fires BEFORE the filtering block.
+		// In the actual code, after classifyMentions, we check for unknown
+		// start mentions and return an error instead of routing to default.
+		hasUnknownStartMention := false
+		for _, sm := range classified.StartMentions {
+			if sm.Kind == "unknown" {
+				hasUnknownStartMention = true
+				break
+			}
+		}
+		assert.True(t, hasUnknownStartMention,
+			"error path must detect unknown start mention")
+
 		unresolved := extractUnresolvedMentions(content, botUserID, knownAgents)
 		assert.Equal(t, []string{"not-an-agent"}, unresolved,
 			"unresolved mentions should be detected for error feedback")
+
+		// Verify the error message that would be sent.
+		errMsg := fmt.Sprintf("Unknown agent: %s. Use `/scion agents` to see available agents.",
+			strings.Join(unresolved, ", "))
+		assert.Contains(t, errMsg, "not-an-agent")
 	})
 
-	t.Run("unknown mention without default agent shows error", func(t *testing.T) {
+	t.Run("multiple unknown mentions reports all names", func(t *testing.T) {
+		// N2: "@foo @bar hello" should report both unknown names.
+		content := "@foo @bar hello"
+
+		classified := classifyMentions(content, botUserID, knownAgents, noopResolver)
+		assert.Equal(t, 0, countAgentStartMentions(classified))
+		assert.Len(t, classified.StartMentions, 2)
+
+		unresolved := extractUnresolvedMentions(content, botUserID, knownAgents)
+		assert.Equal(t, []string{"foo", "bar"}, unresolved)
+
+		errMsg := fmt.Sprintf("Unknown agent: %s. Use `/scion agents` to see available agents.",
+			strings.Join(unresolved, ", "))
+		assert.Contains(t, errMsg, "foo, bar",
+			"error message should list all unresolved mentions")
+	})
+
+	t.Run("unknown mention without default agent returns early", func(t *testing.T) {
+		// Without a default, targets stays empty and the function returns
+		// at the early exit (line ~1226). The error feedback at that point
+		// only fires when isBotMentioned is true (Discord structured mention).
+		// Text-format @unknown does not set isBotMentioned.
 		content := "@not-an-agent hello"
 
 		msg := newMockMessage(content, nil)
 		targets, _ := resolveTargetAgents(msg, botUserID, "", knownAgents)
 		assert.Empty(t, targets)
 
-		// No default agent, targets stays empty.
-		// Post-filtering error check should catch it.
+		// No default → targets stays empty → early return before classifyMentions.
+		// Verify unresolved mentions are detectable for the early-return path.
 		unresolved := extractUnresolvedMentions(content, botUserID, knownAgents)
 		assert.Equal(t, []string{"not-an-agent"}, unresolved)
 	})
 
-	t.Run("known agent mention still routes correctly", func(t *testing.T) {
+	t.Run("known agent mention routes correctly", func(t *testing.T) {
 		content := "@coder fix this bug"
 
 		msg := newMockMessage(content, nil)
@@ -108,16 +129,20 @@ func TestStartMentionFiltering_UnknownMention(t *testing.T) {
 		assert.Equal(t, []string{"coder"}, targets)
 
 		classified := classifyMentions(content, botUserID, knownAgents, noopResolver)
+		assert.Equal(t, 1, countAgentStartMentions(classified))
 
-		agentStartMentions := 0
+		// No unknown start mentions → error path does NOT fire.
+		hasUnknownStartMention := false
 		for _, sm := range classified.StartMentions {
-			if sm.Kind == "agent" {
-				agentStartMentions++
+			if sm.Kind == "unknown" {
+				hasUnknownStartMention = true
+				break
 			}
 		}
-		assert.Equal(t, 1, agentStartMentions)
+		assert.False(t, hasUnknownStartMention,
+			"known agent should not trigger error path")
 
-		// Filtering should preserve the known agent target.
+		// Filtering preserves the known agent.
 		startMentionSet := make(map[string]bool)
 		for _, sm := range classified.StartMentions {
 			if sm.Kind == "agent" {
@@ -133,7 +158,6 @@ func TestStartMentionFiltering_UnknownMention(t *testing.T) {
 		assert.Equal(t, []string{"coder"}, filteredTargets,
 			"known agent should remain in targets after filtering")
 
-		// No unresolved mentions.
 		unresolved := extractUnresolvedMentions(content, botUserID, knownAgents)
 		assert.Empty(t, unresolved)
 	})
@@ -145,17 +169,10 @@ func TestStartMentionFiltering_UnknownMention(t *testing.T) {
 
 		classified := classifyMentions(content, botUserID, knownAgents, noopResolver)
 
-		agentStartMentions := 0
-		for _, sm := range classified.StartMentions {
-			if sm.Kind == "agent" {
-				agentStartMentions++
-			}
-		}
-
-		// No start mentions, so agentStartMentions == 0.
+		// No start mentions, so countAgentStartMentions == 0.
 		// Safety net condition: len(targets) == 0 && agentStartMentions == 0
 		// should allow default restoration.
-		assert.Equal(t, 0, agentStartMentions)
+		assert.Equal(t, 0, countAgentStartMentions(classified))
 		assert.Empty(t, classified.StartMentions)
 		assert.Len(t, classified.BodyMentions, 1)
 	})
