@@ -199,16 +199,17 @@ type ProjectProvider struct {
 
 // ProjectSettings represents project configuration settings.
 type ProjectSettings struct {
-	ActiveProfile        string                 `json:"activeProfile,omitempty"`
-	DefaultTemplate      string                 `json:"defaultTemplate,omitempty"`
-	DefaultHarnessConfig string                 `json:"defaultHarnessConfig,omitempty"`
-	DefaultModel         string                 `json:"defaultModel,omitempty"`
-	DefaultThinkingLevel *int                   `json:"defaultThinkingLevel,omitempty"`
-	TelemetryEnabled     *bool                  `json:"telemetryEnabled,omitempty"`
-	Bucket               *BucketConfig          `json:"bucket,omitempty"`
-	Runtimes             map[string]interface{} `json:"runtimes,omitempty"`
-	Harnesses            map[string]interface{} `json:"harnesses,omitempty"`
-	Profiles             map[string]interface{} `json:"profiles,omitempty"`
+	ActiveProfile          string                 `json:"activeProfile,omitempty"`
+	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
+	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
+	DefaultModel           string                 `json:"defaultModel,omitempty"`
+	DefaultThinkingLevel   *int                   `json:"defaultThinkingLevel,omitempty"`
+	TelemetryEnabled       *bool                  `json:"telemetryEnabled,omitempty"`
+	AutoExposePortsEnabled *bool                  `json:"autoExposePortsEnabled,omitempty"`
+	Bucket                 *BucketConfig          `json:"bucket,omitempty"`
+	Runtimes               map[string]interface{} `json:"runtimes,omitempty"`
+	Harnesses              map[string]interface{} `json:"harnesses,omitempty"`
+	Profiles               map[string]interface{} `json:"profiles,omitempty"`
 
 	// Default agent limits
 	DefaultMaxTurns      int                  `json:"defaultMaxTurns,omitempty"`

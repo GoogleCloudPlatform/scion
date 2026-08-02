@@ -883,7 +883,7 @@ func TestResolvedSettings_DescriptorsWellFormed(t *testing.T) {
 			assert.NotEmptyf(t, desc.path,
 				"descriptor %q reads agent_defaults but has no path, so it can never "+
 					"report anything but unknown", key)
-		case hubSourceNone, hubSourceTelemetryDefault:
+		case hubSourceNone, hubSourceTelemetryDefault, hubSourceAutoExposePortsDefault:
 			assert.Emptyf(t, desc.path,
 				"descriptor %q does not read agent_defaults but carries a path %v, "+
 					"which is never used and is therefore misleading", key, desc.path)

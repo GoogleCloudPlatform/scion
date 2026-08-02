@@ -145,6 +145,9 @@ type ServerConfig struct {
 	// TelemetryDefault is the default telemetry enabled state for new agents.
 	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
 	TelemetryDefault *bool
+	// AutoExposePortsDefault is the default auto-expose-ports enabled state for new agents.
+	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
+	AutoExposePortsDefault *bool
 	// TelemetryConfig is the full hub-level telemetry config from settings.yaml.
 	// Used to populate default telemetry config on new agents when no per-agent
 	// or template-level telemetry config is set.

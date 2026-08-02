@@ -29,12 +29,13 @@ import (
 // When adding a key here, add it to projectSettingKeys below as well.
 // TestProjectSettingKeys_NoDrift enforces this.
 const (
-	projectSettingDefaultTemplate      = "scion.io/default-template"
-	projectSettingDefaultHarnessConfig = "scion.io/default-harness-config"
-	projectSettingDefaultModel         = "scion.io/default-model"
-	projectSettingDefaultThinkingLevel = "scion.io/default-thinking-level"
-	projectSettingTelemetryEnabled     = "scion.io/telemetry-enabled"
-	projectSettingActiveProfile        = "scion.io/active-profile"
+	projectSettingDefaultTemplate        = "scion.io/default-template"
+	projectSettingDefaultHarnessConfig   = "scion.io/default-harness-config"
+	projectSettingDefaultModel           = "scion.io/default-model"
+	projectSettingDefaultThinkingLevel   = "scion.io/default-thinking-level"
+	projectSettingTelemetryEnabled       = "scion.io/telemetry-enabled"
+	projectSettingAutoExposePortsEnabled = "scion.io/auto-expose-ports-enabled"
+	projectSettingActiveProfile          = "scion.io/active-profile"
 
 	// Default agent limits
 	projectSettingDefaultMaxTurns      = "scion.io/default-max-turns"
@@ -118,6 +119,7 @@ var projectSettingKeys = []string{
 	projectSettingDefaultModel,
 	projectSettingDefaultThinkingLevel,
 	projectSettingTelemetryEnabled,
+	projectSettingAutoExposePortsEnabled,
 	projectSettingActiveProfile,
 
 	// Default agent limits
@@ -240,6 +242,12 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 		}
 	}
 
+	if val, ok := project.Annotations[projectSettingAutoExposePortsEnabled]; ok {
+		if b, err := strconv.ParseBool(val); err == nil {
+			settings.AutoExposePortsEnabled = &b
+		}
+	}
+
 	// Default agent limits
 	if val, ok := project.Annotations[projectSettingDefaultMaxTurns]; ok {
 		if n, err := strconv.Atoi(val); err == nil {
@@ -309,6 +317,12 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 		project.Annotations[projectSettingTelemetryEnabled] = strconv.FormatBool(*settings.TelemetryEnabled)
 	} else {
 		delete(project.Annotations, projectSettingTelemetryEnabled)
+	}
+
+	if settings.AutoExposePortsEnabled != nil {
+		project.Annotations[projectSettingAutoExposePortsEnabled] = strconv.FormatBool(*settings.AutoExposePortsEnabled)
+	} else {
+		delete(project.Annotations, projectSettingAutoExposePortsEnabled)
 	}
 
 	// Default GCP identity

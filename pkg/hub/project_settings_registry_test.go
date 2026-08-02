@@ -38,7 +38,7 @@ const projectSettingsSourceFile = "project_settings_handlers.go"
 // .design/project-templates.md §3.1. It is asserted separately from the drift
 // guard so that adding or removing a setting shows up as a deliberate edit in
 // the diff rather than passing silently.
-const expectedProjectSettingCount = 16
+const expectedProjectSettingCount = 17
 
 // isProjectSettingConstName reports whether an identifier names a project
 // settings annotation key constant.

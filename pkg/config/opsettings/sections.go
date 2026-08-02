@@ -49,6 +49,11 @@ type TelemetrySettings struct {
 	config.V1TelemetryConfig
 }
 
+// AutoExposePortsSettings holds Layer-1 auto-expose ports configuration.
+type AutoExposePortsSettings struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
 // AgentDefaultsSettings holds Layer-1 default agent configuration.
 type AgentDefaultsSettings struct {
 	DefaultTemplate      string            `json:"default_template,omitempty"`
