@@ -273,6 +273,37 @@ func runInit(args []string) int {
 	_, projectHookStatErr := os.Stat(projectHookPath)
 	projectHookStaged := projectHookStatErr == nil
 
+	// Clone git workspace BEFORE pre-start hooks so that provisioners
+	// (e.g. antigravity) see the populated workspace rather than an empty
+	// one.  The clone depends only on environment variables and agent
+	// config — not on anything produced by pre-start hooks.  Running it
+	// first also prevents provisioner-created files (e.g. .agents/) from
+	// causing isWorkspaceEmpty to return false and skipping the clone.
+	// See: https://github.com/ptone/scion/issues/739
+	if err := gitCloneWorkspace(targetUID, targetGID, agentHome); err != nil {
+		log.Error("Git clone failed: %v", err)
+
+		// Update local agent-info.json to error state so local status readers
+		// and the broker heartbeat see the failure and error message.
+		errMsg := fmt.Sprintf("git clone failed: %v", err)
+		_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
+		_ = statusHandler.SetMessage(errMsg)
+
+		// Report error to Hub directly so the agent doesn't stay stuck in "cloning" state.
+		// This is best-effort; the broker heartbeat will also pick up the error from
+		// agent-info.json as a fallback if this call fails (e.g. network unreachable).
+		if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
+			hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if hubErr := hubClient.ReportState(hubCtx, state.PhaseError, "", errMsg); hubErr != nil {
+				log.Error("Failed to report clone error to Hub: %v", hubErr)
+			}
+			hubCancel()
+		} else {
+			log.Info("Hub client not configured, clone error will be relayed via broker heartbeat")
+		}
+		return 1
+	}
+
 	// Run pre-start hooks (after setup, before child process)
 	log.Info("Running pre-start hooks...")
 	if err := lifecycleManager.RunPreStart(); err != nil {
@@ -343,31 +374,6 @@ func runInit(args []string) int {
 			harnessEnvOverlay = overlay
 			log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
 		}
-	}
-
-	// Clone git workspace if configured (hub-first git projects)
-	if err := gitCloneWorkspace(targetUID, targetGID, agentHome); err != nil {
-		log.Error("Git clone failed: %v", err)
-
-		// Update local agent-info.json to error state so local status readers
-		// and the broker heartbeat see the failure and error message.
-		errMsg := fmt.Sprintf("git clone failed: %v", err)
-		_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-		_ = statusHandler.SetMessage(errMsg)
-
-		// Report error to Hub directly so the agent doesn't stay stuck in "cloning" state.
-		// This is best-effort; the broker heartbeat will also pick up the error from
-		// agent-info.json as a fallback if this call fails (e.g. network unreachable).
-		if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
-			hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if hubErr := hubClient.ReportState(hubCtx, state.PhaseError, "", errMsg); hubErr != nil {
-				log.Error("Failed to report clone error to Hub: %v", hubErr)
-			}
-			hubCancel()
-		} else {
-			log.Info("Hub client not configured, clone error will be relayed via broker heartbeat")
-		}
-		return 1
 	}
 
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
@@ -2022,7 +2028,7 @@ func isWorkspaceEmpty(path string) bool {
 	// Filter out known marker entries that don't indicate a real workspace
 	for _, e := range entries {
 		switch e.Name() {
-		case ".scion", ".scion-volumes":
+		case ".scion", ".scion-volumes", ".agents":
 			// Provisioning marker / shared-dir mount directory — ignore
 			continue
 		default:
