@@ -57,6 +57,30 @@ func TestIsExitError(t *testing.T) {
 	})
 }
 
+func TestIsImageNotFoundOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"docker not found", "Error: No such image: myimage:latest", true},
+		{"podman not found", "Error: nonexistent: image not known", true},
+		{"generic not found", "image not found", true},
+		{"daemon unreachable", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", false},
+		{"connection refused", "Error response from daemon: dial tcp 127.0.0.1:2376: connect: connection refused", false},
+		{"permission denied", "Got permission denied while trying to connect to the Docker daemon socket", false},
+		{"empty output", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isImageNotFoundOutput(tc.output)
+			if got != tc.want {
+				t.Errorf("isImageNotFoundOutput(%q) = %v, want %v", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDockerRuntime_ImageExists_ErrorPropagation(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -75,9 +99,10 @@ func TestDockerRuntime_ImageExists_ErrorPropagation(t *testing.T) {
 		}
 	})
 
-	t.Run("image not found (exit code)", func(t *testing.T) {
+	t.Run("image not found (exit code with not-found output)", func(t *testing.T) {
 		mockCmd := filepath.Join(tmpDir, "docker-notfound")
-		if err := os.WriteFile(mockCmd, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		script := "#!/bin/sh\necho 'Error: No such image: nonexistent:latest' >&2\nexit 1\n"
+		if err := os.WriteFile(mockCmd, []byte(script), 0755); err != nil {
 			t.Fatal(err)
 		}
 		rt := &DockerRuntime{Command: mockCmd}
@@ -87,6 +112,22 @@ func TestDockerRuntime_ImageExists_ErrorPropagation(t *testing.T) {
 		}
 		if exists {
 			t.Error("expected exists=false for not-found image")
+		}
+	})
+
+	t.Run("daemon unreachable (exit code without not-found output)", func(t *testing.T) {
+		mockCmd := filepath.Join(tmpDir, "docker-daemon-down")
+		script := "#!/bin/sh\necho 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?' >&2\nexit 1\n"
+		if err := os.WriteFile(mockCmd, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		rt := &DockerRuntime{Command: mockCmd}
+		exists, err := rt.ImageExists(context.Background(), "myimage:latest")
+		if err == nil {
+			t.Error("expected error for daemon unreachable, got nil")
+		}
+		if exists {
+			t.Error("expected exists=false on daemon failure")
 		}
 	})
 
@@ -120,9 +161,10 @@ func TestPodmanRuntime_ImageExists_ErrorPropagation(t *testing.T) {
 		}
 	})
 
-	t.Run("image not found (exit code)", func(t *testing.T) {
+	t.Run("image not found (exit code with not-found output)", func(t *testing.T) {
 		mockCmd := filepath.Join(tmpDir, "podman-notfound")
-		if err := os.WriteFile(mockCmd, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		script := "#!/bin/sh\necho 'Error: nonexistent: image not known' >&2\nexit 125\n"
+		if err := os.WriteFile(mockCmd, []byte(script), 0755); err != nil {
 			t.Fatal(err)
 		}
 		rt := &PodmanRuntime{Command: mockCmd}
@@ -132,6 +174,22 @@ func TestPodmanRuntime_ImageExists_ErrorPropagation(t *testing.T) {
 		}
 		if exists {
 			t.Error("expected exists=false for not-found image")
+		}
+	})
+
+	t.Run("daemon unreachable (exit code without not-found output)", func(t *testing.T) {
+		mockCmd := filepath.Join(tmpDir, "podman-daemon-down")
+		script := "#!/bin/sh\necho 'Cannot connect to Podman. Is the podman machine running?' >&2\nexit 125\n"
+		if err := os.WriteFile(mockCmd, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		rt := &PodmanRuntime{Command: mockCmd}
+		exists, err := rt.ImageExists(context.Background(), "myimage:latest")
+		if err == nil {
+			t.Error("expected error for daemon unreachable, got nil")
+		}
+		if exists {
+			t.Error("expected exists=false on daemon failure")
 		}
 	})
 
@@ -165,9 +223,10 @@ func TestAppleContainerRuntime_ImageExists_ErrorPropagation(t *testing.T) {
 		}
 	})
 
-	t.Run("image not found (exit code)", func(t *testing.T) {
+	t.Run("image not found (exit code with not-found output)", func(t *testing.T) {
 		mockCmd := filepath.Join(tmpDir, "container-notfound")
-		if err := os.WriteFile(mockCmd, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		script := "#!/bin/sh\necho 'Error: image not found: nonexistent:latest' >&2\nexit 1\n"
+		if err := os.WriteFile(mockCmd, []byte(script), 0755); err != nil {
 			t.Fatal(err)
 		}
 		rt := &AppleContainerRuntime{Command: mockCmd}
@@ -177,6 +236,22 @@ func TestAppleContainerRuntime_ImageExists_ErrorPropagation(t *testing.T) {
 		}
 		if exists {
 			t.Error("expected exists=false for not-found image")
+		}
+	})
+
+	t.Run("daemon unreachable (exit code without not-found output)", func(t *testing.T) {
+		mockCmd := filepath.Join(tmpDir, "container-daemon-down")
+		script := "#!/bin/sh\necho 'Error: unable to connect to container runtime service' >&2\nexit 1\n"
+		if err := os.WriteFile(mockCmd, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		rt := &AppleContainerRuntime{Command: mockCmd}
+		exists, err := rt.ImageExists(context.Background(), "myimage:latest")
+		if err == nil {
+			t.Error("expected error for daemon unreachable, got nil")
+		}
+		if exists {
+			t.Error("expected exists=false on daemon failure")
 		}
 	})
 
