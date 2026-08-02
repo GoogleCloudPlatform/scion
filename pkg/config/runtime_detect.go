@@ -105,8 +105,10 @@ func OverrideRuntimeDetection(
 	origRC := runCheckFunc
 	lookPathFunc = lookPath
 	runCheckFunc = runCheck
+	resetDetectLocalRuntimeCache()
 	return func() {
 		lookPathFunc = origLP
 		runCheckFunc = origRC
+		resetDetectLocalRuntimeCache()
 	}
 }

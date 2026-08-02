@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/knadh/koanf/parsers/json"
@@ -31,6 +32,23 @@ import (
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 )
+
+// detectLocalRuntimeOnce caches the result of DetectLocalRuntime so that
+// expensive external-command probes (container, podman, docker --version)
+// run at most once per process. GetDefaultSettingsDataYAML, which is called
+// on every LoadSettingsKoanf invocation, uses this wrapper.
+var detectLocalRuntimeOnce = sync.OnceValues(func() (string, error) {
+	return DetectLocalRuntime()
+})
+
+// resetDetectLocalRuntimeCache resets the cached runtime detection result.
+// This must be called in tests that override lookPathFunc/runCheckFunc to
+// ensure the new mock is picked up.
+func resetDetectLocalRuntimeCache() {
+	detectLocalRuntimeOnce = sync.OnceValues(func() (string, error) {
+		return DetectLocalRuntime()
+	})
+}
 
 // LoadSettingsKoanf loads settings using Koanf with provider priority:
 // 1. Embedded defaults (YAML) with OS-specific runtime adjustment
@@ -257,7 +275,13 @@ func GetDefaultSettingsDataYAML() ([]byte, error) {
 	if goruntime.GOOS != "darwin" {
 		return getDefaultSettingsYAMLForRuntime("docker")
 	}
-	return getDefaultSettingsYAMLForRuntime("container")
+	// On macOS, detect the available runtime instead of hardcoding "container".
+	// This prevents failures when only podman is installed (no Apple Container CLI).
+	detected, err := detectLocalRuntimeOnce()
+	if err != nil {
+		return getDefaultSettingsYAMLForRuntime("container") // fallback
+	}
+	return getDefaultSettingsYAMLForRuntime(detected)
 }
 
 // GetProjectDefaultSettingsYAML returns the embedded project-level default settings YAML.
