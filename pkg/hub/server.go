@@ -3406,6 +3406,13 @@ func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 	// offline or owned elsewhere. Async so it never blocks the connect path;
 	// idempotent + CAS-gated so concurrent drains execute each item once.
 	go s.reconcileBroker(context.Background(), brokerID)
+
+	// Notification redeliver (ptone/scion#495): drain undispatched agent
+	// notifications for agents on this broker. Async + CAS-gated, same
+	// pattern as reconcileBroker above.
+	if s.notificationDispatcher != nil {
+		go s.drainUndispatchedNotifications(context.Background(), brokerID)
+	}
 }
 
 // isWebSocketUpgrade checks if the request is a WebSocket upgrade request.
