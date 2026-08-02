@@ -135,6 +135,13 @@ const (
 	// renumbering is safe.
 	LockDataMigrations AdvisoryLockKey = 0x5C100016
 
+	// LockNotificationDispatchSweep guards the periodic undispatched-notification
+	// re-delivery sweep so only one replica per tick scans and retries agent
+	// notifications that were not dispatched (e.g. subscriber had no broker).
+	// Originally allocated 0x5C10000D but that collided with LockTelegramWebhook
+	// after upstream added it; renumbered to 0x5C100017.
+	LockNotificationDispatchSweep AdvisoryLockKey = 0x5C100017
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant
