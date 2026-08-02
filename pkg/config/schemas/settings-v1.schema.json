@@ -1033,6 +1033,13 @@
           "type": "string",
           "description": "GCP project ID for telemetry (Cloud Monitoring). Overrides auto-detection from SA credentials.",
           "x-since": "1"
+        },
+        "cloud_logging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable direct Cloud Logging output. When set, the server writes structured logs to Cloud Logging. The SCION_CLOUD_LOGGING env var takes precedence over this setting.",
+          "x-env-var": "SCION_CLOUD_LOGGING",
+          "x-since": "1"
         }
       },
       "additionalProperties": false

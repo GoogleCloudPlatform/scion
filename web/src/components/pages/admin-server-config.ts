@@ -150,6 +150,8 @@ interface V1TelemetryCloudConfig {
   protocol?: string;
   headers?: Record<string, string>;
   provider?: string;
+  gcp_project_id?: string;
+  cloud_logging?: boolean;
 }
 
 interface V1TelemetryHubConfig {
@@ -329,6 +331,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'telemetry.cloud.endpoint': 'Cloud Export Endpoint',
   'telemetry.cloud.protocol': 'Cloud Export Protocol',
   'telemetry.cloud.provider': 'Cloud Export Provider',
+  'telemetry.cloud.gcp_project_id': 'GCP Project ID',
+  'telemetry.cloud.cloud_logging': 'Cloud Logging',
   'telemetry.hub.enabled': 'Hub Reporting Enabled',
   'telemetry.hub.report_interval': 'Hub Report Interval',
   'telemetry.local.enabled': 'Local Telemetry Enabled',
@@ -470,6 +474,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private telemetryCloudEndpoint = '';
   @state() private telemetryCloudProtocol = '';
   @state() private telemetryCloudProvider = '';
+  @state() private telemetryCloudGcpProjectId = '';
+  @state() private telemetryCloudCloudLogging = false;
   @state() private telemetryHubEnabled = false;
   @state() private telemetryHubReportInterval = '';
   @state() private telemetryLocalEnabled = false;
@@ -1424,6 +1430,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.telemetryCloudEndpoint = tel.cloud.endpoint || '';
         this.telemetryCloudProtocol = tel.cloud.protocol || '';
         this.telemetryCloudProvider = tel.cloud.provider || '';
+        this.telemetryCloudGcpProjectId = tel.cloud.gcp_project_id || '';
+        this.telemetryCloudCloudLogging = tel.cloud.cloud_logging || false;
       }
       if (tel.hub) {
         this.telemetryHubEnabled = tel.hub.enabled || false;
@@ -1633,6 +1641,8 @@ export class ScionPageAdminServerConfig extends LitElement {
           endpoint: this.telemetryCloudEndpoint,
           protocol: this.telemetryCloudProtocol,
           provider: this.telemetryCloudProvider,
+          gcp_project_id: this.telemetryCloudGcpProjectId || undefined,
+          cloud_logging: this.telemetryCloudCloudLogging || undefined,
         };
       }
       if (ok('telemetry.hub.enabled')) {
@@ -3594,6 +3604,33 @@ export class ScionPageAdminServerConfig extends LitElement {
                   this.telemetryCloudProvider = (e.target as HTMLInputElement).value;
                 }}
               ></sl-input>`
+            )}
+          </div>
+          <div class="form-field">
+            <label>GCP Project ID</label>
+            ${this.renderFieldValue(
+              'telemetry.cloud.gcp_project_id',
+              this.telemetryCloudGcpProjectId || '—',
+              html`${this.renderEnvBadge('telemetry.cloud.gcp_project_id')}<sl-input
+                value=${this.telemetryCloudGcpProjectId}
+                placeholder="e.g., my-gcp-project"
+                @sl-input=${(e: Event) => {
+                  this.telemetryCloudGcpProjectId = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
+          </div>
+          <div class="form-field">
+            ${this.renderFieldValue(
+              'telemetry.cloud.cloud_logging',
+              this.telemetryCloudCloudLogging ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('telemetry.cloud.cloud_logging')}<sl-switch
+                ?checked=${this.telemetryCloudCloudLogging}
+                @sl-change=${(e: Event) => {
+                  this.telemetryCloudCloudLogging = (e.target as HTMLInputElement).checked;
+                }}
+                >Enable Cloud Logging</sl-switch
+              >`
             )}
           </div>
         </div>
