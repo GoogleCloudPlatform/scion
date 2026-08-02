@@ -869,17 +869,17 @@ func TestWriteProjectSettings_V1PlacesProjectIDUnderHub(t *testing.T) {
 		t.Skipf("default project settings are not v1 format (schema_version=%q), skipping v1-specific test", v)
 	}
 
-	// grove_id should NOT be at the top level
-	if _, exists := settingsMap["grove_id"]; exists {
-		t.Error("grove_id should not be at the top level in v1 format; expected it under hub.grove_id")
+	// project_id should NOT be at the top level
+	if _, exists := settingsMap["project_id"]; exists {
+		t.Error("project_id should not be at the top level in v1 format; expected it under hub.project_id")
 	}
 
-	// grove_id should be under hub.grove_id
+	// project_id should be under hub.project_id
 	hub, ok := settingsMap["hub"].(map[string]interface{})
 	if !ok {
 		t.Fatal("expected hub section in settings")
 	}
-	if hub["grove_id"] != projectID {
-		t.Errorf("expected hub.grove_id=%q, got %v", projectID, hub["grove_id"])
+	if hub["project_id"] != projectID {
+		t.Errorf("expected hub.project_id=%q, got %v", projectID, hub["project_id"])
 	}
 }

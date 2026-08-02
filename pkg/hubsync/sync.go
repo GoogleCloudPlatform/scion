@@ -272,7 +272,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		} else {
 			// Generate project_id for projects that don't have one
 			projectID = config.GenerateProjectIDForDir(filepath.Dir(resolvedPath))
-			if err := config.UpdateSetting(resolvedPath, "grove_id", projectID, isGlobal); err != nil {
+			if err := config.UpdateSetting(resolvedPath, "project_id", projectID, isGlobal); err != nil {
 				return nil, fmt.Errorf("failed to save project_id: %w", err)
 			}
 			// Reload settings to get the updated project_id
@@ -303,7 +303,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		brokerID = settings.Hub.BrokerID
 	}
 
-	// Prefer hub.groveId (explicit link to a hub project) over project_id
+	// Prefer hub.projectId (explicit link to a hub project) over project_id
 	// (deterministic local identity). For hub API calls, we need the ID
 	// the hub knows the project by.
 	effectiveProjectID := projectID
@@ -384,11 +384,11 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 					case ProjectChoiceLink:
 						// Store the hub project ID separately — don't overwrite
 						// the local project_id.
-						if err := config.UpdateSetting(resolvedPath, "hub.groveId", selectedID, isGlobal); err != nil {
+						if err := config.UpdateSetting(resolvedPath, "hub.projectId", selectedID, isGlobal); err != nil {
 							return nil, fmt.Errorf("failed to save hub project ID: %w", err)
 						}
 						hubCtx.ProjectID = selectedID
-						debugf("Stored hub.groveId: %s", selectedID)
+						debugf("Stored hub.projectId: %s", selectedID)
 					case ProjectChoiceRegisterNew:
 						// Register as new project with the existing local project_id.
 						// The hub will assign its own ID if needed.
@@ -409,13 +409,13 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		if err := registerProject(context.Background(), hubCtx, projectName, isGlobal); err != nil {
 			return nil, wrapHubError(fmt.Errorf("failed to register project: %w", err))
 		}
-		// Reload settings to get updated broker ID and hub.groveId
+		// Reload settings to get updated broker ID and hub.projectId
 		settings, err = config.LoadSettings(resolvedPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to reload settings: %w", err)
 		}
 		hubCtx.Settings = settings
-		// Prefer hub.groveId (explicit link) over project_id (deterministic local ID)
+		// Prefer hub.projectId (explicit link) over project_id (deterministic local ID)
 		if hgid := settings.GetHubProjectID(); hgid != "" {
 			hubCtx.ProjectID = hgid
 		} else {
@@ -1281,7 +1281,7 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	// Don't overwrite project_id — changing it shifts the external config
 	// directory, orphaning settings.
 	if resp.Project.ID != hubCtx.ProjectID {
-		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.groveId", resp.Project.ID, isGlobal); err != nil {
+		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
 			fmt.Printf("Warning: failed to save hub project ID: %v\n", err)
 		} else {
 			hubCtx.ProjectID = resp.Project.ID

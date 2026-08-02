@@ -1259,8 +1259,8 @@ server:
 	if !strings.Contains(content, "endpoint") {
 		t.Error("hub.endpoint should be preserved")
 	}
-	if !strings.Contains(content, "grove_id") {
-		t.Error("hub.grove_id should be preserved")
+	if !strings.Contains(content, "project_id") {
+		t.Error("hub.project_id should be preserved")
 	}
 }
 

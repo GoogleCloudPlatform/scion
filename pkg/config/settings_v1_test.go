@@ -3087,8 +3087,8 @@ hub:
 	version, _ := DetectSettingsFormat(data)
 	assert.Equal(t, "1", version, "legacy file should be migrated to v1 after UpdateSetting")
 
-	// Verify the update was applied
-	assert.Contains(t, string(data), "grove_id: my-grove-id")
+	// Verify the update was applied (struct tags now use project_id)
+	assert.Contains(t, string(data), "project_id: my-grove-id")
 
 	// Verify original values were preserved
 	assert.Contains(t, string(data), "active_profile: local")
