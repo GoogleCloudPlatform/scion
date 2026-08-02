@@ -1713,7 +1713,7 @@ func chownTreeRootOwned(root string, uid, gid int) error {
 			return nil
 		}
 		if stat.Uid == 0 {
-			if chErr := os.Chown(path, uid, gid); chErr != nil {
+			if chErr := os.Lchown(path, uid, gid); chErr != nil {
 				log.Error("chownTreeRootOwned: failed to chown %s: %v", path, chErr)
 			}
 		}

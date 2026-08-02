@@ -237,7 +237,8 @@ def _generate_hooks_json(home: str) -> None:
 
     # AGY only fires project-local hooks. The global path
     # (~/.gemini/antigravity-cli/hooks.json) loads but never executes.
-    agents_dir = os.path.join("/workspace", ".agents")
+    workspace_path = os.environ.get("SCION_WORKSPACE_PATH", "/workspace")
+    agents_dir = os.path.join(workspace_path, ".agents")
     try:
         os.makedirs(agents_dir, exist_ok=True)
         hooks_path = os.path.join(agents_dir, "hooks.json")
@@ -249,11 +250,11 @@ def _generate_hooks_json(home: str) -> None:
         # Fix ownership — provisioner runs as root but workspace is owned
         # by the scion user. Without this, the broker (non-root) cannot
         # delete root-owned files, blocking agent deletion.
-        ws_stat = os.stat('/workspace')
+        ws_stat = os.stat(workspace_path)
         target_uid, target_gid = ws_stat.st_uid, ws_stat.st_gid
         if target_uid != 0:
-            os.chown(agents_dir, target_uid, target_gid)
-            os.chown(hooks_path, target_uid, target_gid)
+            os.lchown(agents_dir, target_uid, target_gid)
+            os.lchown(hooks_path, target_uid, target_gid)
     except (OSError, PermissionError) as exc:
         print(
             f"antigravity provision: warning: could not write hooks.json "
