@@ -82,6 +82,13 @@ func init() {
 			New: func() any { return &TelemetrySettings{} },
 		},
 		{
+			Name: "auto_expose_ports",
+			KoanfPaths: []string{
+				"auto_expose_ports.enabled",
+			},
+			New: func() any { return &AutoExposePortsSettings{} },
+		},
+		{
 			Name: "agent_defaults",
 			KoanfPaths: []string{
 				"default_template", "default_harness_config",
@@ -261,6 +268,13 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"admin_mode":          map[string]interface{}{"type": "boolean"},
 				"maintenance_message": map[string]interface{}{"type": "string"},
+			},
+			"additionalProperties": false,
+		},
+		"auto_expose_ports": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"enabled": map[string]interface{}{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		},

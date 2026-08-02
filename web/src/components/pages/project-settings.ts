@@ -55,6 +55,7 @@ interface ProjectSettings {
   defaultTemplate?: string | undefined;
   defaultHarnessConfig?: string | undefined;
   telemetryEnabled?: boolean | null | undefined;
+  autoExposePortsEnabled?: boolean | null | undefined;
   activeProfile?: string | undefined;
   defaultMaxTurns?: number | undefined;
   defaultMaxModelCalls?: number | undefined;
@@ -158,7 +159,13 @@ export class ScionPageProjectSettings extends LitElement {
   private configTelemetryEnabled: boolean | null = null;
 
   @state()
+  private configAutoExposePortsEnabled: boolean | null = null;
+
+  @state()
   private hubTelemetryDefault: boolean | null = null;
+
+  @state()
+  private hubAutoExposePortsDefault: boolean | null = null;
 
   /** Per-setting hub default info from the resolved endpoint. */
   @state()
@@ -961,6 +968,14 @@ export class ScionPageProjectSettings extends LitElement {
         } else {
           this.hubTelemetryDefault = null;
         }
+
+        // Extract auto-expose ports hub default from the resolved response.
+        const apeEntry = this.resolvedSettings['scion.io/auto-expose-ports-enabled'];
+        if (apeEntry?.hubDefault === 'present' && apeEntry.hubValue != null) {
+          this.hubAutoExposePortsDefault = apeEntry.hubValue as boolean;
+        } else {
+          this.hubAutoExposePortsDefault = null;
+        }
       } else if (resolvedResponse.status === 404) {
         // Backward compatibility: older hub without the resolved endpoint.
         // Fall back to the plain settings endpoint with generic placeholders.
@@ -991,6 +1006,7 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultTemplate = this.settings.defaultTemplate || '';
       this.configDefaultHarnessConfig = this.settings.defaultHarnessConfig || '';
       this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
+      this.configAutoExposePortsEnabled = this.settings.autoExposePortsEnabled ?? null;
       this.configDefaultMaxTurns = this.settings.defaultMaxTurns || 0;
       this.configDefaultMaxModelCalls = this.settings.defaultMaxModelCalls || 0;
       this.configDefaultMaxDuration = this.settings.defaultMaxDuration || '';
@@ -1165,6 +1181,7 @@ export class ScionPageProjectSettings extends LitElement {
         defaultHarnessConfig: this.configDefaultHarnessConfig || undefined,
         defaultModel: defaultModel || undefined,
         telemetryEnabled: this.configTelemetryEnabled,
+        autoExposePortsEnabled: this.configAutoExposePortsEnabled,
         defaultMaxTurns: this.configDefaultMaxTurns || undefined,
         defaultMaxModelCalls: this.configDefaultMaxModelCalls || undefined,
         defaultMaxDuration: this.configDefaultMaxDuration || undefined,
@@ -1743,6 +1760,32 @@ export class ScionPageProjectSettings extends LitElement {
                 </sl-select>
                 <span class="field-help"
                   >Controls telemetry for agents in this project. "Use hub default" inherits the server-level setting.</span
+                >
+              </div>
+
+              <div class="config-field ${this.isHubDefault('scion.io/auto-expose-ports-enabled') ? 'hub-inherited' : ''}">
+                <label>Auto-Expose Ports ${this.renderHubIndicator('scion.io/auto-expose-ports-enabled')}</label>
+                <sl-select
+                  value=${this.configAutoExposePortsEnabled === true
+                    ? 'enabled'
+                    : this.configAutoExposePortsEnabled === false
+                      ? 'disabled'
+                      : 'inherit'}
+                  ?disabled=${!canEdit}
+                  @sl-change=${(e: Event) => {
+                    const val = (e.target as HTMLSelectElement).value;
+                    this.configAutoExposePortsEnabled =
+                      val === 'enabled' ? true : val === 'disabled' ? false : null;
+                  }}
+                >
+                  <sl-option value="inherit"
+                    >Use hub default (${this.hubAutoExposePortsDefault === null ? '…' : this.hubAutoExposePortsDefault ? 'enabled' : 'disabled'})</sl-option
+                  >
+                  <sl-option value="enabled">Enabled</sl-option>
+                  <sl-option value="disabled">Disabled</sl-option>
+                </sl-select>
+                <span class="field-help"
+                  >Automatically detect and expose listening TCP ports in agent containers. "Use hub default" inherits the server-level setting.</span
                 >
               </div>
 

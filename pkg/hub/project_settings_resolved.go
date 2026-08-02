@@ -171,6 +171,10 @@ const (
 	// agent_defaults has no telemetry field would be a false statement about a
 	// question asked of the wrong source.
 	hubSourceTelemetryDefault
+
+	// hubSourceAutoExposePortsDefault: Server.config.AutoExposePortsDefault,
+	// which is a *bool and therefore presence-faithful.
+	hubSourceAutoExposePortsDefault
 )
 
 // resolvedSettingDescriptor carries the per-key knowledge that the annotation
@@ -244,6 +248,9 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 	},
 	projectSettingTelemetryEnabled: {
 		source: hubSourceTelemetryDefault,
+	},
+	projectSettingAutoExposePortsEnabled: {
+		source: hubSourceAutoExposePortsDefault,
 	},
 	projectSettingActiveProfile: {
 		source: hubSourceNone,
@@ -422,6 +429,13 @@ func (s *Server) hubDefaultFor(
 		// is a nil pointer either way.
 		if s.config.TelemetryDefault != nil {
 			return ResolvedHubDefaultPresent, *s.config.TelemetryDefault
+		}
+		return ResolvedHubDefaultAbsent, nil
+
+	case hubSourceAutoExposePortsDefault:
+		// *bool — same presence-faithful pattern as TelemetryDefault.
+		if s.config.AutoExposePortsDefault != nil {
+			return ResolvedHubDefaultPresent, *s.config.AutoExposePortsDefault
 		}
 		return ResolvedHubDefaultAbsent, nil
 

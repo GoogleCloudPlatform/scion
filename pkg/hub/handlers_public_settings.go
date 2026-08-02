@@ -20,7 +20,8 @@ import (
 
 // PublicSettingsResponse contains non-sensitive server settings for the web UI.
 type PublicSettingsResponse struct {
-	TelemetryEnabled bool `json:"telemetryEnabled"`
+	TelemetryEnabled       bool `json:"telemetryEnabled"`
+	AutoExposePortsEnabled bool `json:"autoExposePortsEnabled"`
 }
 
 func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
@@ -29,12 +30,18 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	enabled := false
+	telemetryEnabled := false
 	if s.config.TelemetryDefault != nil {
-		enabled = *s.config.TelemetryDefault
+		telemetryEnabled = *s.config.TelemetryDefault
+	}
+
+	autoExposePortsEnabled := false
+	if s.config.AutoExposePortsDefault != nil {
+		autoExposePortsEnabled = *s.config.AutoExposePortsDefault
 	}
 
 	writeJSON(w, http.StatusOK, PublicSettingsResponse{
-		TelemetryEnabled: enabled,
+		TelemetryEnabled:       telemetryEnabled,
+		AutoExposePortsEnabled: autoExposePortsEnabled,
 	})
 }

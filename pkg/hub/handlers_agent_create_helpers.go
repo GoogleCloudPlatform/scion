@@ -417,6 +417,26 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		}
 	}
 
+	// Apply project-level AutoExposePortsEnabled override.
+	// Only set the env var if the agent's own config does not already specify it,
+	// so agent-level settings take priority over project-level.
+	if project != nil && project.Annotations != nil {
+		if val, ok := project.Annotations[projectSettingAutoExposePortsEnabled]; ok {
+			enabled, err := strconv.ParseBool(val)
+			if err == nil {
+				if agent.AppliedConfig.InlineConfig == nil {
+					agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
+				}
+				if agent.AppliedConfig.InlineConfig.Env == nil {
+					agent.AppliedConfig.InlineConfig.Env = make(map[string]string)
+				}
+				if _, exists := agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"]; !exists {
+					agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = strconv.FormatBool(enabled)
+				}
+			}
+		}
+	}
+
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
 	// so the provisioner's existing Step 3b handles them.
 	s.mergeInjectedSkills(ctx, agent, project)

@@ -85,6 +85,9 @@ type Layer1Snapshot struct {
 	TelemetryEnabled *bool
 	TelemetryConfig  *config.V1TelemetryConfig
 
+	// Auto-expose ports
+	AutoExposePortsEnabled *bool
+
 	// Agent defaults
 	DefaultTemplate      string
 	DefaultHarnessConfig string
@@ -567,6 +570,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		v := k.Bool("telemetry.enabled")
 		snap.TelemetryEnabled = &v
 	}
+
+	// Auto-expose ports
+	if k.Exists("auto_expose_ports.enabled") {
+		v := k.Bool("auto_expose_ports.enabled")
+		snap.AutoExposePortsEnabled = &v
+	}
 	teleSub := k.Cut("telemetry")
 	if teleSub != nil && len(teleSub.Keys()) > 0 {
 		data, err := json.Marshal(teleSub.Raw())
@@ -684,6 +693,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.TelemetryConfig != nil {
 		s.config.TelemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)
 		applied = append(applied, "telemetry_config")
+	}
+
+	// Auto-expose ports
+	if snap.AutoExposePortsEnabled != nil {
+		oldVal := s.config.AutoExposePortsDefault
+		s.config.AutoExposePortsDefault = snap.AutoExposePortsEnabled
+		if oldVal == nil || *oldVal != *snap.AutoExposePortsEnabled {
+			applied = append(applied, "auto_expose_ports_default")
+		}
 	}
 
 	// Admin emails

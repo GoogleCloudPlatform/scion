@@ -206,6 +206,8 @@ interface ServerConfigResponse {
   default_model?: string;
   default_thinking_level?: number | null;
 
+  auto_expose_ports?: { enabled?: boolean };
+
   // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
   settings_tier?: 'db' | 'file';
   env_overrides?: string[];
@@ -319,6 +321,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'server.hub.auto_suspend_stalled': 'Auto-Suspend Stalled Agents',
   'server.hub.soft_delete_retention': 'Soft Delete Retention',
   'server.hub.soft_delete_retain_files': 'Retain Files on Soft Delete',
+  // auto_expose_ports section
+  'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -456,6 +460,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Secrets
   @state() private secretsBackend = '';
   @state() private secretsGCPProjectId = '';
+
+  // Auto-expose ports
+  @state() private autoExposePortsEnabled = false;
 
   // Telemetry
   @state() private telemetryEnabled = false;
@@ -1429,6 +1436,12 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
     }
 
+    // Auto-expose ports
+    const aep = data.auto_expose_ports;
+    if (aep) {
+      this.autoExposePortsEnabled = aep.enabled || false;
+    }
+
     // Runtimes, harness_configs, profiles preserved via rawConfig
 
     // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
@@ -1638,6 +1651,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.telemetry = telemetry;
     }
 
+    // Auto-expose ports — Layer-1
+    if (ok('auto_expose_ports.enabled')) {
+      payload.auto_expose_ports = {
+        enabled: this.autoExposePortsEnabled,
+      };
+    }
+
     // Preserve runtimes, harness_configs, profiles from raw config
     if (this.rawConfig?.runtimes) payload.runtimes = this.rawConfig.runtimes;
     if (this.rawConfig?.harness_configs) payload.harness_configs = this.rawConfig.harness_configs;
@@ -1839,6 +1859,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       };
     }
     if (Object.keys(telemetry).length > 0) payload.telemetry = telemetry;
+
+    // Auto-expose ports
+    if (ok('auto_expose_ports.enabled')) {
+      payload.auto_expose_ports = {
+        enabled: this.autoExposePortsEnabled,
+      };
+    }
 
     // Preserve runtimes, harness_configs, profiles from raw config
     if (this.rawConfig?.runtimes) payload.runtimes = this.rawConfig.runtimes;
@@ -2691,6 +2718,20 @@ export class ScionPageAdminServerConfig extends LitElement {
                     >`
                   )}
                   <span class="hint">Default opt-in state for new agents</span>
+                </div>
+                <div class="form-field full-width">
+                  ${this.renderFieldValue(
+                    'auto_expose_ports.enabled',
+                    this.autoExposePortsEnabled ? 'Enabled' : 'Disabled',
+                    html`${this.renderEnvBadge('auto_expose_ports.enabled')}<sl-switch
+                      ?checked=${this.autoExposePortsEnabled}
+                      @sl-change=${(e: Event) => {
+                        this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
+                      }}
+                      >Enable Auto-Expose Ports</sl-switch
+                    >`
+                  )}
+                  <span class="hint">Automatically detect and expose listening TCP ports in agent containers</span>
                 </div>
                 <div class="form-field">
                   <label>Default Model</label>
