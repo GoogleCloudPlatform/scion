@@ -313,3 +313,52 @@ func TestDrainUndispatchedNotifications_FiltersByBroker(t *testing.T) {
 	require.Len(t, remaining, 1)
 	assert.Equal(t, otherSubscriber.Slug, remaining[0].SubscriberID)
 }
+
+// TestDrainUndispatchedNotifications_PicksUpRecentNotifications verifies that
+// the broker-connect hook (non-empty brokerID) does NOT apply the 60s grace
+// period. This is the R1 fix: a notification created just seconds ago should
+// be drained immediately when the broker connects.
+func TestDrainUndispatchedNotifications_PicksUpRecentNotifications(t *testing.T) {
+	env := setupNotificationTest(t)
+	ctx := context.Background()
+
+	// Create a very recent undispatched notification (within the 60s grace
+	// period that the sweep would skip).
+	recentNotif := &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: env.sub.ID,
+		AgentID:        env.watched.ID,
+		ProjectID:      env.project.ID,
+		SubscriberType: store.SubscriberTypeAgent,
+		SubscriberID:   env.subscriber.Slug,
+		Status:         "COMPLETED",
+		Message:        "watched-agent has reached a state of COMPLETED",
+		Dispatched:     false,
+		// CreatedAt defaults to time.Now() — well within the 60s grace period
+	}
+	require.NoError(t, env.store.CreateNotification(ctx, recentNotif))
+
+	// Verify sweep mode does NOT see this notification (it's too recent).
+	sweepNotifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	assert.Empty(t, sweepNotifs, "sweep should not see notifications within grace period")
+
+	// Verify broker-connect mode DOES see this notification.
+	brokerNotifs, err := env.store.GetUndispatchedAgentNotifications(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	require.Len(t, brokerNotifs, 1, "broker drain should see recent notifications")
+	assert.Equal(t, env.subscriber.Slug, brokerNotifs[0].SubscriberID)
+
+	// Drain should deliver it.
+	srv := &Server{
+		store:                  env.store,
+		agentLifecycleLog:      slog.Default(),
+		notificationDispatcher: env.nd,
+	}
+	srv.drainUndispatchedNotifications(ctx, tid("broker-1"))
+
+	calls := env.dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, env.subscriber.ID, calls[0].Agent.ID)
+	assert.Contains(t, calls[0].Message, "watched-agent has reached a state of COMPLETED")
+}

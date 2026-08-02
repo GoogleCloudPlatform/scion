@@ -1021,12 +1021,15 @@ type NotificationStore interface {
 	UnmarkNotificationDispatched(ctx context.Context, id string) error
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
-	// with dispatched=false, created before a grace period (60s).
+	// with dispatched=false.
 	//
-	// If brokerID is non-empty, only notifications whose subscriber agent
-	// currently has RuntimeBrokerID == brokerID are returned (broker-connect
-	// fast-path). If brokerID is empty, all undispatched agent notifications
-	// are returned (sweep backstop).
+	// If brokerID is empty (sweep mode), a 60s grace period is applied so
+	// the sweep does not race with an in-flight primary dispatch. All
+	// undispatched agent notifications older than 60s are returned.
+	//
+	// If brokerID is non-empty (broker-connect fast-path), no grace period
+	// is applied and only notifications whose subscriber agent currently
+	// has RuntimeBrokerID == brokerID are returned.
 	//
 	// Results are ordered by created_at ASC (oldest first), limited to 100.
 	GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]Notification, error)

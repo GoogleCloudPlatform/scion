@@ -618,21 +618,26 @@ const undispatchedGracePeriod = 60 * time.Second
 const undispatchedBatchLimit = 100
 
 // GetUndispatchedAgentNotifications returns agent-targeted notifications with
-// dispatched=false, created before a 60s grace period, ordered oldest-first,
-// limited to 100 rows.
+// dispatched=false, ordered oldest-first, limited to 100 rows.
 //
-// When brokerID is non-empty, only notifications whose subscriber agent has
-// RuntimeBrokerID == brokerID are returned (broker-connect hook). When empty,
-// all undispatched agent notifications are returned (sweep backstop).
+// When brokerID is empty (sweep mode), a 60s grace period is applied so the
+// sweep does not race with an in-flight primary dispatch. When brokerID is
+// non-empty (broker-connect hook), no grace period is applied — the hook fires
+// precisely because the broker just came online, so even very recent
+// notifications should be drained immediately.
 func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]store.Notification, error) {
-	cutoff := time.Now().Add(-undispatchedGracePeriod)
-
 	query := s.client.Notification.Query().
 		Where(
 			notification.DispatchedEQ(false),
 			notification.SubscriberTypeEQ(store.SubscriberTypeAgent),
-			notification.CreatedLT(cutoff),
 		)
+
+	// Grace period only in sweep mode (empty brokerID) to avoid racing with
+	// the primary dispatch path's 30s retry + margin.
+	if brokerID == "" {
+		cutoff := time.Now().Add(-undispatchedGracePeriod)
+		query = query.Where(notification.CreatedLT(cutoff))
+	}
 
 	if brokerID != "" {
 		// Filter to notifications whose subscriber agent has this broker.
