@@ -246,6 +246,14 @@ def _generate_hooks_json(home: str) -> None:
             f"antigravity provision: generated hooks.json at {hooks_path}",
             file=sys.stderr,
         )
+        # Fix ownership — provisioner runs as root but workspace is owned
+        # by the scion user. Without this, the broker (non-root) cannot
+        # delete root-owned files, blocking agent deletion.
+        ws_stat = os.stat('/workspace')
+        target_uid, target_gid = ws_stat.st_uid, ws_stat.st_gid
+        if target_uid != 0:
+            os.chown(agents_dir, target_uid, target_gid)
+            os.chown(hooks_path, target_uid, target_gid)
     except (OSError, PermissionError) as exc:
         print(
             f"antigravity provision: warning: could not write hooks.json "
