@@ -147,24 +147,19 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject messages to non-running agents.
-	switch state.Phase(agent.Phase) {
-	case state.PhaseRunning:
-		// OK — proceed to dispatch
-	case state.PhaseSuspended:
-		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
-			fmt.Sprintf("Agent %q is suspended.", agent.Slug), nil)
-		return
-	case state.PhaseStopped:
-		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
-			fmt.Sprintf("Agent %q is stopped.", agent.Slug), nil)
-		return
-	case state.PhaseError:
-		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
-			fmt.Sprintf("Agent %q is in error state.", agent.Slug), nil)
-		return
-	default:
-		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
-			fmt.Sprintf("Agent %q is not yet running (phase: %s).", agent.Slug, agent.Phase), nil)
+	if phase := state.Phase(agent.Phase); phase != state.PhaseRunning {
+		var msg string
+		switch phase {
+		case state.PhaseSuspended:
+			msg = fmt.Sprintf("Agent %q is suspended.", agent.Slug)
+		case state.PhaseStopped:
+			msg = fmt.Sprintf("Agent %q is stopped.", agent.Slug)
+		case state.PhaseError:
+			msg = fmt.Sprintf("Agent %q is in error state.", agent.Slug)
+		default:
+			msg = fmt.Sprintf("Agent %q is not yet running (phase: %s).", agent.Slug, agent.Phase)
+		}
+		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning, msg, nil)
 		return
 	}
 

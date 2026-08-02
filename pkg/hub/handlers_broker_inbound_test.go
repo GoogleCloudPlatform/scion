@@ -248,8 +248,7 @@ func TestHandleBrokerInbound_AllowsRunningAgent(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
-	// Running agent should NOT get a 409 — it may fail later (no dispatcher)
-	// but should pass the phase check. A 503 (no dispatcher) is expected.
-	assert.NotEqual(t, http.StatusConflict, rec.Code,
-		"running agent should pass the phase check")
+	// Running agent passes the phase check but gets 503 because no
+	// dispatcher is configured in the test.
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
