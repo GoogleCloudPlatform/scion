@@ -71,7 +71,7 @@ export function showConfirm(
       cleanup(false);
     });
 
-    // Build the message content. Newlines are preserved with <br>.
+    // Build the message content. Newlines are preserved via CSS white-space.
     const body = document.createElement('div');
     body.style.whiteSpace = 'pre-line';
     body.textContent = message;

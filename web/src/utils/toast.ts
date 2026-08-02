@@ -58,7 +58,7 @@ const DEFAULT_DURATIONS: Record<ToastVariant, number> = {
 /**
  * Show a toast notification using Shoelace's built-in toast stack.
  *
- * @param message  The text to display. HTML is escaped automatically.
+ * @param message  The text to display.
  * @param variant  Visual style — defaults to `'danger'` (most calls are errors).
  * @param options  Optional overrides for icon, duration, and closable state.
  */
@@ -83,22 +83,11 @@ export function showToast(
   iconEl.setAttribute('slot', 'icon');
   alert.appendChild(iconEl);
 
-  // Append escaped message text.
-  const escaped = escapeHtml(message);
+  // Append message text.
   const span = document.createElement('span');
-  span.innerHTML = escaped;
+  span.textContent = message;
   alert.appendChild(span);
 
   document.body.appendChild(alert);
   void (alert as HTMLElement & { toast(): Promise<void> }).toast();
-}
-
-/** Minimal HTML escaping for user-supplied message text. */
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
 }
