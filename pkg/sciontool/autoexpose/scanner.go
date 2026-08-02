@@ -117,12 +117,11 @@ func parseLocalAddress(s string, ipv6 bool) (port int, bindAddr string, err erro
 	hexPort := parts[1]
 
 	// Parse port (always 4 hex digits).
-	var p int
 	portVal, err := strconv.ParseUint(hexPort, 16, 16)
 	if err != nil {
 		return 0, "", fmt.Errorf("invalid port hex %q: %w", hexPort, err)
 	}
-	p = int(portVal)
+	port = int(portVal)
 
 	// Parse IP address.
 	addr, err := parseHexIP(hexIP, ipv6)
@@ -130,7 +129,7 @@ func parseLocalAddress(s string, ipv6 bool) (port int, bindAddr string, err erro
 		return 0, "", err
 	}
 
-	return p, addr, nil
+	return port, addr, nil
 }
 
 // parseHexIP converts a hex-encoded IP from /proc/net/tcp to a human-readable string.
