@@ -256,7 +256,15 @@ func OverlaySettings(auth *api.AuthConfig, h api.Harness, agentDir string) {
 		}
 	}
 
-	auth.SelectedType = selectedType
+	// Guard: reject harness implementation names (e.g. "container-script")
+	// that may have leaked into scion-agent.json via a data-corruption bug.
+	// These are never valid auth types and would confuse auth resolution.
+	// The active repair at run.go cleans up the persisted value, but this
+	// guard prevents the corrupted value from entering the auth path on
+	// the first restart after corruption.
+	if !IsHarnessImplementationName(selectedType) {
+		auth.SelectedType = selectedType
+	}
 }
 
 // ValidateAuth checks a ResolvedAuth for completeness before container launch.

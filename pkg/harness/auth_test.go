@@ -621,6 +621,51 @@ func TestOverlaySettings_NoScionAgentJSON(t *testing.T) {
 	}
 }
 
+// TestOverlaySettings_RejectsHarnessImplementationName verifies that
+// OverlaySettings does NOT set auth.SelectedType when scion-agent.json
+// contains a harness implementation name (e.g. "container-script"). This
+// guards against data corruption where the harness implementation name
+// leaks into AuthSelectedType. See issue #723.
+func TestOverlaySettings_RejectsHarnessImplementationName(t *testing.T) {
+	for _, badValue := range []string{"container-script", "generic", "builtin", "passthrough"} {
+		t.Run(badValue, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			scionAgentPath := filepath.Join(tmpDir, "scion-agent.json")
+			_ = os.WriteFile(scionAgentPath,
+				[]byte(`{"auth_selectedType": "`+badValue+`"}`), 0644)
+
+			auth := api.AuthConfig{}
+			h := New("gemini")
+			OverlaySettings(&auth, h, tmpDir)
+
+			if auth.SelectedType != "" {
+				t.Errorf("SelectedType = %q, want empty (harness implementation name should be rejected)", auth.SelectedType)
+			}
+		})
+	}
+}
+
+// TestOverlaySettings_AcceptsValidAuthType verifies that OverlaySettings still
+// accepts legitimate auth types like "vertex-ai", "api-key", "auth-file".
+func TestOverlaySettings_AcceptsValidAuthType(t *testing.T) {
+	for _, validType := range []string{"vertex-ai", "api-key", "auth-file", "adc"} {
+		t.Run(validType, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			scionAgentPath := filepath.Join(tmpDir, "scion-agent.json")
+			_ = os.WriteFile(scionAgentPath,
+				[]byte(`{"auth_selectedType": "`+validType+`"}`), 0644)
+
+			auth := api.AuthConfig{}
+			h := New("gemini")
+			OverlaySettings(&auth, h, tmpDir)
+
+			if auth.SelectedType != validType {
+				t.Errorf("SelectedType = %q, want %q", auth.SelectedType, validType)
+			}
+		})
+	}
+}
+
 func TestGatherAuthWithEnv_BrokerMode(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
