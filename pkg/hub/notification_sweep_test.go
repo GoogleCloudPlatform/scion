@@ -182,18 +182,49 @@ func TestRetryDispatch_SubscriberDeleted(t *testing.T) {
 	// Delete the subscriber agent
 	require.NoError(t, env.store.DeleteAgent(ctx, env.subscriber.ID))
 
-	// Retry — should claim, then find subscriber not found
+	// Retry — should claim, then find subscriber permanently deleted (ErrNotFound).
+	// The notification should remain claimed (dispatched=true) so the sweep
+	// does not retry it every 5 minutes forever.
 	env.nd.RetryDispatch(ctx, &notifs[0])
 
 	// No dispatch call
 	assert.Empty(t, env.dispatcher.getCalls())
 
-	// Notification should be reverted (subscriber might come back after restart)
+	// Notification should remain claimed (dispatched=true) — subscriber is gone
 	allNotifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeAgent, env.subscriber.Slug, false)
 	require.NoError(t, err)
 	for _, n := range allNotifs {
 		if n.ID == notifs[0].ID {
-			assert.False(t, n.Dispatched, "notification should be reverted when subscriber not found")
+			assert.True(t, n.Dispatched, "notification should stay claimed when subscriber is permanently deleted")
+		}
+	}
+}
+
+func TestRetryDispatch_WatchedAgentDeleted(t *testing.T) {
+	env := setupRetryTest(t)
+	ctx := context.Background()
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	// Delete the watched agent (the one that triggered the notification)
+	require.NoError(t, env.store.DeleteAgent(ctx, env.watched.ID))
+
+	// Retry — should claim, look up subscriber (still exists), but fail to
+	// resolve the watched agent. Notification remains claimed (dispatched=true)
+	// because the event source is gone and there is no point retrying.
+	env.nd.RetryDispatch(ctx, &notifs[0])
+
+	// No dispatch call
+	assert.Empty(t, env.dispatcher.getCalls())
+
+	// Notification should remain claimed
+	allNotifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeAgent, env.subscriber.Slug, false)
+	require.NoError(t, err)
+	for _, n := range allNotifs {
+		if n.ID == notifs[0].ID {
+			assert.True(t, n.Dispatched, "notification should stay claimed when watched agent is deleted")
 		}
 	}
 }
