@@ -90,8 +90,22 @@ export function showConfirm(
     confirmBtn.slot = 'footer';
     confirmBtn.setAttribute('variant', variant);
     confirmBtn.textContent = confirmText;
+    confirmBtn.style.marginInlineStart = '0.5rem';
     confirmBtn.addEventListener('click', () => cleanup(true));
     dialog.appendChild(confirmBtn);
+
+    // Enter key confirms the dialog (standard UX pattern).
+    // Guard against intercepting Enter inside form fields.
+    dialog.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+        if (tag === 'textarea' || tag === 'input' || tag === 'sl-textarea' || tag === 'sl-input') {
+          return;
+        }
+        e.preventDefault();
+        cleanup(true);
+      }
+    });
 
     let resolved = false;
     function cleanup(result: boolean) {
