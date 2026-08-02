@@ -2450,7 +2450,11 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	}
 	result := make([]ResolvedSecret, 0, len(resolved))
 	for _, sv := range resolved {
-		if sv.InjectionMode == store.InjectionModeAsNeeded {
+		// Only skip as_needed environment-type secrets (handled by the
+		// two-pass env-gather flow). File-type and variable-type secrets
+		// should always be placed regardless of injection mode — the
+		// as_needed concept does not apply to them.
+		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
 			continue
 		}
 		result = append(result, ResolvedSecret{

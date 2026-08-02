@@ -649,3 +649,113 @@ func TestDispatchAgentCreateWithGather_NoNeeds(t *testing.T) {
 		t.Errorf("expected 1 broker call, got %d", mockClient.callCount)
 	}
 }
+
+// --- resolveSecrets tests: file-type and variable-type secrets pass through ---
+
+func TestResolveSecrets_FileTypePassesThroughAsNeeded(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	hubID := "test-hub-file-passthrough"
+
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	d.SetHubID(hubID)
+	d.SetSecretBackend(&mockSecretBackend{
+		secrets: []secret.SecretWithValue{
+			{
+				SecretMeta: secret.SecretMeta{
+					Name:          "AGY_TOKEN",
+					SecretType:    store.SecretTypeFile,
+					Target:        "~/.gemini/antigravity-cli/antigravity-oauth-token",
+					Scope:         "project",
+					ScopeID:       "project-file-test",
+					InjectionMode: store.InjectionModeAsNeeded,
+				},
+				Value: "oauth-token-content",
+			},
+			{
+				SecretMeta: secret.SecretMeta{
+					Name:          "ENV_SECRET",
+					SecretType:    store.SecretTypeEnvironment,
+					Target:        "MY_ENV",
+					Scope:         "project",
+					ScopeID:       "project-file-test",
+					InjectionMode: store.InjectionModeAsNeeded,
+				},
+				Value: "env-secret-value",
+			},
+			{
+				SecretMeta: secret.SecretMeta{
+					Name:          "VAR_SECRET",
+					SecretType:    store.SecretTypeVariable,
+					Target:        "MY_VAR",
+					Scope:         "project",
+					ScopeID:       "project-file-test",
+					InjectionMode: store.InjectionModeAsNeeded,
+				},
+				Value: "var-secret-value",
+			},
+			{
+				SecretMeta: secret.SecretMeta{
+					Name:          "ALWAYS_ENV",
+					SecretType:    store.SecretTypeEnvironment,
+					Target:        "ALWAYS_KEY",
+					Scope:         "project",
+					ScopeID:       "project-file-test",
+					InjectionMode: store.InjectionModeAlways,
+				},
+				Value: "always-env-value",
+			},
+		},
+	})
+
+	agent := &store.Agent{
+		ID:        "agent-file-passthrough",
+		Name:      "file-passthrough",
+		OwnerID:   "user-1",
+		ProjectID: "project-file-test",
+	}
+
+	result, err := d.resolveSecrets(ctx, agent)
+	if err != nil {
+		t.Fatalf("resolveSecrets: %v", err)
+	}
+
+	// Build lookup by name for easier assertions.
+	byName := make(map[string]ResolvedSecret, len(result))
+	for _, rs := range result {
+		byName[rs.Name] = rs
+	}
+
+	// File-type secret with as_needed should pass through.
+	if rs, ok := byName["AGY_TOKEN"]; !ok {
+		t.Error("expected AGY_TOKEN (file-type, as_needed) to pass through resolveSecrets")
+	} else {
+		if rs.Type != store.SecretTypeFile {
+			t.Errorf("AGY_TOKEN type = %q, want %q", rs.Type, store.SecretTypeFile)
+		}
+		if rs.Target != "~/.gemini/antigravity-cli/antigravity-oauth-token" {
+			t.Errorf("AGY_TOKEN target = %q, want %q", rs.Target, "~/.gemini/antigravity-cli/antigravity-oauth-token")
+		}
+		if rs.Value != "oauth-token-content" {
+			t.Errorf("AGY_TOKEN value = %q, want %q", rs.Value, "oauth-token-content")
+		}
+	}
+
+	// Variable-type secret with as_needed should also pass through.
+	if _, ok := byName["VAR_SECRET"]; !ok {
+		t.Error("expected VAR_SECRET (variable-type, as_needed) to pass through resolveSecrets")
+	}
+
+	// Environment-type secret with as_needed should be filtered out
+	// (handled by the two-pass env-gather flow instead).
+	if _, ok := byName["ENV_SECRET"]; ok {
+		t.Error("ENV_SECRET (environment-type, as_needed) should be filtered by resolveSecrets")
+	}
+
+	// Environment-type secret with always should pass through.
+	if _, ok := byName["ALWAYS_ENV"]; !ok {
+		t.Error("expected ALWAYS_ENV (environment-type, always) to pass through resolveSecrets")
+	}
+}
