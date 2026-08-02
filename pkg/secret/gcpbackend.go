@@ -115,6 +115,9 @@ func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*Sec
 		}
 	}
 	if err != nil {
+		if permErr := wrapGCPError(err, "access secret"); permErr != nil {
+			return nil, permErr
+		}
 		return nil, fmt.Errorf("failed to access secret value from GCP SM: %w", err)
 	}
 
@@ -184,9 +187,15 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 				},
 			})
 			if err != nil {
+				if permErr := wrapGCPError(err, "create secret"); permErr != nil {
+					return false, nil, permErr
+				}
 				return false, nil, fmt.Errorf("failed to create GCP SM secret: %w", err)
 			}
 		} else {
+			if permErr := wrapGCPError(err, "check secret"); permErr != nil {
+				return false, nil, permErr
+			}
 			return false, nil, fmt.Errorf("failed to check GCP SM secret: %w", err)
 		}
 	}
@@ -199,6 +208,9 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 		},
 	})
 	if err != nil {
+		if permErr := wrapGCPError(err, "add secret version"); permErr != nil {
+			return false, nil, permErr
+		}
 		return false, nil, fmt.Errorf("failed to add GCP SM secret version: %w", err)
 	}
 
@@ -225,6 +237,9 @@ func (b *GCPBackend) Delete(ctx context.Context, name, scope, scopeID string) er
 		Name: fullName,
 	})
 	if err != nil && status.Code(err) != codes.NotFound {
+		if permErr := wrapGCPError(err, "delete secret"); permErr != nil {
+			return permErr
+		}
 		return fmt.Errorf("failed to delete GCP SM secret: %w", err)
 	}
 
@@ -486,6 +501,17 @@ func buildLabels(input *SetSecretInput, target, hubName string) map[string]strin
 		labels["scion-userid"] = sanitizeLabel(input.UserEmail)
 	}
 	return labels
+}
+
+// wrapGCPError checks whether err is a gRPC PermissionDenied error and returns
+// a *PermissionError so that HTTP handlers can return 403 instead of 500.
+// Returns nil for all other error codes, enabling the idiomatic
+// "if permErr := wrapGCPError(...); permErr != nil" pattern.
+func wrapGCPError(err error, operation string) error {
+	if status.Code(err) == codes.PermissionDenied {
+		return &PermissionError{Operation: operation, Err: err}
+	}
+	return nil
 }
 
 // resolveHubName returns the hub display name if set, falling back to the machine hostname.

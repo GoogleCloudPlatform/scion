@@ -20,6 +20,7 @@ package secret
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -28,6 +29,23 @@ import (
 // secrets backend (e.g., GCP Secret Manager) but only the local backend is configured.
 // The local backend does not encrypt secret values, so write operations are rejected.
 var ErrNoSecretBackend = errors.New("secret storage requires a configured secrets backend; set SCION_SERVER_SECRETS_BACKEND=gcpsm")
+
+// PermissionError indicates that a secret backend operation failed due to
+// insufficient permissions (e.g., the Hub service account lacks a required
+// Secret Manager permission). Handlers should translate this to HTTP 403.
+type PermissionError struct {
+	Operation string // e.g., "create secret", "access secret version"
+	Err       error  // the underlying error
+}
+
+func (e *PermissionError) Error() string {
+	return fmt.Sprintf("failed to %s: the Hub service account lacks the required Secret Manager permission. "+
+		"Grant roles/secretmanager.admin to the Hub Runner service account", e.Operation)
+}
+
+func (e *PermissionError) Unwrap() error {
+	return e.Err
+}
 
 // Secret type constants define how a secret is projected into the agent container.
 const (
