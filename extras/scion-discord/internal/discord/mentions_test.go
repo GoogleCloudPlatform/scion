@@ -456,6 +456,30 @@ func TestClassifyMentions_UserResolver(t *testing.T) {
 	}, result.BodyMentions)
 }
 
+func TestClassifyMentions_UnknownStartMention(t *testing.T) {
+	// An unknown @mention at the start should be classified as Kind="unknown"
+	// in StartMentions. This is the input condition that previously caused
+	// the filtering bug (empty startMentionSet wiping all targets).
+	result := classifyMentions("@not-an-agent hello", "BOT123",
+		[]string{"agent-a", "agent-b"}, noopResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Equal(t, "not-an-agent", result.StartMentions[0].Name)
+	assert.Equal(t, "unknown", result.StartMentions[0].Kind)
+	assert.Empty(t, result.BodyMentions)
+}
+
+func TestClassifyMentions_UnknownAndKnownStartMentions(t *testing.T) {
+	// Mixed known and unknown @mentions at the start.
+	result := classifyMentions("@agent-a @not-an-agent do this", "BOT123",
+		[]string{"agent-a", "agent-b"}, noopResolver)
+
+	assert.Len(t, result.StartMentions, 2)
+	assert.Equal(t, Mention{Name: "agent-a", Kind: "agent", Identity: "agent:agent-a"}, result.StartMentions[0])
+	assert.Equal(t, "not-an-agent", result.StartMentions[1].Name)
+	assert.Equal(t, "unknown", result.StartMentions[1].Kind)
+}
+
 func TestClassifyMentions_UnknownBodyMentionsSkipped(t *testing.T) {
 	// Unknown mentions in the body should be skipped.
 	result := classifyMentions("do this @stranger", "BOT123",
