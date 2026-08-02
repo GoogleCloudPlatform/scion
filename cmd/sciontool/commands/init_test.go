@@ -282,6 +282,33 @@ func TestIsWorkspaceEmpty(t *testing.T) {
 			t.Error("expected false when workspace has .scion and real files")
 		}
 	})
+
+	t.Run("directory with only .agents marker", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".agents"), 0755)
+		if !isWorkspaceEmpty(tmpDir) {
+			t.Error("expected true when workspace contains only .agents marker")
+		}
+	})
+
+	t.Run("directory with all provisioning markers", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".scion-volumes"), 0755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".agents"), 0755)
+		if !isWorkspaceEmpty(tmpDir) {
+			t.Error("expected true when workspace contains only .scion, .scion-volumes, and .agents")
+		}
+	})
+
+	t.Run("directory with .agents and real content", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".agents"), 0755)
+		_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main"), 0644)
+		if isWorkspaceEmpty(tmpDir) {
+			t.Error("expected false when workspace has .agents and real files")
+		}
+	})
 }
 
 func TestSanitizeGitOutput(t *testing.T) {
