@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -120,12 +121,19 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 	// 3. Look up subscriber agent.
 	subscriber, err := nd.store.GetAgentBySlug(ctx, sub.ProjectID, sub.SubscriberID)
 	if err != nil {
-		nd.log.Warn("retry: subscriber agent not found",
-			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
-		// Revert claim so a future sweep can retry (agent may be temporarily
-		// unreachable during a restart).
-		if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
-			nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
+		if errors.Is(err, store.ErrNotFound) {
+			// Subscriber is permanently deleted — leave claimed so the sweep
+			// does not retry this notification every 5 minutes forever.
+			nd.log.Warn("retry: subscriber agent deleted, leaving claimed",
+				"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+		} else {
+			// Transient error (DB timeout, connection issue) — revert claim
+			// so a future sweep can retry once the store is reachable again.
+			nd.log.Warn("retry: subscriber lookup failed, reverting claim",
+				"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
+			if err2 := nd.store.UnmarkNotificationDispatched(ctx, notif.ID); err2 != nil {
+				nd.log.Error("retry: failed to revert claim", "notificationID", notif.ID, "error", err2)
+			}
 		}
 		return
 	}
