@@ -143,6 +143,49 @@ default_template: claude
 	assert.Equal(t, "claude", vs.DefaultTemplate)
 }
 
+// TestLoadVersionedSettings_GlobalHarnessConfigNotOverriddenByProjectDefaults
+// verifies that when a user sets default_harness_config and default_template in
+// their global settings, initializing a project (which writes the embedded
+// project defaults into the project settings file) does not override those
+// global values.
+//
+// Regression test for GoogleCloudPlatform/scion#212.
+func TestLoadVersionedSettings_GlobalHarnessConfigNotOverriddenByProjectDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Setenv("HOME", tmpDir)
+
+	// Set up global settings with custom default_harness_config and default_template.
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	globalSettings := `
+schema_version: "1"
+default_harness_config: opencode
+default_template: my-template
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644))
+
+	// Set up a project directory with the embedded project defaults — this is
+	// exactly what scion init writes into the project settings file.
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	projectDefaults, err := GetProjectDefaultSettingsYAML()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), projectDefaults, 0644))
+
+	// Load merged settings. The project defaults must NOT override the user's
+	// global preferences for default_harness_config and default_template.
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "opencode", vs.DefaultHarnessConfig,
+		"global default_harness_config should not be overridden by project defaults (issue #212)")
+	assert.Equal(t, "my-template", vs.DefaultTemplate,
+		"global default_template should not be overridden by project defaults")
+}
+
 func TestLoadVersionedSettings_GroveOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
