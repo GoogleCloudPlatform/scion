@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -202,6 +203,57 @@ func projectSearchRoots(slug, projectID string) []string {
 	return roots
 }
 
+// containerPathPrefixes lists the path prefixes used inside agent containers
+// for shared directories. Both the root-level mount and the in-workspace
+// variant are supported.
+var containerPathPrefixes = []string{
+	"/scion-volumes/",
+	"/workspace/.scion-volumes/",
+}
+
+// translateContainerPath converts a container-internal path to its host-side
+// equivalent. If the path doesn't start with /scion-volumes/ or
+// /workspace/.scion-volumes/, it is returned unchanged.
+func translateContainerPath(path, projectSlug, projectID string) string {
+	for _, prefix := range containerPathPrefixes {
+		if !strings.HasPrefix(path, prefix) {
+			// Also match the prefix without trailing slash (bare shared dir name).
+			bare := strings.TrimSuffix(prefix, "/")
+			if path == bare {
+				// e.g. "/scion-volumes" with no shared dir name — can't translate.
+				return path
+			}
+			continue
+		}
+
+		// Strip the prefix to get "<sharedDirName>/remainder" or just "<sharedDirName>".
+		after := strings.TrimPrefix(path, prefix)
+		if after == "" {
+			// Path is exactly the prefix (e.g. "/scion-volumes/") — no shared
+			// dir name, so we can't translate.
+			return path
+		}
+
+		// Split into shared dir name and optional remainder.
+		var sharedDirName, remainder string
+		if idx := strings.IndexByte(after, '/'); idx >= 0 {
+			sharedDirName = after[:idx]
+			remainder = after[idx+1:]
+		} else {
+			sharedDirName = after
+		}
+
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+
+		hostSharedDir := config.SharedDirHostPath(home, projectSlug, projectID, sharedDirName)
+		return filepath.Join(hostSharedDir, remainder)
+	}
+	return path
+}
+
 // HandleSend handles the /scion send <path> command.
 // It resolves the channel's project binding to determine per-project search
 // roots. If the channel is not linked and no send_search_root override is
@@ -214,6 +266,15 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 	if pathArg == "" {
 		h.followup(s, i, "Please provide a file path or search term.")
 		return
+	}
+
+	// Resolve the channel link for project context. If available, translate
+	// container-internal paths (/scion-volumes/...) to host-side equivalents
+	// before file resolution.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID); err == nil && link != nil && link.Active {
+		pathArg = translateContainerPath(pathArg, link.ProjectSlug, link.ProjectID)
 	}
 
 	// Resolve search roots: per-project roots from channel link, with

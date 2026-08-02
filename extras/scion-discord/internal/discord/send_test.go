@@ -559,6 +559,72 @@ func TestDeduplicateRoots_Empty(t *testing.T) {
 	assert.Nil(t, result)
 }
 
+// --- translateContainerPath tests ---
+
+func TestTranslateContainerPath_ScionVolumes(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	slug := "my-proj"
+	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
+
+	got := translateContainerPath("/scion-volumes/scratchpad/foo/bar.md", slug, projectID)
+
+	expected := filepath.Join(fakeHome, ".scion", "project-configs",
+		"my-proj__aabbccdd", "shared-dirs", "scratchpad", "foo", "bar.md")
+	assert.Equal(t, expected, got)
+}
+
+func TestTranslateContainerPath_ScionVolumesNoRemainder(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	slug := "my-proj"
+	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
+
+	got := translateContainerPath("/scion-volumes/scratchpad", slug, projectID)
+
+	expected := filepath.Join(fakeHome, ".scion", "project-configs",
+		"my-proj__aabbccdd", "shared-dirs", "scratchpad")
+	assert.Equal(t, expected, got)
+}
+
+func TestTranslateContainerPath_WorkspaceScionVolumes(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	slug := "my-proj"
+	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
+
+	got := translateContainerPath("/workspace/.scion-volumes/scratchpad/foo.md", slug, projectID)
+
+	expected := filepath.Join(fakeHome, ".scion", "project-configs",
+		"my-proj__aabbccdd", "shared-dirs", "scratchpad", "foo.md")
+	assert.Equal(t, expected, got)
+}
+
+func TestTranslateContainerPath_NonContainerPathUnchanged(t *testing.T) {
+	got := translateContainerPath("/home/scion/something", "slug", "id")
+	assert.Equal(t, "/home/scion/something", got)
+}
+
+func TestTranslateContainerPath_PartialQueryUnchanged(t *testing.T) {
+	got := translateContainerPath("report.txt", "slug", "id")
+	assert.Equal(t, "report.txt", got)
+}
+
+func TestTranslateContainerPath_BarePrefix(t *testing.T) {
+	// "/scion-volumes" with no shared dir name — can't translate.
+	got := translateContainerPath("/scion-volumes", "slug", "id")
+	assert.Equal(t, "/scion-volumes", got)
+}
+
+func TestTranslateContainerPath_TrailingSlashOnly(t *testing.T) {
+	// "/scion-volumes/" with no shared dir name — can't translate.
+	got := translateContainerPath("/scion-volumes/", "slug", "id")
+	assert.Equal(t, "/scion-volumes/", got)
+}
+
 // --- test helpers ---
 
 // setupSearchTestDir creates a temporary directory structure for search tests.
