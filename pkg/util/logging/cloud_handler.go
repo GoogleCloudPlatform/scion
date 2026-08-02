@@ -22,11 +22,14 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"time"
 
 	gcplog "cloud.google.com/go/logging"
 	logpb "cloud.google.com/go/logging/apiv2/loggingpb"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // Environment variable names for Cloud Logging configuration.
@@ -76,8 +79,13 @@ type CloudHandler struct {
 	hubName   string
 	hostname  string
 	projectID string
+	version   string
 	attrs     []slog.Attr
 	groups    []string
+
+	// logHook, when non-nil, receives each entry instead of sending
+	// it to the Cloud Logging API. Used only in tests.
+	logHook func(gcplog.Entry)
 }
 
 // NewCloudHandler creates a new CloudHandler that sends logs to Cloud Logging.
@@ -128,6 +136,7 @@ func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.
 		hubName:   config.HubName,
 		hostname:  hostname,
 		projectID: projectID,
+		version:   version.Short(),
 	}
 
 	cleanup := func() {
@@ -183,6 +192,22 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 		}
 	}
 
+	// Add serviceContext for GCP Error Reporting (all levels)
+	payload["serviceContext"] = map[string]any{
+		"service": h.component,
+		"version": h.version,
+	}
+
+	// ERROR+ only: stack trace and @type for GCP Error Reporting
+	if r.Level >= slog.LevelError {
+		if _, hasST := payload["stack_trace"]; !hasST {
+			payload["stack_trace"] = string(debug.Stack())
+		}
+		if _, hasType := payload["@type"]; !hasType {
+			payload["@type"] = errorReportingType
+		}
+	}
+
 	// Map slog level to Cloud Logging severity
 	severity := slogLevelToSeverity(r.Level)
 
@@ -226,6 +251,10 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 		delete(payload, "message")
 	}
 
+	if h.logHook != nil {
+		h.logHook(entry)
+		return nil
+	}
 	h.logger.Log(entry)
 	return nil
 }
@@ -243,8 +272,10 @@ func (h *CloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
+		version:   h.version,
 		attrs:     newAttrs,
 		groups:    h.groups,
+		logHook:   h.logHook,
 	}
 }
 
@@ -261,8 +292,10 @@ func (h *CloudHandler) WithGroup(name string) slog.Handler {
 		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
+		version:   h.version,
 		attrs:     h.attrs,
 		groups:    newGroups,
+		logHook:   h.logHook,
 	}
 }
 
@@ -285,6 +318,7 @@ func NewCloudHandlerFromClient(client *gcplog.Client, logID, component, hubName 
 		hubName:   hubName,
 		hostname:  hostname,
 		projectID: resolveProjectID(),
+		version:   version.Short(),
 	}
 }
 
