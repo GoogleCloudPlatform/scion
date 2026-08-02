@@ -569,6 +569,96 @@ func notifsToStore(rows []*ent.Notification) []store.Notification {
 	return out
 }
 
+// ClaimNotificationForDispatch atomically claims an undispatched notification
+// for delivery by CAS-updating dispatched from false to true. Returns true if
+// this caller won the claim, false if the notification was already dispatched or
+// does not exist.
+func (s *NotificationStore) ClaimNotificationForDispatch(ctx context.Context, id string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+
+	affected, err := s.client.Notification.Update().
+		Where(
+			notification.IDEQ(uid),
+			notification.DispatchedEQ(false),
+		).
+		SetDispatched(true).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+
+	return affected > 0, nil
+}
+
+// UnmarkNotificationDispatched reverts a notification's dispatched flag to false
+// so a future sweep can retry delivery.
+func (s *NotificationStore) UnmarkNotificationDispatched(ctx context.Context, id string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.client.Notification.Update().
+		Where(notification.IDEQ(uid)).
+		SetDispatched(false).
+		Save(ctx)
+	return mapError(err)
+}
+
+// undispatchedGracePeriod is the minimum age of an undispatched notification
+// before the sweep picks it up. This prevents racing with an in-flight primary
+// dispatch (whose 30s retry + margin is well within this window).
+const undispatchedGracePeriod = 60 * time.Second
+
+// undispatchedBatchLimit caps the number of undispatched notifications returned
+// per query to avoid loading unbounded rows into memory.
+const undispatchedBatchLimit = 100
+
+// GetUndispatchedAgentNotifications returns agent-targeted notifications with
+// dispatched=false, created before a 60s grace period, ordered oldest-first,
+// limited to 100 rows.
+//
+// When brokerID is non-empty, only notifications whose subscriber agent has
+// RuntimeBrokerID == brokerID are returned (broker-connect hook). When empty,
+// all undispatched agent notifications are returned (sweep backstop).
+func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]store.Notification, error) {
+	cutoff := time.Now().Add(-undispatchedGracePeriod)
+
+	query := s.client.Notification.Query().
+		Where(
+			notification.DispatchedEQ(false),
+			notification.SubscriberTypeEQ(store.SubscriberTypeAgent),
+			notification.CreatedLT(cutoff),
+		)
+
+	if brokerID != "" {
+		// Filter to notifications whose subscriber agent has this broker.
+		// Use a correlated EXISTS subquery against the agents table to avoid
+		// an Ent edge dependency.
+		query = query.Where(func(sel *entsql.Selector) {
+			sub := entsql.Select("1").From(entsql.Table("agents")).
+				Where(entsql.And(
+					entsql.ColumnsEQ("agents.slug", sel.C(notification.FieldSubscriberID)),
+					entsql.ColumnsEQ("agents.project_id", sel.C(notification.FieldProjectID)),
+					entsql.EQ("agents.runtime_broker_id", brokerID),
+				))
+			sel.Where(entsql.Exists(sub))
+		})
+	}
+
+	rows, err := query.
+		Order(notification.ByCreated()).
+		Limit(undispatchedBatchLimit).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return notifsToStore(rows), nil
+}
+
 // ----------------------------------------------------------------------------
 // Subscription Template Operations
 // ----------------------------------------------------------------------------

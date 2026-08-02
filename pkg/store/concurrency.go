@@ -82,6 +82,11 @@ const (
 	// running (stopped, deleted, etc.).
 	LockExposedPortsSweep AdvisoryLockKey = 0x5C10000C
 
+	// LockNotificationDispatchSweep guards the periodic undispatched-notification
+	// re-delivery sweep so only one replica per tick scans and retries agent
+	// notifications that were not dispatched (e.g. subscriber had no broker).
+	LockNotificationDispatchSweep AdvisoryLockKey = 0x5C10000D
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant
