@@ -25,6 +25,9 @@ import (
 // project_id field. Returns empty string on any error (file not found, invalid
 // JSON, missing field).
 func ExtractProjectID(credentialsPath string) string {
+	if credentialsPath == "" {
+		return ""
+	}
 	data, err := os.ReadFile(credentialsPath)
 	if err != nil {
 		return ""
