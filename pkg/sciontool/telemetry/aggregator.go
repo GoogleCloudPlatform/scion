@@ -30,15 +30,15 @@ type ToolCallStats struct {
 // SessionSummary is the aggregated result of a completed session, ready to be
 // sent to the Hub as a MetricsPayload.
 type SessionSummary struct {
-	SessionID    string
-	AgentID      string
-	ProjectID    string
-	StartedAt    time.Time
-	EndedAt      time.Time
-	Status       string
-	Model        string
-	TurnCount    int
-	APICallCount int
+	SessionID       string
+	AgentID         string
+	ProjectID       string
+	StartedAt       time.Time
+	EndedAt         time.Time
+	Status          string
+	Model           string
+	TurnCount       int
+	APICallCount    int
 	TokensInput     int64
 	TokensOutput    int64
 	TokensCached    int64
@@ -51,13 +51,13 @@ type SessionSummary struct {
 type Aggregator struct {
 	mu sync.Mutex
 
-	sessionID    string
-	agentID      string
-	projectID    string
-	startedAt    time.Time
-	model        string
-	turnCount    int
-	apiCallCount int
+	sessionID       string
+	agentID         string
+	projectID       string
+	startedAt       time.Time
+	model           string
+	turnCount       int
+	apiCallCount    int
 	tokensInput     int64
 	tokensOutput    int64
 	tokensCached    int64

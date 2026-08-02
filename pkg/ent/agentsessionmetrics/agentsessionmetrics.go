@@ -169,16 +169,6 @@ func ByTokensReasoning(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTokensReasoning, opts...).ToFunc()
 }
 
-// ByToolCalls orders the results by the tool_calls field.
-func ByToolCalls(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldToolCalls, opts...).ToFunc()
-}
-
-// ByLanguages orders the results by the languages field.
-func ByLanguages(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldLanguages, opts...).ToFunc()
-}
-
 // ByCreatedAt orders the results by the created_at field.
 func ByCreatedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreatedAt, opts...).ToFunc()

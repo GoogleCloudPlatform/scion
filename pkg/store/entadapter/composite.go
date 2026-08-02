@@ -93,9 +93,9 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		SkillRegistryStore:       NewSkillRegistryStore(client),
 		HubSettingStore:          NewHubSettingStore(client),
 		SkillInjectionStore:      NewSkillInjectionStore(client),
-		ProjectPreStartHookStore:    NewProjectPreStartHookStore(client),
-		AgentSessionMetricsStore:   NewAgentSessionMetricsStore(client),
-		client:                     client,
+		ProjectPreStartHookStore: NewProjectPreStartHookStore(client),
+		AgentSessionMetricsStore: NewAgentSessionMetricsStore(client),
+		client:                   client,
 	}
 }
 

@@ -3,6 +3,7 @@
 package ent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -43,9 +44,9 @@ type AgentSessionMetrics struct {
 	// TokensReasoning holds the value of the "tokens_reasoning" field.
 	TokensReasoning int64 `json:"tokens_reasoning,omitempty"`
 	// ToolCalls holds the value of the "tool_calls" field.
-	ToolCalls string `json:"tool_calls,omitempty"`
+	ToolCalls map[string]interface{} `json:"tool_calls,omitempty"`
 	// Languages holds the value of the "languages" field.
-	Languages string `json:"languages,omitempty"`
+	Languages []string `json:"languages,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt    time.Time `json:"created_at,omitempty"`
 	selectValues sql.SelectValues
@@ -56,9 +57,11 @@ func (*AgentSessionMetrics) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case agentsessionmetrics.FieldToolCalls, agentsessionmetrics.FieldLanguages:
+			values[i] = new([]byte)
 		case agentsessionmetrics.FieldTurnCount, agentsessionmetrics.FieldTokensInput, agentsessionmetrics.FieldTokensOutput, agentsessionmetrics.FieldTokensCached, agentsessionmetrics.FieldTokensReasoning:
 			values[i] = new(sql.NullInt64)
-		case agentsessionmetrics.FieldAgentID, agentsessionmetrics.FieldGroveID, agentsessionmetrics.FieldSessionID, agentsessionmetrics.FieldStatus, agentsessionmetrics.FieldModel, agentsessionmetrics.FieldToolCalls, agentsessionmetrics.FieldLanguages:
+		case agentsessionmetrics.FieldAgentID, agentsessionmetrics.FieldGroveID, agentsessionmetrics.FieldSessionID, agentsessionmetrics.FieldStatus, agentsessionmetrics.FieldModel:
 			values[i] = new(sql.NullString)
 		case agentsessionmetrics.FieldStartedAt, agentsessionmetrics.FieldEndedAt, agentsessionmetrics.FieldCreatedAt:
 			values[i] = new(sql.NullTime)
@@ -159,16 +162,20 @@ func (_m *AgentSessionMetrics) assignValues(columns []string, values []any) erro
 				_m.TokensReasoning = value.Int64
 			}
 		case agentsessionmetrics.FieldToolCalls:
-			if value, ok := values[i].(*sql.NullString); !ok {
+			if value, ok := values[i].(*[]byte); !ok {
 				return fmt.Errorf("unexpected type %T for field tool_calls", values[i])
-			} else if value.Valid {
-				_m.ToolCalls = value.String
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.ToolCalls); err != nil {
+					return fmt.Errorf("unmarshal field tool_calls: %w", err)
+				}
 			}
 		case agentsessionmetrics.FieldLanguages:
-			if value, ok := values[i].(*sql.NullString); !ok {
+			if value, ok := values[i].(*[]byte); !ok {
 				return fmt.Errorf("unexpected type %T for field languages", values[i])
-			} else if value.Valid {
-				_m.Languages = value.String
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Languages); err != nil {
+					return fmt.Errorf("unmarshal field languages: %w", err)
+				}
 			}
 		case agentsessionmetrics.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -251,10 +258,10 @@ func (_m *AgentSessionMetrics) String() string {
 	builder.WriteString(fmt.Sprintf("%v", _m.TokensReasoning))
 	builder.WriteString(", ")
 	builder.WriteString("tool_calls=")
-	builder.WriteString(_m.ToolCalls)
+	builder.WriteString(fmt.Sprintf("%v", _m.ToolCalls))
 	builder.WriteString(", ")
 	builder.WriteString("languages=")
-	builder.WriteString(_m.Languages)
+	builder.WriteString(fmt.Sprintf("%v", _m.Languages))
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

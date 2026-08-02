@@ -115,16 +115,6 @@ func TokensReasoning(v int64) predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldTokensReasoning, v))
 }
 
-// ToolCalls applies equality check predicate on the "tool_calls" field. It's identical to ToolCallsEQ.
-func ToolCalls(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldToolCalls, v))
-}
-
-// Languages applies equality check predicate on the "languages" field. It's identical to LanguagesEQ.
-func Languages(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldLanguages, v))
-}
-
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldCreatedAt, v))
@@ -815,61 +805,6 @@ func TokensReasoningNotNil() predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldNotNull(FieldTokensReasoning))
 }
 
-// ToolCallsEQ applies the EQ predicate on the "tool_calls" field.
-func ToolCallsEQ(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldToolCalls, v))
-}
-
-// ToolCallsNEQ applies the NEQ predicate on the "tool_calls" field.
-func ToolCallsNEQ(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldNEQ(FieldToolCalls, v))
-}
-
-// ToolCallsIn applies the In predicate on the "tool_calls" field.
-func ToolCallsIn(vs ...string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldIn(FieldToolCalls, vs...))
-}
-
-// ToolCallsNotIn applies the NotIn predicate on the "tool_calls" field.
-func ToolCallsNotIn(vs ...string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldNotIn(FieldToolCalls, vs...))
-}
-
-// ToolCallsGT applies the GT predicate on the "tool_calls" field.
-func ToolCallsGT(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldGT(FieldToolCalls, v))
-}
-
-// ToolCallsGTE applies the GTE predicate on the "tool_calls" field.
-func ToolCallsGTE(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldGTE(FieldToolCalls, v))
-}
-
-// ToolCallsLT applies the LT predicate on the "tool_calls" field.
-func ToolCallsLT(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldLT(FieldToolCalls, v))
-}
-
-// ToolCallsLTE applies the LTE predicate on the "tool_calls" field.
-func ToolCallsLTE(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldLTE(FieldToolCalls, v))
-}
-
-// ToolCallsContains applies the Contains predicate on the "tool_calls" field.
-func ToolCallsContains(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldContains(FieldToolCalls, v))
-}
-
-// ToolCallsHasPrefix applies the HasPrefix predicate on the "tool_calls" field.
-func ToolCallsHasPrefix(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldHasPrefix(FieldToolCalls, v))
-}
-
-// ToolCallsHasSuffix applies the HasSuffix predicate on the "tool_calls" field.
-func ToolCallsHasSuffix(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldHasSuffix(FieldToolCalls, v))
-}
-
 // ToolCallsIsNil applies the IsNil predicate on the "tool_calls" field.
 func ToolCallsIsNil() predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldIsNull(FieldToolCalls))
@@ -880,71 +815,6 @@ func ToolCallsNotNil() predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldNotNull(FieldToolCalls))
 }
 
-// ToolCallsEqualFold applies the EqualFold predicate on the "tool_calls" field.
-func ToolCallsEqualFold(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldEqualFold(FieldToolCalls, v))
-}
-
-// ToolCallsContainsFold applies the ContainsFold predicate on the "tool_calls" field.
-func ToolCallsContainsFold(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldContainsFold(FieldToolCalls, v))
-}
-
-// LanguagesEQ applies the EQ predicate on the "languages" field.
-func LanguagesEQ(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldLanguages, v))
-}
-
-// LanguagesNEQ applies the NEQ predicate on the "languages" field.
-func LanguagesNEQ(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldNEQ(FieldLanguages, v))
-}
-
-// LanguagesIn applies the In predicate on the "languages" field.
-func LanguagesIn(vs ...string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldIn(FieldLanguages, vs...))
-}
-
-// LanguagesNotIn applies the NotIn predicate on the "languages" field.
-func LanguagesNotIn(vs ...string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldNotIn(FieldLanguages, vs...))
-}
-
-// LanguagesGT applies the GT predicate on the "languages" field.
-func LanguagesGT(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldGT(FieldLanguages, v))
-}
-
-// LanguagesGTE applies the GTE predicate on the "languages" field.
-func LanguagesGTE(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldGTE(FieldLanguages, v))
-}
-
-// LanguagesLT applies the LT predicate on the "languages" field.
-func LanguagesLT(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldLT(FieldLanguages, v))
-}
-
-// LanguagesLTE applies the LTE predicate on the "languages" field.
-func LanguagesLTE(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldLTE(FieldLanguages, v))
-}
-
-// LanguagesContains applies the Contains predicate on the "languages" field.
-func LanguagesContains(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldContains(FieldLanguages, v))
-}
-
-// LanguagesHasPrefix applies the HasPrefix predicate on the "languages" field.
-func LanguagesHasPrefix(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldHasPrefix(FieldLanguages, v))
-}
-
-// LanguagesHasSuffix applies the HasSuffix predicate on the "languages" field.
-func LanguagesHasSuffix(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldHasSuffix(FieldLanguages, v))
-}
-
 // LanguagesIsNil applies the IsNil predicate on the "languages" field.
 func LanguagesIsNil() predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldIsNull(FieldLanguages))
@@ -953,16 +823,6 @@ func LanguagesIsNil() predicate.AgentSessionMetrics {
 // LanguagesNotNil applies the NotNil predicate on the "languages" field.
 func LanguagesNotNil() predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldNotNull(FieldLanguages))
-}
-
-// LanguagesEqualFold applies the EqualFold predicate on the "languages" field.
-func LanguagesEqualFold(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldEqualFold(FieldLanguages, v))
-}
-
-// LanguagesContainsFold applies the ContainsFold predicate on the "languages" field.
-func LanguagesContainsFold(v string) predicate.AgentSessionMetrics {
-	return predicate.AgentSessionMetrics(sql.FieldContainsFold(FieldLanguages, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

@@ -161,30 +161,14 @@ func (_c *AgentSessionMetricsCreate) SetNillableTokensReasoning(v *int64) *Agent
 }
 
 // SetToolCalls sets the "tool_calls" field.
-func (_c *AgentSessionMetricsCreate) SetToolCalls(v string) *AgentSessionMetricsCreate {
+func (_c *AgentSessionMetricsCreate) SetToolCalls(v map[string]interface{}) *AgentSessionMetricsCreate {
 	_c.mutation.SetToolCalls(v)
 	return _c
 }
 
-// SetNillableToolCalls sets the "tool_calls" field if the given value is not nil.
-func (_c *AgentSessionMetricsCreate) SetNillableToolCalls(v *string) *AgentSessionMetricsCreate {
-	if v != nil {
-		_c.SetToolCalls(*v)
-	}
-	return _c
-}
-
 // SetLanguages sets the "languages" field.
-func (_c *AgentSessionMetricsCreate) SetLanguages(v string) *AgentSessionMetricsCreate {
+func (_c *AgentSessionMetricsCreate) SetLanguages(v []string) *AgentSessionMetricsCreate {
 	_c.mutation.SetLanguages(v)
-	return _c
-}
-
-// SetNillableLanguages sets the "languages" field if the given value is not nil.
-func (_c *AgentSessionMetricsCreate) SetNillableLanguages(v *string) *AgentSessionMetricsCreate {
-	if v != nil {
-		_c.SetLanguages(*v)
-	}
 	return _c
 }
 
@@ -398,11 +382,11 @@ func (_c *AgentSessionMetricsCreate) createSpec() (*AgentSessionMetrics, *sqlgra
 		_node.TokensReasoning = value
 	}
 	if value, ok := _c.mutation.ToolCalls(); ok {
-		_spec.SetField(agentsessionmetrics.FieldToolCalls, field.TypeString, value)
+		_spec.SetField(agentsessionmetrics.FieldToolCalls, field.TypeJSON, value)
 		_node.ToolCalls = value
 	}
 	if value, ok := _c.mutation.Languages(); ok {
-		_spec.SetField(agentsessionmetrics.FieldLanguages, field.TypeString, value)
+		_spec.SetField(agentsessionmetrics.FieldLanguages, field.TypeJSON, value)
 		_node.Languages = value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
@@ -684,7 +668,7 @@ func (u *AgentSessionMetricsUpsert) ClearTokensReasoning() *AgentSessionMetricsU
 }
 
 // SetToolCalls sets the "tool_calls" field.
-func (u *AgentSessionMetricsUpsert) SetToolCalls(v string) *AgentSessionMetricsUpsert {
+func (u *AgentSessionMetricsUpsert) SetToolCalls(v map[string]interface{}) *AgentSessionMetricsUpsert {
 	u.Set(agentsessionmetrics.FieldToolCalls, v)
 	return u
 }
@@ -702,7 +686,7 @@ func (u *AgentSessionMetricsUpsert) ClearToolCalls() *AgentSessionMetricsUpsert 
 }
 
 // SetLanguages sets the "languages" field.
-func (u *AgentSessionMetricsUpsert) SetLanguages(v string) *AgentSessionMetricsUpsert {
+func (u *AgentSessionMetricsUpsert) SetLanguages(v []string) *AgentSessionMetricsUpsert {
 	u.Set(agentsessionmetrics.FieldLanguages, v)
 	return u
 }
@@ -1030,7 +1014,7 @@ func (u *AgentSessionMetricsUpsertOne) ClearTokensReasoning() *AgentSessionMetri
 }
 
 // SetToolCalls sets the "tool_calls" field.
-func (u *AgentSessionMetricsUpsertOne) SetToolCalls(v string) *AgentSessionMetricsUpsertOne {
+func (u *AgentSessionMetricsUpsertOne) SetToolCalls(v map[string]interface{}) *AgentSessionMetricsUpsertOne {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
 		s.SetToolCalls(v)
 	})
@@ -1051,7 +1035,7 @@ func (u *AgentSessionMetricsUpsertOne) ClearToolCalls() *AgentSessionMetricsUpse
 }
 
 // SetLanguages sets the "languages" field.
-func (u *AgentSessionMetricsUpsertOne) SetLanguages(v string) *AgentSessionMetricsUpsertOne {
+func (u *AgentSessionMetricsUpsertOne) SetLanguages(v []string) *AgentSessionMetricsUpsertOne {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
 		s.SetLanguages(v)
 	})
@@ -1549,7 +1533,7 @@ func (u *AgentSessionMetricsUpsertBulk) ClearTokensReasoning() *AgentSessionMetr
 }
 
 // SetToolCalls sets the "tool_calls" field.
-func (u *AgentSessionMetricsUpsertBulk) SetToolCalls(v string) *AgentSessionMetricsUpsertBulk {
+func (u *AgentSessionMetricsUpsertBulk) SetToolCalls(v map[string]interface{}) *AgentSessionMetricsUpsertBulk {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
 		s.SetToolCalls(v)
 	})
@@ -1570,7 +1554,7 @@ func (u *AgentSessionMetricsUpsertBulk) ClearToolCalls() *AgentSessionMetricsUps
 }
 
 // SetLanguages sets the "languages" field.
-func (u *AgentSessionMetricsUpsertBulk) SetLanguages(v string) *AgentSessionMetricsUpsertBulk {
+func (u *AgentSessionMetricsUpsertBulk) SetLanguages(v []string) *AgentSessionMetricsUpsertBulk {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
 		s.SetLanguages(v)
 	})

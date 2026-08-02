@@ -4620,8 +4620,9 @@ type AgentSessionMetricsMutation struct {
 	addtokens_cached    *int64
 	tokens_reasoning    *int64
 	addtokens_reasoning *int64
-	tool_calls          *string
-	languages           *string
+	tool_calls          *map[string]interface{}
+	languages           *[]string
+	appendlanguages     []string
 	created_at          *time.Time
 	clearedFields       map[string]struct{}
 	done                bool
@@ -5375,12 +5376,12 @@ func (m *AgentSessionMetricsMutation) ResetTokensReasoning() {
 }
 
 // SetToolCalls sets the "tool_calls" field.
-func (m *AgentSessionMetricsMutation) SetToolCalls(s string) {
-	m.tool_calls = &s
+func (m *AgentSessionMetricsMutation) SetToolCalls(value map[string]interface{}) {
+	m.tool_calls = &value
 }
 
 // ToolCalls returns the value of the "tool_calls" field in the mutation.
-func (m *AgentSessionMetricsMutation) ToolCalls() (r string, exists bool) {
+func (m *AgentSessionMetricsMutation) ToolCalls() (r map[string]interface{}, exists bool) {
 	v := m.tool_calls
 	if v == nil {
 		return
@@ -5391,7 +5392,7 @@ func (m *AgentSessionMetricsMutation) ToolCalls() (r string, exists bool) {
 // OldToolCalls returns the old "tool_calls" field's value of the AgentSessionMetrics entity.
 // If the AgentSessionMetrics object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *AgentSessionMetricsMutation) OldToolCalls(ctx context.Context) (v string, err error) {
+func (m *AgentSessionMetricsMutation) OldToolCalls(ctx context.Context) (v map[string]interface{}, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldToolCalls is only allowed on UpdateOne operations")
 	}
@@ -5424,12 +5425,13 @@ func (m *AgentSessionMetricsMutation) ResetToolCalls() {
 }
 
 // SetLanguages sets the "languages" field.
-func (m *AgentSessionMetricsMutation) SetLanguages(s string) {
+func (m *AgentSessionMetricsMutation) SetLanguages(s []string) {
 	m.languages = &s
+	m.appendlanguages = nil
 }
 
 // Languages returns the value of the "languages" field in the mutation.
-func (m *AgentSessionMetricsMutation) Languages() (r string, exists bool) {
+func (m *AgentSessionMetricsMutation) Languages() (r []string, exists bool) {
 	v := m.languages
 	if v == nil {
 		return
@@ -5440,7 +5442,7 @@ func (m *AgentSessionMetricsMutation) Languages() (r string, exists bool) {
 // OldLanguages returns the old "languages" field's value of the AgentSessionMetrics entity.
 // If the AgentSessionMetrics object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *AgentSessionMetricsMutation) OldLanguages(ctx context.Context) (v string, err error) {
+func (m *AgentSessionMetricsMutation) OldLanguages(ctx context.Context) (v []string, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldLanguages is only allowed on UpdateOne operations")
 	}
@@ -5454,9 +5456,23 @@ func (m *AgentSessionMetricsMutation) OldLanguages(ctx context.Context) (v strin
 	return oldValue.Languages, nil
 }
 
+// AppendLanguages adds s to the "languages" field.
+func (m *AgentSessionMetricsMutation) AppendLanguages(s []string) {
+	m.appendlanguages = append(m.appendlanguages, s...)
+}
+
+// AppendedLanguages returns the list of values that were appended to the "languages" field in this mutation.
+func (m *AgentSessionMetricsMutation) AppendedLanguages() ([]string, bool) {
+	if len(m.appendlanguages) == 0 {
+		return nil, false
+	}
+	return m.appendlanguages, true
+}
+
 // ClearLanguages clears the value of the "languages" field.
 func (m *AgentSessionMetricsMutation) ClearLanguages() {
 	m.languages = nil
+	m.appendlanguages = nil
 	m.clearedFields[agentsessionmetrics.FieldLanguages] = struct{}{}
 }
 
@@ -5469,6 +5485,7 @@ func (m *AgentSessionMetricsMutation) LanguagesCleared() bool {
 // ResetLanguages resets all changes to the "languages" field.
 func (m *AgentSessionMetricsMutation) ResetLanguages() {
 	m.languages = nil
+	m.appendlanguages = nil
 	delete(m.clearedFields, agentsessionmetrics.FieldLanguages)
 }
 
@@ -5759,14 +5776,14 @@ func (m *AgentSessionMetricsMutation) SetField(name string, value ent.Value) err
 		m.SetTokensReasoning(v)
 		return nil
 	case agentsessionmetrics.FieldToolCalls:
-		v, ok := value.(string)
+		v, ok := value.(map[string]interface{})
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetToolCalls(v)
 		return nil
 	case agentsessionmetrics.FieldLanguages:
-		v, ok := value.(string)
+		v, ok := value.([]string)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}

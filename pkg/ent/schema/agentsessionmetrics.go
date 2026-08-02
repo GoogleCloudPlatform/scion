@@ -67,11 +67,11 @@ func (AgentSessionMetrics) Fields() []ent.Field {
 		field.Int64("tokens_reasoning").
 			Optional().
 			Default(0),
-		// tool_calls stored as JSON string (serialized map[string]ToolStats)
-		field.Text("tool_calls").
+		// tool_calls stored as JSON
+		field.JSON("tool_calls", map[string]any{}).
 			Optional(),
-		// languages stored as JSON string (serialized []string)
-		field.Text("languages").
+		// languages stored as JSON
+		field.JSON("languages", []string{}).
 			Optional(),
 		field.Time("created_at").
 			Default(time.Now).

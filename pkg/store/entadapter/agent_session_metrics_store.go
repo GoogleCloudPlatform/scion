@@ -95,10 +95,10 @@ func (s *AgentSessionMetricsStore) CreateAgentSessionMetrics(ctx context.Context
 	if m.Model != "" {
 		builder = builder.SetModel(m.Model)
 	}
-	if m.ToolCalls != "" {
+	if len(m.ToolCalls) > 0 {
 		builder = builder.SetToolCalls(m.ToolCalls)
 	}
-	if m.Languages != "" {
+	if len(m.Languages) > 0 {
 		builder = builder.SetLanguages(m.Languages)
 	}
 

@@ -2175,22 +2175,22 @@ const (
 // AgentSessionMetrics represents a pre-aggregated session-level telemetry
 // record reported by sciontool on session-end.
 type AgentSessionMetrics struct {
-	ID              string     `json:"id"`
-	AgentID         string     `json:"agentId"`
-	ProjectID       string     `json:"projectId"`
-	SessionID       string     `json:"sessionId"`
-	StartedAt       time.Time  `json:"startedAt"`
-	EndedAt         *time.Time `json:"endedAt,omitempty"`
-	Status          string     `json:"status,omitempty"`
-	TurnCount       int        `json:"turnCount,omitempty"`
-	Model           string     `json:"model,omitempty"`
-	TokensInput     int64      `json:"tokensInput,omitempty"`
-	TokensOutput    int64      `json:"tokensOutput,omitempty"`
-	TokensCached    int64      `json:"tokensCached,omitempty"`
-	TokensReasoning int64      `json:"tokensReasoning,omitempty"`
-	ToolCalls       string     `json:"toolCalls,omitempty"`  // JSON-encoded map[string]ToolCallStats
-	Languages       string     `json:"languages,omitempty"` // JSON-encoded []string
-	CreatedAt       time.Time  `json:"createdAt"`
+	ID              string         `json:"id"`
+	AgentID         string         `json:"agentId"`
+	ProjectID       string         `json:"projectId"`
+	SessionID       string         `json:"sessionId"`
+	StartedAt       time.Time      `json:"startedAt"`
+	EndedAt         *time.Time     `json:"endedAt,omitempty"`
+	Status          string         `json:"status,omitempty"`
+	TurnCount       int            `json:"turnCount,omitempty"`
+	Model           string         `json:"model,omitempty"`
+	TokensInput     int64          `json:"tokensInput,omitempty"`
+	TokensOutput    int64          `json:"tokensOutput,omitempty"`
+	TokensCached    int64          `json:"tokensCached,omitempty"`
+	TokensReasoning int64          `json:"tokensReasoning,omitempty"`
+	ToolCalls       map[string]any `json:"toolCalls,omitempty"`
+	Languages       []string       `json:"languages,omitempty"`
+	CreatedAt       time.Time      `json:"createdAt"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.

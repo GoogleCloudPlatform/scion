@@ -111,8 +111,8 @@ var (
 		{Name: "tokens_output", Type: field.TypeInt64, Nullable: true, Default: 0},
 		{Name: "tokens_cached", Type: field.TypeInt64, Nullable: true, Default: 0},
 		{Name: "tokens_reasoning", Type: field.TypeInt64, Nullable: true, Default: 0},
-		{Name: "tool_calls", Type: field.TypeString, Nullable: true, Size: 2147483647},
-		{Name: "languages", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "tool_calls", Type: field.TypeJSON, Nullable: true},
+		{Name: "languages", Type: field.TypeJSON, Nullable: true},
 		{Name: "created_at", Type: field.TypeTime},
 	}
 	// AgentSessionMetricsTable holds the schema information for the "agent_session_metrics" table.

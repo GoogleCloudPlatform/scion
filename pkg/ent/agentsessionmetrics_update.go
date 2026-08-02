@@ -10,6 +10,7 @@ import (
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -280,16 +281,8 @@ func (_u *AgentSessionMetricsUpdate) ClearTokensReasoning() *AgentSessionMetrics
 }
 
 // SetToolCalls sets the "tool_calls" field.
-func (_u *AgentSessionMetricsUpdate) SetToolCalls(v string) *AgentSessionMetricsUpdate {
+func (_u *AgentSessionMetricsUpdate) SetToolCalls(v map[string]interface{}) *AgentSessionMetricsUpdate {
 	_u.mutation.SetToolCalls(v)
-	return _u
-}
-
-// SetNillableToolCalls sets the "tool_calls" field if the given value is not nil.
-func (_u *AgentSessionMetricsUpdate) SetNillableToolCalls(v *string) *AgentSessionMetricsUpdate {
-	if v != nil {
-		_u.SetToolCalls(*v)
-	}
 	return _u
 }
 
@@ -300,16 +293,14 @@ func (_u *AgentSessionMetricsUpdate) ClearToolCalls() *AgentSessionMetricsUpdate
 }
 
 // SetLanguages sets the "languages" field.
-func (_u *AgentSessionMetricsUpdate) SetLanguages(v string) *AgentSessionMetricsUpdate {
+func (_u *AgentSessionMetricsUpdate) SetLanguages(v []string) *AgentSessionMetricsUpdate {
 	_u.mutation.SetLanguages(v)
 	return _u
 }
 
-// SetNillableLanguages sets the "languages" field if the given value is not nil.
-func (_u *AgentSessionMetricsUpdate) SetNillableLanguages(v *string) *AgentSessionMetricsUpdate {
-	if v != nil {
-		_u.SetLanguages(*v)
-	}
+// AppendLanguages appends value to the "languages" field.
+func (_u *AgentSessionMetricsUpdate) AppendLanguages(v []string) *AgentSessionMetricsUpdate {
+	_u.mutation.AppendLanguages(v)
 	return _u
 }
 
@@ -459,16 +450,21 @@ func (_u *AgentSessionMetricsUpdate) sqlSave(ctx context.Context) (_node int, er
 		_spec.ClearField(agentsessionmetrics.FieldTokensReasoning, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.ToolCalls(); ok {
-		_spec.SetField(agentsessionmetrics.FieldToolCalls, field.TypeString, value)
+		_spec.SetField(agentsessionmetrics.FieldToolCalls, field.TypeJSON, value)
 	}
 	if _u.mutation.ToolCallsCleared() {
-		_spec.ClearField(agentsessionmetrics.FieldToolCalls, field.TypeString)
+		_spec.ClearField(agentsessionmetrics.FieldToolCalls, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Languages(); ok {
-		_spec.SetField(agentsessionmetrics.FieldLanguages, field.TypeString, value)
+		_spec.SetField(agentsessionmetrics.FieldLanguages, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedLanguages(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agentsessionmetrics.FieldLanguages, value)
+		})
 	}
 	if _u.mutation.LanguagesCleared() {
-		_spec.ClearField(agentsessionmetrics.FieldLanguages, field.TypeString)
+		_spec.ClearField(agentsessionmetrics.FieldLanguages, field.TypeJSON)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -742,16 +738,8 @@ func (_u *AgentSessionMetricsUpdateOne) ClearTokensReasoning() *AgentSessionMetr
 }
 
 // SetToolCalls sets the "tool_calls" field.
-func (_u *AgentSessionMetricsUpdateOne) SetToolCalls(v string) *AgentSessionMetricsUpdateOne {
+func (_u *AgentSessionMetricsUpdateOne) SetToolCalls(v map[string]interface{}) *AgentSessionMetricsUpdateOne {
 	_u.mutation.SetToolCalls(v)
-	return _u
-}
-
-// SetNillableToolCalls sets the "tool_calls" field if the given value is not nil.
-func (_u *AgentSessionMetricsUpdateOne) SetNillableToolCalls(v *string) *AgentSessionMetricsUpdateOne {
-	if v != nil {
-		_u.SetToolCalls(*v)
-	}
 	return _u
 }
 
@@ -762,16 +750,14 @@ func (_u *AgentSessionMetricsUpdateOne) ClearToolCalls() *AgentSessionMetricsUpd
 }
 
 // SetLanguages sets the "languages" field.
-func (_u *AgentSessionMetricsUpdateOne) SetLanguages(v string) *AgentSessionMetricsUpdateOne {
+func (_u *AgentSessionMetricsUpdateOne) SetLanguages(v []string) *AgentSessionMetricsUpdateOne {
 	_u.mutation.SetLanguages(v)
 	return _u
 }
 
-// SetNillableLanguages sets the "languages" field if the given value is not nil.
-func (_u *AgentSessionMetricsUpdateOne) SetNillableLanguages(v *string) *AgentSessionMetricsUpdateOne {
-	if v != nil {
-		_u.SetLanguages(*v)
-	}
+// AppendLanguages appends value to the "languages" field.
+func (_u *AgentSessionMetricsUpdateOne) AppendLanguages(v []string) *AgentSessionMetricsUpdateOne {
+	_u.mutation.AppendLanguages(v)
 	return _u
 }
 
@@ -951,16 +937,21 @@ func (_u *AgentSessionMetricsUpdateOne) sqlSave(ctx context.Context) (_node *Age
 		_spec.ClearField(agentsessionmetrics.FieldTokensReasoning, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.ToolCalls(); ok {
-		_spec.SetField(agentsessionmetrics.FieldToolCalls, field.TypeString, value)
+		_spec.SetField(agentsessionmetrics.FieldToolCalls, field.TypeJSON, value)
 	}
 	if _u.mutation.ToolCallsCleared() {
-		_spec.ClearField(agentsessionmetrics.FieldToolCalls, field.TypeString)
+		_spec.ClearField(agentsessionmetrics.FieldToolCalls, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.Languages(); ok {
-		_spec.SetField(agentsessionmetrics.FieldLanguages, field.TypeString, value)
+		_spec.SetField(agentsessionmetrics.FieldLanguages, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedLanguages(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agentsessionmetrics.FieldLanguages, value)
+		})
 	}
 	if _u.mutation.LanguagesCleared() {
-		_spec.ClearField(agentsessionmetrics.FieldLanguages, field.TypeString)
+		_spec.ClearField(agentsessionmetrics.FieldLanguages, field.TypeJSON)
 	}
 	_node = &AgentSessionMetrics{config: _u.config}
 	_spec.Assign = _node.assignValues

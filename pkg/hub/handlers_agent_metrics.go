@@ -105,6 +105,10 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 			ValidationError(w, "session.ended_at must be RFC3339", nil)
 			return
 		}
+		if t.Before(startedAt) {
+			ValidationError(w, "session.ended_at cannot be before session.started_at", nil)
+			return
+		}
 		endedAt = &t
 	}
 
@@ -114,26 +118,17 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 		writeErrorFromErr(w, err, "")
 		return
 	}
-
-	// Serialize tool_calls to JSON string.
-	var toolCallsJSON string
-	if len(req.Tools) > 0 {
-		b, err := json.Marshal(req.Tools)
-		if err != nil {
-			s.agentMetricsLog.Warn("Failed to marshal tool calls", "agent_id", id, "error", err)
-		} else {
-			toolCallsJSON = string(b)
-		}
+	if agent == nil {
+		writeError(w, http.StatusNotFound, ErrCodeNotFound, "Agent not found", nil)
+		return
 	}
 
-	// Serialize languages to JSON string.
-	var languagesJSON string
-	if len(req.Languages) > 0 {
-		b, err := json.Marshal(req.Languages)
-		if err != nil {
-			s.agentMetricsLog.Warn("Failed to marshal languages", "agent_id", id, "error", err)
-		} else {
-			languagesJSON = string(b)
+	// Convert tool_calls to map[string]any for native JSON storage.
+	var toolCalls map[string]any
+	if len(req.Tools) > 0 {
+		toolCalls = make(map[string]any, len(req.Tools))
+		for k, v := range req.Tools {
+			toolCalls[k] = v
 		}
 	}
 
@@ -152,8 +147,8 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 		TokensOutput:    req.Tokens.Output,
 		TokensCached:    req.Tokens.Cached,
 		TokensReasoning: req.Tokens.Reasoning,
-		ToolCalls:       toolCallsJSON,
-		Languages:       languagesJSON,
+		ToolCalls:       toolCalls,
+		Languages:       req.Languages,
 	}
 
 	if err := s.store.CreateAgentSessionMetrics(ctx, metrics); err != nil {
