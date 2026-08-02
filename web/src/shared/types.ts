@@ -334,16 +334,6 @@ export interface TelemetryConfig {
 }
 
 /**
- * Auto-expose ports configuration for an agent.
- */
-export interface AutoExposePortsConfig {
-  enabled?: boolean;
-  mode?: string;
-  ports?: string;
-  interval?: string;
-}
-
-/**
  * Inline configuration values set at agent creation time.
  */
 export interface AgentInlineConfig {
@@ -356,7 +346,6 @@ export interface AgentInlineConfig {
   task?: string;
   image?: string;
   telemetry?: TelemetryConfig;
-  auto_expose_ports?: AutoExposePortsConfig;
 }
 
 export type SupportLevel = 'no' | 'partial' | 'yes';

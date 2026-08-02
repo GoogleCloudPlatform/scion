@@ -431,11 +431,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 					agent.AppliedConfig.InlineConfig.Env = make(map[string]string)
 				}
 				if _, exists := agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"]; !exists {
-					if enabled {
-						agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = "true"
-					} else {
-						agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = "false"
-					}
+					agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = strconv.FormatBool(enabled)
 				}
 			}
 		}
