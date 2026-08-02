@@ -37,6 +37,7 @@ import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/quick-message-dialog.js';
+import { showToast } from '../../utils/toast.js';
 
 @customElement('scion-page-agents')
 export class ScionPageAgents extends LitElement {
@@ -495,7 +496,7 @@ export class ScionPageAgents extends LitElement {
         this.backgroundRefresh();
       } catch (err) {
         console.error('Failed to delete agent:', err);
-        alert(err instanceof Error ? err.message : 'Failed to delete agent');
+        showToast(err instanceof Error ? err.message : 'Failed to delete agent');
       } finally {
         this.actionLoading = { ...this.actionLoading, [agentId]: false };
       }
@@ -534,7 +535,7 @@ export class ScionPageAgents extends LitElement {
       this.backgroundRefresh();
     } catch (err) {
       console.error(`Failed to ${action} agent:`, err);
-      alert(err instanceof Error ? err.message : `Failed to ${action} agent`);
+      showToast(err instanceof Error ? err.message : `Failed to ${action} agent`);
       // Roll back optimistic update on failure
       this.backgroundRefresh();
     }
@@ -566,13 +567,13 @@ export class ScionPageAgents extends LitElement {
 
       const result = (await response.json()) as { stopped: number; failed: number };
       if (result.failed > 0) {
-        alert(`Stopped ${result.stopped} agents, ${result.failed} failed.`);
+        showToast(`Stopped ${result.stopped} agents, ${result.failed} failed.`, 'warning');
       }
 
       this.backgroundRefresh();
     } catch (err) {
       console.error('Failed to stop all agents:', err);
-      alert(err instanceof Error ? err.message : 'Failed to stop all agents');
+      showToast(err instanceof Error ? err.message : 'Failed to stop all agents');
       this.backgroundRefresh();
     } finally {
       this.stopAllLoading = false;

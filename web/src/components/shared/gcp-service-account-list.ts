@@ -28,6 +28,7 @@ import type { GCPServiceAccount, GCPVerificationStatus, Capabilities, GCPMintQuo
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { showToast } from '../../utils/toast.js';
 
 @customElement('scion-gcp-service-account-list')
 export class ScionGCPServiceAccountList extends LitElement {
@@ -376,7 +377,7 @@ export class ScionGCPServiceAccountList extends LitElement {
       await this.loadAccounts();
     } catch (err) {
       console.error('Failed to delete service account:', err);
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
       this.deletingId = null;
     }

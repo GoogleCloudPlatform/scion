@@ -32,6 +32,7 @@ import { SSEClient } from '../../client/sse-client.js';
 import type { SSEUpdateEvent } from '../../client/sse-client.js';
 import type { StatusType } from '../shared/status-badge.js';
 import '../shared/status-badge.js';
+import { showToast } from '../../utils/toast.js';
 
 // xterm.js imports are client-side only — guarded by typeof check in lifecycle
 // These will be imported dynamically in firstUpdated() since they require DOM APIs
@@ -954,17 +955,19 @@ export class ScionPageTerminal extends LitElement {
 
       if (!response.ok) {
         const msg = await extractApiError(response, 'Failed to run capture auth');
-        alert(msg);
+        showToast(msg);
         return;
       }
 
       const result = await response.json() as { output: string; exitCode: number };
 
       if (result.exitCode === 0) {
-        alert(`Credentials captured successfully.\n\n${result.output}`);
+        showToast('Credentials captured successfully.', 'success');
+        if (result.output) console.log('Capture auth output:', result.output);
         await this.refreshAgentData();
       } else if (result.exitCode === 2) {
-        alert(`No credentials found yet.\n\nAuthenticate first (e.g., run 'agy' inside the container), then try again.\n\n${result.output}`);
+        showToast('No credentials found yet. Authenticate first, then try again.', 'neutral');
+        if (result.output) console.log('Capture auth output:', result.output);
       } else {
         const conflicts: string[] = [];
         for (const m of result.output.matchAll(ScionPageTerminal.SECRET_CONFLICT_RE)) {
@@ -973,12 +976,13 @@ export class ScionPageTerminal extends LitElement {
         if (conflicts.length > 0) {
           this.captureAuthConflicts = conflicts;
         } else {
-          alert(`Capture failed (exit ${result.exitCode}).\n\n${result.output}`);
+          showToast(`Capture failed (exit ${result.exitCode}).`);
+          if (result.output) console.log('Capture auth output:', result.output);
         }
       }
     } catch (err) {
       console.error('Failed to capture auth:', err);
-      alert(err instanceof Error ? err.message : 'Failed to capture auth');
+      showToast(err instanceof Error ? err.message : 'Failed to capture auth');
     } finally {
       this.captureAuthLoading = false;
     }

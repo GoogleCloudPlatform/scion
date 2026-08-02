@@ -28,6 +28,7 @@ import { customElement, state } from 'lit/decorators.js';
 import type { Project } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { showToast } from '../../utils/toast.js';
 
 interface AccessToken {
   id: string;
@@ -360,7 +361,7 @@ export class ScionTokenList extends LitElement {
       await this.loadData();
     } catch (err) {
       console.error('Failed to revoke token:', err);
-      alert(err instanceof Error ? err.message : 'Failed to revoke');
+      showToast(err instanceof Error ? err.message : 'Failed to revoke');
     } finally {
       this.actionLoadingId = null;
     }
@@ -384,7 +385,7 @@ export class ScionTokenList extends LitElement {
       await this.loadData();
     } catch (err) {
       console.error('Failed to delete token:', err);
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
       this.actionLoadingId = null;
     }

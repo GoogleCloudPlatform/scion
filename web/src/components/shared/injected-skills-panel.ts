@@ -34,6 +34,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { Skill } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { showToast } from '../../utils/toast.js';
 
 export type InjectedSkillsScope = 'project' | 'user' | 'hub';
 
@@ -1266,7 +1267,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
       await this.deleteEntry(row, resolvedIndex);
     } catch (err) {
       console.error('Failed to delete skill:', err);
-      alert(err instanceof Error ? err.message : 'Failed to remove skill');
+      showToast(err instanceof Error ? err.message : 'Failed to remove skill');
     } finally {
       this._deletingIndex = null;
     }

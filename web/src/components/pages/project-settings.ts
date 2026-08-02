@@ -41,6 +41,7 @@ import '../shared/resource-list.js';
 import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
+import { showToast } from '../../utils/toast.js';
 
 
 interface ProjectResourceSpec {
@@ -1223,7 +1224,7 @@ export class ScionPageProjectSettings extends LitElement {
       window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {
       console.error('Failed to delete project:', err);
-      alert(err instanceof Error ? err.message : 'Failed to delete project');
+      showToast(err instanceof Error ? err.message : 'Failed to delete project');
     } finally {
       this.deleteLoading = false;
     }

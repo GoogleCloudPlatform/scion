@@ -27,6 +27,7 @@ import type { SkillRegistry } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
 import '../shared/hash-display.js';
+import { showToast } from '../../utils/toast.js';
 
 interface PinnedHash {
   uri: string;
@@ -367,7 +368,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
         void this.loadPinnedHashes();
       }
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save');
+      showToast(err instanceof Error ? err.message : 'Failed to save');
     } finally {
       this.saving = false;
     }
@@ -390,7 +391,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       }
       this.registry = (await res.json()) as SkillRegistry;
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to toggle status');
+      showToast(err instanceof Error ? err.message : 'Failed to toggle status');
     } finally {
       this.actionLoading = { ...this.actionLoading, toggle: false };
     }
@@ -409,7 +410,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       window.history.pushState({}, '', '/admin/skill-registries');
       window.dispatchEvent(new PopStateEvent('popstate'));
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
       this.actionLoading = { ...this.actionLoading, delete: false };
     }
@@ -434,7 +435,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       this.pinHash = '';
       void this.loadPinnedHashes();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to pin');
+      showToast(err instanceof Error ? err.message : 'Failed to pin');
     } finally {
       this.pinning = false;
     }
@@ -453,7 +454,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       }
       void this.loadPinnedHashes();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to unpin');
+      showToast(err instanceof Error ? err.message : 'Failed to unpin');
     }
   }
 
