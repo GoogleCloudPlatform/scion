@@ -415,6 +415,7 @@ export interface Agent {
   taskSummary?: string;
   message?: string;
   lastSeen?: string;
+  lastActivityEvent?: string;
   // Backend sends "created"/"updated"; legacy frontend code uses "createdAt"/"updatedAt".
   // Accept both so existing pages and new API responses both work.
   created?: string;

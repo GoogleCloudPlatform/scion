@@ -257,6 +257,7 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		Created:           a.Created,
 		Updated:           a.Updated,
 		LastSeen:          a.LastSeen,
+		LastActivityEvent: a.LastActivityEvent,
 		DeletedAt:         a.DeletedAt,
 		CreatedBy:         a.CreatedBy,
 		OwnerID:           a.OwnerID,
@@ -378,7 +379,15 @@ func sortAgentsByField(agents []api.AgentInfo) {
 		case "updated":
 			less = agents[i].Updated.Before(agents[j].Updated)
 		case "last-seen":
-			less = agents[i].LastSeen.Before(agents[j].LastSeen)
+			ti := agents[i].LastActivityEvent
+			if ti.IsZero() {
+				ti = agents[i].LastSeen
+			}
+			tj := agents[j].LastActivityEvent
+			if tj.IsZero() {
+				tj = agents[j].LastSeen
+			}
+			less = ti.Before(tj)
 		default:
 			return false
 		}
@@ -410,7 +419,15 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		sortAgentsByField(agents)
 	} else if sortByTime {
 		sort.Slice(agents, func(i, j int) bool {
-			return agents[i].LastSeen.After(agents[j].LastSeen)
+			ti := agents[i].LastActivityEvent
+			if ti.IsZero() {
+				ti = agents[i].LastSeen
+			}
+			tj := agents[j].LastActivityEvent
+			if tj.IsZero() {
+				tj = agents[j].LastSeen
+			}
+			return ti.After(tj)
 		})
 	}
 
@@ -454,7 +471,11 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		if harnessConfig == "" {
 			harnessConfig = "-"
 		}
-		lastActivity := formatLastActivity(a.Activity, a.LastSeen)
+		activityTime := a.LastActivityEvent
+		if activityTime.IsZero() {
+			activityTime = a.LastSeen
+		}
+		lastActivity := formatLastActivity(a.Activity, activityTime)
 		// Use broker name if available, otherwise fall back to ID
 		broker := a.RuntimeBrokerName
 		if broker == "" {
