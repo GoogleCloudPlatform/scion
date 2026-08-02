@@ -160,6 +160,7 @@ type DiscordBroker struct {
 
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID -> slug
+	downloadsPath  string            // override for file download directory; empty = default
 
 	config *Config
 
@@ -308,6 +309,11 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 				return fmt.Errorf("invalid agent_cache_ttl: %w", err)
 			}
 			b.agentCacheTTL = d
+		}
+
+		// Parse optional downloads directory override.
+		if v, ok := config["downloads_path"]; ok && v != "" {
+			b.downloadsPath = v
 		}
 
 		b.log.Info("Discord broker phase 1 configured",
@@ -2015,7 +2021,13 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	timestamp := time.Now().Unix()
 	destName := fmt.Sprintf("discord_%d_%s", timestamp, fileName)
 
-	hostDir := filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
+	// Use configured downloads_path if set; otherwise default to project dir.
+	var hostDir string
+	if b.downloadsPath != "" {
+		hostDir = b.downloadsPath
+	} else {
+		hostDir = filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
+	}
 	if err := os.MkdirAll(hostDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create downloads dir: %w", err)
 	}
@@ -2033,7 +2045,14 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 		return "", "", fmt.Errorf("write file: %w", err)
 	}
 
-	agentPath = filepath.Join("/workspace/downloads", destName)
+	// Derive the agent-visible path from the same base used to save the file.
+	// When a custom downloads_path is configured, the agent sees that path
+	// directly; otherwise it sees the conventional /workspace/downloads mount.
+	if b.downloadsPath != "" {
+		agentPath = filepath.Join(b.downloadsPath, destName)
+	} else {
+		agentPath = filepath.Join("/workspace/downloads", destName)
+	}
 	contentType := att.ContentType
 	if contentType == "" {
 		contentType = "file"

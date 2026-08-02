@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1436,4 +1437,159 @@ func TestResolveChannelLink_CachesConfirmedThread(t *testing.T) {
 	threadParentsMu.Unlock()
 	assert.True(t, cached, "confirmed thread must be cached")
 	assert.Equal(t, parentID, cachedParent)
+}
+
+// --- downloadDiscordAttachment tests ---
+
+func TestDownloadDiscordAttachment_DefaultPath(t *testing.T) {
+	// When downloadsPath is empty, the function writes to
+	// /home/scion/.scion/projects/<slug>/downloads and returns
+	// /workspace/downloads/<name> as the agent-visible path.
+	// We can't safely write to /home/scion in tests, so we verify
+	// the path computation by setting downloadsPath to a temp dir
+	// and confirming the custom-path branch differs from the default.
+
+	fileContent := []byte("default-path-test")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(fileContent)
+	}))
+	defer srv.Close()
+
+	projectSlug := "test-project"
+
+	// Verify the default hostDir and agentPath computation.
+	defaultHostDir := filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
+	assert.Equal(t, "/home/scion/.scion/projects/test-project/downloads", defaultHostDir)
+
+	defaultAgentPath := filepath.Join("/workspace/downloads", "discord_123_photo.png")
+	assert.Equal(t, "/workspace/downloads/discord_123_photo.png", defaultAgentPath)
+
+	// Verify that a broker with no downloadsPath set would use
+	// the default agent path prefix.
+	b := &DiscordBroker{
+		log:        discardLogger(),
+		httpClient: srv.Client(),
+	}
+	assert.Empty(t, b.downloadsPath, "downloadsPath should be empty by default")
+}
+
+func TestDownloadDiscordAttachment_CustomDownloadsPath(t *testing.T) {
+	fileContent := []byte("fake-image-data-for-test")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(fileContent)
+	}))
+	defer srv.Close()
+
+	downloadsDir := t.TempDir()
+	b := &DiscordBroker{
+		log:           discardLogger(),
+		httpClient:    srv.Client(),
+		downloadsPath: downloadsDir,
+	}
+
+	att := &discordgo.MessageAttachment{
+		ID:          "att-002",
+		Filename:    "document.pdf",
+		URL:         srv.URL + "/document.pdf",
+		Size:        len(fileContent),
+		ContentType: "application/pdf",
+	}
+
+	ctx := context.Background()
+	agentPath, placeholder, err := b.downloadDiscordAttachment(ctx, att, "some-project")
+	require.NoError(t, err)
+
+	// Agent path should be downloads_path + filename (not /workspace/downloads/).
+	assert.True(t, strings.HasPrefix(agentPath, downloadsDir),
+		"agentPath %q should start with downloadsPath %q", agentPath, downloadsDir)
+	assert.False(t, strings.Contains(agentPath, "/workspace/downloads"),
+		"agentPath should not contain /workspace/downloads when downloadsPath is set")
+
+	// The filename should contain the original name.
+	assert.Contains(t, filepath.Base(agentPath), "document.pdf")
+	assert.Contains(t, filepath.Base(agentPath), "discord_")
+
+	// Placeholder should describe the attachment.
+	assert.Contains(t, placeholder, "document.pdf")
+	assert.Contains(t, placeholder, "application/pdf")
+
+	// The file should actually exist on disk with correct contents.
+	data, err := os.ReadFile(agentPath)
+	require.NoError(t, err, "downloaded file should exist at agentPath")
+	assert.Equal(t, fileContent, data)
+}
+
+func TestDownloadDiscordAttachment_EmptyProjectSlug(t *testing.T) {
+	b := &DiscordBroker{
+		log:        discardLogger(),
+		httpClient: http.DefaultClient,
+	}
+
+	att := &discordgo.MessageAttachment{
+		ID:       "att-003",
+		Filename: "file.txt",
+		URL:      "http://example.com/file.txt",
+		Size:     10,
+	}
+
+	ctx := context.Background()
+	_, _, err := b.downloadDiscordAttachment(ctx, att, "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "project slug is empty")
+}
+
+func TestDownloadDiscordAttachment_TooLarge(t *testing.T) {
+	b := &DiscordBroker{
+		log:        discardLogger(),
+		httpClient: http.DefaultClient,
+	}
+
+	att := &discordgo.MessageAttachment{
+		ID:       "att-004",
+		Filename: "huge.bin",
+		URL:      "http://example.com/huge.bin",
+		Size:     maxDiscordAttachmentSize + 1,
+	}
+
+	ctx := context.Background()
+	_, _, err := b.downloadDiscordAttachment(ctx, att, "test-project")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "too large")
+}
+
+func TestDownloadDiscordAttachment_CustomPath_CreatesSubdir(t *testing.T) {
+	fileContent := []byte("test-content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(fileContent)
+	}))
+	defer srv.Close()
+
+	// Use a nested path that doesn't exist yet — MkdirAll should create it.
+	baseDir := t.TempDir()
+	downloadsDir := filepath.Join(baseDir, "nested", "downloads")
+	b := &DiscordBroker{
+		log:           discardLogger(),
+		httpClient:    srv.Client(),
+		downloadsPath: downloadsDir,
+	}
+
+	att := &discordgo.MessageAttachment{
+		ID:       "att-005",
+		Filename: "nested-file.txt",
+		URL:      srv.URL + "/nested-file.txt",
+		Size:     len(fileContent),
+	}
+
+	ctx := context.Background()
+	agentPath, _, err := b.downloadDiscordAttachment(ctx, att, "proj")
+	require.NoError(t, err)
+
+	// Verify the directory was created and the file exists.
+	_, err = os.Stat(downloadsDir)
+	require.NoError(t, err, "downloadsPath directory should be created")
+
+	data, err := os.ReadFile(agentPath)
+	require.NoError(t, err)
+	assert.Equal(t, fileContent, data)
 }
