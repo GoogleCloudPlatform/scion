@@ -426,6 +426,7 @@ func TestProjectSearchRoots_DiscoversDirs(t *testing.T) {
 	// Set up a fake home directory structure.
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	slug := "test-proj"
 	projectID := "550e8400-e29b-41d4-a716-446655440000"
@@ -455,6 +456,7 @@ func TestProjectSearchRoots_DiscoversDirs(t *testing.T) {
 func TestProjectSearchRoots_NoSharedDirs(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	slug := "empty-proj"
 	projectID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -472,6 +474,7 @@ func TestProjectSearchRoots_NoSharedDirs(t *testing.T) {
 func TestProjectSearchRoots_NothingExists(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
 
 	roots := projectSearchRoots("nonexistent", "00000000-0000-0000-0000-000000000000")
 
@@ -557,6 +560,75 @@ func TestDeduplicateRoots_SingleRoot(t *testing.T) {
 func TestDeduplicateRoots_Empty(t *testing.T) {
 	result := deduplicateRoots(nil)
 	assert.Nil(t, result)
+}
+
+// --- translateContainerPath tests ---
+
+func TestTranslateContainerPath_ScionVolumes(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
+
+	slug := "my-proj"
+	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
+
+	got := translateContainerPath("/scion-volumes/scratchpad/foo/bar.md", slug, projectID)
+
+	expected := filepath.Join(fakeHome, ".scion", "project-configs",
+		"my-proj__aabbccdd", "shared-dirs", "scratchpad", "foo", "bar.md")
+	assert.Equal(t, expected, got)
+}
+
+func TestTranslateContainerPath_ScionVolumesNoRemainder(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
+
+	slug := "my-proj"
+	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
+
+	got := translateContainerPath("/scion-volumes/scratchpad", slug, projectID)
+
+	expected := filepath.Join(fakeHome, ".scion", "project-configs",
+		"my-proj__aabbccdd", "shared-dirs", "scratchpad")
+	assert.Equal(t, expected, got)
+}
+
+func TestTranslateContainerPath_WorkspaceScionVolumes(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
+
+	slug := "my-proj"
+	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
+
+	got := translateContainerPath("/workspace/.scion-volumes/scratchpad/foo.md", slug, projectID)
+
+	expected := filepath.Join(fakeHome, ".scion", "project-configs",
+		"my-proj__aabbccdd", "shared-dirs", "scratchpad", "foo.md")
+	assert.Equal(t, expected, got)
+}
+
+func TestTranslateContainerPath_NonContainerPathUnchanged(t *testing.T) {
+	got := translateContainerPath("/home/scion/something", "slug", "id")
+	assert.Equal(t, "/home/scion/something", got)
+}
+
+func TestTranslateContainerPath_PartialQueryUnchanged(t *testing.T) {
+	got := translateContainerPath("report.txt", "slug", "id")
+	assert.Equal(t, "report.txt", got)
+}
+
+func TestTranslateContainerPath_BarePrefix(t *testing.T) {
+	// "/scion-volumes" with no shared dir name — can't translate.
+	got := translateContainerPath("/scion-volumes", "slug", "id")
+	assert.Equal(t, "/scion-volumes", got)
+}
+
+func TestTranslateContainerPath_TrailingSlashOnly(t *testing.T) {
+	// "/scion-volumes/" with no shared dir name — can't translate.
+	got := translateContainerPath("/scion-volumes/", "slug", "id")
+	assert.Equal(t, "/scion-volumes/", got)
 }
 
 // --- test helpers ---

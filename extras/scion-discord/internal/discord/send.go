@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -202,6 +203,60 @@ func projectSearchRoots(slug, projectID string) []string {
 	return roots
 }
 
+// containerPathPrefixes lists the path prefixes used inside agent containers
+// for shared directories. Both the root-level mount and the in-workspace
+// variant are supported.
+var containerPathPrefixes = []string{
+	"/scion-volumes/",
+	"/workspace/.scion-volumes/",
+}
+
+// translateContainerPath converts a container-internal path to its host-side
+// equivalent. If the path doesn't start with /scion-volumes/ or
+// /workspace/.scion-volumes/, it is returned unchanged.
+//
+// The returned path is NOT validated for confinement; callers MUST pass it
+// through safeResolve or safeResolveMulti before use.
+func translateContainerPath(path, projectSlug, projectID string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+
+	for _, prefix := range containerPathPrefixes {
+		if !strings.HasPrefix(path, prefix) {
+			// Also match the prefix without trailing slash (bare shared dir name).
+			bare := strings.TrimSuffix(prefix, "/")
+			if path == bare {
+				// e.g. "/scion-volumes" with no shared dir name — can't translate.
+				return path
+			}
+			continue
+		}
+
+		// Strip the prefix to get "<sharedDirName>/remainder" or just "<sharedDirName>".
+		after := strings.TrimPrefix(path, prefix)
+		if after == "" {
+			// Path is exactly the prefix (e.g. "/scion-volumes/") — no shared
+			// dir name, so we can't translate.
+			return path
+		}
+
+		// Split into shared dir name and optional remainder.
+		var sharedDirName, remainder string
+		if idx := strings.IndexByte(after, '/'); idx >= 0 {
+			sharedDirName = after[:idx]
+			remainder = after[idx+1:]
+		} else {
+			sharedDirName = after
+		}
+
+		hostSharedDir := config.SharedDirHostPath(home, projectSlug, projectID, sharedDirName)
+		return filepath.Join(hostSharedDir, remainder)
+	}
+	return path
+}
+
 // HandleSend handles the /scion send <path> command.
 // It resolves the channel's project binding to determine per-project search
 // roots. If the channel is not linked and no send_search_root override is
@@ -216,9 +271,22 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 		return
 	}
 
+	// Resolve the channel link once for project context. The result is shared
+	// by both path translation and search-root resolution to avoid a duplicate
+	// store round-trip and a consistency hazard if the link changes between calls.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
+	if err != nil {
+		h.log.Error("Failed to resolve channel link", "channel_id", i.ChannelID, "error", err)
+	}
+	if link != nil && link.Active {
+		pathArg = translateContainerPath(pathArg, link.ProjectSlug, link.ProjectID)
+	}
+
 	// Resolve search roots: per-project roots from channel link, with
 	// send_search_root as override/fallback.
-	roots := h.resolveSearchRoots(s, i)
+	roots := h.resolveSearchRoots(link)
 	if len(roots) == 0 {
 		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
 		return
@@ -280,7 +348,7 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 		}
 	}
 
-	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content:    fmt.Sprintf("Found %d file(s) matching '%s'. Select one to send:", len(matches), pathArg),
 		Components: rows,
 	})
@@ -293,14 +361,13 @@ func (h *CommandHandler) HandleSend(s *discordgo.Session, i *discordgo.Interacti
 // If the channel is linked to a project, per-project roots are computed.
 // If send_search_root is configured (h.searchRoot != DefaultSearchRoot), it is
 // used as an override when present, or as a fallback when no project link exists.
-func (h *CommandHandler) resolveSearchRoots(s *discordgo.Session, i *discordgo.InteractionCreate) []string {
+//
+// The caller resolves the channel link once and passes it in so that the same
+// result is shared with path translation (avoiding a duplicate store round-trip).
+func (h *CommandHandler) resolveSearchRoots(link *ChannelLink) []string {
 	configuredOverride := h.searchRoot != DefaultSearchRoot && h.searchRoot != ""
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
-	if err != nil || link == nil || !link.Active {
+	if link == nil || !link.Active {
 		// No project link — use configured override if available.
 		if configuredOverride {
 			return []string{h.searchRoot}
