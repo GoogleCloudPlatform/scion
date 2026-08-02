@@ -1170,8 +1170,8 @@ func isSectionName(name string) bool {
 var knownTelemetryCompoundFields = []string{
 	"insecure_skip_verify",
 	"respect_debug_mode",
-	"cloud_logging",
 	"report_interval",
+	"cloud_logging",
 	"max_size",
 }
 

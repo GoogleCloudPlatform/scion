@@ -1642,7 +1642,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           protocol: this.telemetryCloudProtocol,
           provider: this.telemetryCloudProvider,
           gcp_project_id: this.telemetryCloudGcpProjectId || undefined,
-          cloud_logging: this.telemetryCloudCloudLogging || undefined,
+          cloud_logging: this.telemetryCloudCloudLogging,
         };
       }
       if (ok('telemetry.hub.enabled')) {
