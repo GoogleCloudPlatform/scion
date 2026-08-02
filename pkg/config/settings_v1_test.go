@@ -153,9 +153,7 @@ default_template: claude
 func TestLoadVersionedSettings_GlobalHarnessConfigNotOverriddenByProjectDefaults(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Set up global settings with custom default_harness_config and default_template.
 	globalScionDir := filepath.Join(tmpDir, ".scion")
