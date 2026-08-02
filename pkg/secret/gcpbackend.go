@@ -110,16 +110,13 @@ func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*Sec
 			if status.Code(err) == codes.NotFound {
 				return nil, store.ErrNotFound
 			}
-			if wrapped := wrapGCPError(err, "access secret"); wrapped != err {
-				return nil, wrapped
-			}
 		} else {
 			slog.Info("Recovered secret from GCP SM without DB record", "name", name, "scope", scope)
 		}
 	}
 	if err != nil {
-		if wrapped := wrapGCPError(err, "access secret"); wrapped != err {
-			return nil, wrapped
+		if permErr := wrapGCPError(err, "access secret"); permErr != nil {
+			return nil, permErr
 		}
 		return nil, fmt.Errorf("failed to access secret value from GCP SM: %w", err)
 	}
@@ -190,14 +187,14 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 				},
 			})
 			if err != nil {
-				if wrapped := wrapGCPError(err, "create secret"); wrapped != err {
-					return false, nil, wrapped
+				if permErr := wrapGCPError(err, "create secret"); permErr != nil {
+					return false, nil, permErr
 				}
 				return false, nil, fmt.Errorf("failed to create GCP SM secret: %w", err)
 			}
 		} else {
-			if wrapped := wrapGCPError(err, "check secret"); wrapped != err {
-				return false, nil, wrapped
+			if permErr := wrapGCPError(err, "check secret"); permErr != nil {
+				return false, nil, permErr
 			}
 			return false, nil, fmt.Errorf("failed to check GCP SM secret: %w", err)
 		}
@@ -211,8 +208,8 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 		},
 	})
 	if err != nil {
-		if wrapped := wrapGCPError(err, "add secret version"); wrapped != err {
-			return false, nil, wrapped
+		if permErr := wrapGCPError(err, "add secret version"); permErr != nil {
+			return false, nil, permErr
 		}
 		return false, nil, fmt.Errorf("failed to add GCP SM secret version: %w", err)
 	}
@@ -240,8 +237,8 @@ func (b *GCPBackend) Delete(ctx context.Context, name, scope, scopeID string) er
 		Name: fullName,
 	})
 	if err != nil && status.Code(err) != codes.NotFound {
-		if wrapped := wrapGCPError(err, "delete secret"); wrapped != err {
-			return wrapped
+		if permErr := wrapGCPError(err, "delete secret"); permErr != nil {
+			return permErr
 		}
 		return fmt.Errorf("failed to delete GCP SM secret: %w", err)
 	}
@@ -508,18 +505,13 @@ func buildLabels(input *SetSecretInput, target, hubName string) map[string]strin
 
 // wrapGCPError checks whether err is a gRPC PermissionDenied error and returns
 // a *PermissionError so that HTTP handlers can return 403 instead of 500.
-// Other error codes are returned unchanged.
+// Returns nil for all other error codes, enabling the idiomatic
+// "if permErr := wrapGCPError(...); permErr != nil" pattern.
 func wrapGCPError(err error, operation string) error {
-	if err == nil {
-		return nil
-	}
-	code := status.Code(err)
-	switch code {
-	case codes.PermissionDenied:
+	if status.Code(err) == codes.PermissionDenied {
 		return &PermissionError{Operation: operation, Err: err}
-	default:
-		return err
 	}
+	return nil
 }
 
 // resolveHubName returns the hub display name if set, falling back to the machine hostname.
