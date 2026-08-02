@@ -291,15 +291,20 @@ auth:
 	}
 }
 
-// TestExtractRequiredEnvKeys_CompiledFallback verifies the compiled table
-// still drives preflight when the harness-config has no `auth:` block. This
-// is the legacy path required during migration so older configs do not
-// suddenly stop reporting missing credentials.
+// TestExtractRequiredEnvKeys_CompiledFallback verifies that a harness-config
+// with a declarative auth block correctly reports required env keys (e.g.
+// ANTHROPIC_API_KEY for api-key auth type) via the config-driven path.
 func TestExtractRequiredEnvKeys_CompiledFallback(t *testing.T) {
 	srv, _, dotScion := dispatchTestEnv(t, false)
 
 	writeHarnessConfig(t, dotScion, "claude-legacy", `harness: claude
 image: scion-claude:test
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["ANTHROPIC_API_KEY"]
 `)
 
 	req := CreateAgentRequest{

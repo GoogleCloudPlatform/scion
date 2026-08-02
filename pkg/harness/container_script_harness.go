@@ -290,20 +290,30 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// Forward config-driven file credentials. The Files map uses field names
 	// as keys (e.g. "ClaudeAuthFile") and host paths as values. We map the
 	// field names to their container target paths using the harness config's
-	// required_files entries.
+	// required_files entries. A seen set keyed by Field prevents duplicate
+	// mappings when the same field appears in multiple auth types.
 	if c.entry.Auth != nil {
+		seenFields := make(map[string]struct{})
 		for _, authType := range c.entry.Auth.Types {
 			for _, rf := range authType.RequiredFiles {
 				if rf.Field == "" || rf.TargetSuffix == "" {
 					continue
 				}
+				if _, dup := seenFields[rf.Field]; dup {
+					continue
+				}
+				seenFields[rf.Field] = struct{}{}
 				hostPath := auth.Files[rf.Field]
 				if hostPath == "" {
 					continue
 				}
-				// TargetSuffix starts with "/" — prepend "~" to make it relative
-				// to home (e.g. "/.claude/.credentials.json" → "~/.claude/.credentials.json")
-				containerPath := "~" + rf.TargetSuffix
+				// Normalize TargetSuffix to ensure it starts with "/" before
+				// prepending "~" (e.g. ".claude/foo" → "~/.claude/foo").
+				suffix := rf.TargetSuffix
+				if !strings.HasPrefix(suffix, "/") {
+					suffix = "/" + suffix
+				}
+				containerPath := "~" + suffix
 				resolved.Files = append(resolved.Files, api.FileMapping{
 					SourcePath:    hostPath,
 					ContainerPath: containerPath,

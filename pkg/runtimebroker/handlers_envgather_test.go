@@ -27,6 +27,73 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
+// claudeAuthBlock is the declarative auth metadata for the claude harness,
+// matching the production harnesses/claude/config.yaml. Tests that need
+// config-driven auth preflight include this block in their harness-config fixture.
+const claudeAuthBlock = `auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["ANTHROPIC_API_KEY"]
+    vertex-ai:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication"
+          field: GoogleAppCredentials
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
+  autodetect:
+    env:
+      GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
+      GOOGLE_CLOUD_PROJECT: vertex-ai
+      ANTHROPIC_API_KEY: api-key
+    files:
+      gcloud-adc: vertex-ai
+`
+
+// geminiAuthBlock is the declarative auth metadata for the gemini harness,
+// matching the production harnesses/gemini-cli/config.yaml.
+const geminiAuthBlock = `auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    auth-file:
+      required_files:
+        - name: GEMINI_OAUTH_CREDS
+          type: file
+          target_suffix: "/.gemini/oauth_creds.json"
+          field: OAuthCreds
+    vertex-ai:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication"
+          field: GoogleAppCredentials
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
+  autodetect:
+    env:
+      GEMINI_API_KEY: api-key
+      GOOGLE_API_KEY: api-key
+      GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
+      GOOGLE_CLOUD_PROJECT: vertex-ai
+    files:
+      GEMINI_OAUTH_CREDS: auth-file
+      gcloud-adc: vertex-ai
+`
+
 // newTestServerWithProjectPath creates a test server with a temporary project path
 // that has versioned settings with declared env vars.
 func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *envCapturingManager, string) {
@@ -1299,7 +1366,7 @@ profiles:
 // and SecretInfo showing type=file.
 func TestEnvGather_VertexAI_RequiresADCFile(t *testing.T) {
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
-		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
 		`
 schema_version: "1"
 harness_configs:
@@ -1425,7 +1492,7 @@ profiles:
 func TestEnvGather_AutoDetectVertexAI_FromGACEnvVar(t *testing.T) {
 	// No auth_selected_type set — auto-detect should kick in
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
-		"harness: claude\nimage: test-image\nuser: scion\n",
+		"harness: claude\nimage: test-image\nuser: scion\n"+claudeAuthBlock,
 		`
 schema_version: "1"
 harness_configs:
@@ -1588,7 +1655,7 @@ profiles:
 // non-admin users who only have GCP credentials.
 func TestEnvGather_AutoDetectVertexAI_FromGCPProject(t *testing.T) {
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
-		"harness: claude\nimage: test-image\nuser: scion\n",
+		"harness: claude\nimage: test-image\nuser: scion\n"+claudeAuthBlock,
 		`
 schema_version: "1"
 harness_configs:
@@ -1739,7 +1806,7 @@ func TestEnvGather_HarnessAuthOverride(t *testing.T) {
 	// Provide an OAuth file secret so auto-detect would normally pick auth-file.
 	// But --harness-auth api-key should override to api-key, requiring GEMINI_API_KEY.
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "gemini",
-		"harness: gemini\nimage: test-image\nuser: scion\n",
+		"harness: gemini\nimage: test-image\nuser: scion\n"+geminiAuthBlock,
 		`
 schema_version: "1"
 profiles:
@@ -1820,7 +1887,7 @@ profiles:
 	if err := os.MkdirAll(hcDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nimage: test-image\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nimage: test-image\n"+geminiAuthBlock), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1918,7 +1985,7 @@ profiles:
 
 func TestEnvGather_HarnessAuthOverrideVertexAI(t *testing.T) {
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "gemini",
-		"harness: gemini\nimage: test-image\nuser: scion\n",
+		"harness: gemini\nimage: test-image\nuser: scion\n"+geminiAuthBlock,
 		`
 schema_version: "1"
 profiles:
