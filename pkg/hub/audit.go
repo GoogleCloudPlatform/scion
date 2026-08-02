@@ -243,7 +243,7 @@ func (l *LogAuditLogger) LogInviteAuditEvent(ctx context.Context, event *InviteA
 		attrs = append(attrs, slog.String(k, v))
 	}
 
-	l.log.LogAttrs(ctx, level,"authz: "+string(event.EventType), attrs...)
+	l.log.LogAttrs(ctx, level, "authz: "+string(event.EventType), attrs...)
 
 	return nil
 }
@@ -267,7 +267,7 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
 
-	l.log.LogAttrs(ctx, level,"GCP token audit event", attrs...)
+	l.log.LogAttrs(ctx, level, "GCP token audit event", attrs...)
 
 	return nil
 }
@@ -290,7 +290,7 @@ func (l *LogAuditLogger) LogLifecycleHookEvent(ctx context.Context, event *Lifec
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
 
-	l.log.LogAttrs(ctx, level,"lifecycle hook audit event", attrs...)
+	l.log.LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
 
 	return nil
 }
@@ -321,7 +321,7 @@ func (l *LogAuditLogger) LogLifecycleHookExecutionEvent(ctx context.Context, eve
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
 
-	l.log.LogAttrs(ctx, level,"lifecycle hook execution event", attrs...)
+	l.log.LogAttrs(ctx, level, "lifecycle hook execution event", attrs...)
 
 	return nil
 }

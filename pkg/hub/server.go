@@ -738,19 +738,14 @@ type Server struct {
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
-	auditLog          *slog.Logger
 	authLog           *slog.Logger
-	brokersLog        *slog.Logger
 	envSecretLog      *slog.Logger
-	eventsLog         *slog.Logger
 	groupsLog         *slog.Logger
 	maintenanceLog    *slog.Logger
 	messageLog        *slog.Logger
-	policiesLog       *slog.Logger
 	projectsLog       *slog.Logger
 	resourceLog       *slog.Logger
 	templateLog       *slog.Logger
-	webLog            *slog.Logger
 	workspaceLog      *slog.Logger
 
 	// Cached rate limit info from the most recent GitHub App API call
@@ -822,19 +817,14 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("hub.agent-lifecycle"),
-		auditLog:          logging.Subsystem("hub.audit"),
 		authLog:           logging.Subsystem("hub.auth"),
-		brokersLog:        logging.Subsystem("hub.brokers"),
 		envSecretLog:      logging.Subsystem("hub.env-secrets"),
-		eventsLog:         logging.Subsystem("hub.events"),
 		groupsLog:         logging.Subsystem("hub.groups"),
 		maintenanceLog:    logging.Subsystem("hub.maintenance"),
 		messageLog:        logging.Subsystem("hub.messages"),
-		policiesLog:       logging.Subsystem("hub.policies"),
 		projectsLog:       logging.Subsystem("hub.projects"),
 		resourceLog:       logging.Subsystem("hub.resources"),
 		templateLog:       logging.Subsystem("hub.templates"),
-		webLog:            logging.Subsystem("hub.web"),
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 	}
 
