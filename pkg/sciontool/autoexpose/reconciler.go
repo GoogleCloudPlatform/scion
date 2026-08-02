@@ -253,7 +253,9 @@ func (r *Reconciler) registerPort(ctx context.Context, port int) error {
 		// Treat 409 Conflict as success — port is already registered.
 		if isConflictError(err) {
 			log.Debug("auto-expose: port %d already registered (409 conflict)", port)
-			r.autoExposed[port] = true
+			// Do NOT track as auto-exposed — the port may have been manually registered.
+			// The next cache refresh will pick it up in 'registered' and diffToExpose
+			// will skip it.
 			return nil
 		}
 		return err

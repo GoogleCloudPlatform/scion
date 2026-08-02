@@ -42,9 +42,12 @@ func ScanListeners() ([]ListenSocket, error) {
 func scanListenersFrom(tcpPath, tcp6Path string) ([]ListenSocket, error) {
 	var result []ListenSocket
 
-	if sockets, err := parseProcNetTCP(tcpPath, false); err == nil {
-		result = append(result, sockets...)
+	sockets, err := parseProcNetTCP(tcpPath, false)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", tcpPath, err)
 	}
+	result = append(result, sockets...)
+
 	// tcp6 may not exist; ignore read errors.
 	if sockets, err := parseProcNetTCP(tcp6Path, true); err == nil {
 		result = append(result, sockets...)

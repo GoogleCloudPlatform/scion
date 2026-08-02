@@ -201,6 +201,23 @@ func TestScanListenersFrom_MissingTCP6(t *testing.T) {
 	}
 }
 
+func TestScanListenersFrom_TCPReadError(t *testing.T) {
+	dir := t.TempDir()
+
+	// tcp file does not exist — should return an error.
+	tcpPath := filepath.Join(dir, "tcp_missing")
+	tcp6Path := filepath.Join(dir, "tcp6")
+
+	if err := os.WriteFile(tcp6Path, []byte(sampleProcNetTCP6), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := scanListenersFrom(tcpPath, tcp6Path)
+	if err == nil {
+		t.Fatal("expected error when /proc/net/tcp is unreadable, got nil")
+	}
+}
+
 func TestParseHexIPv4(t *testing.T) {
 	tests := []struct {
 		hex  string

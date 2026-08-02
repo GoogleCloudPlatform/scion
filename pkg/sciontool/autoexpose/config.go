@@ -85,6 +85,11 @@ func ConfigFromEnv() Config {
 		MinPort:     envInt(EnvAutoExposeMinPort, DefaultMinPort),
 	}
 
+	// Enforce minimum interval floor to prevent hammering the hub.
+	if cfg.Interval < time.Second {
+		cfg.Interval = time.Second
+	}
+
 	// Normalize filter mode.
 	switch strings.ToLower(cfg.FilterMode) {
 	case FilterModeAllowlist, FilterModeDenylist:

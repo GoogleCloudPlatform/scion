@@ -362,9 +362,10 @@ func TestReconciler_ConflictHandledGracefully(t *testing.T) {
 	r := newTestReconciler(client, defaultTestConfig(), sockets)
 	r.reconcileOnce(context.Background())
 
-	// Port 3000 should be tracked as auto-exposed despite 409.
-	if !r.autoExposed[3000] {
-		t.Error("port 3000 should be tracked as auto-exposed after 409 conflict")
+	// Port 3000 should NOT be tracked as auto-exposed after 409 —
+	// it may have been manually registered.
+	if r.autoExposed[3000] {
+		t.Error("port 3000 should NOT be tracked as auto-exposed after 409 conflict")
 	}
 
 	// Port 5000 should be registered normally.
@@ -443,6 +444,48 @@ func TestReconciler_LabelSetCorrectly(t *testing.T) {
 		}
 	} else {
 		t.Error("port 3000 not found in mock client")
+	}
+}
+
+func TestReconciler_ConflictDoesNotAutoUnexposeManualPort(t *testing.T) {
+	client := newMockHubClient()
+
+	// Simulate: user manually registered port 3000 between cache refresh and
+	// the register call. RegisterPort returns 409 for port 3000.
+	client.ports[3000] = &scionhub.ExposedPort{
+		Port:      3000,
+		ExposedBy: "agent", // manually registered
+	}
+
+	sockets := []ListenSocket{
+		{Port: 3000, BindAddr: "0.0.0.0"},
+	}
+
+	r := newTestReconciler(client, defaultTestConfig(), sockets)
+	// First tick: 3000 not in cache yet, tries to register, gets 409.
+	r.reconcileOnce(context.Background())
+
+	// Port 3000 must NOT be in autoExposed.
+	if r.autoExposed[3000] {
+		t.Fatal("port 3000 should NOT be tracked as auto-exposed after 409 conflict")
+	}
+
+	// Now the process on port 3000 stops listening.
+	r.scan = func() ([]ListenSocket, error) {
+		return nil, nil
+	}
+	r.reconcileOnce(context.Background())
+
+	// The manually-registered port 3000 must still be in the hub.
+	ports := client.registeredPorts()
+	found := false
+	for _, p := range ports {
+		if p == 3000 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("manual port 3000 should NOT have been auto-unexposed, got %v", ports)
 	}
 }
 

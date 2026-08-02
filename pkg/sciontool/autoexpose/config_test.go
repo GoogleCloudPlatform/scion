@@ -139,9 +139,32 @@ func TestConfigFromEnv_Interval(t *testing.T) {
 	}{
 		{"5s", 5 * time.Second},
 		{"1m", time.Minute},
-		{"500ms", 500 * time.Millisecond},
+		{"500ms", time.Second}, // clamped to 1s floor
 		{"invalid", DefaultInterval},
 		{"", DefaultInterval},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			t.Setenv(EnvAutoExposeInterval, tt.value)
+			cfg := ConfigFromEnv()
+			if cfg.Interval != tt.want {
+				t.Errorf("Interval = %v for %q, want %v", cfg.Interval, tt.value, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfigFromEnv_IntervalFloor(t *testing.T) {
+	tests := []struct {
+		value string
+		want  time.Duration
+	}{
+		{"100ms", time.Second},  // clamped to 1s
+		{"1ms", time.Second},    // clamped to 1s
+		{"999ms", time.Second},  // clamped to 1s
+		{"1s", time.Second},     // exactly at floor
+		{"2s", 2 * time.Second}, // above floor, unchanged
 	}
 
 	for _, tt := range tests {
