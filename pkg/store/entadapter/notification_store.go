@@ -637,6 +637,37 @@ func (s *NotificationStore) GetUndispatchedAgentNotifications(ctx context.Contex
 	if brokerID == "" {
 		cutoff := time.Now().Add(-undispatchedGracePeriod)
 		query = query.Where(notification.CreatedLT(cutoff))
+
+		// Only return notifications whose subscriber agent currently has a
+		// RuntimeBrokerID. Without this filter the sweep would claim
+		// notifications for broker-less agents, fail to deliver them, and
+		// revert the claim — wasting cycles and starving deliverable
+		// notifications behind them (head-of-line blocking).
+		query = query.Where(func(sel *entsql.Selector) {
+			subIDCol := sel.C(notification.FieldSubscriberID)
+			projIDCol := sel.C(notification.FieldProjectID)
+			sel.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("EXISTS (SELECT 1 FROM ")
+				b.Ident("agents")
+				b.WriteString(" WHERE ")
+				b.Ident("agents")
+				b.WriteString(".")
+				b.Ident("slug")
+				b.WriteString(" = ")
+				b.WriteString(subIDCol)
+				b.WriteString(" AND ")
+				b.Ident("agents")
+				b.WriteString(".")
+				b.Ident("project_id")
+				b.WriteString(" = ")
+				b.WriteString(projIDCol)
+				b.WriteString(" AND ")
+				b.Ident("agents")
+				b.WriteString(".")
+				b.Ident("runtime_broker_id")
+				b.WriteString(" != '')")
+			}))
+		})
 	}
 
 	if brokerID != "" {
