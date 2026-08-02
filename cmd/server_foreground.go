@@ -1401,16 +1401,14 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// 1. Explicit telemetry.cloud.gcp_project_id setting (highest priority)
 	// 2. Derived from scion-telemetry-gcp-credentials SA key JSON
 	// 3. Existing GCPProjectID fallback (SA minting project, handled in server.go)
-	if cfg.TelemetryConfig != nil && cfg.TelemetryConfig.Cloud != nil && cfg.TelemetryConfig.Cloud.GCPProjectID != nil && *cfg.TelemetryConfig.Cloud.GCPProjectID != "" {
-		hubCfg.TelemetryProjectID = *cfg.TelemetryConfig.Cloud.GCPProjectID
-		log.Printf("Telemetry project ID from settings: %s", hubCfg.TelemetryProjectID)
+	if pid := telemetryGCPProjectFromSettings(cfg); pid != "" {
+		hubCfg.TelemetryProjectID = pid
+		log.Printf("Telemetry project ID from settings: %s", pid)
 	}
 	if hubCfg.TelemetryProjectID == "" && secretBackend != nil {
-		if sw, err := secretBackend.Get(ctx, "scion-telemetry-gcp-credentials", secret.ScopeHub, cfg.Hub.ResolveHubID()); err == nil && sw != nil && sw.Value != "" {
-			if pid := gcputil.ParseProjectID([]byte(sw.Value)); pid != "" {
-				hubCfg.TelemetryProjectID = pid
-				log.Printf("Telemetry project ID derived from SA credentials: %s", pid)
-			}
+		if pid := telemetryGCPProjectFromSecret(ctx, secretBackend, cfg.Hub.ResolveHubID()); pid != "" {
+			hubCfg.TelemetryProjectID = pid
+			log.Printf("Telemetry project ID derived from SA credentials: %s", pid)
 		}
 	}
 
@@ -2710,4 +2708,26 @@ func injectPluginSecretsIntoConfig(ctx context.Context, sb secret.SecretBackend,
 		cfg[m.ConfigKey] = sv.Value
 	}
 	return cfg
+}
+
+// telemetryGCPProjectFromSettings returns the explicit telemetry.cloud.gcp_project_id
+// setting value, or "" if not configured.
+func telemetryGCPProjectFromSettings(cfg *config.GlobalConfig) string {
+	if cfg.TelemetryConfig == nil || cfg.TelemetryConfig.Cloud == nil {
+		return ""
+	}
+	if cfg.TelemetryConfig.Cloud.GCPProjectID == nil {
+		return ""
+	}
+	return *cfg.TelemetryConfig.Cloud.GCPProjectID
+}
+
+// telemetryGCPProjectFromSecret reads the scion-telemetry-gcp-credentials hub
+// secret and extracts the project_id from the SA key JSON.
+func telemetryGCPProjectFromSecret(ctx context.Context, sb secret.SecretBackend, hubID string) string {
+	sw, err := sb.Get(ctx, "scion-telemetry-gcp-credentials", secret.ScopeHub, hubID)
+	if err != nil || sw == nil || sw.Value == "" {
+		return ""
+	}
+	return gcputil.ParseProjectID([]byte(sw.Value))
 }

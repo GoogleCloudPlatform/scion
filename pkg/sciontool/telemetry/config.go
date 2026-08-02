@@ -246,13 +246,6 @@ func (c *Config) IsGCP() bool {
 	return c != nil && c.CloudProvider == "gcp"
 }
 
-// readProjectIDFromCredentials is a thin wrapper around gcp.ExtractProjectID
-// for backward compatibility. Both the hub server and sciontool now use the
-// shared implementation in pkg/util/gcp.
-func readProjectIDFromCredentials(path string) string {
-	return gcp.ExtractProjectID(path)
-}
-
 // parseBoolEnv parses a boolean environment variable with a default value.
 func parseBoolEnv(key string, defaultVal bool) bool {
 	val := os.Getenv(key)

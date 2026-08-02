@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 )
 
 func TestLoadConfig_Defaults(t *testing.T) {
@@ -318,7 +320,7 @@ func TestIsGCP(t *testing.T) {
 	}
 }
 
-func TestReadProjectIDFromCredentials(t *testing.T) {
+func TestExtractProjectIDFromCredentials(t *testing.T) {
 	// Write a temp credentials file
 	tmpFile, err := os.CreateTemp("", "gcp-creds-*.json")
 	if err != nil {
@@ -332,15 +334,15 @@ func TestReadProjectIDFromCredentials(t *testing.T) {
 	}
 	_ = tmpFile.Close()
 
-	got := readProjectIDFromCredentials(tmpFile.Name())
+	got := gcp.ExtractProjectID(tmpFile.Name())
 	if got != "test-project-123" {
-		t.Errorf("readProjectIDFromCredentials() = %q, want %q", got, "test-project-123")
+		t.Errorf("ExtractProjectID() = %q, want %q", got, "test-project-123")
 	}
 
 	// Non-existent file
-	got = readProjectIDFromCredentials("/nonexistent/path.json")
+	got = gcp.ExtractProjectID("/nonexistent/path.json")
 	if got != "" {
-		t.Errorf("readProjectIDFromCredentials(nonexistent) = %q, want empty", got)
+		t.Errorf("ExtractProjectID(nonexistent) = %q, want empty", got)
 	}
 
 	// Invalid JSON
@@ -348,9 +350,9 @@ func TestReadProjectIDFromCredentials(t *testing.T) {
 	defer func() { _ = os.Remove(badFile.Name()) }()
 	_, _ = badFile.WriteString("not json")
 	_ = badFile.Close()
-	got = readProjectIDFromCredentials(badFile.Name())
+	got = gcp.ExtractProjectID(badFile.Name())
 	if got != "" {
-		t.Errorf("readProjectIDFromCredentials(invalid) = %q, want empty", got)
+		t.Errorf("ExtractProjectID(invalid) = %q, want empty", got)
 	}
 }
 
