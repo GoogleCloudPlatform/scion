@@ -214,6 +214,22 @@ export class ScionPageProjectDetail extends LitElement {
   @state()
   private cloneError = '';
 
+  /** Whether the create-template dialog is open */
+  @state()
+  private templateDialogOpen = false;
+
+  /** Name for the new template */
+  @state()
+  private templateName = '';
+
+  /** Whether the create-template operation is in progress */
+  @state()
+  private templateLoading = false;
+
+  /** Error message from create-template operation */
+  @state()
+  private templateError = '';
+
   static override styles = css`
     :host {
       display: block;
@@ -1434,6 +1450,88 @@ export class ScionPageProjectDetail extends LitElement {
     }
   }
 
+  private openTemplateDialog(): void {
+    this.templateName = this.project ? `${this.project.name} Template` : '';
+    this.templateError = '';
+    this.templateLoading = false;
+    this.templateDialogOpen = true;
+  }
+
+  private async handleCreateTemplate(): Promise<void> {
+    if (!this.templateName.trim()) {
+      this.templateError = 'Template name is required.';
+      return;
+    }
+    this.templateLoading = true;
+    this.templateError = '';
+    try {
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/clone`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: this.templateName.trim(), asTemplate: true }),
+      });
+      if (!response.ok) {
+        const errorText = await extractApiError(response, 'Failed to create template');
+        throw new Error(errorText);
+      }
+      this.templateDialogOpen = false;
+      // Navigate to hub resources templates tab
+      window.history.pushState({}, '', '/settings?tab=project-templates');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } catch (err) {
+      this.templateError = err instanceof Error ? err.message : 'Failed to create template';
+    } finally {
+      this.templateLoading = false;
+    }
+  }
+
+  private renderTemplateDialog() {
+    return html`
+      <sl-dialog
+        label="Create Template"
+        ?open=${this.templateDialogOpen}
+        @sl-request-close=${(e: CustomEvent) => {
+          if (this.templateLoading) {
+            e.preventDefault();
+            return;
+          }
+          this.templateDialogOpen = false;
+        }}
+      >
+        <p>
+          Create a project template from
+          <strong>${this.project?.name ?? 'this project'}</strong>.
+        </p>
+        <sl-input
+          label="Template Name"
+          .value=${this.templateName}
+          @sl-input=${(e: Event) => (this.templateName = (e.target as HTMLInputElement).value)}
+          ?disabled=${this.templateLoading}
+        ></sl-input>
+        ${this.templateError
+          ? html`<div class="clone-error">${this.templateError}</div>`
+          : nothing}
+        <sl-button
+          slot="footer"
+          variant="primary"
+          @click=${() => this.handleCreateTemplate()}
+          ?loading=${this.templateLoading}
+          ?disabled=${this.templateLoading}
+        >
+          Create Template
+        </sl-button>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => (this.templateDialogOpen = false)}
+          ?disabled=${this.templateLoading}
+        >
+          Cancel
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
   private renderCloneDialog() {
     return html`
       <sl-dialog
@@ -1537,12 +1635,31 @@ export class ScionPageProjectDetail extends LitElement {
               `
             : nothing}
           ${can(this.project?._capabilities, 'read')
-            ? html`
-                <sl-button size="small" @click=${() => this.openCloneDialog()}>
-                  <sl-icon slot="prefix" name="copy"></sl-icon>
-                  Clone
-                </sl-button>
-              `
+            ? this.pageData?.user?.role === 'admin'
+              ? html`
+                  <sl-dropdown>
+                    <sl-button slot="trigger" size="small" caret>
+                      <sl-icon slot="prefix" name="copy"></sl-icon>
+                      Clone
+                    </sl-button>
+                    <sl-menu>
+                      <sl-menu-item @click=${() => this.openCloneDialog()}>
+                        <sl-icon slot="prefix" name="copy"></sl-icon>
+                        Clone Project
+                      </sl-menu-item>
+                      <sl-menu-item @click=${() => this.openTemplateDialog()}>
+                        <sl-icon slot="prefix" name="file-earmark-plus"></sl-icon>
+                        Create Template
+                      </sl-menu-item>
+                    </sl-menu>
+                  </sl-dropdown>
+                `
+              : html`
+                  <sl-button size="small" @click=${() => this.openCloneDialog()}>
+                    <sl-icon slot="prefix" name="copy"></sl-icon>
+                    Clone
+                  </sl-button>
+                `
             : nothing}
           <a href="/projects/${this.projectId}/metrics" style="text-decoration: none;">
             <sl-button size="small">
@@ -1699,6 +1816,7 @@ export class ScionPageProjectDetail extends LitElement {
       ${this.shouldShowFilesSection() ? this.renderFilesSection() : ''}
 
       ${this.renderCloneDialog()}
+      ${this.renderTemplateDialog()}
     `;
   }
 
