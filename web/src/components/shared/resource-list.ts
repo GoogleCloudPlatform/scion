@@ -527,10 +527,41 @@ export class ScionResourceList extends LitElement {
 
   // ── Refresh All from Source ─────────────────────────────────────────
 
+  /**
+   * Reload items without showing the global loading spinner.
+   * Used after Refresh All to preserve per-row status indicators.
+   */
+  private async _reloadBackground(): Promise<void> {
+    try {
+      const params = new URLSearchParams({ status: 'active', limit: '100' });
+      if (this.scope) params.set('scope', this.scope);
+      if (this.scope === 'project' && this.scopeId) params.set('scopeId', this.scopeId);
+
+      const response = await apiFetch(`/api/v1/${this.apiResource}?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = (await response.json()) as Record<string, ResourceItem[]>;
+      const list = this.kind === 'template' ? data.templates : data.harnessConfigs;
+      this.items = (Array.isArray(list) ? list : [])
+        .slice()
+        .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
+    } catch (err) {
+      console.error(`Failed to background reload ${this.apiResource}:`, err);
+    }
+  }
+
   private async _handleRefreshAll(): Promise<void> {
     if (this._refreshAllRunning) return;
     const refreshable = this.items.filter((item) => item.sourceUrl);
     if (refreshable.length === 0) return;
+
+    // Clear any pending status-clear timer from a previous run
+    if (this._statusClearTimer) {
+      clearTimeout(this._statusClearTimer);
+      this._statusClearTimer = undefined;
+    }
+    this._itemRefreshStatus.clear();
 
     this._refreshAllRunning = true;
 
@@ -580,13 +611,14 @@ export class ScionResourceList extends LitElement {
       showToast(`Refreshed ${succeeded}/${refreshable.length}, ${failed} failed`, 'warning');
     }
 
-    // Reload the list
-    await this.load();
+    // Reload the list in the background to preserve status indicators
+    await this._reloadBackground();
 
     // Clear status indicators after delay
     this._statusClearTimer = setTimeout(() => {
       this._itemRefreshStatus.clear();
       this.requestUpdate();
+      this._statusClearTimer = undefined;
     }, 3000);
   }
 
