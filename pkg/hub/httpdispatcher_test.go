@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -73,6 +74,7 @@ type mockRuntimeBrokerClient struct {
 	startReturnResp        *RemoteAgentResponse // custom start response if set
 	cleanupCalls           int
 	cleanupSlugs           []string
+	createWithGatherFunc   func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
 }
 
 func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -195,6 +197,9 @@ func (m *mockRuntimeBrokerClient) CreateAgentWithGather(ctx context.Context, bro
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastCreateReq = req
+	if m.createWithGatherFunc != nil {
+		return m.createWithGatherFunc(ctx, brokerID, brokerEndpoint, req)
+	}
 	if m.returnErr != nil {
 		return nil, nil, m.returnErr
 	}
@@ -4008,5 +4013,216 @@ func TestInjectThinkingLevelEnv(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// setupFinalizeEnvTest creates a broker, project, project provider and agent
+// ready for DispatchFinalizeEnv tests.
+func setupFinalizeEnvTest(t *testing.T, ctx context.Context, memStore store.Store, asNeededVars []store.EnvVar) *store.Agent {
+	t.Helper()
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-finalize"),
+		Name:     "finalize-broker",
+		Slug:     "finalize-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	project := &store.Project{
+		ID:   tid("project-finalize"),
+		Name: "finalize-project",
+		Slug: "finalize-project",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	provider := &store.ProjectProvider{
+		ProjectID:  tid("project-finalize"),
+		BrokerID:   tid("broker-finalize"),
+		BrokerName: "finalize-broker",
+		LocalPath:  "/home/user/project/.scion",
+		Status:     store.BrokerStatusOnline,
+	}
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	for i, v := range asNeededVars {
+		v.Scope = "project"
+		v.ScopeID = tid("project-finalize")
+		v.InjectionMode = store.InjectionModeAsNeeded
+		if v.ID == "" {
+			v.ID = tid("ev-finalize-" + string(rune('0'+i)))
+		}
+		asNeededVars[i] = v
+		if err := memStore.CreateEnvVar(ctx, &asNeededVars[i]); err != nil {
+			t.Fatalf("failed to create env var %q: %v", v.Key, err)
+		}
+	}
+
+	return &store.Agent{
+		ID:              tid("agent-finalize"),
+		Name:            "finalize-agent",
+		Slug:            "finalize-agent",
+		ProjectID:       tid("project-finalize"),
+		OwnerID:         "owner-1",
+		RuntimeBrokerID: tid("broker-finalize"),
+		AppliedConfig:   &store.AgentAppliedConfig{},
+	}
+}
+
+func TestDispatchFinalizeEnv_PartialAutoResolve(t *testing.T) {
+	// Scenario: broker needs two keys (DB_HOST, API_KEY). The CLI provides
+	// DB_HOST, but API_KEY is available as an as_needed env var. After the
+	// first create call reports API_KEY still needed, the second-pass
+	// resolution should satisfy it without returning ErrEnvStillMissing.
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	agent := setupFinalizeEnvTest(t, ctx, memStore, []store.EnvVar{
+		{Key: "API_KEY", Value: "auto-resolved-key"},
+	})
+
+	callCount := 0
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			callCount++
+			if callCount == 1 {
+				// First call: broker says API_KEY is still needed
+				return nil, &RemoteEnvRequirementsResponse{
+					AgentID: req.ID,
+					Needs:   []string{"API_KEY"},
+				}, nil
+			}
+			// Second call: all resolved — check API_KEY was merged
+			if v, ok := req.ResolvedEnv["API_KEY"]; !ok || v != "auto-resolved-key" {
+				t.Errorf("second call: expected API_KEY='auto-resolved-key', got %q (ok=%v)", v, ok)
+			}
+			if v, ok := req.ResolvedEnv["DB_HOST"]; !ok || v != "cli-provided-host" {
+				t.Errorf("second call: expected DB_HOST='cli-provided-host', got %q (ok=%v)", v, ok)
+			}
+			return &RemoteAgentResponse{
+				Agent: &RemoteAgentInfo{
+					ID:    req.ID,
+					Slug:  req.Slug,
+					Name:  req.Name,
+					Phase: string(state.PhaseRunning),
+				},
+				Created: true,
+			}, nil, nil
+		},
+	}
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+		"DB_HOST": "cli-provided-host",
+	})
+	if err != nil {
+		t.Fatalf("DispatchFinalizeEnv returned unexpected error: %v", err)
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected 2 CreateAgentWithGather calls, got %d", callCount)
+	}
+}
+
+func TestDispatchFinalizeEnv_FullAutoResolveInFinalize(t *testing.T) {
+	// Scenario: after merging CLI-provided env, the broker still needs two
+	// keys (SECRET_A, SECRET_B) — but both are available as as_needed env
+	// vars. The second pass resolves them all; no ErrEnvStillMissing.
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	agent := setupFinalizeEnvTest(t, ctx, memStore, []store.EnvVar{
+		{Key: "SECRET_A", Value: "val-a"},
+		{Key: "SECRET_B", Value: "val-b"},
+	})
+
+	callCount := 0
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			callCount++
+			if callCount == 1 {
+				return nil, &RemoteEnvRequirementsResponse{
+					AgentID: req.ID,
+					Needs:   []string{"SECRET_A", "SECRET_B"},
+				}, nil
+			}
+			// Verify both keys were merged
+			for _, k := range []string{"SECRET_A", "SECRET_B"} {
+				if _, ok := req.ResolvedEnv[k]; !ok {
+					t.Errorf("second call: expected %s in ResolvedEnv", k)
+				}
+			}
+			return &RemoteAgentResponse{
+				Agent: &RemoteAgentInfo{
+					ID:    req.ID,
+					Slug:  req.Slug,
+					Name:  req.Name,
+					Phase: string(state.PhaseRunning),
+				},
+				Created: true,
+			}, nil, nil
+		},
+	}
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+		"CLI_VAR": "cli-value",
+	})
+	if err != nil {
+		t.Fatalf("DispatchFinalizeEnv returned unexpected error: %v", err)
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected 2 CreateAgentWithGather calls, got %d", callCount)
+	}
+}
+
+func TestDispatchFinalizeEnv_NoAsNeededMatches(t *testing.T) {
+	// Scenario: broker still needs keys after CLI env merge, but no as_needed
+	// entries match. Behavior is unchanged — ErrEnvStillMissing is returned.
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	// No as_needed vars
+	agent := setupFinalizeEnvTest(t, ctx, memStore, nil)
+
+	callCount := 0
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			callCount++
+			return nil, &RemoteEnvRequirementsResponse{
+				AgentID: req.ID,
+				Needs:   []string{"MISSING_VAR"},
+			}, nil
+		},
+	}
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+		"SOME_VAR": "some-value",
+	})
+
+	var stillMissing *ErrEnvStillMissing
+	if !errors.As(err, &stillMissing) {
+		t.Fatalf("expected ErrEnvStillMissing, got: %v", err)
+	}
+
+	if len(stillMissing.Requirements.Needs) != 1 || stillMissing.Requirements.Needs[0] != "MISSING_VAR" {
+		t.Errorf("expected Needs=[MISSING_VAR], got %v", stillMissing.Requirements.Needs)
+	}
+
+	// Should only have called once — no second pass since no as_needed matched
+	if callCount != 1 {
+		t.Errorf("expected 1 CreateAgentWithGather call, got %d", callCount)
 	}
 }

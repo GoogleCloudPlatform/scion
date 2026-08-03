@@ -1094,6 +1094,27 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	}
 
 	if envReqs != nil && len(envReqs.Needs) > 0 {
+		// Second pass: try to satisfy remaining needs with as_needed entries,
+		// mirroring the pattern in DispatchAgentCreateWithGather.
+		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs)
+		if len(asNeededEnv) > 0 {
+			for k, v := range asNeededEnv {
+				req.ResolvedEnv[k] = v
+			}
+			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(
+				ctx, agent.RuntimeBrokerID, endpoint, req,
+			)
+			if err2 != nil {
+				return err2
+			}
+			if envReqs2 != nil && len(envReqs2.Needs) > 0 {
+				return &ErrEnvStillMissing{Requirements: envReqs2}
+			}
+			if resp2 != nil {
+				d.applyBrokerResponse(agent, resp2)
+			}
+			return nil
+		}
 		return &ErrEnvStillMissing{Requirements: envReqs}
 	}
 
