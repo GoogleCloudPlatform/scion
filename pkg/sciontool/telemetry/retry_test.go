@@ -17,6 +17,7 @@ import (
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -402,28 +403,48 @@ func TestFlushMetricBuffer_RebufferOnExhaustion(t *testing.T) {
 }
 
 func TestFlushMetricBuffer_RebufferCapped(t *testing.T) {
+	// makeDistinct creates n ResourceMetrics with unique scope+metric names
+	// so deduplicateMetrics does not collapse them.
+	makeDistinct := func(n int, prefix string) []*metricpb.ResourceMetrics {
+		out := make([]*metricpb.ResourceMetrics, n)
+		for i := range out {
+			out[i] = &metricpb.ResourceMetrics{
+				ScopeMetrics: []*metricpb.ScopeMetrics{{
+					Scope:   &commonpb.InstrumentationScope{Name: fmt.Sprintf("%s.scope.%d", prefix, i)},
+					Metrics: []*metricpb.Metric{{Name: fmt.Sprintf("%s.metric.%d", prefix, i)}},
+				}},
+			}
+		}
+		return out
+	}
+
+	// The mock export function simulates concurrent handleMetrics calls
+	// flooding the buffer during the retry window. flushMetricBuffer sets
+	// metricBuf = nil before calling the exporter, so entries added here
+	// accumulate in the buffer while the export retries. After retries
+	// exhaust, the re-buffer appends deduped data on top of these entries.
+	var p *Pipeline
 	metricClient := &mockMetricClient{
 		exportFunc: func(_ context.Context, _ *colmetricpb.ExportMetricsServiceRequest, _ ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+			// Simulate concurrent handleMetrics adding entries during retry.
+			p.metricBufMu.Lock()
+			p.metricBuf = append(p.metricBuf, makeDistinct(maxMetricBufCap/2, "concurrent")...)
+			p.metricBufMu.Unlock()
 			return nil, errors.New("temporary failure")
 		},
 	}
 
-	p := newTestPipelineWithExporter(nil, metricClient, nil)
+	p = newTestPipelineWithExporter(nil, metricClient, nil)
 	p.retryConfig = fastRetryConfig()
 
-	// Pre-fill the buffer with maxMetricBufCap entries to simulate accumulation
-	existing := make([]*metricpb.ResourceMetrics, maxMetricBufCap)
-	for i := range existing {
-		existing[i] = &metricpb.ResourceMetrics{
-			ScopeMetrics: []*metricpb.ScopeMetrics{{
-				Metrics: []*metricpb.Metric{{Name: fmt.Sprintf("existing.%d", i)}},
-			}},
-		}
-	}
-	// Put some of these in the buffer to be flushed, rest stay
-	p.metricBuf = existing[:maxMetricBufCap-10]
+	// Seed the buffer with one batch.
+	p.metricBuf = makeDistinct(10, "initial")
 
-	// Flush — these will fail and be re-buffered
+	// Flush — export fails on every attempt. Each attempt adds
+	// maxMetricBufCap/2 entries to the buffer (simulating concurrent
+	// handleMetrics calls). After 4 attempts (1 + 3 retries) the buffer
+	// holds 4*(maxMetricBufCap/2) = 2*maxMetricBufCap entries, plus the
+	// re-buffered deduped batch. The cap should trim it.
 	p.flushMetricBuffer(context.Background(), true)
 
 	p.metricBufMu.Lock()
@@ -432,6 +453,9 @@ func TestFlushMetricBuffer_RebufferCapped(t *testing.T) {
 
 	if bufLen > maxMetricBufCap {
 		t.Errorf("re-buffer exceeded cap: got %d, max %d", bufLen, maxMetricBufCap)
+	}
+	if bufLen == 0 {
+		t.Error("expected re-buffered metrics, got empty buffer")
 	}
 }
 

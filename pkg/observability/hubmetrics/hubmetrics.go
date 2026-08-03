@@ -178,15 +178,15 @@ func (e *loggingExporter) Aggregation(k metric.InstrumentKind) metric.Aggregatio
 func (e *loggingExporter) Export(ctx context.Context, rm *metricdata.ResourceMetrics) error {
 	err := e.delegate.Export(ctx, rm)
 	if err != nil {
-		datapoints := 0
+		metricCount := 0
 		if rm != nil {
 			for _, sm := range rm.ScopeMetrics {
-				datapoints += len(sm.Metrics)
+				metricCount += len(sm.Metrics)
 			}
 		}
 		slog.Error("hub metrics export error",
 			"error", err,
-			"metric_count", datapoints,
+			"metric_count", metricCount,
 		)
 	}
 	return err
