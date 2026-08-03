@@ -221,10 +221,15 @@ export class ScionProjectTemplateList extends LitElement {
   }
 
   private onSourceProjectChange(e: Event): void {
+    const oldSourceId = this.selectedSourceId;
     this.selectedSourceId = (e.target as HTMLSelectElement).value;
+    const oldProject = this.sourceProjects.find(p => p.id === oldSourceId);
     const project = this.sourceProjects.find(p => p.id === this.selectedSourceId);
-    if (project && !this.newTemplateName) {
-      this.newTemplateName = `${project.name} Template`;
+    if (project) {
+      const oldDefaultName = oldProject ? `${oldProject.name} Template` : '';
+      if (!this.newTemplateName || this.newTemplateName === oldDefaultName) {
+        this.newTemplateName = `${project.name} Template`;
+      }
     }
   }
 
