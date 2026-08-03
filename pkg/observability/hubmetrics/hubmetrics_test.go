@@ -6,6 +6,7 @@ package hubmetrics
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -168,5 +169,85 @@ func TestPoolMetricsNotDroppedWhenNotifyDisabled(t *testing.T) {
 
 	if !names[dbmetrics.MetricPoolConnectionsActive] {
 		t.Error("pool metric should still be exported when only db-notify is disabled")
+	}
+}
+
+// --- loggingExporter tests ---
+
+// mockExporter implements metric.Exporter for testing the loggingExporter wrapper.
+type mockExporter struct {
+	exportErr    error
+	exportCalled bool
+}
+
+func (m *mockExporter) Temporality(k metric.InstrumentKind) metricdata.Temporality {
+	return metricdata.CumulativeTemporality
+}
+
+func (m *mockExporter) Aggregation(k metric.InstrumentKind) metric.Aggregation {
+	return nil
+}
+
+func (m *mockExporter) Export(ctx context.Context, rm *metricdata.ResourceMetrics) error {
+	m.exportCalled = true
+	return m.exportErr
+}
+
+func (m *mockExporter) ForceFlush(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockExporter) Shutdown(ctx context.Context) error {
+	return nil
+}
+
+func TestLoggingExporter_DelegatesOnSuccess(t *testing.T) {
+	mock := &mockExporter{}
+	le := &loggingExporter{delegate: mock}
+
+	err := le.Export(context.Background(), &metricdata.ResourceMetrics{})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !mock.exportCalled {
+		t.Error("expected delegate Export to be called")
+	}
+}
+
+func TestLoggingExporter_LogsAndReturnsError(t *testing.T) {
+	exportErr := errors.New("cloud monitoring write failed")
+	mock := &mockExporter{exportErr: exportErr}
+	le := &loggingExporter{delegate: mock}
+
+	err := le.Export(context.Background(), &metricdata.ResourceMetrics{
+		ScopeMetrics: []metricdata.ScopeMetrics{
+			{Metrics: []metricdata.Metrics{{Name: "test.metric"}}},
+		},
+	})
+	if err == nil {
+		t.Error("expected error to be returned")
+	}
+	if !errors.Is(err, exportErr) {
+		t.Errorf("expected original error, got: %v", err)
+	}
+}
+
+func TestLoggingExporter_DelegatesTemporality(t *testing.T) {
+	mock := &mockExporter{}
+	le := &loggingExporter{delegate: mock}
+
+	got := le.Temporality(metric.InstrumentKindCounter)
+	if got != metricdata.CumulativeTemporality {
+		t.Errorf("expected CumulativeTemporality, got %v", got)
+	}
+}
+
+func TestLoggingExporter_DelegatesAggregation(t *testing.T) {
+	mock := &mockExporter{}
+	le := &loggingExporter{delegate: mock}
+
+	got := le.Aggregation(metric.InstrumentKindCounter)
+	if got != nil {
+		t.Errorf("expected nil aggregation, got %v", got)
 	}
 }
