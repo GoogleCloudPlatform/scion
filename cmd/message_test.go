@@ -1502,3 +1502,481 @@ func TestStageAttachments_FilteredPathsSkipped(t *testing.T) {
 	// Cleanup
 	_ = os.RemoveAll(filepath.Dir(staged[0]))
 }
+
+// --- @mention and --cc tests ---
+
+func TestExtractMentions_Basic(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{
+			name: "no mentions",
+			text: "hello world",
+			want: nil,
+		},
+		{
+			name: "single mention",
+			text: "hey @alice check this out",
+			want: []string{"alice"},
+		},
+		{
+			name: "multiple mentions",
+			text: "hey @alice and @bob check this",
+			want: []string{"alice", "bob"},
+		},
+		{
+			name: "mention at start",
+			text: "@alice please review",
+			want: []string{"alice"},
+		},
+		{
+			name: "mention at end",
+			text: "please review @alice",
+			want: []string{"alice"},
+		},
+		{
+			name: "duplicate mentions",
+			text: "@alice hey @alice check this",
+			want: []string{"alice"},
+		},
+		{
+			name: "case insensitive dedup",
+			text: "@Alice hey @alice check this",
+			want: []string{"Alice"},
+		},
+		{
+			name: "mention with trailing punctuation",
+			text: "hey @alice, @bob! @charlie.",
+			want: []string{"alice", "bob", "charlie"},
+		},
+		{
+			name: "mention with hyphen",
+			text: "hey @my-agent check this",
+			want: []string{"my-agent"},
+		},
+		{
+			name: "mention with underscore",
+			text: "hey @my_agent check this",
+			want: []string{"my_agent"},
+		},
+		{
+			name: "double at sign",
+			text: "hey @@ what",
+			want: nil,
+		},
+		{
+			name: "bare at sign",
+			text: "hey @ what",
+			want: nil,
+		},
+		{
+			name: "email address not treated as mention",
+			text: "send to user@example.com",
+			want: nil,
+		},
+		{
+			name: "mention followed by colon",
+			text: "hey @alice: check this",
+			want: []string{"alice"},
+		},
+		{
+			name: "mention in parentheses",
+			text: "(cc @bob)",
+			want: []string{"bob"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractMentions(tc.text)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestParseCCFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		cc   string
+		want []string
+	}{
+		{
+			name: "empty",
+			cc:   "",
+			want: nil,
+		},
+		{
+			name: "single name",
+			cc:   "alice",
+			want: []string{"alice"},
+		},
+		{
+			name: "multiple names",
+			cc:   "alice,bob,charlie",
+			want: []string{"alice", "bob", "charlie"},
+		},
+		{
+			name: "whitespace trimmed",
+			cc:   " alice , bob , charlie ",
+			want: []string{"alice", "bob", "charlie"},
+		},
+		{
+			name: "empty entries skipped",
+			cc:   "alice,,bob",
+			want: []string{"alice", "bob"},
+		},
+		{
+			name: "duplicates removed",
+			cc:   "alice,bob,alice",
+			want: []string{"alice", "bob"},
+		},
+		{
+			name: "case insensitive dedup",
+			cc:   "Alice,alice",
+			want: []string{"Alice"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseCCFlag(tc.cc)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestSendMessageViaHub_MentionFanOut(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-mention"
+	agents := []hubclient.Agent{
+		{Name: "primary-agent", Status: "running"},
+		{Name: "mentioned-agent", Status: "running"},
+		{Name: "other-agent", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	// Reset CC flag
+	origCC := msgCC
+	msgCC = ""
+	defer func() { msgCC = origCC }()
+
+	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false, false, false, false)
+	require.NoError(t, err)
+
+	// Should have 2 messages: primary + mention
+	require.Len(t, *sent, 2)
+
+	// First message is the primary instruction
+	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
+	require.NotNil(t, (*sent)[0].StructuredMsg)
+	assert.Equal(t, messages.TypeInstruction, (*sent)[0].StructuredMsg.Type)
+
+	// Second message is the mention notification
+	assert.Equal(t, "mentioned-agent", (*sent)[1].AgentName)
+	require.NotNil(t, (*sent)[1].StructuredMsg)
+	assert.Equal(t, messages.TypeMention, (*sent)[1].StructuredMsg.Type)
+	assert.Equal(t, "agent:primary-agent", (*sent)[1].StructuredMsg.Metadata["mention_source"])
+	assert.Equal(t, "body", (*sent)[1].StructuredMsg.Metadata["mention_position"])
+}
+
+func TestSendMessageViaHub_MentionDedup(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-mention-dedup"
+	agents := []hubclient.Agent{
+		{Name: "my-agent", Status: "running"},
+		{Name: "other-agent", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	origCC := msgCC
+	msgCC = ""
+	defer func() { msgCC = origCC }()
+
+	// Primary recipient is also @mentioned in body — should be deduplicated
+	err = sendMessageViaHub(hubCtx, "my-agent", "hey @my-agent check @other-agent", false, false, false, false, false)
+	require.NoError(t, err)
+
+	// Should have 2 messages: primary + mention for other-agent only (my-agent deduped)
+	require.Len(t, *sent, 2)
+	assert.Equal(t, "my-agent", (*sent)[0].AgentName)
+	assert.Equal(t, "other-agent", (*sent)[1].AgentName)
+	assert.Equal(t, messages.TypeMention, (*sent)[1].StructuredMsg.Type)
+}
+
+func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-mention-unknown"
+	agents := []hubclient.Agent{
+		{Name: "my-agent", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	origCC := msgCC
+	msgCC = ""
+	defer func() { msgCC = origCC }()
+
+	// @nonexistent doesn't match any agent — should warn but not fail
+	err = sendMessageViaHub(hubCtx, "my-agent", "hey @nonexistent check this", false, false, false, false, false)
+	require.NoError(t, err)
+
+	// Only the primary message should be sent
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "my-agent", (*sent)[0].AgentName)
+}
+
+func TestSendMessageViaHub_CCFlag(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-cc"
+	agents := []hubclient.Agent{
+		{Name: "primary-agent", Status: "running"},
+		{Name: "cc-agent-1", Status: "running"},
+		{Name: "cc-agent-2", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	origCC := msgCC
+	msgCC = "cc-agent-1,cc-agent-2"
+	defer func() { msgCC = origCC }()
+
+	err = sendMessageViaHub(hubCtx, "primary-agent", "check this out", false, false, false, false, false)
+	require.NoError(t, err)
+
+	// Should have 3 messages: primary + 2 CC mentions
+	require.Len(t, *sent, 3)
+	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
+	assert.Equal(t, messages.TypeInstruction, (*sent)[0].StructuredMsg.Type)
+
+	// CC agents get TypeMention messages (order may vary due to goroutines)
+	ccNames := []string{(*sent)[1].AgentName, (*sent)[2].AgentName}
+	assert.ElementsMatch(t, []string{"cc-agent-1", "cc-agent-2"}, ccNames)
+	for _, s := range (*sent)[1:] {
+		assert.Equal(t, messages.TypeMention, s.StructuredMsg.Type)
+		assert.Equal(t, "agent:primary-agent", s.StructuredMsg.Metadata["mention_source"])
+	}
+}
+
+func TestSendMessageViaHub_CCAndMentionCombined(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-cc-mention"
+	agents := []hubclient.Agent{
+		{Name: "primary-agent", Status: "running"},
+		{Name: "mention-agent", Status: "running"},
+		{Name: "cc-agent", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	origCC := msgCC
+	msgCC = "cc-agent"
+	defer func() { msgCC = origCC }()
+
+	// Both @mention in body and --cc flag
+	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mention-agent check this", false, false, false, false, false)
+	require.NoError(t, err)
+
+	// Should have 3 messages: primary + @mention + --cc
+	require.Len(t, *sent, 3)
+	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
+
+	mentionNames := []string{(*sent)[1].AgentName, (*sent)[2].AgentName}
+	assert.ElementsMatch(t, []string{"mention-agent", "cc-agent"}, mentionNames)
+}
+
+func TestSendMessageViaHub_CCDedupWithMention(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-cc-dedup"
+	agents := []hubclient.Agent{
+		{Name: "primary-agent", Status: "running"},
+		{Name: "shared-agent", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	origCC := msgCC
+	msgCC = "shared-agent"
+	defer func() { msgCC = origCC }()
+
+	// Same agent in both @mention and --cc — should only get one mention
+	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @shared-agent check this", false, false, false, false, false)
+	require.NoError(t, err)
+
+	// Should have 2 messages: primary + 1 mention (deduped)
+	require.Len(t, *sent, 2)
+	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
+	assert.Equal(t, "shared-agent", (*sent)[1].AgentName)
+}
+
+func TestSendMessageViaHub_NoMentionsInBody(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-no-mention"
+	agents := []hubclient.Agent{
+		{Name: "my-agent", Status: "running"},
+		{Name: "other-agent", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	origCC := msgCC
+	msgCC = ""
+	defer func() { msgCC = origCC }()
+
+	// No mentions in body, no --cc — only primary should be sent
+	err = sendMessageViaHub(hubCtx, "my-agent", "hello world", false, false, false, false, false)
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "my-agent", (*sent)[0].AgentName)
+}
+
+func TestCCFlagValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		cc        string
+		broadcast bool
+		all       bool
+		raw       bool
+		userRecip bool
+		wantErr   string
+	}{
+		{
+			name:      "cc with broadcast",
+			cc:        "agent-a",
+			broadcast: true,
+			wantErr:   "--cc cannot be combined with --broadcast or --all",
+		},
+		{
+			name:    "cc with all",
+			cc:      "agent-a",
+			all:     true,
+			wantErr: "--cc cannot be combined with --broadcast or --all",
+		},
+		{
+			name:    "cc with raw",
+			cc:      "agent-a",
+			raw:     true,
+			wantErr: "--cc cannot be combined with --raw",
+		},
+		{
+			name:      "cc with user recipient",
+			cc:        "agent-a",
+			userRecip: true,
+			wantErr:   "--cc cannot be used with user recipients",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origCC := msgCC
+			origBroadcast := msgBroadcast
+			origAll := msgAll
+			origRaw := msgRaw
+			defer func() {
+				msgCC = origCC
+				msgBroadcast = origBroadcast
+				msgAll = origAll
+				msgRaw = origRaw
+			}()
+
+			msgCC = tc.cc
+			msgBroadcast = tc.broadcast
+			msgAll = tc.all
+			msgRaw = tc.raw
+
+			var args []string
+			if tc.broadcast || tc.all {
+				args = []string{"hello"}
+			} else if tc.userRecip {
+				args = []string{"user:alice", "hello"}
+			} else {
+				args = []string{"my-agent", "hello"}
+			}
+
+			err := messageCmd.RunE(messageCmd, args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
