@@ -2079,6 +2079,38 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 				MetadataMode: store.GCPMetadataModeBlock,
 			}
 		case store.GCPMetadataModePassthrough:
+			// Passthrough exposes the broker's own GCP identity to the agent
+			// container. The create path (see createAgentInProject) enforces
+			// broker-owner/admin restriction for this mode. This PATCH path
+			// must enforce the same restriction — without it, "create without
+			// passthrough, then PATCH it in" bypasses the create-path gate.
+			//
+			// Kept as a near-duplicate of the create path deliberately: see
+			// the assign branch comments on greppability.
+			if agent.RuntimeBrokerID == "" {
+				ValidationError(w, "GCP identity passthrough requires a runtime broker, but this agent has no broker assigned", nil)
+				return
+			}
+			userIdent := GetUserIdentityFromContext(ctx)
+			if userIdent == nil {
+				logAuthzDenial(r, GetIdentityFromContext(ctx),
+					Resource{Type: "broker", ID: agent.RuntimeBrokerID}, ActionDispatch,
+					"passthrough is restricted to broker owners and admins")
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
+				return
+			}
+			broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if userIdent.Role() != "admin" && broker.CreatedBy != userIdent.ID() {
+				logAuthzDenial(r, userIdent, brokerResource(broker), ActionDispatch, "not broker owner or admin")
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
+				return
+			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModePassthrough,
 			}
