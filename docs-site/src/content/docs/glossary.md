@@ -145,6 +145,12 @@ The feature that allows users, developers, and external systems to access HTTP s
 ### Auto-Expose
 A sub-feature of port forwarding where `sciontool` periodically scans for listening TCP sockets inside the agent container (by reading `/proc/net/tcp` and `/proc/net/tcp6`), filters them by policy, and registers them with the Hub using the `auto-scan` label. Stale registrations are automatically cleaned up when the service stops listening.
 
+### A2A Protocol
+An open standard (developed by Google) for secure, structured communication between independent artificial agents. It defines a lightweight JSON-RPC 2.0 dialect over HTTP, alongside standard discovery mechanics ("Agent Cards") for advertising capabilities.
+
+### A2A Protocol Bridge
+A standalone, self-managed service that translates standard A2A JSON-RPC payloads into Scion Hub API calls and vice versa. It exposes Scion agents as standard A2A-compliant JSON-RPC endpoints, enabling multi-agent orchestration, third-party platform integrations, and desktop client federation.
+
 ## Users & Access
 
 ### Group
