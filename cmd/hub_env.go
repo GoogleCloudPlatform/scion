@@ -370,6 +370,7 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 	if envSecret {
 		secretReq := &hubclient.SetSecretRequest{
 			Value:         value,
+			Encoding:      "raw", // plaintext from CLI; server defaults to base64-decode without this
 			Scope:         scope,
 			ScopeID:       scopeID,
 			InjectionMode: injectionMode,

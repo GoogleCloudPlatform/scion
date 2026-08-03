@@ -420,6 +420,9 @@ func TestRunSecretSet_FileSendsNoEncoding(t *testing.T) {
 	// @file values are base64-encoded by the CLI; encoding field should be absent
 	_, hasEncoding := captured["encoding"]
 	assert.False(t, hasEncoding, "@file values should not send encoding field")
+
+	// Verify the value is the base64-encoded form of "file-contents"
+	assert.Equal(t, "ZmlsZS1jb250ZW50cw==", captured["value"], "@file value should be base64-encoded")
 }
 
 func TestHubSecretListCmd_ScopeFlag(t *testing.T) {
