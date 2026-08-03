@@ -25,6 +25,7 @@ import (
 	"sync"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -47,6 +48,7 @@ var msgNotify bool
 var msgWake bool
 var msgChannel string
 var msgThreadID string
+var msgCC string
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
@@ -135,6 +137,22 @@ Examples:
 		// Validate --notify restrictions
 		if msgNotify && (msgBroadcast || msgAll) {
 			return fmt.Errorf("--notify cannot be combined with --broadcast or --all")
+		}
+
+		// Validate --cc restrictions
+		if msgCC != "" {
+			if msgBroadcast || msgAll {
+				return fmt.Errorf("--cc cannot be combined with --broadcast or --all")
+			}
+			if msgRaw {
+				return fmt.Errorf("--cc cannot be combined with --raw")
+			}
+			if msgIn != "" || msgAt != "" {
+				return fmt.Errorf("--cc cannot be combined with --in or --at")
+			}
+			if userRecipient != "" {
+				return fmt.Errorf("--cc cannot be used with user recipients")
+			}
 		}
 
 		// Validate user-recipient restrictions
@@ -252,6 +270,11 @@ Examples:
 		// --notify requires Hub mode
 		if msgNotify && hubCtx == nil {
 			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
+		}
+
+		// --cc requires Hub mode
+		if msgCC != "" && hubCtx == nil {
+			return fmt.Errorf("--cc requires Hub mode (use 'scion hub enable' first)")
 		}
 
 		// Stage attachments to shared volume (after Hub mode confirmed)
@@ -524,6 +547,17 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 			fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 		}
 	}
+
+	// @mention and --cc fan-out: send TypeMention messages to mentioned agents
+	var mentionNames []string
+	// Parse @mentions from message body
+	mentionNames = append(mentionNames, extractMentions(message)...)
+	// Parse --cc flag
+	mentionNames = append(mentionNames, parseCCFlag(msgCC)...)
+	if len(mentionNames) > 0 {
+		sendMentionMessages(hubCtx, sender, "agent:"+agentName, message, mentionNames, agentSvc)
+	}
+
 	return nil
 }
 
@@ -706,12 +740,49 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
 	}
 
+	// @mention and --cc fan-out for group messages: mentioned agents that are
+	// not already group recipients receive a TypeMention notification.
+	// This runs regardless of partial delivery — mention recipients are
+	// independent of the group.
+	var mentionNames []string
+	mentionNames = append(mentionNames, extractMentions(message)...)
+	mentionNames = append(mentionNames, parseCCFlag(msgCC)...)
+	if len(mentionNames) > 0 {
+		// Build a mention source that reflects the group
+		recipientStrs := make([]string, len(recipients))
+		for i, r := range recipients {
+			recipientStrs[i] = r.String()
+		}
+		mentionSource := "group[" + strings.Join(recipientStrs, ",") + "]"
+
+		// Collect group recipient slugs to exclude from mentions
+		groupSlugs := make(map[string]bool)
+		for _, r := range recipients {
+			if r.Kind == messages.RecipientAgent {
+				groupSlugs[api.Slugify(r.Name)] = true
+			}
+		}
+
+		// Filter out names already in the group
+		var filtered []string
+		for _, name := range mentionNames {
+			if !groupSlugs[api.Slugify(name)] {
+				filtered = append(filtered, name)
+			}
+		}
+
+		if len(filtered) > 0 {
+			sendMentionMessages(hubCtx, sender, mentionSource, message, filtered, agentSvc)
+		}
+	}
+
 	if delivered == 0 {
 		return fmt.Errorf("group delivery failed: 0/%d recipients received the message", len(recipients))
 	}
 	if delivered < len(recipients) {
 		return fmt.Errorf("group delivery partially failed: %d/%d delivered", delivered, len(recipients))
 	}
+
 	return nil
 }
 
@@ -828,6 +899,139 @@ func validateChannel(hubCtx *HubContext, channel string) error {
 	return fmt.Errorf("channel %q is not registered; available channels: %s", channel, strings.Join(available, ", "))
 }
 
+// extractMentions scans message text for @name tokens and returns a deduplicated
+// list of mentioned names (without the @ prefix). Trailing punctuation (except
+// underscores and hyphens) is stripped from each token.
+func extractMentions(text string) []string {
+	var mentions []string
+	seen := make(map[string]bool)
+	for _, word := range strings.Fields(text) {
+		if !strings.HasPrefix(word, "@") {
+			continue
+		}
+		name := strings.TrimPrefix(word, "@")
+		name = strings.TrimRightFunc(name, func(r rune) bool {
+			return unicode.IsPunct(r) && r != '_' && r != '-'
+		})
+		if name == "" {
+			continue
+		}
+		lower := strings.ToLower(name)
+		if !seen[lower] {
+			seen[lower] = true
+			mentions = append(mentions, name)
+		}
+	}
+	return mentions
+}
+
+// parseCCFlag parses the --cc flag value into a slice of agent names.
+// Names are comma-separated and whitespace-trimmed.
+func parseCCFlag(cc string) []string {
+	if cc == "" {
+		return nil
+	}
+	parts := strings.Split(cc, ",")
+	var names []string
+	seen := make(map[string]bool)
+	for _, p := range parts {
+		name := strings.TrimSpace(p)
+		if name == "" {
+			continue
+		}
+		lower := strings.ToLower(name)
+		if !seen[lower] {
+			seen[lower] = true
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// maxMentionRecipients caps the number of mention recipients to avoid spam.
+const maxMentionRecipients = 10
+
+// sendMentionMessages resolves @mentions and --cc names against project agents
+// and sends TypeMention messages to each resolved agent. The primary recipient
+// is excluded from mentions. Unresolved names produce stderr warnings but do
+// not fail the primary send.
+func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageText string, mentionNames []string, agentSvc hubclient.AgentService) {
+	if len(mentionNames) == 0 {
+		return
+	}
+
+	// List project agents for resolution
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := agentSvc.List(ctx, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not list project agents for @mention resolution: %s\n", err)
+		return
+	}
+	if resp == nil {
+		return
+	}
+
+	// Build lookup map of known agents (slug -> slug with original case)
+	knownAgents := make(map[string]string, len(resp.Agents))
+	for _, a := range resp.Agents {
+		knownAgents[strings.ToLower(a.Name)] = a.Name
+	}
+
+	// Determine the primary recipient's slug for dedup
+	primarySlug := strings.ToLower(strings.TrimPrefix(primaryRecipient, "agent:"))
+
+	// Resolve mentions and deduplicate
+	var resolved []string
+	seen := make(map[string]bool)
+	seen[primarySlug] = true // skip primary recipient
+
+	for _, name := range mentionNames {
+		if len(resolved) >= maxMentionRecipients {
+			fmt.Fprintf(os.Stderr, "Warning: too many @mentions; only the first %d will receive mention notifications\n", maxMentionRecipients)
+			break
+		}
+		lower := strings.ToLower(name)
+		if seen[lower] {
+			continue
+		}
+		seen[lower] = true
+
+		slug, ok := knownAgents[lower]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Warning: @%s does not match any agent in this project; skipping mention\n", name)
+			continue
+		}
+		resolved = append(resolved, slug)
+	}
+
+	if len(resolved) == 0 {
+		return
+	}
+
+	// Send TypeMention to each resolved agent
+	var wg sync.WaitGroup
+	for _, slug := range resolved {
+		wg.Add(1)
+		go func(agentSlug string) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			mentionMsg := messages.NewMention(sender, "agent:"+agentSlug, messageText, primaryRecipient)
+			if _, err := agentSvc.SendStructuredMessage(ctx, agentSlug, mentionMsg, false, false, false); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to send mention to @%s: %s\n", agentSlug, err)
+				return
+			}
+			if !isJSONOutput() {
+				fmt.Fprintf(os.Stderr, "Mention notification sent to @%s.\n", agentSlug)
+			}
+		}(slug)
+	}
+	wg.Wait()
+}
+
 func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgBroadcast, "broadcast", "b", false, "Send the message to all running agents in the current project")
@@ -841,6 +1045,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Target a specific message channel (e.g. telegram, gchat, web)")
 	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Target a specific thread within the channel")
+	messageCmd.Flags().StringVar(&msgCC, "cc", "", "CC additional agents (comma-separated names); each receives a mention notification")
 	messageCmd.AddCommand(messageChannelsCmd)
 	rootCmd.AddCommand(messageCmd)
 }
