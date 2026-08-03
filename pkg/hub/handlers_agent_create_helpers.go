@@ -438,12 +438,12 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	// Apply hub-level AutoExposePortsDefault as lowest-priority fallback.
-	// Only injects SCION_AUTO_EXPOSE_PORTS if neither the agent config nor
-	// the project annotation already set it.
+	// Injects SCION_AUTO_EXPOSE_PORTS if neither the agent config nor
+	// the project annotation already set it, respecting both true and false defaults.
 	s.mu.RLock()
 	hubAutoExposeDefault := s.config.AutoExposePortsDefault
 	s.mu.RUnlock()
-	if hubAutoExposeDefault != nil && *hubAutoExposeDefault {
+	if hubAutoExposeDefault != nil {
 		if agent.AppliedConfig.InlineConfig == nil {
 			agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
 		}
@@ -451,7 +451,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 			agent.AppliedConfig.InlineConfig.Env = make(map[string]string)
 		}
 		if _, exists := agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"]; !exists {
-			agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = "true"
+			agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = strconv.FormatBool(*hubAutoExposeDefault)
 		}
 	}
 
