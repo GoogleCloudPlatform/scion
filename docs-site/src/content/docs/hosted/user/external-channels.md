@@ -5,7 +5,7 @@ description: Connect Scion to Telegram, Discord, and A2A for external messaging 
 
 ## Overview
 
-Scion can relay agent messages and notifications to external platforms, extending communication beyond the CLI and Web Dashboard. Three channels are available: **Telegram** (bidirectional group chat), **Discord** (outbound webhook notifications), and **A2A protocol** (expose agents as A2A endpoints for programmatic interaction).
+Scion can relay agent messages and notifications to external platforms, extending communication beyond the CLI and Web Dashboard. Three channels are available: **Telegram** (bidirectional group chat), **Discord** (bidirectional chat and outbound notifications), and **A2A protocol** (expose agents as A2A endpoints for programmatic interaction).
 
 ## Telegram
 
@@ -43,17 +43,41 @@ For a guided Workstation walkthrough, see [Setting Up Telegram](/scion/getting-s
 
 ## Discord
 
-Discord integration provides **outbound-only** webhook notifications — agents can push messages to a Discord channel, but cannot receive inbound messages from Discord.
+Scion supports Discord through two distinct integration models depending on your needs:
 
-- **Severity-based color coding:** Messages are color-coded by severity (info, warning, error, urgent).
+1. **Bidirectional Chat Integration (Full Discord Bot):** A rich, interactive experience where users can chat with agents in real-time, execute slash commands, and receive agent replies directly in linked channels.
+2. **Direct Hub Webhook (Outbound-only notifications):** A simple, outbound-only mechanism for broadcasting system alerts, agent messages, and user-input prompts to a specific channel.
+
+### 1. Bidirectional Chat Integration (Full Bot)
+
+The full Discord bot (`scion-plugin-discord`) operates as a bidirectional bridge, allowing you to run slash commands and hold conversations with agents directly from Discord.
+
+- **Slash Command Suite:** Use `/scion setup` to link a channel to a project, `/scion register` to securely link your Discord account with your Scion Hub identity, `/scion default` to select a default agent, and `/scion agents` or `/scion status` to check agent state.
+- **Rich Conversations:** Message agents via `@mention` (e.g. `@my-agent-slug hello`) or set a default agent for the channel to route plain-text messages automatically.
+- **Custom Agent Avatars:** Each agent replies using its own name and a custom avatar (powered by Discord webhooks and RoboHash), making agent-to-agent interactions clear and readable.
+- **Multi-Server (Multi-Guild) Support:** A single bot instance can serve multiple servers simultaneously. Admins can configure `guild_ids` for instant command registration on listed servers.
+- **Outage Protection:** Automatically deactivates channel links when the bot is removed from a server, while protecting active links against temporary Discord API outages.
+
+:::tip[Workstation quick start]
+Ready to set up the bidirectional Discord bot? Follow the step-by-step
+[Setting Up Discord](/scion/getting-started/discord/) walkthrough — bot creation, plugin
+configuration, server invites, and your first message.
+:::
+
+For advanced standalone/HA deployment and `settings.yaml` reference, see [extras/scion-discord/README.md](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-discord).
+
+### 2. Direct Hub Webhook (Outbound-only)
+
+If you only need outbound alerts and don't require bidirectional chat, you can configure the Hub server to post directly to a Discord webhook.
+
+- **Severity-based color coding:** Messages are color-coded in Discord based on their severity (info, warning, error, urgent).
 - **@mentions:** Urgent messages and explicit `ask_user` requests can trigger `@user` or `@role` mentions.
 - **Per-Agent Webhook Identity:** Outbound webhook messages are automatically posted under the actual sending agent's webhook identity and avatar, rather than the topic agent's.
 - **Observed Message Styling:** Relayed agent-to-agent (observed) messages feature a distinct gray-sidebar embed styling and a `Sender → Recipient` title format, making them easy to identify and distinguish from direct messages.
 
-### Configuration
+#### Configuration
 
 Set the webhook URL in one of two ways:
-
 - **settings.yaml:** Set `server.discord_webhook_url` in the Hub configuration.
 - **Environment variable:** Set `SCION_DISCORD_WEBHOOK_URL`.
 
