@@ -177,15 +177,11 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 // seeds the built-in maintenance operations, matching the behavior of the
 // former raw-SQL store (which seeded these as part of its migrations).
 func (c *CompositeStore) Migrate(ctx context.Context) error {
-	// Deduplicate access_policies before migration adds a unique index.
-	// Existing databases may have duplicate (name, scope_type, scope_id) rows
-	// which would cause the UNIQUE constraint migration to fail.
-	if err := c.deduplicateAccessPolicies(ctx); err != nil {
-		return fmt.Errorf("pre-migration dedup: %w", err)
-	}
-
-	// Backfill null scope_id to empty string before schema migration
-	// applies NOT NULL constraint (prevents SQLSTATE 23502).
+	// Backfill null scope_id to empty string before dedup and schema migration.
+	// Must run BEFORE dedup: in SQL NULL != NULL, so dedup won't detect
+	// duplicate rows where scope_id IS NULL. Converting to '' first lets
+	// dedup catch all real duplicates. Also prevents SQLSTATE 23502 when
+	// the schema migration applies the NOT NULL constraint.
 	if db := c.DB(); db != nil {
 		exists, err := c.accessPoliciesTableExists(ctx, db)
 		if err != nil {
@@ -201,6 +197,14 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 				slog.Info("backfilled null scope_id before migration", "rows_updated", n)
 			}
 		}
+	}
+
+	// Deduplicate access_policies before migration adds a unique index.
+	// Existing databases may have duplicate (name, scope_type, scope_id) rows
+	// (including former NULL scope_id rows now normalized to '') which would
+	// cause the UNIQUE constraint migration to fail.
+	if err := c.deduplicateAccessPolicies(ctx); err != nil {
+		return fmt.Errorf("pre-migration dedup: %w", err)
 	}
 
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {
