@@ -667,8 +667,23 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	// If Cloud Logging becomes unavailable (e.g. during a metadata
 	// service outage), the circuit breaker opens and the hub falls back to
 	// local-only logging automatically.
+	// Check env var first (SCION_CLOUD_LOGGING), then fall back to settings.
+	// When the env var is set (even to "false"), it takes precedence over
+	// the settings value. Only consult settings when the env var is unset.
+	var cloudLoggingEnabled bool
+	if os.Getenv(logging.EnvCloudLogging) != "" {
+		cloudLoggingEnabled = logging.IsCloudLoggingEnabled()
+	} else {
+		projectPath := ""
+		if globalMode {
+			projectPath = "global"
+		}
+		if vs, err := config.LoadVersionedSettings(projectPath); err == nil && vs.Telemetry != nil && vs.Telemetry.Cloud != nil && vs.Telemetry.Cloud.CloudLogging != nil {
+			cloudLoggingEnabled = *vs.Telemetry.Cloud.CloudLogging
+		}
+	}
 	var cloudHandler slog.Handler
-	if logging.IsCloudLoggingEnabled() {
+	if cloudLoggingEnabled {
 		logLevel := logging.ResolveLogLevel(enableDebug)
 		cfg := logging.CloudLoggingConfig{
 			Component: component,

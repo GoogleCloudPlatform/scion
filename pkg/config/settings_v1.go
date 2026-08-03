@@ -700,6 +700,7 @@ type V1TelemetryCloudConfig struct {
 	Batch        *V1TelemetryBatchConfig `json:"batch,omitempty" yaml:"batch,omitempty" koanf:"batch"`
 	Provider     string                  `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
 	GCPProjectID *string                 `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
+	CloudLogging *bool                   `json:"cloud_logging,omitempty" yaml:"cloud_logging,omitempty" koanf:"cloud_logging"`
 }
 
 // V1TelemetryTLSConfig holds TLS settings for cloud OTLP export.
@@ -1170,6 +1171,7 @@ var knownTelemetryCompoundFields = []string{
 	"insecure_skip_verify",
 	"respect_debug_mode",
 	"report_interval",
+	"cloud_logging",
 	"max_size",
 }
 

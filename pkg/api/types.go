@@ -380,6 +380,7 @@ type TelemetryCloudConfig struct {
 	Batch        *TelemetryBatch   `json:"batch,omitempty" yaml:"batch,omitempty"`
 	Provider     string            `json:"provider,omitempty" yaml:"provider,omitempty"`
 	GCPProjectID *string           `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty"`
+	CloudLogging *bool             `json:"cloud_logging,omitempty" yaml:"cloud_logging,omitempty"`
 }
 
 // TelemetryTLS holds TLS settings for OTLP export.

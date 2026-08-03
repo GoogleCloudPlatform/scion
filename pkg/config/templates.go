@@ -996,6 +996,9 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 		if override.Cloud.GCPProjectID != nil {
 			result.Cloud.GCPProjectID = override.Cloud.GCPProjectID
 		}
+		if override.Cloud.CloudLogging != nil {
+			result.Cloud.CloudLogging = override.Cloud.CloudLogging
+		}
 	}
 	if override.Hub != nil {
 		if result.Hub == nil {
