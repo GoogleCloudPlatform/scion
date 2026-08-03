@@ -1101,7 +1101,6 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 			for k, v := range asNeededEnv {
 				req.ResolvedEnv[k] = v
 			}
-			req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
 			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(
 				ctx, agent.RuntimeBrokerID, endpoint, req,
 			)
