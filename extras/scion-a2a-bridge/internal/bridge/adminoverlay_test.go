@@ -883,6 +883,113 @@ func TestParseAdminOverlay_EmptyStringFieldsStillPresent(t *testing.T) {
 	}
 }
 
+func TestConfigure_ProjectsJSONRoundTrip(t *testing.T) {
+	broker := NewBrokerServer(nil, discardLogger(), nil)
+	baseCfg := &Config{
+		Auth: AuthConfig{Scheme: "none"},
+	}
+	snap := NewSnapshotHolder(BuildSnapshot(*baseCfg))
+	dir := t.TempDir()
+	broker.SetAdminConfig(baseCfg, snap, dir)
+
+	// Step 1: push 2 projects.
+	twoProjects := `[
+		{"slug":"proj-alpha","default_template":"default","auto_provision":false,"exposed_agents":["agent1","agent2"]},
+		{"slug":"proj-beta","default_template":"custom","auto_provision":true,"exposed_agents":[]}
+	]`
+	err := broker.Configure(map[string]string{
+		"projects_json": twoProjects,
+	})
+	if err != nil {
+		t.Fatalf("Configure with 2 projects: %v", err)
+	}
+
+	current := snap.Load()
+	if len(current.Config.Projects) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(current.Config.Projects))
+	}
+	if current.Config.Projects[0].Slug != "proj-alpha" {
+		t.Errorf("Projects[0].Slug = %q, want proj-alpha", current.Config.Projects[0].Slug)
+	}
+	if len(current.Config.Projects[0].ExposedAgents) != 2 {
+		t.Errorf("Projects[0].ExposedAgents = %d, want 2", len(current.Config.Projects[0].ExposedAgents))
+	}
+	if current.Config.Projects[1].Slug != "proj-beta" {
+		t.Errorf("Projects[1].Slug = %q, want proj-beta", current.Config.Projects[1].Slug)
+	}
+	if !current.Config.Projects[1].AutoProvision {
+		t.Error("Projects[1].AutoProvision should be true")
+	}
+	if current.Config.Projects[1].DefaultTemplate != "custom" {
+		t.Errorf("Projects[1].DefaultTemplate = %q, want custom", current.Config.Projects[1].DefaultTemplate)
+	}
+
+	// Step 2: push again with 1 project removed.
+	oneProject := `[{"slug":"proj-alpha","default_template":"default","auto_provision":false,"exposed_agents":["agent1"]}]`
+	err = broker.Configure(map[string]string{
+		"projects_json": oneProject,
+	})
+	if err != nil {
+		t.Fatalf("Configure with 1 project: %v", err)
+	}
+
+	current = snap.Load()
+	if len(current.Config.Projects) != 1 {
+		t.Fatalf("expected 1 project after update, got %d", len(current.Config.Projects))
+	}
+	if current.Config.Projects[0].Slug != "proj-alpha" {
+		t.Errorf("Projects[0].Slug = %q, want proj-alpha", current.Config.Projects[0].Slug)
+	}
+	if len(current.Config.Projects[0].ExposedAgents) != 1 {
+		t.Errorf("Projects[0].ExposedAgents = %d, want 1", len(current.Config.Projects[0].ExposedAgents))
+	}
+
+	// Verify persistence: the overlay file should reflect the latest state.
+	loaded, err := LoadPersistedOverlay(dir)
+	if err != nil {
+		t.Fatalf("LoadPersistedOverlay: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected persisted overlay")
+	}
+	if len(loaded.Projects) != 1 {
+		t.Fatalf("persisted Projects = %d, want 1", len(loaded.Projects))
+	}
+	if loaded.Projects[0].Slug != "proj-alpha" {
+		t.Errorf("persisted Projects[0].Slug = %q, want proj-alpha", loaded.Projects[0].Slug)
+	}
+}
+
+func TestConfigure_EmptyProjectsJSON(t *testing.T) {
+	broker := NewBrokerServer(nil, discardLogger(), nil)
+	baseCfg := &Config{
+		Auth: AuthConfig{Scheme: "none"},
+		Projects: []ProjectConfig{
+			{Slug: "base-proj"},
+		},
+	}
+	snap := NewSnapshotHolder(BuildSnapshot(*baseCfg))
+	dir := t.TempDir()
+	broker.SetAdminConfig(baseCfg, snap, dir)
+
+	// Push empty projects_json → clears projects.
+	err := broker.Configure(map[string]string{
+		"projects_json": "[]",
+	})
+	if err != nil {
+		t.Fatalf("Configure with empty projects: %v", err)
+	}
+
+	current := snap.Load()
+	// Empty JSON array results in empty overlay Projects slice.
+	// ApplyOverlay requires the key to be present AND overlay.Projects non-nil.
+	// With "[]", ParseAdminOverlay sets overlay.Projects to an empty (non-nil) slice,
+	// and the key is present, so the base projects are replaced.
+	if len(current.Config.Projects) != 0 {
+		t.Errorf("expected 0 projects after empty push, got %d", len(current.Config.Projects))
+	}
+}
+
 func discardLogger() *slog.Logger {
 	return slog.Default()
 }

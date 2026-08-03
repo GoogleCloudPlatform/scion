@@ -72,6 +72,21 @@ interface PlatformSecretDef {
   required?: boolean;
 }
 
+/** Shape of a project entry in the projects_json flat config value. */
+interface A2AProjectEntry {
+  slug: string;
+  default_template: string;
+  auto_provision: boolean;
+  exposed_agents: string[];
+}
+
+/** Lightweight project info from GET /api/v1/projects. */
+interface ProjectInfo {
+  id: string;
+  name: string;
+  slug?: string;
+}
+
 const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
   telegram: [
     { key: 'bot_token', label: 'Bot Token', description: 'Telegram bot token from @BotFather', required: true },
@@ -195,6 +210,9 @@ export class ScionPageAdminIntegrations extends LitElement {
   // Available integrations for install
   @state() private availableIntegrations: AvailableIntegration[] = [];
   @state() private installingName: string | null = null;
+
+  // Available projects for A2A project selector
+  @state() private availableProjects: ProjectInfo[] = [];
 
   static override styles = css`
     :host {
@@ -529,6 +547,37 @@ export class ScionPageAdminIntegrations extends LitElement {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
     }
+
+    /* ── A2A Projects Editor ── */
+
+    .project-card {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      padding: 1rem;
+      margin-bottom: 0.75rem;
+      background: var(--scion-bg-subtle, #f8fafc);
+    }
+
+    .project-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .project-card .form-grid {
+      gap: 0.75rem;
+    }
+
+    .projects-empty {
+      padding: 1.5rem;
+      text-align: center;
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.875rem;
+    }
   `;
 
   private get currentName(): string | null {
@@ -590,10 +639,28 @@ export class ScionPageAdminIntegrations extends LitElement {
         ...(this.detail.settings || {}),
       };
       this.editedSecrets = {};
+
+      // For A2A integrations, fetch the project list for the projects editor.
+      if (resolvePlatform(name) === 'a2a') {
+        void this.loadAvailableProjects();
+      }
     } catch {
       this.error = 'Failed to connect to server';
     } finally {
       this.loading = false;
+    }
+  }
+
+  /** Fetch the hub project list for the A2A project selector. */
+  private async loadAvailableProjects(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/projects');
+      if (res.ok) {
+        const body = (await res.json()) as { projects: ProjectInfo[] };
+        this.availableProjects = body.projects ?? [];
+      }
+    } catch {
+      // Non-fatal: the editor still works, but the dropdown will be empty.
     }
   }
 
@@ -929,6 +996,7 @@ export class ScionPageAdminIntegrations extends LitElement {
       ${this.renderA2ASetupSection(d)}
       ${this.renderSecretsSection(d)}
       ${this.renderConfigSection(d)}
+      ${this.renderA2AProjectsSection(d)}
       ${this.renderDiscordInviteLink(d)}
       ${this.renderActionsSection()}
     `;
@@ -1019,7 +1087,14 @@ export class ScionPageAdminIntegrations extends LitElement {
     const platform = resolvePlatform(d.name);
     const fieldDefs = PLATFORM_FIELDS[platform] || [];
     const definedKeys = new Set(fieldDefs.map((f) => f.key));
-    const extraKeys = Object.keys(d.settings || {}).filter((k) => !definedKeys.has(k));
+    // Filter out keys that have dedicated editors (e.g. projects_json for A2A).
+    const hiddenExtraKeys = new Set<string>();
+    if (platform === 'a2a') {
+      hiddenExtraKeys.add('projects_json');
+    }
+    const extraKeys = Object.keys(d.settings || {}).filter(
+      (k) => !definedKeys.has(k) && !hiddenExtraKeys.has(k),
+    );
     const hasFields = fieldDefs.length > 0 || extraKeys.length > 0;
 
     if (!hasFields && Object.keys(d.settings || {}).length === 0) {
@@ -1116,6 +1191,240 @@ export class ScionPageAdminIntegrations extends LitElement {
         }}
       ></sl-input>
     `;
+  }
+
+  // ── A2A Projects & Agent Exposure Editor ──
+
+  /** Parse the projects_json flat config value into an array of project entries. */
+  private parseProjectsJSON(): A2AProjectEntry[] {
+    const raw = this.editedSettings['projects_json'] ?? '';
+    if (!raw || raw === '[]') return [];
+    try {
+      const parsed = JSON.parse(raw) as A2AProjectEntry[];
+      if (!Array.isArray(parsed)) return [];
+      return parsed;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Serialize the project entries back to the projects_json flat config value. */
+  private serializeProjectsJSON(projects: A2AProjectEntry[]): void {
+    this.editedSettings = {
+      ...this.editedSettings,
+      projects_json: JSON.stringify(projects),
+    };
+  }
+
+  private renderA2AProjectsSection(d: IntegrationDetail) {
+    const platform = resolvePlatform(d.name);
+    if (platform !== 'a2a') return nothing;
+
+    const projects = this.parseProjectsJSON();
+
+    // Slugs already used — for duplicate-prevention in the dropdown.
+    const usedSlugs = new Set(projects.map((p) => p.slug));
+
+    return html`
+      <div class="section">
+        <h3 class="section-title">Projects & Agent Exposure</h3>
+        ${projects.length === 0
+          ? html`
+              <div class="projects-empty">
+                <p>No projects configured. Add a project to expose its agents via A2A.</p>
+              </div>
+            `
+          : projects.map((proj, idx) =>
+              this.renderProjectCard(proj, idx, projects, usedSlugs),
+            )}
+        <sl-button
+          variant="default"
+          size="small"
+          style="margin-top: 0.5rem;"
+          @click=${() => this.handleAddProject(projects)}
+        >
+          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+          Add Project
+        </sl-button>
+      </div>
+    `;
+  }
+
+  private renderProjectCard(
+    proj: A2AProjectEntry,
+    idx: number,
+    allProjects: A2AProjectEntry[],
+    usedSlugs: Set<string>,
+  ) {
+    // Build project display name for the header.
+    const matchedProject = this.availableProjects.find(
+      (p) => (p.slug ?? p.id) === proj.slug,
+    );
+    const headerLabel = matchedProject
+      ? `${matchedProject.name} (${proj.slug})`
+      : proj.slug || 'New Project';
+
+    return html`
+      <div class="project-card">
+        <div class="project-card-header">
+          <span>Project ${idx + 1}: ${headerLabel}</span>
+          <sl-button
+            variant="danger"
+            size="small"
+            outline
+            @click=${() => this.handleRemoveProject(allProjects, idx)}
+          >
+            Remove
+          </sl-button>
+        </div>
+        <div class="form-grid">
+          <div class="form-field">
+            <label>Project</label>
+            ${this.availableProjects.length > 0
+              ? html`
+                  <sl-select
+                    .value=${proj.slug}
+                    placeholder="Select a project"
+                    @sl-change=${(e: Event) =>
+                      this.handleProjectFieldChange(
+                        allProjects,
+                        idx,
+                        'slug',
+                        (e.target as HTMLSelectElement).value,
+                      )}
+                  >
+                    ${this.availableProjects.map((p) => {
+                      const slug = p.slug ?? p.id;
+                      const disabled = usedSlugs.has(slug) && slug !== proj.slug;
+                      return html`
+                        <sl-option value=${slug} ?disabled=${disabled}>
+                          ${p.name} (${slug})
+                        </sl-option>
+                      `;
+                    })}
+                  </sl-select>
+                `
+              : html`
+                  <sl-input
+                    .value=${proj.slug}
+                    placeholder="project-slug"
+                    @sl-change=${(e: Event) =>
+                      this.handleProjectFieldChange(
+                        allProjects,
+                        idx,
+                        'slug',
+                        (e.target as HTMLInputElement).value,
+                      )}
+                  ></sl-input>
+                `}
+            <span class="hint">Project to expose via A2A</span>
+          </div>
+
+          <div class="form-field">
+            <label>Default Template</label>
+            <sl-input
+              .value=${proj.default_template}
+              placeholder="default"
+              @sl-change=${(e: Event) =>
+                this.handleProjectFieldChange(
+                  allProjects,
+                  idx,
+                  'default_template',
+                  (e.target as HTMLInputElement).value,
+                )}
+            ></sl-input>
+            <span class="hint">Agent template for auto-provisioned agents</span>
+          </div>
+
+          <div class="form-field">
+            <label>Auto Provision</label>
+            <sl-switch
+              ?checked=${proj.auto_provision}
+              @sl-change=${(e: Event) =>
+                this.handleProjectFieldChange(
+                  allProjects,
+                  idx,
+                  'auto_provision',
+                  (e.target as HTMLInputElement).checked,
+                )}
+            ></sl-switch>
+            <span class="hint">Automatically create agents from A2A requests</span>
+          </div>
+
+          <div class="form-field">
+            <label>Exposed Agents</label>
+            <sl-input
+              .value=${(proj.exposed_agents ?? []).join(', ')}
+              placeholder="Leave empty to expose all agents"
+              @sl-change=${(e: Event) =>
+                this.handleProjectFieldChange(
+                  allProjects,
+                  idx,
+                  'exposed_agents',
+                  (e.target as HTMLInputElement).value,
+                )}
+            ></sl-input>
+            <span class="hint">Comma-separated agent names. Leave empty to expose all agents.</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private handleAddProject(currentProjects: A2AProjectEntry[]): void {
+    const updated = [
+      ...currentProjects,
+      {
+        slug: '',
+        default_template: 'default',
+        auto_provision: false,
+        exposed_agents: [] as string[],
+      },
+    ];
+    this.serializeProjectsJSON(updated);
+    this.requestUpdate();
+  }
+
+  private handleRemoveProject(
+    currentProjects: A2AProjectEntry[],
+    idx: number,
+  ): void {
+    const updated = currentProjects.filter((_, i) => i !== idx);
+    this.serializeProjectsJSON(updated);
+    this.requestUpdate();
+  }
+
+  private handleProjectFieldChange(
+    currentProjects: A2AProjectEntry[],
+    idx: number,
+    field: string,
+    value: string | boolean,
+  ): void {
+    const updated = currentProjects.map((p, i) => {
+      if (i !== idx) return { ...p };
+      const copy = { ...p };
+      switch (field) {
+        case 'slug':
+          copy.slug = value as string;
+          break;
+        case 'default_template':
+          copy.default_template = value as string;
+          break;
+        case 'auto_provision':
+          copy.auto_provision = value as boolean;
+          break;
+        case 'exposed_agents': {
+          const raw = (value as string).trim();
+          copy.exposed_agents = raw
+            ? raw.split(',').map((s) => s.trim()).filter((s) => s !== '')
+            : [];
+          break;
+        }
+      }
+      return copy;
+    });
+    this.serializeProjectsJSON(updated);
+    this.requestUpdate();
   }
 
   private renderDiscordInviteLink(d: IntegrationDetail) {
