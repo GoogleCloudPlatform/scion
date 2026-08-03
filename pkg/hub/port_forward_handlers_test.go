@@ -102,6 +102,96 @@ func TestAgentPortProxyNoTunnelReturns503(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
+func TestProxyErrorContentNegotiation(t *testing.T) {
+	srv, s := testServer(t)
+	agent, token := createPortForwardAgent(t, srv, s)
+
+	// Expose port 3000 so we can test the "no tunnel" path; port 9999 is NOT
+	// exposed, so it exercises the "port not found" path.
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": 3000,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	tests := []struct {
+		name          string
+		path          string
+		accept        string
+		wantStatus    int
+		wantHTML      bool
+		wantSubstring string
+	}{
+		{
+			name:          "port_not_found_browser_gets_html",
+			path:          "/api/v1/agents/" + agent.ID + "/ports/9999/proxy/",
+			accept:        "text/html,application/xhtml+xml",
+			wantStatus:    http.StatusNotFound,
+			wantHTML:      true,
+			wantSubstring: "Port Not Available",
+		},
+		{
+			name:          "port_not_found_api_gets_json",
+			path:          "/api/v1/agents/" + agent.ID + "/ports/9999/proxy/",
+			accept:        "application/json",
+			wantStatus:    http.StatusNotFound,
+			wantHTML:      false,
+			wantSubstring: `"not_found"`,
+		},
+		{
+			name:          "port_not_found_no_accept_gets_json",
+			path:          "/api/v1/agents/" + agent.ID + "/ports/9999/proxy/",
+			accept:        "",
+			wantStatus:    http.StatusNotFound,
+			wantHTML:      false,
+			wantSubstring: `"not_found"`,
+		},
+		{
+			name:          "no_tunnel_browser_gets_html",
+			path:          "/api/v1/agents/" + agent.ID + "/ports/3000/proxy/",
+			accept:        "text/html,application/xhtml+xml",
+			wantStatus:    http.StatusServiceUnavailable,
+			wantHTML:      true,
+			wantSubstring: "Service Unavailable",
+		},
+		{
+			name:          "no_tunnel_api_gets_json",
+			path:          "/api/v1/agents/" + agent.ID + "/ports/3000/proxy/",
+			accept:        "application/json",
+			wantStatus:    http.StatusServiceUnavailable,
+			wantHTML:      false,
+			wantSubstring: `"runtime_error"`,
+		},
+		{
+			name:          "no_tunnel_no_accept_gets_json",
+			path:          "/api/v1/agents/" + agent.ID + "/ports/3000/proxy/",
+			accept:        "",
+			wantStatus:    http.StatusServiceUnavailable,
+			wantHTML:      false,
+			wantSubstring: `"runtime_error"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.Header.Set("X-Scion-Agent-Token", token)
+			if tc.accept != "" {
+				req.Header.Set("Accept", tc.accept)
+			}
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			assert.Equal(t, tc.wantStatus, w.Code)
+			if tc.wantHTML {
+				assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
+			} else {
+				assert.Contains(t, w.Header().Get("Content-Type"), "application/json")
+			}
+			assert.Contains(t, w.Body.String(), tc.wantSubstring)
+		})
+	}
+}
+
 func TestAgentPortProxyThroughTunnel(t *testing.T) {
 	srv, s := testServer(t)
 	hubHTTP := httptest.NewServer(srv.Handler())

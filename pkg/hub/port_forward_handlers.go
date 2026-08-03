@@ -383,7 +383,12 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	}
 	exposed := findExposedPort(agent.ExposedPorts, port)
 	if exposed == nil {
-		NotFound(w, "Port")
+		if isBrowserRequest(r) {
+			writeProxyErrorHTML(w, http.StatusNotFound, "Port Not Available",
+				"The requested port is not exposed on this agent.")
+		} else {
+			NotFound(w, "Port")
+		}
 		return
 	}
 	if isWebSocketUpgrade(r) {
@@ -410,7 +415,12 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	})
 	if err != nil {
 		if errors.Is(err, errNoPortTunnel) {
-			writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, "No active port-forward tunnel for this agent", nil)
+			if isBrowserRequest(r) {
+				writeProxyErrorHTML(w, http.StatusServiceUnavailable, "Service Unavailable",
+					"No active port-forward tunnel for this agent. The agent may not be running or the tunnel has not been established yet.")
+			} else {
+				writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, "No active port-forward tunnel for this agent", nil)
+			}
 			return
 		}
 		if errors.Is(err, errTunnelBusy) {
@@ -446,6 +456,20 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		"status", resp.Status,
 		"duration", time.Since(start),
 	)
+}
+
+// writeProxyErrorHTML writes a self-contained HTML error page for browser requests
+// to proxy endpoints. It delegates to the shared renderErrorPage template.
+func writeProxyErrorHTML(w http.ResponseWriter, status int, title, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprint(w, proxyErrorPageHTML(title, message))
+}
+
+// proxyErrorPageHTML returns a self-contained HTML error page with the given
+// title and message, using the shared renderErrorPage template.
+func proxyErrorPageHTML(title, message string) string {
+	return renderErrorPage("Scion - "+title, "&#9888;&#65039;", "error", title, message)
 }
 
 func (s *Server) handleAgentPortTunnel(w http.ResponseWriter, r *http.Request, agentID string) {
