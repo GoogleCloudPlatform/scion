@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 
 	entsql "entgo.io/ent/dialect/sql"
 
@@ -186,8 +187,20 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	// Backfill null scope_id to empty string before schema migration
 	// applies NOT NULL constraint (prevents SQLSTATE 23502).
 	if db := c.DB(); db != nil {
-		_, _ = db.ExecContext(ctx,
-			"UPDATE access_policies SET scope_id = '' WHERE scope_id IS NULL")
+		exists, err := c.accessPoliciesTableExists(ctx, db)
+		if err != nil {
+			return fmt.Errorf("pre-migration null scope_id check: %w", err)
+		}
+		if exists {
+			result, err := db.ExecContext(ctx,
+				"UPDATE access_policies SET scope_id = '' WHERE scope_id IS NULL")
+			if err != nil {
+				return fmt.Errorf("pre-migration null scope_id backfill: %w", err)
+			}
+			if n, _ := result.RowsAffected(); n > 0 {
+				slog.Info("backfilled null scope_id before migration", "rows_updated", n)
+			}
+		}
 	}
 
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {
