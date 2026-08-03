@@ -379,7 +379,7 @@ func PersistOverlay(stateDir string, overlay *AdminOverlay) error {
 	if overlay.RateLimitEnabled != nil {
 		p.RateLimitEnabled = overlay.RateLimitEnabled
 	}
-	if overlay.UATCacheTTL > 0 {
+	if overlay.IsPresent("uat_cache_ttl") {
 		p.UATCacheTTL = overlay.UATCacheTTL.String()
 	}
 	if overlay.SendMessageTimeout > 0 {

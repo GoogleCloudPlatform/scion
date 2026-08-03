@@ -2459,3 +2459,121 @@ func TestListAvailableIntegrations_IncludesA2ABridge(t *testing.T) {
 		t.Errorf("expected a2a-bridge in available integrations, got %v", result)
 	}
 }
+
+func TestListAvailableIntegrations_IncludesDescription(t *testing.T) {
+	repoDir := t.TempDir()
+	// Create source directories for a2a-bridge and telegram.
+	for _, d := range []string{"extras/scion-a2a-bridge", "extras/scion-telegram"} {
+		if err := os.MkdirAll(filepath.Join(repoDir, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mgr := newMockIntegrationManager()
+
+	srv := &Server{}
+	srv.config.MaintenanceConfig.RepoPath = repoDir
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result []AvailableIntegration
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+
+	for _, a := range result {
+		if a.Description == "" {
+			t.Errorf("expected description for %s, got empty", a.Name)
+		}
+		if a.Name == "a2a-bridge" && !strings.Contains(a.Description, "External") {
+			t.Errorf("a2a-bridge should have external-service description, got %q", a.Description)
+		}
+	}
+}
+
+// --- Self-managed rebuild (dev mode) ---
+
+func TestUpdateIntegration_SelfManaged_DevModeRebuild_NoSource(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["a2a-bridge"] = map[string]string{}
+	mgr.selfManaged["a2a-bridge"] = true
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+	srv.config.MaintenanceConfig.RepoPath = t.TempDir() // RepoPath set but no source dir
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 (no source dir), got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUpdateIntegration_SelfManaged_NoRepoPath(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["a2a-bridge"] = map[string]string{}
+	mgr.selfManaged["a2a-bridge"] = true
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+	// No RepoPath set → should reject with guidance
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 (no repo path), got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "update the binary manually") {
+		t.Error("expected guidance message about manual update")
+	}
+}
+
+func TestUpdateIntegration_SelfManaged_DevModeRebuild_SourceExists(t *testing.T) {
+	// Create a temp repo directory with the source structure.
+	repoPath := t.TempDir()
+	sourceDir := filepath.Join(repoPath, "extras", "scion-a2a-bridge", "cmd", "scion-a2a-bridge")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["a2a-bridge"] = map[string]string{}
+	mgr.selfManaged["a2a-bridge"] = true
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+	srv.config.MaintenanceConfig.RepoPath = repoPath
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	// Build will fail because there's no real Go source, but the handler should
+	// get past the source-dir check and reach the build step (500 from build failure).
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 (build failure on empty source), got %d: %s", rr.Code, rr.Body.String())
+	}
+	// Error body should not leak internal build output
+	if strings.Contains(rr.Body.String(), "go build") {
+		t.Error("response should not leak internal build details")
+	}
+}

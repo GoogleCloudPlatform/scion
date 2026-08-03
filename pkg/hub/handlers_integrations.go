@@ -130,8 +130,9 @@ type IntegrationConfigUpdateRequest struct {
 
 // AvailableIntegration represents a plugin that could be installed.
 type AvailableIntegration struct {
-	Name     string `json:"name"`
-	Platform string `json:"platform"`
+	Name        string `json:"name"`
+	Platform    string `json:"platform"`
+	Description string `json:"description,omitempty"`
 }
 
 // IntegrationUpdateResponse is returned by POST update for HA integrations (202)
@@ -157,13 +158,14 @@ type KnownPlugin struct {
 	BinaryName  string // binary name, default "scion-plugin-<name>"
 	SourceDir   string // source directory, default "extras/scion-<name>"
 	SelfManaged bool   // true = register+instruct, never build/launch
+	Description string // human-readable description for the available-integrations list
 }
 
 var knownPluginCatalog = []KnownPlugin{
-	{Name: "telegram", Platform: "telegram", BinaryName: "scion-plugin-telegram", SourceDir: "extras/scion-telegram"},
-	{Name: "discord", Platform: "discord", BinaryName: "scion-plugin-discord", SourceDir: "extras/scion-discord"},
-	{Name: "slack", Platform: "slack", BinaryName: "scion-plugin-slack", SourceDir: "extras/scion-slack"},
-	{Name: "a2a-bridge", Platform: "a2a", BinaryName: "scion-a2a-bridge", SourceDir: "extras/scion-a2a-bridge", SelfManaged: true},
+	{Name: "telegram", Platform: "telegram", BinaryName: "scion-plugin-telegram", SourceDir: "extras/scion-telegram", Description: "Chat integration — built and managed by the Hub"},
+	{Name: "discord", Platform: "discord", BinaryName: "scion-plugin-discord", SourceDir: "extras/scion-discord", Description: "Chat integration — built and managed by the Hub"},
+	{Name: "slack", Platform: "slack", BinaryName: "scion-plugin-slack", SourceDir: "extras/scion-slack", Description: "Chat integration — built and managed by the Hub"},
+	{Name: "a2a-bridge", Platform: "a2a", BinaryName: "scion-a2a-bridge", SourceDir: "extras/scion-a2a-bridge", SelfManaged: true, Description: "External service — installed separately, managed via admin UI"},
 }
 
 var knownPluginSet = func() map[string]bool {
@@ -718,9 +720,15 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Self-managed plugins cannot be updated via the Hub (no build/launch).
+	// Self-managed plugins: in dev mode (RepoPath set), offer a binary rebuild
+	// but do NOT restart the bridge process. Otherwise reject with guidance.
 	if kp := lookupKnownPlugin(name); kp != nil && kp.SelfManaged {
-		BadRequest(w, "self-managed integrations cannot be updated via the Hub — update the binary manually and click Reconnect")
+		repoPath := s.config.MaintenanceConfig.RepoPath
+		if repoPath == "" {
+			BadRequest(w, "self-managed integrations cannot be updated via the Hub — update the binary manually and click Reconnect")
+			return
+		}
+		s.handleRebuildSelfManaged(w, r, kp, repoPath)
 		return
 	}
 
@@ -1084,6 +1092,60 @@ func createBridgeConfigTemplate(name, configFilePath, hubEndpoint string) error 
 	return os.WriteFile(resolved, []byte(content), 0600)
 }
 
+// handleRebuildSelfManaged builds a self-managed plugin binary from source
+// (dev mode only). Unlike regular plugin updates, this does NOT restart the
+// bridge process — the response instructs the operator to restart manually.
+func (s *Server) handleRebuildSelfManaged(w http.ResponseWriter, _ *http.Request, kp *KnownPlugin, repoPath string) {
+	sourceDir := filepath.Join(repoPath, kp.SourceDir)
+	if _, err := os.Stat(sourceDir); err != nil {
+		NotFound(w, "plugin source directory")
+		return
+	}
+
+	mu := acquirePluginBuildLock(kp.Name)
+	if mu == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "a build is already in progress for this integration",
+		})
+		return
+	}
+	defer releasePluginBuildLock(kp.Name)
+
+	// Build the binary into the repo's bin/ directory using the same pattern
+	// as the Makefile target: go build -o bin/<binary> ./<source>/cmd/<binary>/
+	binDir := filepath.Join(repoPath, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		slog.Error("Failed to create bin directory", "path", binDir, "error", err)
+		InternalError(w)
+		return
+	}
+
+	binaryPath := filepath.Join(binDir, kp.BinaryName)
+	buildPkg := "./" + kp.SourceDir + "/cmd/" + kp.BinaryName + "/"
+
+	slog.Info("Rebuilding self-managed plugin binary",
+		"plugin", kp.Name, "source", sourceDir, "binary", binaryPath)
+
+	buildCmd := exec.Command("go", "build", "-o", binaryPath, buildPkg)
+	buildCmd.Dir = repoPath
+	output, err := buildCmd.CombinedOutput()
+	if err != nil {
+		slog.Error("Build failed for self-managed plugin", "plugin", kp.Name, "error", err, "output", string(output))
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Build failed — check server logs for details", nil)
+		return
+	}
+
+	slog.Info("Self-managed plugin binary rebuilt successfully",
+		"plugin", kp.Name, "binary", binaryPath)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":      "rebuilt",
+		"binary_path": binaryPath,
+		"notes":       "Binary rebuilt successfully. Restart the bridge process to use the new binary.",
+	})
+}
+
 func (s *Server) handleListAvailableIntegrations(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
 	mgr := s.pluginManager
@@ -1132,8 +1194,9 @@ func (s *Server) handleListAvailableIntegrations(w http.ResponseWriter, _ *http.
 		}
 
 		available = append(available, AvailableIntegration{
-			Name:     kp.Name,
-			Platform: kp.Platform,
+			Name:        kp.Name,
+			Platform:    kp.Platform,
+			Description: kp.Description,
 		})
 	}
 

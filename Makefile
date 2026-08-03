@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build install test test-fast vet lint compat-literals golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge install test test-fast vet lint compat-literals golangci-lint web web-typecheck web-test fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -27,6 +27,13 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	@go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) $(MAIN_PKG)
 	@echo "Binary: $(BUILD_DIR)/$(BINARY)"
+
+## build-a2a-bridge: Build the A2A bridge binary into ./bin/
+build-a2a-bridge:
+	@echo "Building scion-a2a-bridge..."
+	@mkdir -p bin
+	@go build -o bin/scion-a2a-bridge ./extras/scion-a2a-bridge/cmd/scion-a2a-bridge/
+	@echo "Binary: bin/scion-a2a-bridge"
 
 ## install: Install a pre-built binary (default: /usr/local/bin, override with PREFIX=~/.local). Run 'make build' first.
 install:

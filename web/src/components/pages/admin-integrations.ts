@@ -213,7 +213,7 @@ export class ScionPageAdminIntegrations extends LitElement {
 
   // Available projects for A2A project selector
   @state() private availableProjects: ProjectInfo[] = [];
-  @state() private projectsJsonWarning: string | null = null;
+
 
   static override styles = css`
     :host {
@@ -1197,25 +1197,20 @@ export class ScionPageAdminIntegrations extends LitElement {
   // ── A2A Projects & Agent Exposure Editor ──
 
   /** Parse the projects_json flat config value into an array of project entries. */
-  private parseProjectsJSON(): A2AProjectEntry[] {
+  private parseProjectsJSON(): { projects: A2AProjectEntry[]; warning: string | null } {
     const raw = this.editedSettings['projects_json'] ?? '';
     if (!raw || raw === '[]') {
-      this.projectsJsonWarning = null;
-      return [];
+      return { projects: [], warning: null };
     }
     try {
       const parsed = JSON.parse(raw) as A2AProjectEntry[];
       if (!Array.isArray(parsed)) {
-        this.projectsJsonWarning = null;
-        return [];
+        return { projects: [], warning: null };
       }
-      this.projectsJsonWarning = null;
-      return parsed;
+      return { projects: parsed, warning: null };
     } catch (e) {
       console.warn('Could not parse projects_json configuration:', e);
-      this.projectsJsonWarning =
-        'Warning: Could not parse existing projects configuration.';
-      return [];
+      return { projects: [], warning: 'Warning: Could not parse existing projects configuration.' };
     }
   }
 
@@ -1231,7 +1226,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     const platform = resolvePlatform(d.name);
     if (platform !== 'a2a') return nothing;
 
-    const projects = this.parseProjectsJSON();
+    const { projects, warning } = this.parseProjectsJSON();
 
     // Slugs already used — for duplicate-prevention in the dropdown.
     const usedSlugs = new Set(projects.map((p) => p.slug));
@@ -1239,10 +1234,10 @@ export class ScionPageAdminIntegrations extends LitElement {
     return html`
       <div class="section">
         <h3 class="section-title">Projects & Agent Exposure</h3>
-        ${this.projectsJsonWarning
+        ${warning
           ? html`<div class="warning-message" style="color: var(--sl-color-warning-600); margin-bottom: 0.5rem;">
               <sl-icon name="exclamation-triangle" style="margin-right: 0.25rem;"></sl-icon>
-              ${this.projectsJsonWarning}
+              ${warning}
             </div>`
           : nothing}
         ${projects.length === 0
