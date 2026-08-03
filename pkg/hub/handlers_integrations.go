@@ -147,16 +147,42 @@ type IntegrationUpdateResponse struct {
 	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
-// knownPlugins is the list of plugins that can be discovered for installation.
-var knownPlugins = []string{"telegram", "discord", "slack"}
+// KnownPlugin describes a plugin that can be discovered for installation.
+// The catalog replaces the former knownPlugins string list so that per-plugin
+// metadata (binary name, source directory, self-managed flag) is explicit
+// rather than derived from naming conventions.
+type KnownPlugin struct {
+	Name        string // settings.yaml key: "a2a-bridge"
+	Platform    string // platform identifier: "a2a"
+	BinaryName  string // binary name, default "scion-plugin-<name>"
+	SourceDir   string // source directory, default "extras/scion-<name>"
+	SelfManaged bool   // true = register+instruct, never build/launch
+}
+
+var knownPluginCatalog = []KnownPlugin{
+	{Name: "telegram", Platform: "telegram", BinaryName: "scion-plugin-telegram", SourceDir: "extras/scion-telegram"},
+	{Name: "discord", Platform: "discord", BinaryName: "scion-plugin-discord", SourceDir: "extras/scion-discord"},
+	{Name: "slack", Platform: "slack", BinaryName: "scion-plugin-slack", SourceDir: "extras/scion-slack"},
+	{Name: "a2a-bridge", Platform: "a2a", BinaryName: "scion-a2a-bridge", SourceDir: "extras/scion-a2a-bridge", SelfManaged: true},
+}
 
 var knownPluginSet = func() map[string]bool {
-	s := make(map[string]bool, len(knownPlugins))
-	for _, n := range knownPlugins {
-		s[n] = true
+	s := make(map[string]bool, len(knownPluginCatalog))
+	for _, p := range knownPluginCatalog {
+		s[p.Name] = true
 	}
 	return s
 }()
+
+// lookupKnownPlugin returns the catalog entry for the named plugin, or nil.
+func lookupKnownPlugin(name string) *KnownPlugin {
+	for i := range knownPluginCatalog {
+		if knownPluginCatalog[i].Name == name {
+			return &knownPluginCatalog[i]
+		}
+	}
+	return nil
+}
 
 // settingsWriteMu guards concurrent writes to settings.yaml.
 var settingsWriteMu sync.Mutex
@@ -692,6 +718,12 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Self-managed plugins cannot be updated via the Hub (no build/launch).
+	if kp := lookupKnownPlugin(name); kp != nil && kp.SelfManaged {
+		BadRequest(w, "self-managed integrations cannot be updated via the Hub — update the binary manually and click Reconnect")
+		return
+	}
+
 	// HA (Mode 3) integrations: insert an update request row + NOTIFY.
 	if s.isHAIntegration(mgr, name) {
 		s.handleUpdateIntegrationHA(w, r, name)
@@ -750,8 +782,22 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Look up the catalog entry for this plugin.
+	kp := lookupKnownPlugin(name)
+	if kp == nil {
+		BadRequest(w, "unknown integration: "+name)
+		return
+	}
+
+	// Self-managed plugins have a distinct install flow: register + scaffold
+	// + instruct, no build or process launch.
+	if kp.SelfManaged {
+		s.handleInstallSelfManaged(w, r, mgr, kp)
+		return
+	}
+
 	repoPath := s.config.MaintenanceConfig.RepoPath
-	binaryName := "scion-plugin-" + name
+	binaryName := kp.BinaryName
 	_, lookPathErr := exec.LookPath(binaryName)
 	binaryOnPath := lookPathErr == nil
 
@@ -765,7 +811,7 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 
 	// Source-dir check and build lock only apply when building from source.
 	if repoPath != "" {
-		sourceDir := filepath.Join(repoPath, "extras", "scion-"+name)
+		sourceDir := filepath.Join(repoPath, kp.SourceDir)
 		if _, err := os.Stat(sourceDir); err != nil {
 			NotFound(w, "plugin source")
 			return
@@ -860,6 +906,127 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// handleInstallSelfManaged implements the install flow for self-managed plugins
+// (e.g. A2A bridge): create the Hub-side admin config file, register in
+// settings.yaml with self_managed/mode/address/config_file, attempt LoadOne
+// (non-fatal if the bridge process is not running), and return setup
+// instructions.
+func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request, mgr IntegrationManager, kp *KnownPlugin) {
+	name := kp.Name
+
+	// Also reject if already registered in settings.yaml but not loaded.
+	if entry := installedPluginSettingsEntry(name); entry != nil {
+		BadRequest(w, "integration is already installed")
+		return
+	}
+
+	// 1. Create the Hub-side flat admin config file (if absent).
+	adminConfigPath := "~/.scion/scion-" + name + "-admin.yaml"
+	resolvedAdminPath := adminConfigPath
+	if home, err := os.UserHomeDir(); err == nil {
+		resolvedAdminPath = filepath.Join(home, adminConfigPath[2:])
+	}
+	if _, err := os.Stat(resolvedAdminPath); err != nil {
+		if !os.IsNotExist(err) {
+			slog.Error("Failed to check admin config file", "plugin", name, "path", resolvedAdminPath, "error", err)
+			InternalError(w)
+			return
+		}
+		if err := createSelfManagedAdminConfig(name, adminConfigPath); err != nil {
+			slog.Error("Failed to create admin config file", "plugin", name, "error", err)
+			InternalError(w)
+			return
+		}
+	} else {
+		slog.Info("Admin config file already exists, preserving", "plugin", name, "path", resolvedAdminPath)
+	}
+
+	// 2. Register in settings.yaml with self-managed fields.
+	settingsWriteMu.Lock()
+	err := config.AddSelfManagedPluginToSettings(config.SelfManagedPluginEntry{
+		Name:       name,
+		Address:    "localhost:9090",
+		ConfigFile: adminConfigPath,
+	})
+	if err == nil {
+		err = config.AddPluginToMessageBrokerTypes(name)
+	}
+	settingsWriteMu.Unlock()
+	if err != nil {
+		slog.Error("Failed to add self-managed plugin to settings.yaml", "plugin", name, "error", err)
+		InternalError(w)
+		return
+	}
+
+	// 3. Attempt LoadOne — non-fatal if the bridge is not running.
+	pluginsDir, _ := plugin.DefaultPluginsDir()
+	if err := mgr.LoadOne(plugin.PluginTypeBroker, name, plugin.PluginEntry{
+		SelfManaged: true,
+		Mode:        "self-managed",
+		Address:     "localhost:9090",
+		ConfigFile:  adminConfigPath,
+	}, pluginsDir); err != nil {
+		slog.Warn("Self-managed plugin installed but bridge not reachable (expected for fresh installs)",
+			"plugin", name, "error", err)
+	} else {
+		// If LoadOne succeeded, wire up the spoke and reconfigure.
+		if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
+			slog.Warn("Self-managed plugin reconfigure failed after LoadOne", "plugin", name, "error", err)
+		}
+		s.ensureBrokerSpoke(mgr, name)
+	}
+
+	// 4. Return setup instructions.
+	configFile := "~/.scion/scion-" + name + ".yaml"
+	startCommand := kp.BinaryName + " -config " + configFile
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "installed",
+		"setup": map[string]string{
+			"binary":        kp.BinaryName,
+			"config_file":   configFile,
+			"start_command": startCommand,
+			"notes":         "Start the bridge process, then click Reconnect to activate.",
+		},
+	})
+}
+
+// createSelfManagedAdminConfig creates a default Hub-side flat admin config
+// file for a self-managed plugin.
+func createSelfManagedAdminConfig(pluginName, configFilePath string) error {
+	resolved := configFilePath
+	if strings.HasPrefix(resolved, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home dir: %w", err)
+		}
+		resolved = filepath.Join(home, resolved[2:])
+	}
+
+	dir := filepath.Dir(resolved)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	content := "# Scion admin configuration for " + pluginName + "\n"
+	switch pluginName {
+	case "a2a-bridge":
+		content += "external_url: \"\"\n"
+		content += "auth_scheme: \"none\"\n"
+		content += "rate_limit_enabled: \"false\"\n"
+		content += "rate_limit_rps: \"10\"\n"
+		content += "rate_limit_burst: \"20\"\n"
+		content += "send_message_timeout: \"120s\"\n"
+		content += "sse_keepalive: \"30s\"\n"
+		content += "push_retry_max: \"3\"\n"
+		content += "provider_org: \"\"\n"
+		content += "provider_url: \"\"\n"
+		content += "projects_json: \"[]\"\n"
+	}
+
+	return os.WriteFile(resolved, []byte(content), 0600)
+}
+
 func (s *Server) handleListAvailableIntegrations(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
 	mgr := s.pluginManager
@@ -882,24 +1049,22 @@ func (s *Server) handleListAvailableIntegrations(w http.ResponseWriter, _ *http.
 	}
 
 	var available []AvailableIntegration
-	for _, name := range knownPlugins {
-		if mgr != nil && mgr.HasPlugin("broker", name) {
+	for _, kp := range knownPluginCatalog {
+		if mgr != nil && mgr.HasPlugin("broker", kp.Name) {
 			continue
 		}
 		// Also skip if registered in settings.yaml (installed but not yet loaded).
-		if _, ok := settingsBroker[name]; ok {
+		if _, ok := settingsBroker[kp.Name]; ok {
 			continue
 		}
 
-		binaryName := "scion-plugin-" + name
-
 		// Check 1: binary is on $PATH (covers Homebrew / package-manager installs).
-		_, onPathErr := exec.LookPath(binaryName)
+		_, onPathErr := exec.LookPath(kp.BinaryName)
 
 		// Check 2: source checkout exists (covers development installs).
 		inSourceCheckout := false
 		if repoPath != "" {
-			sourceDir := filepath.Join(repoPath, "extras", "scion-"+name)
+			sourceDir := filepath.Join(repoPath, kp.SourceDir)
 			if _, err := os.Stat(sourceDir); err == nil {
 				inSourceCheckout = true
 			}
@@ -910,8 +1075,8 @@ func (s *Server) handleListAvailableIntegrations(w http.ResponseWriter, _ *http.
 		}
 
 		available = append(available, AvailableIntegration{
-			Name:     name,
-			Platform: resolvePlatform(name),
+			Name:     kp.Name,
+			Platform: kp.Platform,
 		})
 	}
 
@@ -1010,6 +1175,8 @@ func resolvePlatform(name string) string {
 		return "slack"
 	case "chat-app":
 		return "gchat"
+	case "a2a-bridge":
+		return "a2a"
 	default:
 		return name
 	}

@@ -2104,3 +2104,216 @@ func TestGetIntegration_ReadsFromConfigFile(t *testing.T) {
 		t.Error("hub_url should be filtered from settings")
 	}
 }
+
+// --- KnownPlugin catalog tests ---
+
+func TestLookupKnownPlugin_Found(t *testing.T) {
+	for _, name := range []string{"telegram", "discord", "slack", "a2a-bridge"} {
+		kp := lookupKnownPlugin(name)
+		if kp == nil {
+			t.Errorf("lookupKnownPlugin(%q) returned nil, want non-nil", name)
+			continue
+		}
+		if kp.Name != name {
+			t.Errorf("lookupKnownPlugin(%q).Name = %q", name, kp.Name)
+		}
+	}
+}
+
+func TestLookupKnownPlugin_NotFound(t *testing.T) {
+	if kp := lookupKnownPlugin("nonexistent"); kp != nil {
+		t.Errorf("lookupKnownPlugin(nonexistent) = %+v, want nil", kp)
+	}
+}
+
+func TestKnownPluginCatalog_A2ABridgeIsSelfManaged(t *testing.T) {
+	kp := lookupKnownPlugin("a2a-bridge")
+	if kp == nil {
+		t.Fatal("a2a-bridge not in catalog")
+	}
+	if !kp.SelfManaged {
+		t.Error("a2a-bridge should be SelfManaged")
+	}
+	if kp.Platform != "a2a" {
+		t.Errorf("a2a-bridge platform: got %q, want %q", kp.Platform, "a2a")
+	}
+	if kp.BinaryName != "scion-a2a-bridge" {
+		t.Errorf("a2a-bridge BinaryName: got %q, want %q", kp.BinaryName, "scion-a2a-bridge")
+	}
+	if kp.SourceDir != "extras/scion-a2a-bridge" {
+		t.Errorf("a2a-bridge SourceDir: got %q, want %q", kp.SourceDir, "extras/scion-a2a-bridge")
+	}
+}
+
+func TestKnownPluginCatalog_ChatPluginsNotSelfManaged(t *testing.T) {
+	for _, name := range []string{"telegram", "discord", "slack"} {
+		kp := lookupKnownPlugin(name)
+		if kp == nil {
+			t.Fatalf("%s not in catalog", name)
+		}
+		if kp.SelfManaged {
+			t.Errorf("%s should NOT be SelfManaged", name)
+		}
+	}
+}
+
+func TestKnownPluginSet_IncludesA2ABridge(t *testing.T) {
+	if !knownPluginSet["a2a-bridge"] {
+		t.Error("knownPluginSet should include a2a-bridge")
+	}
+}
+
+func TestResolvePlatform_A2ABridge(t *testing.T) {
+	if got := resolvePlatform("a2a-bridge"); got != "a2a" {
+		t.Errorf("resolvePlatform(a2a-bridge) = %q, want %q", got, "a2a")
+	}
+}
+
+func TestUpdateIntegration_SelfManagedRejected(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["a2a-bridge"] = map[string]string{}
+	mgr.selfManaged["a2a-bridge"] = true
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/update", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for self-managed update, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "self-managed") {
+		t.Errorf("error should mention self-managed: %s", rr.Body.String())
+	}
+}
+
+func TestInstallIntegration_SelfManaged_CreatesAdminConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify admin config file was created.
+	adminConfigPath := filepath.Join(tmpHome, ".scion", "scion-a2a-bridge-admin.yaml")
+	data, err := os.ReadFile(adminConfigPath)
+	if err != nil {
+		t.Fatalf("admin config file not created: %v", err)
+	}
+	if !strings.Contains(string(data), "auth_scheme") {
+		t.Errorf("admin config missing expected defaults: %s", string(data))
+	}
+
+	// Verify settings.yaml was updated with self-managed entry.
+	settingsPath := filepath.Join(tmpHome, ".scion", "settings.yaml")
+	settingsData, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not created: %v", err)
+	}
+	settingsStr := string(settingsData)
+	if !strings.Contains(settingsStr, "a2a-bridge") {
+		t.Errorf("settings.yaml missing a2a-bridge entry: %s", settingsStr)
+	}
+	if !strings.Contains(settingsStr, "self_managed") {
+		t.Errorf("settings.yaml missing self_managed field: %s", settingsStr)
+	}
+
+	// Verify the response includes setup instructions.
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp["status"] != "installed" {
+		t.Errorf("expected status=installed, got %v", resp["status"])
+	}
+	setup, ok := resp["setup"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected setup object in response")
+	}
+	if setup["binary"] != "scion-a2a-bridge" {
+		t.Errorf("expected binary=scion-a2a-bridge, got %v", setup["binary"])
+	}
+}
+
+func TestInstallIntegration_SelfManaged_AlreadyInstalled(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["a2a-bridge"] = map[string]string{}
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for already-installed, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestListAvailableIntegrations_IncludesA2ABridge(t *testing.T) {
+	repoDir := t.TempDir()
+	// Create source directory for a2a-bridge.
+	if err := os.MkdirAll(filepath.Join(repoDir, "extras", "scion-a2a-bridge"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+
+	srv := &Server{}
+	srv.config.MaintenanceConfig.RepoPath = repoDir
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result []AvailableIntegration
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+
+	found := false
+	for _, a := range result {
+		if a.Name == "a2a-bridge" && a.Platform == "a2a" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a2a-bridge in available integrations, got %v", result)
+	}
+}
