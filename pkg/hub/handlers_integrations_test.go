@@ -2202,6 +2202,7 @@ func TestInstallIntegration_SelfManaged_CreatesAdminConfig(t *testing.T) {
 
 	srv := &Server{}
 	srv.pluginManager = mgr
+	srv.config.HubEndpoint = "http://hub.example.com:8080"
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
@@ -2219,8 +2220,26 @@ func TestInstallIntegration_SelfManaged_CreatesAdminConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admin config file not created: %v", err)
 	}
-	if !strings.Contains(string(data), "auth_scheme") {
-		t.Errorf("admin config missing expected defaults: %s", string(data))
+	adminStr := string(data)
+	if !strings.Contains(adminStr, "auth_scheme") {
+		t.Errorf("admin config missing expected defaults: %s", adminStr)
+	}
+	if !strings.Contains(adminStr, "uat_cache_ttl") {
+		t.Errorf("admin config missing uat_cache_ttl: %s", adminStr)
+	}
+
+	// Verify bridge bootstrap config template was created.
+	bridgeConfigPath := filepath.Join(tmpHome, ".scion", "scion-a2a-bridge.yaml")
+	bridgeData, err := os.ReadFile(bridgeConfigPath)
+	if err != nil {
+		t.Fatalf("bridge config file not created: %v", err)
+	}
+	bridgeStr := string(bridgeData)
+	if !strings.Contains(bridgeStr, "http://hub.example.com:8080") {
+		t.Errorf("bridge config missing hub endpoint: %s", bridgeStr)
+	}
+	if !strings.Contains(bridgeStr, "localhost:9090") {
+		t.Errorf("bridge config missing plugin listen_address: %s", bridgeStr)
 	}
 
 	// Verify settings.yaml was updated with self-managed entry.
@@ -2251,6 +2270,129 @@ func TestInstallIntegration_SelfManaged_CreatesAdminConfig(t *testing.T) {
 	}
 	if setup["binary"] != "scion-a2a-bridge" {
 		t.Errorf("expected binary=scion-a2a-bridge, got %v", setup["binary"])
+	}
+}
+
+func TestCreateBridgeConfigTemplate(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := "~/.scion/scion-a2a-bridge.yaml"
+	hubEndpoint := "https://my-hub.example.com:9443"
+
+	if err := createBridgeConfigTemplate("a2a-bridge", configPath, hubEndpoint); err != nil {
+		t.Fatalf("createBridgeConfigTemplate failed: %v", err)
+	}
+
+	resolvedPath := filepath.Join(tmpHome, ".scion", "scion-a2a-bridge.yaml")
+	data, err := os.ReadFile(resolvedPath)
+	if err != nil {
+		t.Fatalf("bridge config file not created: %v", err)
+	}
+
+	content := string(data)
+
+	// Verify hub endpoint is pre-filled.
+	if !strings.Contains(content, hubEndpoint) {
+		t.Errorf("bridge config missing hub endpoint %q: %s", hubEndpoint, content)
+	}
+
+	// Verify plugin listen address is set.
+	if !strings.Contains(content, "localhost:9090") {
+		t.Errorf("bridge config missing plugin listen_address: %s", content)
+	}
+
+	// Verify it contains commented-out defaults for operator reference.
+	if !strings.Contains(content, "# bridge:") {
+		t.Errorf("bridge config missing commented bridge section: %s", content)
+	}
+	if !strings.Contains(content, "operator-managed") {
+		t.Errorf("bridge config missing operator-managed note: %s", content)
+	}
+}
+
+func TestCreateBridgeConfigTemplate_PreservesExisting(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	scionDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-create the bridge config with custom content.
+	existingPath := filepath.Join(scionDir, "scion-a2a-bridge.yaml")
+	originalContent := "hub:\n  endpoint: \"https://custom-hub:1234\"\n"
+	if err := os.WriteFile(existingPath, []byte(originalContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Install should NOT overwrite existing bridge config — verified via the
+	// stat-before-create guard in handleInstallSelfManaged (the function itself
+	// always writes). Here we verify the guard at the handler level.
+	mgr := newMockIntegrationManager()
+	srv := &Server{}
+	srv.pluginManager = mgr
+	srv.config.HubEndpoint = "http://other-hub:8080"
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify original content was preserved.
+	data, err := os.ReadFile(existingPath)
+	if err != nil {
+		t.Fatalf("failed to read bridge config: %v", err)
+	}
+	if string(data) != originalContent {
+		t.Errorf("bridge config was overwritten: got %q, want %q", string(data), originalContent)
+	}
+}
+
+func TestInstallIntegration_SelfManaged_RegisteredButNotLoaded(t *testing.T) {
+	// Test the installedPluginSettingsEntry(name) check path: plugin is
+	// registered in settings.yaml but NOT loaded into the manager.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed settings.yaml with a2a-bridge entry (simulates a previous install
+	// where the bridge process was never started, so LoadOne never succeeded).
+	if err := config.AddSelfManagedPluginToSettings(config.SelfManagedPluginEntry{
+		Name:       "a2a-bridge",
+		Address:    "localhost:9090",
+		ConfigFile: "~/.scion/scion-a2a-bridge-admin.yaml",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager() // a2a-bridge NOT in mgr.plugins
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for registered-but-not-loaded, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "already installed") {
+		t.Errorf("error should mention already installed: %s", rr.Body.String())
 	}
 }
 

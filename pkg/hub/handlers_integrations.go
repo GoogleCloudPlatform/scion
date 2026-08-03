@@ -835,9 +835,11 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 	}
 
 	configFilePath := "~/.scion/scion-" + name + ".yaml"
-	resolvedConfigPath := configFilePath
-	if home, err := os.UserHomeDir(); err == nil {
-		resolvedConfigPath = filepath.Join(home, configFilePath[2:])
+	resolvedConfigPath, err := resolveTilde(configFilePath)
+	if err != nil {
+		slog.Error("Failed to resolve config file path", "plugin", name, "error", err)
+		InternalError(w)
+		return
 	}
 	if _, err := os.Stat(resolvedConfigPath); err != nil {
 		if !os.IsNotExist(err) {
@@ -922,9 +924,11 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 
 	// 1. Create the Hub-side flat admin config file (if absent).
 	adminConfigPath := "~/.scion/scion-" + name + "-admin.yaml"
-	resolvedAdminPath := adminConfigPath
-	if home, err := os.UserHomeDir(); err == nil {
-		resolvedAdminPath = filepath.Join(home, adminConfigPath[2:])
+	resolvedAdminPath, err := resolveTilde(adminConfigPath)
+	if err != nil {
+		slog.Error("Failed to resolve admin config path", "plugin", name, "error", err)
+		InternalError(w)
+		return
 	}
 	if _, err := os.Stat(resolvedAdminPath); err != nil {
 		if !os.IsNotExist(err) {
@@ -941,9 +945,32 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 		slog.Info("Admin config file already exists, preserving", "plugin", name, "path", resolvedAdminPath)
 	}
 
-	// 2. Register in settings.yaml with self-managed fields.
+	// 2. Create bridge bootstrap config template (if absent).
+	bridgeConfigPath := "~/.scion/scion-" + name + ".yaml"
+	resolvedBridgePath, err := resolveTilde(bridgeConfigPath)
+	if err != nil {
+		slog.Error("Failed to resolve bridge config path", "plugin", name, "error", err)
+		InternalError(w)
+		return
+	}
+	if _, err := os.Stat(resolvedBridgePath); err != nil {
+		if !os.IsNotExist(err) {
+			slog.Error("Failed to check bridge config file", "plugin", name, "path", resolvedBridgePath, "error", err)
+			InternalError(w)
+			return
+		}
+		if err := createBridgeConfigTemplate(name, bridgeConfigPath, s.config.HubEndpoint); err != nil {
+			slog.Error("Failed to create bridge config template", "plugin", name, "error", err)
+			InternalError(w)
+			return
+		}
+	} else {
+		slog.Info("Bridge config file already exists, preserving", "plugin", name, "path", resolvedBridgePath)
+	}
+
+	// 3. Register in settings.yaml with self-managed fields.
 	settingsWriteMu.Lock()
-	err := config.AddSelfManagedPluginToSettings(config.SelfManagedPluginEntry{
+	err = config.AddSelfManagedPluginToSettings(config.SelfManagedPluginEntry{
 		Name:       name,
 		Address:    "localhost:9090",
 		ConfigFile: adminConfigPath,
@@ -958,7 +985,7 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 3. Attempt LoadOne — non-fatal if the bridge is not running.
+	// 4. Attempt LoadOne — non-fatal if the bridge is not running.
 	pluginsDir, _ := plugin.DefaultPluginsDir()
 	if err := mgr.LoadOne(plugin.PluginTypeBroker, name, plugin.PluginEntry{
 		SelfManaged: true,
@@ -976,7 +1003,7 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 		s.ensureBrokerSpoke(mgr, name)
 	}
 
-	// 4. Return setup instructions.
+	// 5. Return setup instructions.
 	configFile := "~/.scion/scion-" + name + ".yaml"
 	startCommand := kp.BinaryName + " -config " + configFile
 
@@ -994,13 +1021,9 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 // createSelfManagedAdminConfig creates a default Hub-side flat admin config
 // file for a self-managed plugin.
 func createSelfManagedAdminConfig(pluginName, configFilePath string) error {
-	resolved := configFilePath
-	if strings.HasPrefix(resolved, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("resolve home dir: %w", err)
-		}
-		resolved = filepath.Join(home, resolved[2:])
+	resolved, err := resolveTilde(configFilePath)
+	if err != nil {
+		return err
 	}
 
 	dir := filepath.Dir(resolved)
@@ -1013,6 +1036,7 @@ func createSelfManagedAdminConfig(pluginName, configFilePath string) error {
 	case "a2a-bridge":
 		content += "external_url: \"\"\n"
 		content += "auth_scheme: \"none\"\n"
+		content += "uat_cache_ttl: \"60s\"\n"
 		content += "rate_limit_enabled: \"false\"\n"
 		content += "rate_limit_rps: \"10\"\n"
 		content += "rate_limit_burst: \"20\"\n"
@@ -1023,6 +1047,38 @@ func createSelfManagedAdminConfig(pluginName, configFilePath string) error {
 		content += "provider_url: \"\"\n"
 		content += "projects_json: \"[]\"\n"
 	}
+
+	return os.WriteFile(resolved, []byte(content), 0600)
+}
+
+// createBridgeConfigTemplate creates a bridge bootstrap config template file
+// pre-filled with the Hub endpoint and default plugin listen address. The
+// template gives operators a working starting point for the bridge's own
+// nested YAML configuration.
+func createBridgeConfigTemplate(name, configFilePath, hubEndpoint string) error {
+	resolved, err := resolveTilde(configFilePath)
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(resolved)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	content := "# Scion A2A bridge bootstrap configuration\n"
+	content += "# This file is operator-managed. Edit it to configure listen addresses,\n"
+	content += "# TLS, state database, and signing key settings.\n"
+	content += "hub:\n"
+	content += "  endpoint: \"" + hubEndpoint + "\"\n"
+	content += "plugin:\n"
+	content += "  listen_address: \"localhost:9090\"\n"
+	content += "# bridge:\n"
+	content += "#   listen_address: \":8081\"\n"
+	content += "# state:\n"
+	content += "#   database: \"~/.scion/scion-a2a-bridge.db\"\n"
+	content += "# logging:\n"
+	content += "#   level: \"info\"\n"
 
 	return os.WriteFile(resolved, []byte(content), 0600)
 }
@@ -1087,6 +1143,19 @@ func (s *Server) handleListAvailableIntegrations(w http.ResponseWriter, _ *http.
 }
 
 // --- Helpers ---
+
+// resolveTilde expands a leading "~/" in path to the user's home directory.
+// If the path does not start with "~/", it is returned unchanged.
+func resolveTilde(path string) (string, error) {
+	if !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, path[2:]), nil
+}
 
 // installedPluginSettingsEntry returns the settings.yaml broker entry for the
 // named plugin, or nil if the plugin is not registered there. Used as the
