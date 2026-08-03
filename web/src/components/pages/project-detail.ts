@@ -23,7 +23,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Project, Agent, AgentPhase, Capabilities } from '../../shared/types.js';
+import type { PageData, Project, Agent, AgentPhase, Capabilities, ProjectSessionMetricsSummary } from '../../shared/types.js';
 import { can, canAny, getAgentDisplayStatus, isAgentRunning, isTerminalAvailable, isSharedWorkspace } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -160,6 +160,12 @@ export class ScionPageProjectDetail extends LitElement {
     activeAgents24h: number;
     periodLabel: string;
   } | null = null;
+
+  /**
+   * DB-backed session metrics summary for the project.
+   */
+  @state()
+  private sessionMetricsSummary: ProjectSessionMetricsSummary | null = null;
 
   /**
    * Whether the messages section is expanded (lazy-load trigger)
@@ -909,6 +915,7 @@ export class ScionPageProjectDetail extends LitElement {
 
       // Fetch metrics summary (non-blocking, gracefully degrades)
       void this.loadMetricsSummary();
+      void this.loadSessionMetricsSummary();
 
       // Auto-discover GitHub App installation if project has a GitHub remote but no installation
       if (this.project && this.project.gitRemote && /github\.com[/:]/.test(this.project.gitRemote) && this.project.githubInstallationId == null) {
@@ -938,6 +945,19 @@ export class ScionPageProjectDetail extends LitElement {
       this.metricsSummary = data;
     } catch {
       this.metricsSummary = null;
+    }
+  }
+
+  private async loadSessionMetricsSummary(): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/metrics/summary`);
+      if (res.ok) {
+        this.sessionMetricsSummary = (await res.json()) as ProjectSessionMetricsSummary;
+      } else {
+        this.sessionMetricsSummary = null;
+      }
+    } catch {
+      this.sessionMetricsSummary = null;
     }
   }
 
@@ -1593,6 +1613,23 @@ export class ScionPageProjectDetail extends LitElement {
                 View Details
               </sl-button>
             </a>
+          </div>
+        </div>
+      ` : nothing}
+
+      ${this.sessionMetricsSummary ? html`
+        <div class="stats-row" style="margin-top: 0.5rem;">
+          <div class="stat">
+            <span class="stat-label">Total Sessions</span>
+            <span class="stat-value">${this.sessionMetricsSummary.totalSessions}</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Total Tokens</span>
+            <span class="stat-value">${this.formatTokenCount(this.sessionMetricsSummary.totalTokensInput + this.sessionMetricsSummary.totalTokensOutput)}</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Active Agents</span>
+            <span class="stat-value">${this.sessionMetricsSummary.activeAgents}</span>
           </div>
         </div>
       ` : nothing}

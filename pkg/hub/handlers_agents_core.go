@@ -1538,6 +1538,12 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle agent session metrics summary (GET /api/v1/agents/{id}/metrics/summary)
+	if action == "metrics/summary" {
+		s.handleAgentMetricsSummary(w, r, id)
+		return
+	}
+
 	// Handle actions
 	if action != "" {
 		s.handleAgentAction(w, r, id, action)

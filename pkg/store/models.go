@@ -2193,6 +2193,19 @@ type AgentSessionMetrics struct {
 	CreatedAt       time.Time      `json:"createdAt"`
 }
 
+// AgentSessionMetricsAggregates holds SQL-level aggregation results for
+// session metrics (COUNT, SUM). Fields that require per-row inspection (tool
+// calls, model distribution) are not included — those are derived from list
+// queries.
+type AgentSessionMetricsAggregates struct {
+	Count           int   `json:"count"`
+	SumTokensInput  int64 `json:"sumTokensInput"`
+	SumTokensOutput int64 `json:"sumTokensOutput"`
+	SumTokensCached int64 `json:"sumTokensCached"`
+	SumTokensReason int64 `json:"sumTokensReasoning"`
+	SumTurnCount    int64 `json:"sumTurnCount"`
+}
+
 // MarshalJSON implements custom marshaling to support legacy groveId field.
 func (m AgentSessionMetrics) MarshalJSON() ([]byte, error) {
 	type Alias AgentSessionMetrics

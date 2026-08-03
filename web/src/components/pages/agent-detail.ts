@@ -34,6 +34,7 @@ import type {
   Project,
   Notification,
   Subscription,
+  AgentMetricsSummary,
 } from '../../shared/types.js';
 import {
   can,
@@ -141,6 +142,9 @@ export class ScionPageAgentDetail extends LitElement {
 
   @state()
   private quickMessageOpen = false;
+
+  @state()
+  private metricsSummary: AgentMetricsSummary | null = null;
 
   static override styles = css`
     :host {
@@ -708,6 +712,9 @@ export class ScionPageAgentDetail extends LitElement {
 
       await Promise.all(parallel);
 
+      // Load metrics summary (non-blocking).
+      this.loadMetricsSummary();
+
       stateManager.seedAgents([this.agent]);
       if (this.project) {
         stateManager.seedProjects([this.project]);
@@ -720,6 +727,17 @@ export class ScionPageAgentDetail extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
     } finally {
       this.loading = false;
+    }
+  }
+
+  private async loadMetricsSummary(): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/agents/${this.agentId}/metrics/summary`);
+      if (res.ok) {
+        this.metricsSummary = (await res.json()) as AgentMetricsSummary;
+      }
+    } catch {
+      // Metrics loading is optional — do not block the page.
     }
   }
 
@@ -958,11 +976,13 @@ export class ScionPageAgentDetail extends LitElement {
 
       <sl-tab-group @sl-tab-show=${this.handleTabShow}>
         <sl-tab slot="nav" panel="status">Status</sl-tab>
+        <sl-tab slot="nav" panel="metrics">Metrics</sl-tab>
         <sl-tab slot="nav" panel="logs">Logs</sl-tab>
         <sl-tab slot="nav" panel="messages">Messages</sl-tab>
         <sl-tab slot="nav" panel="configuration">Configuration</sl-tab>
 
         <sl-tab-panel name="status">${this.renderStatusTab()}</sl-tab-panel>
+        <sl-tab-panel name="metrics">${this.renderMetricsTab()}</sl-tab-panel>
         <sl-tab-panel name="logs">
           <scion-agent-log-viewer
             agentId=${this.agentId}
@@ -1405,6 +1425,119 @@ export class ScionPageAgentDetail extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Metrics Tab
+  // ---------------------------------------------------------------------------
+
+  private renderMetricsTab() {
+    const m = this.metricsSummary;
+    if (!m) {
+      return html`
+        <div class="card">
+          <h3 class="card-title">Session Metrics</h3>
+          <p style="color: var(--scion-text-muted, #888)">No session metrics available yet.</p>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="card">
+        <h3 class="card-title">Token Usage</h3>
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="info-label">TOTAL SESSIONS</span>
+            <span class="info-value">${m.totalSessions.toLocaleString()}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">INPUT TOKENS</span>
+            <span class="info-value">${m.totalTokensInput.toLocaleString()}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">OUTPUT TOKENS</span>
+            <span class="info-value">${m.totalTokensOutput.toLocaleString()}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">CACHED TOKENS</span>
+            <span class="info-value">${m.totalTokensCached.toLocaleString()}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">REASONING TOKENS</span>
+            <span class="info-value">${m.totalTokensReasoning.toLocaleString()}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">AVG TOKENS / SESSION</span>
+            <span class="info-value">${m.avgTokensPerSession.toLocaleString()}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">Session Statistics</h3>
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="info-label">TOTAL TOOL CALLS</span>
+            <span class="info-value">${m.totalToolCalls.toLocaleString()}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">AVG DURATION</span>
+            <span class="info-value">${this.formatDurationMs(m.avgSessionDurationMs)}</span>
+          </div>
+        </div>
+      </div>
+
+      ${m.mostUsedTools.length > 0
+        ? html`
+            <div class="card">
+              <h3 class="card-title">Most Used Tools</h3>
+              <div class="info-grid">
+                ${m.mostUsedTools.map(
+                  (t) => html`
+                    <div class="info-item">
+                      <span class="info-label">${t.name.toUpperCase()}</span>
+                      <span class="info-value">
+                        ${t.calls} calls
+                        ${t.error > 0
+                          ? html`<span style="color: var(--scion-danger-500, #ef4444)"> (${t.error} errors)</span>`
+                          : nothing}
+                      </span>
+                    </div>
+                  `
+                )}
+              </div>
+            </div>
+          `
+        : nothing}
+      ${m.mostUsedModels.length > 0
+        ? html`
+            <div class="card">
+              <h3 class="card-title">Models</h3>
+              <div class="info-grid">
+                ${m.mostUsedModels.map(
+                  (model) => html`
+                    <div class="info-item">
+                      <span class="info-label">${model.model.toUpperCase()}</span>
+                      <span class="info-value">${model.sessions} sessions</span>
+                    </div>
+                  `
+                )}
+              </div>
+            </div>
+          `
+        : nothing}
+    `;
+  }
+
+  private formatDurationMs(ms: number): string {
+    if (ms <= 0) return '—';
+    const totalSeconds = Math.round(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
   }
 
   // ---------------------------------------------------------------------------

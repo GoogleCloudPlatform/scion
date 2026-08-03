@@ -2955,6 +2955,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/secrets", s.handleSecrets)
 	s.mux.HandleFunc("/api/v1/secrets/", s.handleSecretByKey)
 
+	// Session metrics (DB-backed, distinct from Cloud Monitoring metrics dashboard)
+	s.mux.HandleFunc("/api/v1/metrics/session/", s.handleSessionMetrics)
+
 	// Groups and Policies (Hub Permissions System)
 	s.mux.HandleFunc("/api/v1/groups", s.handleGroups)
 	s.mux.HandleFunc("/api/v1/groups/", s.handleGroupRoutes)
