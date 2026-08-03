@@ -179,12 +179,12 @@ func (s *AgentSessionMetricsStore) ListAgentSessionMetricsByProject(ctx context.
 // AggregateByAgent returns SQL-level aggregate totals for an agent's sessions.
 func (s *AgentSessionMetricsStore) AggregateByAgent(ctx context.Context, agentID string) (*store.AgentSessionMetricsAggregates, error) {
 	var agg []struct {
-		Count           int   `json:"count"`
-		SumTokensInput  int64 `json:"sum_tokens_input"`
-		SumTokensOutput int64 `json:"sum_tokens_output"`
-		SumTokensCached int64 `json:"sum_tokens_cached"`
-		SumTokensReason int64 `json:"sum_tokens_reasoning"`
-		SumTurnCount    int64 `json:"sum_turn_count"`
+		Count           int    `json:"count"`
+		SumTokensInput  *int64 `json:"sum_tokens_input"`
+		SumTokensOutput *int64 `json:"sum_tokens_output"`
+		SumTokensCached *int64 `json:"sum_tokens_cached"`
+		SumTokensReason *int64 `json:"sum_tokens_reasoning"`
+		SumTurnCount    *int64 `json:"sum_turn_count"`
 	}
 
 	err := s.client.AgentSessionMetrics.
@@ -207,25 +207,31 @@ func (s *AgentSessionMetricsStore) AggregateByAgent(ctx context.Context, agentID
 		return &store.AgentSessionMetricsAggregates{}, nil
 	}
 
+	deref := func(p *int64) int64 {
+		if p == nil {
+			return 0
+		}
+		return *p
+	}
 	return &store.AgentSessionMetricsAggregates{
 		Count:           agg[0].Count,
-		SumTokensInput:  agg[0].SumTokensInput,
-		SumTokensOutput: agg[0].SumTokensOutput,
-		SumTokensCached: agg[0].SumTokensCached,
-		SumTokensReason: agg[0].SumTokensReason,
-		SumTurnCount:    agg[0].SumTurnCount,
+		SumTokensInput:  deref(agg[0].SumTokensInput),
+		SumTokensOutput: deref(agg[0].SumTokensOutput),
+		SumTokensCached: deref(agg[0].SumTokensCached),
+		SumTokensReason: deref(agg[0].SumTokensReason),
+		SumTurnCount:    deref(agg[0].SumTurnCount),
 	}, nil
 }
 
 // AggregateByProject returns SQL-level aggregate totals for a project's sessions.
 func (s *AgentSessionMetricsStore) AggregateByProject(ctx context.Context, projectID string) (*store.AgentSessionMetricsAggregates, error) {
 	var agg []struct {
-		Count           int   `json:"count"`
-		SumTokensInput  int64 `json:"sum_tokens_input"`
-		SumTokensOutput int64 `json:"sum_tokens_output"`
-		SumTokensCached int64 `json:"sum_tokens_cached"`
-		SumTokensReason int64 `json:"sum_tokens_reasoning"`
-		SumTurnCount    int64 `json:"sum_turn_count"`
+		Count           int    `json:"count"`
+		SumTokensInput  *int64 `json:"sum_tokens_input"`
+		SumTokensOutput *int64 `json:"sum_tokens_output"`
+		SumTokensCached *int64 `json:"sum_tokens_cached"`
+		SumTokensReason *int64 `json:"sum_tokens_reasoning"`
+		SumTurnCount    *int64 `json:"sum_turn_count"`
 	}
 
 	err := s.client.AgentSessionMetrics.
@@ -248,13 +254,19 @@ func (s *AgentSessionMetricsStore) AggregateByProject(ctx context.Context, proje
 		return &store.AgentSessionMetricsAggregates{}, nil
 	}
 
+	deref := func(p *int64) int64 {
+		if p == nil {
+			return 0
+		}
+		return *p
+	}
 	return &store.AgentSessionMetricsAggregates{
 		Count:           agg[0].Count,
-		SumTokensInput:  agg[0].SumTokensInput,
-		SumTokensOutput: agg[0].SumTokensOutput,
-		SumTokensCached: agg[0].SumTokensCached,
-		SumTokensReason: agg[0].SumTokensReason,
-		SumTurnCount:    agg[0].SumTurnCount,
+		SumTokensInput:  deref(agg[0].SumTokensInput),
+		SumTokensOutput: deref(agg[0].SumTokensOutput),
+		SumTokensCached: deref(agg[0].SumTokensCached),
+		SumTokensReason: deref(agg[0].SumTokensReason),
+		SumTurnCount:    deref(agg[0].SumTurnCount),
 	}, nil
 }
 

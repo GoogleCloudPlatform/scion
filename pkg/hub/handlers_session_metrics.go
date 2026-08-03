@@ -76,6 +76,9 @@ type projectMetricsSummaryResponse struct {
 func aggregateToolCalls(sessions []*store.AgentSessionMetrics) (tools []toolUsageSummary, totalCalls int) {
 	toolMap := make(map[string]*toolUsageSummary)
 	for _, s := range sessions {
+		if s == nil {
+			continue
+		}
 		for name, raw := range s.ToolCalls {
 			ts, ok := toolMap[name]
 			if !ok {
@@ -111,6 +114,9 @@ func aggregateToolCalls(sessions []*store.AgentSessionMetrics) (tools []toolUsag
 func aggregateModels(sessions []*store.AgentSessionMetrics) []modelUsageSummary {
 	counts := make(map[string]int)
 	for _, s := range sessions {
+		if s == nil {
+			continue
+		}
 		if s.Model != "" {
 			counts[s.Model]++
 		}
@@ -137,6 +143,9 @@ func avgSessionDuration(sessions []*store.AgentSessionMetrics) int64 {
 	var total time.Duration
 	var count int
 	for _, s := range sessions {
+		if s == nil {
+			continue
+		}
 		if s.EndedAt != nil {
 			total += s.EndedAt.Sub(s.StartedAt)
 			count++
@@ -171,6 +180,10 @@ func intFromAny(v interface{}) int {
 // agent) is allowed to read the given agent resource. Returns true if
 // access is allowed, false if a response was already written.
 func (s *Server) authorizeSessionMetricsAccess(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+	if agent == nil {
+		NotFound(w, "Agent")
+		return false
+	}
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -292,6 +305,10 @@ func (s *Server) handleSessionMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics, err := s.store.GetAgentSessionMetrics(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+	if metrics == nil {
+		NotFound(w, "Session metrics")
 		return
 	}
 

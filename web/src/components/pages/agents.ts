@@ -447,6 +447,7 @@ export class ScionPageAgents extends LitElement {
     const maxAgents = 20;
     const concurrency = 5;
     const subset = this.agents.slice(0, maxAgents);
+    const accumulatedMetrics = { ...this.agentMetrics };
 
     // Process in batches of `concurrency`.
     for (let i = 0; i < subset.length; i += concurrency) {
@@ -457,13 +458,14 @@ export class ScionPageAgents extends LitElement {
             const res = await apiFetch(`/api/v1/agents/${agent.id}/metrics/summary`);
             if (res.ok) {
               const data = (await res.json()) as AgentMetricsSummary;
-              this.agentMetrics = { ...this.agentMetrics, [agent.id]: data };
+              accumulatedMetrics[agent.id] = data;
             }
           } catch {
             // Metrics loading is optional per agent.
           }
         })
       );
+      this.agentMetrics = { ...accumulatedMetrics };
     }
   }
 

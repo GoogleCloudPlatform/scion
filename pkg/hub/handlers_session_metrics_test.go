@@ -146,7 +146,7 @@ func TestHandleAgentMetricsSummary(t *testing.T) {
 
 		assert.Equal(t, agent1.ID, resp.AgentID)
 		assert.Equal(t, 2, resp.TotalSessions)
-		assert.Equal(t, int64(3000), resp.TotalTokensInput)   // 1000 + 2000
+		assert.Equal(t, int64(3000), resp.TotalTokensInput)    // 1000 + 2000
 		assert.Equal(t, int64(600), resp.TotalTokensOutput)    // 200 + 400
 		assert.Equal(t, int64(300), resp.TotalTokensCached)    // 100 + 200
 		assert.Equal(t, int64(150), resp.TotalTokensReasoning) // 50 + 100
