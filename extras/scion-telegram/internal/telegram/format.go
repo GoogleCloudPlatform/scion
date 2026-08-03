@@ -285,7 +285,12 @@ func FormatSystemCard(msg *messages.StructuredMessage) string {
 	category := "System"
 	if msg.Metadata != nil {
 		if cat, ok := msg.Metadata["system_category"]; ok && cat != "" {
-			category = strings.ToUpper(cat[:1]) + cat[1:]
+			r, size := utf8.DecodeRuneInString(cat)
+			if r != utf8.RuneError {
+				category = strings.ToUpper(string(r)) + cat[size:]
+			} else {
+				category = cat
+			}
 		}
 	}
 

@@ -2049,7 +2049,8 @@ type hubMessageAdapter struct {
 }
 
 func (a *hubMessageAdapter) SendSelfMessage(ctx context.Context, msg string, metadata map[string]string) error {
-	return a.client.SendSelfMessage(ctx, messages.NewSystemMessage("system", "", msg, metadata["system_category"]))
+	recipient := "agent:" + a.client.AgentID()
+	return a.client.SendSelfMessage(ctx, messages.NewSystemMessage("system", recipient, msg, metadata["system_category"]))
 }
 
 // cleanGcloudConfigForMetadata removes gcloud configuration state files from
