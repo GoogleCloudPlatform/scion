@@ -184,6 +184,20 @@ func (m *StructuredMessage) Validate() error {
 	return nil
 }
 
+// NewGroupSet creates a group-set message delivered to each member of a group.
+func NewGroupSet(sender, recipient, msg, recipients string) *StructuredMessage {
+	m := &StructuredMessage{
+		Version:    Version,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Sender:     sender,
+		Recipient:  recipient,
+		Msg:        msg,
+		Type:       TypeGroupSet,
+		Recipients: recipients,
+	}
+	return m
+}
+
 // NewInstruction creates a new instruction message with standard defaults.
 func NewInstruction(sender, recipient, msg string) *StructuredMessage {
 	return &StructuredMessage{

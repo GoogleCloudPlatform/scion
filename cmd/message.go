@@ -653,6 +653,13 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 	}
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
+	// Build the recipients string once before the fan-out loop.
+	recipientStrs := make([]string, len(recipients))
+	for i, r := range recipients {
+		recipientStrs[i] = r.String()
+	}
+	recipientsStr := messages.FormatGroupRecipients(sender, recipientStrs)
+
 	if !isJSONOutput() {
 		fmt.Printf("Sending message to %d recipients...\n", len(recipients))
 	}
@@ -678,6 +685,8 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
 				msg := buildStructuredMessage(sender, "agent:"+slug, message)
+				msg.Type = messages.TypeGroupSet
+				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}
 				if _, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
@@ -707,11 +716,12 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 				outMsg := &hubclient.OutboundMessageRequest{
 					Recipient:   userRecip,
 					Msg:         message,
-					Type:        "instruction",
+					Type:        messages.TypeGroupSet,
 					Urgent:      interrupt,
 					Attachments: msgAttach,
 					Channel:     msgChannel,
 					ThreadID:    msgThreadID,
+					Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
 				}
 				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
