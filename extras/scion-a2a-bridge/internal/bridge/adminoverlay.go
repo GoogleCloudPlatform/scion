@@ -408,7 +408,15 @@ func PersistOverlay(stateDir string, overlay *AdminOverlay) error {
 	}
 
 	path := filepath.Join(stateDir, overlayFileName)
-	return os.WriteFile(path, data, 0600)
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+		return fmt.Errorf("write temp overlay: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename overlay: %w", err)
+	}
+	return nil
 }
 
 // LoadPersistedOverlay reads a previously saved overlay. Returns nil, nil if no file exists.

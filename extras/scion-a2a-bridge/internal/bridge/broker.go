@@ -99,6 +99,12 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 		return err // Hub surfaces this error to the admin UI
 	}
 
+	effective := ApplyOverlay(*b.baseConfig, overlay)
+	if err := ValidateConfig(&effective); err != nil {
+		b.log.Error("rejected admin config push due to validation failure", "error", err)
+		return err
+	}
+
 	b.applyOverlay(overlay)
 
 	if b.stateDir != "" {
