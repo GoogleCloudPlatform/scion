@@ -23,12 +23,35 @@ By default a skill reference resolves against the local Hub. Federation lets the
 | Source | URI form | Notes |
 | :--- | :--- | :--- |
 | Another Scion Hub / external registry | `skill://<registry-name>/…` | Configured via `scion skills registries`. |
-| GitHub repository | `gh://<owner>/<repo>/<path>@<ref>` | Also accepts `https://github.com/…` URLs. |
+| GitHub repository | `gh://<owner>/<repo>/<path>[@<ref>][?token=<SECRET>]` | Sourced directly from GitHub. Supports private repos and browser URLs. |
 | GCP Vertex AI | `gcp-skill://<alias>/<skillId>@<version>` | Resolves the alias to a registry endpoint. |
 
 ### GitHub source (`gh://`)
 
-Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally; provide a `GITHUB_TOKEN` (or `GH_TOKEN`) in the agent environment for authenticated access and higher rate limits. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+
+#### Private repository resolution
+
+For private GitHub repositories, Scion resolves skills securely using your project's configured git credentials or custom secrets:
+
+- **Default credentials**: A bare `gh://` URI automatically uses the project's default `GITHUB_TOKEN` (such as a GitHub App installation token or a Personal Access Token configured at the project level).
+- **Named credentials (per-URI selection)**: You can select a specific project secret using the `?token=SECRET_NAME` query parameter on the URI:
+  ```text
+  gh://acme-corp/partner-skills/my-skill@v1.2.3?token=PARTNER_GITHUB_TOKEN
+  ```
+  The secret value is fetched during provisioning from the `ProvisionCredentials` channel. It is processed in memory and **never** forwarded to the agent's container environment or harness scripts.
+
+#### Input validation & auto-normalization
+
+To prevent typos, 404s, and duplicate entries, Scion automatically validates and transforms browser URLs to canonical `gh://` shorthand when added via the CLI, Web UI, or Hub API:
+
+- **Browser tree URLs**: `https://github.com/org/repo/tree/main/skills/my-skill` is normalized to `gh://org/repo/my-skill@main`.
+- **Browser blob URLs**: `https://github.com/org/repo/blob/main/skills/my-skill/SKILL.md` is normalized to `gh://org/repo/my-skill@main`.
+- **Secret validation**: The secret name specified via `?token=SECRET_NAME` must match standard environment variable naming rules (`[A-Z][A-Z0-9_]*`).
+
+:::note
+The old `scion://` scheme is no longer supported and is rejected during validation with a clear error pointing to `skill://`.
+:::
 
 ### GCP Vertex AI source (`gcp-skill://`)
 
