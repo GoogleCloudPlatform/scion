@@ -29,7 +29,6 @@ import (
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"google.golang.org/api/iterator"
-	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -38,8 +37,6 @@ const (
 	cacheTTL      = 5 * time.Minute
 	maxPeriodDays = 90
 	defaultPeriod = 7
-	alignmentDay  = 86400 // seconds in a day
-	alignmentHour = 3600
 )
 
 // MetricsDashboardService queries Google Cloud Monitoring for Scion telemetry metrics.
@@ -353,6 +350,13 @@ func (s *MetricsDashboardService) QueryTokens(ctx context.Context, periodDays in
 }
 
 // querySum queries a metric and returns the total sum across all time series and points.
+//
+// Raw data is fetched without Cloud Monitoring aggregation to avoid aligner
+// compatibility issues with CUMULATIVE metrics (ALIGN_SUM is invalid for
+// CUMULATIVE; ALIGN_DELTA yields 0 for sparse single-point data). Each raw
+// data point from a short-lived sciontool process represents an independent
+// increment (counter starts at 0 per process), so summing all point values
+// gives the correct total.
 func (s *MetricsDashboardService) querySum(ctx context.Context, metricName string, start, end time.Time, extraFilter []string) (int64, error) {
 	filter := fmt.Sprintf(`metric.type = "%s%s"`, metricPrefix, metricName)
 	for _, f := range extraFilter {
@@ -365,11 +369,6 @@ func (s *MetricsDashboardService) querySum(ctx context.Context, metricName strin
 		Interval: &monitoringpb.TimeInterval{
 			StartTime: timestamppb.New(start),
 			EndTime:   timestamppb.New(end),
-		},
-		Aggregation: &monitoringpb.Aggregation{
-			AlignmentPeriod:    durationpb.New(end.Sub(start).Truncate(time.Second)),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
-			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
 		},
 	}
 
@@ -391,6 +390,7 @@ func (s *MetricsDashboardService) querySum(ctx context.Context, metricName strin
 }
 
 // queryDailyTimeSeries returns daily aggregated data points for a metric.
+// Raw data is fetched and bucketed by day in Go to avoid CUMULATIVE aligner issues.
 func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metricName string, start, end time.Time, extraFilter []string) ([]TimeSeriesPoint, error) {
 	filter := fmt.Sprintf(`metric.type = "%s%s"`, metricPrefix, metricName)
 	for _, f := range extraFilter {
@@ -404,14 +404,9 @@ func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metr
 			StartTime: timestamppb.New(start),
 			EndTime:   timestamppb.New(end),
 		},
-		Aggregation: &monitoringpb.Aggregation{
-			AlignmentPeriod:    durationpb.New(time.Duration(alignmentDay) * time.Second),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
-			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
-		},
 	}
 
-	var points []TimeSeriesPoint
+	dayTotals := make(map[string]int64)
 	it := s.client.ListTimeSeries(ctx, req)
 	for {
 		ts, err := it.Next()
@@ -422,12 +417,18 @@ func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metr
 			return nil, fmt.Errorf("listing daily time series for %s: %w", metricName, err)
 		}
 		for _, p := range ts.GetPoints() {
-			points = append(points, TimeSeriesPoint{
-				Timestamp: p.GetInterval().GetEndTime().AsTime().Format("2006-01-02"),
-				Value:     p.GetValue().GetInt64Value(),
-			})
+			day := p.GetInterval().GetEndTime().AsTime().Format("2006-01-02")
+			dayTotals[day] += p.GetValue().GetInt64Value()
 		}
 	}
+
+	points := make([]TimeSeriesPoint, 0, len(dayTotals))
+	for day, total := range dayTotals {
+		points = append(points, TimeSeriesPoint{Timestamp: day, Value: total})
+	}
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].Timestamp < points[j].Timestamp
+	})
 	return points, nil
 }
 
@@ -439,6 +440,7 @@ func labelKeyFromGroupBy(groupByLabel string) string {
 }
 
 // queryGroupedTimeSeries returns daily data grouped by a label.
+// Raw data is fetched and grouped/bucketed in Go to avoid CUMULATIVE aligner issues.
 func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string) ([]LabeledTimeSeries, error) {
 	filter := fmt.Sprintf(`metric.type = "%s%s"`, metricPrefix, metricName)
 	for _, f := range extraFilter {
@@ -453,15 +455,10 @@ func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, me
 			StartTime: timestamppb.New(start),
 			EndTime:   timestamppb.New(end),
 		},
-		Aggregation: &monitoringpb.Aggregation{
-			AlignmentPeriod:    durationpb.New(time.Duration(alignmentDay) * time.Second),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
-			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
-			GroupByFields:      []string{groupByLabel},
-		},
 	}
 
-	seriesMap := make(map[string][]TimeSeriesPoint)
+	// label -> day -> total
+	seriesDayTotals := make(map[string]map[string]int64)
 	it := s.client.ListTimeSeries(ctx, req)
 	for {
 		ts, err := it.Next()
@@ -479,16 +476,24 @@ func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, me
 			}
 		}
 
+		if seriesDayTotals[label] == nil {
+			seriesDayTotals[label] = make(map[string]int64)
+		}
 		for _, p := range ts.GetPoints() {
-			seriesMap[label] = append(seriesMap[label], TimeSeriesPoint{
-				Timestamp: p.GetInterval().GetEndTime().AsTime().Format("2006-01-02"),
-				Value:     p.GetValue().GetInt64Value(),
-			})
+			day := p.GetInterval().GetEndTime().AsTime().Format("2006-01-02")
+			seriesDayTotals[label][day] += p.GetValue().GetInt64Value()
 		}
 	}
 
 	var result []LabeledTimeSeries
-	for label, points := range seriesMap {
+	for label, dayTotals := range seriesDayTotals {
+		points := make([]TimeSeriesPoint, 0, len(dayTotals))
+		for day, total := range dayTotals {
+			points = append(points, TimeSeriesPoint{Timestamp: day, Value: total})
+		}
+		sort.Slice(points, func(i, j int) bool {
+			return points[i].Timestamp < points[j].Timestamp
+		})
 		result = append(result, LabeledTimeSeries{Label: label, Points: points})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -512,12 +517,6 @@ func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricN
 			StartTime: timestamppb.New(start),
 			EndTime:   timestamppb.New(end),
 		},
-		Aggregation: &monitoringpb.Aggregation{
-			AlignmentPeriod:    durationpb.New(end.Sub(start).Truncate(time.Second)),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
-			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
-			GroupByFields:      []string{groupByLabel},
-		},
 	}
 
 	unique := make(map[string]bool)
@@ -540,6 +539,7 @@ func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricN
 }
 
 // queryDailyUniqueCount returns per-day counts of unique label values.
+// Raw data is fetched and bucketed by day in Go to avoid CUMULATIVE aligner issues.
 func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string) ([]TimeSeriesPoint, error) {
 	filter := fmt.Sprintf(`metric.type = "%s%s"`, metricPrefix, metricName)
 	for _, f := range extraFilter {
@@ -553,12 +553,6 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 		Interval: &monitoringpb.TimeInterval{
 			StartTime: timestamppb.New(start),
 			EndTime:   timestamppb.New(end),
-		},
-		Aggregation: &monitoringpb.Aggregation{
-			AlignmentPeriod:    durationpb.New(time.Duration(alignmentDay) * time.Second),
-			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
-			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
-			GroupByFields:      []string{groupByLabel},
 		},
 	}
 
