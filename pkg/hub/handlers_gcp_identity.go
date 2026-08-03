@@ -553,6 +553,10 @@ func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Invalidate cached actAs decisions for the deleted SA so that any
+	// subsequent check against this email goes to the inner checker.
+	s.invalidateActAsCache(sa.Email)
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -872,6 +876,11 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 
 	slog.Info("GCP SA mint: SA created and tokenCreator grant succeeded",
 		"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail)
+
+	// Invalidate cached actAs decisions for the minted SA. The IAM mutation
+	// above may have changed who can act as this SA, so any prior cached
+	// denial (or allow against a stale policy) must be cleared.
+	s.invalidateActAsCache(saEmail)
 
 	// Store the SA record — only reached when the required IAM mutation succeeded.
 	sa := &store.GCPServiceAccount{

@@ -2032,16 +2032,48 @@ func (s *Server) SetGCPServiceAccountAdmin(a GCPServiceAccountAdmin) {
 // checker instance so that the two surfaces share one cache.
 func (s *Server) SetSAAssignChecker(c store.CallerPermissionChecker) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	old := s.saAssignChecker
 	s.saAssignChecker = c
+	s.mu.Unlock()
+
+	// Drain stale entries from the outgoing checker. Entries cached under the
+	// old checker's inner would produce decisions against the wrong backend
+	// if the reference leaked (it shouldn't, but belt-and-suspenders).
+	if cc, ok := old.(*CachedCallerPermissionChecker); ok {
+		cc.InvalidateAll()
+	}
 }
 
 // SetHookIdentityChecker replaces the caller-permission checker for the
 // lifecycle-hook execution-identity surface.
 func (s *Server) SetHookIdentityChecker(c store.CallerPermissionChecker) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	old := s.hookIdentityChecker
 	s.hookIdentityChecker = c
+	s.mu.Unlock()
+
+	// Drain stale entries — same rationale as SetSAAssignChecker.
+	if cc, ok := old.(*CachedCallerPermissionChecker); ok {
+		cc.InvalidateAll()
+	}
+}
+
+// invalidateActAsCache removes cached actAs decisions for a specific SA.
+// Called after SA deletion and Hub-initiated IAM mutations (mint path).
+// No-op if the configured checkers do not support invalidation (e.g.
+// DisabledCallerPermissionChecker when gcpIamCheckMode=off).
+func (s *Server) invalidateActAsCache(saEmail string) {
+	s.mu.RLock()
+	assignChecker := s.saAssignChecker
+	hookChecker := s.hookIdentityChecker
+	s.mu.RUnlock()
+
+	if c, ok := assignChecker.(*CachedCallerPermissionChecker); ok {
+		c.InvalidateForSA(saEmail)
+	}
+	if c, ok := hookChecker.(*CachedCallerPermissionChecker); ok {
+		c.InvalidateForSA(saEmail)
+	}
 }
 
 // SetGCPProjectID sets the GCP project ID used for minting service accounts.
