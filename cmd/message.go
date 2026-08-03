@@ -759,14 +759,14 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		groupSlugs := make(map[string]bool)
 		for _, r := range recipients {
 			if r.Kind == messages.RecipientAgent {
-				groupSlugs[strings.ToLower(r.Name)] = true
+				groupSlugs[api.Slugify(r.Name)] = true
 			}
 		}
 
 		// Filter out names already in the group
 		var filtered []string
 		for _, name := range mentionNames {
-			if !groupSlugs[strings.ToLower(name)] {
+			if !groupSlugs[api.Slugify(name)] {
 				filtered = append(filtered, name)
 			}
 		}
@@ -967,6 +967,9 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 	resp, err := agentSvc.List(ctx, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not list project agents for @mention resolution: %s\n", err)
+		return
+	}
+	if resp == nil {
 		return
 	}
 
