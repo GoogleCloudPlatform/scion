@@ -213,6 +213,7 @@ export class ScionPageAdminIntegrations extends LitElement {
 
   // Available projects for A2A project selector
   @state() private availableProjects: ProjectInfo[] = [];
+  @state() private projectsJsonWarning: string | null = null;
 
   static override styles = css`
     :host {
@@ -1198,12 +1199,22 @@ export class ScionPageAdminIntegrations extends LitElement {
   /** Parse the projects_json flat config value into an array of project entries. */
   private parseProjectsJSON(): A2AProjectEntry[] {
     const raw = this.editedSettings['projects_json'] ?? '';
-    if (!raw || raw === '[]') return [];
+    if (!raw || raw === '[]') {
+      this.projectsJsonWarning = null;
+      return [];
+    }
     try {
       const parsed = JSON.parse(raw) as A2AProjectEntry[];
-      if (!Array.isArray(parsed)) return [];
+      if (!Array.isArray(parsed)) {
+        this.projectsJsonWarning = null;
+        return [];
+      }
+      this.projectsJsonWarning = null;
       return parsed;
-    } catch {
+    } catch (e) {
+      console.warn('Could not parse projects_json configuration:', e);
+      this.projectsJsonWarning =
+        'Warning: Could not parse existing projects configuration.';
       return [];
     }
   }
@@ -1228,6 +1239,12 @@ export class ScionPageAdminIntegrations extends LitElement {
     return html`
       <div class="section">
         <h3 class="section-title">Projects & Agent Exposure</h3>
+        ${this.projectsJsonWarning
+          ? html`<div class="warning-message" style="color: var(--sl-color-warning-600); margin-bottom: 0.5rem;">
+              <sl-icon name="exclamation-triangle" style="margin-right: 0.25rem;"></sl-icon>
+              ${this.projectsJsonWarning}
+            </div>`
+          : nothing}
         ${projects.length === 0
           ? html`
               <div class="projects-empty">
@@ -1382,7 +1399,6 @@ export class ScionPageAdminIntegrations extends LitElement {
       },
     ];
     this.serializeProjectsJSON(updated);
-    this.requestUpdate();
   }
 
   private handleRemoveProject(
@@ -1391,13 +1407,12 @@ export class ScionPageAdminIntegrations extends LitElement {
   ): void {
     const updated = currentProjects.filter((_, i) => i !== idx);
     this.serializeProjectsJSON(updated);
-    this.requestUpdate();
   }
 
   private handleProjectFieldChange(
     currentProjects: A2AProjectEntry[],
     idx: number,
-    field: string,
+    field: keyof A2AProjectEntry,
     value: string | boolean,
   ): void {
     const updated = currentProjects.map((p, i) => {
@@ -1424,7 +1439,6 @@ export class ScionPageAdminIntegrations extends LitElement {
       return copy;
     });
     this.serializeProjectsJSON(updated);
-    this.requestUpdate();
   }
 
   private renderDiscordInviteLink(d: IntegrationDetail) {
