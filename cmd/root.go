@@ -205,6 +205,13 @@ func Execute() {
 
 	applyModeRestrictions(rootCmd)
 
+	// Suppress ASCII banner in agent mode. This runs after early flag
+	// parsing so resolveMode() can safely load settings and the project
+	// path is available — unlike init(), where flags haven't been parsed.
+	if resolveMode() == ModeAgent {
+		rootCmd.Long = ""
+	}
+
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
