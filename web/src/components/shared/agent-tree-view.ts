@@ -128,10 +128,10 @@ export class ScionAgentTreeView extends LitElement {
       min-height: 340px;
       cursor: grab;
       touch-action: none;
-      user-select: none;
     }
 
     .canvas.dragging {
+      user-select: none;
       cursor: grabbing;
     }
 
