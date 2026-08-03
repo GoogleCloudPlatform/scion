@@ -19,4 +19,4 @@ The hub-side `gh://` skill cache completed its three-phase rollout: fallback rou
 
 ## 🔧 Chores
 * **[Deps]:** Bump postcss from 8.5.10 to 8.5.24 in web (#899).
-* **[Harness]:** Update `ANTHROPIC_DEFAULT_HAIKU_MODEL` value.
+* **[Harness]:** Update `ANTHROPIC_DEFAULT_HAIKU_MODEL` value (7eff9bb).
