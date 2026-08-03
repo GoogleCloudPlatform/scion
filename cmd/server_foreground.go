@@ -674,7 +674,11 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	if os.Getenv(logging.EnvCloudLogging) != "" {
 		cloudLoggingEnabled = logging.IsCloudLoggingEnabled()
 	} else {
-		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Telemetry != nil && vs.Telemetry.Cloud != nil && vs.Telemetry.Cloud.CloudLogging != nil {
+		projectPath := ""
+		if globalMode {
+			projectPath = "global"
+		}
+		if vs, err := config.LoadVersionedSettings(projectPath); err == nil && vs.Telemetry != nil && vs.Telemetry.Cloud != nil && vs.Telemetry.Cloud.CloudLogging != nil {
 			cloudLoggingEnabled = *vs.Telemetry.Cloud.CloudLogging
 		}
 	}

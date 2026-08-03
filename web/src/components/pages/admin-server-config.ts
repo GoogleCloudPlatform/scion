@@ -1851,6 +1851,12 @@ export class ScionPageAdminServerConfig extends LitElement {
         provider: ok('telemetry.cloud.provider')
           ? this.telemetryCloudProvider || undefined
           : undefined,
+        gcp_project_id: ok('telemetry.cloud.gcp_project_id')
+          ? this.telemetryCloudGcpProjectId || undefined
+          : undefined,
+        cloud_logging: ok('telemetry.cloud.cloud_logging')
+          ? this.telemetryCloudCloudLogging
+          : undefined,
       };
     }
     if (ok('telemetry.hub.enabled')) {
