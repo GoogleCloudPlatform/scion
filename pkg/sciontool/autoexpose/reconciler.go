@@ -288,7 +288,7 @@ func (r *Reconciler) registerPort(ctx context.Context, port int) error {
 
 	// Notify the agent that a port was auto-exposed.
 	if r.msgClient != nil {
-		notifyMsg := fmt.Sprintf("Port %d has been auto-exposed for proxy access. Run 'sciontool port list' for the full proxy URL.", port)
+		notifyMsg := fmt.Sprintf("Port %d has been auto-exposed for proxy access. Run 'sciontool port list' for the full proxy URL. If you are collaborating with a user, consider sharing this URL so they can access what is running on this port.", port)
 		metadata := map[string]string{"system_category": messages.SystemCategoryPortForward}
 		if err := r.msgClient.SendSelfMessage(ctx, notifyMsg, metadata); err != nil {
 			log.Error("auto-expose: failed to send notification for port %d: %v", port, err)
