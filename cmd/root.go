@@ -205,6 +205,13 @@ func Execute() {
 
 	applyModeRestrictions(rootCmd)
 
+	// Suppress ASCII banner in agent mode. This runs after early flag
+	// parsing so resolveMode() can safely load settings and the project
+	// path is available — unlike init(), where flags haven't been parsed.
+	if resolveMode() == ModeAgent {
+		rootCmd.Long = ""
+	}
+
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
@@ -225,9 +232,7 @@ func commandInSubtree(cmd *cobra.Command, name string) bool {
 }
 
 func init() {
-	if resolveMode() != ModeAgent {
-		rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
-	}
+	rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
 	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
 	rootCmd.PersistentFlags().StringVar(&projectPath, "grove", "", "Deprecated alias for --project")
 	_ = rootCmd.PersistentFlags().MarkDeprecated("grove", "use --project instead")
