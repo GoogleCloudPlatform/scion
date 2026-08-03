@@ -183,6 +183,13 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("pre-migration dedup: %w", err)
 	}
 
+	// Backfill null scope_id to empty string before schema migration
+	// applies NOT NULL constraint (prevents SQLSTATE 23502).
+	if db := c.DB(); db != nil {
+		_, _ = db.ExecContext(ctx,
+			"UPDATE access_policies SET scope_id = '' WHERE scope_id IS NULL")
+	}
+
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {
 		return err
 	}
