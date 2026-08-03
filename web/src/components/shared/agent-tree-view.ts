@@ -642,6 +642,7 @@ export class ScionAgentTreeView extends LitElement {
   }
 
   private onKeyDown(e: KeyboardEvent): void {
+    if (!this.isConnected) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (this.isTextEntryTarget(e)) return;
     switch (e.key) {
