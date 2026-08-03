@@ -15,7 +15,7 @@ var (
 		{Name: "name", Type: field.TypeString},
 		{Name: "description", Type: field.TypeString, Nullable: true},
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"hub", "project", "resource"}},
-		{Name: "scope_id", Type: field.TypeString, Nullable: true},
+		{Name: "scope_id", Type: field.TypeString, Default: ""},
 		{Name: "resource_type", Type: field.TypeString},
 		{Name: "resource_id", Type: field.TypeString, Nullable: true},
 		{Name: "actions", Type: field.TypeJSON, Nullable: true},
