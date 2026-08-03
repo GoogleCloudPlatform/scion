@@ -680,9 +680,9 @@ export class ScionAgentTreeView extends LitElement {
       <marker
         id=${id}
         viewBox="0 0 8 8"
-        markerWidth="7"
-        markerHeight="7"
-        refX="6.5"
+        markerWidth="8"
+        markerHeight="8"
+        refX="0.5"
         refY="4"
         orient="auto"
         markerUnits="userSpaceOnUse"
@@ -700,10 +700,16 @@ export class ScionAgentTreeView extends LitElement {
     const lit = related !== null && related.has(e.parentId) && related.has(e.childId);
     const dim = related !== null && !lit;
     const midY = (e.y1 + e.y2) / 2;
-    const yEnd = e.y2 - 2;
+    // End with a short straight vertical segment so the arrowhead always
+    // points straight down. The stroke stops at the arrowhead's BASE — the
+    // marker (refX near 0) extends past the path end so the stroke can never
+    // poke out beyond the triangle's tip. The tip lands exactly on the
+    // card's top edge (y2): touching, but never hidden under the card.
+    const yEnd = e.y2 - 6.5;
+    const yApproach = yEnd - 4;
     return svg`<path
       class="edge ${lit ? 'lit' : ''} ${dim ? 'dim' : ''}"
-      d="M ${e.x1} ${e.y1} C ${e.x1} ${midY}, ${e.x2} ${midY}, ${e.x2} ${yEnd}"
+      d="M ${e.x1} ${e.y1} C ${e.x1} ${midY}, ${e.x2} ${midY}, ${e.x2} ${yApproach} L ${e.x2} ${yEnd}"
     />`;
   }
 
