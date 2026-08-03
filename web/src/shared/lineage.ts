@@ -68,7 +68,7 @@ export interface ForestLayout {
 export const NODE_W = 180;
 export const NODE_H = 76;
 export const GAP_X = 24;
-export const GAP_Y = 48;
+export const GAP_Y = 52;
 export const PAD = 24;
 
 /** Edge/hover key for a user node, distinct from any agent ID. */
