@@ -47,14 +47,14 @@ func (c *CompositeStore) deduplicateAccessPolicies(ctx context.Context) error {
 	// ROW_NUMBER() OVER … is supported by both SQLite (≥3.25) and Postgres.
 	result, err := db.ExecContext(ctx, `
 		DELETE FROM access_policies
-		WHERE id NOT IN (
+		WHERE id IN (
 			SELECT id FROM (
 				SELECT id, ROW_NUMBER() OVER (
 					PARTITION BY name, scope_type, scope_id
 					ORDER BY created ASC
 				) AS rn
 				FROM access_policies
-			) sub WHERE rn = 1
+			) sub WHERE rn > 1
 		)
 	`)
 	if err != nil {
@@ -70,12 +70,19 @@ func (c *CompositeStore) deduplicateAccessPolicies(ctx context.Context) error {
 // accessPoliciesTableExists checks whether the access_policies table exists
 // in the database. SQLite and Postgres use different system catalogs.
 func (c *CompositeStore) accessPoliciesTableExists(ctx context.Context, db *sql.DB) (bool, error) {
-	var query string
 	drv, ok := c.client.Driver().(*entsql.Driver)
-	if ok && drv.Dialect() == dialect.Postgres {
+	if !ok {
+		return false, nil
+	}
+
+	var query string
+	switch drv.Dialect() {
+	case dialect.Postgres:
 		query = `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'access_policies'`
-	} else {
+	case dialect.SQLite:
 		query = `SELECT name FROM sqlite_master WHERE type='table' AND name='access_policies'`
+	default:
+		return false, nil
 	}
 
 	var name string
@@ -84,8 +91,7 @@ func (c *CompositeStore) accessPoliciesTableExists(ctx context.Context, db *sql.
 		return false, nil
 	}
 	if err != nil {
-		slog.Debug("accessPoliciesTableExists: unexpected error, assuming table absent", "error", err)
-		return false, nil // treat unexpected errors as "table absent" — safe to skip
+		return false, err
 	}
 	return true, nil
 }
