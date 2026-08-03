@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -41,6 +42,11 @@ type BrokerServer struct {
 	mu            sync.RWMutex
 	subscriptions map[string]bool
 	configured    bool
+
+	// Admin config management fields (Phase 3).
+	baseConfig *Config         // base YAML config loaded at boot (immutable after init)
+	snapshot   *SnapshotHolder // atomic snapshot of effective config
+	stateDir   string          // directory for admin-overlay.json persistence
 }
 
 var _ plugin.MessageBrokerPluginInterface = (*BrokerServer)(nil)
@@ -63,13 +69,69 @@ func (b *BrokerServer) SetHandler(handler MessageHandler) {
 	b.handler = handler
 }
 
+// SetAdminConfig wires the base config, snapshot holder, and state directory
+// for admin overlay management. Must be called before the first Configure() push.
+func (b *BrokerServer) SetAdminConfig(baseCfg *Config, snap *SnapshotHolder, stateDir string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.baseConfig = baseCfg
+	b.snapshot = snap
+	b.stateDir = stateDir
+}
+
 // Configure is called by the Hub plugin manager during initialization.
+// It parses the flat key map, validates values, applies the overlay onto the
+// base YAML config, and atomically swaps the effective snapshot.
 func (b *BrokerServer) Configure(config map[string]string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if b.baseConfig == nil || b.snapshot == nil {
+		// Admin config management not wired — fall back to no-op.
+		b.configured = true
+		b.log.Info("broker plugin configured (no admin config wired)", "config_keys", len(config))
+		return nil
+	}
+
+	overlay, err := ParseAdminOverlay(config)
+	if err != nil {
+		b.log.Error("rejected admin config push", "error", err)
+		return err // Hub surfaces this error to the admin UI
+	}
+
+	b.applyOverlay(overlay)
+
+	if b.stateDir != "" {
+		if err := PersistOverlay(b.stateDir, overlay); err != nil {
+			b.log.Warn("failed to persist admin overlay", "error", err)
+			// Non-fatal: config is applied in memory, just won't survive restart.
+		}
+	}
+
 	b.configured = true
-	b.log.Info("broker plugin configured", "config_keys", len(config))
+	b.log.Info("admin config applied",
+		"auth_scheme", overlay.AuthScheme,
+		"external_url", overlay.ExternalURL,
+		"projects", len(overlay.Projects),
+	)
 	return nil
+}
+
+// applyOverlay merges the overlay onto the base config and swaps the snapshot.
+// Must be called with b.mu held.
+func (b *BrokerServer) applyOverlay(overlay *AdminOverlay) {
+	effective := ApplyOverlay(*b.baseConfig, overlay)
+	snap := BuildSnapshot(effective)
+
+	// Preserve the JWT validator from the current snapshot if the scheme
+	// is still hubJWT — the signing key is loaded at boot and doesn't change.
+	if snap.Auth.Scheme == "hubJWT" {
+		if current := b.snapshot.Load(); current != nil && current.Auth.JWTValidator != nil {
+			snap.Auth.JWTValidator = current.Auth.JWTValidator
+		}
+	}
+
+	b.snapshot.Store(snap)
 }
 
 // Publish receives a message from the Hub and routes it to the handler.
@@ -121,7 +183,7 @@ func (b *BrokerServer) GetInfo() (*plugin.PluginInfo, error) {
 	}, nil
 }
 
-// HealthCheck returns the plugin's health status.
+// HealthCheck returns the plugin's health status with effective config details.
 func (b *BrokerServer) HealthCheck() (*plugin.HealthStatus, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -133,10 +195,28 @@ func (b *BrokerServer) HealthCheck() (*plugin.HealthStatus, error) {
 		msg = "not yet configured by hub"
 	}
 
-	return &plugin.HealthStatus{
+	hs := &plugin.HealthStatus{
 		Status:  status,
 		Message: msg,
-	}, nil
+	}
+
+	// Enrich with effective config details from the snapshot.
+	if b.snapshot != nil {
+		snap := b.snapshot.Load()
+		if snap != nil {
+			if hs.Details == nil {
+				hs.Details = make(map[string]string)
+			}
+			hs.Details["auth_scheme"] = snap.Config.Auth.Scheme
+			hs.Details["external_url"] = snap.Config.Bridge.ExternalURL
+			hs.Details["exposed_projects"] = strconv.Itoa(len(snap.Config.Projects))
+			if snap.Config.Bridge.Provider.Organization != "" {
+				hs.Details["provider_org"] = snap.Config.Bridge.Provider.Organization
+			}
+		}
+	}
+
+	return hs, nil
 }
 
 // SetHostCallbacks is called by the go-plugin framework to provide the reverse channel.

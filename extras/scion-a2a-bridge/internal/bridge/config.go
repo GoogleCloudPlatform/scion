@@ -79,10 +79,10 @@ type AuthConfig struct {
 
 // ProjectConfig configures a project exposed via the bridge.
 type ProjectConfig struct {
-	Slug            string   `yaml:"slug"`
-	DefaultTemplate string   `yaml:"default_template"`
-	AutoProvision   bool     `yaml:"auto_provision"`
-	ExposedAgents   []string `yaml:"exposed_agents"`
+	Slug            string   `yaml:"slug" json:"slug"`
+	DefaultTemplate string   `yaml:"default_template" json:"default_template"`
+	AutoProvision   bool     `yaml:"auto_provision" json:"auto_provision"`
+	ExposedAgents   []string `yaml:"exposed_agents" json:"exposed_agents"`
 }
 
 // GroveConfig is a legacy alias for ProjectConfig.
