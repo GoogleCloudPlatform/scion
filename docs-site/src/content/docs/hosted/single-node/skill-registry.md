@@ -30,6 +30,15 @@ By default a skill reference resolves against the local Hub. Federation lets the
 
 Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
 
+#### Authentication & reliability
+
+The GitHub resolver includes several optimizations and fallbacks:
+
+* **Authentication Fallback**: The resolver first searches for a `GITHUB_TOKEN` or `GH_TOKEN` in the environment. If neither is set, it falls back to the project-scoped `GITHUB_TOKEN` provisioned credential on the Hub.
+* **Unauthenticated Warning**: If no token can be resolved, the resolver proceeds unauthenticated but emits a warning. Unauthenticated requests are heavily rate-limited by GitHub (60 requests/hour), so providing a token is highly recommended.
+* **Full SHA Short-Circuit**: If the requested `@<ref>` is a full 40-character git SHA, the resolver bypasses all GitHub API branch-existence checks and constructs the raw download URL directly, saving rate-limit quota.
+* **Cache Diagnostics**: Cache initialization errors are recorded with detailed logging for immediate operator visibility.
+
 #### Private repository resolution
 
 For private GitHub repositories, Scion resolves skills securely using your project's configured git credentials or custom secrets:
