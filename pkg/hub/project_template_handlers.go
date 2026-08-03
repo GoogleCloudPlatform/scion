@@ -55,8 +55,15 @@ func (s *Server) handleSetTemplate(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
+	// Check ActionUpdate permission on the project
+	decision := s.authzService.CheckAccess(r.Context(), user, projectResource(project), ActionUpdate)
+	if !decision.Allowed {
+		Forbidden(w)
+		return
+	}
+
 	if req.IsTemplate {
-		// Check for running agents before marking as template
+		// Check for existing agents before marking as template
 		agentResult, err := s.store.ListAgents(r.Context(), store.AgentFilter{ProjectID: project.ID}, store.ListOptions{Limit: 1})
 		if err != nil {
 			writeErrorFromErr(w, err, "")

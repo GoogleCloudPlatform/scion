@@ -147,9 +147,13 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	case "true":
 		isTemplate := true
 		filter.IsTemplate = &isTemplate
-	default:
+	case "false", "":
 		isTemplate := false
 		filter.IsTemplate = &isTemplate
+	default:
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"isTemplate must be 'true' or 'false'", nil)
+		return
 	}
 
 	// scope=mine: projects the current user owns
