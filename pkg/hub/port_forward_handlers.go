@@ -383,7 +383,12 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	}
 	exposed := findExposedPort(agent.ExposedPorts, port)
 	if exposed == nil {
-		NotFound(w, "Port")
+		if isBrowserRequest(r) {
+			writeProxyErrorHTML(w, http.StatusNotFound, "Port Not Available",
+				"The requested port is not exposed on this agent.")
+		} else {
+			NotFound(w, "Port")
+		}
 		return
 	}
 	if isWebSocketUpgrade(r) {
@@ -410,7 +415,12 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	})
 	if err != nil {
 		if errors.Is(err, errNoPortTunnel) {
-			writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, "No active port-forward tunnel for this agent", nil)
+			if isBrowserRequest(r) {
+				writeProxyErrorHTML(w, http.StatusServiceUnavailable, "Service Unavailable",
+					"No active port-forward tunnel for this agent. The agent may not be running or the tunnel has not been established yet.")
+			} else {
+				writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, "No active port-forward tunnel for this agent", nil)
+			}
 			return
 		}
 		if errors.Is(err, errTunnelBusy) {
@@ -446,6 +456,120 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		"status", resp.Status,
 		"duration", time.Since(start),
 	)
+}
+
+// writeProxyErrorHTML writes a self-contained HTML error page for browser requests
+// to proxy endpoints. It uses inline styles (no external dependencies) with dark
+// mode support, following the pattern of maintenancePageHTML in admin_mode.go.
+func writeProxyErrorHTML(w http.ResponseWriter, status int, title, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	fmt.Fprint(w, proxyErrorPageHTML(title, message))
+}
+
+// proxyErrorPageHTML returns a self-contained HTML error page with the given
+// title and message. The page uses the same design system as maintenancePageHTML.
+func proxyErrorPageHTML(title, message string) string {
+	escapeHTML := func(s string) string {
+		s = strings.ReplaceAll(s, "&", "&amp;")
+		s = strings.ReplaceAll(s, "<", "&lt;")
+		s = strings.ReplaceAll(s, ">", "&gt;")
+		s = strings.ReplaceAll(s, "\"", "&quot;")
+		return s
+	}
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scion - %s</title>
+    <style>
+        :root {
+            --bg: #f8fafc;
+            --surface: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --accent: #3b82f6;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0f172a;
+                --surface: #1e293b;
+                --text: #f1f5f9;
+                --text-muted: #94a3b8;
+                --border: #334155;
+                --accent: #60a5fa;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html, body {
+            height: 100%%;
+            font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            text-align: center;
+            padding: 2rem;
+            max-width: 480px;
+        }
+
+        .icon {
+            font-size: 3rem;
+            margin-bottom: 1.5rem;
+            display: block;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+        }
+
+        .message {
+            color: var(--text-muted);
+            font-size: 1rem;
+            line-height: 1.6;
+        }
+
+        .badge {
+            display: inline-block;
+            margin-top: 1.5rem;
+            padding: 0.25rem 0.75rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: var(--accent);
+            border: 1px solid var(--border);
+            border-radius: 9999px;
+            background: var(--surface);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <span class="icon" role="img" aria-label="error">&#9888;&#65039;</span>
+        <h1>%s</h1>
+        <p class="message">%s</p>
+        <span class="badge">scion</span>
+    </div>
+</body>
+</html>`, escapeHTML(title), escapeHTML(title), escapeHTML(message))
 }
 
 func (s *Server) handleAgentPortTunnel(w http.ResponseWriter, r *http.Request, agentID string) {
