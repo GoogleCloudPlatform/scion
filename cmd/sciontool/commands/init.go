@@ -626,7 +626,7 @@ func runInit(args []string) int {
 			log.Info("Started port-forward tunnel manager")
 
 			// Auto-expose: detect and register listening ports
-			if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled {
+			if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
 				reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
 				reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
 				go reconciler.Run(ctx)
@@ -2049,6 +2049,9 @@ type hubMessageAdapter struct {
 }
 
 func (a *hubMessageAdapter) SendSelfMessage(ctx context.Context, msg string, metadata map[string]string) error {
+	if a.client == nil {
+		return fmt.Errorf("hub client is nil")
+	}
 	recipient := "agent:" + a.client.AgentID()
 	return a.client.SendSelfMessage(ctx, messages.NewSystemMessage("system", recipient, msg, metadata["system_category"]))
 }

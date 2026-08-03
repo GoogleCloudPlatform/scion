@@ -61,9 +61,9 @@ const (
 
 // System message category constants identify the origin of a system message.
 const (
-	SystemCategoryScheduler       = "scheduler"
-	SystemCategoryPortForward     = "port-forward"
-	SystemCategoryDeliveryFailed  = "delivery-failed"
+	SystemCategoryScheduler      = "scheduler"
+	SystemCategoryPortForward    = "port-forward"
+	SystemCategoryDeliveryFailed = "delivery-failed"
 )
 
 // Visibility constants control which consumers see a message.
