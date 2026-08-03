@@ -1445,4 +1445,8 @@ type AgentSessionMetricsStore interface {
 	// ListAgentSessionMetricsByAgent returns all session metrics for an agent,
 	// ordered by started_at DESC.
 	ListAgentSessionMetricsByAgent(ctx context.Context, agentID string) ([]*AgentSessionMetrics, error)
+
+	// ListAgentSessionMetricsByProject returns all session metrics for a project,
+	// ordered by started_at DESC.
+	ListAgentSessionMetricsByProject(ctx context.Context, projectID string) ([]*AgentSessionMetrics, error)
 }

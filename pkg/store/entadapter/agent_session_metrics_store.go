@@ -151,3 +151,23 @@ func (s *AgentSessionMetricsStore) ListAgentSessionMetricsByAgent(ctx context.Co
 	}
 	return result, nil
 }
+
+// ListAgentSessionMetricsByProject returns session metrics for all agents
+// in a project, ordered by started_at descending, capped at defaultMetricsListLimit.
+func (s *AgentSessionMetricsStore) ListAgentSessionMetricsByProject(ctx context.Context, projectID string) ([]*store.AgentSessionMetrics, error) {
+	entities, err := s.client.AgentSessionMetrics.
+		Query().
+		Where(entasm.GroveIDEQ(projectID)).
+		Order(ent.Desc(entasm.FieldStartedAt)).
+		Limit(defaultMetricsListLimit).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	result := make([]*store.AgentSessionMetrics, 0, len(entities))
+	for _, e := range entities {
+		result = append(result, entAgentSessionMetricsToStore(e))
+	}
+	return result, nil
+}
