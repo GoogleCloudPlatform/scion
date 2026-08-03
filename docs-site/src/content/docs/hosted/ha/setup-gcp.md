@@ -113,7 +113,6 @@ for ROLE in \
   roles/iam.serviceAccountAdmin \
   roles/run.admin \
   roles/editor; do
-
   gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:$DEPLOYER_SA" \
     --role="$ROLE" \
