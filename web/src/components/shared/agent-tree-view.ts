@@ -22,6 +22,15 @@
  * rendering, pan/zoom, hover-highlighting, and collapse/expand. Designed to
  * slot into the same content area as the grid/list views on the agents page
  * and project-detail page.
+ *
+ * Supports two flow directions via the `orientation` property/toolbar toggle:
+ * 'vertical' (default, roots on top) and 'horizontal' (roots on the left,
+ * depth increases to the right). Changing it dispatches an
+ * `orientation-change` CustomEvent so host pages can persist the choice.
+ *
+ * Keyboard shortcuts (ignored while typing in inputs/dialogs/dropdowns or
+ * when a modifier key is held): `t` transposes the orientation, `f` fits the graph
+ * to the viewport, `+`/`=` zooms in, `-` zooms out.
  */
 
 import { LitElement, html, css, svg, nothing } from 'lit';
@@ -37,9 +46,11 @@ import {
   parentIdOf,
   pruneCollapsed,
   rootUserOf,
+  transposeLayout,
   userKey,
   NODE_W,
   NODE_H,
+  type Orientation,
   type PositionedNode,
   type PositionedEdge,
   type PositionedUser,
@@ -82,6 +93,14 @@ export class ScionAgentTreeView extends LitElement {
   @property({ type: String })
   focusId = '';
 
+  /**
+   * Flow direction of the lineage forest. Host pages may set it (e.g. from a
+   * URL param); the toolbar toggle and the `t` shortcut update it in place
+   * and dispatch `orientation-change` so hosts can stay in sync.
+   */
+  @property({ type: String })
+  orientation: Orientation = 'vertical';
+
   @state() private showUsers = false;
   @state() private hoverId: string | null = null;
   @state() private collapsedIds: ReadonlySet<string> = new Set();
@@ -95,6 +114,10 @@ export class ScionAgentTreeView extends LitElement {
   @query('.canvas') private canvasEl?: HTMLDivElement;
 
   private boundOnWheel = (e: WheelEvent) => this.onWheel(e);
+  private boundOnKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
+  /** Canvas-content size of the last computed layout (for keyboard "fit"). */
+  private contentW = 0;
+  private contentH = 0;
   private dragging = false;
   private dragStartX = 0;
   private dragStartY = 0;
@@ -114,6 +137,52 @@ export class ScionAgentTreeView extends LitElement {
       gap: 0.75rem;
       margin-bottom: 0.5rem;
       flex-wrap: wrap;
+    }
+
+    /* Segmented vertical/horizontal control, same visual language as
+       <scion-view-toggle>. */
+    .orientation-toggle {
+      display: inline-flex;
+      border: 1px solid var(--sl-color-neutral-300);
+      border-radius: var(--sl-border-radius-medium, 6px);
+      overflow: hidden;
+    }
+
+    .orientation-toggle button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      border: none;
+      padding: 0;
+      background: var(--sl-color-neutral-0);
+      color: var(--sl-color-neutral-600);
+      cursor: pointer;
+      transition: all 150ms ease;
+    }
+
+    .orientation-toggle button:not(:last-child) {
+      border-right: 1px solid var(--sl-color-neutral-300);
+    }
+
+    .orientation-toggle button:hover:not(.active) {
+      background: var(--sl-color-neutral-100);
+    }
+
+    .orientation-toggle button.active {
+      background: var(--sl-color-primary-600);
+      color: var(--sl-color-neutral-0);
+    }
+
+    .orientation-toggle sl-icon {
+      font-size: 0.875rem;
+    }
+
+    /* Bootstrap Icons has no left→right tree glyph; rotate the top-down one
+       so the root lands on the left. */
+    .orientation-toggle sl-icon.rotated {
+      transform: rotate(-90deg);
     }
 
     .canvas {
@@ -289,6 +358,16 @@ export class ScionAgentTreeView extends LitElement {
       color: var(--sl-color-primary-600);
     }
 
+    /* Horizontal orientation: children grow to the right, so the chip hangs
+       off the parent card's right-edge-center instead of bottom-center. */
+    .collapse-chip.horizontal {
+      bottom: auto;
+      left: auto;
+      right: -9px;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
     /*
      * Terminal icon button — lower-right corner of the agent card.
      * Hidden by default; revealed on hover or keyboard focus-within so
@@ -398,15 +477,22 @@ export class ScionAgentTreeView extends LitElement {
     this.showUsers = localStorage.getItem('scion-graph-show-users') === 'true';
     // Wheel needs passive:false so we can preventDefault (prevent page zoom/scroll).
     this.addEventListener('wheel', this.boundOnWheel, { passive: false });
+    window.addEventListener('keydown', this.boundOnKeyDown);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.removeEventListener('wheel', this.boundOnWheel);
+    window.removeEventListener('keydown', this.boundOnKeyDown);
   }
 
   override willUpdate(changedProperties: Map<PropertyKey, unknown>): void {
     super.willUpdate(changedProperties);
+    // Flipping the flow direction swaps the canvas aspect ratio; re-fit so
+    // the whole forest stays visible.
+    if (changedProperties.has('orientation') && changedProperties.get('orientation') !== undefined) {
+      this.didAutoFit = false;
+    }
     if (changedProperties.has('agents')) {
       const oldAgents = changedProperties.get('agents') as Agent[] | undefined;
       // Re-fit when agents arrive for the first time or when the project
@@ -515,6 +601,73 @@ export class ScionAgentTreeView extends LitElement {
     this.didAutoFit = false;
   }
 
+  private setOrientation(orientation: Orientation): void {
+    if (this.orientation === orientation) return;
+    this.orientation = orientation;
+    this.dispatchEvent(
+      new CustomEvent('orientation-change', {
+        detail: { orientation },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  // --- Keyboard shortcuts ---------------------------------------------------
+
+  /**
+   * True when the keydown originated from a text-entry or overlay context
+   * (inputs, textareas, selects, contenteditable, or anything inside a
+   * Shoelace dialog/dropdown/input) — shortcuts must never fire while the
+   * user is typing in the project filter or the quick-message dialog.
+   */
+  private isTextEntryTarget(e: KeyboardEvent): boolean {
+    for (const el of e.composedPath()) {
+      if (!(el instanceof HTMLElement)) continue;
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable) {
+        return true;
+      }
+      if (
+        tag === 'SL-INPUT' ||
+        tag === 'SL-TEXTAREA' ||
+        tag === 'SL-SELECT' ||
+        tag === 'SL-DIALOG' ||
+        tag === 'SL-DROPDOWN'
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private onKeyDown(e: KeyboardEvent): void {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (this.isTextEntryTarget(e)) return;
+    switch (e.key) {
+      case 't':
+      case 'T':
+        this.setOrientation(this.orientation === 'vertical' ? 'horizontal' : 'vertical');
+        break;
+      case 'f':
+      case 'F':
+        if (this.contentW > 0 && this.contentH > 0) {
+          this.fitToView(this.contentW, this.contentH);
+        }
+        break;
+      case '+':
+      case '=':
+        this.zoomButtons(1.25);
+        break;
+      case '-':
+        this.zoomButtons(1 / 1.25);
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+  }
+
   // --- Hover lineage highlight ---------------------------------------------
 
   /**
@@ -577,17 +730,39 @@ export class ScionAgentTreeView extends LitElement {
 
   // --- Rendering ------------------------------------------------------------
 
+  private renderToolbar() {
+    return html`
+      <div class="toolbar">
+        <sl-switch
+          size="small"
+          ?checked=${this.showUsers}
+          @sl-change=${this.onShowUsersChange}
+        >Show users</sl-switch>
+        <div class="orientation-toggle" role="group" aria-label="Graph orientation">
+          <button
+            class=${this.orientation === 'vertical' ? 'active' : ''}
+            title="Vertical layout (T)"
+            @click=${() => this.setOrientation('vertical')}
+          >
+            <sl-icon name="diagram-3"></sl-icon>
+          </button>
+          <button
+            class=${this.orientation === 'horizontal' ? 'active' : ''}
+            title="Horizontal layout (T)"
+            @click=${() => this.setOrientation('horizontal')}
+          >
+            <sl-icon name="diagram-3" class="rotated"></sl-icon>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   override render() {
     const agents = this.agents;
     if (agents.length === 0) {
       return html`
-        <div class="toolbar">
-          <sl-switch
-            size="small"
-            ?checked=${this.showUsers}
-            @sl-change=${this.onShowUsersChange}
-          >Show users</sl-switch>
-        </div>
+        ${this.renderToolbar()}
         <div class="empty-state">
           <sl-icon name="diagram-3"></sl-icon>
           <p>No agents to display.</p>
@@ -598,9 +773,13 @@ export class ScionAgentTreeView extends LitElement {
     const forest = buildLineageForest(agents);
     const hiddenCounts = descendantCounts(forest);
     pruneCollapsed(forest, this.collapsedIds);
-    const { nodes, edges, users, width, height } = this.showUsers
-      ? layoutForestWithUsers(forest)
-      : layoutForest(forest);
+    let layout = this.showUsers ? layoutForestWithUsers(forest) : layoutForest(forest);
+    if (this.orientation === 'horizontal') {
+      layout = transposeLayout(layout);
+    }
+    const { nodes, edges, users, width, height } = layout;
+    this.contentW = width;
+    this.contentH = height;
     const related = this.relatedIds(agents);
 
     // First render with content: center on the deep-linked agent if there is
@@ -633,13 +812,7 @@ export class ScionAgentTreeView extends LitElement {
     }
 
     return html`
-      <div class="toolbar">
-        <sl-switch
-          size="small"
-          ?checked=${this.showUsers}
-          @sl-change=${this.onShowUsersChange}
-        >Show users</sl-switch>
-      </div>
+      ${this.renderToolbar()}
       <div
         class="canvas"
         @pointerdown=${this.onPointerDown}
@@ -657,9 +830,9 @@ export class ScionAgentTreeView extends LitElement {
           ${nodes.map(n => this.renderNode(n, related, hiddenCounts))}
         </div>
         <div class="zoom-controls">
-          <sl-button size="small" @click=${() => this.zoomButtons(1.25)} title="Zoom in">+</sl-button>
-          <sl-button size="small" @click=${() => this.zoomButtons(1 / 1.25)} title="Zoom out">−</sl-button>
-          <sl-button size="small" @click=${() => this.fitToView(width, height)} title="Fit to view">Fit</sl-button>
+          <sl-button size="small" @click=${() => this.zoomButtons(1.25)} title="Zoom in (+)">+</sl-button>
+          <sl-button size="small" @click=${() => this.zoomButtons(1 / 1.25)} title="Zoom out (−)">−</sl-button>
+          <sl-button size="small" @click=${() => this.fitToView(width, height)} title="Fit to view (F)">Fit</sl-button>
         </div>
       </div>
 
@@ -699,18 +872,32 @@ export class ScionAgentTreeView extends LitElement {
   private renderEdge(e: PositionedEdge, related: Set<string> | null) {
     const lit = related !== null && related.has(e.parentId) && related.has(e.childId);
     const dim = related !== null && !lit;
-    const midY = (e.y1 + e.y2) / 2;
-    // End with a short straight vertical segment so the arrowhead always
-    // points straight down. The stroke stops at the arrowhead's BASE — the
-    // marker (refX near 0) extends past the path end so the stroke can never
-    // poke out beyond the triangle's tip. The tip lands exactly on the
-    // card's top edge (y2): touching, but never hidden under the card.
-    const yEnd = e.y2 - 6.5;
-    const yApproach = yEnd - 4;
     return svg`<path
       class="edge ${lit ? 'lit' : ''} ${dim ? 'dim' : ''}"
-      d="M ${e.x1} ${e.y1} C ${e.x1} ${midY}, ${e.x2} ${midY}, ${e.x2} ${yApproach} L ${e.x2} ${yEnd}"
+      d=${this.edgePath(e)}
     />`;
+  }
+
+  /**
+   * Cubic sweep between the layout's edge anchors, finished with a short
+   * straight run-in so the arrowhead always points along the flow axis.
+   * Vertical: parent bottom-center → child top-center; horizontal: parent
+   * right-edge-center → child left-edge-center. The stroke stops at the
+   * arrowhead's BASE — the marker (refX near 0) extends past the path end so
+   * the stroke can never poke out beyond the triangle's tip, which lands
+   * exactly on the card's edge: touching, but never hidden under the card.
+   */
+  private edgePath(e: PositionedEdge): string {
+    if (this.orientation === 'horizontal') {
+      const midX = (e.x1 + e.x2) / 2;
+      const xEnd = e.x2 - 6.5;
+      const xApproach = xEnd - 4;
+      return `M ${e.x1} ${e.y1} C ${midX} ${e.y1}, ${midX} ${e.y2}, ${xApproach} ${e.y2} L ${xEnd} ${e.y2}`;
+    }
+    const midY = (e.y1 + e.y2) / 2;
+    const yEnd = e.y2 - 6.5;
+    const yApproach = yEnd - 4;
+    return `M ${e.x1} ${e.y1} C ${e.x1} ${midY}, ${e.x2} ${midY}, ${e.x2} ${yApproach} L ${e.x2} ${yEnd}`;
   }
 
   private toggleCollapse(agentId: string, e: Event): void {
@@ -782,7 +969,7 @@ export class ScionAgentTreeView extends LitElement {
         ` : nothing}
         ${descendants > 0 ? html`
           <button
-            class="collapse-chip"
+            class="collapse-chip ${this.orientation === 'horizontal' ? 'horizontal' : ''}"
             title=${collapsed ? `Expand ${descendants} hidden agent${descendants === 1 ? '' : 's'}` : 'Collapse subtree'}
             @click=${(e: Event) => this.toggleCollapse(agent.id, e)}
           >${collapsed ? `+${descendants}` : '−'}</button>

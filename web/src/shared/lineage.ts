@@ -71,6 +71,17 @@ export const GAP_X = 24;
 export const GAP_Y = 52;
 export const PAD = 24;
 
+/** Graph flow direction: vertical = top→down (default), horizontal = left→right. */
+export type Orientation = 'vertical' | 'horizontal';
+
+/**
+ * Horizontal-orientation spacing. Cards keep their 180×76 size, so the
+ * along-depth gap between columns must clear the wide edge curves (cards are
+ * wider than tall), while sibling rows can pack tighter.
+ */
+export const H_GAP_X = 64;
+export const H_GAP_Y = 24;
+
 /** Edge/hover key for a user node, distinct from any agent ID. */
 export function userKey(userId: string): string {
   return `user:${userId}`;
@@ -294,4 +305,70 @@ export function layoutForestWithUsers(roots: LineageNode[]): ForestLayout {
   }
 
   return { ...base, edges, users };
+}
+
+/**
+ * Transposes a vertical layout (from layoutForest / layoutForestWithUsers)
+ * into a horizontal one: depth maps to the x axis (roots on the left, depth
+ * increases to the right) and leaf slots stack vertically. Cards keep their
+ * NODE_W×NODE_H size — only positions change — so the column pitch uses
+ * NODE_W + H_GAP_X and the row pitch NODE_H + H_GAP_Y. Edges are recomputed
+ * from the transposed node positions: parent right-edge-center → child
+ * left-edge-center. User nodes end up in the leftmost column, vertically
+ * centered across their group's roots.
+ *
+ * The vertical layout is the single source of truth for the tidy-tree
+ * algorithm; this helper only recovers the abstract (slot, depth) coordinates
+ * from the vertical pixel grid and re-projects them.
+ */
+export function transposeLayout(layout: ForestLayout): ForestLayout {
+  const slotOf = (px: number) => (px - PAD) / (NODE_W + GAP_X);
+  const depthOf = (py: number) => (py - PAD) / (NODE_H + GAP_Y);
+  const hx = (depth: number) => PAD + depth * (NODE_W + H_GAP_X);
+  const hy = (slot: number) => PAD + slot * (NODE_H + H_GAP_Y);
+
+  const nodes: PositionedNode[] = layout.nodes.map(n => ({
+    agent: n.agent,
+    px: hx(depthOf(n.py)),
+    py: hy(slotOf(n.px)),
+  }));
+  const users: PositionedUser[] = layout.users.map(u => ({
+    id: u.id,
+    px: hx(depthOf(u.py)),
+    py: hy(slotOf(u.px)),
+  }));
+
+  const posByKey = new Map<string, { px: number; py: number }>();
+  for (const n of nodes) posByKey.set(n.agent.id, n);
+  for (const u of users) posByKey.set(userKey(u.id), u);
+
+  const edges: PositionedEdge[] = [];
+  for (const e of layout.edges) {
+    const parent = posByKey.get(e.parentId);
+    const child = posByKey.get(e.childId);
+    if (!parent || !child) continue;
+    edges.push({
+      x1: parent.px + NODE_W,
+      y1: parent.py + NODE_H / 2,
+      x2: child.px,
+      y2: child.py + NODE_H / 2,
+      parentId: e.parentId,
+      childId: e.childId,
+    });
+  }
+
+  let maxX = 0;
+  let maxY = 0;
+  for (const p of posByKey.values()) {
+    maxX = Math.max(maxX, p.px + NODE_W);
+    maxY = Math.max(maxY, p.py + NODE_H);
+  }
+
+  return {
+    nodes,
+    edges,
+    users,
+    width: (posByKey.size > 0 ? maxX : PAD + NODE_W) + PAD,
+    height: (posByKey.size > 0 ? maxY : PAD + NODE_H) + PAD,
+  };
 }

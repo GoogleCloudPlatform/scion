@@ -23,11 +23,14 @@ import {
   parentIdOf,
   pruneCollapsed,
   rootUserOf,
+  transposeLayout,
   userKey,
   NODE_W,
   NODE_H,
   GAP_X,
   GAP_Y,
+  H_GAP_X,
+  H_GAP_Y,
   PAD,
 } from './lineage.js';
 import type { Agent } from './types.js';
@@ -228,5 +231,91 @@ describe('layoutForestWithUsers', () => {
     expect(users.map(u => u.id)).toEqual(['user-1']);
     expect(nodes.map(n => n.agent.id).sort()).toEqual(['a1', 'u1']);
     expect(edges.filter(e => e.childId === 'u1')).toHaveLength(0);
+  });
+});
+
+describe('transposeLayout', () => {
+  it('maps depth to columns and leaf slots to rows', () => {
+    const parent = agent('p1', 'parent', ['user-1']);
+    const left = agent('l1', 'a-left', ['user-1', 'p1']);
+    const right = agent('r1', 'b-right', ['user-1', 'p1']);
+
+    const layout = transposeLayout(layoutForest(buildLineageForest([parent, left, right])));
+    const byId = new Map(layout.nodes.map(n => [n.agent.id, n]));
+
+    // Depth → x: root in the leftmost column, children one column right.
+    expect(byId.get('p1')!.px).toBe(PAD);
+    expect(byId.get('l1')!.px).toBe(PAD + NODE_W + H_GAP_X);
+    expect(byId.get('r1')!.px).toBe(PAD + NODE_W + H_GAP_X);
+
+    // Leaf slot → y: siblings stack, parent vertically centered between them.
+    expect(byId.get('l1')!.py).toBe(PAD);
+    expect(byId.get('r1')!.py).toBe(PAD + NODE_H + H_GAP_Y);
+    expect(byId.get('p1')!.py).toBe((byId.get('l1')!.py + byId.get('r1')!.py) / 2);
+  });
+
+  it('connects parent right-edge-center to child left-edge-center', () => {
+    const parent = agent('p1', 'parent', ['user-1']);
+    const left = agent('l1', 'a-left', ['user-1', 'p1']);
+    const right = agent('r1', 'b-right', ['user-1', 'p1']);
+
+    const layout = transposeLayout(layoutForest(buildLineageForest([parent, left, right])));
+    const byId = new Map(layout.nodes.map(n => [n.agent.id, n]));
+
+    expect(layout.edges).toHaveLength(2);
+    expect(layout.edges.map(e => `${e.parentId}->${e.childId}`).sort()).toEqual([
+      'p1->l1',
+      'p1->r1',
+    ]);
+    for (const e of layout.edges) {
+      const p = byId.get(e.parentId)!;
+      const c = byId.get(e.childId)!;
+      expect(e.x1).toBe(p.px + NODE_W);
+      expect(e.y1).toBe(p.py + NODE_H / 2);
+      expect(e.x2).toBe(c.px);
+      expect(e.y2).toBe(c.py + NODE_H / 2);
+      expect(e.x2).toBeGreaterThan(e.x1);
+    }
+  });
+
+  it('reports canvas size that bounds all nodes', () => {
+    const root = agent('r1', 'root', ['user-1']);
+    const mid = agent('m1', 'mid', ['user-1', 'r1']);
+    const leafA = agent('la', 'leaf-a', ['user-1', 'r1', 'm1']);
+    const leafB = agent('lb', 'leaf-b', ['user-1', 'r1', 'm1']);
+    const solo = agent('s1', 'solo', ['user-2']);
+
+    const layout = transposeLayout(layoutForest(buildLineageForest([root, mid, leafA, leafB, solo])));
+    for (const n of layout.nodes) {
+      expect(n.px).toBeGreaterThanOrEqual(PAD);
+      expect(n.py).toBeGreaterThanOrEqual(PAD);
+      expect(n.px + NODE_W).toBeLessThanOrEqual(layout.width);
+      expect(n.py + NODE_H).toBeLessThanOrEqual(layout.height);
+    }
+    // Three depth levels → the deepest column ends exactly PAD short of width.
+    expect(layout.width).toBe(PAD * 2 + 3 * NODE_W + 2 * H_GAP_X);
+  });
+
+  it('puts the user column on the left, centered across its roots', () => {
+    const a = agent('a1', 'alpha', ['user-1']);
+    const b = agent('b1', 'beta', ['user-1']);
+
+    const layout = transposeLayout(layoutForestWithUsers(buildLineageForest([a, b])));
+    const byId = new Map(layout.nodes.map(n => [n.agent.id, n]));
+
+    expect(layout.users).toHaveLength(1);
+    const u = layout.users[0];
+    expect(u.px).toBe(PAD);
+    expect(byId.get('a1')!.px).toBe(PAD + NODE_W + H_GAP_X);
+    expect(byId.get('b1')!.px).toBe(PAD + NODE_W + H_GAP_X);
+    expect(u.py).toBe((byId.get('a1')!.py + byId.get('b1')!.py) / 2);
+
+    // User → root edges leave the user card's right edge.
+    const uEdges = layout.edges.filter(e => e.parentId === userKey('user-1'));
+    expect(uEdges.map(e => e.childId).sort()).toEqual(['a1', 'b1']);
+    for (const e of uEdges) {
+      expect(e.x1).toBe(u.px + NODE_W);
+      expect(e.y1).toBe(u.py + NODE_H / 2);
+    }
   });
 });

@@ -19,6 +19,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import type { Orientation } from '../../shared/lineage.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
@@ -40,6 +41,8 @@ export class AgentGraphPage extends LitElement {
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private projectFilter = '';
+  /** Graph flow direction, persisted in the URL as ?dir=horizontal (absent = vertical). */
+  @state() private orientation: Orientation = 'vertical';
   /** True when the page was entered with a ?project= param already set in the URL. */
   private initiallyProjectScoped = false;
   /** Agent ID to center on load (?focus=<agent-id> deep link) */
@@ -56,6 +59,7 @@ export class AgentGraphPage extends LitElement {
     this.projectFilter = params.get('project') || '';
     this.initiallyProjectScoped = !!params.get('project');
     this.focusId = params.get('focus') || '';
+    this.orientation = params.get('dir') === 'horizontal' ? 'horizontal' : 'vertical';
 
     const hydrated = stateManager.getAgents();
     if (hydrated.length > 0) {
@@ -151,6 +155,18 @@ export class AgentGraphPage extends LitElement {
     window.history.replaceState({}, '', url);
   }
 
+  /** Keeps the URL's ?dir= param in sync with the graph orientation toggle. */
+  private onOrientationChange(e: CustomEvent<{ orientation: Orientation }>): void {
+    this.orientation = e.detail.orientation;
+    const url = new URL(window.location.href);
+    if (this.orientation === 'horizontal') {
+      url.searchParams.set('dir', 'horizontal');
+    } else {
+      url.searchParams.delete('dir');
+    }
+    window.history.replaceState({}, '', url);
+  }
+
   /** Grid/list picks from the toggle navigate back to the agents list. */
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     const mode = e.detail.view;
@@ -208,6 +224,8 @@ export class AgentGraphPage extends LitElement {
                 <scion-agent-tree-view
                   .agents=${this.visibleAgents}
                   focusId=${this.focusId}
+                  orientation=${this.orientation}
+                  @orientation-change=${this.onOrientationChange}
                 ></scion-agent-tree-view>
               `}
       </div>
