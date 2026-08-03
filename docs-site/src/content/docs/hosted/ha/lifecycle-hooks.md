@@ -3,16 +3,17 @@ title: Lifecycle Hooks & Customization Hooks
 description: Hub-side webhooks on agent phase transitions and in-container pre-start shell scripts for environment initialization.
 ---
 
-Scion supports two distinct types of hooks to orchestrate and customize the agent lifecycle:
+:::note[Lifecycle Hooks vs. Pre-Start Hooks]
+Scion features two distinct kinds of hooks that serve different purposes:
+1. **Lifecycle Hooks (This guide):** Hub-side, admin-authored automation rules that run **outside the agent container** on the Hub *after* an agent has successfully crossed a phase transition (e.g. `running`, `stopped`). Execution is asynchronous and does not block the agent's startup or state changes.
+2. **Pre-Start Hooks:** Custom shell scripts running **inside the agent container** on the Runtime Broker *before* the agent process starts (configured by project owners or hub admins). If a pre-start hook fails, agent startup is aborted. See the [Pre-Start Hooks User Guide](/scion/hosted/user/pre-start-hooks/).
+:::
 
-1. **Hub-Side Lifecycle Hooks (Asynchronous/Non-blocking)**: Admin-authored, Hub-side automation rules that fire an HTTP or webhook action when an agent crosses an **authoritative phase transition** (such as starting or stopping). They execute asynchronously **outside the agent container** and do not affect agent execution on failure.
-2. **In-Container Pre-Start Customization Hooks (Synchronous/Blocking)**: Project-scoped or Hub-scoped shell scripts that execute **inside the agent container** during initialization before the main harness process begins. They run synchronously, and if they exit with a non-zero code, agent startup is aborted.
-
----
-
-## Hub-Side Lifecycle Hooks
-
-Hub-side lifecycle hooks are stored in the Hub database, managed entirely through the admin API, and run outside the agent container.
+Lifecycle hooks are Hub-side, admin-authored automation rules that fire an HTTP
+or webhook action when an agent crosses an **authoritative phase transition**.
+They are stored in the Hub database, managed entirely through the admin API, and
+run **outside the agent container** — there is no in-container scripting and no
+code is executed inside the agent's runtime.
 
 Hooks run asynchronously *after* a phase transition has been committed. Hook
 execution never blocks, delays, or fails the transition itself: if a hook errors

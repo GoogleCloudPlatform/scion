@@ -85,6 +85,7 @@ session.
 
 - **Flags:**
     - `-a, --attach`: Attach to the agent immediately.
+    - `-f, --force`: Force resume an agent in the `error` phase. This attempts an in-place restart of a crashed or interrupted session, preserving the prior harness conversation state instead of starting fresh.
 
 ### `scion attach`
 

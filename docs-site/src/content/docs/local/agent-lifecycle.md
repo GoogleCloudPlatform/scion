@@ -120,15 +120,23 @@ gracefully and exit cleanly (code 0). Only a *genuine* crash or a hard kill
 produces the `error` phase — stopping an agent never leaves it in `error`.
 :::
 
-The `error` phase is **restartable**. Starting the agent again clears the error
-and runs a **fresh** session:
+The `error` phase is **restartable**. By default, starting the agent again clears the error and runs a **fresh** session:
 
 ```bash
 scion start <agent-name>
 ```
 
-Because the crash discarded the previous run, this is a clean start rather than
-a session continuation.
+Because the crash discarded the previous run, this is a clean start rather than a session continuation.
+
+#### In-Place Session Resume after Crash
+
+If the agent's harness supports session resume, you can force Scion to attempt to continue the prior conversation rather than starting fresh. This is useful for recovering a crashed or interrupted session:
+
+```bash
+scion resume <agent-name> --force
+```
+
+Using `scion resume --force` on an agent in the `error` phase permits an in-place restart, passing the harness-specific resume/continue flag so that the interrupted conversation is preserved.
 
 ## Auto-Suspend of Stalled Agents
 

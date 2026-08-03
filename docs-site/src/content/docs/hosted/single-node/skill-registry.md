@@ -39,6 +39,13 @@ The GitHub resolver includes several optimizations and fallbacks:
 * **Full SHA Short-Circuit**: If the requested `@<ref>` is a full 40-character git SHA, the resolver bypasses all GitHub API branch-existence checks and constructs the raw download URL directly, saving rate-limit quota.
 * **Cache Diagnostics**: Cache initialization errors are recorded with detailed logging for immediate operator visibility.
 
+#### Resolution caching and performance
+
+To avoid hitting GitHub API rate limits during concurrent agent launches, the Runtime Broker implements a **broker-level singleton resolution cache**:
+- **Broker-Level Singleton:** The cache is a long-lived, shared singleton service running within the Runtime Broker daemon, rather than a per-request ephemeral cache.
+- **Extended TTLs:** General resolution metadata remains cached for **30 minutes**.
+- **Git SHA Resolution (24h TTL):** Once a reference (like a branch or tag name) has been fully resolved to a specific Git commit SHA, the SHA resolution is cached for **24 hours**, bypassing external API queries entirely on subsequent requests.
+
 #### Private repository resolution
 
 For private GitHub repositories, Scion resolves skills securely using your project's configured git credentials or custom secrets:

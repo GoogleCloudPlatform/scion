@@ -400,6 +400,33 @@ If you see logs but they aren't linked to traces in the Cloud Trace waterfall:
 1.  Ensure the agent is using the `sciontool` gRPC port (4317).
 2.  Verify `SCION_OTEL_LOG_ENABLED=true` is set on the system components.
 
+### Common Hub and Broker API Errors
+
+#### 1. `no_runtime_broker` (422 Unprocessable Entity)
+* **Symptom:** Dispatched agents or CLI commands like `scion start` fail immediately with a `no_runtime_broker` error code.
+* **Observable:** The Hub server logs contain `ErrCodeNoRuntimeBroker` or `no_runtime_broker` error messages.
+* **Root Cause:** The Runtime Broker is disconnected, locked up, or saturated (failing to send heartbeats within the expected interval). High load or redundant synchronous workspace sweeps can block heartbeats.
+* **Operator Action:** 
+  1. Check broker daemon health and restart the broker service if unresponsive.
+  2. Wait 30–60 seconds for heartbeats to resume after a restart.
+  3. Reduce concurrent agent start operations under high load.
+
+#### 2. Agent Token Verification Failures
+* **Symptom:** Agents fail to start or refresh tokens with errors like `failed to verify token: error in cryptographic primitive` or repeat `Token refresh failed … 401` in logs.
+* **Observable:** Loop between user `login` and `session_expired` states.
+* **Root Cause:** The Hub regenerated its JWT/session signing keys on restart, or there is a multi-replica key mismatch (replicas using different signing keys).
+* **Operator Action:** 
+  1. Pin the session/JWT signing key securely in the deployment configuration. Ensure `SESSION_SECRET` (or `SharedSigningSecret`) is set consistently across all Hub replicas and survives restarts.
+  2. Have users run `scion message <agent> "continue"` to trigger resume, or perform a manual login refresh.
+
+#### 3. Duplicate `sciontool` Processes (Split-Brain Agent)
+* **Symptom:** An agent gets stuck in the `starting` phase while its activity says `completed`, or has port conflicts.
+* **Observable:** Agent logs show `sciontool init starting as PID <different-pid>` and `Failed to start telemetry: ... address already in use` or similar port conflicts.
+* **Root Cause:** A duplicate `sciontool` process was spawned. This typically happens when test runners (like `go test`) or child processes inherit Hub/agent environment variables and invoke a second `sciontool init`.
+* **Operator Action:** 
+  1. Inspect running processes inside the agent container and terminate the duplicate PID.
+  2. Recreate the agent to clean up the telemetry socket and state files.
+
 ## Related Guides
 
 - [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) - Detailed telemetry configuration

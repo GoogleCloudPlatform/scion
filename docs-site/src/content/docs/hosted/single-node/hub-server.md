@@ -153,6 +153,13 @@ All maintenance tasks executed through the panel are tracked. The maintenance in
 - Execution history detailing operation duration, completion status, and log archives.
 - Automated cleanup of stalled operations during server startup.
 
+#### Concurrency Guard
+
+To guarantee server stability, the Hub enforces a strict **concurrency guard** on all maintenance operations:
+- **Mutual Exclusion:** Running multiple operations (such as parallel `go build` compilations) simultaneously is rejected.
+- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds.
+- **Status Monitoring:** Operators can trace progress and view active logs on the dashboard's maintenance interface.
+
 ### WebDAV Synchronization
 
 The Hub provides robust WebDAV endpoints for transparent file access across native, shared, and remote linked projects.
