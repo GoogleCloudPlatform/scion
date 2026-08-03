@@ -130,6 +130,7 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/login$/, tag: 'scion-login-page', load: () => import('../components/pages/login.js') },
   { pattern: /^\/invite$/, tag: 'scion-page-invite', load: () => import('../components/pages/invite.js') },
   { pattern: /^\/onboarding$/, tag: 'scion-page-onboarding', load: () => import('../components/pages/onboarding.js') },
+  { pattern: /^\/intake$/, tag: 'scion-page-secret-intake', load: () => import('../components/pages/secret-intake.js') },
   { pattern: /^\/$/, tag: 'scion-page-home', load: () => import('../components/pages/home.js') },
   { pattern: /^\/projects$/, tag: 'scion-page-projects', load: () => import('../components/pages/projects.js') },
   { pattern: /^\/agents$/, tag: 'scion-page-agents', load: () => import('../components/pages/agents.js') },
@@ -179,7 +180,7 @@ const ROUTES: RouteConfig[] = [
 /**
  * Routes that render without the app shell (full-page layout)
  */
-const STANDALONE_ROUTES = new Set(['scion-login-page', 'scion-page-invite', 'scion-page-onboarding']);
+const STANDALONE_ROUTES = new Set(['scion-login-page', 'scion-page-invite', 'scion-page-onboarding', 'scion-page-secret-intake']);
 
 /**
  * Routes that render inside the profile shell instead of the main app shell
