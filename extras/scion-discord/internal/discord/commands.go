@@ -18,6 +18,7 @@ import (
 
 // AgentInfo holds an agent's slug and current activity state.
 type AgentInfo struct {
+	ID       string `json:"id"`
 	Slug     string `json:"slug"`
 	Activity string `json:"activity,omitempty"`
 	Phase    string `json:"phase,omitempty"`
@@ -71,6 +72,9 @@ type HubClient interface {
 	// onBehalfOf is a namespaced principal (e.g. "user:alice@example.com"); it is
 	// sent as the X-Scion-On-Behalf-Of header, NOT in the body.
 	CreateAgent(ctx context.Context, projectID string, req CreateAgentRequest, onBehalfOf string) (*CreateAgentResponse, error)
+
+	// HubBaseURL returns the base URL of the hub (e.g. "https://hub.example.com").
+	HubBaseURL() string
 }
 
 // CommandHandler manages Discord slash command registration and dispatch.
@@ -280,6 +284,18 @@ func (h *CommandHandler) RegisterCommandsForGuild(guildID string) error {
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "terminal",
+				Description: "Get the web terminal URL for an agent",
+				Options: []*discordgo.ApplicationCommandOption{{
+					Type:         discordgo.ApplicationCommandOptionString,
+					Name:         "agent",
+					Description:  "Agent name",
+					Required:     true,
+					Autocomplete: true,
+				}},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
 				Name:        "send",
 				Description: "Send a file by path or search for files by name",
 				Options: []*discordgo.ApplicationCommandOption{
@@ -321,6 +337,7 @@ var ephemeralCommands = map[string]bool{
 	"unlink":   true,
 	"settings": true,
 	"default":  true,
+	"terminal": true,
 	"thread":   true,
 	"send":     true,
 }
@@ -390,6 +407,8 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 			h.HandleSettings(s, i)
 		case "default":
 			h.HandleDefault(s, i)
+		case "terminal":
+			h.HandleTerminal(s, i)
 		case "thread":
 			h.HandleThread(s, i)
 		case "send":
@@ -526,6 +545,7 @@ func helpText() string {
 		"`/scion msg <agent> <text>` — Send a message to an agent\n" +
 		"`/scion logs <agent>` — View agent logs\n" +
 		"`/scion default [agent]` — Set or clear the default agent\n" +
+		"`/scion terminal <agent>` — Get the web terminal URL for an agent\n" +
 		"`/scion send <path>` — Send a file by path or search for files\n" +
 		"`/scion thread <title> [template]` — Create a thread with a new agent\n" +
 		"`/scion register` — Link your Discord account to Scion Hub\n" +
@@ -1229,6 +1249,48 @@ func isForumChannelType(s *discordgo.Session, channelID string) bool {
 
 	return ch.Type == discordgo.ChannelTypeGuildForum ||
 		ch.Type == discordgo.ChannelTypeGuildMedia
+}
+
+// HandleTerminal returns the web terminal URL for a running agent.
+func (h *CommandHandler) HandleTerminal(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	agentSlug := getSubcommandOption(i, "agent")
+	if agentSlug == "" {
+		h.followup(s, i, "Usage: `/scion terminal <agent-name>`")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
+	if err != nil || link == nil {
+		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
+		return
+	}
+
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	if err != nil {
+		h.followup(s, i, "Failed to fetch agents. Please try again.")
+		return
+	}
+
+	for _, agent := range agents {
+		if strings.EqualFold(agent.Slug, agentSlug) {
+			if strings.ToLower(agent.Phase) != "running" {
+				phase := agent.Phase
+				if phase == "" {
+					phase = "unknown"
+				}
+				h.followup(s, i, fmt.Sprintf("Agent **%s** is not running (phase: %s).", agent.Slug, phase))
+				return
+			}
+			terminalURL := fmt.Sprintf("%s/agents/%s/terminal", h.hubClient.HubBaseURL(), agent.ID)
+			h.followup(s, i, fmt.Sprintf("Terminal for **%s**: %s", agent.Slug, terminalURL))
+			return
+		}
+	}
+
+	h.followup(s, i, fmt.Sprintf("Agent '%s' not found in this project.", agentSlug))
 }
 
 // HandleThread creates a Discord thread and a Scion agent in one command.

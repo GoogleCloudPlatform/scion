@@ -57,6 +57,7 @@ type hubAgentsResponse struct {
 }
 
 type hubAgent struct {
+	ID       string `json:"id"`
 	Slug     string `json:"slug"`
 	Activity string `json:"activity"`
 	Phase    string `json:"phase"`
@@ -205,7 +206,7 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 
 	agents := make([]AgentInfo, len(result.Agents))
 	for i, a := range result.Agents {
-		agents[i] = AgentInfo{Slug: a.Slug, Activity: a.Activity, Phase: a.Phase}
+		agents[i] = AgentInfo{ID: a.ID, Slug: a.Slug, Activity: a.Activity, Phase: a.Phase}
 	}
 	return agents, nil
 }
@@ -387,6 +388,10 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 		he := parseHubError(resp)
 		return nil, fmt.Errorf("create agent returned status %d: %s", resp.StatusCode, he.Message)
 	}
+}
+
+func (c *httpHubClient) HubBaseURL() string {
+	return c.hubURL
 }
 
 func (c *httpHubClient) signRequest(req *http.Request) error {

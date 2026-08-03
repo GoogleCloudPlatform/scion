@@ -73,6 +73,10 @@ func (f *fakeHubClient) ListAgents(_ context.Context, projectID string) ([]Agent
 	return f.agents[projectID], nil
 }
 
+func (f *fakeHubClient) HubBaseURL() string {
+	return "https://hub.example.com"
+}
+
 // fakeTGServerV2 extends fakeTelegramServer with v2 endpoint support.
 type fakeTGServerV2 struct {
 	srv *httptest.Server

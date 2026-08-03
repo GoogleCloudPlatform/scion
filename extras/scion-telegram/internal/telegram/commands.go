@@ -31,8 +31,10 @@ import (
 
 // AgentInfo holds an agent's slug and current activity state.
 type AgentInfo struct {
+	ID       string `json:"id"`
 	Slug     string `json:"slug"`
 	Activity string `json:"activity,omitempty"`
+	Phase    string `json:"phase,omitempty"`
 }
 
 // HubClient provides access to the Scion hub API for project and agent listing.
@@ -41,6 +43,9 @@ type HubClient interface {
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
 	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
 	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
+
+	// HubBaseURL returns the base URL of the hub (e.g. "https://hub.example.com").
+	HubBaseURL() string
 }
 
 // CommandHandler processes bot commands from incoming Telegram messages.
@@ -104,6 +109,9 @@ func (h *CommandHandler) HandleCommand(msg *TGMessage) bool {
 		return true
 	case "/help":
 		h.handleHelp(msg)
+		return true
+	case "/terminal":
+		h.handleTerminal(msg)
 		return true
 	case "/status":
 		h.handleStatus(msg)
@@ -245,6 +253,58 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 	h.replyWithKeyboardInThread(chatID, threadID, promptText, kb)
 }
 
+func (h *CommandHandler) handleTerminal(msg *TGMessage) {
+	chatID := msg.Chat.ID
+
+	// Parse agent name from the message text.
+	parts := strings.Fields(msg.Text)
+	if len(parts) < 2 {
+		h.reply(chatID, "Usage: /terminal <agent-name>")
+		return
+	}
+	agentName := parts[1]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	link, err := h.store.GetGroupLink(ctx, chatID)
+	if err != nil {
+		h.log.Error("Failed to get group link", "chat_id", chatID, "error", err)
+		h.reply(chatID, "Something went wrong. Please try again.")
+		return
+	}
+
+	if link == nil {
+		h.reply(chatID, "This group is not linked to a project. Use /setup first.")
+		return
+	}
+
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	if err != nil {
+		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
+		h.reply(chatID, "Failed to fetch agents. Please try again later.")
+		return
+	}
+
+	for _, agent := range agents {
+		if strings.EqualFold(agent.Slug, agentName) {
+			if strings.ToLower(agent.Phase) != "running" {
+				phase := agent.Phase
+				if phase == "" {
+					phase = "unknown"
+				}
+				h.reply(chatID, fmt.Sprintf("Agent '%s' is not running (phase: %s).", agent.Slug, phase))
+				return
+			}
+			terminalURL := fmt.Sprintf("%s/agents/%s/terminal", h.hubClient.HubBaseURL(), agent.ID)
+			h.reply(chatID, fmt.Sprintf("Terminal for *%s*: %s", agent.Slug, terminalURL))
+			return
+		}
+	}
+
+	h.reply(chatID, fmt.Sprintf("Agent '%s' not found in this project.", agentName))
+}
+
 func (h *CommandHandler) handleAgents(msg *TGMessage) {
 	chatID := msg.Chat.ID
 
@@ -339,6 +399,7 @@ func (h *CommandHandler) handleHelp(msg *TGMessage) {
 			"/setup — Link this group to a project\n" +
 			"/default — Set the default agent\n" +
 			"/agents — List agents in the linked project\n" +
+			"/terminal <agent> — Get the web terminal URL for an agent\n" +
 			"/settings — Configure group settings\n" +
 			"/unlink — Unlink this group from its project\n" +
 			"/help — Show this help message\n\n" +
@@ -658,8 +719,10 @@ type hubAgentsResponse struct {
 }
 
 type hubAgent struct {
+	ID       string `json:"id"`
 	Slug     string `json:"slug"`
 	Activity string `json:"activity"`
+	Phase    string `json:"phase"`
 }
 
 func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
@@ -804,9 +867,13 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 
 	agents := make([]AgentInfo, len(result.Agents))
 	for i, a := range result.Agents {
-		agents[i] = AgentInfo{Slug: a.Slug, Activity: a.Activity}
+		agents[i] = AgentInfo{ID: a.ID, Slug: a.Slug, Activity: a.Activity, Phase: a.Phase}
 	}
 	return agents, nil
+}
+
+func (c *httpHubClient) HubBaseURL() string {
+	return c.hubURL
 }
 
 func (c *httpHubClient) signRequest(req *http.Request) error {
