@@ -29,8 +29,9 @@ import (
 
 // CloneProjectRequest is the request body for POST /api/v1/projects/{id}/clone.
 type CloneProjectRequest struct {
-	Name string `json:"name"` // required
-	Slug string `json:"slug"` // optional explicit slug override
+	Name       string `json:"name"`                 // required
+	Slug       string `json:"slug"`                 // optional explicit slug override
+	AsTemplate bool   `json:"asTemplate,omitempty"` // mark clone as template
 }
 
 // handleProjectClone clones a project's configuration into a new project.
@@ -175,6 +176,20 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			}
 			clone.Labels[store.LabelWorkspaceMode] = srcMode
 		}
+	}
+
+	// ── asTemplate: mark clone as a project template ─────────────────────
+	if req.AsTemplate {
+		// Admin-only: creating templates is a hub-management action
+		if user := GetUserIdentityFromContext(ctx); user == nil || user.Role() != "admin" {
+			Forbidden(w)
+			return
+		}
+		if clone.Labels == nil {
+			clone.Labels = make(map[string]string)
+		}
+		clone.Labels[store.LabelTemplate] = "true"
+		clone.Visibility = store.VisibilityTeam
 	}
 
 	// ── Rollback stack ───────────────────────────────────────────────────

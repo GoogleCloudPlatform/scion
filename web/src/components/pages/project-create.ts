@@ -27,7 +27,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
 import '../shared/dir-browser.js';
 
-type ProjectMode = 'git' | 'hub' | 'linked';
+type ProjectMode = 'git' | 'hub' | 'linked' | 'template';
 type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
 
 interface ValidatePathResponse {
@@ -101,6 +101,16 @@ export class ScionPageProjectCreate extends LitElement {
 
   @state()
   private embeddedBrokerID = '';
+
+  // Template mode state
+  @state()
+  private templates: Array<{id: string; name: string; slug: string}> = [];
+
+  @state()
+  private selectedTemplateId = '';
+
+  @state()
+  private templatesLoading = false;
 
   private pathCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -432,6 +442,26 @@ export class ScionPageProjectCreate extends LitElement {
 
   private onModeChange(e: Event): void {
     this.mode = (e.target as HTMLElement & { value: string }).value as ProjectMode;
+    if (this.mode === 'template') {
+      void this.loadTemplates();
+    }
+  }
+
+  private async loadTemplates(): Promise<void> {
+    this.templatesLoading = true;
+    try {
+      const res = await apiFetch('/api/v1/projects?isTemplate=true');
+      if (res.ok) {
+        const data = (await res.json()) as { projects?: Array<{id: string; name: string; slug: string}> };
+        this.templates = data.projects ?? [];
+      } else {
+        this.error = 'Failed to load templates. Please try again.';
+      }
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load templates.';
+    } finally {
+      this.templatesLoading = false;
+    }
   }
 
   private gitRemoteCheckTimer: ReturnType<typeof setTimeout> | null = null;
@@ -512,6 +542,27 @@ export class ScionPageProjectCreate extends LitElement {
     this.error = null;
 
     try {
+      // Template mode: clone from the selected template
+      if (this.mode === 'template') {
+        if (!this.selectedTemplateId) {
+          this.error = 'Please select a template.';
+          this.submitting = false;
+          return;
+        }
+        const response = await apiFetch(`/api/v1/projects/${this.selectedTemplateId}/clone`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: this.name.trim() }),
+        });
+        if (!response.ok) {
+          const errorText = await extractApiError(response, 'Failed to create project from template');
+          throw new Error(errorText);
+        }
+        const created = (await response.json()) as { id: string };
+        this.navigateToProject(created.id);
+        return;
+      }
+
       const body: Record<string, unknown> = {
         name: this.name.trim(),
         visibility: this.visibility,
@@ -646,13 +697,16 @@ export class ScionPageProjectCreate extends LitElement {
               <sl-option value="hub">Hub-managed Workspace</sl-option>
               <sl-option value="git">Git Repository</sl-option>
               <sl-option value="linked">Local Directory (linked)</sl-option>
+              <sl-option value="template">From Template</sl-option>
             </sl-select>
             <div class="hint">
               ${this.mode === 'hub'
                 ? 'A workspace managed by the Hub. No git repository required.'
                 : this.mode === 'linked'
                   ? 'Link a local directory. The directory stays where it is and is operated on in place.'
-                  : 'Link to an existing git repository for source-controlled workspaces.'}
+                  : this.mode === 'template'
+                    ? 'Create a new project from an existing project template.'
+                    : 'Link to an existing git repository for source-controlled workspaces.'}
             </div>
           </div>
 
@@ -752,6 +806,25 @@ export class ScionPageProjectCreate extends LitElement {
               `
             : nothing}
 
+          ${this.mode === 'template'
+            ? html`
+                <div class="form-field">
+                  <label>Template</label>
+                  ${this.templatesLoading ? html`<sl-spinner></sl-spinner>` : html`
+                  <sl-select
+                    placeholder="Select a template..."
+                    .value=${this.selectedTemplateId}
+                    @sl-change=${(e: Event) => (this.selectedTemplateId = (e.target as HTMLSelectElement).value)}
+                  >
+                    ${this.templates.length === 0
+                      ? html`<sl-option disabled value="">No templates available</sl-option>`
+                      : this.templates.map(t => html`<sl-option value=${t.id}>${t.name}</sl-option>`)}
+                  </sl-select>
+                  `}
+                </div>
+              `
+            : nothing}
+
           ${this.mode === 'linked'
             ? html`
                 <div class="form-field">
@@ -816,6 +889,7 @@ export class ScionPageProjectCreate extends LitElement {
               `
             : nothing}
 
+          ${this.mode !== 'template' ? html`
           <div class="form-field">
             <label for="slug">Slug</label>
             <sl-input
@@ -826,6 +900,7 @@ export class ScionPageProjectCreate extends LitElement {
             ></sl-input>
             <div class="hint">URL-safe identifier. Auto-derived from name if left unchanged.</div>
           </div>
+          ` : nothing}
 
           ${this.mode === 'git'
             ? html`
@@ -844,6 +919,7 @@ export class ScionPageProjectCreate extends LitElement {
               `
             : nothing}
 
+          ${this.mode !== 'template' ? html`
           <div class="form-field">
             <label for="visibility">Visibility</label>
             <sl-select
@@ -858,6 +934,7 @@ export class ScionPageProjectCreate extends LitElement {
               <sl-option value="public">Public</sl-option>
             </sl-select>
           </div>
+          ` : nothing}
 
           <div class="form-actions">
             <sl-button

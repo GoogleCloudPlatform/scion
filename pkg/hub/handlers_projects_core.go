@@ -141,6 +141,21 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		Slug:       query.Get("slug"),
 	}
 
+	// Template filtering: default to excluding template projects.
+	// ?isTemplate=true returns only templates; absent or false excludes them.
+	switch query.Get("isTemplate") {
+	case "true":
+		isTemplate := true
+		filter.IsTemplate = &isTemplate
+	case "false", "":
+		isTemplate := false
+		filter.IsTemplate = &isTemplate
+	default:
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"isTemplate must be 'true' or 'false'", nil)
+		return
+	}
+
 	// scope=mine: projects the current user owns
 	// scope=shared: projects where the user is a member/admin but not the owner
 	// mine=true (legacy): projects the user owns or is a member of
@@ -1486,6 +1501,12 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 	// sub-resource with no PUT, not a mode of the settings endpoint.
 	if subPath == "settings/resolved" {
 		s.handleProjectSettingsResolved(w, r, projectID)
+		return
+	}
+
+	// Check for nested /set-template path
+	if subPath == "set-template" {
+		s.handleSetTemplate(w, r, projectID)
 		return
 	}
 

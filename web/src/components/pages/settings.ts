@@ -32,6 +32,7 @@ import '../shared/resource-list.js';
 import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
+import '../shared/project-template-list.js';
 
 @customElement('scion-page-settings')
 export class ScionPageSettings extends LitElement {
@@ -166,6 +167,9 @@ export class ScionPageSettings extends LitElement {
           <sl-tab slot="nav" panel="skills" ?active=${this.activeTab === 'skills'}
             >Skills</sl-tab
           >
+          <sl-tab slot="nav" panel="project-templates" ?active=${this.activeTab === 'project-templates'}
+            >Project Templates</sl-tab
+          >
 
           <sl-tab-panel name="env-vars">
             <scion-env-var-list scope="hub" apiBasePath="/api/v1" compact></scion-env-var-list>
@@ -233,6 +237,15 @@ export class ScionPageSettings extends LitElement {
               can be added and removed by hub admins.
             </p>
             <scion-injected-skills-panel scope="hub"></scion-injected-skills-panel>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="project-templates">
+            <p class="tab-intro">
+              Project templates for quick project setup. Create a template from any
+              existing project, then use it to create new projects with pre-configured
+              settings.
+            </p>
+            <scion-project-template-list></scion-project-template-list>
           </sl-tab-panel>
         </sl-tab-group>
       </div>
