@@ -30,6 +30,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { showToast } from '../../utils/toast.js';
 
 export type ResourceKind = 'template' | 'harness-config';
 
@@ -40,6 +41,7 @@ interface ResourceItem {
   description?: string;
   harness?: string;
   imageStatus?: string;
+  sourceUrl?: string;
 }
 
 @customElement('scion-resource-list')
@@ -86,6 +88,12 @@ export class ScionResourceList extends LitElement {
   @state() private actionError = '';
   @state() private cloneName = '';
   @state() private deleteFiles = true;
+
+  @state() private _refreshAllRunning = false;
+  @state() private _itemRefreshStatus: Map<string, 'pending' | 'running' | 'success' | 'error'> =
+    new Map();
+
+  private _statusClearTimer: ReturnType<typeof setTimeout> | undefined;
 
   @state() private globalPickerOpen = false;
   @state() private globalItems: ResourceItem[] = [];
@@ -234,10 +242,6 @@ export class ScionResourceList extends LitElement {
       margin-top: 0.75rem;
     }
 
-    .clone-global-btn {
-      margin-bottom: 0.75rem;
-    }
-
     .global-picker-list {
       display: flex;
       flex-direction: column;
@@ -284,11 +288,51 @@ export class ScionResourceList extends LitElement {
       color: var(--scion-text-muted, #64748b);
       margin-top: 0.125rem;
     }
+
+    .list-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .refresh-status {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.25rem;
+      height: 1.25rem;
+      flex-shrink: 0;
+    }
+    .refresh-status sl-spinner {
+      font-size: 0.875rem;
+      --track-width: 2px;
+    }
+    .refresh-status sl-icon {
+      font-size: 0.875rem;
+    }
+    .refresh-status .refresh-success {
+      color: var(--sl-color-success-600, #16a34a);
+    }
+    .refresh-status .refresh-error {
+      color: var(--sl-color-danger-600, #dc2626);
+    }
+    .refresh-status .refresh-pending {
+      color: var(--sl-color-neutral-400, #94a3b8);
+    }
   `;
 
   override connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this._statusClearTimer) {
+      clearTimeout(this._statusClearTimer);
+      this._statusClearTimer = undefined;
+    }
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -331,7 +375,9 @@ export class ScionResourceList extends LitElement {
       }
       const data = (await response.json()) as Record<string, ResourceItem[]>;
       const list = this.kind === 'template' ? data.templates : data.harnessConfigs;
-      this.items = (Array.isArray(list) ? list : []).slice().sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
+      this.items = (Array.isArray(list) ? list : [])
+        .slice()
+        .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
     } catch (err) {
       console.error(`Failed to load ${this.apiResource}:`, err);
       this.error = err instanceof Error ? err.message : `Failed to load ${this.apiResource}`;
@@ -413,14 +459,11 @@ export class ScionResourceList extends LitElement {
       if (this.scope) body.scope = this.scope;
       if (this.scope === 'project' && this.scopeId) body.scopeId = this.scopeId;
 
-      const response = await apiFetch(
-        `/api/v1/${this.apiResource}/${this.cloneTarget.id}/clone`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
-      );
+      const response = await apiFetch(`/api/v1/${this.apiResource}/${this.cloneTarget.id}/clone`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
       if (response.status === 409) {
         this.actionError = 'A resource with this slug already exists. Choose a different name.';
         this.actionInProgress = false;
@@ -458,7 +501,9 @@ export class ScionResourceList extends LitElement {
       }
       const data = (await response.json()) as Record<string, ResourceItem[]>;
       const list = this.kind === 'template' ? data.templates : data.harnessConfigs;
-      this.globalItems = (Array.isArray(list) ? list : []).slice().sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
+      this.globalItems = (Array.isArray(list) ? list : [])
+        .slice()
+        .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
     } catch (err) {
       this.globalError = err instanceof Error ? err.message : 'Failed to load global resources';
     } finally {
@@ -480,6 +525,103 @@ export class ScionResourceList extends LitElement {
     this.actionInProgress = false;
   }
 
+  // ── Refresh All from Source ─────────────────────────────────────────
+
+  /**
+   * Reload items without showing the global loading spinner.
+   * Used after Refresh All to preserve per-row status indicators.
+   */
+  private async _reloadBackground(): Promise<void> {
+    try {
+      const params = new URLSearchParams({ status: 'active', limit: '100' });
+      if (this.scope) params.set('scope', this.scope);
+      if (this.scope === 'project' && this.scopeId) params.set('scopeId', this.scopeId);
+
+      const response = await apiFetch(`/api/v1/${this.apiResource}?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = (await response.json()) as Record<string, ResourceItem[]>;
+      const list = this.kind === 'template' ? data.templates : data.harnessConfigs;
+      this.items = (Array.isArray(list) ? list : [])
+        .slice()
+        .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
+    } catch (err) {
+      console.error(`Failed to background reload ${this.apiResource}:`, err);
+    }
+  }
+
+  private async _handleRefreshAll(): Promise<void> {
+    if (this._refreshAllRunning) return;
+    const refreshable = this.items.filter((item) => item.sourceUrl);
+    if (refreshable.length === 0) return;
+
+    // Clear any pending status-clear timer from a previous run
+    if (this._statusClearTimer) {
+      clearTimeout(this._statusClearTimer);
+      this._statusClearTimer = undefined;
+    }
+    this._itemRefreshStatus.clear();
+
+    this._refreshAllRunning = true;
+
+    // Set all to pending
+    for (const item of refreshable) {
+      this._itemRefreshStatus.set(item.id, 'pending');
+    }
+    this.requestUpdate();
+
+    // Fire all in parallel
+    const results = await Promise.allSettled(
+      refreshable.map(async (item) => {
+        this._itemRefreshStatus.set(item.id, 'running');
+        this.requestUpdate();
+        try {
+          const response = await apiFetch(`/api/v1/${this.apiResource}/${item.id}/reimport`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          if (!response.ok) {
+            const errMsg = await extractApiError(response, `HTTP ${response.status}`);
+            throw new Error(errMsg);
+          }
+          this._itemRefreshStatus.set(item.id, 'success');
+          this.requestUpdate();
+          return { id: item.id, name: item.name, success: true };
+        } catch (err) {
+          this._itemRefreshStatus.set(item.id, 'error');
+          this.requestUpdate();
+          return { id: item.id, name: item.name, success: false, error: err };
+        }
+      })
+    );
+
+    this._refreshAllRunning = false;
+
+    // Show summary toast
+    const succeeded = results.filter((r) => r.status === 'fulfilled' && r.value.success).length;
+    const failed = refreshable.length - succeeded;
+    if (failed === 0) {
+      showToast(
+        `Refreshed ${succeeded} harness config${succeeded !== 1 ? 's' : ''} successfully`,
+        'success'
+      );
+    } else {
+      showToast(`Refreshed ${succeeded}/${refreshable.length}, ${failed} failed`, 'warning');
+    }
+
+    // Reload the list in the background to preserve status indicators
+    await this._reloadBackground();
+
+    // Clear status indicators after delay
+    this._statusClearTimer = setTimeout(() => {
+      this._itemRefreshStatus.clear();
+      this.requestUpdate();
+      this._statusClearTimer = undefined;
+    }, 3000);
+  }
+
   // ── Render ─────────────────────────────────────────────────────────
 
   override render() {
@@ -492,14 +634,41 @@ export class ScionResourceList extends LitElement {
 
     const hasActions = this.canClone || this.canDelete;
 
+    const showRefreshAll =
+      this.kind === 'harness-config' && this.items.some((item) => item.sourceUrl);
+
+    const hasListHeader = (this.cloneFromGlobal && this.canClone) || showRefreshAll;
+
     return html`
-      ${this.cloneFromGlobal && this.canClone
+      ${hasListHeader
         ? html`
-            <div class="clone-global-btn">
-              <sl-button size="small" variant="default" @click=${() => this.openGlobalPicker()}>
-                <sl-icon slot="prefix" name="download"></sl-icon>
-                Clone from Global
-              </sl-button>
+            <div class="list-header">
+              ${this.cloneFromGlobal && this.canClone
+                ? html`
+                    <sl-button
+                      size="small"
+                      variant="default"
+                      @click=${() => this.openGlobalPicker()}
+                    >
+                      <sl-icon slot="prefix" name="download"></sl-icon>
+                      Clone from Global
+                    </sl-button>
+                  `
+                : nothing}
+              ${showRefreshAll
+                ? html`
+                    <sl-button
+                      size="small"
+                      variant="default"
+                      ?loading=${this._refreshAllRunning}
+                      ?disabled=${this._refreshAllRunning}
+                      @click=${() => this._handleRefreshAll()}
+                    >
+                      <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                      Refresh All from Source
+                    </sl-button>
+                  `
+                : nothing}
             </div>
           `
         : nothing}
@@ -510,26 +679,72 @@ export class ScionResourceList extends LitElement {
               ${this.items.map((item) => this.renderItem(item, hasActions))}
             </div>
           `}
-      ${this.renderDeleteDialog()} ${this.renderCloneDialog()}
-      ${this.renderGlobalPickerDialog()}
+      ${this.renderDeleteDialog()} ${this.renderCloneDialog()} ${this.renderGlobalPickerDialog()}
     `;
+  }
+
+  private renderRefreshStatus(item: ResourceItem) {
+    const status = this._itemRefreshStatus.get(item.id);
+    if (!status) return nothing;
+    switch (status) {
+      case 'pending':
+        return html`<span class="refresh-status"
+          ><sl-icon
+            class="refresh-pending"
+            name="hourglass-split"
+            aria-label="Refresh pending"
+          ></sl-icon
+        ></span>`;
+      case 'running':
+        return html`<span class="refresh-status"
+          ><sl-spinner aria-label="Refreshing"></sl-spinner
+        ></span>`;
+      case 'success':
+        return html`<span class="refresh-status"
+          ><sl-icon
+            class="refresh-success"
+            name="check-circle"
+            aria-label="Refresh successful"
+          ></sl-icon
+        ></span>`;
+      case 'error':
+        return html`<span class="refresh-status"
+          ><sl-icon
+            class="refresh-error"
+            name="x-circle"
+            aria-label="Refresh failed"
+          ></sl-icon
+        ></span>`;
+    }
   }
 
   private renderItem(item: ResourceItem, hasActions: boolean) {
     if (!hasActions) {
       return html`
-        <a href="${this.detailBasePath}/${this.detailSegment}/${item.id}" class="resource-row resource-item">
+        <a
+          href="${this.detailBasePath}/${this.detailSegment}/${item.id}"
+          class="resource-row resource-item"
+        >
           <sl-icon name=${this.icon}></sl-icon>
           <div class="resource-info">
             <div class="resource-name">${item.displayName || item.name}</div>
             ${item.description ? html`<div class="resource-meta">${item.description}</div>` : ''}
           </div>
           ${item.harness ? html`<span class="resource-badge">${item.harness}</span>` : ''}
-          ${item.imageStatus ? html`
-            <span class="image-status-badge ${item.imageStatus}">
-              ${item.imageStatus === 'valid' ? '✓' : item.imageStatus === 'invalid' ? '✗' : item.imageStatus === 'error' ? '⚠' : '?'}
-            </span>
-          ` : ''}
+          ${item.imageStatus
+            ? html`
+                <span class="image-status-badge ${item.imageStatus}">
+                  ${item.imageStatus === 'valid'
+                    ? '✓'
+                    : item.imageStatus === 'invalid'
+                      ? '✗'
+                      : item.imageStatus === 'error'
+                        ? '⚠'
+                        : '?'}
+                </span>
+              `
+            : ''}
+          ${this.renderRefreshStatus(item)}
           <sl-icon
             name="chevron-right"
             style="color: var(--sl-color-neutral-400); font-size: 0.875rem;"
@@ -547,11 +762,20 @@ export class ScionResourceList extends LitElement {
             ${item.description ? html`<div class="resource-meta">${item.description}</div>` : ''}
           </div>
           ${item.harness ? html`<span class="resource-badge">${item.harness}</span>` : ''}
-          ${item.imageStatus ? html`
-            <span class="image-status-badge ${item.imageStatus}">
-              ${item.imageStatus === 'valid' ? '✓' : item.imageStatus === 'invalid' ? '✗' : item.imageStatus === 'error' ? '⚠' : '?'}
-            </span>
-          ` : ''}
+          ${item.imageStatus
+            ? html`
+                <span class="image-status-badge ${item.imageStatus}">
+                  ${item.imageStatus === 'valid'
+                    ? '✓'
+                    : item.imageStatus === 'invalid'
+                      ? '✗'
+                      : item.imageStatus === 'error'
+                        ? '⚠'
+                        : '?'}
+                </span>
+              `
+            : ''}
+          ${this.renderRefreshStatus(item)}
           <sl-icon
             name="chevron-right"
             style="color: var(--sl-color-neutral-400); font-size: 0.875rem;"
@@ -574,7 +798,10 @@ export class ScionResourceList extends LitElement {
               ${this.canClone && this.canDelete ? html`<sl-divider></sl-divider>` : nothing}
               ${this.canDelete
                 ? html`
-                    <sl-menu-item class="menu-item-danger" @click=${() => this.openDeleteDialog(item)}>
+                    <sl-menu-item
+                      class="menu-item-danger"
+                      @click=${() => this.openDeleteDialog(item)}
+                    >
                       <sl-icon slot="prefix" name="trash"></sl-icon>
                       Delete
                     </sl-menu-item>
@@ -654,7 +881,9 @@ export class ScionResourceList extends LitElement {
     if (!this.cloneTarget) return nothing;
 
     const isFromGlobal =
-      this.cloneFromGlobal && this.scope === 'project' && !this.items.find((i) => i.id === this.cloneTarget!.id);
+      this.cloneFromGlobal &&
+      this.scope === 'project' &&
+      !this.items.find((i) => i.id === this.cloneTarget!.id);
 
     return html`
       <sl-dialog
@@ -704,11 +933,7 @@ export class ScionResourceList extends LitElement {
     if (!this.globalPickerOpen) return nothing;
     const label = this.kind === 'template' ? 'templates' : 'harness configs';
     return html`
-      <sl-dialog
-        label="Clone from Global"
-        open
-        @sl-request-close=${() => this.closeGlobalPicker()}
-      >
+      <sl-dialog label="Clone from Global" open @sl-request-close=${() => this.closeGlobalPicker()}>
         <p>Select a global ${this.kindLabel} to clone into this project.</p>
         ${this.globalLoading
           ? html`<div class="empty"><sl-spinner></sl-spinner></div>`
@@ -720,15 +945,10 @@ export class ScionResourceList extends LitElement {
                   <div class="global-picker-list">
                     ${this.globalItems.map(
                       (item) => html`
-                        <div
-                          class="global-picker-item"
-                          @click=${() => this.selectGlobalItem(item)}
-                        >
+                        <div class="global-picker-item" @click=${() => this.selectGlobalItem(item)}>
                           <sl-icon name=${this.icon}></sl-icon>
                           <div class="global-picker-info">
-                            <div class="global-picker-name">
-                              ${item.displayName || item.name}
-                            </div>
+                            <div class="global-picker-name">${item.displayName || item.name}</div>
                             ${item.description
                               ? html`<div class="global-picker-desc">${item.description}</div>`
                               : nothing}
