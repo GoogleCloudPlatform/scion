@@ -86,6 +86,54 @@ The A2A server listens on plain HTTP. **TLS must be terminated at a reverse prox
 | 8443 | A2A HTTP server (JSON-RPC, agent cards, health/metrics) |
 | 9090 | Broker plugin RPC (Hub connects here to push agent messages) |
 
+## Admin UI management
+
+The A2A bridge can be installed, configured, and monitored from the Scion Hub admin UI. This is the recommended approach for most deployments.
+
+### Installation via admin UI
+
+1. Navigate to **Admin > Integrations** in the Scion web UI.
+2. The A2A Bridge appears under **Available Integrations** (listed as "External service — installed separately, managed via admin UI").
+3. Click **Install** for the A2A Bridge entry.
+4. The Hub creates configuration files and registers the bridge in `settings.yaml`. The UI displays setup instructions including the binary name, config file path, and a sample start command.
+5. Build the bridge binary (see [Build the binary](#2-build-the-binary) below, or use `make build-a2a-bridge` from the repository root).
+6. Start the bridge process using the displayed command (e.g., `scion-a2a-bridge -config ~/.scion/scion-a2a-bridge.yaml`).
+7. Return to the admin UI and click **Reconnect** to activate the integration. The status changes to **Connected** once the Hub reaches the bridge's RPC endpoint.
+
+### Configuration via admin UI
+
+Once installed, the bridge's admin-managed settings can be edited from the integration detail page:
+
+| Setting | Description |
+|---------|-------------|
+| **Auth scheme** | Client authentication mode: `apiKey`, `bearer`, `none`, `hubUAT`, or `hubJWT`. Select from the dropdown. |
+| **API key** | Static API key for `apiKey`/`bearer` schemes. Stored in the Hub secret backend — never written to YAML files. Only shown when the auth scheme requires it. |
+| **External URL** | Public URL where A2A clients reach the bridge (e.g., `https://a2a.example.com`). Used in generated agent cards. |
+| **Rate limiting** | Enable/disable per-client rate limiting, with configurable requests-per-second and burst size. |
+| **Provider metadata** | Organization name and URL included in agent cards. |
+| **Timeouts** | Send-message timeout, SSE keepalive interval, and push notification retry limit. |
+
+Changes saved via the admin UI take effect immediately on the running bridge — no bridge restart is required. The Hub pushes the updated configuration over the existing RPC connection.
+
+### Project and agent exposure
+
+The admin UI provides a structured editor for controlling which projects and agents are reachable via A2A:
+
+- **Add projects**: Select a project from the dropdown to expose it over A2A.
+- **Restrict agents**: Optionally select specific agents within a project. Leave empty to expose all agents in the project.
+- **Auto-provision**: Toggle whether the bridge automatically provisions conversations for new A2A tasks.
+- **Default template**: Set the default agent template used when auto-provisioning.
+
+Changes to project/agent exposure take effect immediately without a bridge restart.
+
+### Operational notes
+
+- **Config changes are live.** Admin UI settings are pushed to the running bridge via RPC. No bridge restart is needed for admin-managed settings.
+- **Bootstrap settings remain operator-managed.** Listen addresses (`bridge.listen_address`, `plugin.listen_address`), TLS configuration, state database path, and the Hub signing key are configured in the bridge's own YAML file (`scion-a2a-bridge.yaml`). These are displayed as read-only in the admin UI.
+- **Config persistence.** The bridge persists admin overlay settings to `admin-overlay.json` in the state directory. This overlay survives bridge restarts — settings configured via the admin UI are re-applied at boot before the bridge begins serving.
+- **Version skew.** An older bridge binary with a newer Hub ignores the `Configure()` push (existing no-op behavior). A newer bridge with an older Hub simply never receives admin overlay pushes. Neither direction breaks messaging. The admin UI displays the bridge version so operators can identify pre-admin-support binaries.
+- **Dev-mode rebuild.** When the Hub is running with `MaintenanceConfig.RepoPath` set (development mode), the Update action rebuilds the bridge binary from source. The response instructs the operator to restart the bridge process manually — the Hub does not manage the bridge lifecycle.
+
 ## Setup and onboarding (agent instructions)
 
 Step-by-step instructions for installing, configuring, and running the A2A bridge from scratch. Every command is copy-paste ready.
