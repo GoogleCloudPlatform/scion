@@ -53,6 +53,10 @@ To prevent typos, 404s, and duplicate entries, Scion automatically validates and
 The old `scion://` scheme is no longer supported and is rejected during validation with a clear error pointing to `skill://`.
 :::
 
+:::note
+For private repository skills, the resolver preserves credentials end-to-end to prevent unauthenticated 404 errors during multi-step downloading. See [Secrets & Environment — Convention-based project secrets](/scion/hosted/user/secrets/#naming-convention) for configuring credentials for external private repositories.
+:::
+
 ### GCP Vertex AI source (`gcp-skill://`)
 
 The `gcp-skill://<alias>/<skillId>` form resolves the alias to a registered `gcp`-type registry endpoint and fetches the skill using GCP Application Default Credentials (ADC) with the `cloud-platform` scope. Ensure the broker/agent environment has ADC available.

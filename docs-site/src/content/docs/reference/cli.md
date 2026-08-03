@@ -110,7 +110,17 @@ Sends a message to a running agent's harness by enqueuing it into its input stre
     - `-i, --interrupt`: Interrupt the harness before sending the message.
     - `-b, --broadcast`: Send the message to all running agents in the current project.
     - `-a, --all`: Send the message to all running agents across all projects.
+    - `-w, --wake`: Resume a suspended agent before delivering the message.
+    - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
+        - **Constraints:** Cannot be combined with `--raw`, `--in`, or `--at`.
+        - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
     - `--notify`: Get notified when the target agent(s) respond or reach a terminal state after receiving the message.
+    - `--in <duration>`: Schedule message delivery after a duration (e.g., `30m`, `1h`). *(Requires Hub mode)*
+    - `--at <time>`: Schedule message delivery at an absolute time (ISO 8601, e.g., `2026-02-28T14:00:00Z`). *(Requires Hub mode)*
+    - `--plain`: Mark for plain-text delivery (the message still flows as structured JSON internally).
+    - `--raw`: Send literal bytes via tmux send-keys with no trailing Enter (supports control keys like arrows and Escape). Cannot be combined with `--attach`.
+    - `--channel <channel>`: Target a specific message channel (e.g., `telegram`, `gchat`, `web`).
+    - `--thread-id <id>`: Target a specific thread ID within the channel.
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
 

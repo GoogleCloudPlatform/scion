@@ -176,6 +176,8 @@ When resolving a `gh://owner/repo/...` URI, Scion checks credentials in this ord
 
 The first match wins. If no convention secret exists, behavior is identical to the default single-token resolution.
 
+*Note: Credentials resolved for private `gh://` URIs are preserved end-to-end through the entire download sequence, preventing unauthenticated fallback or 404 errors during multi-file resolution.*
+
 ### Injection Mode Behavior
 
 Convention-keyed GitHub secrets support the standard injection modes:

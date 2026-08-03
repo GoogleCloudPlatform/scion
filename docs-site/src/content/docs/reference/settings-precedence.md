@@ -106,6 +106,8 @@ existing value.
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_MODEL_CALLS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_DURATION` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
+| `SCION_WORKSPACE_MODE` | canonical workspace sharing mode (`shared-plain`, `clone-per-agent`, or `worktree-per-agent`) | **Unconditional** — overwrites |
+| `SCION_WORKSPACE_GIT` | `"true"` when the workspace is a git repository, absent otherwise | **Unconditional** — overwrites |
 | `SCION_TEMPLATE` | full template reference, for debugging | Set only when a template reference exists |
 | `SCION_BROKER_NAME` | broker name, defaults to `local` | **Guarded** — defers to an existing value |
 | `SCION_HARNESS` | harness name | **Guarded** — defers to an existing value |
