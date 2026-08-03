@@ -63,6 +63,12 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 - **Environment Hardening (`~/.claude/settings.json`)**: Scion pre-populates a strict permissions deny list and security hardeners in the agent's native settings file:
     - **Permissions Deny List**: Denies potentially hazardous operations such as `EnterPlanMode`, `ExitPlanMode`, `DesignSync`, `NotebookEdit`, `SendMessage`, `PushNotification`, `RemoteTrigger`, `ReportFindings`, `ScheduleWakeup`, `AskUserQuestion`, `CronCreate`, `CronDelete`, and `CronList`.
     - **Hardening Flags**: Disables experimental or outbound-connecting features by setting `disableBundledSkills`, `disableWorkflows`, `disableRemoteControl`, `disableClaudeAiConnectors`, and `disableArtifacts` to `true`.
+- **Model Resolution & Aliases:** The Claude harness's container-side `provision.py` dynamically resolves the requested model (provided via `--model` / `SCION_MODEL`) using the harness configuration's `model_aliases` mapping:
+  - `small` &rarr; `haiku` (or whatever `ANTHROPIC_DEFAULT_HAIKU_MODEL` resolves to)
+  - `medium` &rarr; `sonnet`
+  - `large` &rarr; `opus`
+  - `extra-large` &rarr; `fable`
+  The resolved model is set in the environment overlay as `ANTHROPIC_MODEL`. If no model is requested, it falls back to the default model `opus`. Note that setting `ANTHROPIC_MODEL` directly in your settings or a template environment block acts as an explicit, non-overridable pin.
 
 ### Known Limitations
 - Claude Code is a beta tool and its configuration format may change.

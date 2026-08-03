@@ -338,3 +338,9 @@ scion delete <agent-name>
 - **Worktrees**: The worktree directory is removed and git metadata is pruned.
 - **Branches**: By default, the branch is deleted. Use `--preserve-branch` (or `-b`) to keep it.
 - **Explicit Workspaces**: Directories mounted via `--workspace` are **NOT** deleted. Scion only cleans up resources it created.
+
+:::caution[Committed is not Pushed]
+Committing changes within your agent's workspace is **not** an automatic guarantee of safety.
+- **`--preserve-branch` does not push:** The `--preserve-branch` (or `-b`) flag only keeps the agent's branch inside the *local* repository clone on the host/broker. It does **not** push the branch to a remote origin repository.
+- **Avoid losing work:** If you are operating on an ephemeral or remote broker container (where the local clone is discarded when the agent is deleted), any unpushed commits on the agent's branch will be **permanently lost**. Always ensure your agents run `git push` (or you push manually from the workspace) to save your commits upstream before deleting the agent.
+:::
