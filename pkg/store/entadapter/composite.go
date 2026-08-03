@@ -176,6 +176,13 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 // seeds the built-in maintenance operations, matching the behavior of the
 // former raw-SQL store (which seeded these as part of its migrations).
 func (c *CompositeStore) Migrate(ctx context.Context) error {
+	// Deduplicate access_policies before migration adds a unique index.
+	// Existing databases may have duplicate (name, scope_type, scope_id) rows
+	// which would cause the UNIQUE constraint migration to fail.
+	if err := c.deduplicateAccessPolicies(ctx); err != nil {
+		return fmt.Errorf("pre-migration dedup: %w", err)
+	}
+
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {
 		return err
 	}
