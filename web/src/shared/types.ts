@@ -947,3 +947,85 @@ export interface PreStartHook extends PreStartHookSummary {
   created: string;
   updated: string;
 }
+
+// =============================================================================
+// Session Metrics (DB-backed, from M3/M4 milestone)
+// =============================================================================
+
+/**
+ * A single agent session metrics record.
+ * Mirrors the Go `store.AgentSessionMetrics` struct.
+ */
+export interface AgentSessionMetrics {
+  id: string;
+  agentId: string;
+  projectId: string;
+  sessionId: string;
+  startedAt: string;
+  endedAt?: string;
+  status?: string;
+  turnCount?: number;
+  model?: string;
+  tokensInput?: number;
+  tokensOutput?: number;
+  tokensCached?: number;
+  tokensReasoning?: number;
+  toolCalls?: Record<string, ToolCallStats>;
+  languages?: string[];
+  createdAt: string;
+}
+
+/** Tool call statistics within a session. */
+export interface ToolCallStats {
+  calls: number;
+  success: number;
+  error: number;
+}
+
+/** Tool usage summary in aggregate responses. */
+export interface ToolUsageSummary {
+  name: string;
+  calls: number;
+  success: number;
+  errors: number;
+}
+
+/** Model usage summary in aggregate responses. */
+export interface ModelUsageSummary {
+  model: string;
+  sessions: number;
+}
+
+/**
+ * Aggregate session metrics for a single agent.
+ * Response from GET /api/v1/agents/{id}/metrics/summary.
+ */
+export interface AgentMetricsSummary {
+  agentId: string;
+  totalSessions: number;
+  totalTokensInput: number;
+  totalTokensOutput: number;
+  totalTokensCached: number;
+  totalTokensReasoning: number;
+  totalToolCalls: number;
+  avgSessionDurationMs: number;
+  avgTokensPerSession: number;
+  mostUsedTools: ToolUsageSummary[];
+  mostUsedModels: ModelUsageSummary[];
+}
+
+/**
+ * Aggregate session metrics for a project.
+ * Response from GET /api/v1/projects/{id}/metrics/summary.
+ */
+export interface ProjectSessionMetricsSummary {
+  projectId: string;
+  totalSessions: number;
+  totalTokensInput: number;
+  totalTokensOutput: number;
+  totalTokensCached: number;
+  totalTokensReasoning: number;
+  activeAgents: number;
+  mostUsedTools: ToolUsageSummary[];
+  mostUsedModels: ModelUsageSummary[];
+}

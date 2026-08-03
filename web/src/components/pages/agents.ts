@@ -23,7 +23,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Agent, AgentPhase, Capabilities } from '../../shared/types.js';
+import type { PageData, Agent, AgentPhase, Capabilities, AgentMetricsSummary } from '../../shared/types.js';
 import { can, isTerminalAvailable, getAgentDisplayStatus, isAgentRunning } from '../../shared/types.js';
 
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
@@ -116,6 +116,10 @@ export class ScionPageAgents extends LitElement {
 
   @state()
   private quickMessageOpen = false;
+
+  /** Per-agent metrics summaries, keyed by agent ID. */
+  @state()
+  private agentMetrics: Record<string, AgentMetricsSummary> = {};
 
   static override styles = [
     listPageStyles,
@@ -425,12 +429,29 @@ export class ScionPageAgents extends LitElement {
 
     try {
       await this.fetchAndMergeAgents();
+      // Load metrics in background — non-blocking.
+      this.loadAgentMetrics();
     } catch (err) {
       console.error('Failed to load agents:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load agents';
     } finally {
       this.loading = false;
     }
+  }
+
+  private async loadAgentMetrics(): Promise<void> {
+    const fetches = this.agents.map(async (agent) => {
+      try {
+        const res = await apiFetch(`/api/v1/agents/${agent.id}/metrics/summary`);
+        if (res.ok) {
+          const data = (await res.json()) as AgentMetricsSummary;
+          this.agentMetrics = { ...this.agentMetrics, [agent.id]: data };
+        }
+      } catch {
+        // Metrics loading is optional per agent.
+      }
+    });
+    await Promise.all(fetches);
   }
 
   private backgroundRefresh(): void {
@@ -1053,6 +1074,15 @@ export class ScionPageAgents extends LitElement {
 
         ${agent.taskSummary ? html` <div class="agent-task">${agent.taskSummary}</div> ` : ''}
 
+        ${this.agentMetrics[agent.id]
+          ? html`
+              <div class="agent-meta" style="margin-top: 0.5em; font-size: 0.8em; color: var(--scion-text-muted, #888);">
+                <div><sl-icon name="bar-chart"></sl-icon> ${this.agentMetrics[agent.id].totalSessions} sessions</div>
+                <div><sl-icon name="hash"></sl-icon> ${(this.agentMetrics[agent.id].totalTokensInput + this.agentMetrics[agent.id].totalTokensOutput).toLocaleString()} tokens</div>
+              </div>
+            `
+          : nothing}
+
         ${agent.labels && Object.keys(agent.labels).length > 0
           ? html`<div class="agent-labels" style="margin-top: 0.5em;">${Object.entries(agent.labels).map(
               ([k, v]) => html`<sl-tag size="small" variant="neutral" style="margin: 0.15em;">${k}: ${v}</sl-tag>`
@@ -1087,6 +1117,8 @@ export class ScionPageAgents extends LitElement {
                 @click=${() => this.toggleSort('updated')}
               >Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span></th>
               <th class="hide-mobile">Task</th>
+              <th class="hide-mobile">Sessions</th>
+              <th class="hide-mobile">Tokens</th>
               <th style="text-align: right">Actions</th>
             </tr>
           </thead>
@@ -1120,6 +1152,8 @@ export class ScionPageAgents extends LitElement {
         <td class="hide-mobile">
           <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
         </td>
+        <td class="hide-mobile">${this.agentMetrics[agent.id] ? this.agentMetrics[agent.id].totalSessions : '\u2014'}</td>
+        <td class="hide-mobile">${this.agentMetrics[agent.id] ? (this.agentMetrics[agent.id].totalTokensInput + this.agentMetrics[agent.id].totalTokensOutput).toLocaleString() : '\u2014'}</td>
         <td class="actions-cell">
           <span class="table-actions">
             ${this.renderActionButtons(agent)}
