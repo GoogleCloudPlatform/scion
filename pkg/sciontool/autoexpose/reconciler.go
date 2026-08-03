@@ -266,7 +266,7 @@ func (r *Reconciler) getRegistered(ctx context.Context, force bool) (map[int]str
 
 // registerPort registers a port with the Hub and tracks it as auto-exposed.
 func (r *Reconciler) registerPort(ctx context.Context, port int) error {
-	_, err := r.client.RegisterPort(ctx, scionhub.RegisterPortRequest{
+	exposed, err := r.client.RegisterPort(ctx, scionhub.RegisterPortRequest{
 		Port:  port,
 		Label: autoExposeLabel,
 		Host:  "127.0.0.1",
@@ -288,7 +288,7 @@ func (r *Reconciler) registerPort(ctx context.Context, port int) error {
 
 	// Notify the agent that a port was auto-exposed.
 	if r.msgClient != nil {
-		notifyMsg := fmt.Sprintf("Port %d has been auto-exposed for proxy access. Run 'sciontool port list' for the full proxy URL. If you are collaborating with a user, consider sharing this URL so they can access what is running on this port.", port)
+		notifyMsg := fmt.Sprintf("Port %d has been auto-exposed and is available at: %s — if you are collaborating with a user, consider sharing this URL so they can access what is running on this port.", port, exposed.URL)
 		metadata := map[string]string{"system_category": messages.SystemCategoryPortForward}
 		if err := r.msgClient.SendSelfMessage(ctx, notifyMsg, metadata); err != nil {
 			log.Error("auto-expose: failed to send notification for port %d: %v", port, err)
