@@ -205,6 +205,15 @@ Manages the Scion workspace (Project).
     - `add [project] <uri>`: Add a skill URI to the project's auto-injected list.
         - Flags: `--as <alias>` (alias under which to mount the skill), `--optional` (continue provisioning if resolution fails), `--from-directory <url>` (discover and batch-add all skills from a GitHub repository directory).
     - `remove [project] <id|uri>` (aliases `rm`, `delete`): Remove an auto-injected skill entry from the project by its ID or full URI.
+- `scion project hook` (alias `psh`): Manage project-scoped pre-start hooks. These shell scripts run inside the container during agent initialization, and abort agent startup on failure.
+    - `list [project]` (alias `ls`): List pre-start hooks for a project.
+    - `show <id-or-slug> [project]`: Show details and script content of a pre-start hook.
+    - `create [project]`: Create a new hook (archives the current active hook).
+        - Flags: `--name` (required, human-readable name), `--script` (required, path to shell script, or `-` for stdin), `--slug` (url-safe identifier), `--description` (optional description).
+    - `update <id-or-slug> [project]`: Update an existing pre-start hook.
+        - Flags: `--name`, `--script`, `--description`.
+    - `activate <id-or-slug> [project]`: Mark an archived hook as active (archives any currently active hook).
+    - `delete <id-or-slug> [project]` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
 
 ### `scion user`
 
@@ -370,6 +379,15 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `clear <key>`: Remove a variable.
 - `scion hub project create <git-url>`: Create a project from a remote git repository.
     - Flags: `--slug`, `--name`, `--branch`, `--visibility`, `--json`
+- `scion hub hook` (alias `psh`): Manage hub-scoped (baseline) pre-start hooks. Requires administrator privileges.
+    - `list` (alias `ls`): List hub-scoped pre-start hooks.
+    - `show <id-or-slug>`: Show details and script content of a hub-scoped hook.
+    - `create`: Create a new hook (archives the current active hook).
+        - Flags: `--name` (required, human-readable name), `--script` (required, path to shell script, or `-` for stdin), `--slug` (url-safe identifier), `--description` (optional description).
+    - `update <id-or-slug>`: Update an existing hook.
+        - Flags: `--name`, `--script`, `--description`.
+    - `activate <id-or-slug>`: Mark an archived hook as active (archives any currently active hub-scoped hook).
+    - `delete <id-or-slug>` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
 
 ## Infrastructure
 
