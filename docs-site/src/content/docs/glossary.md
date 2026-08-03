@@ -48,6 +48,9 @@ The addressing scheme for a **Skill**: a bare name or a `skill://<registry>/<sco
 ### Plugin
 An out-of-process extension built on `hashicorp/go-plugin` (gRPC) that supplies a **Message Broker** implementation without modifying Scion core. **Harness implementations are *not* offered as plugins**; additional plugin types may be added in the future.
 
+### Pre-Start Hook
+A project-scoped or Hub-scoped shell script executed synchronously inside the agent container during initialization before the main harness starts up (via the `EventPreStart` hook point, staged at `.scion/hooks/pre-start.d/30-project-custom`). If the script exits non-zero, agent startup is aborted. This provides project owners and Hub administrators with a synchronous, blocking initialization mechanism.
+
 ### sciontool
 The helper utility injected into every agent container for status reporting, metadata access, and task management.
 

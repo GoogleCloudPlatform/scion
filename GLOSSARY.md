@@ -62,6 +62,10 @@ An out-of-process extension built on `hashicorp/go-plugin` (gRPC) that supplies 
 _Avoid_: extension, addon, module, skill
 _See also_: Broker plugin, Message Broker
 
+**Pre-Start Hook**:
+A project-scoped or Hub-scoped shell script executed synchronously inside the agent container during initialization before the main harness starts up (via the `EventPreStart` hook point, staged at `.scion/hooks/pre-start.d/30-project-custom`). If the script exits non-zero, agent startup is aborted. Provides a blocking initialization mechanism for project owners and Hub administrators.
+_Avoid_: startup script, provision hook, lifecycle script
+
 **sciontool**:
 The helper utility injected into every agent container for status reporting, metadata access, and task management.
 _Avoid_: agent tool, scion-tool
