@@ -131,6 +131,7 @@ export class ScionAgentTreeView extends LitElement {
     }
 
     .canvas.dragging {
+      user-select: none;
       cursor: grabbing;
     }
 
@@ -484,6 +485,7 @@ export class ScionAgentTreeView extends LitElement {
       const tag = (el as HTMLElement).tagName;
       if (tag === 'A' || tag === 'BUTTON' || tag === 'SL-BUTTON' || tag === 'SL-ICON-BUTTON') return;
     }
+    e.preventDefault();
     this.dragging = true;
     this.dragStartX = e.clientX;
     this.dragStartY = e.clientY;
