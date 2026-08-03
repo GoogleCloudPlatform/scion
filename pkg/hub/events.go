@@ -292,6 +292,8 @@ func (p *ChannelEventPublisher) Subscribe(patterns ...string) (<-chan Event, fun
 	}
 	p.mu.Unlock()
 
+	p.logger().Info("subscriber added", "patterns", patterns)
+
 	unsubscribe := func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
@@ -304,6 +306,7 @@ func (p *ChannelEventPublisher) Subscribe(patterns ...string) (<-chan Event, fun
 				}
 			}
 		}
+		p.logger().Info("subscriber removed", "patterns", patterns)
 	}
 
 	return ch, unsubscribe
@@ -327,17 +330,23 @@ func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 		return
 	}
 
+	matched := 0
 	for pattern, subs := range p.subscribers {
 		if subjectMatchesPattern(pattern, subject) {
 			for _, ch := range subs {
 				select {
 				case ch <- evt:
+					matched++
 				default:
 					// Drop event on full buffer (backpressure)
+					p.logger().Debug("event dropped (subscriber buffer full)",
+						"subject", subject, "pattern", pattern)
 				}
 			}
 		}
 	}
+
+	p.logger().Debug("event published", "subject", subject, "subscribers", matched)
 }
 
 // PublishRaw publishes an arbitrary event on the given subject.
@@ -365,6 +374,8 @@ func (p *ChannelEventPublisher) Close() {
 			}
 		}
 	}
+
+	p.logger().Info("event publisher closed", "subscriber_channels", len(seen))
 }
 
 // PublishAgentStatus publishes an agent status event to both agent-specific
