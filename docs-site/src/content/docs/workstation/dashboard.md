@@ -25,7 +25,9 @@ View and manage your registered projects.
 - **Workspace & File Management**: Access the comprehensive **inline file editor** to view and modify files directly in the browser, featuring integrated Markdown preview capabilities. The file browser supports **fuzzy and regex-based filtering** for fast navigation. You can also download individual workspace files or generate ZIP archives of entire projects directly from the UI.
 - **Template Management**: Direct server-side importing of templates with immediate UI feedback. Includes full template file browsing, editing, and upload capabilities directly within the dashboard.
 - **Shared Directory Management**: View and manage project shared directories directly from the Web UI (see [Project Shared Directories](/scion/local/workspace/#5-project-shared-directories)).
-- **Agent List**: See all agents belonging to the project, with card/list view toggle for flexible display.
+- **Agent List & Lineage Views**: See all agents belonging to the project, with options to toggle between card, list, and the interactive **Agent Lineage Graph** view.
+  - **Lineage Graph View**: Renders parent/child agent relationships as a zoomable, pannable parent/child forest. Uses HTML card nodes, SVG cubic-curve edges, spawn-direction arrowheads, pan/zoom/fit-to-view navigation, and collapse pruning for complex trees.
+  - **Inline Integration**: The lineage graph is an inline tree/graph component rendered directly in the main agent content slot on both the main Agents page and individual Project detail pages. Filters for agent status and labels apply automatically across card, list, and graph views.
 
 ### Agents
 Detailed view for individual agents, featuring a high-density tabbed layout and improved breadcrumb navigation with a dedicated back button.

@@ -226,5 +226,14 @@ To enable log forwarding, set `SCION_OTEL_LOG_ENABLED=true` and `SCION_OTEL_ENDP
 The Hub exposes health check endpoints:
 - `/healthz`: Basic liveness check.
 - `/readyz`: Readiness check (verifies database connectivity).
+- `/health`: Legacy/alternative liveness check endpoint.
+
+### Reverse Proxy / GFE Interception Handling
+
+In distributed or hosted deployments (such as Google Cloud Run behind a Google Front End), reverse proxies may intercept calls to `/healthz` and return a non-JSON response (e.g. `text/plain`). 
+
+To prevent connectivity and status reporting issues:
+- **Hub Client Fallback**: The Scion Hub client automatically detects non-JSON `2xx` responses from reverse proxies on `/healthz` and transparently falls back to `/health`. If both fail, it appends a helpful diagnostic tip suggesting a Cloud Run or GFE configuration review.
+- **Broker Client Diagnostics**: If the Runtime Broker client receives a non-JSON `2xx` response on `/healthz`, it blocks the call and returns a precise error indicating that a reverse proxy (e.g., GFE) is likely intercepting `/healthz` and provides troubleshooting guidance.
 
 Logs are output to `stdout` in either `text` (default) or `json` format, suitable for collection by systems like Fluentd, Cloud Logging, or Prometheus.
