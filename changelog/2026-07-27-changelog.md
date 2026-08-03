@@ -1,6 +1,6 @@
 # Release Notes (2026-07-27)
 
-A major platform skills and agent infrastructure day: project-level pre-start customization hooks shipped with Ent schema and CRUD API, A2A bridge gained per-user access token auth, six platform skills were added or expanded (scheduler, git-operations, messaging, recovery, shell safety), and the GitHub skill resolver received auth, caching, and rate-limit fixes.
+A major platform skills and agent infrastructure day: project-level pre-start customization hooks shipped with Ent schema and CRUD API, A2A bridge gained per-user access token auth, six platform skills were added or expanded (scheduler, git-operations, workspace orientation, messaging, recovery, shell safety), and the GitHub skill resolver received auth, caching, and rate-limit fixes.
 
 ## 🚀 Features
 * **[Agent]:** Project-level pre-start customization hooks — new `ProjectPreStartHook` Ent entity with project-scoped shell scripts attached to the `EventPreStart` hook point, staged as `pre-start.d/30-project-custom` with abort-on-failure wiring (#879).
