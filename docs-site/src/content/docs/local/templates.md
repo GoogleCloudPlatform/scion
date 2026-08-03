@@ -332,6 +332,10 @@ model_aliases:
 
 A template that sets `model: large` then resolves to `opus` under Claude and `gemini-pro` under Gemini — the same role, portable across harnesses. Concrete model names still pass through unchanged (for backward compatibility) but tie the template to one harness.
 
+:::note
+Model aliases are resolved by the Hub before they are stored in the agent's `AppliedConfig` and injected as the `SCION_MODEL` environment variable. This ensures harness provision scripts receive the fully resolved concrete model name (such as `gemini-pro`) rather than an unresolved alias.
+:::
+
 ### Customizing and creating variants
 
 Edit the files in a harness-config directory to change defaults (for example, remap `large` to a newer model, or add a persistent CLI flag in `home/.gemini/settings.json`). Copy the directory to make a variant:
