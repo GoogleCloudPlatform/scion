@@ -310,6 +310,21 @@ scion user skills remove <uuid>
 scion user skills remove skill://scion/global/personal-notes@latest
 ```
 
+### Batch-Adding Injected Skills via the Web UI
+
+In addition to managing injected skills via the CLI, the Scion Web Dashboard allows configuring **Injected Skills** for a project, user profile, or globally on the Hub. To simplify adding multiple skills at once, Scion provides a **directory-discovery** workflow:
+
+1. Under the settings page (Project Settings, User Profile, or Hub Settings), open the **Injected Skills** panel and click **Add Skill**.
+2. Paste a GitHub directory URL (e.g., `https://github.com/org/repo/tree/main/skills-directory`) into the **Skill URI** input.
+3. If the input matches a directory structure on GitHub, a **Discover Skills from Directory** helper button appears.
+4. Clicking it triggers an automated scan of the remote directory. A **checkbox interstitial dialog** will display all discovered skill subdirectories.
+5. Select or deselect skills using the checkboxes, then click confirm. 
+6. Scion adds all checked skills as individual URI references in a single atomic update.
+
+:::note[Security & Privacy]
+Before performing discovery or logging requests, Scion's API automatically strips any embedded userinfo or credentials from the URL, preventing sensitive tokens or usernames from appearing in system logs.
+:::
+
 ## Platform skills
 
 Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent. They provide baseline capabilities without any Hub or template setup.

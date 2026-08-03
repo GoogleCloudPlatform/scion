@@ -420,3 +420,9 @@ If GitHub App integration is not available, you can use a Personal Access Token.
 3. Scion injects this token into the agent container as an environment variable (`GITHUB_TOKEN`), which Git uses for HTTPS authentication.
 
 For detailed instructions on setting this up, see [Git-Based Projects](/scion/workstation/git-projects/).
+
+### Multi-Repository (Convention-Based) Secrets
+
+When your templates reference skills or repositories across multiple GitHub owners or organizations, a single default `GITHUB_TOKEN` may not have the required permissions.
+
+To address this, Scion supports **convention-based multi-GitHub credential resolution** using project secrets (e.g., `GH_OWNER__REPO` or `GH_OWNER`). For setup examples, precedence rules, and naming conventions, see the [GitHub Multi-Repo Credentials](/scion/hosted/user/secrets/#github-multi-repo-credentials) section in the Secrets Guide.

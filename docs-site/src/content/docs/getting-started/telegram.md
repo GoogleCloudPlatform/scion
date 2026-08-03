@@ -193,7 +193,7 @@ Useful group commands once linked:
 | `/default` | Set, change, or clear the default agent for the group. |
 | `/settings` | Toggle group options (see below). |
 | `/unlink` | Unlink the group from its project (only the person who linked it can unlink). |
-| `/help` | Show the available commands. |
+| `/help` | Show the available commands. The output also displays the plugin's build version and git commit hash (injected via build-time `ldflags`). |
 
 ### Setting the default agent
 
