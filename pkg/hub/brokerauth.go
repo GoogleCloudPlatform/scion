@@ -220,6 +220,10 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 		return nil, errors.New("name is required")
 	}
 
+	// GCP SA emails are case-insensitive; normalize to lowercase before
+	// storage so that later comparisons (e.g. actAs checks) are reliable.
+	req.GCPHostServiceAccountEmail = strings.ToLower(req.GCPHostServiceAccountEmail)
+
 	// Default broker-type label to "external" if not provided
 	if req.Labels == nil {
 		req.Labels = make(map[string]string)

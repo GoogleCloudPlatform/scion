@@ -366,7 +366,7 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		broker.Labels = updates.Labels
 	}
 	if updates.GCPHostServiceAccountEmail != nil {
-		email := *updates.GCPHostServiceAccountEmail
+		email := strings.ToLower(*updates.GCPHostServiceAccountEmail)
 		if email != "" && !isValidServiceAccountEmail(email) {
 			ValidationError(w, "gcpHostServiceAccountEmail must be a valid GCP service account email "+
 				"(name@project.iam.gserviceaccount.com)", map[string]interface{}{

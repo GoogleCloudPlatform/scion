@@ -673,3 +673,46 @@ func TestGCPSA_FlatByID_NoIdentity_DeleteIsAlsoIndistinguishable(t *testing.T) {
 	require.False(t, saExists(t, s, userSA.ID),
 		"and the authorized delete must actually delete")
 }
+
+// HIGH-1: The flat delete route must invalidate the actAs cache for the
+// deleted SA's email, matching what the project-nested delete already does.
+// Without this, a cached "allowed" verdict for a deleted SA would survive the
+// delete and let a subsequent actAs check succeed against a credential that no
+// longer exists.
+func TestGCPSA_FlatByID_Delete_InvalidatesActAsCache(t *testing.T) {
+	srv, s, _, member, _, _ := setupGCPAuthzTest(t)
+	ctx := context.Background()
+
+	saEmail := "cacheflat@p.iam.gserviceaccount.com"
+	sa := mkSA(t, s, "sa-flat-cache-inv", saEmail,
+		store.ScopeHub, "hub-instance-1", member.ID)
+
+	// Install a cached checker and populate it with a cached decision for the
+	// SA we are about to delete.
+	inner := newCountingChecker()
+	inner.inner.AllowTarget(saEmail)
+	cached := NewCachedCallerPermissionChecker(inner, 60*time.Second, 10*time.Second)
+	srv.SetSAAssignChecker(cached)
+
+	// Prime the cache — inner should be called once.
+	targetSA := &store.GCPServiceAccount{ID: sa.ID, Email: saEmail, ProjectID: "gcp-proj"}
+	_, _ = cached.CanActAs(ctx, cacheCaller, targetSA)
+	require.Equal(t, 1, inner.callCount(), "setup: inner should have been called once to prime the cache")
+
+	// Verify the cache is warm — inner should NOT be called again.
+	_, _ = cached.CanActAs(ctx, cacheCaller, targetSA)
+	require.Equal(t, 1, inner.callCount(), "cache should be warm; inner must not be called a second time")
+
+	// Delete the SA via the flat route.
+	rec := doRequestAsUser(t, srv, member, http.MethodDelete, flatSAPath+sa.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code,
+		"creator should be able to delete their hub-scoped SA; got: %s", rec.Body.String())
+	require.False(t, saExists(t, s, sa.ID), "SA should be deleted")
+
+	// The cache for this email must have been invalidated — inner should be
+	// called again on the next CanActAs.
+	_, _ = cached.CanActAs(ctx, cacheCaller, targetSA)
+	require.Equal(t, 2, inner.callCount(),
+		"flat delete must invalidate the actAs cache; inner was not called after delete, "+
+			"meaning the stale cached decision survived")
+}

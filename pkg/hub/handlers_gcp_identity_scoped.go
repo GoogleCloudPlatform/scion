@@ -489,6 +489,11 @@ func (s *Server) deleteGCPServiceAccountByID(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Invalidate cached actAs decisions for the deleted SA so that any
+	// subsequent check against this email goes to the inner checker.
+	// Mirrors the project-nested delete in handlers_gcp_identity.go.
+	s.invalidateActAsCache(sa.Email)
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

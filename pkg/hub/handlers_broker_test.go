@@ -439,3 +439,26 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	})
 }
+
+// MEDIUM-3: A PATCH to the broker's gcpHostServiceAccountEmail with mixed-case
+// input must store the value lowercased, because GCP SA emails are
+// case-insensitive and downstream actAs checks compare by exact string match.
+func TestBrokerUpdate_HostSAEmail_NormalizedToLowercase(t *testing.T) {
+	srv, s, alice, _, _, _, broker := setupBrokerAuthzTest(t)
+	ctx := context.Background()
+
+	mixedEmail := "Host-SA@My-Project.iam.gserviceaccount.com"
+	rec := doRequestAsUser(t, srv, alice, http.MethodPatch,
+		"/api/v1/runtime-brokers/"+broker.ID, map[string]interface{}{
+			"gcpHostServiceAccountEmail": mixedEmail,
+		})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"owner should be able to update broker host SA email; got: %s", rec.Body.String())
+
+	updated, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+
+	want := "host-sa@my-project.iam.gserviceaccount.com"
+	require.Equal(t, want, updated.GCPHostServiceAccountEmail,
+		"PATCH must normalize the host SA email to lowercase")
+}
