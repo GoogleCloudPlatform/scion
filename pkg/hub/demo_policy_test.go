@@ -685,3 +685,64 @@ func TestDemoPolicy_ProjectDeleteCleansUpGroupsAndPolicies(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, policies.TotalCount, "policy should be deleted after project deletion")
 }
+
+// ============================================================================
+// Duplicate Policy Name Tests (Issue #610)
+// ============================================================================
+
+// TestCreatePolicy_DuplicateNameConflict verifies that creating two policies
+// with the same name in the same scope returns HTTP 409 Conflict.
+func TestCreatePolicy_DuplicateNameConflict(t *testing.T) {
+	srv, _, alice, _, _ := setupDemoPolicyTest(t)
+
+	policyReq := CreatePolicyRequest{
+		Name:         "unique-test-policy",
+		ScopeType:    "hub",
+		ResourceType: "*",
+		Actions:      []string{"read"},
+		Effect:       "allow",
+	}
+
+	// First creation should succeed.
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/policies", policyReq)
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"first policy creation should succeed; got: %s", rec.Body.String())
+
+	// Second creation with the same name and scope should return 409.
+	rec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/policies", policyReq)
+	assert.Equal(t, http.StatusConflict, rec2.Code,
+		"duplicate policy name in same scope should return 409; got: %s", rec2.Body.String())
+}
+
+// TestCreatePolicy_SameNameDifferentScope verifies that policies with the same
+// name but different scopes are allowed (no conflict).
+func TestCreatePolicy_SameNameDifferentScope(t *testing.T) {
+	srv, _, alice, _, project := setupDemoPolicyTest(t)
+
+	hubPolicy := CreatePolicyRequest{
+		Name:         "shared-policy-name",
+		ScopeType:    "hub",
+		ResourceType: "*",
+		Actions:      []string{"read"},
+		Effect:       "allow",
+	}
+
+	projectPolicy := CreatePolicyRequest{
+		Name:         "shared-policy-name",
+		ScopeType:    "project",
+		ScopeID:      project.ID,
+		ResourceType: "*",
+		Actions:      []string{"read"},
+		Effect:       "allow",
+	}
+
+	// Hub-scoped policy.
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/policies", hubPolicy)
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"hub-scoped policy creation should succeed; got: %s", rec.Body.String())
+
+	// Project-scoped policy with the same name should also succeed.
+	rec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/policies", projectPolicy)
+	assert.Equal(t, http.StatusCreated, rec2.Code,
+		"same name in different scope should succeed; got: %s", rec2.Body.String())
+}

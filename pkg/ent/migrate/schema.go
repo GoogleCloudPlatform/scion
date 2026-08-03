@@ -33,6 +33,13 @@ var (
 		Name:       "access_policies",
 		Columns:    AccessPoliciesColumns,
 		PrimaryKey: []*schema.Column{AccessPoliciesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "accesspolicy_name_scope_type_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{AccessPoliciesColumns[1], AccessPoliciesColumns[3], AccessPoliciesColumns[4]},
+			},
+		},
 	}
 	// AgentsColumns holds the columns for the "agents" table.
 	AgentsColumns = []*schema.Column{
