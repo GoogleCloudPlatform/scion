@@ -57,9 +57,14 @@ The Runtime Broker exposes a local API (usually on port 9800) for agent executio
 Brokers maintain a persistent outbound WebSocket connection to the Hub. The Hub uses this tunnel to send commands (e.g., `CreateAgent`) to brokers that might be behind NAT.
 
 ### Local Endpoints
-- `GET /healthz`: Basic liveness and readiness check.
+- `GET /healthz`: Basic liveness and readiness check. In multi-node or hosted setups, if a reverse proxy (like GFE) intercepts this endpoint and returns a non-JSON body, the client detects this and returns a precise error naming the likely cause (rather than a generic JSON-decoding failure) to assist with troubleshooting.
 - `POST /api/v1/agents`: (Internal) The Hub dispatches agents to this endpoint.
 - `GET /api/v1/agents/:id/attach`: (WebSocket) Provides a terminal stream for interactive sessions.
+
+## System Health Endpoints (Hub)
+- `GET /healthz`: Basic liveness check. If a reverse proxy intercepts this with a non-JSON response, the client gracefully falls back to `/health`.
+- `GET /readyz`: Readiness check verifying database connectivity.
+- `GET /health`: Legacy/alternative liveness check endpoint.
 
 ## Communication Patterns
 

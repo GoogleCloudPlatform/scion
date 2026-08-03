@@ -90,6 +90,8 @@ session.
 
 Connects to the interactive session of a running agent.
 
+When connecting to a Hub behind Google Identity-Aware Proxy (IAP), `scion attach` automatically attempts to resolve transport-layer authentication (Google OIDC ID tokens) *before* evaluating the application-level access token gate. If transport auth can be successfully established (e.g., using your local Google Cloud SDK identity or GKE Workload Identity), the application token check is bypassed, enabling seamless attachment in proxy-auth/IAP mode.
+
 **Usage:** `scion attach <agent-name>`
 
 - **Key Bindings:**
@@ -396,6 +398,48 @@ agent's own health — environment variables, Hub token (presence/format/expiry)
 token refresh, the GCP metadata server, and the GitHub App token. See
 [Harness Authentication](/scion/local/agent-credentials/#diagnostics).
 :::
+
+### `scion whoami`
+
+Prints identity details of the current agent container or system user.
+
+- **Outside an agent container**: Gracefully falls back to the system `whoami` command (e.g., printing the current operating system user).
+- **Inside an agent container**: Prints the agent's identity. By default, it prints the agent's slug in plain text.
+
+**Usage:** `scion whoami [flags]`
+
+- **Flags:**
+    - `--full`: Enriches the output with live metadata from the Hub. 
+        - When run in plain text, prints a human-readable multi-line summary of both local environment settings and live Hub details (e.g., agent phase, activity, etc.).
+        - When run with `--format json`, includes both Tier 1 and Tier 2 fields in the JSON object.
+        - If the Hub is unreachable, the command gracefully degrades to returning environment-only details, printing a warning to `stderr`.
+    - `--format json` (persistent global flag): Returns a structured JSON output representing the agent's identity configuration and state.
+
+#### Output Details (`--format json`)
+
+The command populates a structured JSON schema divided into two latency tiers:
+
+##### Tier 1 (Always populated, zero latency, derived from container environment variables)
+- `slug`: The agent's slug identifier (falls back to its name if slug is absent).
+- `name`: The agent's display name.
+- `id`: The unique agent UUID.
+- `project` / `projectId`: The assigned project's name and ID.
+- `template`: The name of the template used to spawn the agent.
+- `harness`: The underlying agent harness (e.g., `codex`, etc.).
+- `model`: The model used by the agent.
+- `creator`: The identity of the agent's creator.
+- `brokerName` / `brokerId`: The running broker's name and ID.
+- `cliMode`: The active CLI mode.
+- `hubEndpoint`: The endpoint URL of the connecting Hub.
+- `hubUrl`: The reconstructed direct URL pointing to the agent's resource page on the Hub (`{hubEndpoint}/agents/{id}`).
+
+##### Tier 2 (Enriched, requires `--full` flag and Hub connectivity)
+- `phase`: The current lifecycle phase of the agent (e.g., `running`, `suspended`, `error`).
+- `activity`: The current runtime activity status of the agent (e.g., `thinking`, `stalled`, `offline`).
+- `labels`: Metadata key-value pairs assigned to the agent.
+- `annotations`: System key-value pairs attached to the agent.
+- `ancestry`: A lineage array representing the agent's parent/child spawn relationships.
+- `taskSummary`: A brief summary of active task execution.
 
 ### `scion version`
 
