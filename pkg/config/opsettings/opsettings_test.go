@@ -31,7 +31,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "telemetry",
 		"agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults"}
+		"project_defaults", "auto_expose_ports"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -113,6 +113,7 @@ func TestOwningSection(t *testing.T) {
 		{"server.github_app.app_id", "github_app"},
 		{"server.github_app.webhooks_enabled", "github_app"},
 		{"server.notification_channels", "notifications"},
+		{"auto_expose_ports.enabled", "auto_expose_ports"},
 	}
 	for _, tt := range tests {
 		got := OwningSection(tt.key)
@@ -191,6 +192,8 @@ func TestValidateValidDoc(t *testing.T) {
 		{"project_defaults", `{"default_scratchpad":true}`},
 		{"project_defaults", `{"default_scratchpad":false}`},
 		{"project_defaults", `{}`},
+		{"auto_expose_ports", `{"enabled":true}`},
+		{"auto_expose_ports", `{}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -262,8 +265,9 @@ func TestExtractSectionFromKoanf(t *testing.T) {
 		"server.notification_channels": []interface{}{
 			map[string]interface{}{"type": "slack", "params": map[string]interface{}{"url": "https://hooks.slack.com/test"}},
 		},
-		"server.database.driver": "postgres",
-		"server.hub.port":        9810,
+		"server.database.driver":    "postgres",
+		"server.hub.port":           9810,
+		"auto_expose_ports.enabled": true,
 	}, "."), nil)
 	if err != nil {
 		t.Fatalf("load koanf: %v", err)
@@ -317,6 +321,11 @@ func TestExtractSectionFromKoanf(t *testing.T) {
 		{"notifications", func(t *testing.T, doc map[string]interface{}) {
 			if doc["notification_channels"] == nil {
 				t.Error("expected notification_channels")
+			}
+		}},
+		{"auto_expose_ports", func(t *testing.T, doc map[string]interface{}) {
+			if doc["enabled"] != true {
+				t.Errorf("expected enabled=true, got %v", doc["enabled"])
 			}
 		}},
 	}
@@ -415,8 +424,9 @@ func TestRoundTrip(t *testing.T) {
 		"server.notification_channels": []interface{}{
 			map[string]interface{}{"type": "slack"},
 		},
-		"server.database.driver": "postgres",
-		"server.hub.port":        9810,
+		"server.database.driver":    "postgres",
+		"server.hub.port":           9810,
+		"auto_expose_ports.enabled": true,
 	}
 	if err := k.Load(confmap.Provider(original, "."), nil); err != nil {
 		t.Fatalf("load original: %v", err)
@@ -448,6 +458,7 @@ func TestRoundTrip(t *testing.T) {
 		{"telemetry.cloud.endpoint", "https://otel.example.com"},
 		{"server.github_app.app_id", nil},
 		{"server.github_app.webhooks_enabled", true},
+		{"auto_expose_ports.enabled", true},
 	}
 
 	for _, c := range checks {
@@ -558,6 +569,8 @@ default_resources:
     memory: "1Gi"
   disk: "5Gi"
 image_registry: "gcr.io/my-project"
+auto_expose_ports:
+  enabled: true
 `
 
 	dir := t.TempDir()
@@ -991,6 +1004,65 @@ func TestKoanfPathFromSectionKey(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("KoanfPathFromSectionKey(%q, %q) = %q, want %q", tt.section, tt.jsonKey, got, tt.want)
 		}
+	}
+}
+
+// TestAutoExposePortsKoanfRoundTrip verifies that auto_expose_ports can be
+// extracted from koanf and loaded back without data loss.
+func TestAutoExposePortsKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"auto_expose_ports.enabled": true,
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	// Extract the section.
+	raw, err := ExtractSectionFromKoanf(k, "auto_expose_ports")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc["enabled"] != true {
+		t.Errorf("expected enabled=true in extracted doc, got %v", doc["enabled"])
+	}
+
+	// Reload into a fresh koanf.
+	sections := map[string]json.RawMessage{
+		"auto_expose_ports": raw,
+	}
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+
+	if !reloaded.Exists("auto_expose_ports.enabled") {
+		t.Fatal("expected auto_expose_ports.enabled to exist in reloaded koanf")
+	}
+	if reloaded.Bool("auto_expose_ports.enabled") != true {
+		t.Errorf("expected auto_expose_ports.enabled=true, got %v", reloaded.Get("auto_expose_ports.enabled"))
+	}
+}
+
+// TestAutoExposePortsEmptyExtract verifies that ExtractSectionFromKoanf returns
+// an empty doc when auto_expose_ports is not set.
+func TestAutoExposePortsEmptyExtract(t *testing.T) {
+	k := koanf.New(".")
+	raw, err := ExtractSectionFromKoanf(k, "auto_expose_ports")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(doc) != 0 {
+		t.Errorf("expected empty doc for absent auto_expose_ports, got %v", doc)
 	}
 }
 

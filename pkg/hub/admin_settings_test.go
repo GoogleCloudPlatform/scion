@@ -158,6 +158,79 @@ func TestApplySettingsUpdates_PreservesServerKeys(t *testing.T) {
 	}
 }
 
+func TestApplySettingsUpdates_AutoExposePortsNilEnabled(t *testing.T) {
+	// When AutoExposePorts is provided but Enabled is nil, the key should be
+	// deleted to avoid persisting an empty auto_expose_ports: {} block.
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"auto_expose_ports": map[string]interface{}{
+			"enabled": true,
+		},
+	}
+
+	req := &ServerConfigUpdateRequest{
+		AutoExposePorts: &config.AutoExposePortsSettings{
+			Enabled: nil, // nil signals deletion
+		},
+	}
+
+	applySettingsUpdates(raw, req)
+
+	if _, ok := raw["auto_expose_ports"]; ok {
+		t.Error("expected auto_expose_ports key to be deleted when Enabled is nil")
+	}
+}
+
+func TestApplySettingsUpdates_AutoExposePortsWithEnabled(t *testing.T) {
+	// When AutoExposePorts is provided with a non-nil Enabled, the key should
+	// be set normally.
+	raw := map[string]interface{}{
+		"schema_version": "1",
+	}
+
+	enabled := true
+	req := &ServerConfigUpdateRequest{
+		AutoExposePorts: &config.AutoExposePortsSettings{
+			Enabled: &enabled,
+		},
+	}
+
+	applySettingsUpdates(raw, req)
+
+	aep, ok := raw["auto_expose_ports"]
+	if !ok {
+		t.Fatal("expected auto_expose_ports key to be present")
+	}
+	aepMap, ok := aep.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected auto_expose_ports to be a map, got %T", aep)
+	}
+	if aepMap["enabled"] != true {
+		t.Errorf("expected enabled=true, got %v", aepMap["enabled"])
+	}
+}
+
+func TestApplySettingsUpdates_AutoExposePortsNilRequest(t *testing.T) {
+	// When AutoExposePorts itself is nil in the request, the existing value
+	// should be preserved (no change).
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"auto_expose_ports": map[string]interface{}{
+			"enabled": true,
+		},
+	}
+
+	req := &ServerConfigUpdateRequest{
+		AutoExposePorts: nil,
+	}
+
+	applySettingsUpdates(raw, req)
+
+	if _, ok := raw["auto_expose_ports"]; !ok {
+		t.Error("expected auto_expose_ports to be preserved when request field is nil")
+	}
+}
+
 func serverConfigForMaskTest() config.V1ServerConfig {
 	return config.V1ServerConfig{
 		Auth: &config.V1AuthConfig{

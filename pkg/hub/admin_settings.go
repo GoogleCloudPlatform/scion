@@ -480,7 +480,11 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		}
 	}
 	if req.AutoExposePorts != nil {
-		raw["auto_expose_ports"] = marshalToMap(req.AutoExposePorts)
+		if req.AutoExposePorts.Enabled != nil {
+			raw["auto_expose_ports"] = marshalToMap(req.AutoExposePorts)
+		} else {
+			delete(raw, "auto_expose_ports")
+		}
 	}
 }
 
