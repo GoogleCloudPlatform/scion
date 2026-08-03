@@ -339,7 +339,7 @@ func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 					matched++
 				default:
 					// Drop event on full buffer (backpressure)
-					p.logger().Warn("event dropped (subscriber buffer full)",
+					p.logger().Debug("event dropped (subscriber buffer full)",
 						"subject", subject, "pattern", pattern)
 				}
 			}

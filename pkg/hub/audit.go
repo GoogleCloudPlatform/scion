@@ -215,6 +215,9 @@ func (l *LogAuditLogger) logger() *slog.Logger {
 
 // LogBrokerAuthEvent logs a broker authentication event to the standard logger.
 func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAuthEvent) error {
+	if event == nil {
+		return nil
+	}
 	level := slog.LevelInfo
 	if !event.Success {
 		level = slog.LevelWarn
