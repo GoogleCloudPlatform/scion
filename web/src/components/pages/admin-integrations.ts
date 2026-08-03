@@ -125,6 +125,15 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
   a2a: [
     { key: 'external_url', label: 'External URL', description: 'Public URL for agent cards', defaultValue: '' },
     { key: 'auth_scheme', label: 'Auth Scheme', description: 'apiKey, bearer, none, hubUAT, or hubJWT', defaultValue: 'none' },
+    { key: 'uat_cache_ttl', label: 'UAT Cache TTL', description: 'Cache duration for UAT validation results', defaultValue: '60s' },
+    { key: 'rate_limit_enabled', label: 'Rate Limiting Enabled', description: 'Enable request rate limiting (true/false)', defaultValue: 'false' },
+    { key: 'rate_limit_rps', label: 'Rate Limit (req/s)', description: 'Maximum requests per second', defaultValue: '10' },
+    { key: 'rate_limit_burst', label: 'Rate Limit Burst', description: 'Maximum burst size for rate limiter', defaultValue: '20' },
+    { key: 'send_message_timeout', label: 'Send Message Timeout', description: 'Timeout for sending messages to agents', defaultValue: '120s' },
+    { key: 'sse_keepalive', label: 'SSE Keepalive Interval', description: 'Interval for SSE keepalive pings', defaultValue: '30s' },
+    { key: 'push_retry_max', label: 'Push Notification Retries', description: 'Maximum retries for push notification delivery', defaultValue: '3' },
+    { key: 'provider_org', label: 'Provider Organization', description: 'Organization name for agent card metadata', defaultValue: '' },
+    { key: 'provider_url', label: 'Provider URL', description: 'Organization URL for agent card metadata', defaultValue: '' },
   ],
 };
 

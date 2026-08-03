@@ -968,16 +968,14 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 		slog.Info("Bridge config file already exists, preserving", "plugin", name, "path", resolvedBridgePath)
 	}
 
-	// 3. Register in settings.yaml with self-managed fields.
+	// 3. Register in settings.yaml with self-managed fields and broker type
+	//    in a single read-modify-write cycle.
 	settingsWriteMu.Lock()
-	err = config.AddSelfManagedPluginToSettings(config.SelfManagedPluginEntry{
+	err = config.AddSelfManagedPluginWithBrokerType(config.SelfManagedPluginEntry{
 		Name:       name,
 		Address:    "localhost:9090",
 		ConfigFile: adminConfigPath,
 	})
-	if err == nil {
-		err = config.AddPluginToMessageBrokerTypes(name)
-	}
 	settingsWriteMu.Unlock()
 	if err != nil {
 		slog.Error("Failed to add self-managed plugin to settings.yaml", "plugin", name, "error", err)
@@ -986,7 +984,10 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 	}
 
 	// 4. Attempt LoadOne — non-fatal if the bridge is not running.
-	pluginsDir, _ := plugin.DefaultPluginsDir()
+	pluginsDir, err := plugin.DefaultPluginsDir()
+	if err != nil {
+		slog.Warn("Failed to resolve plugins directory, continuing without it", "plugin", name, "error", err)
+	}
 	if err := mgr.LoadOne(plugin.PluginTypeBroker, name, plugin.PluginEntry{
 		SelfManaged: true,
 		Mode:        "self-managed",
