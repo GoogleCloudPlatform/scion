@@ -15,6 +15,7 @@
 package bridge
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -117,6 +118,13 @@ func ValidateConfig(cfg *Config) error {
 			return fmt.Errorf("bridge.provider.url is invalid: %w", err)
 		}
 	}
+	// Require explicit opt-in for unauthenticated gRPC/REST transports.
+	if cfg.Bridge.GRPCListenAddress != "" && !cfg.Bridge.GRPCInsecure && cfg.Auth.Scheme == "none" {
+		return fmt.Errorf("gRPC transport is configured but auth.scheme is \"none\"; set bridge.grpc_insecure: true to acknowledge unauthenticated gRPC access, or configure auth")
+	}
+	if cfg.Bridge.RESTListenAddress != "" && !cfg.Bridge.RESTInsecure && cfg.Auth.Scheme == "none" {
+		return fmt.Errorf("REST transport is configured but auth.scheme is \"none\"; set bridge.rest_insecure: true to acknowledge unauthenticated REST access, or configure auth")
+	}
 	return nil
 }
 
@@ -157,10 +165,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.Handle("GET /metrics", MetricsHandler())
 
-	// Wrap with middleware chain: metrics -> rate limit -> auth.
+	// Wrap with middleware chain: SSE deadlines -> metrics -> rate limit -> auth.
+	// SSEWriteDeadlineMiddleware is outermost so it wraps the raw
+	// http.ResponseWriter: it replaces the server's fixed WriteTimeout with a
+	// rolling per-write deadline for text/event-stream responses, which keeps
+	// long-lived streams alive without disabling write deadlines globally.
 	handler := s.authMiddleware(mux)
 	handler = RateLimitMiddleware(handler, s.config.RateLimit)
 	handler = InstrumentHandler(handler, s.metrics)
+	handler = SSEWriteDeadlineMiddleware(handler)
 	return handler
 }
 
@@ -288,8 +301,8 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce request body size limit to prevent memory exhaustion.
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
+	// Limit request body to 1 MB to prevent memory exhaustion from oversized payloads.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	// Inject routing info into context for the executor.
 	ctx := WithRouteInfo(r.Context(), RouteInfo{
@@ -300,6 +313,20 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	// Delegate to SDK JSON-RPC handler.
 	s.sdkHandler.ServeHTTP(w, r)
+}
+
+// normalizeJSONRPCID ensures only valid JSON-RPC 2.0 ID types (string, number,
+// null) are echoed back. Arrays, objects, and booleans are replaced with null
+// per JSON-RPC 2.0 §4.1.
+func normalizeJSONRPCID(id interface{}) interface{} {
+	switch id.(type) {
+	case nil, string, float64, int, int64:
+		return id
+	case json.Number:
+		return id
+	default:
+		return nil
+	}
 }
 
 // writeJSONRPCError writes a minimal JSON-RPC error response.
@@ -315,11 +342,102 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 	}
 	resp := jsonrpcResponse{
 		JSONRPC: "2.0",
-		ID:      id,
+		ID:      normalizeJSONRPCID(id),
 		Error:   &jsonrpcError{Code: code, Message: message},
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Default().Error("failed to encode JSON-RPC error response", "error", err)
+	}
+}
+
+// verifyCredential checks that the provided credential matches the configured API key.
+func verifyCredential(provided, expected string) bool {
+	expectedHash := sha256.Sum256([]byte(expected))
+	providedHash := sha256.Sum256([]byte(provided))
+	return subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) == 1
+}
+
+// authError describes an authentication failure in a transport-neutral way so
+// that HTTP, REST, and gRPC callers can map it onto their own error model.
+type authError struct {
+	msg string
+	// internal marks a server-side misconfiguration (500) rather than a
+	// caller error (401).
+	internal bool
+}
+
+func (e *authError) Error() string { return e.msg }
+
+// headerLookup returns the value of a request header/metadata entry. Keys are
+// the canonical HTTP names ("Authorization", "X-API-Key"); implementations are
+// responsible for any transport-specific casing (gRPC metadata is lowercase).
+type headerLookup func(name string) string
+
+// authenticate validates caller credentials against the configured auth scheme.
+// It is transport-neutral: the JSON-RPC HTTP middleware, the REST middleware,
+// and the gRPC interceptors all go through it so every transport supports the
+// same schemes. For the per-user schemes (hubUAT/hubJWT) the returned context
+// carries the resolved CallerIdentity; legacy schemes return ctx unchanged.
+func (s *Server) authenticate(ctx context.Context, header headerLookup) (context.Context, *authError) {
+	switch s.config.Auth.Scheme {
+	case "none":
+		return ctx, nil
+
+	case "hubUAT":
+		token := bearerOrAPIKeyFrom(header)
+		if !strings.HasPrefix(token, "scion_pat_") {
+			return nil, &authError{msg: "unauthorized: expected scion_pat_* token"}
+		}
+		if s.uatValidator == nil {
+			s.log.Error("hubUAT scheme configured but UAT validator not initialized")
+			return nil, &authError{msg: "internal server error", internal: true}
+		}
+		caller, err := s.uatValidator.Validate(ctx, token)
+		if err != nil {
+			s.log.Debug("UAT validation failed", "error", err)
+			return nil, &authError{msg: "unauthorized"}
+		}
+		return withCallerIdentity(ctx, caller), nil
+
+	case "hubJWT":
+		token := bearerFrom(header)
+		if token == "" {
+			return nil, &authError{msg: "unauthorized: missing bearer token"}
+		}
+		if s.jwtValidator == nil {
+			s.log.Error("hubJWT scheme configured but JWT validator not initialized")
+			return nil, &authError{msg: "internal server error", internal: true}
+		}
+		caller, err := s.jwtValidator.Validate(token)
+		if err != nil {
+			s.log.Debug("JWT validation failed", "error", err)
+			return nil, &authError{msg: "unauthorized"}
+		}
+		return withCallerIdentity(ctx, caller), nil
+
+	default:
+		// Legacy schemes: "apiKey", "bearer", or "" (accept either header).
+		// No CallerIdentity is injected.
+		var apiKey string
+		switch s.config.Auth.Scheme {
+		case "apiKey":
+			apiKey = header("X-API-Key")
+		case "bearer":
+			apiKey = bearerFrom(header)
+		default:
+			// When auth.scheme is unset (empty), accept credentials from either
+			// X-API-Key or Authorization: Bearer headers for convenience.
+			apiKey = header("X-API-Key")
+			if apiKey == "" {
+				apiKey = bearerFrom(header)
+			}
+		}
+		if !verifyCredential(apiKey, s.config.Auth.APIKey) {
+			return nil, &authError{msg: "unauthorized"}
+		}
+		return ctx, nil
+	}
 }
 
 // authMiddleware validates authentication on non-public endpoints.
@@ -338,77 +456,41 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		switch s.config.Auth.Scheme {
-		case "none":
-			next.ServeHTTP(w, r)
+		ctx, authErr := s.authenticate(r.Context(), r.Header.Get)
+		if authErr != nil {
+			writeAuthError(w, authErr)
 			return
-
-		case "hubUAT":
-			token := extractBearerOrAPIKey(r)
-			if !strings.HasPrefix(token, "scion_pat_") {
-				http.Error(w, "unauthorized: expected scion_pat_* token", http.StatusUnauthorized)
-				return
-			}
-			caller, err := s.uatValidator.Validate(r.Context(), token)
-			if err != nil {
-				s.log.Debug("UAT validation failed", "error", err)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			ctx := withCallerIdentity(r.Context(), caller)
-			next.ServeHTTP(w, r.WithContext(ctx))
-			return
-
-		case "hubJWT":
-			token := extractBearerToken(r)
-			if token == "" {
-				http.Error(w, "unauthorized: missing bearer token", http.StatusUnauthorized)
-				return
-			}
-			if s.jwtValidator == nil {
-				s.log.Error("hubJWT scheme configured but JWT validator not initialized")
-				http.Error(w, "internal server error", http.StatusInternalServerError)
-				return
-			}
-			caller, err := s.jwtValidator.Validate(token)
-			if err != nil {
-				s.log.Debug("JWT validation failed", "error", err)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			ctx := withCallerIdentity(r.Context(), caller)
-			next.ServeHTTP(w, r.WithContext(ctx))
-			return
-
-		default:
-			// Legacy schemes: "apiKey", "bearer", or "" (accept either header).
-			// No CallerIdentity is injected.
-			var apiKey string
-			switch s.config.Auth.Scheme {
-			case "apiKey":
-				apiKey = r.Header.Get("X-API-Key")
-			case "bearer":
-				apiKey = extractBearerToken(r)
-			default:
-				// When auth.scheme is unset (empty), accept credentials from either
-				// X-API-Key or Authorization: Bearer headers for convenience.
-				apiKey = r.Header.Get("X-API-Key")
-				if apiKey == "" {
-					apiKey = extractBearerToken(r)
-				}
-			}
-
-			// Compare SHA-256 hashes to avoid leaking key length via timing.
-			expectedHash := sha256.Sum256([]byte(s.config.Auth.APIKey))
-			providedHash := sha256.Sum256([]byte(apiKey))
-			if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			next.ServeHTTP(w, r)
 		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// AuthHTTPMiddleware wraps an http.Handler with the configured authentication,
+// for transports served outside the main JSON-RPC mux (REST). It supports the
+// same schemes as authMiddleware, including per-user hubUAT/hubJWT. Auth is
+// skipped only when the operator explicitly opted out via bridge.rest_insecure
+// or auth.scheme: "none".
+func (s *Server) AuthHTTPMiddleware(next http.Handler) http.Handler {
+	if s.config.Auth.Scheme == "none" || s.config.Bridge.RESTInsecure {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, authErr := s.authenticate(r.Context(), r.Header.Get)
+		if authErr != nil {
+			writeAuthError(w, authErr)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// writeAuthError maps an authError onto an HTTP response.
+func writeAuthError(w http.ResponseWriter, err *authError) {
+	if err.internal {
+		http.Error(w, err.msg, http.StatusInternalServerError)
+		return
+	}
+	http.Error(w, err.msg, http.StatusUnauthorized)
 }
 
 // extractBearerToken extracts the token from an Authorization: Bearer header.
@@ -426,4 +508,23 @@ func extractBearerOrAPIKey(r *http.Request) string {
 		return token
 	}
 	return r.Header.Get("X-API-Key")
+}
+
+// bearerFrom extracts the token from an Authorization: Bearer header using a
+// transport-neutral lookup.
+func bearerFrom(header headerLookup) string {
+	auth := header("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	return ""
+}
+
+// bearerOrAPIKeyFrom extracts a token from Authorization: Bearer or X-API-Key
+// using a transport-neutral lookup.
+func bearerOrAPIKeyFrom(header headerLookup) string {
+	if token := bearerFrom(header); token != "" {
+		return token
+	}
+	return header("X-API-Key")
 }

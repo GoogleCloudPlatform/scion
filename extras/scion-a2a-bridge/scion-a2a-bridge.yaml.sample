@@ -8,6 +8,20 @@ bridge:
   # Address for the A2A HTTP server (JSON-RPC + agent card endpoints).
   listen_address: ":8443"
 
+  # Optional: enable the A2A gRPC transport. Leave unset to disable.
+  # gRPC has no per-request routing, so every request is routed to the first
+  # exposed agent of the first project below.
+  # grpc_listen_address: ":8444"
+
+  # Optional: enable the A2A HTTP+JSON (REST) transport. Leave unset to
+  # disable. Same fixed-routing caveat as gRPC.
+  # rest_listen_address: ":8445"
+
+  # Explicit opt-in required to run gRPC/REST without authentication.
+  # Only meaningful together with auth.scheme: "none".
+  # grpc_insecure: false
+  # rest_insecure: false
+
   # Public-facing URL where A2A clients reach this bridge. Used to
   # construct agent card URLs and self-referencing links.
   external_url: "https://a2a.example.com"

@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,9 +33,12 @@ import (
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	a2agrpc "github.com/a2aproject/a2a-go/v2/a2agrpc/v0"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
@@ -176,16 +180,22 @@ func main() {
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
 	srv.WarnOnOpenAuth()
 
+	// Bound non-streaming responses: blocking sends can take up to
+	// Timeouts.SendMessage, so allow that plus margin. SSE responses opt out of
+	// this deadline via SSEWriteDeadlineMiddleware, which installs a rolling
+	// per-write deadline instead.
+	writeTimeout := cfg.Timeouts.SendMessage + 30*time.Second
+
 	httpServer := &http.Server{
 		Addr:           listenAddr,
 		Handler:        srv.Handler(),
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		WriteTimeout:   writeTimeout,
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 3) // capacity matches the 3 server goroutines (HTTP, gRPC, REST)
 	go func() {
 		log.Warn("A2A server starting WITHOUT TLS — ensure TLS is terminated at a reverse proxy (e.g. Caddy, nginx, cloud LB)", "address", listenAddr)
 		log.Info("A2A protocol server starting", "address", listenAddr)
@@ -194,8 +204,125 @@ func main() {
 		}
 	}()
 
+	// Start gRPC server if configured.
+	// NOTE: gRPC and REST transports require a single-project, single-agent
+	// configuration because they lack per-request project/agent routing. The
+	// executor injects the configured default route into every request context.
+	// Auth uses the same schemes as the JSON-RPC transport (including the
+	// per-user hubUAT/hubJWT schemes) and can only be disabled by explicitly
+	// setting bridge.grpc_insecure / bridge.rest_insecure.
+	var grpcServer *grpc.Server
+	if cfg.Bridge.GRPCListenAddress != "" {
+		if len(cfg.Projects) == 0 || len(cfg.Projects[0].ExposedAgents) == 0 {
+			log.Error("gRPC transport requires at least one project with exposed agents in config")
+			os.Exit(1)
+		}
+		defaultRoute := bridge.RouteInfo{
+			ProjectSlug: cfg.Projects[0].Slug,
+			AgentSlug:   cfg.Projects[0].ExposedAgents[0],
+		}
+		log.Warn("gRPC transport uses fixed routing — all requests go to the first configured agent",
+			"project", defaultRoute.ProjectSlug, "agent", defaultRoute.AgentSlug)
+
+		if !cfg.Bridge.GRPCInsecure {
+			log.Warn("gRPC transport: auth enabled — clients must provide credentials via gRPC metadata",
+				"scheme", cfg.Auth.Scheme)
+		} else {
+			log.Warn("⚠ gRPC transport: auth DISABLED (grpc_insecure: true) — any client can send requests without credentials",
+				"address", cfg.Bridge.GRPCListenAddress)
+		}
+
+		grpcServer = grpc.NewServer(
+			grpc.MaxRecvMsgSize(1<<20), // 1 MB, matching REST/JSON-RPC body limit
+			grpc.MaxConcurrentStreams(100),
+			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+				MinTime:             30 * time.Second,
+				PermitWithoutStream: true,
+			}),
+			grpc.ChainUnaryInterceptor(
+				srv.AuthUnaryInterceptor(),
+				bridge.RouteInfoUnaryInterceptor(defaultRoute),
+			),
+			grpc.ChainStreamInterceptor(
+				srv.AuthStreamInterceptor(),
+				bridge.RouteInfoStreamInterceptor(defaultRoute),
+			),
+		)
+		grpcHandler := a2agrpc.NewHandler(sdkRequestHandler)
+		grpcHandler.RegisterWith(grpcServer)
+
+		grpcListener, err := net.Listen("tcp", cfg.Bridge.GRPCListenAddress)
+		if err != nil {
+			log.Error("failed to listen for gRPC", "address", cfg.Bridge.GRPCListenAddress, "error", err)
+			os.Exit(1)
+		}
+
+		go func() {
+			log.Info("gRPC transport starting", "address", cfg.Bridge.GRPCListenAddress)
+			if err := grpcServer.Serve(grpcListener); err != nil {
+				errCh <- fmt.Errorf("gRPC server: %w", err)
+			}
+		}()
+	}
+
+	// Start REST server if configured.
+	var restServer *http.Server
+	if cfg.Bridge.RESTListenAddress != "" {
+		if len(cfg.Projects) == 0 || len(cfg.Projects[0].ExposedAgents) == 0 {
+			log.Error("REST transport requires at least one project with exposed agents in config")
+			os.Exit(1)
+		}
+		defaultRoute := bridge.RouteInfo{
+			ProjectSlug: cfg.Projects[0].Slug,
+			AgentSlug:   cfg.Projects[0].ExposedAgents[0],
+		}
+		log.Warn("REST transport uses fixed routing — all requests go to the first configured agent",
+			"project", defaultRoute.ProjectSlug, "agent", defaultRoute.AgentSlug)
+		if !cfg.Bridge.RESTInsecure {
+			log.Warn("REST transport: auth enabled — clients must provide credentials via HTTP headers",
+				"scheme", cfg.Auth.Scheme)
+		} else {
+			log.Warn("⚠ REST transport: auth DISABLED (rest_insecure: true) — any client can send requests without credentials",
+				"address", cfg.Bridge.RESTListenAddress)
+		}
+
+		restHandler := srv.AuthHTTPMiddleware(bridge.MaxBytesReaderMiddleware(1<<20,
+			bridge.RouteInfoMiddleware(defaultRoute,
+				bridge.SSEWriteDeadlineMiddleware(
+					a2asrv.NewRESTHandler(
+						sdkRequestHandler,
+						a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+					),
+				),
+			),
+		))
+
+		restServer = &http.Server{
+			Addr:           cfg.Bridge.RESTListenAddress,
+			Handler:        restHandler,
+			ReadTimeout:    30 * time.Second,
+			WriteTimeout:   writeTimeout, // SSE responses override this with a rolling deadline (SSEWriteDeadlineMiddleware).
+			IdleTimeout:    120 * time.Second,
+			MaxHeaderBytes: 1 << 20,
+		}
+
+		go func() {
+			log.Info("REST transport starting", "address", cfg.Bridge.RESTListenAddress)
+			if err := restServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errCh <- fmt.Errorf("REST server: %w", err)
+			}
+		}()
+	}
+
+	transports := []string{"JSON-RPC"}
+	if cfg.Bridge.GRPCListenAddress != "" {
+		transports = append(transports, "gRPC")
+	}
+	if cfg.Bridge.RESTListenAddress != "" {
+		transports = append(transports, "REST")
+	}
 	log.Info("scion-a2a-bridge ready",
-		"transport", "JSON-RPC",
+		"transports", transports,
 		"sdk", "a2a-go/v2",
 	)
 
@@ -215,6 +342,28 @@ func main() {
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Error("failed to stop A2A server", "error", err)
+	}
+
+	if grpcServer != nil {
+		grpcStopped := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(grpcStopped)
+		}()
+		select {
+		case <-grpcStopped:
+			log.Info("gRPC server stopped gracefully")
+		case <-shutdownCtx.Done():
+			log.Warn("gRPC graceful shutdown timed out, forcing stop")
+			grpcServer.Stop()
+		}
+	}
+
+	if restServer != nil {
+		if err := restServer.Shutdown(shutdownCtx); err != nil {
+			log.Error("failed to stop REST server", "error", err)
+		}
+		log.Info("REST server stopped")
 	}
 
 	// Drain background goroutines before closing the store.

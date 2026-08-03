@@ -75,6 +75,34 @@ docker run -p 8443:8443 -p 9090:9090 \
 - `tasks/pushNotification/get` — list webhooks for a task
 - `tasks/pushNotification/delete` — remove a webhook
 
+## Transports
+
+The bridge speaks all three A2A transports through the same a2a-go SDK request
+handler, so behaviour (task lifecycle, streaming, push notifications) is
+identical across them.
+
+| Transport | Enabled by | Routing | Streaming |
+|-----------|-----------|---------|-----------|
+| JSON-RPC 2.0 over HTTP | always (`bridge.listen_address`) | per-request, from the URL path | SSE |
+| gRPC | `bridge.grpc_listen_address` | fixed: first exposed agent of the first project | server streaming |
+| HTTP+JSON (REST) | `bridge.rest_listen_address` | fixed: first exposed agent of the first project | SSE |
+
+Authentication is the same on every transport: the configured `auth.scheme`
+(`apiKey`, `bearer`, `hubUAT`, `hubJWT`, or `none`) is enforced for JSON-RPC,
+gRPC, and REST alike. gRPC clients pass credentials as metadata (`x-api-key`
+or `authorization: Bearer …`); REST clients pass the equivalent HTTP headers.
+Per-user schemes (`hubUAT`, `hubJWT`) resolve the caller identity and use it
+for Hub writes on all transports.
+
+Auth can only be disabled per transport by explicitly setting
+`bridge.grpc_insecure: true` / `bridge.rest_insecure: true`; the bridge refuses
+to start with a transport enabled, `auth.scheme: none`, and no matching
+insecure flag.
+
+Both extra transports enforce the same 1 MB request body limit as JSON-RPC and
+apply a rolling write deadline to SSE streams so long-lived streams are not cut
+by the server write timeout.
+
 ## TLS
 
 The A2A server listens on plain HTTP. **TLS must be terminated at a reverse proxy** (e.g. Caddy, nginx, or a cloud load balancer) in front of the bridge. The bridge logs a `WARN` at startup as a reminder. Do not expose the bridge port directly to the internet without a TLS-terminating proxy.
@@ -84,6 +112,8 @@ The A2A server listens on plain HTTP. **TLS must be terminated at a reverse prox
 | Port | Purpose |
 |------|---------|
 | 8443 | A2A HTTP server (JSON-RPC, agent cards, health/metrics) |
+| 8444 | A2A gRPC transport (optional, `bridge.grpc_listen_address`) |
+| 8445 | A2A HTTP+JSON/REST transport (optional, `bridge.rest_listen_address`) |
 | 9090 | Broker plugin RPC (Hub connects here to push agent messages) |
 
 ## Setup and onboarding (agent instructions)
@@ -131,7 +161,11 @@ Edit `scion-a2a-bridge.yaml`. The required fields are:
 | `hub.user` | Admin identity the bridge uses for Hub API calls | `a2a-bridge@example.com` |
 | `hub.signing_key` | Path to a file containing the Hub's base64-encoded HS256 signing key. Mutually exclusive with `hub.signing_key_secret`. | `/path/to/signing-key.b64` |
 | `hub.signing_key_secret` | GCP Secret Manager resource name for the signing key. Mutually exclusive with `hub.signing_key`. | `projects/my-project/secrets/hub-signing-key` |
-| `bridge.listen_address` | Address for the A2A HTTP server | `:8443` |
+| `bridge.listen_address` | Address for the A2A HTTP server (JSON-RPC) | `:8443` |
+| `bridge.grpc_listen_address` | Optional. Address for the A2A gRPC transport. Empty disables it. | `:8444` |
+| `bridge.rest_listen_address` | Optional. Address for the A2A HTTP+JSON (REST) transport. Empty disables it. | `:8445` |
+| `bridge.grpc_insecure` | Optional. Disable auth on the gRPC transport (explicit opt-in; required if `auth.scheme` is `none`). | `false` |
+| `bridge.rest_insecure` | Optional. Disable auth on the REST transport (explicit opt-in; required if `auth.scheme` is `none`). | `false` |
 | `bridge.external_url` | Public URL where A2A clients reach the bridge | `https://a2a.example.com` |
 | `auth.api_key` | Static API key clients pass in the `X-API-Key` header. Supports env var expansion. | `${A2A_API_KEY}` |
 | `projects[].slug` | Grove slug to expose. Add one entry per project. | `my-project` |
@@ -271,7 +305,7 @@ The container runs as non-root user `bridge` (UID 1000). The state database dire
 
 ## Known Limitations
 
-- **No gRPC or REST transport.** The bridge only supports JSON-RPC 2.0 over HTTP. gRPC and HTTP+JSON/REST transports are not implemented.
+- **gRPC and REST transports are single-agent.** JSON-RPC routes per request via `/projects/{project}/agents/{agent}/jsonrpc`. The gRPC and HTTP+JSON/REST transports have no per-request routing in the A2A spec, so every request is routed to the first exposed agent of the first configured project. Run one bridge instance per exposed agent if you need more.
 - **Blocking-mode `input-required` flows.** In blocking mode, state-change messages are skipped for waiters so the actual content reply is delivered. A blocking `message/send` against an agent that transitions to `input-required` without sending content will time out (default 120s). Use non-blocking mode with push notifications or SSE for `input-required` flows.
 
 ## Security considerations

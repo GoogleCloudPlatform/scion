@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -126,12 +127,14 @@ func TranslateA2AToScion(parts []Part) *messages.StructuredMessage {
 			attachments = append(attachments, part.URL)
 		case part.Data != nil:
 			jsonBytes, err := json.Marshal(part.Data)
-			if err == nil {
-				if textContent.Len() > 0 {
-					textContent.WriteString("\n")
-				}
-				textContent.WriteString(string(jsonBytes))
+			if err != nil {
+				slog.Default().Warn("failed to marshal A2A Data part, skipping", "error", err)
+				continue
 			}
+			if textContent.Len() > 0 {
+				textContent.WriteString("\n")
+			}
+			textContent.WriteString(string(jsonBytes))
 		}
 	}
 
@@ -155,6 +158,9 @@ func TranslateA2AToScion(parts []Part) *messages.StructuredMessage {
 
 // TranslateScionToA2A converts a Scion StructuredMessage into an A2A Message and optional Artifacts.
 func TranslateScionToA2A(msg *messages.StructuredMessage) (Message, []Artifact) {
+	if msg == nil {
+		return Message{MessageID: uuid.New().String(), Role: RoleAgent}, nil
+	}
 	parts := []Part{{Text: msg.Msg, MediaType: "text/plain"}}
 
 	for _, att := range msg.Attachments {
@@ -198,12 +204,14 @@ func TranslateA2APartsToScion(parts a2a.ContentParts) *messages.StructuredMessag
 			attachments = append(attachments, string(v))
 		case a2a.Data:
 			jsonBytes, err := json.Marshal(v.Value)
-			if err == nil {
-				if textContent.Len() > 0 {
-					textContent.WriteString("\n")
-				}
-				textContent.WriteString(string(jsonBytes))
+			if err != nil {
+				slog.Default().Warn("failed to marshal A2A Data part, skipping", "error", err)
+				continue
 			}
+			if textContent.Len() > 0 {
+				textContent.WriteString("\n")
+			}
+			textContent.WriteString(string(jsonBytes))
 		}
 	}
 

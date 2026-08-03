@@ -345,11 +345,14 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 	b.registerActiveTask(taskID, aKey)
 	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
+	if !b.addWaiter(taskID, &waiter{
 		ch:        responseCh,
 		agentSlug: agentCtx.AgentSlug,
 		projectID: agentCtx.ProjectID,
-	})
+	}) {
+		b.unregisterActiveTask(taskID, aKey)
+		return nil, fmt.Errorf("concurrent request for task %s", taskID)
+	}
 	defer b.removeWaiter(taskID)
 	// Keep task registered in activeTasks — the agent's eventual state-change
 	// to completed/failed will close it via dispatchToActiveTask.
@@ -468,7 +471,10 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		aKey := agentKey(task.ProjectID, task.AgentSlug)
 		b.registerActiveTask(taskID, aKey)
 		responseCh := make(chan *messages.StructuredMessage, 1)
-		b.addWaiter(taskID, &waiter{ch: responseCh, agentSlug: task.AgentSlug, projectID: task.ProjectID})
+		if !b.addWaiter(taskID, &waiter{ch: responseCh, agentSlug: task.AgentSlug, projectID: task.ProjectID}) {
+			b.unregisterActiveTask(taskID, aKey)
+			return nil, fmt.Errorf("concurrent follow-up for task %s: another blocking request is already waiting", taskID)
+		}
 		defer b.removeWaiter(taskID)
 		defer b.unregisterActiveTask(taskID, aKey)
 
@@ -730,9 +736,34 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 	// If the message carries a task correlation ID, dispatch only to that task
 	// after verifying the message's agent matches the task's owner.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
+		// Try waiter first — SDK-created tasks (via AgentExecutor) may not
+		// be stored in the local SQLite store, but they register a waiter
+		// for blocking response correlation. Check the waiter before the
+		// store to avoid dropping responses for SDK-managed tasks.
+		if b.dispatchToWaiter(taskID, msg) {
+			return
+		}
+
 		task, err := b.store.GetTask(taskID)
 		if err != nil || task == nil {
-			b.log.Debug("ignoring message for unknown task", "task_id", taskID)
+			// Also check if the task is registered as active (SDK executor
+			// registers in activeTasks even without a store entry).
+			b.tasksMu.RLock()
+			entry, isActive := b.activeTasks[taskID]
+			b.tasksMu.RUnlock()
+			if !isActive {
+				b.log.Debug("ignoring message for unknown task", "task_id", taskID)
+				return
+			}
+			// Verify the message sender's agent slug matches the active
+			// task's registered agent key (format "projectID:agentSlug").
+			if parts := strings.SplitN(entry.aKey, ":", 2); len(parts) == 2 && parts[1] != agentSlug {
+				b.log.Warn("dropping cross-agent message for SDK-managed task",
+					"task_agent", parts[1], "msg_agent", agentSlug, "task_id", taskID)
+				return
+			}
+			// Active but not in store — SDK-managed task, dispatch via active path.
+			b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
 			return
 		}
 		if task.AgentSlug != agentSlug {
@@ -741,9 +772,6 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 			return
 		}
 
-		if b.dispatchToWaiter(taskID, msg) {
-			return
-		}
 		b.tasksMu.RLock()
 		_, isActive := b.activeTasks[taskID]
 		b.tasksMu.RUnlock()
@@ -786,13 +814,28 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 // dispatchToWaiter sends a message to a blocking waiter for the given taskID.
 // Returns true if a waiter exists and handled the message (callers should skip
 // further dispatch). State-change messages are skipped so the actual reply
-// lands in the buffer.
+// lands in the buffer. Verifies the message sender's agent slug matches the
+// waiter's expected agent to prevent cross-agent message injection.
 func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage) bool {
 	b.mu.RLock()
 	w, ok := b.waiters[taskID]
 	b.mu.RUnlock()
 	if !ok {
 		return false
+	}
+	// Verify agent ownership: the waiter's expected agent must match the
+	// message sender's agent slug. This prevents a response from Agent B
+	// being delivered to a task that was started for Agent A.
+	if w.agentSlug != "" {
+		senderAgent := extractAgentIDFromSender(msg.Sender)
+		if senderAgent != "" && senderAgent != w.agentSlug {
+			b.log.Warn("dropping cross-agent message for waiter",
+				"task_id", taskID,
+				"expected_agent", w.agentSlug,
+				"sender_agent", senderAgent,
+			)
+			return true // consumed but rejected — don't fall through to other dispatch paths
+		}
 	}
 	if msg.Type == messages.TypeStateChange {
 		// Terminal state-changes must still be persisted to the DB even though
@@ -1015,7 +1058,7 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 		"version":     "1.0.0",
 		"capabilities": map[string]bool{
 			"streaming":         true,
-			"pushNotifications": true,
+			"pushNotifications": false,
 		},
 		"defaultInputModes":  []string{"text/plain", "application/json"},
 		"defaultOutputModes": []string{"text/plain", "application/json"},
@@ -1212,10 +1255,17 @@ func (b *Bridge) unregisterActiveTask(taskID, aKey string) {
 	}
 }
 
-func (b *Bridge) addWaiter(taskID string, w *waiter) {
+// addWaiter registers a blocking waiter for a task. Returns false if a waiter
+// is already registered (concurrent follow-ups to the same task), in which case
+// the caller should reject the request to prevent response mis-delivery.
+func (b *Bridge) addWaiter(taskID string, w *waiter) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, exists := b.waiters[taskID]; exists {
+		return false
+	}
 	b.waiters[taskID] = w
+	return true
 }
 
 func (b *Bridge) removeWaiter(taskID string) {
