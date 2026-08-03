@@ -82,6 +82,12 @@ func (RuntimeBroker) Fields() []ent.Field {
 			Optional(),
 		field.Bool("auto_provide").
 			Default(false),
+		field.String("gcp_host_service_account_email").
+			Optional().
+			Nillable(),
+		field.String("gcp_host_project_id").
+			Optional().
+			Nillable(),
 		field.String("connected_hub_id").
 			Optional().
 			Nillable(),

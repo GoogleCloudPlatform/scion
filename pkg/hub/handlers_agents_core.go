@@ -657,39 +657,21 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	// Validate GCP passthrough mode: only the broker owner (or admin) may use passthrough,
-	// because it exposes the broker's own GCP identity to the agent container.
+	// Validate GCP passthrough mode. Two independent checks:
+	//  1. Broker-owner/admin restriction.
+	//  2. actAs on the broker host service account (requires the broker to
+	//     have its host SA registered).
 	//
-	// This is deliberately still a hand-rolled ownership comparison rather than
-	// s.authorize(brokerResource(broker), ActionDispatch): no policy can grant
-	// passthrough and the project-owner bypass does not apply, so routing it
-	// through the policy engine would change behaviour for *users*, not just
-	// for the non-user callers #591 is about. That alignment is tracked
-	// separately as ptone/scion#596. The fix here is the minimal one — the
-	// comparison is unchanged, and callers that are not users, which previously
-	// skipped the whole block, are now denied explicitly.
+	// Both are enforced by authorizePassthroughIdentity. The ownership check
+	// is deliberately a hand-rolled comparison rather than policy-based
+	// authorization — see passthrough_gate.go for the reasoning.
 	if req.GCPIdentity != nil && req.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough && runtimeBrokerID != "" {
-		userIdent := GetUserIdentityFromContext(ctx)
-		if userIdent == nil {
-			// Agents and brokers reach this and cannot own a broker, so there
-			// is nothing for the comparison below to consult. Deny, rather than
-			// skipping the block as this site did before #591.
-			logAuthzDenial(r, GetIdentityFromContext(ctx),
-				Resource{Type: "broker", ID: runtimeBrokerID}, ActionDispatch,
-				"passthrough is restricted to broker owners and admins")
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
-			return
-		}
 		broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if userIdent.Role() != "admin" && broker.CreatedBy != userIdent.ID() {
-			logAuthzDenial(r, userIdent, brokerResource(broker), ActionDispatch, "not broker owner or admin")
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
+		if !s.authorizePassthroughIdentity(w, r, broker, SurfacePassthroughCreate) {
 			return
 		}
 	}
@@ -2081,23 +2063,13 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 		case store.GCPMetadataModePassthrough:
 			// Passthrough exposes the broker's own GCP identity to the agent
 			// container. The create path (see createAgentInProject) enforces
-			// broker-owner/admin restriction for this mode. This PATCH path
-			// must enforce the same restriction — without it, "create without
-			// passthrough, then PATCH it in" bypasses the create-path gate.
-			//
-			// Kept as a near-duplicate of the create path deliberately: see
-			// the assign branch comments on greppability.
+			// broker-owner/admin + actAs restriction for passthrough. This
+			// PATCH path must enforce the same restriction — without it,
+			// "create without passthrough, then PATCH it in" bypasses the
+			// create-path gate. Both checks live in
+			// authorizePassthroughIdentity.
 			if agent.RuntimeBrokerID == "" {
 				ValidationError(w, "GCP identity passthrough requires a runtime broker, but this agent has no broker assigned", nil)
-				return
-			}
-			userIdent := GetUserIdentityFromContext(ctx)
-			if userIdent == nil {
-				logAuthzDenial(r, GetIdentityFromContext(ctx),
-					Resource{Type: "broker", ID: agent.RuntimeBrokerID}, ActionDispatch,
-					"passthrough is restricted to broker owners and admins")
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
 				return
 			}
 			broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
@@ -2105,10 +2077,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			if userIdent.Role() != "admin" && broker.CreatedBy != userIdent.ID() {
-				logAuthzDenial(r, userIdent, brokerResource(broker), ActionDispatch, "not broker owner or admin")
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"GCP identity passthrough requires broker ownership. Only the broker owner can expose the broker's GCP identity to agents.", nil)
+			if !s.authorizePassthroughIdentity(w, r, broker, SurfacePassthroughPatch) {
 				return
 			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{

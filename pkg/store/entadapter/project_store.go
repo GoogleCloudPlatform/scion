@@ -591,6 +591,12 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	sb.ConnectedHubID = b.ConnectedHubID
 	sb.ConnectedSessionID = b.ConnectedSessionID
 	sb.ConnectedAt = b.ConnectedAt
+	if b.GcpHostServiceAccountEmail != nil {
+		sb.GCPHostServiceAccountEmail = *b.GcpHostServiceAccountEmail
+	}
+	if b.GcpHostProjectID != nil {
+		sb.GCPHostProjectID = *b.GcpHostProjectID
+	}
 	unmarshalRawJSON(b.Capabilities, &sb.Capabilities)
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
@@ -640,6 +646,12 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 	}
 	if b.ConnectedAt != nil {
 		create.SetConnectedAt(*b.ConnectedAt)
+	}
+	if b.GCPHostServiceAccountEmail != "" {
+		create.SetGcpHostServiceAccountEmail(b.GCPHostServiceAccountEmail)
+	}
+	if b.GCPHostProjectID != "" {
+		create.SetGcpHostProjectID(b.GCPHostProjectID)
 	}
 
 	created, err := create.Save(ctx)
@@ -728,6 +740,16 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			update.SetConnectedAt(*b.ConnectedAt)
 		} else {
 			update.ClearConnectedAt()
+		}
+		if b.GCPHostServiceAccountEmail != "" {
+			update.SetGcpHostServiceAccountEmail(b.GCPHostServiceAccountEmail)
+		} else {
+			update.ClearGcpHostServiceAccountEmail()
+		}
+		if b.GCPHostProjectID != "" {
+			update.SetGcpHostProjectID(b.GCPHostProjectID)
+		} else {
+			update.ClearGcpHostProjectID()
 		}
 		affected, err := update.Save(ctx)
 		if err != nil {

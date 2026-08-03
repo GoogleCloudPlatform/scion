@@ -416,6 +416,13 @@ type RuntimeBroker struct {
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 
+	// GCP host identity — the GCP service account that runs on this broker's
+	// host machine. Set by the operator at registration/update time so the Hub
+	// can gate passthrough mode on an actAs check against this identity.
+	// Optional: brokers that never serve passthrough agents need not set them.
+	GCPHostServiceAccountEmail string `json:"gcp_host_service_account_email,omitempty"`
+	GCPHostProjectID           string `json:"gcp_host_project_id,omitempty"`
+
 	// Ownership - tracks who registered this broker
 	CreatedBy     string `json:"createdBy,omitempty"`
 	CreatedByName string `json:"createdByName,omitempty"` // Enriched: resolved from CreatedBy

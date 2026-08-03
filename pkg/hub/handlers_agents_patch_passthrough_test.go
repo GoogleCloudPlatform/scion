@@ -102,13 +102,15 @@ func setupPatchPassthroughFixture(t *testing.T) *patchPassthroughFixture {
 	require.NoError(t, s.CreateProject(ctx, f.project))
 	srv.createProjectMembersGroupAndPolicy(ctx, f.project)
 
-	// Create a broker owned by the broker owner
+	// Create a broker owned by the broker owner, with host SA (P8).
 	f.broker = &store.RuntimeBroker{
-		ID:        tid("pp-broker"),
-		Name:      "PP Test Broker",
-		Slug:      "pp-test-broker",
-		Status:    store.BrokerStatusOnline,
-		CreatedBy: f.brokerOwner.ID,
+		ID:                         tid("pp-broker"),
+		Name:                       "PP Test Broker",
+		Slug:                       "pp-test-broker",
+		Status:                     store.BrokerStatusOnline,
+		CreatedBy:                  f.brokerOwner.ID,
+		GCPHostServiceAccountEmail: "host@test.iam.gserviceaccount.com",
+		GCPHostProjectID:           "test",
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, f.broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{

@@ -178,6 +178,11 @@ type CreateBrokerRegistrationRequest struct {
 	AutoProvide  bool              `json:"autoProvide,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
+
+	// GCP host identity — the GCP service account that runs on this broker's
+	// host. Set by the operator so the Hub can gate passthrough on actAs.
+	GCPHostServiceAccountEmail string `json:"gcpHostServiceAccountEmail,omitempty"`
+	GCPHostProjectID           string `json:"gcpHostProjectId,omitempty"`
 }
 
 // CreateBrokerRegistrationResponse is the response for POST /api/v1/brokers.
@@ -248,6 +253,8 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 		brokerID = existingBroker.ID
 		reregistered = true
 		existingBroker.AutoProvide = req.AutoProvide
+		existingBroker.GCPHostServiceAccountEmail = req.GCPHostServiceAccountEmail
+		existingBroker.GCPHostProjectID = req.GCPHostProjectID
 		// Merge request labels into existing labels to preserve any
 		// user-set labels while updating registration-provided ones.
 		if len(req.Labels) > 0 {
@@ -271,15 +278,17 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 		}
 
 		broker := &store.RuntimeBroker{
-			ID:          brokerID,
-			Name:        req.Name,
-			Slug:        slugify(req.Name),
-			Status:      store.BrokerStatusOffline,
-			AutoProvide: req.AutoProvide,
-			Labels:      req.Labels,
-			Created:     time.Now(),
-			Updated:     time.Now(),
-			CreatedBy:   createdBy,
+			ID:                         brokerID,
+			Name:                       req.Name,
+			Slug:                       slugify(req.Name),
+			Status:                     store.BrokerStatusOffline,
+			AutoProvide:                req.AutoProvide,
+			Labels:                     req.Labels,
+			GCPHostServiceAccountEmail: req.GCPHostServiceAccountEmail,
+			GCPHostProjectID:           req.GCPHostProjectID,
+			Created:                    time.Now(),
+			Updated:                    time.Now(),
+			CreatedBy:                  createdBy,
 		}
 
 		if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {

@@ -4131,7 +4131,14 @@ func TestCreateAgent_GCPIdentityBlock(t *testing.T) {
 
 func TestCreateAgent_GCPIdentityPassthrough(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp)
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	// P8: passthrough requires a broker host SA. Set it on the test broker.
+	broker, err := s.GetRuntimeBroker(context.Background(), tid("broker-create"))
+	require.NoError(t, err)
+	broker.GCPHostServiceAccountEmail = "host@test.iam.gserviceaccount.com"
+	broker.GCPHostProjectID = "test"
+	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), broker))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "gcp-passthrough-agent",
@@ -4329,13 +4336,15 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
-	// Create a broker owned by the same user
+	// Create a broker owned by the same user, with host SA registered (P8).
 	broker := &store.RuntimeBroker{
-		ID:        tid("broker-pt-owner"),
-		Name:      "Owner Broker",
-		Slug:      "owner-broker",
-		Status:    store.BrokerStatusOnline,
-		CreatedBy: owner.ID,
+		ID:                         tid("broker-pt-owner"),
+		Name:                       "Owner Broker",
+		Slug:                       "owner-broker",
+		Status:                     store.BrokerStatusOnline,
+		CreatedBy:                  owner.ID,
+		GCPHostServiceAccountEmail: "host@test.iam.gserviceaccount.com",
+		GCPHostProjectID:           "test",
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
@@ -4478,13 +4487,15 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
-	// Broker owned by someone else
+	// Broker owned by someone else, with host SA registered (P8).
 	broker := &store.RuntimeBroker{
-		ID:        tid("broker-pt-admin"),
-		Name:      "Admin Test Broker",
-		Slug:      "admin-test-broker",
-		Status:    store.BrokerStatusOnline,
-		CreatedBy: brokerOwner.ID,
+		ID:                         tid("broker-pt-admin"),
+		Name:                       "Admin Test Broker",
+		Slug:                       "admin-test-broker",
+		Status:                     store.BrokerStatusOnline,
+		CreatedBy:                  brokerOwner.ID,
+		GCPHostServiceAccountEmail: "host@test.iam.gserviceaccount.com",
+		GCPHostProjectID:           "test",
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{

@@ -48,6 +48,10 @@ const (
 	FieldCreatedBy = "created_by"
 	// FieldAutoProvide holds the string denoting the auto_provide field in the database.
 	FieldAutoProvide = "auto_provide"
+	// FieldGcpHostServiceAccountEmail holds the string denoting the gcp_host_service_account_email field in the database.
+	FieldGcpHostServiceAccountEmail = "gcp_host_service_account_email"
+	// FieldGcpHostProjectID holds the string denoting the gcp_host_project_id field in the database.
+	FieldGcpHostProjectID = "gcp_host_project_id"
 	// FieldConnectedHubID holds the string denoting the connected_hub_id field in the database.
 	FieldConnectedHubID = "connected_hub_id"
 	// FieldConnectedSessionID holds the string denoting the connected_session_id field in the database.
@@ -82,6 +86,8 @@ var Columns = []string{
 	FieldEndpoint,
 	FieldCreatedBy,
 	FieldAutoProvide,
+	FieldGcpHostServiceAccountEmail,
+	FieldGcpHostProjectID,
 	FieldConnectedHubID,
 	FieldConnectedSessionID,
 	FieldConnectedAt,
@@ -215,6 +221,16 @@ func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByAutoProvide orders the results by the auto_provide field.
 func ByAutoProvide(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAutoProvide, opts...).ToFunc()
+}
+
+// ByGcpHostServiceAccountEmail orders the results by the gcp_host_service_account_email field.
+func ByGcpHostServiceAccountEmail(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGcpHostServiceAccountEmail, opts...).ToFunc()
+}
+
+// ByGcpHostProjectID orders the results by the gcp_host_project_id field.
+func ByGcpHostProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGcpHostProjectID, opts...).ToFunc()
 }
 
 // ByConnectedHubID orders the results by the connected_hub_id field.

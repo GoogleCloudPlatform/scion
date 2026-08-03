@@ -246,6 +246,34 @@ func (_c *RuntimeBrokerCreate) SetNillableAutoProvide(v *bool) *RuntimeBrokerCre
 	return _c
 }
 
+// SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
+func (_c *RuntimeBrokerCreate) SetGcpHostServiceAccountEmail(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetGcpHostServiceAccountEmail(v)
+	return _c
+}
+
+// SetNillableGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableGcpHostServiceAccountEmail(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetGcpHostServiceAccountEmail(*v)
+	}
+	return _c
+}
+
+// SetGcpHostProjectID sets the "gcp_host_project_id" field.
+func (_c *RuntimeBrokerCreate) SetGcpHostProjectID(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetGcpHostProjectID(v)
+	return _c
+}
+
+// SetNillableGcpHostProjectID sets the "gcp_host_project_id" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableGcpHostProjectID(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetGcpHostProjectID(*v)
+	}
+	return _c
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_c *RuntimeBrokerCreate) SetConnectedHubID(v string) *RuntimeBrokerCreate {
 	_c.mutation.SetConnectedHubID(v)
@@ -541,6 +569,14 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.AutoProvide(); ok {
 		_spec.SetField(runtimebroker.FieldAutoProvide, field.TypeBool, value)
 		_node.AutoProvide = value
+	}
+	if value, ok := _c.mutation.GcpHostServiceAccountEmail(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostServiceAccountEmail, field.TypeString, value)
+		_node.GcpHostServiceAccountEmail = &value
+	}
+	if value, ok := _c.mutation.GcpHostProjectID(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostProjectID, field.TypeString, value)
+		_node.GcpHostProjectID = &value
 	}
 	if value, ok := _c.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
@@ -881,6 +917,42 @@ func (u *RuntimeBrokerUpsert) SetAutoProvide(v bool) *RuntimeBrokerUpsert {
 // UpdateAutoProvide sets the "auto_provide" field to the value that was provided on create.
 func (u *RuntimeBrokerUpsert) UpdateAutoProvide() *RuntimeBrokerUpsert {
 	u.SetExcluded(runtimebroker.FieldAutoProvide)
+	return u
+}
+
+// SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
+func (u *RuntimeBrokerUpsert) SetGcpHostServiceAccountEmail(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldGcpHostServiceAccountEmail, v)
+	return u
+}
+
+// UpdateGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateGcpHostServiceAccountEmail() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldGcpHostServiceAccountEmail)
+	return u
+}
+
+// ClearGcpHostServiceAccountEmail clears the value of the "gcp_host_service_account_email" field.
+func (u *RuntimeBrokerUpsert) ClearGcpHostServiceAccountEmail() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldGcpHostServiceAccountEmail)
+	return u
+}
+
+// SetGcpHostProjectID sets the "gcp_host_project_id" field.
+func (u *RuntimeBrokerUpsert) SetGcpHostProjectID(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldGcpHostProjectID, v)
+	return u
+}
+
+// UpdateGcpHostProjectID sets the "gcp_host_project_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateGcpHostProjectID() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldGcpHostProjectID)
+	return u
+}
+
+// ClearGcpHostProjectID clears the value of the "gcp_host_project_id" field.
+func (u *RuntimeBrokerUpsert) ClearGcpHostProjectID() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldGcpHostProjectID)
 	return u
 }
 
@@ -1313,6 +1385,48 @@ func (u *RuntimeBrokerUpsertOne) SetAutoProvide(v bool) *RuntimeBrokerUpsertOne 
 func (u *RuntimeBrokerUpsertOne) UpdateAutoProvide() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.UpdateAutoProvide()
+	})
+}
+
+// SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
+func (u *RuntimeBrokerUpsertOne) SetGcpHostServiceAccountEmail(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetGcpHostServiceAccountEmail(v)
+	})
+}
+
+// UpdateGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateGcpHostServiceAccountEmail() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateGcpHostServiceAccountEmail()
+	})
+}
+
+// ClearGcpHostServiceAccountEmail clears the value of the "gcp_host_service_account_email" field.
+func (u *RuntimeBrokerUpsertOne) ClearGcpHostServiceAccountEmail() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearGcpHostServiceAccountEmail()
+	})
+}
+
+// SetGcpHostProjectID sets the "gcp_host_project_id" field.
+func (u *RuntimeBrokerUpsertOne) SetGcpHostProjectID(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetGcpHostProjectID(v)
+	})
+}
+
+// UpdateGcpHostProjectID sets the "gcp_host_project_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateGcpHostProjectID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateGcpHostProjectID()
+	})
+}
+
+// ClearGcpHostProjectID clears the value of the "gcp_host_project_id" field.
+func (u *RuntimeBrokerUpsertOne) ClearGcpHostProjectID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearGcpHostProjectID()
 	})
 }
 
@@ -1923,6 +2037,48 @@ func (u *RuntimeBrokerUpsertBulk) SetAutoProvide(v bool) *RuntimeBrokerUpsertBul
 func (u *RuntimeBrokerUpsertBulk) UpdateAutoProvide() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.UpdateAutoProvide()
+	})
+}
+
+// SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
+func (u *RuntimeBrokerUpsertBulk) SetGcpHostServiceAccountEmail(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetGcpHostServiceAccountEmail(v)
+	})
+}
+
+// UpdateGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateGcpHostServiceAccountEmail() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateGcpHostServiceAccountEmail()
+	})
+}
+
+// ClearGcpHostServiceAccountEmail clears the value of the "gcp_host_service_account_email" field.
+func (u *RuntimeBrokerUpsertBulk) ClearGcpHostServiceAccountEmail() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearGcpHostServiceAccountEmail()
+	})
+}
+
+// SetGcpHostProjectID sets the "gcp_host_project_id" field.
+func (u *RuntimeBrokerUpsertBulk) SetGcpHostProjectID(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetGcpHostProjectID(v)
+	})
+}
+
+// UpdateGcpHostProjectID sets the "gcp_host_project_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateGcpHostProjectID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateGcpHostProjectID()
+	})
+}
+
+// ClearGcpHostProjectID clears the value of the "gcp_host_project_id" field.
+func (u *RuntimeBrokerUpsertBulk) ClearGcpHostProjectID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearGcpHostProjectID()
 	})
 }
 
