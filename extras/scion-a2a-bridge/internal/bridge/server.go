@@ -75,6 +75,9 @@ func (s *Server) SetSnapshot(snap *SnapshotHolder) {
 // SetJWTValidator sets the JWT validator for hubJWT mode. Called after the
 // signing key is loaded (which may require Secret Manager access).
 // Also updates the snapshot if one is wired.
+//
+// NOTE: not safe for concurrent use with Configure(). Currently only called
+// once during boot before the HTTP server starts.
 func (s *Server) SetJWTValidator(v *JWTValidator) {
 	s.jwtValidator = v
 	if s.snapshot != nil {

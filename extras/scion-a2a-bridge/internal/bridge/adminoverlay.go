@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -42,7 +43,7 @@ type AdminOverlay struct {
 	UATCacheTTL        time.Duration
 	RateLimitEnabled   *bool   // pointer so we can distinguish absent from false
 	RateLimitRPS       float64 // 0 means not set
-	RateLimitBurst     int     // -1 means not set (0 is a valid value meaning "no burst")
+	RateLimitBurst     int     // -1 means not set (0 means use default 20)
 	SendMessageTimeout time.Duration
 	SSEKeepalive       time.Duration
 	PushRetryMax       int // -1 means not set
@@ -71,10 +72,10 @@ type persistedOverlay struct {
 	UATCacheTTL        string          `json:"uat_cache_ttl,omitempty"`
 	RateLimitEnabled   *bool           `json:"rate_limit_enabled,omitempty"`
 	RateLimitRPS       float64         `json:"rate_limit_rps,omitempty"`
-	RateLimitBurst     int             `json:"rate_limit_burst"`
+	RateLimitBurst     *int            `json:"rate_limit_burst,omitempty"`
 	SendMessageTimeout string          `json:"send_message_timeout,omitempty"`
 	SSEKeepalive       string          `json:"sse_keepalive,omitempty"`
-	PushRetryMax       int             `json:"push_retry_max"`
+	PushRetryMax       *int            `json:"push_retry_max,omitempty"`
 	ProviderOrg        string          `json:"provider_org,omitempty"`
 	ProviderURL        string          `json:"provider_url,omitempty"`
 	Projects           []ProjectConfig `json:"projects,omitempty"`
@@ -159,6 +160,9 @@ func ParseAdminOverlay(cfg map[string]string) (*AdminOverlay, error) {
 		}
 		if d < 0 {
 			return nil, fmt.Errorf("invalid uat_cache_ttl %q: must not be negative", v)
+		}
+		if d > 300*time.Second {
+			return nil, fmt.Errorf("invalid uat_cache_ttl %q: must not exceed 300s", v)
 		}
 		overlay.UATCacheTTL = d
 	}
@@ -359,10 +363,12 @@ func PersistOverlay(stateDir string, overlay *AdminOverlay) error {
 	}
 	// Only persist non-sentinel values for integer fields.
 	if overlay.RateLimitBurst >= 0 {
-		p.RateLimitBurst = overlay.RateLimitBurst
+		b := overlay.RateLimitBurst
+		p.RateLimitBurst = &b
 	}
 	if overlay.PushRetryMax >= 0 {
-		p.PushRetryMax = overlay.PushRetryMax
+		b := overlay.PushRetryMax
+		p.PushRetryMax = &b
 	}
 	if overlay.RateLimitEnabled != nil {
 		p.RateLimitEnabled = overlay.RateLimitEnabled
@@ -378,13 +384,17 @@ func PersistOverlay(stateDir string, overlay *AdminOverlay) error {
 	}
 
 	// Persist which keys were present so the overlay can be re-applied correctly.
+	// Keys are sorted for deterministic serialization.
+	keys := make([]string, 0, len(overlay.presentKeys))
 	for k := range overlay.presentKeys {
 		// Never persist api_key presence — it comes fresh on each Configure push.
 		if k == "api_key" {
 			continue
 		}
-		p.PresentKeys = append(p.PresentKeys, k)
+		keys = append(keys, k)
 	}
+	sort.Strings(keys)
+	p.PresentKeys = keys
 
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
@@ -416,12 +426,20 @@ func LoadPersistedOverlay(stateDir string) (*AdminOverlay, error) {
 		AuthScheme:       p.AuthScheme,
 		RateLimitEnabled: p.RateLimitEnabled,
 		RateLimitRPS:     p.RateLimitRPS,
-		RateLimitBurst:   p.RateLimitBurst,
-		PushRetryMax:     p.PushRetryMax,
+		RateLimitBurst:   -1, // sentinel: not set
+		PushRetryMax:     -1, // sentinel: not set
 		ProviderOrg:      p.ProviderOrg,
 		ProviderURL:      p.ProviderURL,
 		Projects:         p.Projects,
 		presentKeys:      make(map[string]bool),
+	}
+
+	// Dereference persisted pointers; nil means sentinel stays.
+	if p.RateLimitBurst != nil {
+		overlay.RateLimitBurst = *p.RateLimitBurst
+	}
+	if p.PushRetryMax != nil {
+		overlay.PushRetryMax = *p.PushRetryMax
 	}
 
 	// Restore present keys.

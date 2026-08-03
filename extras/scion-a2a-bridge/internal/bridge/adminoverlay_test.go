@@ -221,7 +221,7 @@ func TestParseAdminOverlay_NegativeRateLimits(t *testing.T) {
 }
 
 func TestParseAdminOverlay_ZeroBurst(t *testing.T) {
-	// Zero burst is valid (means no burst capacity).
+	// Zero burst is valid (means use default 20).
 	cfg := map[string]string{"rate_limit_burst": "0"}
 	overlay, err := ParseAdminOverlay(cfg)
 	if err != nil {
@@ -229,6 +229,14 @@ func TestParseAdminOverlay_ZeroBurst(t *testing.T) {
 	}
 	if overlay.RateLimitBurst != 0 {
 		t.Errorf("RateLimitBurst = %d, want 0", overlay.RateLimitBurst)
+	}
+}
+
+func TestParseAdminOverlay_UATCacheTTLExceedsMax(t *testing.T) {
+	cfg := map[string]string{"uat_cache_ttl": "600s"}
+	_, err := ParseAdminOverlay(cfg)
+	if err == nil {
+		t.Fatal("expected error for uat_cache_ttl > 300s")
 	}
 }
 
@@ -327,6 +335,68 @@ func TestPersistAndLoadOverlay_RoundTrip(t *testing.T) {
 	}
 	if loaded.IsPresent("auth_scheme") != true {
 		t.Error("expected auth_scheme to be present")
+	}
+}
+
+func TestPersistAndLoadOverlay_SentinelPreservation(t *testing.T) {
+	// Regression: sentinel values (-1) for RateLimitBurst and PushRetryMax must
+	// survive a persist→load round-trip. Previously, -1 was skipped during
+	// persist (correct), but the zero value 0 was serialized instead, and on
+	// load 0 replaced the sentinel — causing ApplyOverlay to override the base
+	// YAML value with 0.
+	dir := t.TempDir()
+	overlay := &AdminOverlay{
+		ExternalURL:    "https://example.com",
+		RateLimitBurst: -1, // sentinel: not set
+		PushRetryMax:   -1, // sentinel: not set
+		presentKeys: map[string]bool{
+			"external_url": true,
+		},
+	}
+
+	if err := PersistOverlay(dir, overlay); err != nil {
+		t.Fatalf("PersistOverlay: %v", err)
+	}
+
+	// Verify the JSON does not contain the sentinel fields.
+	data, err := os.ReadFile(filepath.Join(dir, overlayFileName))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, ok := raw["rate_limit_burst"]; ok {
+		t.Error("rate_limit_burst should NOT be present in JSON when sentinel")
+	}
+	if _, ok := raw["push_retry_max"]; ok {
+		t.Error("push_retry_max should NOT be present in JSON when sentinel")
+	}
+
+	// Load and verify sentinels are restored.
+	loaded, err := LoadPersistedOverlay(dir)
+	if err != nil {
+		t.Fatalf("LoadPersistedOverlay: %v", err)
+	}
+	if loaded.RateLimitBurst != -1 {
+		t.Errorf("loaded RateLimitBurst = %d, want -1 (sentinel)", loaded.RateLimitBurst)
+	}
+	if loaded.PushRetryMax != -1 {
+		t.Errorf("loaded PushRetryMax = %d, want -1 (sentinel)", loaded.PushRetryMax)
+	}
+
+	// Verify ApplyOverlay does NOT override base values when sentinels are preserved.
+	base := Config{
+		RateLimit: RateLimitConfig{Burst: 42},
+		Timeouts:  TimeoutConfig{PushRetryMax: 7},
+	}
+	result := ApplyOverlay(base, loaded)
+	if result.RateLimit.Burst != 42 {
+		t.Errorf("ApplyOverlay burst = %d, want 42 (base preserved)", result.RateLimit.Burst)
+	}
+	if result.Timeouts.PushRetryMax != 7 {
+		t.Errorf("ApplyOverlay push_retry_max = %d, want 7 (base preserved)", result.Timeouts.PushRetryMax)
 	}
 }
 
