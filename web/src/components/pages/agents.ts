@@ -439,19 +439,32 @@ export class ScionPageAgents extends LitElement {
     }
   }
 
+  /**
+   * Load metrics summaries for displayed agents. Caps the number of requests
+   * and limits concurrency to avoid overwhelming the backend.
+   */
   private async loadAgentMetrics(): Promise<void> {
-    const fetches = this.agents.map(async (agent) => {
-      try {
-        const res = await apiFetch(`/api/v1/agents/${agent.id}/metrics/summary`);
-        if (res.ok) {
-          const data = (await res.json()) as AgentMetricsSummary;
-          this.agentMetrics = { ...this.agentMetrics, [agent.id]: data };
-        }
-      } catch {
-        // Metrics loading is optional per agent.
-      }
-    });
-    await Promise.all(fetches);
+    const maxAgents = 20;
+    const concurrency = 5;
+    const subset = this.agents.slice(0, maxAgents);
+
+    // Process in batches of `concurrency`.
+    for (let i = 0; i < subset.length; i += concurrency) {
+      const batch = subset.slice(i, i + concurrency);
+      await Promise.all(
+        batch.map(async (agent) => {
+          try {
+            const res = await apiFetch(`/api/v1/agents/${agent.id}/metrics/summary`);
+            if (res.ok) {
+              const data = (await res.json()) as AgentMetricsSummary;
+              this.agentMetrics = { ...this.agentMetrics, [agent.id]: data };
+            }
+          } catch {
+            // Metrics loading is optional per agent.
+          }
+        })
+      );
+    }
   }
 
   private backgroundRefresh(): void {

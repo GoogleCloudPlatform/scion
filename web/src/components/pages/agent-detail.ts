@@ -1498,8 +1498,8 @@ export class ScionPageAgentDetail extends LitElement {
                       <span class="info-label">${t.name.toUpperCase()}</span>
                       <span class="info-value">
                         ${t.calls} calls
-                        ${t.errors > 0
-                          ? html`<span style="color: var(--scion-danger-500, #ef4444)"> (${t.errors} errors)</span>`
+                        ${t.error > 0
+                          ? html`<span style="color: var(--scion-danger-500, #ef4444)"> (${t.error} errors)</span>`
                           : nothing}
                       </span>
                     </div>

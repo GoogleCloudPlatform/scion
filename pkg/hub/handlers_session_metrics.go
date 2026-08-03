@@ -31,7 +31,7 @@ type toolUsageSummary struct {
 	Name    string `json:"name"`
 	Calls   int    `json:"calls"`
 	Success int    `json:"success"`
-	Errors  int    `json:"errors"`
+	Error   int    `json:"error"`
 }
 
 // modelUsageSummary counts sessions per model.
@@ -42,34 +42,34 @@ type modelUsageSummary struct {
 
 // agentMetricsSummaryResponse is returned by the agent metrics summary endpoint.
 type agentMetricsSummaryResponse struct {
-	AgentID             string             `json:"agentId"`
-	TotalSessions       int                `json:"totalSessions"`
-	TotalTokensInput    int64              `json:"totalTokensInput"`
-	TotalTokensOutput   int64              `json:"totalTokensOutput"`
-	TotalTokensCached   int64              `json:"totalTokensCached"`
-	TotalTokensReasoning int64             `json:"totalTokensReasoning"`
-	TotalToolCalls      int                `json:"totalToolCalls"`
-	AvgSessionDurationMs int64             `json:"avgSessionDurationMs"`
-	AvgTokensPerSession int64              `json:"avgTokensPerSession"`
-	MostUsedTools       []toolUsageSummary `json:"mostUsedTools"`
-	MostUsedModels      []modelUsageSummary `json:"mostUsedModels"`
+	AgentID              string              `json:"agentId"`
+	TotalSessions        int                 `json:"totalSessions"`
+	TotalTokensInput     int64               `json:"totalTokensInput"`
+	TotalTokensOutput    int64               `json:"totalTokensOutput"`
+	TotalTokensCached    int64               `json:"totalTokensCached"`
+	TotalTokensReasoning int64               `json:"totalTokensReasoning"`
+	TotalToolCalls       int                 `json:"totalToolCalls"`
+	AvgSessionDurationMs int64               `json:"avgSessionDurationMs"`
+	AvgTokensPerSession  int64               `json:"avgTokensPerSession"`
+	MostUsedTools        []toolUsageSummary  `json:"mostUsedTools"`
+	MostUsedModels       []modelUsageSummary `json:"mostUsedModels"`
 }
 
 // projectMetricsSummaryResponse is returned by the project metrics summary endpoint.
 type projectMetricsSummaryResponse struct {
-	ProjectID            string             `json:"projectId"`
-	TotalSessions        int                `json:"totalSessions"`
-	TotalTokensInput     int64              `json:"totalTokensInput"`
-	TotalTokensOutput    int64              `json:"totalTokensOutput"`
-	TotalTokensCached    int64              `json:"totalTokensCached"`
-	TotalTokensReasoning int64              `json:"totalTokensReasoning"`
-	ActiveAgents         int                `json:"activeAgents"`
-	MostUsedTools        []toolUsageSummary `json:"mostUsedTools"`
+	ProjectID            string              `json:"projectId"`
+	TotalSessions        int                 `json:"totalSessions"`
+	TotalTokensInput     int64               `json:"totalTokensInput"`
+	TotalTokensOutput    int64               `json:"totalTokensOutput"`
+	TotalTokensCached    int64               `json:"totalTokensCached"`
+	TotalTokensReasoning int64               `json:"totalTokensReasoning"`
+	ActiveAgents         int                 `json:"activeAgents"`
+	MostUsedTools        []toolUsageSummary  `json:"mostUsedTools"`
 	MostUsedModels       []modelUsageSummary `json:"mostUsedModels"`
 }
 
 // =============================================================================
-// Aggregation helpers
+// Aggregation helpers (tool/model breakdowns from list queries)
 // =============================================================================
 
 // aggregateToolCalls extracts tool usage statistics from session metrics records.
@@ -88,7 +88,7 @@ func aggregateToolCalls(sessions []*store.AgentSessionMetrics) (tools []toolUsag
 				errs := intFromAny(m["error"])
 				ts.Calls += calls
 				ts.Success += success
-				ts.Errors += errs
+				ts.Error += errs
 				totalCalls += calls
 			}
 		}
@@ -164,10 +164,47 @@ func intFromAny(v interface{}) int {
 }
 
 // =============================================================================
+// Authorization helpers
+// =============================================================================
+
+// authorizeSessionMetricsAccess checks that the calling identity (user or
+// agent) is allowed to read the given agent resource. Returns true if
+// access is allowed, false if a response was already written.
+func (s *Server) authorizeSessionMetricsAccess(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+
+	if userIdent, ok := identity.(UserIdentity); ok {
+		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
+		if !decision.Allowed {
+			Forbidden(w)
+			return false
+		}
+	} else if agentIdent, ok := identity.(AgentIdentity); ok {
+		if agentIdent.ProjectID() != agent.ProjectID {
+			Forbidden(w)
+			return false
+		}
+	} else {
+		Forbidden(w)
+		return false
+	}
+	return true
+}
+
+// =============================================================================
 // Handlers
 // =============================================================================
 
 // handleAgentMetricsSummary returns aggregate session metrics for an agent.
+// Numeric totals (session count, token sums) are computed via SQL-level
+// aggregation; tool/model breakdowns are derived from the most recent
+// sessions (capped by the store list limit).
+//
 // GET /api/v1/agents/{id}/metrics/summary
 func (s *Server) handleAgentMetricsSummary(w http.ResponseWriter, r *http.Request, agentID string) {
 	ctx := r.Context()
@@ -177,27 +214,26 @@ func (s *Server) handleAgentMetricsSummary(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Require user authentication.
-	userIdent := GetUserIdentityFromContext(ctx)
-	if userIdent == nil {
-		Unauthorized(w)
-		return
-	}
-
-	// Verify the agent exists and the user can view it.
+	// Verify the agent exists and the caller can view it.
 	agent, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-
-	decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionRead)
-	if !decision.Allowed {
-		Forbidden(w)
+	if !s.authorizeSessionMetricsAccess(w, r, agent) {
 		return
 	}
 
-	// Fetch all session metrics for this agent.
+	// SQL-level aggregation for accurate totals.
+	agg, err := s.store.AggregateByAgent(ctx, agentID)
+	if err != nil {
+		s.agentMetricsLog.Error("Failed to aggregate session metrics for agent",
+			"agent_id", agentID, "error", err)
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// List queries for tool/model breakdowns and avg duration (capped).
 	sessions, err := s.store.ListAgentSessionMetricsByAgent(ctx, agentID)
 	if err != nil {
 		s.agentMetricsLog.Error("Failed to list session metrics for agent",
@@ -206,32 +242,23 @@ func (s *Server) handleAgentMetricsSummary(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Aggregate.
-	var totalInput, totalOutput, totalCached, totalReasoning int64
-	for _, sess := range sessions {
-		totalInput += sess.TokensInput
-		totalOutput += sess.TokensOutput
-		totalCached += sess.TokensCached
-		totalReasoning += sess.TokensReasoning
-	}
-
 	tools, totalToolCalls := aggregateToolCalls(sessions)
 	models := aggregateModels(sessions)
 	avgDuration := avgSessionDuration(sessions)
 
-	totalTokens := totalInput + totalOutput
+	totalTokens := agg.SumTokensInput + agg.SumTokensOutput
 	var avgTokens int64
-	if len(sessions) > 0 {
-		avgTokens = totalTokens / int64(len(sessions))
+	if agg.Count > 0 {
+		avgTokens = totalTokens / int64(agg.Count)
 	}
 
 	resp := agentMetricsSummaryResponse{
 		AgentID:              agentID,
-		TotalSessions:        len(sessions),
-		TotalTokensInput:     totalInput,
-		TotalTokensOutput:    totalOutput,
-		TotalTokensCached:    totalCached,
-		TotalTokensReasoning: totalReasoning,
+		TotalSessions:        agg.Count,
+		TotalTokensInput:     agg.SumTokensInput,
+		TotalTokensOutput:    agg.SumTokensOutput,
+		TotalTokensCached:    agg.SumTokensCached,
+		TotalTokensReasoning: agg.SumTokensReason,
 		TotalToolCalls:       totalToolCalls,
 		AvgSessionDurationMs: avgDuration,
 		AvgTokensPerSession:  avgTokens,
@@ -252,13 +279,6 @@ func (s *Server) handleSessionMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Require user authentication.
-	userIdent := GetUserIdentityFromContext(ctx)
-	if userIdent == nil {
-		Unauthorized(w)
-		return
-	}
-
 	id := extractID(r, "/api/v1/metrics/session")
 	if id == "" {
 		NotFound(w, "Session metrics")
@@ -271,10 +291,23 @@ func (s *Server) handleSessionMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Authorize: verify the caller can view the owning agent.
+	agent, err := s.store.GetAgent(ctx, metrics.AgentID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if !s.authorizeSessionMetricsAccess(w, r, agent) {
+		return
+	}
+
 	writeJSON(w, http.StatusOK, metrics)
 }
 
 // handleProjectSessionMetricsSummary returns aggregate session metrics for a project.
+// Numeric totals are computed via SQL-level aggregation; tool/model breakdowns
+// are derived from the most recent sessions (capped by the store list limit).
+//
 // GET /api/v1/projects/{id}/metrics/summary
 func (s *Server) handleProjectSessionMetricsSummary(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
@@ -295,7 +328,7 @@ func (s *Server) handleProjectSessionMetricsSummary(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// Authorize: any authenticated user with view access.
+	// Authorize: any authenticated identity with view access.
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
@@ -322,7 +355,24 @@ func (s *Server) handleProjectSessionMetricsSummary(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// Fetch all session metrics for this project.
+	// SQL-level aggregation for accurate totals.
+	agg, err := s.store.AggregateByProject(ctx, projectID)
+	if err != nil {
+		s.agentMetricsLog.Error("Failed to aggregate session metrics for project",
+			"project_id", projectID, "error", err)
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	activeAgents, err := s.store.CountDistinctAgentsByProject(ctx, projectID)
+	if err != nil {
+		s.agentMetricsLog.Error("Failed to count active agents for project",
+			"project_id", projectID, "error", err)
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// List queries for tool/model breakdowns (capped).
 	sessions, err := s.store.ListAgentSessionMetricsByProject(ctx, projectID)
 	if err != nil {
 		s.agentMetricsLog.Error("Failed to list session metrics for project",
@@ -331,28 +381,17 @@ func (s *Server) handleProjectSessionMetricsSummary(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// Aggregate.
-	var totalInput, totalOutput, totalCached, totalReasoning int64
-	activeAgentSet := make(map[string]struct{})
-	for _, sess := range sessions {
-		totalInput += sess.TokensInput
-		totalOutput += sess.TokensOutput
-		totalCached += sess.TokensCached
-		totalReasoning += sess.TokensReasoning
-		activeAgentSet[sess.AgentID] = struct{}{}
-	}
-
 	tools, _ := aggregateToolCalls(sessions)
 	models := aggregateModels(sessions)
 
 	resp := projectMetricsSummaryResponse{
 		ProjectID:            projectID,
-		TotalSessions:        len(sessions),
-		TotalTokensInput:     totalInput,
-		TotalTokensOutput:    totalOutput,
-		TotalTokensCached:    totalCached,
-		TotalTokensReasoning: totalReasoning,
-		ActiveAgents:         len(activeAgentSet),
+		TotalSessions:        agg.Count,
+		TotalTokensInput:     agg.SumTokensInput,
+		TotalTokensOutput:    agg.SumTokensOutput,
+		TotalTokensCached:    agg.SumTokensCached,
+		TotalTokensReasoning: agg.SumTokensReason,
+		ActiveAgents:         activeAgents,
 		MostUsedTools:        tools,
 		MostUsedModels:       models,
 	}

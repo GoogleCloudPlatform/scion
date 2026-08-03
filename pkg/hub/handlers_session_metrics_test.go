@@ -146,13 +146,13 @@ func TestHandleAgentMetricsSummary(t *testing.T) {
 
 		assert.Equal(t, agent1.ID, resp.AgentID)
 		assert.Equal(t, 2, resp.TotalSessions)
-		assert.Equal(t, int64(3000), resp.TotalTokensInput)    // 1000 + 2000
-		assert.Equal(t, int64(600), resp.TotalTokensOutput)     // 200 + 400
-		assert.Equal(t, int64(300), resp.TotalTokensCached)     // 100 + 200
-		assert.Equal(t, int64(150), resp.TotalTokensReasoning)  // 50 + 100
-		assert.Equal(t, 10, resp.TotalToolCalls)                // 3+2+5
+		assert.Equal(t, int64(3000), resp.TotalTokensInput)   // 1000 + 2000
+		assert.Equal(t, int64(600), resp.TotalTokensOutput)    // 200 + 400
+		assert.Equal(t, int64(300), resp.TotalTokensCached)    // 100 + 200
+		assert.Equal(t, int64(150), resp.TotalTokensReasoning) // 50 + 100
+		assert.Equal(t, 10, resp.TotalToolCalls)               // 3+2+5
 		assert.Greater(t, resp.AvgSessionDurationMs, int64(0))
-		assert.Equal(t, int64(1800), resp.AvgTokensPerSession)  // (3000+600)/2
+		assert.Equal(t, int64(1800), resp.AvgTokensPerSession) // (3000+600)/2
 		assert.NotEmpty(t, resp.MostUsedTools)
 		assert.NotEmpty(t, resp.MostUsedModels)
 	})
@@ -241,6 +241,26 @@ func TestHandleSessionMetrics(t *testing.T) {
 			"/api/v1/metrics/session/"+m.ID, nil)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
+
+	t.Run("session with deleted agent returns error", func(t *testing.T) {
+		// Create a session record pointing to an agent that does not exist.
+		// The handler must look up the agent for authorization; a missing
+		// agent should produce a 404 rather than leaking the record.
+		orphanMetrics := &store.AgentSessionMetrics{
+			AgentID:     tid("deleted-agent"),
+			ProjectID:   project.ID,
+			SessionID:   "session-orphan",
+			StartedAt:   time.Date(2026, 8, 1, 13, 0, 0, 0, time.UTC),
+			TokensInput: 999,
+		}
+		require.NoError(t, s.CreateAgentSessionMetrics(ctx, orphanMetrics))
+
+		rec := doRequest(t, srv, http.MethodGet,
+			"/api/v1/metrics/session/"+orphanMetrics.ID, nil)
+
+		// The agent lookup should fail with 404.
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
 }
 
 // =============================================================================
@@ -263,11 +283,11 @@ func TestHandleProjectSessionMetricsSummary(t *testing.T) {
 
 		assert.Equal(t, project.ID, resp.ProjectID)
 		assert.Equal(t, 3, resp.TotalSessions)                 // 2 from agent1 + 1 from agent2
-		assert.Equal(t, int64(6000), resp.TotalTokensInput)     // 1000+2000+3000
-		assert.Equal(t, int64(1200), resp.TotalTokensOutput)    // 200+400+600
-		assert.Equal(t, int64(600), resp.TotalTokensCached)     // 100+200+300
-		assert.Equal(t, int64(300), resp.TotalTokensReasoning)  // 50+100+150
-		assert.Equal(t, 2, resp.ActiveAgents)                   // agent1 and agent2
+		assert.Equal(t, int64(6000), resp.TotalTokensInput)    // 1000+2000+3000
+		assert.Equal(t, int64(1200), resp.TotalTokensOutput)   // 200+400+600
+		assert.Equal(t, int64(600), resp.TotalTokensCached)    // 100+200+300
+		assert.Equal(t, int64(300), resp.TotalTokensReasoning) // 50+100+150
+		assert.Equal(t, 2, resp.ActiveAgents)                  // agent1 and agent2
 		assert.NotEmpty(t, resp.MostUsedTools)
 		assert.NotEmpty(t, resp.MostUsedModels)
 	})

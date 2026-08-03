@@ -1449,4 +1449,14 @@ type AgentSessionMetricsStore interface {
 	// ListAgentSessionMetricsByProject returns all session metrics for a project,
 	// ordered by started_at DESC.
 	ListAgentSessionMetricsByProject(ctx context.Context, projectID string) ([]*AgentSessionMetrics, error)
+
+	// AggregateByAgent returns SQL-level aggregate totals for an agent's sessions.
+	AggregateByAgent(ctx context.Context, agentID string) (*AgentSessionMetricsAggregates, error)
+
+	// AggregateByProject returns SQL-level aggregate totals for a project's sessions.
+	AggregateByProject(ctx context.Context, projectID string) (*AgentSessionMetricsAggregates, error)
+
+	// CountDistinctAgentsByProject returns the number of distinct agents with
+	// session metrics in a project.
+	CountDistinctAgentsByProject(ctx context.Context, projectID string) (int, error)
 }

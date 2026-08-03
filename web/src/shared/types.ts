@@ -987,7 +987,7 @@ export interface ToolUsageSummary {
   name: string;
   calls: number;
   success: number;
-  errors: number;
+  error: number;
 }
 
 /** Model usage summary in aggregate responses. */
