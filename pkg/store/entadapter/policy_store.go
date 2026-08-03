@@ -119,9 +119,11 @@ func (s *PolicyStore) CreatePolicy(ctx context.Context, p *store.Policy) error {
 		SetEffect(accesspolicy.Effect(p.Effect)).
 		SetPriority(p.Priority)
 
-	if p.ScopeID != "" {
-		create.SetScopeID(p.ScopeID)
-	}
+	// Always set scope_id (even when empty) so the unique index on
+	// (name, scope_type, scope_id) works correctly. SQL NULL values do not
+	// participate in unique constraints, so leaving scope_id as NULL would
+	// allow duplicate policy names within the same scope.
+	create.SetScopeID(p.ScopeID)
 	if p.ResourceID != "" {
 		create.SetResourceID(p.ResourceID)
 	}
@@ -181,11 +183,9 @@ func (s *PolicyStore) UpdatePolicy(ctx context.Context, p *store.Policy) error {
 		SetEffect(accesspolicy.Effect(p.Effect)).
 		SetPriority(p.Priority)
 
-	if p.ScopeID != "" {
-		update.SetScopeID(p.ScopeID)
-	} else {
-		update.ClearScopeID()
-	}
+	// Always set scope_id (even when empty) so the unique index on
+	// (name, scope_type, scope_id) works correctly — matches CreatePolicy.
+	update.SetScopeID(p.ScopeID)
 	if p.ResourceID != "" {
 		update.SetResourceID(p.ResourceID)
 	} else {

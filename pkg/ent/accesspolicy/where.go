@@ -316,16 +316,6 @@ func ScopeIDHasSuffix(v string) predicate.AccessPolicy {
 	return predicate.AccessPolicy(sql.FieldHasSuffix(FieldScopeID, v))
 }
 
-// ScopeIDIsNil applies the IsNil predicate on the "scope_id" field.
-func ScopeIDIsNil() predicate.AccessPolicy {
-	return predicate.AccessPolicy(sql.FieldIsNull(FieldScopeID))
-}
-
-// ScopeIDNotNil applies the NotNil predicate on the "scope_id" field.
-func ScopeIDNotNil() predicate.AccessPolicy {
-	return predicate.AccessPolicy(sql.FieldNotNull(FieldScopeID))
-}
-
 // ScopeIDEqualFold applies the EqualFold predicate on the "scope_id" field.
 func ScopeIDEqualFold(v string) predicate.AccessPolicy {
 	return predicate.AccessPolicy(sql.FieldEqualFold(FieldScopeID, v))

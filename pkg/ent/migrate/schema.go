@@ -15,7 +15,7 @@ var (
 		{Name: "name", Type: field.TypeString},
 		{Name: "description", Type: field.TypeString, Nullable: true},
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"hub", "project", "resource"}},
-		{Name: "scope_id", Type: field.TypeString, Nullable: true},
+		{Name: "scope_id", Type: field.TypeString, Default: ""},
 		{Name: "resource_type", Type: field.TypeString},
 		{Name: "resource_id", Type: field.TypeString, Nullable: true},
 		{Name: "actions", Type: field.TypeJSON, Nullable: true},
@@ -33,6 +33,13 @@ var (
 		Name:       "access_policies",
 		Columns:    AccessPoliciesColumns,
 		PrimaryKey: []*schema.Column{AccessPoliciesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "accesspolicy_name_scope_type_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{AccessPoliciesColumns[1], AccessPoliciesColumns[3], AccessPoliciesColumns[4]},
+			},
+		},
 	}
 	// AgentsColumns holds the columns for the "agents" table.
 	AgentsColumns = []*schema.Column{

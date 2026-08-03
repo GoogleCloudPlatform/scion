@@ -94,12 +94,6 @@ func (_u *AccessPolicyUpdate) SetNillableScopeID(v *string) *AccessPolicyUpdate 
 	return _u
 }
 
-// ClearScopeID clears the value of the "scope_id" field.
-func (_u *AccessPolicyUpdate) ClearScopeID() *AccessPolicyUpdate {
-	_u.mutation.ClearScopeID()
-	return _u
-}
-
 // SetResourceType sets the "resource_type" field.
 func (_u *AccessPolicyUpdate) SetResourceType(v string) *AccessPolicyUpdate {
 	_u.mutation.SetResourceType(v)
@@ -378,9 +372,6 @@ func (_u *AccessPolicyUpdate) sqlSave(ctx context.Context) (_node int, err error
 	if value, ok := _u.mutation.ScopeID(); ok {
 		_spec.SetField(accesspolicy.FieldScopeID, field.TypeString, value)
 	}
-	if _u.mutation.ScopeIDCleared() {
-		_spec.ClearField(accesspolicy.FieldScopeID, field.TypeString)
-	}
 	if value, ok := _u.mutation.ResourceType(); ok {
 		_spec.SetField(accesspolicy.FieldResourceType, field.TypeString, value)
 	}
@@ -561,12 +552,6 @@ func (_u *AccessPolicyUpdateOne) SetNillableScopeID(v *string) *AccessPolicyUpda
 	if v != nil {
 		_u.SetScopeID(*v)
 	}
-	return _u
-}
-
-// ClearScopeID clears the value of the "scope_id" field.
-func (_u *AccessPolicyUpdateOne) ClearScopeID() *AccessPolicyUpdateOne {
-	_u.mutation.ClearScopeID()
 	return _u
 }
 
@@ -877,9 +862,6 @@ func (_u *AccessPolicyUpdateOne) sqlSave(ctx context.Context) (_node *AccessPoli
 	}
 	if value, ok := _u.mutation.ScopeID(); ok {
 		_spec.SetField(accesspolicy.FieldScopeID, field.TypeString, value)
-	}
-	if _u.mutation.ScopeIDCleared() {
-		_spec.ClearField(accesspolicy.FieldScopeID, field.TypeString)
 	}
 	if value, ok := _u.mutation.ResourceType(); ok {
 		_spec.SetField(accesspolicy.FieldResourceType, field.TypeString, value)

@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -238,6 +239,10 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.CreatePolicy(ctx, policy); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			Conflict(w, "A policy with this name already exists in this scope")
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -378,6 +383,10 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	if err := s.store.UpdatePolicy(ctx, policy); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			Conflict(w, "A policy with this name already exists in this scope")
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}

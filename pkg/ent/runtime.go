@@ -62,6 +62,10 @@ func init() {
 	accesspolicyDescName := accesspolicyFields[1].Descriptor()
 	// accesspolicy.NameValidator is a validator for the "name" field. It is called by the builders before save.
 	accesspolicy.NameValidator = accesspolicyDescName.Validators[0].(func(string) error)
+	// accesspolicyDescScopeID is the schema descriptor for scope_id field.
+	accesspolicyDescScopeID := accesspolicyFields[4].Descriptor()
+	// accesspolicy.DefaultScopeID holds the default value on creation for the scope_id field.
+	accesspolicy.DefaultScopeID = accesspolicyDescScopeID.Default.(string)
 	// accesspolicyDescResourceType is the schema descriptor for resource_type field.
 	accesspolicyDescResourceType := accesspolicyFields[5].Descriptor()
 	// accesspolicy.ResourceTypeValidator is a validator for the "resource_type" field. It is called by the builders before save.

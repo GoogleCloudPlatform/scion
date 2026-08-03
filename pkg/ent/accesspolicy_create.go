@@ -236,6 +236,10 @@ func (_c *AccessPolicyCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *AccessPolicyCreate) defaults() {
+	if _, ok := _c.mutation.ScopeID(); !ok {
+		v := accesspolicy.DefaultScopeID
+		_c.mutation.SetScopeID(v)
+	}
 	if _, ok := _c.mutation.Priority(); !ok {
 		v := accesspolicy.DefaultPriority
 		_c.mutation.SetPriority(v)
@@ -271,6 +275,9 @@ func (_c *AccessPolicyCreate) check() error {
 		if err := accesspolicy.ScopeTypeValidator(v); err != nil {
 			return &ValidationError{Name: "scope_type", err: fmt.Errorf(`ent: validator failed for field "AccessPolicy.scope_type": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.ScopeID(); !ok {
+		return &ValidationError{Name: "scope_id", err: errors.New(`ent: missing required field "AccessPolicy.scope_id"`)}
 	}
 	if _, ok := _c.mutation.ResourceType(); !ok {
 		return &ValidationError{Name: "resource_type", err: errors.New(`ent: missing required field "AccessPolicy.resource_type"`)}
@@ -512,12 +519,6 @@ func (u *AccessPolicyUpsert) SetScopeID(v string) *AccessPolicyUpsert {
 // UpdateScopeID sets the "scope_id" field to the value that was provided on create.
 func (u *AccessPolicyUpsert) UpdateScopeID() *AccessPolicyUpsert {
 	u.SetExcluded(accesspolicy.FieldScopeID)
-	return u
-}
-
-// ClearScopeID clears the value of the "scope_id" field.
-func (u *AccessPolicyUpsert) ClearScopeID() *AccessPolicyUpsert {
-	u.SetNull(accesspolicy.FieldScopeID)
 	return u
 }
 
@@ -794,13 +795,6 @@ func (u *AccessPolicyUpsertOne) SetScopeID(v string) *AccessPolicyUpsertOne {
 func (u *AccessPolicyUpsertOne) UpdateScopeID() *AccessPolicyUpsertOne {
 	return u.Update(func(s *AccessPolicyUpsert) {
 		s.UpdateScopeID()
-	})
-}
-
-// ClearScopeID clears the value of the "scope_id" field.
-func (u *AccessPolicyUpsertOne) ClearScopeID() *AccessPolicyUpsertOne {
-	return u.Update(func(s *AccessPolicyUpsert) {
-		s.ClearScopeID()
 	})
 }
 
@@ -1271,13 +1265,6 @@ func (u *AccessPolicyUpsertBulk) SetScopeID(v string) *AccessPolicyUpsertBulk {
 func (u *AccessPolicyUpsertBulk) UpdateScopeID() *AccessPolicyUpsertBulk {
 	return u.Update(func(s *AccessPolicyUpsert) {
 		s.UpdateScopeID()
-	})
-}
-
-// ClearScopeID clears the value of the "scope_id" field.
-func (u *AccessPolicyUpsertBulk) ClearScopeID() *AccessPolicyUpsertBulk {
-	return u.Update(func(s *AccessPolicyUpsert) {
-		s.ClearScopeID()
 	})
 }
 

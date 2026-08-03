@@ -20,6 +20,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
 	"github.com/google/uuid"
 )
 
@@ -43,7 +44,7 @@ func (AccessPolicy) Fields() []ent.Field {
 		field.Enum("scope_type").
 			Values("hub", "project", "resource"),
 		field.String("scope_id").
-			Optional(),
+			Default(""),
 		field.String("resource_type").
 			NotEmpty(),
 		field.String("resource_id").
@@ -68,6 +69,13 @@ func (AccessPolicy) Fields() []ent.Field {
 			UpdateDefault(time.Now),
 		field.String("created_by").
 			Optional(),
+	}
+}
+
+// Indexes of the AccessPolicy.
+func (AccessPolicy) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("name", "scope_type", "scope_id").Unique(),
 	}
 }
 

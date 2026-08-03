@@ -403,22 +403,9 @@ func (m *AccessPolicyMutation) OldScopeID(ctx context.Context) (v string, err er
 	return oldValue.ScopeID, nil
 }
 
-// ClearScopeID clears the value of the "scope_id" field.
-func (m *AccessPolicyMutation) ClearScopeID() {
-	m.scope_id = nil
-	m.clearedFields[accesspolicy.FieldScopeID] = struct{}{}
-}
-
-// ScopeIDCleared returns if the "scope_id" field was cleared in this mutation.
-func (m *AccessPolicyMutation) ScopeIDCleared() bool {
-	_, ok := m.clearedFields[accesspolicy.FieldScopeID]
-	return ok
-}
-
 // ResetScopeID resets all changes to the "scope_id" field.
 func (m *AccessPolicyMutation) ResetScopeID() {
 	m.scope_id = nil
-	delete(m.clearedFields, accesspolicy.FieldScopeID)
 }
 
 // SetResourceType sets the "resource_type" field.
@@ -1304,9 +1291,6 @@ func (m *AccessPolicyMutation) ClearedFields() []string {
 	if m.FieldCleared(accesspolicy.FieldDescription) {
 		fields = append(fields, accesspolicy.FieldDescription)
 	}
-	if m.FieldCleared(accesspolicy.FieldScopeID) {
-		fields = append(fields, accesspolicy.FieldScopeID)
-	}
 	if m.FieldCleared(accesspolicy.FieldResourceID) {
 		fields = append(fields, accesspolicy.FieldResourceID)
 	}
@@ -1341,9 +1325,6 @@ func (m *AccessPolicyMutation) ClearField(name string) error {
 	switch name {
 	case accesspolicy.FieldDescription:
 		m.ClearDescription()
-		return nil
-	case accesspolicy.FieldScopeID:
-		m.ClearScopeID()
 		return nil
 	case accesspolicy.FieldResourceID:
 		m.ClearResourceID()
