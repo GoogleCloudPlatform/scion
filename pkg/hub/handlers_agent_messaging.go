@@ -192,10 +192,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		ThreadID:    req.ThreadID,
 		Metadata:    req.Metadata,
 	}
-	// Propagate recipients from metadata for group-set messages.
+	// Propagate recipients and group_id from metadata for group-set messages.
 	if req.Metadata != nil {
 		if r, ok := req.Metadata["recipients"]; ok {
 			structuredMsg.Recipients = r
+		}
+		if gid, ok := req.Metadata["group_id"]; ok {
+			storeMsg.GroupID = gid
 		}
 	}
 

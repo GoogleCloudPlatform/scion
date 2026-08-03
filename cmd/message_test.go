@@ -1038,6 +1038,7 @@ func TestSendGroupMessageViaHub_UserRecipientType(t *testing.T) {
 	require.NotNil(t, receivedMsg)
 	assert.Equal(t, messages.TypeGroupSet, receivedMsg.Type, "user recipient in group should get type group-set")
 	assert.NotEmpty(t, receivedMsg.Metadata["recipients"], "user recipient in group should have recipients in metadata")
+	assert.NotEmpty(t, receivedMsg.Metadata["group_id"], "user recipient in group should have group_id in metadata")
 }
 
 func TestSendGroupMessageViaHub_RequiresHub(t *testing.T) {

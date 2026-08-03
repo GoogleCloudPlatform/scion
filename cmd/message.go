@@ -687,7 +687,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 					Attachments: msgAttach,
 					Channel:     msgChannel,
 					ThreadID:    msgThreadID,
-					Metadata:    map[string]string{"recipients": recipientsStr},
+					Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
 				}
 				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
