@@ -112,11 +112,13 @@ fi
 # --- Step: Push ---
 
 step "Pushing to origin..."
-if [[ -n "$BRANCH" ]]; then
-    git push origin "$BRANCH"
-else
-    git push origin main
+BRANCH="${BRANCH:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)}"
+if [[ -z "$BRANCH" ]] || [[ "$BRANCH" == "HEAD" ]]; then
+    BRANCH="main"
 fi
+
+echo "  -> Pushing branch ${BRANCH} to origin..."
+git push origin "$BRANCH"
 
 # --- Step: Upload config files (full mode only) ---
 
