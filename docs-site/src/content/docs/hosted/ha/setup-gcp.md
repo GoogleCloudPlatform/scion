@@ -117,7 +117,6 @@ for ROLE in \
   gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:$DEPLOYER_SA" \
     --role="$ROLE" \
-    --condition=None \
     --quiet
 done
 ```
@@ -337,7 +336,6 @@ for ROLE in \
   gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:$SA_HUB" \
     --role="$ROLE" \
-    --condition=None \
     --quiet
 done
 ```
@@ -399,7 +397,6 @@ the Hub:
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_TRANSPORT" \
   --role="roles/iap.httpsResourceAccessor" \
-  --condition=None \
   --quiet
 ```
 
@@ -433,14 +430,12 @@ SA_DISCORD="scion-discord-runner@$PROJECT_ID.iam.gserviceaccount.com"
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_DISCORD" \
   --role="roles/cloudsql.client" \
-  --condition=None \
   --quiet
 
 # IAP access to call Hub APIs
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_DISCORD" \
   --role="roles/iap.httpsResourceAccessor" \
-  --condition=None \
   --quiet
 ```
 
@@ -470,7 +465,6 @@ gcloud iam service-accounts add-iam-policy-binding \
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$GKE_GSA" \
   --role="roles/secretmanager.secretAccessor" \
-  --condition=None \
   --quiet
 ```
 
@@ -883,7 +877,7 @@ gcloud run deploy scion-discord \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
   --use-http2 \
   --port=8080 \
-  --set-env-vars="GRPC_PORT=8080,DISCORD_STANDALONE=true,DATABASE_URL=postgres://scion:${DB_PASSWORD}@/scionhub?host=/cloudsql/$PROJECT_ID:$REGION:scion-hub-db,DISCORD_BOT_TOKEN=YOUR_BOT_TOKEN,DISCORD_APPLICATION_ID=YOUR_APP_ID,DISCORD_GUILD_IDS=YOUR_GUILD_ID,DISCORD_HUB_URL=$HUB_URL,DISCORD_TRANSPORT_MODE=iap,DISCORD_TRANSPORT_AUDIENCE=$IAP_CLIENT_ID" \
+  --set-env-vars="GRPC_PORT=8080,DISCORD_STANDALONE=true,DATABASE_URL=postgres://scion:${DB_PASSWORD}@/scionhub?host=/cloudsql/$PROJECT_ID:$REGION:scion-hub-db,DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN,DISCORD_APPLICATION_ID=$DISCORD_APPLICATION_ID,DISCORD_GUILD_IDS=$DISCORD_GUILD_IDS,DISCORD_HUB_URL=$HUB_URL,DISCORD_TRANSPORT_MODE=iap,DISCORD_TRANSPORT_AUDIENCE=$IAP_CLIENT_ID" \
   --min-instances=1 \
   --max-instances=1 \
   --cpu=1 \
