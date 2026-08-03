@@ -208,6 +208,15 @@ A sub-feature of port forwarding where `sciontool` periodically scans for listen
 _Avoid_: auto-port, automatic scan, port exposure
 _See also_: Port Forwarding, sciontool
 
+**A2A Protocol**:
+An open standard (developed by Google) for secure, structured communication between independent artificial agents. It defines a lightweight JSON-RPC 2.0 dialect over HTTP, alongside standard discovery mechanics ("Agent Cards") for advertising capabilities.
+_See also_: A2A Protocol Bridge
+
+**A2A Protocol Bridge**:
+A standalone, self-managed service that translates standard A2A JSON-RPC payloads into Scion Hub API calls and vice versa. It exposes Scion agents as standard A2A-compliant JSON-RPC endpoints, enabling multi-agent orchestration, third-party platform integrations, and desktop client federation.
+_Avoid_: A2A bridge, A2A adapter, A2A proxy
+_See also_: A2A Protocol, Hub
+
 ## Users & Access
 
 **Group**:
