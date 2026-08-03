@@ -115,12 +115,6 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could read policies.
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -179,12 +173,6 @@ func (s *Server) listPolicies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could create policies.
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
 	ctx := r.Context()
 
 	var req CreatePolicyRequest
@@ -442,12 +430,6 @@ func (s *Server) handlePolicyBindings(w http.ResponseWriter, r *http.Request, po
 }
 
 func (s *Server) listPolicyBindings(w http.ResponseWriter, r *http.Request, policyID string) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could read policy bindings.
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
 	ctx := r.Context()
 
 	bindings, err := s.store.GetPolicyBindings(ctx, policyID)
@@ -462,12 +444,6 @@ func (s *Server) listPolicyBindings(w http.ResponseWriter, r *http.Request, poli
 }
 
 func (s *Server) addPolicyBinding(w http.ResponseWriter, r *http.Request, policyID string) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could add policy bindings.
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
 	ctx := r.Context()
 
 	var req AddPolicyBindingRequest
@@ -547,12 +523,6 @@ func (s *Server) handlePolicyBindingByID(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) removePolicyBinding(w http.ResponseWriter, r *http.Request, policyID, principalType, principalID string) {
-	// Policy operations are gated to hub admins (ptone/scion#591). Before this
-	// gate, any authenticated caller could remove policy bindings.
-	if _, ok := s.requireAdmin(w, r); !ok {
-		return
-	}
-
 	ctx := r.Context()
 
 	if err := s.store.RemovePolicyBinding(ctx, policyID, principalType, principalID); err != nil {
