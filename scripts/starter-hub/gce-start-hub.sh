@@ -220,7 +220,7 @@ EOF
     # Upload all config files to /tmp/ on the instance; they are placed into
     # their final locations at the start of the main remote SSH session.
     substep "Uploading files to instance..."
-    gcloud compute scp "$UPLOAD_DIR"/* "${INSTANCE_NAME}:/tmp/" --zone="${ZONE}"
+    gcloud compute scp "$UPLOAD_DIR"/* "${INSTANCE_NAME}:/tmp/" --project="${PROJECT_ID}" --zone="${ZONE}"
 
     substep "Files uploaded to instance"
 fi
@@ -395,7 +395,7 @@ fi
 
 step "Remote: pull, build, restart..."
 
-gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
+gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT_ID}" --zone="${ZONE}" --command '
     set -euo pipefail
     RESET_DB='"${RESET_DB}"'
     FULL_DEPLOY='"${FULL_DEPLOY}"'

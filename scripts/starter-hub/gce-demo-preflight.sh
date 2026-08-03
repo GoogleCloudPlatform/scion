@@ -285,10 +285,10 @@ if [[ -n "$PROJECT_ID" ]] && [[ -n "$ACTIVE_ACCOUNT" ]]; then
         check_warn "Could not verify IAM access (may be missing roles/iam.admin)"
     fi
 
-    if gcloud dns managed-zones list --project "${PROJECT_ID}" --limit=1 &>/dev/null; then
-        check_pass "Cloud DNS access"
+    if gcloud dns managed-zones list --project "${DNS_PROJECT_ID}" --limit=1 &>/dev/null; then
+        check_pass "Cloud DNS access (project: ${DNS_PROJECT_ID})"
     else
-        check_warn "Could not verify Cloud DNS access (may be missing roles/dns.admin)"
+        check_warn "Could not verify Cloud DNS access in ${DNS_PROJECT_ID} (may be missing roles/dns.admin)"
     fi
 
     if [[ "${ENABLE_GKE}" == "true" ]]; then
@@ -307,15 +307,15 @@ fi
 # ---------------------------------------------------------------------------
 section "DNS Zone"
 
-if [[ -n "$PROJECT_ID" ]]; then
-    if gcloud dns managed-zones describe "${DNS_ZONE_NAME}" --project "${PROJECT_ID}" &>/dev/null; then
-        check_pass "Cloud DNS zone ${DNS_ZONE_NAME} exists"
+if [[ -n "$DNS_PROJECT_ID" ]]; then
+    if gcloud dns managed-zones describe "${DNS_ZONE_NAME}" --project "${DNS_PROJECT_ID}" &>/dev/null; then
+        check_pass "Cloud DNS zone ${DNS_ZONE_NAME} exists in ${DNS_PROJECT_ID}"
     else
-        check_warn "Cloud DNS zone ${DNS_ZONE_NAME} does not exist yet (gce-certs.sh will create it)"
+        check_warn "Cloud DNS zone ${DNS_ZONE_NAME} does not exist yet in ${DNS_PROJECT_ID} (gce-certs.sh will create it)"
         echo -e "         Ensure NS records for ${CERT_DOMAIN} are delegated to Google Cloud DNS at your registrar"
     fi
 else
-    check_warn "Skipping DNS check (PROJECT_ID not set)"
+    check_warn "Skipping DNS check (DNS_PROJECT_ID not set)"
 fi
 
 # ---------------------------------------------------------------------------

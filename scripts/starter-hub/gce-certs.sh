@@ -34,28 +34,29 @@ fi
 echo "=== DNS and Certificate Setup for ${DOMAIN} ==="
 
 # 1. Create Managed DNS Zone if it doesn't exist
-if ! gcloud dns managed-zones describe "${ZONE_NAME}" &>/dev/null; then
-    echo "Creating Cloud DNS managed zone: ${ZONE_NAME}..."
+if ! gcloud dns managed-zones describe "${ZONE_NAME}" --project "${DNS_PROJECT_ID}" &>/dev/null; then
+    echo "Creating Cloud DNS managed zone: ${ZONE_NAME} in project ${DNS_PROJECT_ID}..."
     gcloud dns managed-zones create "${ZONE_NAME}" \
+        --project="${DNS_PROJECT_ID}" \
         --dns-name="${DOMAIN}." \
         --description="Managed zone for scion-ai.dev sub-domain" \
         --visibility="public"
 else
-    echo "DNS zone ${ZONE_NAME} already exists."
+    echo "DNS zone ${ZONE_NAME} already exists in project ${DNS_PROJECT_ID}."
 fi
 
 # 2. Display Nameservers
 echo "--------------------------------------------------"
 echo "Registrar Nameservers:"
-gcloud dns managed-zones describe "${ZONE_NAME}" --format="value(nameServers)" | tr ';' '\n'
+gcloud dns managed-zones describe "${ZONE_NAME}" --project "${DNS_PROJECT_ID}" --format="value(nameServers)" | tr ';' '\n'
 echo "--------------------------------------------------"
 
 # 3. Add or Update A Record for the Hub
 echo "Checking A record for ${HUB_SUBDOMAIN}..."
-EXTERNAL_IP=$(gcloud compute instances describe "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
+EXTERNAL_IP=$(gcloud compute instances describe "${INSTANCE_NAME}" --project="${PROJECT_ID}" --zone="${GCE_ZONE}" --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
 
 # Try to get the current IP of the record
-CURRENT_RECORD_IP=$(gcloud dns record-sets list --zone="${ZONE_NAME}" --name="${HUB_SUBDOMAIN}." --type="A" --format="value(rrdatas[0])" 2>/dev/null || true)
+CURRENT_RECORD_IP=$(gcloud dns record-sets list --project="${DNS_PROJECT_ID}" --zone="${ZONE_NAME}" --name="${HUB_SUBDOMAIN}." --type="A" --format="value(rrdatas[0])" 2>/dev/null || true)
 
 if [[ -n "$CURRENT_RECORD_IP" ]]; then
     if [[ "$CURRENT_RECORD_IP" == "$EXTERNAL_IP" ]]; then
@@ -63,6 +64,7 @@ if [[ -n "$CURRENT_RECORD_IP" ]]; then
     else
         echo "Updating A record for ${HUB_SUBDOMAIN} from ${CURRENT_RECORD_IP} to ${EXTERNAL_IP}..."
         gcloud dns record-sets update "${HUB_SUBDOMAIN}." \
+            --project="${DNS_PROJECT_ID}" \
             --zone="${ZONE_NAME}" \
             --type="A" \
             --ttl="300" \
@@ -71,6 +73,7 @@ if [[ -n "$CURRENT_RECORD_IP" ]]; then
 else
     echo "Creating A record for ${HUB_SUBDOMAIN} pointing to ${EXTERNAL_IP}..."
     gcloud dns record-sets create "${HUB_SUBDOMAIN}." \
+        --project="${DNS_PROJECT_ID}" \
         --zone="${ZONE_NAME}" \
         --type="A" \
         --ttl="300" \
@@ -80,12 +83,42 @@ fi
 # 4. Obtain Wildcard Certificate via SSH on the instance
 # This assumes the instance has the roles/dns.admin and python3-certbot-dns-google installed via provision/cloud-init
 echo "Checking certificate status on ${INSTANCE_NAME}..."
-if gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo test -f /etc/letsencrypt/live/${DOMAIN}/fullchain.pem" &>/dev/null; then
+if gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT_ID}" --zone="${GCE_ZONE}" --command="sudo test -f /etc/letsencrypt/live/${DOMAIN}/fullchain.pem" &>/dev/null; then
     echo "Certificate for ${DOMAIN} already exists. Skipping acquisition."
 else
-    echo "Requesting wildcard certificate for ${DOMAIN}..."
-    gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo certbot certonly \
+    echo "Requesting wildcard certificate for ${DOMAIN} (DNS project: ${DNS_PROJECT_ID})..."
+    KEY_FILE="${KEY_FILE:-.scratch/dns-admin-key.json}"
+    DNS_SA_EMAIL="scion-${HUB_NAME}-dns@${DNS_PROJECT_ID}.iam.gserviceaccount.com"
+
+    if [[ ! -f "${KEY_FILE}" ]]; then
+        echo "Creating DNS service account key for ${DNS_SA_EMAIL}..."
+        if ! gcloud iam service-accounts describe "${DNS_SA_EMAIL}" --project="${DNS_PROJECT_ID}" &>/dev/null; then
+            gcloud iam service-accounts create "scion-${HUB_NAME}-dns" \
+                --project="${DNS_PROJECT_ID}" \
+                --display-name="Scion ${HUB_NAME} DNS SA" || true
+            sleep 3
+            gcloud projects add-iam-policy-binding "${DNS_PROJECT_ID}" \
+                --member="serviceAccount:${DNS_SA_EMAIL}" \
+                --role="roles/dns.admin" \
+                --condition=None > /dev/null || true
+        fi
+        gcloud iam service-accounts keys create "${KEY_FILE}" \
+            --iam-account="${DNS_SA_EMAIL}" \
+            --project="${DNS_PROJECT_ID}"
+    fi
+
+    echo "Uploading SA key to instance..."
+    gcloud compute scp "${KEY_FILE}" "${INSTANCE_NAME}:/tmp/dns-google.json" --project="${PROJECT_ID}" --zone="${GCE_ZONE}"
+    
+    gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT_ID}" --zone="${GCE_ZONE}" --command="
+        sudo mkdir -p /etc/letsencrypt
+        sudo mv /tmp/dns-google.json /etc/letsencrypt/dns-google.json
+        sudo chmod 600 /etc/letsencrypt/dns-google.json
+    "
+
+    gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT_ID}" --zone="${GCE_ZONE}" --command="sudo certbot certonly \
         --dns-google \
+        --dns-google-credentials /etc/letsencrypt/dns-google.json \
         --dns-google-propagation-seconds 60 \
         -d '${DOMAIN}' \
         -d '*.${DOMAIN}' \
@@ -96,9 +129,9 @@ else
 fi
 
 # 5. Reload Caddy if it's installed to pick up new/renewed certificates
-if gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="command -v caddy" &>/dev/null; then
+if gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT_ID}" --zone="${GCE_ZONE}" --command="command -v caddy" &>/dev/null; then
     echo "Reloading Caddy on ${INSTANCE_NAME}..."
-    gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo systemctl reload caddy || sudo caddy reload --config /etc/caddy/Caddyfile"
+    gcloud compute ssh "${INSTANCE_NAME}" --project="${PROJECT_ID}" --zone="${GCE_ZONE}" --command="sudo systemctl reload caddy || sudo caddy reload --config /etc/caddy/Caddyfile"
 fi
 
 echo ""

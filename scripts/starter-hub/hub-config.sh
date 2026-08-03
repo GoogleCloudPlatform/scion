@@ -55,6 +55,7 @@ ZONE="${ZONE:-us-central1-a}"
 
 # --- Derived: Project ---
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
+DNS_PROJECT_ID="${DNS_PROJECT_ID:-${PROJECT_ID}}"
 
 # --- Derived: Paths ---
 HUB_ENV_FILE="${HUB_ENV_FILE:-.scratch/hub-${HUB_NAME}.env}"
