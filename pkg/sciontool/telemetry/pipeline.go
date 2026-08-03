@@ -424,10 +424,17 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 		// Re-buffer failed metrics so they can be retried on the next flush
 		// cycle. Cap the buffer to maxMetricBufCap to avoid unbounded growth.
 		p.metricBufMu.Lock()
-		p.metricBuf = append(p.metricBuf, deduped...)
+		// Prepend the failed metrics so they remain the oldest in the buffer,
+		// and newly accumulated metrics remain the newest.
+		p.metricBuf = append(deduped, p.metricBuf...)
 		if len(p.metricBuf) > maxMetricBufCap {
 			log.Error("Metric re-buffer exceeds cap (%d > %d), discarding oldest entries", len(p.metricBuf), maxMetricBufCap)
-			p.metricBuf = p.metricBuf[len(p.metricBuf)-maxMetricBufCap:]
+			discardCount := len(p.metricBuf) - maxMetricBufCap
+			// Nil out discarded pointers to prevent memory leaks
+			for i := 0; i < discardCount; i++ {
+				p.metricBuf[i] = nil
+			}
+			p.metricBuf = p.metricBuf[discardCount:]
 		}
 		p.metricBufMu.Unlock()
 		return
