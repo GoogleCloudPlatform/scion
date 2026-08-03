@@ -93,6 +93,8 @@ export class ScionResourceList extends LitElement {
   @state() private _itemRefreshStatus: Map<string, 'pending' | 'running' | 'success' | 'error'> =
     new Map();
 
+  private _statusClearTimer: ReturnType<typeof setTimeout> | undefined;
+
   @state() private globalPickerOpen = false;
   @state() private globalItems: ResourceItem[] = [];
   @state() private globalLoading = false;
@@ -325,6 +327,14 @@ export class ScionResourceList extends LitElement {
     void this.load();
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this._statusClearTimer) {
+      clearTimeout(this._statusClearTimer);
+      this._statusClearTimer = undefined;
+    }
+  }
+
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('kind') || changed.has('scope') || changed.has('scopeId')) {
       void this.load();
@@ -518,6 +528,7 @@ export class ScionResourceList extends LitElement {
   // ── Refresh All from Source ─────────────────────────────────────────
 
   private async _handleRefreshAll(): Promise<void> {
+    if (this._refreshAllRunning) return;
     const refreshable = this.items.filter((item) => item.sourceUrl);
     if (refreshable.length === 0) return;
 
@@ -535,7 +546,7 @@ export class ScionResourceList extends LitElement {
         this._itemRefreshStatus.set(item.id, 'running');
         this.requestUpdate();
         try {
-          const response = await apiFetch(`/api/v1/harness-configs/${item.id}/reimport`, {
+          const response = await apiFetch(`/api/v1/${this.apiResource}/${item.id}/reimport`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({}),
@@ -573,7 +584,7 @@ export class ScionResourceList extends LitElement {
     await this.load();
 
     // Clear status indicators after delay
-    setTimeout(() => {
+    this._statusClearTimer = setTimeout(() => {
       this._itemRefreshStatus.clear();
       this.requestUpdate();
     }, 3000);
@@ -646,17 +657,31 @@ export class ScionResourceList extends LitElement {
     switch (status) {
       case 'pending':
         return html`<span class="refresh-status"
-          ><sl-icon class="refresh-pending" name="hourglass-split"></sl-icon
+          ><sl-icon
+            class="refresh-pending"
+            name="hourglass-split"
+            aria-label="Refresh pending"
+          ></sl-icon
         ></span>`;
       case 'running':
-        return html`<span class="refresh-status"><sl-spinner></sl-spinner></span>`;
+        return html`<span class="refresh-status"
+          ><sl-spinner aria-label="Refreshing"></sl-spinner
+        ></span>`;
       case 'success':
         return html`<span class="refresh-status"
-          ><sl-icon class="refresh-success" name="check-circle"></sl-icon
+          ><sl-icon
+            class="refresh-success"
+            name="check-circle"
+            aria-label="Refresh successful"
+          ></sl-icon
         ></span>`;
       case 'error':
         return html`<span class="refresh-status"
-          ><sl-icon class="refresh-error" name="x-circle"></sl-icon
+          ><sl-icon
+            class="refresh-error"
+            name="x-circle"
+            aria-label="Refresh failed"
+          ></sl-icon
         ></span>`;
     }
   }
