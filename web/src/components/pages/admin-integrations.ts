@@ -83,6 +83,9 @@ const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
     { key: 'app_token', label: 'App Token', description: 'Slack app-level token for Socket Mode (xapp-...)' },
     { key: 'signing_secret', label: 'Signing Secret', description: 'Slack signing secret for HTTP mode' },
   ],
+  a2a: [
+    { key: 'api_key', label: 'API Key', description: 'Static API key for apiKey/bearer auth schemes' },
+  ],
 };
 
 function resolvePlatform(name: string): string {
@@ -91,6 +94,7 @@ function resolvePlatform(name: string): string {
     case 'discord': return 'discord';
     case 'slack': return 'slack';
     case 'chat-app': return 'gchat';
+    case 'a2a-bridge': return 'a2a';
     default: return name;
   }
 }
@@ -117,6 +121,19 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     { key: 'listen_address', label: 'Listen Address', description: 'HTTP listen address (HTTP mode only)', defaultValue: ':3000' },
     { key: 'db_path', label: 'Database Path', description: 'Path to SQLite database', defaultValue: '~/.scion/scion-slack.db' },
     { key: 'agent_cache_ttl', label: 'Agent Cache TTL', description: 'How long to cache agent info', defaultValue: '5m' },
+  ],
+  a2a: [
+    { key: 'external_url', label: 'External URL', description: 'Public URL for agent cards', defaultValue: '' },
+    { key: 'auth_scheme', label: 'Auth Scheme', description: 'apiKey, bearer, none, hubUAT, or hubJWT', defaultValue: 'none' },
+    { key: 'uat_cache_ttl', label: 'UAT Cache TTL', description: 'Cache duration for UAT validation results', defaultValue: '60s' },
+    { key: 'rate_limit_enabled', label: 'Rate Limiting Enabled', description: 'Enable request rate limiting (true/false)', defaultValue: 'false' },
+    { key: 'rate_limit_rps', label: 'Rate Limit (req/s)', description: 'Maximum requests per second', defaultValue: '10' },
+    { key: 'rate_limit_burst', label: 'Rate Limit Burst', description: 'Maximum burst size for rate limiter', defaultValue: '20' },
+    { key: 'send_message_timeout', label: 'Send Message Timeout', description: 'Timeout for sending messages to agents', defaultValue: '120s' },
+    { key: 'sse_keepalive', label: 'SSE Keepalive Interval', description: 'Interval for SSE keepalive pings', defaultValue: '30s' },
+    { key: 'push_retry_max', label: 'Push Notification Retries', description: 'Maximum retries for push notification delivery', defaultValue: '3' },
+    { key: 'provider_org', label: 'Provider Organization', description: 'Organization name for agent card metadata', defaultValue: '' },
+    { key: 'provider_url', label: 'Provider URL', description: 'Organization URL for agent card metadata', defaultValue: '' },
   ],
 };
 
@@ -877,6 +894,7 @@ export class ScionPageAdminIntegrations extends LitElement {
 
       ${this.renderStatusSection(d.status)}
       ${this.renderSetupBanner(d)}
+      ${this.renderA2ASetupSection(d)}
       ${this.renderSecretsSection(d)}
       ${this.renderConfigSection(d)}
       ${this.renderDiscordInviteLink(d)}
@@ -1061,6 +1079,45 @@ export class ScionPageAdminIntegrations extends LitElement {
     `;
   }
 
+  private renderA2ASetupSection(d: IntegrationDetail) {
+    const platform = resolvePlatform(d.name);
+    if (platform !== 'a2a') return nothing;
+
+    // Only show the setup section when the bridge is not connected.
+    if (d.status?.connected) return nothing;
+
+    const binaryName = 'scion-a2a-bridge';
+    const configFile = '~/.scion/scion-a2a-bridge.yaml';
+    const startCommand = `${binaryName} -config ${configFile}`;
+
+    return html`
+      <div class="section">
+        <h3 class="section-title">Bridge Setup</h3>
+        <div class="setup-banner">
+          <sl-icon name="info-circle"></sl-icon>
+          <div>
+            <strong>The A2A bridge process is not connected</strong>
+            Start the bridge process and click Reconnect to activate.
+          </div>
+        </div>
+        <div style="font-size: 0.875rem; display: flex; flex-direction: column; gap: 0.5rem;">
+          <div class="status-row">
+            <span class="status-label">Binary</span>
+            <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;">${binaryName}</span>
+          </div>
+          <div class="status-row">
+            <span class="status-label">Config File</span>
+            <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;">${configFile}</span>
+          </div>
+          <div class="status-row">
+            <span class="status-label">Start Command</span>
+            <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;">${startCommand}</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   private renderSetupBanner(d: IntegrationDetail) {
     const platform = resolvePlatform(d.name);
     const secretDefs = PLATFORM_SECRETS[platform] ?? [];
@@ -1138,6 +1195,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   private renderActionsSection() {
     const mode = this.detail?.deployment_mode ?? 'plugin';
     const showUpdate = this.detail && mode !== 'external';
+    const restartLabel = mode === 'external' ? 'Reconnect' : 'Restart';
     return html`
       <div class="actions">
         <sl-button
@@ -1153,7 +1211,7 @@ export class ScionPageAdminIntegrations extends LitElement {
           @click=${() => { void this.handleRestart(); }}
         >
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-          Restart
+          ${restartLabel}
         </sl-button>
         ${showUpdate
           ? html`
@@ -1255,6 +1313,8 @@ export class ScionPageAdminIntegrations extends LitElement {
         return 'Slack';
       case 'gchat':
         return 'Google Chat';
+      case 'a2a':
+        return 'A2A Bridge';
       default:
         return platform;
     }

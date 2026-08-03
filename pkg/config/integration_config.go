@@ -42,6 +42,9 @@ const (
 
 	// Google Chat
 	SecretGChatSigningKey = "GCHAT_SIGNING_KEY"
+
+	// A2A Bridge
+	SecretA2AAPIKey = "A2A_API_KEY"
 )
 
 // IntegrationConfigProvider defines the interface for reading and writing
@@ -162,6 +165,9 @@ var PluginSecretKeyMap = map[string][]IntegrationSecretMapping{
 	"chat-app": {
 		{SecretGChatSigningKey, "signing_key"},
 	},
+	"a2a-bridge": {
+		{SecretA2AAPIKey, "api_key"},
+	},
 }
 
 // wiringKeys are config keys that always come from settings.yaml inline config,
@@ -204,6 +210,7 @@ var backendSecretKeys = []string{
 	SecretDiscordBotToken, SecretDiscordPublicKey,
 	SecretSlackBotToken, SecretSlackAppToken, SecretSlackSigningSecret,
 	SecretGChatSigningKey,
+	SecretA2AAPIKey,
 }
 
 // ResolvePluginConfig builds the config map for a plugin with consistent precedence.
@@ -268,6 +275,171 @@ func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map
 	}
 
 	return merged, nil
+}
+
+// SelfManagedPluginEntry holds the parameters for registering a self-managed
+// broker plugin in settings.yaml.
+type SelfManagedPluginEntry struct {
+	Name       string // plugin name (settings.yaml key)
+	Address    string // RPC address, e.g. "localhost:9090"
+	ConfigFile string // path to the Hub-side admin config file
+}
+
+// AddSelfManagedPluginToSettings adds a self-managed broker plugin entry to
+// the global settings.yaml with mode, address, and config_file fields.
+func AddSelfManagedPluginToSettings(entry SelfManagedPluginEntry) error {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return fmt.Errorf("resolve global dir: %w", err)
+	}
+
+	settingsPath := filepath.Join(globalDir, "settings.yaml")
+
+	var raw map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("read settings file: %w", err)
+		}
+		raw = make(map[string]interface{})
+	} else {
+		if err := yamlv3.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("parse settings file: %w", err)
+		}
+		if raw == nil {
+			raw = make(map[string]interface{})
+		}
+	}
+
+	server, _ := raw["server"].(map[string]interface{})
+	if server == nil {
+		server = make(map[string]interface{})
+		raw["server"] = server
+	}
+
+	plugins, _ := server["plugins"].(map[string]interface{})
+	if plugins == nil {
+		plugins = make(map[string]interface{})
+		server["plugins"] = plugins
+	}
+
+	broker, _ := plugins["broker"].(map[string]interface{})
+	if broker == nil {
+		broker = make(map[string]interface{})
+		plugins["broker"] = broker
+	}
+
+	broker[entry.Name] = map[string]interface{}{
+		"self_managed": true,
+		"mode":         "self-managed",
+		"address":      entry.Address,
+		"config_file":  entry.ConfigFile,
+	}
+
+	out, err := yamlv3.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+
+	return os.WriteFile(settingsPath, out, 0644)
+}
+
+// AddSelfManagedPluginWithBrokerType combines AddSelfManagedPluginToSettings and
+// AddPluginToMessageBrokerTypes into a single read-modify-write cycle, avoiding
+// the redundant file I/O of calling them separately.
+func AddSelfManagedPluginWithBrokerType(entry SelfManagedPluginEntry) error {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return fmt.Errorf("resolve global dir: %w", err)
+	}
+
+	settingsPath := filepath.Join(globalDir, "settings.yaml")
+
+	var raw map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("read settings file: %w", err)
+		}
+		raw = make(map[string]interface{})
+	} else {
+		if err := yamlv3.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("parse settings file: %w", err)
+		}
+		if raw == nil {
+			raw = make(map[string]interface{})
+		}
+	}
+
+	server, _ := raw["server"].(map[string]interface{})
+	if server == nil {
+		server = make(map[string]interface{})
+		raw["server"] = server
+	}
+
+	// --- Plugin entry ---
+	plugins, _ := server["plugins"].(map[string]interface{})
+	if plugins == nil {
+		plugins = make(map[string]interface{})
+		server["plugins"] = plugins
+	}
+
+	broker, _ := plugins["broker"].(map[string]interface{})
+	if broker == nil {
+		broker = make(map[string]interface{})
+		plugins["broker"] = broker
+	}
+
+	broker[entry.Name] = map[string]interface{}{
+		"self_managed": true,
+		"mode":         "self-managed",
+		"address":      entry.Address,
+		"config_file":  entry.ConfigFile,
+	}
+
+	// --- Message broker types ---
+	mb, _ := server["message_broker"].(map[string]interface{})
+	if mb == nil {
+		mb = make(map[string]interface{})
+		server["message_broker"] = mb
+	}
+
+	mb["enabled"] = true
+
+	var types []string
+	if existing, ok := mb["types"]; ok {
+		if arr, ok := existing.([]interface{}); ok {
+			for _, v := range arr {
+				if s, ok := v.(string); ok {
+					types = append(types, s)
+				}
+			}
+		}
+	}
+
+	hasPlugin := false
+	for _, t := range types {
+		if t == entry.Name {
+			hasPlugin = true
+			break
+		}
+	}
+	if !hasPlugin {
+		types = append(types, entry.Name)
+	}
+
+	iface := make([]interface{}, len(types))
+	for i, t := range types {
+		iface[i] = t
+	}
+	mb["types"] = iface
+
+	out, err := yamlv3.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+
+	return os.WriteFile(settingsPath, out, 0644)
 }
 
 // AddPluginToSettings adds a broker plugin entry to the global settings.yaml.
