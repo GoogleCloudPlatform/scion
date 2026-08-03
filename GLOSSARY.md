@@ -193,6 +193,16 @@ A credential made available to an agent at runtime (e.g. API keys, tokens). A ha
 _Avoid_: credential, vault, secret store, env secret
 _See also_: Harness-config, Profile
 
+**Port Forwarding**:
+The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated WebSocket-based reverse tunnel established from within the container to the Hub.
+_Avoid_: tunnel, docker proxy, ingress
+_See also_: Auto-Expose, Hub
+
+**Auto-Expose**:
+A sub-feature of port forwarding where `sciontool` periodically scans for listening TCP sockets inside the agent container (by reading `/proc/net/tcp` and `/proc/net/tcp6`), filters them by policy, and registers them with the Hub using the `auto-scan` label. Stale registrations are automatically cleaned up when the service stops listening.
+_Avoid_: auto-port, automatic scan, port exposure
+_See also_: Port Forwarding, sciontool
+
 ## Users & Access
 
 **Group**:

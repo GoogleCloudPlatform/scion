@@ -33,6 +33,7 @@ const hostedUserGuide = {
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
 		{ label: 'Scheduling & Events', slug: 'hosted/user/scheduling' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
+		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 	],
 };
 
