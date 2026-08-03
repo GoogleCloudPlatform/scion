@@ -615,7 +615,7 @@ type HarnessConfig struct {
 // CloneProjectRequest is the request body for POST /api/v1/projects/{id}/clone.
 type CloneProjectRequest struct {
 	Name       string `json:"name"`                 // required
-	Slug       string `json:"slug,omitempty"`        // optional explicit slug override
+	Slug       string `json:"slug,omitempty"`       // optional explicit slug override
 	AsTemplate bool   `json:"asTemplate,omitempty"` // mark clone as template
 }
 
