@@ -233,7 +233,11 @@ func (s *Server) handleAgentMetricsSummary(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// List queries for tool/model breakdowns and avg duration (capped).
+	// Tool/model breakdowns and avg duration are derived from the most recent
+	// sessions returned by the list query, which is capped at 100 records
+	// (defaultMetricsListLimit). For agents with >100 sessions these values
+	// reflect only the newest subset — acceptable for MVP. A future iteration
+	// could push tool/model aggregation and AVG(duration) into SQL.
 	sessions, err := s.store.ListAgentSessionMetricsByAgent(ctx, agentID)
 	if err != nil {
 		s.agentMetricsLog.Error("Failed to list session metrics for agent",
@@ -372,7 +376,11 @@ func (s *Server) handleProjectSessionMetricsSummary(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// List queries for tool/model breakdowns (capped).
+	// Tool/model breakdowns are derived from the most recent sessions returned
+	// by the list query, which is capped at 100 records (defaultMetricsListLimit).
+	// For projects with >100 sessions these values reflect only the newest
+	// subset — acceptable for MVP. A future iteration could push tool/model
+	// aggregation into SQL.
 	sessions, err := s.store.ListAgentSessionMetricsByProject(ctx, projectID)
 	if err != nil {
 		s.agentMetricsLog.Error("Failed to list session metrics for project",
