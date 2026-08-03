@@ -10,6 +10,7 @@ package hubmetrics
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
@@ -84,10 +86,11 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 		fn(o)
 	}
 
-	exporter, err := mexporter.New(mexporter.WithProjectID(gcpProjectID))
+	baseExporter, err := mexporter.New(mexporter.WithProjectID(gcpProjectID))
 	if err != nil {
 		return nil, fmt.Errorf("creating GCP metric exporter: %w", err)
 	}
+	exporter := &loggingExporter{delegate: baseExporter}
 
 	resAttrs := []attribute.KeyValue{
 		semconv.ServiceName("scion-hub"),
@@ -152,4 +155,47 @@ func GroupScopes() []MetricGroup {
 // dispatchmetrics package, useful for building Views in tests.
 func InstrumentationScope(name string) instrumentation.Scope {
 	return instrumentation.Scope{Name: name}
+}
+
+// loggingExporter wraps a metric.Exporter and logs any export errors with
+// structured context before returning them. This gives hub operators
+// visibility into metric export failures that the OTel SDK would otherwise
+// only surface through the global error handler.
+type loggingExporter struct {
+	delegate metric.Exporter
+}
+
+var _ metric.Exporter = (*loggingExporter)(nil)
+
+func (e *loggingExporter) Temporality(k metric.InstrumentKind) metricdata.Temporality {
+	return e.delegate.Temporality(k)
+}
+
+func (e *loggingExporter) Aggregation(k metric.InstrumentKind) metric.Aggregation {
+	return e.delegate.Aggregation(k)
+}
+
+func (e *loggingExporter) Export(ctx context.Context, rm *metricdata.ResourceMetrics) error {
+	err := e.delegate.Export(ctx, rm)
+	if err != nil {
+		metricCount := 0
+		if rm != nil {
+			for _, sm := range rm.ScopeMetrics {
+				metricCount += len(sm.Metrics)
+			}
+		}
+		slog.Error("hub metrics export error",
+			"error", err,
+			"metric_count", metricCount,
+		)
+	}
+	return err
+}
+
+func (e *loggingExporter) ForceFlush(ctx context.Context) error {
+	return e.delegate.ForceFlush(ctx)
+}
+
+func (e *loggingExporter) Shutdown(ctx context.Context) error {
+	return e.delegate.Shutdown(ctx)
 }

@@ -32,6 +32,12 @@ import (
 // processes (hooks) send metrics in rapid succession.
 const metricFlushInterval = 15 * time.Second
 
+// maxMetricBufCap is the maximum number of ResourceMetrics batches kept in
+// the re-buffer when metric export fails after retries are exhausted. This
+// prevents unbounded memory growth — it allows roughly 2x the normal inflow
+// between flush intervals to accumulate before older entries are discarded.
+const maxMetricBufCap = 100
+
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
 	config       *Config
@@ -43,6 +49,7 @@ type Pipeline struct {
 	healthCancel context.CancelFunc
 	exportErrors otelmetric.Int64Counter
 	meter        otelmetric.Meter
+	retryConfig  RetryConfig
 
 	metricsDropWarned sync.Once
 	logsDropWarned    sync.Once
@@ -64,8 +71,9 @@ func New() *Pipeline {
 		return nil
 	}
 	return &Pipeline{
-		config: config,
-		filter: NewFilter(config.Filter),
+		config:      config,
+		filter:      NewFilter(config.Filter),
+		retryConfig: DefaultRetryConfig(),
 	}
 }
 
@@ -75,8 +83,9 @@ func NewWithConfig(config *Config) *Pipeline {
 		return nil
 	}
 	return &Pipeline{
-		config: config,
-		filter: NewFilter(config.Filter),
+		config:      config,
+		filter:      NewFilter(config.Filter),
+		retryConfig: DefaultRetryConfig(),
 	}
 }
 
@@ -260,9 +269,18 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 		}
 	}
 
-	// Forward to cloud exporter if available
+	// Forward to cloud exporter if available.
+	// This retry sits above the gRPC/SDK transport-level retry. Both layers
+	// are intentional: transport retries handle transient network blips,
+	// while this pipeline-level retry catches higher-level failures (quota,
+	// timeout) that the transport considers terminal. In the worst case a
+	// batch sees ~16 network attempts (4 pipeline × ~4 transport), which is
+	// acceptable for background telemetry where data loss is costlier.
 	if p.exporter != nil {
-		if err := p.exporter.ExportProtoSpans(ctx, filtered); err != nil {
+		err := retryExport(ctx, p.retryConfig, "spans", func() error {
+			return p.exporter.ExportProtoSpans(ctx, filtered)
+		})
+		if err != nil {
 			p.recordExportError(ctx, "spans", err)
 			log.Error("Failed to export spans to cloud: %v", err)
 			return err
@@ -394,9 +412,31 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 		}
 	}
 
-	if err := p.exporter.ExportProtoMetrics(ctx, deduped); err != nil {
+	// Pipeline-level retry on top of gRPC/SDK transport retry — see
+	// handleSpans for the rationale on intentional double-retry layering.
+	err := retryExport(ctx, p.retryConfig, "metrics", func() error {
+		return p.exporter.ExportProtoMetrics(ctx, deduped)
+	})
+	if err != nil {
 		p.recordExportError(ctx, "metrics", err)
 		log.Error("Failed to export %d buffered metrics to cloud: %v", metricCount, err)
+
+		// Re-buffer failed metrics so they can be retried on the next flush
+		// cycle. Cap the buffer to maxMetricBufCap to avoid unbounded growth.
+		p.metricBufMu.Lock()
+		// Prepend the failed metrics so they remain the oldest in the buffer,
+		// and newly accumulated metrics remain the newest.
+		p.metricBuf = append(deduped, p.metricBuf...)
+		if len(p.metricBuf) > maxMetricBufCap {
+			log.Error("Metric re-buffer exceeds cap (%d > %d), discarding oldest entries", len(p.metricBuf), maxMetricBufCap)
+			discardCount := len(p.metricBuf) - maxMetricBufCap
+			// Nil out discarded pointers to prevent memory leaks
+			for i := 0; i < discardCount; i++ {
+				p.metricBuf[i] = nil
+			}
+			p.metricBuf = p.metricBuf[discardCount:]
+		}
+		p.metricBufMu.Unlock()
 		return
 	}
 	p.metricBufMu.Lock()
@@ -561,9 +601,14 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 		}
 	}
 
-	// Forward to cloud exporter if available
+	// Forward to cloud exporter if available.
+	// Pipeline-level retry on top of gRPC/SDK transport retry — see
+	// handleSpans for the rationale on intentional double-retry layering.
 	if p.exporter != nil {
-		if err := p.exporter.ExportProtoLogs(ctx, resourceLogs); err != nil {
+		err := retryExport(ctx, p.retryConfig, "logs", func() error {
+			return p.exporter.ExportProtoLogs(ctx, resourceLogs)
+		})
+		if err != nil {
 			p.recordExportError(ctx, "logs", err)
 			log.Error("Failed to export logs to cloud: %v", err)
 			return err
