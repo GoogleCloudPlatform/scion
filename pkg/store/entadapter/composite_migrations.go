@@ -84,6 +84,7 @@ func (c *CompositeStore) accessPoliciesTableExists(ctx context.Context, db *sql.
 		return false, nil
 	}
 	if err != nil {
+		slog.Debug("accessPoliciesTableExists: unexpected error, assuming table absent", "error", err)
 		return false, nil // treat unexpected errors as "table absent" — safe to skip
 	}
 	return true, nil
