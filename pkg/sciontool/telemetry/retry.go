@@ -55,14 +55,12 @@ func DefaultRetryConfig() RetryConfig {
 // classification. Auth errors are not retryable because they will not
 // self-heal without credential rotation.
 func isRetryable(err error) bool {
-	switch classifyError(err) {
-	case "auth":
+	if err == nil {
 		return false
-	case "timeout", "quota", "other":
-		return true
-	default:
-		return true
 	}
+	// Known retryable classes: timeout, quota, other (unknown).
+	// Only auth is explicitly non-retryable.
+	return classifyError(err) != "auth"
 }
 
 // retryExport retries fn with exponential backoff until it succeeds, a
@@ -87,6 +85,10 @@ func retryExport(ctx context.Context, cfg RetryConfig, signal string, fn func() 
 
 		log.Debug("Export %s retry %d/%d after %v (error: %v)", signal, attempt, cfg.MaxRetries, sleep, err)
 
+		// NOTE: time.After leaks its timer if the context is cancelled before
+		// it fires. With max backoff of 5s and 3 retries this is at most ~15s
+		// of leaked timers — negligible for this use case. If retryExport is
+		// ever promoted to a hot path, switch to time.NewTimer + t.Stop().
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

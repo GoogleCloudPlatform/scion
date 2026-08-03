@@ -269,7 +269,13 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 		}
 	}
 
-	// Forward to cloud exporter if available
+	// Forward to cloud exporter if available.
+	// This retry sits above the gRPC/SDK transport-level retry. Both layers
+	// are intentional: transport retries handle transient network blips,
+	// while this pipeline-level retry catches higher-level failures (quota,
+	// timeout) that the transport considers terminal. In the worst case a
+	// batch sees ~16 network attempts (4 pipeline × ~4 transport), which is
+	// acceptable for background telemetry where data loss is costlier.
 	if p.exporter != nil {
 		err := retryExport(ctx, p.retryConfig, "spans", func() error {
 			return p.exporter.ExportProtoSpans(ctx, filtered)
@@ -406,6 +412,8 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 		}
 	}
 
+	// Pipeline-level retry on top of gRPC/SDK transport retry — see
+	// handleSpans for the rationale on intentional double-retry layering.
 	err := retryExport(ctx, p.retryConfig, "metrics", func() error {
 		return p.exporter.ExportProtoMetrics(ctx, deduped)
 	})
@@ -586,7 +594,9 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 		}
 	}
 
-	// Forward to cloud exporter if available
+	// Forward to cloud exporter if available.
+	// Pipeline-level retry on top of gRPC/SDK transport retry — see
+	// handleSpans for the rationale on intentional double-retry layering.
 	if p.exporter != nil {
 		err := retryExport(ctx, p.retryConfig, "logs", func() error {
 			return p.exporter.ExportProtoLogs(ctx, resourceLogs)

@@ -85,7 +85,7 @@ func TestIsRetryable(t *testing.T) {
 		err       error
 		retryable bool
 	}{
-		{"nil error", nil, true},
+		{"nil error", nil, false},
 		{"timeout error", context.DeadlineExceeded, true},
 		{"canceled error", context.Canceled, true},
 		{"auth 401 error", &googleapi.Error{Code: 401}, false},
