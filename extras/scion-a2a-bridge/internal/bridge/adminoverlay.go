@@ -130,8 +130,14 @@ func ParseAdminOverlay(cfg map[string]string) (*AdminOverlay, error) {
 		presentKeys:    make(map[string]bool),
 	}
 
-	for key := range cfg {
-		overlay.presentKeys[key] = true
+	// String fields can be explicitly cleared; non-string fields with empty
+	// values should not override base config.
+	for key, val := range cfg {
+		isStringField := key == "external_url" || key == "auth_scheme" || key == "api_key" ||
+			key == "provider_org" || key == "provider_url"
+		if val != "" || isStringField {
+			overlay.presentKeys[key] = true
+		}
 	}
 
 	// external_url

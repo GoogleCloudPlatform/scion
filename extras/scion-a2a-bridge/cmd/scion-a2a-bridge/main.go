@@ -204,6 +204,9 @@ func main() {
 
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
 	srv.SetSnapshot(snapshot)
+	if signingKey != nil {
+		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
+	}
 	srv.WarnOnOpenAuth()
 
 	httpServer := &http.Server{

@@ -538,6 +538,118 @@ func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 	}
 }
 
+func TestSetJWTValidator_EnablesHubJWTAuth(t *testing.T) {
+	// Verify that calling SetJWTValidator on the server with a signing key
+	// initializes the JWTValidator so hubJWT auth works (and doesn't 500).
+	dir := t.TempDir()
+	store, err := state.New(filepath.Join(dir, "jwt-test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	signingKey := make([]byte, 32)
+	for i := range signingKey {
+		signingKey[i] = byte(i + 1) // deterministic key for test
+	}
+
+	cfg := &Config{
+		Bridge: BridgeConfig{
+			ExternalURL: "https://a2a.test.example.com",
+		},
+		Auth: AuthConfig{
+			Scheme: "hubJWT",
+		},
+		Projects: []ProjectConfig{
+			{
+				Slug:          "proj",
+				ExposedAgents: []string{"agent-1"},
+			},
+		},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b := New(store, nil, nil, cfg, nil, log)
+
+	executor := NewScionExecutor(b, log)
+	routeAuth := RouteKeyAuthenticator()
+	innerStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: routeAuth,
+	})
+	scopedStore := NewScopedTaskStore(innerStore)
+	sdkRequestHandler := a2asrv.NewHandler(
+		executor,
+		a2asrv.WithLogger(log),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{
+			Streaming:         true,
+			PushNotifications: false,
+		}),
+		a2asrv.WithTaskStore(scopedStore),
+	)
+	b.SetSDKRequestHandler(sdkRequestHandler)
+	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(sdkRequestHandler)
+
+	srv := NewServer(b, cfg, nil, log, sdkJSONRPCHandler)
+
+	// Wire snapshot so the JWTValidator is propagated to the auth middleware.
+	snapshot := NewSnapshotHolder(BuildSnapshot(*cfg))
+	srv.SetSnapshot(snapshot)
+
+	// Simulate what main.go should do: call SetJWTValidator after loading key.
+	srv.SetJWTValidator(NewJWTValidator(signingKey))
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Mint a valid JWT.
+	token := mintTestJWT(t, signingKey, validClaims())
+
+	// A request with a valid JWT should succeed (not 500).
+	rpcReq, _ := json.Marshal(jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "tasks/get",
+		Params:  json.RawMessage(`{"id":"nonexistent"}`),
+	})
+	httpReq, _ := http.NewRequest(http.MethodPost,
+		ts.URL+"/projects/proj/agents/agent-1/jsonrpc",
+		bytes.NewReader(rpcReq))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	resp.Body.Close()
+
+	// Should be 200 (the RPC itself may error with task-not-found, but auth passes).
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("hubJWT auth status = %d, want 200 (auth should pass)", resp.StatusCode)
+	}
+
+	// Without JWT validator, requests should 500. Verify by clearing it.
+	// (Reset snapshot to one without JWTValidator.)
+	snapshot.Store(BuildSnapshot(*cfg))
+	srv.SetJWTValidator(nil)
+
+	httpReq, _ = http.NewRequest(http.MethodPost,
+		ts.URL+"/projects/proj/agents/agent-1/jsonrpc",
+		bytes.NewReader(rpcReq))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err = http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("without JWTValidator status = %d, want 500", resp.StatusCode)
+	}
+}
+
 func TestRouteInfoContext(t *testing.T) {
 	ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj", AgentSlug: "agt"})
 	info, ok := RouteInfoFrom(ctx)

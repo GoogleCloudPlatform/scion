@@ -779,6 +779,110 @@ func TestHealthCheck_EnrichedDetails(t *testing.T) {
 	}
 }
 
+func TestParseAdminOverlay_EmptyNonStringFieldsNotPresent(t *testing.T) {
+	// Regression: empty string values for non-string fields (durations, ints,
+	// bools, projects_json) must NOT be marked as present — otherwise
+	// ApplyOverlay overwrites base YAML values with zero values.
+	cfg := map[string]string{
+		"uat_cache_ttl":        "",
+		"send_message_timeout": "",
+		"sse_keepalive":        "",
+		"rate_limit_enabled":   "",
+		"rate_limit_rps":       "",
+		"rate_limit_burst":     "",
+		"push_retry_max":       "",
+		"projects_json":        "",
+	}
+
+	overlay, err := ParseAdminOverlay(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	nonStringKeys := []string{
+		"uat_cache_ttl", "send_message_timeout", "sse_keepalive",
+		"rate_limit_enabled", "rate_limit_rps", "rate_limit_burst",
+		"push_retry_max", "projects_json",
+	}
+	for _, key := range nonStringKeys {
+		if overlay.IsPresent(key) {
+			t.Errorf("%q should NOT be marked as present when value is empty", key)
+		}
+	}
+
+	// Verify ApplyOverlay does not override base values.
+	base := Config{
+		Auth:     AuthConfig{UATCacheTTL: 90 * time.Second},
+		Timeouts: TimeoutConfig{SendMessage: 60 * time.Second, SSEKeepalive: 15 * time.Second, PushRetryMax: 5},
+	}
+	result := ApplyOverlay(base, overlay)
+	if result.Auth.UATCacheTTL != 90*time.Second {
+		t.Errorf("UATCacheTTL = %v, want 90s (base preserved)", result.Auth.UATCacheTTL)
+	}
+	if result.Timeouts.SendMessage != 60*time.Second {
+		t.Errorf("SendMessage = %v, want 60s (base preserved)", result.Timeouts.SendMessage)
+	}
+	if result.Timeouts.SSEKeepalive != 15*time.Second {
+		t.Errorf("SSEKeepalive = %v, want 15s (base preserved)", result.Timeouts.SSEKeepalive)
+	}
+	if result.Timeouts.PushRetryMax != 5 {
+		t.Errorf("PushRetryMax = %d, want 5 (base preserved)", result.Timeouts.PushRetryMax)
+	}
+}
+
+func TestParseAdminOverlay_EmptyStringFieldsStillPresent(t *testing.T) {
+	// String fields (external_url, auth_scheme, api_key, provider_org,
+	// provider_url) can be explicitly cleared by setting them to empty. They
+	// should still be marked as present so ApplyOverlay writes the empty value.
+	cfg := map[string]string{
+		"external_url": "",
+		"auth_scheme":  "",
+		"api_key":      "",
+		"provider_org": "",
+		"provider_url": "",
+	}
+
+	overlay, err := ParseAdminOverlay(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	stringKeys := []string{"external_url", "auth_scheme", "api_key", "provider_org", "provider_url"}
+	for _, key := range stringKeys {
+		if !overlay.IsPresent(key) {
+			t.Errorf("%q should be marked as present even when value is empty", key)
+		}
+	}
+
+	// Verify ApplyOverlay clears base values.
+	base := Config{
+		Bridge: BridgeConfig{
+			ExternalURL: "https://base.example.com",
+			Provider:    ProviderConfig{Organization: "Base Org", URL: "https://base.com"},
+		},
+		Auth: AuthConfig{
+			Scheme: "apiKey",
+			APIKey: "base-key",
+		},
+	}
+	result := ApplyOverlay(base, overlay)
+	if result.Bridge.ExternalURL != "" {
+		t.Errorf("ExternalURL = %q, want empty (cleared)", result.Bridge.ExternalURL)
+	}
+	if result.Auth.Scheme != "" {
+		t.Errorf("Auth.Scheme = %q, want empty (cleared)", result.Auth.Scheme)
+	}
+	if result.Auth.APIKey != "" {
+		t.Errorf("Auth.APIKey = %q, want empty (cleared)", result.Auth.APIKey)
+	}
+	if result.Bridge.Provider.Organization != "" {
+		t.Errorf("Provider.Organization = %q, want empty (cleared)", result.Bridge.Provider.Organization)
+	}
+	if result.Bridge.Provider.URL != "" {
+		t.Errorf("Provider.URL = %q, want empty (cleared)", result.Bridge.Provider.URL)
+	}
+}
+
 func discardLogger() *slog.Logger {
 	return slog.Default()
 }
