@@ -27,14 +27,14 @@ scion messages --agent <agent-name>
 scion messages read <message-id>
 ```
 
-## Discord Notifications
+## Discord
 
-For teams or individuals who prefer external notifications, Scion supports native Discord webhooks.
+Scion supports Discord through two separate integration pathways:
 
-- **Severity-Based Color Coding:** Messages are color-coded in Discord based on their severity (e.g., info, warning, error, urgent).
-- **Mentions:** Urgent messages or explicit `ask_user` requests can trigger `@user` or `@role` mentions in Discord, ensuring that critical requests don't go unnoticed.
+- **Bidirectional Discord Bot:** Interact with agents directly from Discord channels using slash commands under `/scion` (e.g., `/scion setup` to link channels, `/scion default` to set routing targets, `/scion agents` to check state). Agent replies are pushed back into the Discord channel with their own name and RoboHash-generated avatar.
+- **Outbound Webhook Notifications:** A simpler, outbound-only mechanism where agents push status updates, alerts, and `ask_user` requests to a designated Discord channel. Messages are color-coded by severity, and urgent notifications can trigger `@user` or `@role` mentions.
 
-To configure Discord notifications, see the [Hub Administration Guide](/scion/hosted/single-node/hub-server/#discord-integration).
+For a full setup guide and configuration options, see [External Channels](/scion/hosted/user/external-channels/).
 
 ## Telegram
 
