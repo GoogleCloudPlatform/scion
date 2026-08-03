@@ -805,14 +805,9 @@ func (h *CommandHandler) HandleInfo(s *discordgo.Session, i *discordgo.Interacti
 			sb.WriteString(fmt.Sprintf("\n**Channel project:** %s", link.ProjectSlug))
 
 			// Check for thread-level default agent.
-			infoParentID, ok := threadParentID(s, i.ChannelID)
-			if !ok {
-				h.log.Error("Failed to resolve channel details for info", "channel_id", i.ChannelID)
-				// Gracefully degrade: show channel-level default only. Unlike HandleDefault
-				// and HandleStatus which abort on failure, /scion info is best-effort display
-				// and partial info is still useful.
-			}
-			if infoParentID != "" {
+			// link.ChannelID is the parent channel (resolveChannelLink falls back);
+			// if it differs from i.ChannelID, we are in a thread.
+			if link.ChannelID != i.ChannelID {
 				threadDefault, tdErr := h.store.GetThreadDefault(ctx, link.ChannelID, i.ChannelID)
 				if tdErr != nil {
 					h.log.Error("Failed to get thread default for info", "error", tdErr)
