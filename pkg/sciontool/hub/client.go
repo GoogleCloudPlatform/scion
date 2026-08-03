@@ -33,6 +33,7 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -1384,6 +1385,54 @@ func (c *Client) SendOutboundMessage(ctx context.Context, msg OutboundMessage) e
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send outbound message: %w", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// selfMessageRequest is the payload for delivering a message to the current agent
+// via the hub's inbound agent message endpoint (POST /api/v1/agents/{id}/message).
+type selfMessageRequest struct {
+	StructuredMessage *messages.StructuredMessage `json:"structured_message"`
+}
+
+// SendSelfMessage delivers a structured message to the current agent via the
+// hub's inbound message endpoint. Unlike SendOutboundMessage (which targets
+// a human inbox), this delivers a message into the agent's own harness input.
+// No retries — this is a best-effort fire-and-forget call.
+func (c *Client) SendSelfMessage(ctx context.Context, msg *messages.StructuredMessage) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/message",
+		strings.TrimSuffix(c.hubURL, "/"), c.agentID)
+
+	payload := selfMessageRequest{StructuredMessage: msg}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal self message: %w", err)
+	}
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Agent-Token", currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send self message: %w", err)
 	}
 	respBody, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()

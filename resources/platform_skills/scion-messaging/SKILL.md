@@ -112,6 +112,7 @@ is addressed to you or is a notification about another agent.
 - **`input-needed`** — an agent is waiting for input. See below.
 - **`mention`** — you were CC'd or mentioned in a message primarily directed at someone else. Treat as FYI — no action needed unless the message text clearly directs you to do something.
 - **`group-set`** — a user @-mentioned multiple agents (not `@all`). Read and act on it like an `instruction`.
+- **`system`** — a hub-generated operational notice (e.g. scheduled event fired, port auto-exposed, message delivery failed). Read for situational awareness; no reply needed. Check `metadata.system_category` for the specific category.
 
 ### Handling `input-needed`
 

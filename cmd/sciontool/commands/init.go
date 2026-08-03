@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -625,8 +626,10 @@ func runInit(args []string) int {
 			log.Info("Started port-forward tunnel manager")
 
 			// Auto-expose: detect and register listening ports
-			if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled {
-				go autoexpose.NewReconciler(hubClient, autoExposeCfg).Run(ctx)
+			if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
+				reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
+				reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
+				go reconciler.Run(ctx)
 				log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
 			}
 
@@ -2037,6 +2040,20 @@ func isWorkspaceEmpty(path string) bool {
 		}
 	}
 	return true
+}
+
+// hubMessageAdapter adapts the Hub client to the autoexpose.MessageClient interface
+// so the reconciler can notify the agent about auto-exposed ports.
+type hubMessageAdapter struct {
+	client *hub.Client
+}
+
+func (a *hubMessageAdapter) SendSelfMessage(ctx context.Context, msg string, metadata map[string]string) error {
+	if a.client == nil {
+		return fmt.Errorf("hub client is nil")
+	}
+	recipient := "agent:" + a.client.AgentID()
+	return a.client.SendSelfMessage(ctx, messages.NewSystemMessage("system", recipient, msg, metadata["system_category"]))
 }
 
 // cleanGcloudConfigForMetadata removes gcloud configuration state files from

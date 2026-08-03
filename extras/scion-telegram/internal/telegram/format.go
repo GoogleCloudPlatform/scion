@@ -273,6 +273,48 @@ func FormatInputNeededCard(msg *messages.StructuredMessage, agentSlug string) st
 	return truncateHTMLMessage(b.String())
 }
 
+// FormatSystemCard converts a system StructuredMessage into an HTML-formatted
+// card for Telegram. The card shows a gear icon, the system category (if
+// available), timestamp, and message body. All user-supplied content is
+// HTML-escaped to prevent injection.
+func FormatSystemCard(msg *messages.StructuredMessage) string {
+	if msg == nil {
+		return ""
+	}
+
+	category := "System"
+	if msg.Metadata != nil {
+		if cat, ok := msg.Metadata["system_category"]; ok && cat != "" {
+			r, size := utf8.DecodeRuneInString(cat)
+			if r != utf8.RuneError {
+				category = strings.ToUpper(string(r)) + cat[size:]
+			} else {
+				category = cat
+			}
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "<b>⚙️ %s</b>\n", html.EscapeString(category))
+
+	ts := formatTimestamp(msg.Timestamp)
+	if ts != "" {
+		fmt.Fprintf(&b, "🕐 %s\n", html.EscapeString(ts))
+	}
+
+	body := strings.TrimSpace(msg.Msg)
+	if body != "" {
+		summaryBudget := maxTelegramMessageLength - htmlCardOverhead
+		if summaryBudget > maxTaskSummaryLength {
+			summaryBudget = maxTaskSummaryLength
+		}
+		body = truncatePlainText(body, summaryBudget)
+		b.WriteString(html.EscapeString(body))
+	}
+
+	return truncateHTMLMessage(b.String())
+}
+
 // formatTimestamp parses an RFC3339 timestamp and returns a human-friendly
 // representation like "May 13, 2:30 PM UTC". Returns the raw string if
 // parsing fails.

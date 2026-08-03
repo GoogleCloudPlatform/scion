@@ -181,6 +181,9 @@ func extractDiscordUserIDs(s string) []string {
 	return ids
 }
 
+// discordColorSystem is the colour for system/operational messages.
+const discordColorSystem = 0x95a5a6 // grey — system/operational
+
 func discordColorForMessage(msg *messages.StructuredMessage) int {
 	if msg.Urgent {
 		return discordColorUrgent
@@ -192,6 +195,8 @@ func discordColorForMessage(msg *messages.StructuredMessage) int {
 		return discordColorInputNeeded
 	case messages.TypeInstruction:
 		return discordColorInstruction
+	case messages.TypeSystem:
+		return discordColorSystem
 	default:
 		return discordColorStateChange
 	}

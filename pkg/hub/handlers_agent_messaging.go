@@ -1135,8 +1135,9 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 		Recipient:   msg.Sender,
 		RecipientID: senderAgent.ID,
 		Msg:         failMsg,
-		Type:        messages.TypeStateChange,
+		Type:        messages.TypeSystem,
 		Status:      "DELIVERY_FAILED",
+		Metadata:    map[string]string{"system_category": messages.SystemCategoryDeliveryFailed},
 	}
 
 	dispatcher := s.GetDispatcher()

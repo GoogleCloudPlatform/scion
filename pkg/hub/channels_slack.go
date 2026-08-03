@@ -115,6 +115,8 @@ func formatSlackMessage(msg *messages.StructuredMessage, mentionOnUrgent string)
 		b.WriteString(":information_source: ")
 	case messages.TypeInputNeeded:
 		b.WriteString(":raising_hand: ")
+	case messages.TypeSystem:
+		b.WriteString(":gear: ")
 	default:
 		b.WriteString(":speech_balloon: ")
 	}
