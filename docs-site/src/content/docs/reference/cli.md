@@ -188,6 +188,21 @@ Manages the Scion workspace (Project).
 - `scion project list` (alias `ls`): List all projects known to Scion on this machine, including their type, agent count, status, and workspace path.
 - `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up.
 - `scion project reconnect <new-workspace-path>`: Reconnect a moved workspace to its externalized project configuration. This fixes projects that show as "orphaned" after being relocated.
+- `scion project skills`: Manage auto-injected skills for the project.
+    - `list [project]` (alias `ls`): List auto-injected skills configured for the current project (or a specified project).
+    - `add [project] <uri>`: Add a skill URI to the project's auto-injected list.
+        - Flags: `--as <alias>` (alias under which to mount the skill), `--optional` (continue provisioning if resolution fails), `--from-directory <url>` (discover and batch-add all skills from a GitHub repository directory).
+    - `remove [project] <id|uri>` (aliases `rm`, `delete`): Remove an auto-injected skill entry from the project by its ID or full URI.
+
+### `scion user`
+
+Manages per-user Hub settings.
+
+- `scion user skills`: Manage auto-injected skills for your user across all projects.
+    - `list` (alias `ls`): List your personal auto-injected skills.
+    - `add <uri>`: Add a skill URI to your personal auto-injected list.
+        - Flags: `--as <alias>` (alias under which to mount the skill), `--optional` (continue provisioning if resolution fails), `--from-directory <url>` (discover and batch-add all skills from a GitHub repository directory).
+    - `remove <id|uri>` (aliases `rm`, `delete`): Remove an auto-injected skill entry from your personal list by its ID or full URI.
 
 ### `scion clean`
 

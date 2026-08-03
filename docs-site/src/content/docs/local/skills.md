@@ -226,6 +226,62 @@ Most commands accept either a skill **name** or **ID**. Add the global `--format
 `scion skill` (singular) is an alias for `scion skills`.
 :::
 
+## Auto-Injected Skills (Multi-Scope)
+
+While you can manually reference skills inside templates or agent configurations, Scion also supports **auto-injection**. This allows you to configure skills that are automatically injected into every provisioned agent, without needing to modify your templates or configurations.
+
+Injected skills are managed at multiple scopes. During agent provisioning, Scion resolves these scopes in order from broadest to most specific. More specific scopes have higher precedence and can override broader ones (lowest to highest precedence):
+
+```text
+Hub (System + User-Defined) → User → Project → Template
+```
+
+1. **Hub Scope** (broadest): Configured by the Hub administrator for the entire platform. This includes pre-seeded **System** (built-in) skills under the `scion-platform://` URI scheme (such as status signaling and messaging operations) as well as admin-defined global skills.
+2. **User Scope**: Configured by you. These skills are automatically injected into every agent you provision, regardless of the project.
+3. **Project Scope**: Configured for a specific project. These skills are automatically injected into all agents running within that project.
+4. **Template Scope** (highest): Defined directly inside the agent's template. A template-level skill reference always overrides any injected skill of the same name.
+
+### Managing Project-Scoped Injected Skills
+
+Use the `scion project skills` command group to manage skills that should be auto-injected for every agent in a project:
+
+```bash
+# List injected skills for the current project (or a specified project)
+scion project skills list
+scion project skills list my-project
+
+# Add a skill to the project's injected list
+scion project skills add skill://scion/global/deploy-checklist@^1.0
+scion project skills add my-project skill://scion/global/deploy-checklist@^1.0 --as checklist --optional
+
+# Discover and batch-add all skills from a GitHub directory path
+scion project skills add --from-directory https://github.com/my-org/skills/tree/main/production-skills
+
+# Remove a skill by its UUID or full URI
+scion project skills remove <uuid>
+scion project skills remove skill://scion/global/deploy-checklist@^1.0
+```
+
+### Managing User-Scoped Injected Skills
+
+Use the `scion user skills` command group to manage skills that should be auto-injected for every agent you provision, across all of your projects:
+
+```bash
+# List your personal injected skills
+scion user skills list
+
+# Add a skill to your personal injected list
+scion user skills add skill://scion/global/personal-notes@latest
+scion user skills add skill://scion/global/personal-notes@latest --as notes --optional
+
+# Discover and batch-add all skills from a GitHub directory path
+scion user skills add --from-directory https://github.com/my-org/skills/tree/main/personal-skills
+
+# Remove a skill by its UUID or full URI
+scion user skills remove <uuid>
+scion user skills remove skill://scion/global/personal-notes@latest
+```
+
 ## Platform skills
 
 Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent. They provide baseline capabilities without any Hub or template setup.
