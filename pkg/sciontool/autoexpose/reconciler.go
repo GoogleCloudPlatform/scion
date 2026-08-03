@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
@@ -288,7 +289,7 @@ func (r *Reconciler) registerPort(ctx context.Context, port int) error {
 	// Notify the agent that a port was auto-exposed.
 	if r.msgClient != nil {
 		notifyMsg := fmt.Sprintf("Port %d has been auto-exposed for proxy access. Run 'sciontool port list' for the full proxy URL.", port)
-		metadata := map[string]string{"system_category": "port-forward"}
+		metadata := map[string]string{"system_category": messages.SystemCategoryPortForward}
 		if err := r.msgClient.SendSelfMessage(ctx, notifyMsg, metadata); err != nil {
 			log.Error("auto-expose: failed to send notification for port %d: %v", port, err)
 		}

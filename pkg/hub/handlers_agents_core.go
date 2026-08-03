@@ -1945,11 +1945,24 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	// For actions other than status/token refresh and outbound-message
 	// (self-access), we require user or agent authentication
 	// with appropriate scopes. Self-access endpoints enforce their own auth checks.
-	if action != api.AgentActionStatus &&
-		action != api.AgentActionMetrics &&
-		action != api.AgentActionTokenRefresh &&
-		action != api.AgentActionRefreshToken &&
-		action != api.AgentActionOutboundMessage {
+	selfAccess := action == api.AgentActionStatus ||
+		action == api.AgentActionMetrics ||
+		action == api.AgentActionTokenRefresh ||
+		action == api.AgentActionRefreshToken ||
+		action == api.AgentActionOutboundMessage
+
+	// Self-message: allow an agent to deliver a message to itself using its
+	// own token, without requiring the ScopeAgentLifecycle scope. This mirrors
+	// the outbound-message self-access pattern and is used by sciontool to
+	// send system notifications (e.g. port auto-expose) to the agent's own
+	// harness input.
+	if action == api.AgentActionMessage {
+		if claims := GetAgentFromContext(r.Context()); claims != nil && claims.Subject == id {
+			selfAccess = true
+		}
+	}
+
+	if !selfAccess {
 		userIdent := GetUserIdentityFromContext(r.Context())
 		agentIdent := GetAgentIdentityFromContext(r.Context())
 		if userIdent == nil && agentIdent == nil {

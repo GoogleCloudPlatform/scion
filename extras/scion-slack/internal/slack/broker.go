@@ -510,7 +510,9 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		}
 
 		var text string
-		if isStateChange {
+		if msg.Type == messages.TypeSystem {
+			text = FormatSystemMessage(msg)
+		} else if isStateChange {
 			text = FormatStateChange(msg, agentSlug)
 		} else {
 			text = FormatWebhookMessage(msg)

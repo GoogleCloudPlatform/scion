@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -2048,11 +2049,7 @@ type hubMessageAdapter struct {
 }
 
 func (a *hubMessageAdapter) SendSelfMessage(ctx context.Context, msg string, metadata map[string]string) error {
-	return a.client.SendOutboundMessage(ctx, hub.OutboundMessage{
-		Msg:      msg,
-		Type:     "system",
-		Metadata: metadata,
-	})
+	return a.client.SendSelfMessage(ctx, messages.NewSystemMessage("system", "", msg, metadata["system_category"]))
 }
 
 // cleanGcloudConfigForMetadata removes gcloud configuration state files from
