@@ -33,7 +33,8 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 ### Configuration
 - **scion-agent.yaml**: Can be configured via `agent_instructions` and `system_prompt` fields in the template.
 - **Settings File**: `~/.gemini/settings.json` (inside the agent container). Scion automatically updates `security.auth.selectedType` in this file to match the resolved auth method.
-- **System Prompt**: `~/.gemini/system_prompt.md` is automatically seeded if `system_prompt` is provided in the agent config.
+- **System Prompt**: `~/.gemini/system_prompt.md` is automatically seeded if `system_prompt` is provided in the agent config. Additionally, Scion injects the system prompt into the `GEMINI_SYSTEM_MD` environment variable to ensure direct pickup by the Gemini CLI tool during initialization.
+- **Model Aliases**: Supports both traditional alias sizes and single-letter model alias mappings (`S` / `M` / `L` for Small / Medium / Large). The `provision.py` script automatically maps and handles fallback alias resolution during startup.
 
 ### Known Limitations
 - The `gemini` CLI tool must be installed in the container image (included in default images).
@@ -49,7 +50,7 @@ Claude supports four authentication methods (auto-detected in this precedence or
 - **API Key** (`api-key`): Set `ANTHROPIC_API_KEY` in your host environment. Scion propagates this to the agent and pre-approves it in `.claude.json` so Claude Code does not prompt for confirmation.
 - **OAuth Token** (`oauth-token`): Set `CLAUDE_CODE_OAUTH_TOKEN` (generate with `claude setup-token`). This is also the token captured automatically after an in-agent `claude setup-token` login.
 - **Auth File** (`auth-file`): Uses `~/.claude/.credentials.json` (file-secret key `CLAUDE_AUTH`) if available.
-- **Vertex AI** (`vertex-ai`): Uses Google Cloud's Vertex AI endpoint with ADC, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_REGION`.
+- **Vertex AI** (`vertex-ai`): Uses Google Cloud's Vertex AI endpoint with ADC, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_REGION`. Scion automatically translates `GOOGLE_CLOUD_PROJECT` to `ANTHROPIC_VERTEX_PROJECT_ID` during container provisioning to ensure compatibility with Claude Code's native Vertex AI client.
 
 If no credentials are found, the agent drops to a shell — run `claude setup-token` interactively, then capture the credential with `capture_auth.py` (see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
 
@@ -57,8 +58,17 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 
 ### Configuration
 - **scion-agent.yaml**: Can be configured via `agent_instructions` and `system_prompt` fields in the template.
-- **Config File**: `~/.claude.json`. Scion manages project-specific settings in this file to ensure the agent respects the workspace boundaries.
+- **Config File (`~/.claude.json`)**: Scion manages project-specific settings in this file to ensure the agent respects workspace boundaries.
 - **Projects**: Scion automatically configures the current workspace as a project in `.claude.json`.
+- **Environment Hardening (`~/.claude/settings.json`)**: Scion pre-populates a strict permissions deny list and security hardeners in the agent's native settings file:
+    - **Permissions Deny List**: Denies potentially hazardous operations such as `EnterPlanMode`, `ExitPlanMode`, `DesignSync`, `NotebookEdit`, `SendMessage`, `PushNotification`, `RemoteTrigger`, `ReportFindings`, `ScheduleWakeup`, `AskUserQuestion`, `CronCreate`, `CronDelete`, and `CronList`.
+    - **Hardening Flags**: Disables experimental or outbound-connecting features by setting `disableBundledSkills`, `disableWorkflows`, `disableRemoteControl`, `disableClaudeAiConnectors`, and `disableArtifacts` to `true`.
+- **Model Resolution & Aliases:** The Claude harness's container-side `provision.py` dynamically resolves the requested model (provided via `--model` / `SCION_MODEL`) using the harness configuration's `model_aliases` mapping:
+  - `small` &rarr; `haiku` (or whatever `ANTHROPIC_DEFAULT_HAIKU_MODEL` resolves to)
+  - `medium` &rarr; `sonnet`
+  - `large` &rarr; `opus`
+  - `extra-large` &rarr; `fable`
+  The resolved model is set in the environment overlay as `ANTHROPIC_MODEL`. If no model is requested, it falls back to the default model `opus`. Note that setting `ANTHROPIC_MODEL` directly in your settings or a template environment block acts as an explicit, non-overridable pin.
 
 ### Known Limitations
 - Claude Code is a beta tool and its configuration format may change.
@@ -77,6 +87,7 @@ OpenCode supports two authentication methods (auto-detected in this order):
 ### Configuration
 - **Config File**: `~/.config/opencode/opencode.json`.
 - **Environment**: Respects standard OpenCode environment variables.
+- **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. When `ctx.model_resolution` is empty, the provisioning script automatically falls back to `SCION_MODEL` to resolve and configure the underlying model.
 
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is copied only when the agent is **created**. If you update your host credentials, you may need to manually update the file in the agent or recreate the agent.
@@ -162,6 +173,7 @@ with `capture_auth.py`.
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `AGENTS.md`. Hermes has no native system-prompt flag, so the system prompt is *prepended to `AGENTS.md`*.
 - **MCP**: `~/.hermes/mcp.json`. Project-scoped MCP servers are not supported.
 - **Model aliases**: `small` → `google/gemini-3.5-flash`, `medium` → `anthropic/claude-sonnet-4`, `large` → `anthropic/claude-opus-4`.
+- **Model Resolution**: Integrates with the `SCION_MODEL` environment variable for fallback model alias resolution. When `ctx.model_resolution` is empty, the `provision.py` script falls back to `SCION_MODEL` to map size aliases to the correct Nous Research endpoints.
 
 ### Known Limitations
 - **System Prompt**: approximated via `AGENTS.md` (no native override).

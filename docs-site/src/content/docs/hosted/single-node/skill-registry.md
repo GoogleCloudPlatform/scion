@@ -23,12 +23,55 @@ By default a skill reference resolves against the local Hub. Federation lets the
 | Source | URI form | Notes |
 | :--- | :--- | :--- |
 | Another Scion Hub / external registry | `skill://<registry-name>/…` | Configured via `scion skills registries`. |
-| GitHub repository | `gh://<owner>/<repo>/<path>@<ref>` | Also accepts `https://github.com/…` URLs. |
+| GitHub repository | `gh://<owner>/<repo>/<path>[@<ref>][?token=<SECRET>]` | Sourced directly from GitHub. Supports private repos and browser URLs. |
 | GCP Vertex AI | `gcp-skill://<alias>/<skillId>@<version>` | Resolves the alias to a registry endpoint. |
 
 ### GitHub source (`gh://`)
 
-Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally; provide a `GITHUB_TOKEN` (or `GH_TOKEN`) in the agent environment for authenticated access and higher rate limits. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+Skills can be sourced directly from a GitHub repository path. The resolver uses the GitHub Contents API and caches its resolutions locally. Requests are retried with exponential backoff, and individual files are capped at 10 MB.
+
+#### Authentication & reliability
+
+The GitHub resolver includes several optimizations and fallbacks:
+
+* **Authentication Fallback**: The resolver first searches for a `GITHUB_TOKEN` or `GH_TOKEN` in the environment. If neither is set, it falls back to the project-scoped `GITHUB_TOKEN` provisioned credential on the Hub.
+* **Unauthenticated Warning**: If no token can be resolved, the resolver proceeds unauthenticated but emits a warning. Unauthenticated requests are heavily rate-limited by GitHub (60 requests/hour), so providing a token is highly recommended.
+* **Full SHA Short-Circuit**: If the requested `@<ref>` is a full 40-character git SHA, the resolver bypasses all GitHub API branch-existence checks and constructs the raw download URL directly, saving rate-limit quota.
+* **Cache Diagnostics**: Cache initialization errors are recorded with detailed logging for immediate operator visibility.
+
+#### Resolution caching and performance
+
+To avoid hitting GitHub API rate limits during concurrent agent launches, the Runtime Broker implements a **broker-level singleton resolution cache**:
+- **Broker-Level Singleton:** The cache is a long-lived, shared singleton service running within the Runtime Broker daemon, rather than a per-request ephemeral cache.
+- **Extended TTLs:** General resolution metadata remains cached for **30 minutes**.
+- **Git SHA Resolution (24h TTL):** Once a reference (like a branch or tag name) has been fully resolved to a specific Git commit SHA, the SHA resolution is cached for **24 hours**, bypassing external API queries entirely on subsequent requests.
+
+#### Private repository resolution
+
+For private GitHub repositories, Scion resolves skills securely using your project's configured git credentials or custom secrets:
+
+- **Default credentials**: A bare `gh://` URI automatically uses the project's default `GITHUB_TOKEN` (such as a GitHub App installation token or a Personal Access Token configured at the project level).
+- **Named credentials (per-URI selection)**: You can select a specific project secret using the `?token=SECRET_NAME` query parameter on the URI:
+  ```text
+  gh://acme-corp/partner-skills/my-skill@v1.2.3?token=PARTNER_GITHUB_TOKEN
+  ```
+  The secret value is fetched during provisioning from the `ProvisionCredentials` channel. It is processed in memory and **never** forwarded to the agent's container environment or harness scripts.
+
+#### Input validation & auto-normalization
+
+To prevent typos, 404s, and duplicate entries, Scion automatically validates and transforms browser URLs to canonical `gh://` shorthand when added via the CLI, Web UI, or Hub API:
+
+- **Browser tree URLs**: `https://github.com/org/repo/tree/main/skills/my-skill` is normalized to `gh://org/repo/my-skill@main`.
+- **Browser blob URLs**: `https://github.com/org/repo/blob/main/skills/my-skill/SKILL.md` is normalized to `gh://org/repo/my-skill@main`.
+- **Secret validation**: The secret name specified via `?token=SECRET_NAME` must match standard environment variable naming rules (`[A-Z][A-Z0-9_]*`).
+
+:::note
+The old `scion://` scheme is no longer supported and is rejected during validation with a clear error pointing to `skill://`.
+:::
+
+:::note
+For private repository skills, the resolver preserves credentials end-to-end to prevent unauthenticated 404 errors during multi-step downloading. See [Secrets & Environment — Convention-based project secrets](/scion/hosted/user/secrets/#naming-convention) for configuring credentials for external private repositories.
+:::
 
 ### GCP Vertex AI source (`gcp-skill://`)
 

@@ -85,10 +85,13 @@ session.
 
 - **Flags:**
     - `-a, --attach`: Attach to the agent immediately.
+    - `-f, --force`: Force resume an agent in the `error` phase. This attempts an in-place restart of a crashed or interrupted session, preserving the prior harness conversation state instead of starting fresh.
 
 ### `scion attach`
 
 Connects to the interactive session of a running agent.
+
+When connecting to a Hub behind Google Identity-Aware Proxy (IAP), `scion attach` automatically attempts to resolve transport-layer authentication (Google OIDC ID tokens) *before* evaluating the application-level access token gate. If transport auth can be successfully established (e.g., using your local Google Cloud SDK identity or GKE Workload Identity), the application token check is bypassed, enabling seamless attachment in proxy-auth/IAP mode.
 
 **Usage:** `scion attach <agent-name>`
 
@@ -108,7 +111,17 @@ Sends a message to a running agent's harness by enqueuing it into its input stre
     - `-i, --interrupt`: Interrupt the harness before sending the message.
     - `-b, --broadcast`: Send the message to all running agents in the current project.
     - `-a, --all`: Send the message to all running agents across all projects.
+    - `-w, --wake`: Resume a suspended agent before delivering the message.
+    - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
+        - **Constraints:** Cannot be combined with `--raw`, `--in`, or `--at`.
+        - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
     - `--notify`: Get notified when the target agent(s) respond or reach a terminal state after receiving the message.
+    - `--in <duration>`: Schedule message delivery after a duration (e.g., `30m`, `1h`). *(Requires Hub mode)*
+    - `--at <time>`: Schedule message delivery at an absolute time (ISO 8601, e.g., `2026-02-28T14:00:00Z`). *(Requires Hub mode)*
+    - `--plain`: Mark for plain-text delivery (the message still flows as structured JSON internally).
+    - `--raw`: Send literal bytes via tmux send-keys with no trailing Enter (supports control keys like arrows and Escape). Cannot be combined with `--attach`.
+    - `--channel <channel>`: Target a specific message channel (e.g., `telegram`, `gchat`, `web`).
+    - `--thread-id <id>`: Target a specific thread ID within the channel.
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
 
@@ -188,6 +201,30 @@ Manages the Scion workspace (Project).
 - `scion project list` (alias `ls`): List all projects known to Scion on this machine, including their type, agent count, status, and workspace path.
 - `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up.
 - `scion project reconnect <new-workspace-path>`: Reconnect a moved workspace to its externalized project configuration. This fixes projects that show as "orphaned" after being relocated.
+- `scion project skills`: Manage auto-injected skills for the project.
+    - `list [project]` (alias `ls`): List auto-injected skills configured for the current project (or a specified project).
+    - `add [project] <uri>`: Add a skill URI to the project's auto-injected list.
+        - Flags: `--as <alias>` (alias under which to mount the skill), `--optional` (continue provisioning if resolution fails), `--from-directory <url>` (discover and batch-add all skills from a GitHub repository directory).
+    - `remove [project] <id|uri>` (aliases `rm`, `delete`): Remove an auto-injected skill entry from the project by its ID or full URI.
+- `scion project hook` (alias `psh`): Manage project-scoped pre-start hooks. These shell scripts run inside the container during agent initialization, and abort agent startup on failure.
+    - `list [project]` (alias `ls`): List pre-start hooks for a project.
+    - `show <id-or-slug> [project]`: Show details and script content of a pre-start hook.
+    - `create [project]`: Create a new hook (archives the current active hook).
+        - Flags: `--name` (required, human-readable name), `--script` (required, path to shell script, or `-` for stdin), `--slug` (url-safe identifier), `--description` (optional description).
+    - `update <id-or-slug> [project]`: Update an existing pre-start hook.
+        - Flags: `--name`, `--script`, `--description`.
+    - `activate <id-or-slug> [project]`: Mark an archived hook as active (archives any currently active hook).
+    - `delete <id-or-slug> [project]` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
+
+### `scion user`
+
+Manages per-user Hub settings.
+
+- `scion user skills`: Manage auto-injected skills for your user across all projects.
+    - `list` (alias `ls`): List your personal auto-injected skills.
+    - `add <uri>`: Add a skill URI to your personal auto-injected list.
+        - Flags: `--as <alias>` (alias under which to mount the skill), `--optional` (continue provisioning if resolution fails), `--from-directory <url>` (discover and batch-add all skills from a GitHub repository directory).
+    - `remove <id|uri>` (aliases `rm`, `delete`): Remove an auto-injected skill entry from your personal list by its ID or full URI.
 
 ### `scion clean`
 
@@ -343,6 +380,15 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `clear <key>`: Remove a variable.
 - `scion hub project create <git-url>`: Create a project from a remote git repository.
     - Flags: `--slug`, `--name`, `--branch`, `--visibility`, `--json`
+- `scion hub hook` (alias `psh`): Manage hub-scoped (baseline) pre-start hooks. Requires administrator privileges.
+    - `list` (alias `ls`): List hub-scoped pre-start hooks.
+    - `show <id-or-slug>`: Show details and script content of a hub-scoped hook.
+    - `create`: Create a new hook (archives the current active hook).
+        - Flags: `--name` (required, human-readable name), `--script` (required, path to shell script, or `-` for stdin), `--slug` (url-safe identifier), `--description` (optional description).
+    - `update <id-or-slug>`: Update an existing hook.
+        - Flags: `--name`, `--script`, `--description`.
+    - `activate <id-or-slug>`: Mark an archived hook as active (archives any currently active hub-scoped hook).
+    - `delete <id-or-slug>` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
 
 ## Infrastructure
 
@@ -381,6 +427,48 @@ agent's own health — environment variables, Hub token (presence/format/expiry)
 token refresh, the GCP metadata server, and the GitHub App token. See
 [Harness Authentication](/scion/local/agent-credentials/#diagnostics).
 :::
+
+### `scion whoami`
+
+Prints identity details of the current agent container or system user.
+
+- **Outside an agent container**: Gracefully falls back to the system `whoami` command (e.g., printing the current operating system user).
+- **Inside an agent container**: Prints the agent's identity. By default, it prints the agent's slug in plain text.
+
+**Usage:** `scion whoami [flags]`
+
+- **Flags:**
+    - `--full`: Enriches the output with live metadata from the Hub. 
+        - When run in plain text, prints a human-readable multi-line summary of both local environment settings and live Hub details (e.g., agent phase, activity, etc.).
+        - When run with `--format json`, includes both Tier 1 and Tier 2 fields in the JSON object.
+        - If the Hub is unreachable, the command gracefully degrades to returning environment-only details, printing a warning to `stderr`.
+    - `--format json` (persistent global flag): Returns a structured JSON output representing the agent's identity configuration and state.
+
+#### Output Details (`--format json`)
+
+The command populates a structured JSON schema divided into two latency tiers:
+
+##### Tier 1 (Always populated, zero latency, derived from container environment variables)
+- `slug`: The agent's slug identifier (falls back to its name if slug is absent).
+- `name`: The agent's display name.
+- `id`: The unique agent UUID.
+- `project` / `projectId`: The assigned project's name and ID.
+- `template`: The name of the template used to spawn the agent.
+- `harness`: The underlying agent harness (e.g., `codex`, etc.).
+- `model`: The model used by the agent.
+- `creator`: The identity of the agent's creator.
+- `brokerName` / `brokerId`: The running broker's name and ID.
+- `cliMode`: The active CLI mode.
+- `hubEndpoint`: The endpoint URL of the connecting Hub.
+- `hubUrl`: The reconstructed direct URL pointing to the agent's resource page on the Hub (`{hubEndpoint}/agents/{id}`).
+
+##### Tier 2 (Enriched, requires `--full` flag and Hub connectivity)
+- `phase`: The current lifecycle phase of the agent (e.g., `running`, `suspended`, `error`).
+- `activity`: The current runtime activity status of the agent (e.g., `thinking`, `stalled`, `offline`).
+- `labels`: Metadata key-value pairs assigned to the agent.
+- `annotations`: System key-value pairs attached to the agent.
+- `ancestry`: A lineage array representing the agent's parent/child spawn relationships.
+- `taskSummary`: A brief summary of active task execution.
 
 ### `scion version`
 

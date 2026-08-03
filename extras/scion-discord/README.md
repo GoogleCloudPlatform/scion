@@ -103,7 +103,7 @@ server:
           # Optional tuning.
           # send_queue_size: 100     # max queued messages per channel
           # send_min_delay: 50ms     # minimum delay between sends (rate limiting)
-          # agent_cache_ttl: 5m      # how long to cache agent lists from hub
+          # agent_cache_ttl: 30s     # how long to cache agent lists from hub
 ```
 
 ### 5. Start the Hub
@@ -228,6 +228,7 @@ All commands are subcommands of `/scion`:
 | `/scion agents` | List agents in the linked project with real-time state |
 | `/scion default [agent]` | Set, change, or show the default agent |
 | `/scion status <agent>` | Show detailed status for an agent |
+| `/scion send <path>` | Send a file from the shared scratchpad by absolute path or partial-name search |
 | `/scion register` | Link your Discord account to your Scion hub identity |
 | `/scion unregister` | Remove your Discord account link |
 | `/scion info` | Show your registration status |
@@ -244,6 +245,14 @@ Commands that modify configuration (`setup`, `unlink`) require Discord's **Manag
 4. The plugin detects confirmation and stores the link
 
 Registration codes expire after 15 minutes. Run `/scion register` again for a fresh code.
+
+### File Retrieval (`/scion send`)
+
+The `/scion send <path>` command allows you to retrieve files from your project's **shared scratchpad directory** directly inside Discord:
+
+- **Fuzzy Search & Selector**: You can specify an absolute path or a partial filename. If multiple files match, the bot presents an interactive button picker (for up to 5 matches) to let you select the exact file.
+- **Path Confinement**: All file retrieval operations are strictly confined to the `/scion-volumes/` mount.
+- **Symlink Protection**: The command includes robust symlink traversal validation. Symlinks pointing outside of `/scion-volumes/` are rejected to prevent directory traversal and exfiltration of host system files.
 
 ### Sending Messages to Agents
 
@@ -291,6 +300,8 @@ These keys go in `plugins.broker.discord.config` in `settings.yaml`:
 | `send_queue_size` | No | `100` | Max queued outbound messages per channel |
 | `send_min_delay` | No | `50ms` | Minimum delay between sends (rate-limit protection) |
 | `agent_cache_ttl` | No | `5m` | TTL for cached agent lists from the hub |
+| `register_url` | No | `hub_url` | Public URL for user-facing registration links. Used instead of internal `hub_url` to fix broken links behind auth proxies. |
+| `send_search_root` | No | `/scion-volumes/` | Configurable base directory for file searches when executing `/scion send` commands. |
 
 ### Example settings.yaml (Complete)
 

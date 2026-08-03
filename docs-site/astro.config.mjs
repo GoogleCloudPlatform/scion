@@ -29,7 +29,10 @@ const hostedUserGuide = {
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
+		{ label: 'Pre-Start Hooks', slug: 'hosted/user/pre-start-hooks' },
+		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
+		{ label: 'Scheduling & Events', slug: 'hosted/user/scheduling' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
 	],
 };
@@ -98,6 +101,7 @@ export default defineConfig({
 						{ label: 'Onboarding Wizard', slug: 'getting-started/onboarding' },
 						{ label: 'Tutorial', slug: 'getting-started/tutorial' },
 						{ label: 'Setting Up Telegram', slug: 'getting-started/telegram' },
+						{ label: 'Setting Up Discord', slug: 'getting-started/discord' },
 					],
 				},
 				{

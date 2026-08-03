@@ -1,7 +1,13 @@
 ---
-title: Lifecycle Hooks
-description: Hub-side, admin-authored automation that fires HTTP or webhook actions on agent phase transitions.
+title: Lifecycle Hooks & Customization Hooks
+description: Hub-side webhooks on agent phase transitions and in-container pre-start shell scripts for environment initialization.
 ---
+
+:::note[Lifecycle Hooks vs. Pre-Start Hooks]
+Scion features two distinct kinds of hooks that serve different purposes:
+1. **Lifecycle Hooks (This guide):** Hub-side, admin-authored automation rules that run **outside the agent container** on the Hub *after* an agent has successfully crossed a phase transition (e.g. `running`, `stopped`). Execution is asynchronous and does not block the agent's startup or state changes.
+2. **Pre-Start Hooks:** Custom shell scripts running **inside the agent container** on the Runtime Broker *before* the agent process starts (configured by project owners or hub admins). If a pre-start hook fails, agent startup is aborted. See the [Pre-Start Hooks User Guide](/scion/hosted/user/pre-start-hooks/).
+:::
 
 Lifecycle hooks are Hub-side, admin-authored automation rules that fire an HTTP
 or webhook action when an agent crosses an **authoritative phase transition**.
@@ -13,7 +19,7 @@ Hooks run asynchronously *after* a phase transition has been committed. Hook
 execution never blocks, delays, or fails the transition itself: if a hook errors
 or times out, the agent's lifecycle proceeds unaffected.
 
-## When to use lifecycle hooks
+### When to use Hub-side hooks
 
 Lifecycle hooks implement an admission- and policy-webhook pattern at the Hub
 level. Reach for them when an external system needs to react to agent lifecycle
@@ -369,16 +375,80 @@ deregisters it when it stops.
 You can add matching deregister hooks for the `suspended` and `error` triggers to
 ensure agents are removed from the registry in all terminal and inactive states.
 
-## Out of scope (v1)
+---
+
+## In-Container Pre-Start Customization Hooks
+
+While Hub-side lifecycle hooks are designed for external service registration and run asynchronously *outside* the agent container, **In-Container Pre-Start Customization Hooks** allow you to run custom shell scripts **inside** the agent's container.
+
+These hooks are executed synchronously by `sciontool` during agent initialization before the main harness process starts. If a hook script exits with a non-zero exit code, agent startup is immediately aborted, protecting against misconfigured or half-provisioned runs.
+
+### Scope Levels
+
+In-container hooks can be registered at two scopes:
+
+1. **Project-scoped (`scion project hook`)**: Authored by project owners. These scripts apply to all agents launched within that specific project.
+2. **Hub-scoped (`scion hub hook`)**: Authored by Hub administrators. These serve as a baseline fallback for the entire platform. If a project does not have an active project-scoped hook, it inherits the active Hub-scoped hook. If a project defines its own active hook, it **completely overrides** the Hub-scoped baseline.
+
+### How Staging and Execution Works
+
+* **Baking at Creation**: At the moment an agent is created, the active hook's script content is retrieved from the Hub database and baked into the agent's applied configuration (`AgentAppliedConfig`). This ensures that subsequent hook updates do not unexpectedly alter already running or suspended agents.
+* **Staging File**: When the broker launches the agent container, it writes the script to the agent container's home directory at:
+  `$HOME/.scion/hooks/pre-start.d/30-project-custom`
+* **Lexical Execution Order**: The in-container scripts are executed in lexical order:
+  1. `20-harness-provision` (Harness-specific environment setup)
+  2. `30-project-custom` (Your project or Hub-scoped baseline script)
+* **Limits**: To prevent bloat, the Hub and the CLI enforce a maximum script size of **64 KB**.
+
+### CLI Command Examples
+
+#### Managing Project Hooks (as a Project Owner)
+
+```bash
+# List all pre-start hooks in the current project
+scion project hook list
+
+# Create a new active pre-start hook from a local script file
+# (This automatically archives any currently active hook)
+scion project hook create --name "Install python deps" --script setup.sh
+
+# Inspect hook script and metadata
+scion project hook show setup-python-deps
+
+# Update a hook's metadata or script content
+scion project hook update setup-python-deps --script updated-setup.sh
+
+# Activate an archived hook
+scion project hook activate old-setup-script
+
+# Delete an archived hook (active hooks cannot be deleted)
+scion project hook delete old-setup-script
+```
+
+#### Managing Hub Baseline Hooks (as a Hub Admin)
+
+```bash
+# List hub-wide baseline hooks
+scion hub hook list
+
+# Create a baseline hook that applies to projects without their own hooks
+scion hub hook create --name "Baseline Security Patch" --script baseline.sh
+
+# Activate a baseline hook
+scion hub hook activate baseline-v2
+```
+
+:::caution[Persistence Note]
+Deleting or updating a hook only affects **future** agents. Agents already created will continue to run the script they were provisioned with on every restart. To apply a new hook script to an existing agent, you must recreate the agent container (e.g. stop and delete, then start).
+:::
+
+---
+
+## Out of Scope (v1)
 
 The following are intentionally **not** part of the first release:
 
-- In-container or blocking hooks (hooks always run Hub-side and never block a
-  transition).
-- `script` action types (only `http` and `webhook` are supported).
-- Activity-change triggers (only the four authoritative phase transitions fire
-  hooks).
-- Project-scoped hooks (`scopeType` is `hub` in v1; `project` is reserved for a
-  future release and is not usable yet — use the selector to target a subset of
-  agents).
+- `script` action types for **Hub-side lifecycle hooks** (only `http` and `webhook` are supported for Hub-side hooks; use **In-Container Pre-Start Customization Hooks** for in-container scripting).
+- Activity-change triggers for Hub-side hooks (only the four authoritative phase transitions fire hooks).
+- Project-scoped Hub-side lifecycle hooks (`scopeType` is `hub` in v1; `project` is reserved for a future release — use the project-id selector to target specific projects instead).
 - Agent-label selectors (selectors match on `projectId` and `template` only).

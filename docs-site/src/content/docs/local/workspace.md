@@ -28,14 +28,36 @@ You can tell Scion exactly which directory to use as the workspace. This is usef
 - Using a shared directory across multiple agents.
 - Working on a path outside the current repository without creating a worktree.
 
+### Absolute vs. Relative Paths
+
+The `--workspace` (or `-w`) flag accepts both **absolute host paths** and **project-relative paths**, distinguished automatically by `filepath.IsAbs()`:
+
+#### Absolute Paths
+
+If you specify an absolute host path, Scion mounts that exact directory directly.
+
 ```bash
-# Mount a specific directory
-scion start my-agent "fix bugs" --workspace ./my-service
+# Mount a specific absolute host path
+scion start my-agent "run analysis" --workspace /home/user/my-service
 ```
 
 - **Behavior**: The specified directory is mounted directly to `/workspace`.
 - **Isolation**: **None**. Changes made by the agent are immediately visible on the host and to any other agents sharing this directory.
 - **Git**: No new worktree or branch is created, even if inside a repo.
+
+#### Relative Paths (Contained Subdirectory Mounts)
+
+If you specify a relative path, it is interpreted as a subdirectory scoped to your project's **logical root** (or current working directory). This allows you to confine an agent to a specific subdirectory, such as a package in a monorepo:
+
+```bash
+# Scope the agent to a project subdirectory
+scion start my-agent "fix web bugs" --workspace packages/web
+```
+
+- **Behavior**: Scion resolves the subdirectory path against the project root, performs strict containment checks (preventing directory traversal and escaping via symlinks), and mounts only that subtree to `/workspace`.
+- **Isolation**: The agent has **full containment** — it cannot see or access any files or folders outside of that specific subdirectory.
+- **Support**: Supported for directory (non-git) projects — both linked and hub-managed.
+- **Git-Clone Projects Limitation**: Relative `--workspace` paths are **not supported** for per-agent git (clone-based) projects and will be rejected with an error. For those projects, use an absolute path or omit the `--workspace` flag.
 
 ---
 
@@ -163,6 +185,13 @@ scion start my-agent --no-hub "fix the bug"
 ## 5. Project Shared Directories
 
 Project Shared Directories provide a persistent, mutable storage layer that can be shared between multiple agents within a single project. This is ideal for sharing build artifacts, shared caches, or state files without relying on version control or the Hub database.
+
+### Default Scratchpad Auto-Provisioning
+
+To ensure that newly created projects have an immediate space for agent file transfers, message attachments, and logs, the Hub can automatically provision a default shared directory named `scratchpad` upon project creation.
+
+- **Auto-Provisioning Toggle**: This behavior is controlled by the `project_defaults.default_scratchpad` setting in the Hub's operational settings (default is **`ON` / `true`**).
+- **Inbound Message Attachments**: In isolated workspace modes, Scion automatically routes agent message attachments through the default `scratchpad` shared volume to prevent silent delivery failures.
 
 ### Managing Shared Directories
 
@@ -316,3 +345,9 @@ scion delete <agent-name>
 - **Worktrees**: The worktree directory is removed and git metadata is pruned.
 - **Branches**: By default, the branch is deleted. Use `--preserve-branch` (or `-b`) to keep it.
 - **Explicit Workspaces**: Directories mounted via `--workspace` are **NOT** deleted. Scion only cleans up resources it created.
+
+:::caution[Committed is not Pushed]
+Committing changes within your agent's workspace is **not** an automatic guarantee of safety.
+- **`--preserve-branch` does not push:** The `--preserve-branch` (or `-b`) flag only keeps the agent's branch inside the *local* repository clone on the host/broker. It does **not** push the branch to a remote origin repository.
+- **Avoid losing work:** If you are operating on an ephemeral or remote broker container (where the local clone is discarded when the agent is deleted), any unpushed commits on the agent's branch will be **permanently lost**. Always ensure your agents run `git push` (or you push manually from the workspace) to save your commits upstream before deleting the agent.
+:::

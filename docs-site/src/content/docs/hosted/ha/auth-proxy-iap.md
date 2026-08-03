@@ -209,6 +209,12 @@ server:
 | `iap` | The **IAP OAuth client ID** (found in Cloud Console → Security → IAP → your backend → OAuth client). Format: `<client-id>.apps.googleusercontent.com` |
 | `cloudrun_invoker` | The **Hub's URL** (e.g., `https://hub.example.com`). If left empty, derived from `hub.public_url`. |
 
+:::caution[Audience Decoupling]
+`server.auth.transport.oidc_audience` and `server.auth.proxy.iap.audience` are intentionally decoupled and **must differ**:
+- `server.auth.proxy.iap.audience` is the Cloud Run native IAP audience path (e.g. `/projects/<number>/locations/<region>/services/<service>`) or GCE/GKE backend service audience path, which is used for validating incoming IAP-signed JWTs.
+- `server.auth.transport.oidc_audience` is the IAP OAuth client ID (e.g., `<client-id>.apps.googleusercontent.com`), which is used for minting OIDC tokens for dispatched agents and brokers to traverse IAP. IAP requires the OAuth client ID format for validating these tokens, not the Cloud Run resource path.
+:::
+
 :::note
 When both IAP and Cloud Run invoker guards are present on the same service, the IAP service agent carries the Cloud Run invoker role automatically. Agents send a single outer token targeting the IAP audience — no three-layer case.
 :::
@@ -264,9 +270,13 @@ gcloud iap web enable \
   --service=YOUR_BACKEND_SERVICE_NAME
 ```
 
-Note the **IAP OAuth client ID** (found in Console → Security → IAP → your backend → click the three dots → Edit OAuth Client). You will need it for both `auth.proxy.iap.audience` and `auth.transport.oidc_audience`.
+Note the **IAP OAuth client ID** (found in Console → Security → IAP → your backend → click the three dots → Edit OAuth Client). You will need this client ID for `auth.transport.oidc_audience` (it is used for minting OIDC tokens).
 
-Note the **signed header JWT audience** (found in Console → Security → IAP → your backend). This goes into `auth.proxy.iap.audience`.
+Note the **signed header JWT audience** (found in Console → Security → IAP → your backend). This goes into `auth.proxy.iap.audience` (used for validating incoming human and browser requests).
+
+:::caution[Audience Separation]
+Do **not** use the same value for both. `auth.proxy.iap.audience` requires the Cloud Run/GCE/GKE native service path (e.g. `/projects/...`), while `auth.transport.oidc_audience` requires the OAuth client ID (e.g. `<client-id>.apps.googleusercontent.com`). Using the same audience for both will cause preflight checks and token verification to fail.
+:::
 
 ### 3. Create the transport service account
 
@@ -341,6 +351,26 @@ server:
 ### Reference scripts
 
 The `scripts/cloudrun/` directory on the `pr/cloudrun-hub` branch contains reference deployment scripts (deploy.sh, entrypoint.sh, hub-settings-template.yaml) for a Cloud Run + IAP topology that can serve as a starting point.
+
+## Interactive CLI sessions (scion attach) via IAP
+
+Connecting an interactive terminal to a running agent's session (`scion attach <agent-name>`) when the Hub is behind IAP requires tunneling through the Google platform guard.
+
+### Dual-layer Authentication Bypass
+
+Because IAP is a transport-layer security mechanism, authenticating via the CLI in IAP-protected environments utilizes a dual-layer authentication model:
+1. **Outer Transport Layer**: Google OIDC ID token matching the IAP Client ID audience. This satisfies the Google IAP proxy check and allows the WebSocket request to reach the Hub.
+2. **Inner App Layer**: Existing Hub authentication (such as a User Access Token (UAT) / PAT) carried as a custom WebSocket protocol header.
+
+### App-Token Gate Bypassing
+
+Previously, `scion attach` would enforce the existence of an application-level token *before* attempting transport-auth resolution. Since proxy/IAP mode operates by validating credentials at the transport level (with the Hub deriving identity from the `X-Goog-IAP-JWT-Assertion` header inserted by IAP), requiring a separate application-level token at the CLI gate blocked fully-authenticated IAP connections.
+
+The `scion attach` flow resolves transport-layer authentication **before** checking the application-level token gate:
+- If a valid transport auth token source is configured and resolved (e.g., your local Google Cloud SDK identity or GKE Workload Identity can authenticate to IAP), the application-level token requirement is bypassed.
+- If no transport source is configured, the command falls back to requiring a standard Hub access token (via `scion hub auth login` or `SCION_HUB_TOKEN`).
+
+This unblocks seamless interactive attachments to agents executing under IAP-secured Hubs.
 
 ## Brokers behind IAP
 

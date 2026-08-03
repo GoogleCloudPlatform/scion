@@ -79,6 +79,12 @@ scion hub secret set ANTHROPIC_API_KEY sk-ant-api01-...
 scion hub secret set --project DB_PASSWORD my-secure-password
 ```
 
+:::tip[Graceful Raw vs. Base64 Fallback]
+To prevent silent integration failures (such as when the web UI sends raw plaintext but the underlying REST endpoint accepts base64), all four of Scion's secret-write API handlers (Hub, User, Project, and Broker scopes) feature a **graceful fallback mechanism**.
+
+When writing a secret, the Hub checks if the payload is a valid base64-encoded string. If it is, the Hub decodes it back to raw bytes before encrypting. If it is not valid base64 (or if decoding fails), the Hub gracefully falls back to treating the payload as raw plaintext. This ensures that both base64-encoded binary payloads (e.g. key files) and raw plaintext API keys are accepted reliably.
+:::
+
 **Interactive Secrets-Gather:**
 If a template requires specific secrets (defined in `scion-agent.yaml`), Scion utilizes an interactive `secrets-gather` pipeline during agent creation. It will automatically prompt you to securely input any missing values and store them in the backend, ensuring sensitive credentials are never written to plain text configuration files.
 
@@ -175,6 +181,8 @@ When resolving a `gh://owner/repo/...` URI, Scion checks credentials in this ord
 | 5 | Unauthenticated | No credential found; works for public repos only |
 
 The first match wins. If no convention secret exists, behavior is identical to the default single-token resolution.
+
+*Note: Credentials resolved for private `gh://` URIs are preserved end-to-end through the entire download sequence, preventing unauthenticated fallback or 404 errors during multi-file resolution.*
 
 ### Injection Mode Behavior
 

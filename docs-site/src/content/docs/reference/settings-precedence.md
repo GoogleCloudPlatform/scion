@@ -106,6 +106,8 @@ existing value.
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_MODEL_CALLS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_DURATION` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
+| `SCION_WORKSPACE_MODE` | canonical workspace sharing mode (`shared-plain`, `clone-per-agent`, or `worktree-per-agent`) | **Unconditional** — overwrites |
+| `SCION_WORKSPACE_GIT` | `"true"` when the workspace is a git repository, absent otherwise | **Unconditional** — overwrites |
 | `SCION_TEMPLATE` | full template reference, for debugging | Set only when a template reference exists |
 | `SCION_BROKER_NAME` | broker name, defaults to `local` | **Guarded** — defers to an existing value |
 | `SCION_HARNESS` | harness name | **Guarded** — defers to an existing value |
@@ -594,21 +596,26 @@ further downstream has not been traced — the over-collection is measured, the 
 
 ## System B — `ScionConfig` limits and resources
 
-This governs `model`, `thinking_level`, `max_turns`, `max_model_calls`, `max_duration` and
+This governs `model`, `thinking_level`, `harness_config`, `max_turns`, `max_model_calls`, `max_duration` and
 `resources`. It is **not** the ladder in System A.
 
-### B1. The three scalar limits
+### B1. Harness configuration, model, thinking level, and scalar limits
 
-For `max_turns`, `max_model_calls` and `max_duration`, higher tiers win and lower tiers fill in
+For `harness_config`, `model`, `thinking_level`, `max_turns`, `max_model_calls` and `max_duration`, higher tiers win and lower tiers fill in
 only what is still unset:
 
 | Priority | Source |
 | --- | --- |
 | Highest | the agent-create request / inline config |
-| | the project's `scion.io/default-*` annotation |
+| | the project's `scion.io/default-*` annotation (e.g., `scion.io/default-harness-config`, `scion.io/default-model`, `scion.io/default-thinking-level`) |
 | | the template's `scion-agent.yaml` |
 | | hub `agent_defaults` — **see [Bucket 4](#bucket-4--operatoradmin-settings), the position is not settled** |
-| Lowest | the broker's own `settings.yaml` `default_max_turns` / `default_max_model_calls` / `default_max_duration` |
+| Lowest | the broker's own `settings.yaml` defaults (e.g., `default_max_turns` / `default_max_model_calls` / `default_max_duration`) |
+
+#### `Changed in this release` — project `default-harness-config` correctly outranks template harness config
+
+**Before:** The project default setting `scion.io/default-harness-config` was silently outranked by the template's own `harness_config` on both interactive and scheduled agent-create paths.
+**After:** The project setting `scion.io/default-harness-config` now correctly outranks the template's harness config, matching the standard precedence ordering of the other scalar and limit settings in this ladder.
 
 :::tip[Where the two systems agree — worth stating positively]
 On this axis `runtime_broker < hub` is **true**, which is the **same** relation the environment
@@ -780,15 +787,10 @@ In file mode the hub does not transmit `agent_defaults`, and a remote broker has
 deliberate — the alternative regresses single-node installs — but if that shape matters to you it
 is a follow-up, not current behaviour.
 
-### `Known gap` — a thinking level set by project annotation is invisible on every surface
+#### `Changed in this release` — Thinking level propagation and merging corrected
 
-A project's `scion.io/default-thinking-level` annotation reaches the agent's **environment**, but
-it is **not written to `scion-agent.json`**. `applyProjectDefaults` does not stamp it into
-`AppliedConfig`.
-
-The consequence is a real operational trap: `scion agent config` and the web configure form
-**do not display it.** The value is in effect and invisible to every surface an operator would
-check to find out what an agent is running with.
+**Before:** A project's `scion.io/default-thinking-level` annotation reached the agent's environment, but was not written to `scion-agent.json` because `applyProjectDefaults` did not stamp it into `AppliedConfig`. This made it invisible on both `scion agent config` and the web configure form. Additionally, any thinking level supplied via the override position (e.g., `--config`, API agent creation, or the web configure form) was silently dropped by `MergeScionConfig`.
+**After:** Both bugs are resolved. The default thinking level from project settings is now correctly stamped into `AppliedConfig` (persisted in `scion-agent.json` and visible in the UI), and `MergeScionConfig` correctly preserves and merges the `ThinkingLevel` from override-position configurations.
 
 ---
 

@@ -85,6 +85,58 @@ Present (value `"true"`) when the workspace is a git repository. Absent when the
 
 **Compatibility note:** Older broker versions emitted only `SCION_SHARED_WORKSPACE=true` for shared-plain git workspaces. The `sciontool init` compat shim prefers the new vars and falls back to `SCION_SHARED_WORKSPACE` when they are absent. `SCION_SHARED_WORKSPACE` is deprecated and tracked for removal in [ptone/scion#575](https://github.com/ptone/scion/issues/575).
 
+---
+
+## Workspace Orientation & Invariants (Mandatory Boilerplate)
+
+All Scion agents should run a **workspace orientation check** immediately upon startup. By reading `SCION_WORKSPACE_MODE` and `SCION_WORKSPACE_GIT`, an agent can adapt its behavior to match its level of isolation.
+
+### 1. Per-Mode Behavior Guidelines
+
+Depending on the effective workspace sharing mode, agents must adhere to the following rules:
+
+* **When `SCION_WORKSPACE_MODE` is `shared-plain`**:
+  * **Concurrency Hazard**: You are sharing a single filesystem directory with other agents in real-time. Edits you make are immediately visible to others, and others may modify files while you are working.
+  * **Non-Assumption**: Do *not* assume a file remains unchanged between the time you read it and the time you write it.
+  * **Coordination**: Before making broad, structural, or disruptive filesystem changes (such as renaming directories or refactoring shared libraries), use `scion message` to coordinate with other agents or the project coordinator.
+* **When `SCION_WORKSPACE_MODE` is `worktree-per-agent`**:
+  * **Private Working Tree**: Your working tree `/workspace` is private and isolated. You can edit files freely without stepping on other agents' uncommitted changes.
+  * **Shared Git Repo**: The underlying git repository history, local branches, and refs are shared. Treat local branch names as a shared namespace to avoid collisions.
+* **When `SCION_WORKSPACE_MODE` is `clone-per-agent`**:
+  * **Full Isolation**: Your clone is entirely your own. Nothing you do to the working tree, local refs, or local branches will affect any other agent's workspace.
+
+### 2. The Shared-Directories Invariant
+
+Scion allows mounting persistent **Shared Directories** (such as a shared cache or scratchpad) into agent containers.
+
+:::danger[Shared Directories are Always Shared]
+**Shared directories are shared across all agents in every workspace mode — including the highly isolated `worktree-per-agent` and `clone-per-agent` modes.** They bypass working tree isolation. Treat shared directory paths as concurrent-access, zero-isolation storage.
+:::
+
+---
+
+## Git Operations & Safety for Agents
+
+When operating within a git-backed workspace (`SCION_WORKSPACE_GIT=true`), agents must follow strict safety procedures to avoid data loss and build breaks.
+
+### 1. Working Tree Reset Safety (`-fd` vs `-fdx`)
+
+If you need to clean or reset a working tree to get a clean slate, **always default to `git clean -fd`, never `git clean -fdx`**.
+
+* **`git clean -fd` (Safe)**: Removes untracked files but **respects `.gitignore`**. Crucial agent-local state files, `.scion/` directory metadata, and local cached credentials survive the clean.
+* **`git clean -fdx` (Dangerous)**: Deliberately ignores `.gitignore` and **deletes everything untracked**. This will wipe your `.scion/` metadata, agent state, and configurations, causing immediate container and agent dysfunction.
+
+### 2. Rebase-After-Deletion Guidance
+
+When a pull request or merge deletes a file, performing a `git rebase` introduces a hidden logical hazard:
+
+* **Standard Conflicts**: If someone concurrently edits the deleted file, git will raise a `modify/delete` conflict and halt the rebase, which is easily detected.
+* **Dangling References**: If a concurrent change in a *different* file adds a new reference or call to the deleted file, git sees these as disjoint changes. The rebase will complete with **no conflicts** and report a successful merge, leaving a dangling reference that breaks the build or runtime execution.
+
+**Required Procedure**: After performing any rebase or pull that deletes a file, you must run a repository-wide `grep` search for the deleted file's name/imports to verify that no new dangling references were introduced in other files.
+
+---
+
 ## Related workspace concepts
 
 A few adjacent terms are worth distinguishing from the sharing mode itself:

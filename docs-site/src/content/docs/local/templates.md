@@ -125,6 +125,17 @@ Every non-`default` template automatically **inherits the `default` template as 
 
 This is why a minimal template only needs a `scion-agent.yaml` plus the files it wants to override — common dotfiles and defaults come from `default` for free.
 
+### Mandatory Instruction Preamble Injection
+
+To ensure consistent and reliable agent execution across the platform, Scion enforces a **mandatory instruction preamble injection** mechanism during the provisioning pipeline:
+
+- **What it is:** Scion automatically loads all Markdown files from an embedded boilerplate filesystem (`mandatory_boilerplate/`) and **prepends** them directly to the final `agent_instructions` file inside the agent's home directory.
+- **Why it exists:** This guarantees that every provisioned agent — regardless of template, role, or harness choice — is seeded with critical platform contracts before starting.
+- **Embedded contents:**
+  - **Workspace Orientation:** Clear explanations of `SCION_WORKSPACE_MODE` (`shared-plain`, `worktree-per-agent`, `clone-per-agent`), `SCION_WORKSPACE_GIT`, and how directories/shared volumes are mounted.
+  - **Agent Status Signals:** Exact protocols directing the agent to explicitly declare its execution states via `sciontool status` (e.g. `sciontool status ask_user "<question>"`, `sciontool status blocked "<reason>"`, or `sciontool status task_completed "<task>"`). This prevents false stall timeouts, handles notifications routing, and tracks progress.
+- **Template Isolation:** Because this preamble is injected programmatically by the Hub or CLI, it cannot be overridden, removed, or bypassed by custom templates, securing baseline platform behaviors across all agents.
+
 The final composition layers on top of the chosen harness-config:
 
 1. **Harness-config base layer** — runtime mechanics (image, model aliases, auth, base tool files).
@@ -320,6 +331,10 @@ model_aliases:
 ```
 
 A template that sets `model: large` then resolves to `opus` under Claude and `gemini-pro` under Gemini — the same role, portable across harnesses. Concrete model names still pass through unchanged (for backward compatibility) but tie the template to one harness.
+
+:::note
+Model aliases are resolved by the Hub before they are stored in the agent's `AppliedConfig` and injected as the `SCION_MODEL` environment variable. This ensures harness provision scripts receive the fully resolved concrete model name (such as `gemini-pro`) rather than an unresolved alias.
+:::
 
 ### Customizing and creating variants
 

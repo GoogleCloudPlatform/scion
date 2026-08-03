@@ -108,7 +108,7 @@ Most segments are optional. Common forms:
 | `skill://scion/user/<userId>/scratch@1.4.0` | User-scoped skill, exact version. |
 | `skill://project/deploy-checklist` | Scope-alias form (registry defaults to `scion`). |
 | `skill://registry.example.com/global/tool@^2.0` | External registry (federation). |
-| `gh://<owner>/<repo>/<path>@<ref>` | Skill sourced from a GitHub repository. |
+| `gh://<owner>/<repo>/<path>[@<ref>][?token=<SECRET>]` | Skill sourced from a GitHub repository. Supports private repos and per-URI credentials. |
 | `gcp-skill://<alias>/<skillId>@<version>` | Skill sourced from GCP Vertex AI. |
 
 ### Version specifiers
@@ -119,6 +119,34 @@ The `@version` suffix accepts:
 - An exact version, e.g. `1.4.0` (a leading `v` is stripped).
 - A semver range, e.g. `^1.0`, `~1.2`, `>=1.0.0` — resolves to the highest matching version.
 - A content hash, e.g. `sha256:abc123…` — resolves to the exact bytes with that hash.
+
+### GitHub skill URIs (`gh://`)
+
+The `gh://` scheme retrieves skill files directly from a GitHub repository. It works out-of-the-box for public repositories, and supports secure private repository resolution.
+
+#### Private repository resolution
+
+For private repositories, Scion resolves skills using the project's configured git credentials or custom secrets:
+
+1. **Default credentials**: A plain `gh://` URI automatically uses the project's default `GITHUB_TOKEN` (such as a GitHub App installation token or a PAT configured at the project level).
+2. **Named credentials (per-URI selection)**: Use the `?token=SECRET_NAME` query parameter on the URI to target a specific project secret:
+   ```yaml
+   - uri: gh://acme-corp/partner-skills/my-skill@v1.2.3?token=PARTNER_GITHUB_TOKEN
+   ```
+   Scion retrieves the secret from the `ProvisionCredentials` channel during provisioning. The secret value is processed completely in memory and is **never** forwarded to the agent's container environment or harness scripts.
+3. **Local CLI fallback**: In local CLI mode, the resolver automatically falls back to your local `GITHUB_TOKEN` environment variable.
+
+#### Input validation & auto-normalization
+
+To make adding skills as seamless as possible, Scion automatically validates and transforms full GitHub browser URLs to canonical `gh://` shorthand. This is supported in the CLI, Web UI, and Hub API:
+
+- **Browser tree URLs**: `https://github.com/owner/repo/tree/main/skills/my-skill` is normalized to `gh://owner/repo/my-skill@main`.
+- **Browser blob URLs**: `https://github.com/owner/repo/blob/main/skills/my-skill/SKILL.md` is normalized to `gh://owner/repo/my-skill@main`.
+- **Secret validation**: Any named secret via `?token=SECRET_NAME` is validated to ensure it matches standard environment variable naming (`[A-Z][A-Z0-9_]*`).
+
+:::note
+The old `scion://` scheme is no longer supported and is rejected during validation with a clear error pointing to `skill://`.
+:::
 
 ### Scopes and resolution order
 
@@ -138,6 +166,30 @@ user → project → global → core
 ```
 
 More specific scopes therefore override broader ones — a user's own skill shadows a global skill of the same name.
+
+### Destination-Name Collision Resolution
+
+When multiple skills are resolved for an agent, they are mounted into the harness's skills directory. If multiple skills resolve to the same destination folder name (for example, if they share a name but come from different scopes, or use overlapping `as` aliases), Scion performs a precedence-based deduplication pass to resolve the collision rather than failing.
+
+The precedence hierarchy for resolving destination name collisions is (highest priority wins):
+
+```text
+project > template > user > hub > platform
+```
+
+- **Project**: Skills explicitly defined at the project scope.
+- **Template**: Skills mounted or supplied by the agent's template.
+- **User**: Personal/user-scoped skills.
+- **Hub**: Global skills published to the Hub's Skill Registry.
+- **Platform**: Built-in system or workspace skills injected by Scion.
+
+#### Collision Reporting
+
+When a destination-name collision is detected and resolved:
+1. Scion logs the collision and the resolution outcome in the Hub and agent dispatch logs.
+2. The collision details and final resolved mapping are recorded in a `resolved-skills.json` file inside the agent's run/state directory.
+
+Each `SkillReference` includes a `Scope` field, annotated at all injection sites, allowing full traceability of where each skill was sourced and how collisions were handled.
 
 ## Publishing a skill
 
@@ -224,6 +276,77 @@ Most commands accept either a skill **name** or **ID**. Add the global `--format
 
 :::tip
 `scion skill` (singular) is an alias for `scion skills`.
+:::
+
+## Auto-Injected Skills (Multi-Scope)
+
+While you can manually reference skills inside templates or agent configurations, Scion also supports **auto-injection**. This allows you to configure skills that are automatically injected into every provisioned agent, without needing to modify your templates or configurations.
+
+Injected skills are managed at multiple scopes. During agent provisioning, Scion resolves these scopes in order from broadest to most specific. More specific scopes have higher precedence and can override broader ones (lowest to highest precedence):
+
+```text
+Hub (System + User-Defined) → User → Project → Template
+```
+
+1. **Hub Scope** (broadest): Configured by the Hub administrator for the entire platform. This includes pre-seeded **System** (built-in) skills under the `scion-platform://` URI scheme (such as status signaling and messaging operations) as well as admin-defined global skills.
+2. **User Scope**: Configured by you. These skills are automatically injected into every agent you provision, regardless of the project.
+3. **Project Scope**: Configured for a specific project. These skills are automatically injected into all agents running within that project.
+4. **Template Scope** (highest): Defined directly inside the agent's template. A template-level skill reference always overrides any injected skill of the same name.
+
+### Managing Project-Scoped Injected Skills
+
+Use the `scion project skills` command group to manage skills that should be auto-injected for every agent in a project:
+
+```bash
+# List injected skills for the current project (or a specified project)
+scion project skills list
+scion project skills list my-project
+
+# Add a skill to the project's injected list
+scion project skills add skill://scion/global/deploy-checklist@^1.0
+scion project skills add my-project skill://scion/global/deploy-checklist@^1.0 --as checklist --optional
+
+# Discover and batch-add all skills from a GitHub directory path
+scion project skills add --from-directory https://github.com/my-org/skills/tree/main/production-skills
+
+# Remove a skill by its UUID or full URI
+scion project skills remove <uuid>
+scion project skills remove skill://scion/global/deploy-checklist@^1.0
+```
+
+### Managing User-Scoped Injected Skills
+
+Use the `scion user skills` command group to manage skills that should be auto-injected for every agent you provision, across all of your projects:
+
+```bash
+# List your personal injected skills
+scion user skills list
+
+# Add a skill to your personal injected list
+scion user skills add skill://scion/global/personal-notes@latest
+scion user skills add skill://scion/global/personal-notes@latest --as notes --optional
+
+# Discover and batch-add all skills from a GitHub directory path
+scion user skills add --from-directory https://github.com/my-org/skills/tree/main/personal-skills
+
+# Remove a skill by its UUID or full URI
+scion user skills remove <uuid>
+scion user skills remove skill://scion/global/personal-notes@latest
+```
+
+### Batch-Adding Injected Skills via the Web UI
+
+In addition to managing injected skills via the CLI, the Scion Web Dashboard allows configuring **Injected Skills** for a project, user profile, or globally on the Hub. To simplify adding multiple skills at once, Scion provides a **directory-discovery** workflow:
+
+1. Under the settings page (Project Settings, User Profile, or Hub Settings), open the **Injected Skills** panel and click **Add Skill**.
+2. Paste a GitHub directory URL (e.g., `https://github.com/org/repo/tree/main/skills-directory`) into the **Skill URI** input.
+3. If the input matches a directory structure on GitHub, a **Discover Skills from Directory** helper button appears.
+4. Clicking it triggers an automated scan of the remote directory. A **checkbox interstitial dialog** will display all discovered skill subdirectories.
+5. Select or deselect skills using the checkboxes, then click confirm. 
+6. Scion adds all checked skills as individual URI references in a single atomic update.
+
+:::note[Security & Privacy]
+Before performing discovery or logging requests, Scion's API automatically strips any embedded userinfo or credentials from the URL, preventing sensitive tokens or usernames from appearing in system logs.
 :::
 
 ## Platform skills

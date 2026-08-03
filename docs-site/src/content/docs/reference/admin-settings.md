@@ -153,10 +153,25 @@ For high-availability deployments with multiple hub replicas:
 
 ## Admin UI
 
-The admin settings page (`/admin/server-config`) is layer-aware:
+The admin settings page (`/admin/server-config`) is layer-aware and has been restructured for improved usability:
 
 - **Database mode:** Layer-0 fields are read-only with a "Managed via deployment configuration" badge. Layer-1 fields are editable.
 - **File mode:** Fields pinned by `SCION_SERVER_*` environment variables are read-only with a "Set via environment variable" badge. Other fields are editable and write to `settings.yaml`.
+
+### Layout Structure
+
+To streamline management of complex environments, the **General** settings tab is restructured into three high-density, focused cards:
+
+1. **General Card**: Houses central Hub identity, registration endpoints, and core server configurations.
+2. **Agent Defaults Card** (with dedicated sub-tabs):
+   - Configures default resource constraints (`max_turns`, `max_duration`, limits).
+   - Introduces **Default Model** (`default_model`) and **Default Thinking Level** (`default_thinking_level`) fields directly into the agent default pipeline.
+   - Houses the **Telemetry Toggle**, which has been moved to this card to keep telemetry configuration closely aligned with operational defaults.
+3. **Project Default Settings Card**: Configures platform-level default annotations and behaviors for newly created projects.
+
+#### Navigation Updates
+
+- **Message Broker Integration**: The Message Broker configuration has been consolidated and moved from the General tab to the **Hub Server** tab, grouping external integrations and network-bound transports in one logical place.
 
 ### Visual Indicators
 

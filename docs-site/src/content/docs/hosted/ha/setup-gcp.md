@@ -816,6 +816,10 @@ sciontool skips OIDC → IAP rejects with `"Invalid IAP credentials: empty token
 | `SCION_TRANSPORT_AUDIENCE` | OAuth client ID | Token minted with wrong audience |
 | `SCION_METADATA_MODE` | `block` | sciontool may try GCE metadata fallback |
 
+:::tip[Automatic Hub Endpoint Derivation]
+In hosted HA deployments with Google IAP authentication enabled, the Hub automatically derives its public endpoint (`SCION_HUB_ENDPOINT` / Cloud Run URL) from the configured `auth.proxy.iap.audience` URL instead of using a hardcoded fallback. This ensures GKE-dispatched agents can always resolve and reach the Hub out-of-the-box.
+:::
+
 ---
 
 ## 6. First Agent Test (E2E Verification)

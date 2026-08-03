@@ -211,6 +211,14 @@ scion hub secret set GOOGLE_CLOUD_REGION "us-east5"
 The `gcloud-adc` secret automatically writes the ADC file to the well-known GCP path inside the container. Scion does **not** set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable by default when using `gcloud-adc`. If you need to use `GOOGLE_APPLICATION_CREDENTIALS` as an alternative for Vertex AI or to point to a non-standard path, set it up as a standard environment variable secret alongside your file secret.
 :::
 
+:::tip[Claude Vertex AI Translation]
+For the Claude harness, Scion automatically translates `GOOGLE_CLOUD_PROJECT` to the `ANTHROPIC_VERTEX_PROJECT_ID` environment variable during container provisioning. This ensures that Claude Code's native Vertex AI client authenticates and operates correctly with Vertex Model Garden endpoints without manual environment adjustments.
+:::
+
+:::caution[Defensive Auth Protection]
+To prevent auth state corruption across container restarts, Scion implements a strict defensive guard rejecting known harness implementation names (e.g., `container-script`) from being stored or written as authentication types into `opts.HarnessAuth` or `scion-agent.json`. This ensures that previous backfill scripts or configurations cannot accidentally pollute the agent's authentication setup and cause self-perpetuating "not logged in" errors on subsequent runs.
+:::
+
 ### Harness specific credential file (`auth-file`)
 
 Some harnesses authenticate with their own credential files, such as OAuth credential files. Scion
@@ -420,3 +428,9 @@ If GitHub App integration is not available, you can use a Personal Access Token.
 3. Scion injects this token into the agent container as an environment variable (`GITHUB_TOKEN`), which Git uses for HTTPS authentication.
 
 For detailed instructions on setting this up, see [Git-Based Projects](/scion/workstation/git-projects/).
+
+### Multi-Repository (Convention-Based) Secrets
+
+When your templates reference skills or repositories across multiple GitHub owners or organizations, a single default `GITHUB_TOKEN` may not have the required permissions.
+
+To address this, Scion supports **convention-based multi-GitHub credential resolution** using project secrets (e.g., `GH_OWNER__REPO` or `GH_OWNER`). For setup examples, precedence rules, and naming conventions, see the [GitHub Multi-Repo Credentials](/scion/hosted/user/secrets/#github-multi-repo-credentials) section in the Secrets Guide.

@@ -153,6 +153,13 @@ All maintenance tasks executed through the panel are tracked. The maintenance in
 - Execution history detailing operation duration, completion status, and log archives.
 - Automated cleanup of stalled operations during server startup.
 
+#### Concurrency Guard
+
+To guarantee server stability, the Hub enforces a strict **concurrency guard** on all maintenance operations:
+- **Mutual Exclusion:** Running multiple operations (such as parallel `go build` compilations) simultaneously is rejected.
+- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds.
+- **Status Monitoring:** Operators can trace progress and view active logs on the dashboard's maintenance interface.
+
 ### WebDAV Synchronization
 
 The Hub provides robust WebDAV endpoints for transparent file access across native, shared, and remote linked projects.
@@ -226,5 +233,14 @@ To enable log forwarding, set `SCION_OTEL_LOG_ENABLED=true` and `SCION_OTEL_ENDP
 The Hub exposes health check endpoints:
 - `/healthz`: Basic liveness check.
 - `/readyz`: Readiness check (verifies database connectivity).
+- `/health`: Legacy/alternative liveness check endpoint.
+
+### Reverse Proxy / GFE Interception Handling
+
+In distributed or hosted deployments (such as Google Cloud Run behind a Google Front End), reverse proxies may intercept calls to `/healthz` and return a non-JSON response (e.g. `text/plain`). 
+
+To prevent connectivity and status reporting issues:
+- **Hub Client Fallback**: The Scion Hub client automatically detects non-JSON `2xx` responses from reverse proxies on `/healthz` and transparently falls back to `/health`. If both fail, it appends a helpful diagnostic tip suggesting a Cloud Run or GFE configuration review.
+- **Broker Client Diagnostics**: If the Runtime Broker client receives a non-JSON `2xx` response on `/healthz`, it blocks the call and returns a precise error indicating that a reverse proxy (e.g., GFE) is likely intercepting `/healthz` and provides troubleshooting guidance.
 
 Logs are output to `stdout` in either `text` (default) or `json` format, suitable for collection by systems like Fluentd, Cloud Logging, or Prometheus.

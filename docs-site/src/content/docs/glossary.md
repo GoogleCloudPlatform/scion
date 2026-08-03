@@ -48,10 +48,16 @@ The addressing scheme for a **Skill**: a bare name or a `skill://<registry>/<sco
 ### Plugin
 An out-of-process extension built on `hashicorp/go-plugin` (gRPC) that supplies a **Message Broker** implementation without modifying Scion core. **Harness implementations are *not* offered as plugins**; additional plugin types may be added in the future.
 
+### Pre-Start Hook
+A project-scoped or Hub-scoped shell script executed synchronously inside the agent container during initialization before the main harness starts up (via the `EventPreStart` hook point, staged at `.scion/hooks/pre-start.d/30-project-custom`). If the script exits non-zero, agent startup is aborted. This provides project owners and Hub administrators with a synchronous, blocking initialization mechanism.
+
 ### sciontool
 The helper utility injected into every agent container for status reporting, metadata access, and task management.
 
 ## Runtime & Workspace
+
+### Agent Port Forwarding
+A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket reverse tunnel.
 
 ### Runtime
 The container technology that executes an agent's container: Docker, Podman, Apple Container, or Kubernetes.
@@ -104,7 +110,7 @@ An agent whose lifecycle is managed directly by the Hub via a cloud provider API
 A named bundle of runtime broker settings selected as a unit — a runtime plus its execution settings (env, volumes, resources), default harness-config and template, image registry, secrets, and harness overrides. A runtime-broker-scoped concept; long form **Runtime Broker Profile**.
 
 ### Message Broker
-The pluggable system that brokers messages between Scion actors (agents and users) and messaging surfaces — built-in brokers such as the web UI Messages view, and broker plugins to external systems like Telegram and Google Chat (Discord and Slack planned). Backs the `scion message` command. Distinct from the Runtime Broker despite the shared word.
+The pluggable system that brokers messages between Scion actors (agents and users) and messaging surfaces — built-in brokers such as the web UI Messages view, and broker plugins to external systems like Telegram, Discord, Slack, and Google Chat. Backs the `scion message` command. Distinct from the Runtime Broker despite the shared word.
 
 ### Broker plugin
 A Message Broker implementation for a specific external messaging system (e.g. Telegram, Google Chat), loaded through the broker plugin interface (`PluginTypeBroker`).
@@ -133,10 +139,19 @@ A server process running both the Hub and Runtime Broker components together (th
 ### Secret
 A credential made available to an agent at runtime (e.g. API keys, tokens). A harness-config's `secrets` field *declares* which secrets an agent needs; the **Secret Backend** — a pluggable store (local SQLite for development, GCP Secret Manager in production, selected via `SCION_SERVER_SECRETS_BACKEND`) — *stores and resolves* them, scoped by user, project, runtime broker, or hub, and injects them into the container.
 
+### Port Forwarding
+The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated WebSocket-based reverse tunnel established from within the container to the Hub.
+
+### Auto-Expose
+A sub-feature of port forwarding where `sciontool` periodically scans for listening TCP sockets inside the agent container (by reading `/proc/net/tcp` and `/proc/net/tcp6`), filters them by policy, and registers them with the Hub using the `auto-scan` label. Stale registrations are automatically cleaned up when the service stops listening.
+
 ## Users & Access
 
 ### Group
 A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients) and from a **Project**.
+
+### User Access Token (UAT)
+A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT is scoped to a single project and carries a specific list of action permissions (scopes). Formerly known as a *Personal Access Token (PAT)*.
 
 ## Messaging
 
