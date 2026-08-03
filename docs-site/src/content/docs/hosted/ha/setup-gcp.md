@@ -21,7 +21,7 @@ agent dispatch, and **Cloud SQL** for durable state.
 
 ---
 
-## 0. Prerequisites
+## 0. Prerequisites & Deployer Identity
 
 ### GCP Project
 
@@ -56,16 +56,70 @@ gcloud services enable \
 |------|---------|--------|
 | `gcloud` | [cloud.google.com/sdk/install](https://cloud.google.com/sdk/docs/install) | `gcloud version` |
 | `kubectl` | `gcloud components install kubectl` | `kubectl version --client` |
-| `gke-gcloud-auth-plugin` | `gcloud components install gke-gcloud-auth-plugin` | `gke-gcloud-auth-plugin --version` |
+| `gke-gcloud-auth-plugin` | See below | `gke-gcloud-auth-plugin --version` |
 | `psql` | `sudo apt-get install -y postgresql-client` | `psql --version` |
 | `scion` CLI | Per Scion repo README | `scion version` |
 
+:::tip[gke-gcloud-auth-plugin in Containers]
+In containerized, managed, or non-interactive environments (where standard `gcloud components install` is disabled), you must configure the Google Cloud SDK apt repository and install the plugin natively:
+```bash
+sudo apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin
+```
+Otherwise, use the gcloud component manager:
+```bash
+gcloud components install gke-gcloud-auth-plugin
+```
+:::
+
 ### Authenticate
 
+#### For Human Deployers (Interactive)
 ```bash
 gcloud auth login
 gcloud config set project $PROJECT_ID
 gcloud auth application-default login
+```
+
+#### For Automated Deployers / Service Accounts (Non-Interactive / Cross-Project)
+If an automated CI/CD agent or a service account from another project is executing this deployment:
+1. Authenticate using the service account's key file:
+   ```bash
+   gcloud auth activate-service-account --key-file=KEY_FILE_PATH
+   gcloud config set project $PROJECT_ID
+   ```
+2. Note that interactive authentication commands (`gcloud auth login` and `gcloud auth application-default login`) are disabled and should be skipped.
+
+---
+
+### Deployer Permission Requirements
+
+The deployment identity (whether human or service account) must bypass two separate permission walls: **project-level IAM bindings** and **service-account-level IAM bindings**. Ensure the deployer has the following consolidated roles on the target project:
+
+| Role | Scope | Why It's Needed |
+|------|-------|-----------------|
+| `roles/resourcemanager.projectIamAdmin` | Project-level | Needed to assign project-level IAM policies to service accounts (Section 2) |
+| `roles/iam.serviceAccountAdmin` | Service-account-level | Needed to set service-account-level policy bindings (such as Token Creator in 2c, 2d and Workload Identity in 2g) |
+| `roles/run.admin` | Service-level | Needed to deploy Cloud Run services and bind service-level permissions (`run.invoker`) |
+| `roles/editor` | Project-level | General resource provisioning (Cloud SQL, GCS, Secret Manager, GKE) |
+
+#### Granting Cross-Project Deployer Access
+If deploying from a service account in a different "Infrastructure" project (e.g., `scion-deployer@infra-project.iam.gserviceaccount.com`), grant the required roles to that service account on the target project before proceeding:
+
+```bash
+DEPLOYER_SA="scion-deployer@infra-project.iam.gserviceaccount.com"
+
+for ROLE in \
+  roles/resourcemanager.projectIamAdmin \
+  roles/iam.serviceAccountAdmin \
+  roles/run.admin \
+  roles/editor; do
+
+  gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$DEPLOYER_SA" \
+    --role="$ROLE" \
+    --condition=None \
+    --quiet
+done
 ```
 
 ---
@@ -91,11 +145,16 @@ export IMAGE_REGISTRY="$REGION-docker.pkg.dev/$PROJECT_ID/scion"
 ```bash
 gcloud sql instances create scion-hub-db \
   --database-version=POSTGRES_16 \
+  --edition=ENTERPRISE \
   --tier=db-f1-micro \
   --region=$REGION \
   --project=$PROJECT_ID \
   --database-flags=max_connections=200
 ```
+
+:::note[Enterprise Edition Required for Micro Tier]
+You must explicitly provide `--edition=ENTERPRISE` in the instance creation command. If omitted, some projects/organizations default to `ENTERPRISE_PLUS`, which does not support the cost-effective `db-f1-micro` tier.
+:::
 
 :::note[Why max_connections=200?]
 Cloud Run can spin up multiple revisions during deploys. With the Hub, Discord, and agent
@@ -115,7 +174,6 @@ gcloud sql users create scion \
   --project=$PROJECT_ID
 
 # The database is created automatically by Ent AutoMigrate on first Hub boot.
-# If you prefer to pre-create:
 gcloud sql databases create scionhub \
   --instance=scion-hub-db \
   --project=$PROJECT_ID
@@ -149,6 +207,13 @@ this flag, you can enable it later with `gcloud container clusters update`.
 |-----------|--------------------------|----------------------|
 | CSI Driver | `secrets-store.csi.x-k8s.io` | `secrets-store-gke.csi.k8s.io` |
 | Provider | `gcp` | `gke` |
+:::
+
+:::caution[Shared Directories and Volume Capabilities Failure]
+When creating a project through the Hub web UI, Scion includes a default **"scratchpad" shared directory**. Under the hood, this mounts a Kubernetes PersistentVolumeClaim with `ReadWriteMany` (RWX) access mode. 
+- **The Catch:** GKE Autopilot's default storage class (`standard-rwo`) **only supports `ReadWriteOnce` (RWO)**. Attempting to dispatch an agent will fail with an opaque scheduling error: `VolumeCapabilities is invalid: specified multi writer with mount access type`, and the Hub will output `pods not found`.
+- **The Fix (Option A - Easiest):** If you do not require shared directories, navigate to your project settings in the Hub UI *after* installation and **remove or disable the default shared directory** (e.g., delete the scratchpad entry).
+- **The Fix (Option B - Production):** Set up Google Cloud Filestore or a compatible NFS server, configure the Filestore CSI driver, and define the custom storage class in your GKE runtime profile to support native ReadWriteMany volumes.
 :::
 
 Create the agent namespace:
@@ -236,8 +301,7 @@ gcloud secrets describe scion-gke-kubeconfig --project=$PROJECT_ID \
 
 :::danger[Critical Section]
 The majority of deployment failures trace back to missing IAM bindings. Every binding below
-was discovered through real deployment failures — several of them fail silently (especially
-the transport token minting binding in Section 2c).
+was discovered through real deployment failures.
 :::
 
 ### 2a. Create Service Accounts
@@ -267,8 +331,7 @@ SA_HUB="scion-hub-runner@$PROJECT_ID.iam.gserviceaccount.com"
 for ROLE in \
   roles/cloudsql.client \
   roles/storage.objectAdmin \
-  roles/secretmanager.secretAccessor \
-  roles/secretmanager.viewer \
+  roles/secretmanager.admin \
   roles/container.developer; do
 
   gcloud projects add-iam-policy-binding $PROJECT_ID \
@@ -283,8 +346,7 @@ done
 |------|---------|
 | `roles/cloudsql.client` | Connect to Cloud SQL via Unix socket |
 | `roles/storage.objectAdmin` | Read/write GCS bucket (templates, artifacts) |
-| `roles/secretmanager.secretAccessor` | Read secret values |
-| `roles/secretmanager.viewer` | List and describe secrets |
+| `roles/secretmanager.admin` | **Required.** Read, write, and create Secret Manager secrets (e.g. API keys saved by users via the Hub web UI). Traditional viewer/accessor roles are too restrictive and cause "Internal Error" failures when writing secrets. |
 | `roles/container.developer` | Dispatch agent pods to GKE, create K8s resources |
 
 ### 2c. Hub Runner SA — Token Creator on Transport SA
@@ -313,7 +375,21 @@ behalf of the transport SA (via `gcpTransportMinter.MintIDToken`). This token is
 `Authorization: Bearer` for all Hub API calls through IAP. The `serviceAccountTokenCreator`
 role authorizes the Hub SA to mint tokens as the transport SA.
 
-### 2d. Transport SA — IAP Access
+### 2d. Hub Runner SA — Token Creator on Itself
+
+The Hub generates signed GCS URLs for template files when dispatching agents. This operation requires the `iam.serviceAccounts.signBlob` permission, which requires the Hub Runner SA to have the Token Creator role on **itself**:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding \
+  $SA_HUB \
+  --member="serviceAccount:$SA_HUB" \
+  --role="roles/iam.serviceAccountTokenCreator" \
+  --project=$PROJECT_ID
+```
+
+Without this binding, template generation will fail with: `Permission 'iam.serviceAccounts.signBlob' denied on resource`.
+
+### 2e. Transport SA — IAP Access
 
 The transport SA's identity is used in the IAP token. IAP must allow this identity to access
 the Hub:
@@ -328,15 +404,13 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 ```
 
 :::note[Why `roles/iap.httpsResourceAccessor` and not just `roles/run.invoker`?]
-When Cloud Run has native IAP enabled (`run.googleapis.com/iap-enabled: 'true'`),
-`roles/run.invoker` alone is NOT sufficient. The request passes through the IAP layer first,
-which checks `roles/iap.httpsResourceAccessor`. Without it, GKE agents get
-`403: Access denied` even with a valid token.
+When Cloud Run has native IAP enabled, `roles/run.invoker` alone is NOT sufficient. The request passes through the IAP layer first, which checks `roles/iap.httpsResourceAccessor`. Without it, GKE agents get `403: Access denied` even with a valid token.
 :::
 
 Also grant Cloud Run invoker (needed for the underlying service):
 
 ```bash
+# Run this command AFTER the scion-hub service is created in Section 3
 gcloud run services add-iam-policy-binding scion-hub \
   --member="serviceAccount:$SA_TRANSPORT" \
   --role="roles/run.invoker" \
@@ -345,18 +419,17 @@ gcloud run services add-iam-policy-binding scion-hub \
 ```
 
 :::tip
-Run this command **after** the Hub service is created in Section 3. Come back to this step
-after the initial deploy.
+Make sure your deployer identity has `roles/run.admin` before running this, as it modifies service-level IAM.
 :::
 
-### 2e. Discord Runner SA — IAP Access
+### 2f. Discord Runner SA — IAP Access
 
 The Discord service calls Hub APIs through IAP (for registration, message routing, etc.):
 
 ```bash
 SA_DISCORD="scion-discord-runner@$PROJECT_ID.iam.gserviceaccount.com"
 
-# Cloud SQL access (for Discord's Cloud SQL proxy sidecar)
+# Cloud SQL access (for Discord's database interactions)
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$SA_DISCORD" \
   --role="roles/cloudsql.client" \
@@ -371,7 +444,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
   --quiet
 ```
 
-### 2f. GKE Workload Identity — Agent Pod Secret Access
+### 2g. GKE Workload Identity — Agent Pod Secret Access
 
 Agent pods need Workload Identity (WI) bindings to access Secret Manager for CSI-mounted
 secrets:
@@ -407,26 +480,6 @@ Pods dispatched to a different namespace (e.g. `default`) will fail with
 `PermissionDenied: secretmanager.versions.access denied`.
 :::
 
-### 2g. Deployer Roles (for the human running deploys)
-
-```bash
-# Replace with your own identity
-DEPLOYER="user:you@example.com"
-
-for ROLE in \
-  roles/run.admin \
-  roles/iam.serviceAccountUser \
-  roles/logging.viewer \
-  roles/iap.admin; do
-
-  gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="$DEPLOYER" \
-    --role="$ROLE" \
-    --condition=None \
-    --quiet
-done
-```
-
 ### IAM Verification
 
 ```bash
@@ -456,58 +509,64 @@ gcloud projects get-iam-policy $PROJECT_ID \
 |----------------|------|-------|---------|
 | `scion-hub-runner` | `roles/cloudsql.client` | Project | Cloud SQL connections |
 | `scion-hub-runner` | `roles/storage.objectAdmin` | Project | GCS bucket read/write |
-| `scion-hub-runner` | `roles/secretmanager.secretAccessor` | Project | Read secret values |
-| `scion-hub-runner` | `roles/secretmanager.viewer` | Project | List/describe secrets |
+| `scion-hub-runner` | `roles/secretmanager.admin` | Project | Read, write, create secret values |
 | `scion-hub-runner` | `roles/container.developer` | Project | GKE agent dispatch |
+| `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On itself** | Generate GCS signed URLs |
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On `scion-transport` SA** | Mint IAP tokens for agents |
 | `scion-transport` | `roles/iap.httpsResourceAccessor` | Project | Allow IAP access to Hub |
 | `scion-transport` | `roles/run.invoker` | Hub service | Allow Cloud Run invocation |
-| `scion-discord-runner` | `roles/cloudsql.client` | Project | Discord Cloud SQL proxy |
+| `scion-discord-runner` | `roles/cloudsql.client` | Project | Cloud SQL connections |
 | `scion-discord-runner` | `roles/iap.httpsResourceAccessor` | Project | Call Hub API through IAP |
 | GKE pods GSA | `roles/secretmanager.secretAccessor` | Project | CSI secret mounts |
 | GKE pods GSA | `roles/iam.workloadIdentityUser` | **On itself, for KSA** | WI auth for pods |
-| Deployer (human) | `roles/run.admin` | Project | Deploy Cloud Run services |
-| Deployer (human) | `roles/iam.serviceAccountUser` | Project | Attach SAs to services |
-| Deployer (human) | `roles/logging.viewer` | Project | Read deployment logs |
-| Deployer (human) | `roles/iap.admin` | Project | Configure IAP |
 
 ---
 
 ## 3. Hub Deployment (Cloud Run)
 
-### 3a. Configure IAP
+### 3a. Configure custom OAuth Client ID
 
-Before deploying, enable IAP on the Cloud Run service. IAP is configured through the
-Google Cloud Console:
+For programmatic access to an IAP-protected Cloud Run service (which our GKE agent pods require), you must set up a custom OAuth Client ID:
 
-1. Go to **Security > Identity-Aware Proxy** in the Cloud Console
-2. After the Hub service is deployed (step 3c), find `scion-hub` in the list
-3. Toggle IAP ON for the service
-4. Note the **OAuth Client ID** from the IAP configuration page — you need it for transport auth
+1. In the GCP Console, go to **APIs & Services > Credentials**.
+2. Click **Create Credentials** and select **OAuth client ID**.
+3. Set the Application type to **Web application**.
+4. Set the Name to `scion-hub-iap`.
+5. Under **Authorized redirect URIs**, add the following native IAP redirect path:
+   `https://iap.googleapis.com/v1/oauth/clientIds/YOUR_CLIENT_ID:handleRedirect` (Note: replace `YOUR_CLIENT_ID` with the actual client ID string generated after creation).
+6. Export the Client ID for subsequent steps:
+   ```bash
+   export IAP_CLIENT_ID="your-client-id-string.apps.googleusercontent.com"
+   ```
 
-```bash
-# After IAP is configured, export the OAuth client ID
-export IAP_CLIENT_ID="YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com"
-```
+---
 
-:::caution[IAP audience vs OAuth client ID]
-These are different values with different purposes:
+### 3b. Build Container Images
 
-- **IAP audience** (native path): `/projects/$PROJECT_NUMBER/locations/$REGION/services/scion-hub` — used in `proxy.iap.audience` for proxy auth
-- **OAuth client ID**: `$PROJECT_NUMBER-xxxx.apps.googleusercontent.com` — used in `transport.oidc_audience` for minting transport tokens
+#### Docker Build Chain Architecture
+Scion agent image building follows a strict dependency chain:
+$$\text{core-base} \longrightarrow \text{scion-base} \longrightarrow \text{harnesses (gemini-cli, etc.)}$$
 
-The proxy audience is the Cloud Run native resource path. The transport audience **must** be
-the OAuth client ID because that is what IAP validates in the Bearer token.
+1. **`core-base`:** Contains core tools (Go compiler, Git from source, unix packages, GCS FUSE).
+2. **`scion-base`:** Copies repository code (`cmd/`, `pkg/`, etc.) and builds the `scion` and `sciontool` binaries on top of `core-base`.
+3. **Harnesses:** Pulls `scion-base` and adds target agent packages (like `@google/gemini-cli`).
+
+#### Single-Architecture AMD64 Speed Up
+:::tip[Avoid Emulation Build Timeouts]
+The official `cloudbuild-scion-base.yaml` compiles multi-platform (`linux/amd64,linux/arm64`). Under Cloud Build, `arm64` compiles run under slow QEMU emulation on standard `amd64` machines, which **routinely times out after 30 minutes**. 
+Since GKE Autopilot runs on standard `amd64` nodes by default, you can completely bypass this limit and accelerate your build by building **amd64-only** images. 
+
+Additionally, because `gcloud builds submit --tag` does not support `--build-arg`, we must compile the dependent images using small, custom Cloud Build `--config` YAML files to feed the `BASE_IMAGE` build argument cleanly.
 :::
 
-### 3b. Build the Hub Image
-
+#### 1. Clone the repository
 ```bash
-# Clone and enter the repo
 git clone https://github.com/GoogleCloudPlatform/scion.git
 cd scion
+```
 
-# Build the Hub image using Cloud Build
+#### 2. Build the Hub Image
+```bash
 gcloud builds submit . \
   --tag="$IMAGE_REGISTRY/hub:latest" \
   --project=$PROJECT_ID \
@@ -515,47 +574,160 @@ gcloud builds submit . \
   --machine-type=e2-highcpu-8 \
   --quiet
 ```
-
 :::caution[Use `--ignore-file=.dockerignore`]
-The default `.gcloudignore` excludes `web/` frontend files. But the Hub Dockerfile is
-multi-stage — it builds the frontend and embeds it in the Go binary. Without
-`--ignore-file=.dockerignore`, the build succeeds but produces a Hub with missing web assets.
+The default `.gcloudignore` excludes the `web/` frontend directory. Because the Hub's Dockerfile compiles frontend assets and embeds them directly inside the Go binary, forgetting `--ignore-file=.dockerignore` will produce a Hub container missing its entire Web UI.
 :::
 
-### 3c. Build Agent Images
-
-Agent dispatch requires base and harness images in your registry:
-
+#### 3. Build the Core Base Image
 ```bash
-# Build scion-base image
-gcloud builds submit image-build/scion-base/ \
-  --tag="$IMAGE_REGISTRY/scion-base:latest" \
-  --project=$PROJECT_ID \
-  --quiet
-
-# Build scion-gemini-cli harness image
-gcloud builds submit harnesses/gemini-cli/ \
-  --tag="$IMAGE_REGISTRY/scion-gemini-cli:latest" \
-  --build-arg="BASE_IMAGE=$IMAGE_REGISTRY/scion-base:latest" \
+gcloud builds submit . \
+  --tag="$IMAGE_REGISTRY/core-base:latest" \
+  --dockerfile=image-build/core-base/Dockerfile \
   --project=$PROJECT_ID \
   --quiet
 ```
 
-:::note
-The `image_registry` value in settings.yaml must match the registry where you pushed agent
-images. If they don't match, agent dispatch fails with `docker.io/library/...` not found
-errors.
+#### 4. Build the Scion Base Image
+Create a single-arch temporary build file to inject the custom `BASE_IMAGE` cleanly:
+```bash
+cat <<EOF > /tmp/scion-base-build.yaml
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+    'build',
+    '--build-arg', 'BASE_IMAGE=$IMAGE_REGISTRY/core-base:latest',
+    '-t', '$IMAGE_REGISTRY/scion-base:latest',
+    '-f', 'image-build/scion-base/Dockerfile',
+    '.'
+  ]
+images:
+- '$IMAGE_REGISTRY/scion-base:latest'
+EOF
+
+gcloud builds submit . --config /tmp/scion-base-build.yaml --project=$PROJECT_ID --quiet
+rm /tmp/scion-base-build.yaml
+```
+
+#### 5. Build the Gemini-CLI Harness Image
+Create a single-arch temporary build file:
+```bash
+cat <<EOF > /tmp/gemini-cli-build.yaml
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+    'build',
+    '--build-arg', 'BASE_IMAGE=$IMAGE_REGISTRY/scion-base:latest',
+    '-t', '$IMAGE_REGISTRY/scion-gemini-cli:latest',
+    '-f', 'harnesses/gemini-cli/Dockerfile',
+    '.'
+  ]
+images:
+- '$IMAGE_REGISTRY/scion-gemini-cli:latest'
+EOF
+
+gcloud builds submit . --config /tmp/gemini-cli-build.yaml --project=$PROJECT_ID --quiet
+rm /tmp/gemini-cli-build.yaml
+```
+
+---
+
+### 3c. Configure and Store `settings.yaml`
+
+To eliminate extremely fragile shell escaping and prevent nested quotation failures, **do not embed settings.yaml within startup commands**. Instead, write a clean local `settings.yaml`, save it as a Secret Manager secret, and mount it natively as a file on Cloud Run.
+
+:::caution[No Cloud Run Profile Allowed]
+If the Hub is deployed on Cloud Run with GKE as the agent runtime, the `settings.yaml` **must NOT** include a Cloud Run (`cr`) runtime/profile block. Having both runtimes in the file causes transient routing issues where the broker incorrectly attempts to spin up agents via Cloud Run, outputting the error: `cloudrun: PullImage not yet implemented`. Keep the profile focused exclusively on Kubernetes.
 :::
+
+#### 1. Write the Configuration File
+Create a local `settings.yaml` file:
+
+```yaml
+schema_version: "1"                    # REQUIRED — must be first key
+image_registry: REGISTRY_PLACEHOLDER   # Overwritten with $IMAGE_REGISTRY
+active_profile: remote                 # Default dispatch runtime is GKE
+
+# === RUNTIME DEFINITIONS ===
+runtimes:
+  remote:
+    type: kubernetes
+    gke: true                          # Enables CSI Secret Manager mounts
+
+# === PROFILE MAPPINGS ===
+profiles:
+  remote:
+    runtime: remote
+
+# === SERVER CONFIGURATION ===
+server:
+  database:
+    driver: postgres
+    url: postgres://scion:DB_PASSWORD_PLACEHOLDER@/scionhub?host=/cloudsql/PROJECT_ID:REGION:scion-hub-db
+
+  auth:
+    mode: proxy
+    proxy:
+      provider: iap
+      iap:
+        audience: /projects/PROJECT_NUMBER/locations/REGION/services/scion-hub
+    transport:
+      mode: iap
+      oidc_audience: IAP_CLIENT_ID_PLACEHOLDER
+      platform_auth_sa: scion-transport@PROJECT_ID.iam.gserviceaccount.com
+
+  secrets:
+    backend: gcpsm
+    gcp_project_id: PROJECT_ID
+
+  hub:
+    admin_emails:
+      - your-admin@example.com          # Admin email addresses
+    hub_name: scion-hub-ha
+
+  storage:
+    provider: gcs
+    bucket: BUCKET_NAME_PLACEHOLDER
+
+  broker:
+    enabled: true
+    host: 127.0.0.1
+```
+
+Replace placeholders with your live values:
+```bash
+sed -e "s|REGISTRY_PLACEHOLDER|$IMAGE_REGISTRY|" \
+    -e "s|DB_PASSWORD_PLACEHOLDER|$DB_PASSWORD|" \
+    -e "s|PROJECT_ID|$PROJECT_ID|g" \
+    -e "s|PROJECT_NUMBER|$PROJECT_NUMBER|g" \
+    -e "s|REGION|$REGION|g" \
+    -e "s|IAP_CLIENT_ID_PLACEHOLDER|$IAP_CLIENT_ID|" \
+    -e "s|BUCKET_NAME_PLACEHOLDER|$BUCKET_NAME|" \
+    settings.yaml > /tmp/settings-final.yaml
+```
+
+:::note[Understanding admin_emails Settings Precedence]
+- **What it is:** `admin_emails` defines the list of Google/IAP accounts granted the Administrator role in the Hub Web UI, enabling them to configure projects and dispatches.
+- **The Precedence Trap:** Scion's settings follow a strict precedence order: **Embedded Defaults → YAML Config → PostgreSQL Operational Settings → Environment Variables**.
+- **The Friction:** When the Hub starts for the first time, YAML values are persisted directly to the Database. Any subsequent updates to `admin_emails` inside `settings.yaml` **will be silently ignored** because database-stored operational settings override them. 
+- **The Workaround:** Once the Hub database is initialized, you must add administrators through the Hub Admin Web UI/API, or execute a database update manually.
+:::
+
+#### 2. Create the Secret in Secret Manager
+```bash
+gcloud secrets create scion-hub-settings \
+  --data-file=/tmp/settings-final.yaml \
+  --project=$PROJECT_ID
+
+rm /tmp/settings-final.yaml
+```
+
+---
 
 ### 3d. Deploy the Hub to Cloud Run
 
-The Hub startup requires a `settings.yaml` file because several config fields use camelCase
-koanf tags that cannot be set via `SCION_SERVER_*` environment variables. Fields affected
-include `oidcAudience`, `platformAuthSA`, `gcpProjectId`, `hubName`, and `adminEmails`.
+We can now deploy the Hub to Cloud Run cleanly. Notice that we mount both the kubeconfig and the `settings.yaml` files as secrets directly under `/etc/scion/` and `/home/scion/.scion/`, keeping the start command extremely simple and robust.
 
 ```bash
-HUB_NAME="hub-$(date +%Y%m%d)-initial"
-
 gcloud run deploy scion-hub \
   --image="$IMAGE_REGISTRY/hub:latest" \
   --region=$REGION \
@@ -563,132 +735,145 @@ gcloud run deploy scion-hub \
   --service-account=scion-hub-runner@$PROJECT_ID.iam.gserviceaccount.com \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
   --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents" \
-  --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest" \
+  --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest,/home/scion/.scion/settings.yaml=scion-hub-settings:latest" \
   --min-instances=1 \
   --max-instances=3 \
   --cpu=1 \
   --memory=512Mi \
   --port=8080 \
-  --command="bash" \
-  --args="-c,mkdir -p \$HOME/.scion && printf 'schema_version: \"1\"\nimage_registry: $IMAGE_REGISTRY\nactive_profile: remote\nruntimes:\n  remote:\n    type: kubernetes\n    gke: true\n  cr:\n    type: cloudrun\n    cloudrun:\n      project: $PROJECT_ID\n      region: $REGION\nprofiles:\n  remote:\n    runtime: remote\n  cr:\n    runtime: cr\nserver:\n  database:\n    driver: postgres\n    url: postgres://scion:${DB_PASSWORD}@/scionhub?host=/cloudsql/$PROJECT_ID:$REGION:scion-hub-db\n  auth:\n    mode: proxy\n    proxy:\n      provider: iap\n      iap:\n        audience: /projects/$PROJECT_NUMBER/locations/$REGION/services/scion-hub\n    transport:\n      mode: iap\n      oidc_audience: $IAP_CLIENT_ID\n      platform_auth_sa: scion-transport@$PROJECT_ID.iam.gserviceaccount.com\n  secrets:\n    backend: gcpsm\n    gcp_project_id: $PROJECT_ID\n  hub:\n    admin_emails:\n      - your-admin@example.com\n    hub_name: $HUB_NAME\n  storage:\n    provider: gcs\n    bucket: $BUCKET_NAME\n  broker:\n    enabled: true\n    host: 127.0.0.1\n' > \$HOME/.scion/settings.yaml && exec /usr/local/bin/scion server start --hosted --enable-hub --enable-runtime-broker --enable-web --foreground --web-port 8080 --session-secret $SESSION_SECRET" \
+  --timeout=900 \
+  --command="/usr/local/bin/scion" \
+  --args="server,start,--hosted,--enable-hub,--enable-runtime-broker,--enable-web,--foreground,--web-port,8080,--session-secret,$SESSION_SECRET" \
   --no-allow-unauthenticated \
   --quiet
 ```
 
-:::danger[Critical settings.yaml requirements]
-1. **`schema_version: "1"` must be the first key.** Without it, the legacy loader silently drops `type: cloudrun` and the `cloudrun:` sub-block.
-2. **`image_registry` is root-level** (not under `server:`). If missing, agent dispatch returns 500.
-3. **`active_profile: remote`** (not `cr`). The `cr` profile dispatches agents to Cloud Run, not GKE.
-4. **Runtime key must not be named `cloudrun`** — koanf cannot parse `runtimes.cloudrun.cloudrun` (same key at two levels = silent nil sub-config). Use a short name like `cr`.
-5. **`gke: true`** enables Secrets Store CSI Driver path. Requires the CSI add-on on the cluster.
-6. **`mkdir -p $HOME/.scion`** must run before the server starts.
+:::caution[Cloud Run Timeout Warning]
+We explicitly set `--timeout=900` (15 minutes). When dispatching the very first agent, GKE Autopilot triggers node provisioning to scale up from 0 nodes, which routinely takes 5-10 minutes. The default Cloud Run timeout (300 seconds) will prematurely kill the request, return a `503 Service Unavailable`, and tear down the initiating container. Set the timeout to at least 900 seconds to prevent this.
 :::
 
-**Environment variables explained:**
+---
 
-| Env Var | Purpose |
-|---------|---------|
-| `SCION_DEPLOY=$(date +%s)` | Forces a new revision on redeploy (timestamp changes) |
-| `KUBECONFIG=/etc/scion/kubeconfig.yaml` | Points to the Secret Manager-mounted kubeconfig |
-| `SCION_K8S_NAMESPACE=scion-agents` | Tells the broker to dispatch pods to `scion-agents` namespace. Without this, pods go to `default` where the WI binding does not exist. |
+### 3e. Enable Cloud Run Native IAP
 
-### 3e. Enable IAP (if not already done)
-
-After the service is created, enable IAP:
-
-1. Go to **Cloud Console > Security > Identity-Aware Proxy**
-2. Find `scion-hub` and toggle IAP ON
-3. Add authorized users/groups as **IAP-Secured Web App User** (`roles/iap.httpsResourceAccessor`)
-
-Now go back and run the deferred IAM binding from Section 2d:
+Once the Hub service is deployed, activate Native IAP via the CLI:
 
 ```bash
+gcloud run services update scion-hub \
+  --iap=enabled \
+  --region=$REGION \
+  --project=$PROJECT_ID
+```
+
+#### Finalize Invoker Permissions
+Grant invoker permissions to both the `scion-transport` service account and the native IAP service agent so the authentication pipeline completes smoothly:
+
+```bash
+# Allow IAP service agent to invoke Cloud Run
 gcloud run services add-iam-policy-binding scion-hub \
+  --region=$REGION \
+  --project=$PROJECT_ID \
+  --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-iap.iam.gserviceaccount.com" \
+  --role="roles/run.invoker" \
+  --quiet
+
+# Allow scion-transport SA to invoke Cloud Run
+gcloud run services add-iam-policy-binding scion-hub \
+  --region=$REGION \
+  --project=$PROJECT_ID \
   --member="serviceAccount:scion-transport@$PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/run.invoker" \
-  --project=$PROJECT_ID \
-  --region=$REGION
+  --quiet
 ```
+
+---
 
 ### 3f. Verify Hub Health
 
+Retrieve your live Hub URL:
 ```bash
-# Check revision is serving
-gcloud run services describe scion-hub \
-  --region=$REGION --project=$PROJECT_ID \
-  --format="yaml(status.conditions)"
-# Expected: All conditions status: 'True' (Ready, ConfigurationsReady, RoutesReady)
-
-# Get the service URL
-HUB_URL=$(gcloud run services describe scion-hub \
+export HUB_URL=$(gcloud run services describe scion-hub \
   --region=$REGION --project=$PROJECT_ID \
   --format="value(status.url)")
 echo "Hub URL: $HUB_URL"
+```
 
-# Test IAP is working (unauthenticated request should be blocked)
+Verify that unauthenticated endpoints are successfully blocked by IAP:
+```bash
 curl -s -o /dev/null -w "%{http_code}" "$HUB_URL/"
 # Expected: 302 (redirect to Google sign-in) or 403 (IAP block)
 ```
 
-**Check startup logs for errors:**
-```bash
-gcloud logging read \
-  'resource.type="cloud_run_revision" AND resource.labels.service_name="scion-hub" AND severity>=ERROR' \
-  --project=$PROJECT_ID --limit=10 --freshness=5m \
-  --format="table(timestamp, textPayload)"
-```
+#### Verify authenticated `/health` check
+:::danger[Avoid /healthz Endpoints]
+Do **not** hit `$HUB_URL/healthz`. The HA Hub serves operational diagnostics strictly at `/health` (the legacy `/healthz` path returns a Google IAP 404 page, which can mislead administrators into thinking their entire IAP routing is broken).
+:::
 
-**Verify broker started correctly:**
-```bash
-gcloud logging read \
-  'resource.type="cloud_run_revision" AND resource.labels.service_name="scion-hub"' \
-  --project=$PROJECT_ID --limit=50 --freshness=5m \
-  --format="value(jsonPayload.message, textPayload)" \
-  | grep -i -E "broker|runtime|transport"
-```
-
-**Expected log lines (confirm all present):**
-```
-Runtime broker using runtime: kubernetes
-Starting Runtime Broker API server on 127.0.0.1:9800
-Runtime Broker API server starting
-Message broker started: fan-out with N spoke(s)
-```
-
-**Authenticated health check:**
 ```bash
 TOKEN=$(gcloud auth print-identity-token --audiences="$IAP_CLIENT_ID")
 
-curl -s "$HUB_URL/healthz" \
+curl -s "$HUB_URL/health" \
   -H "Authorization: Bearer $TOKEN"
 # Expected: {"status":"healthy",...}
 ```
-
-### Common Startup Failures
-
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `no supported container runtime found` | `~/.scion/` dir not created | Ensure startup command has `mkdir -p $HOME/.scion` |
-| `hosted HA deployment requires server.auth.transport.oidc_audience` | camelCase field set via env var | Move to settings.yaml (not env vars) |
-| `gcpsm backend requires a GCP project ID` | Same camelCase issue for `gcp_project_id` | Must be in settings.yaml |
-| `SQLSTATE 53300` (too many connections) | Other services holding DB connections | Scale Discord to min-instances=0 first |
-| `dial tcp: lookup scion-hub-db: no such host` | Missing `--add-cloudsql-instances` | Add the Cloud SQL instance flag |
 
 ---
 
 ## 4. Discord Service Deployment (Cloud Run)
 
-### 4a. Build Discord Image
+The Scion Discord service links Discord servers directly to the Hub API, enabling Slack/Discord-styled interactive chat dispatches.
+
+### 4a. Discord Bot Setup (Developer Portal)
+Before deploying, you must register a bot application with Discord:
+1. Navigate to the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Click **New Application** and choose a name (e.g. `scion-bot`).
+3. Under the **Bot** tab:
+   - Click **Reset Token** and copy the generated **Bot Token** (save this as `DISCORD_BOT_TOKEN`).
+   - Under **Privileged Gateway Intents**, enable **Presence Intent**, **Server Members Intent**, and **Message Content Intent** (required to read client messages).
+4. Under the **OAuth2** tab, note the **Client ID** (save this as `DISCORD_APPLICATION_ID`).
+5. Open your Discord client, enable developer mode (User Settings > Advanced > Developer Mode), right-click your Discord Server, and copy its ID (save this as `DISCORD_GUILD_IDS`).
+6. Generate the Bot Invite Link:
+   - Go to OAuth2 > URL Generator.
+   - Under Scopes, select `bot`.
+   - Under Bot Permissions, select `Send Messages`, `Read Message History`, and `View Channel`.
+   - Copy the generated URL at the bottom and load it in your browser to invite the bot to your target server.
+
+---
+
+### 4b. Build Discord Image
+Ensure the build context is set to the repo root (`.`) and not `extras/scion-discord/`. The Discord service depends on parent modules within the workspace directory, so building from the subdirectory will throw compilation errors.
 
 ```bash
-gcloud builds submit extras/scion-discord/ \
+gcloud builds submit . \
   --tag="$IMAGE_REGISTRY/discord:latest" \
+  --dockerfile=extras/scion-discord/Dockerfile \
   --project=$PROJECT_ID \
   --quiet
 ```
 
-### 4b. Deploy Discord Service
+---
 
+### 4c. Deploy Discord Service
+:::caution[gRPC Port Configuration]
+The Discord plugin is an internal gRPC service listening on port `50051` by default. Under Cloud Run, the TCP startup probe routes traffic to the container port (`8080` by default), which causes immediate startup probe crashes and deployment failures. 
+To resolve this:
+1. You must inject the environment variable `GRPC_PORT=8080` to instruct the service to bind to Cloud Run's port.
+2. You must enable HTTP2 support on Cloud Run using the `--use-http2` flag so gRPC traffic flows correctly.
+:::
+
+#### Required Environment Variables:
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | Cloud SQL PostgreSQL connection string |
+| `DISCORD_STANDALONE` | Instructs the plugin to run in standalone listener mode (`true`) |
+| `DISCORD_BOT_TOKEN` | Your secure Discord bot token |
+| `DISCORD_APPLICATION_ID` | Your Discord client/application ID |
+| `DISCORD_GUILD_IDS` | Comma-separated target Discord Guild (server) IDs |
+| `DISCORD_HUB_URL` | The fully qualified public URL of your Hub (`$HUB_URL`) |
+| `DISCORD_TRANSPORT_MODE` | Set to `iap` for Identity-Aware Proxy auth |
+| `DISCORD_TRANSPORT_AUDIENCE` | The OAuth client ID of the Hub (`$IAP_CLIENT_ID`) |
+
+#### Deployment Command:
 ```bash
 gcloud run deploy scion-discord \
   --image="$IMAGE_REGISTRY/discord:latest" \
@@ -696,33 +881,15 @@ gcloud run deploy scion-discord \
   --project=$PROJECT_ID \
   --service-account=scion-discord-runner@$PROJECT_ID.iam.gserviceaccount.com \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
+  --use-http2 \
+  --port=8080 \
+  --set-env-vars="GRPC_PORT=8080,DISCORD_STANDALONE=true,DATABASE_URL=postgres://scion:${DB_PASSWORD}@/scionhub?host=/cloudsql/$PROJECT_ID:$REGION:scion-hub-db,DISCORD_BOT_TOKEN=YOUR_BOT_TOKEN,DISCORD_APPLICATION_ID=YOUR_APP_ID,DISCORD_GUILD_IDS=YOUR_GUILD_ID,DISCORD_HUB_URL=$HUB_URL,DISCORD_TRANSPORT_MODE=iap,DISCORD_TRANSPORT_AUDIENCE=$IAP_CLIENT_ID" \
   --min-instances=1 \
   --max-instances=1 \
   --cpu=1 \
   --memory=512Mi \
-  --port=8080 \
   --no-allow-unauthenticated \
   --quiet
-```
-
-:::note
-Keep `min-instances=1` for Discord — Discord bots need persistent connections. Cold-start
-timeouts (15-30s) can cause setup commands to time out.
-:::
-
-### 4c. Verify Discord
-
-```bash
-gcloud run services describe scion-discord \
-  --region=$REGION --project=$PROJECT_ID \
-  --format="yaml(status.conditions)"
-# Expected: All conditions status: 'True'
-
-# Check for errors
-gcloud logging read \
-  'resource.type="cloud_run_revision" AND resource.labels.service_name="scion-discord" AND severity>=ERROR' \
-  --project=$PROJECT_ID --limit=10 --freshness=5m \
-  --format="table(timestamp, textPayload)"
 ```
 
 ---
@@ -733,8 +900,8 @@ By this point you should have:
 - GKE Autopilot cluster with Secret Manager CSI add-on (Section 1d)
 - `scion-agents` namespace created (Section 1d)
 - Kubeconfig in Secret Manager (Section 1e)
-- Workload Identity binding (Section 2f)
-- Hub deployed with `gke: true` and `SCION_K8S_NAMESPACE=scion-agents` (Section 3d)
+- Workload Identity binding (Section 2g)
+- Hub deployed with GKE support (Section 3d)
 
 ### 5a. Verify GKE Configuration
 
@@ -754,7 +921,7 @@ gcloud iam service-accounts get-iam-policy $GKE_GSA --project=$PROJECT_ID
 
 ### 5b. Settings.yaml Reference for GKE Dispatch
 
-The key settings.yaml sections for GKE:
+Our settings.yaml only exposes GKE (remote) to ensure zero profile/runtime resolution conflicts:
 
 ```yaml
 schema_version: "1"
@@ -765,18 +932,10 @@ runtimes:
   remote:
     type: kubernetes
     gke: true          # true = CSI Secret Manager mounts
-                       # false = K8s native Secrets (no CSI needed)
-  cr:
-    type: cloudrun
-    cloudrun:
-      project: your-project
-      region: us-central1
 
 profiles:
   remote:
     runtime: remote    # Maps to runtimes.remote (kubernetes)
-  cr:
-    runtime: cr        # Maps to runtimes.cr (cloudrun)
 ```
 
 | `gke` Setting | Secret Storage | Requires CSI Add-on | Secret Values in Pod Spec |
@@ -806,20 +965,6 @@ Understanding this flow is essential for debugging:
 **If step 2 fails silently** (missing IAM binding): `SCION_TRANSPORT_TOKEN` is empty →
 sciontool skips OIDC → IAP rejects with `"Invalid IAP credentials: empty token"`.
 
-**Critical env vars injected into GKE agent pods:**
-
-| Var | Expected Value | If Wrong |
-|-----|---------------|----------|
-| `SCION_HUB_ENDPOINT` | Hub Cloud Run URL | Agent cannot reach Hub |
-| `SCION_TRANSPORT_MODE` | `iap` | Will not use IAP auth |
-| `SCION_TRANSPORT_TOKEN` | Non-empty JWT | Hub did not mint token — check IAM |
-| `SCION_TRANSPORT_AUDIENCE` | OAuth client ID | Token minted with wrong audience |
-| `SCION_METADATA_MODE` | `block` | sciontool may try GCE metadata fallback |
-
-:::tip[Automatic Hub Endpoint Derivation]
-In hosted HA deployments with Google IAP authentication enabled, the Hub automatically derives its public endpoint (`SCION_HUB_ENDPOINT` / Cloud Run URL) from the configured `auth.proxy.iap.audience` URL instead of using a hardcoded fallback. This ensures GKE-dispatched agents can always resolve and reach the Hub out-of-the-box.
-:::
-
 ---
 
 ## 6. First Agent Test (E2E Verification)
@@ -831,7 +976,7 @@ In hosted HA deployments with Google IAP authentication enabled, the Hub automat
 TOKEN=$(gcloud auth print-identity-token --audiences="$IAP_CLIENT_ID")
 
 # Check Hub is reachable
-curl -s "$HUB_URL/healthz" -H "Authorization: Bearer $TOKEN"
+curl -s "$HUB_URL/health" -H "Authorization: Bearer $TOKEN"
 # Expected: {"status":"healthy",...}
 
 # Dispatch a test agent
@@ -876,30 +1021,9 @@ Heartbeat succeeded
 Transport token refresh scheduled
 ```
 
-**Failure indicators:**
-
-| Log Line | Root Cause | Fix |
-|----------|-----------|-----|
-| `Heartbeat failed: ... empty token` | `SCION_TRANSPORT_TOKEN` not set | Check `serviceAccountTokenCreator` binding (Section 2c) |
-| `Heartbeat failed: ... 403: Access denied` | Transport SA lacks IAP access | Grant `iap.httpsResourceAccessor` (Section 2d) |
-| `Heartbeat failed: dial tcp 127.0.0.1:8080: connection refused` | Hub endpoint is localhost | Update Scion to latest |
-| `FailedMount: driver name secrets-store.csi.x-k8s.io not found` | Wrong CSI driver name | Update Scion to latest |
-| `PermissionDenied: secretmanager.versions.access denied` | WI binding missing or wrong namespace | Check WI binding and `SCION_K8S_NAMESPACE` (Section 2f) |
-
-### 6d. E2E Success Criteria
-
-All of these must be true for a successful deployment:
-
-- [ ] Hub healthz returns 200 with IAP token
-- [ ] Agent pod created in `scion-agents` namespace
-- [ ] Pod reaches `Running` state
-- [ ] `SCION_TRANSPORT_TOKEN` is non-empty in pod env
-- [ ] Heartbeat succeeds (check pod logs)
-- [ ] Agent appears in Hub agent list (`GET /api/v1/agents`)
-
 ---
 
-## 7. Maintenance
+## 7. Maintenance & Troubleshooting
 
 ### 7a. Redeploy Checklist
 
@@ -930,10 +1054,6 @@ When redeploying the Hub with a new image:
    # CORRECT — preserves all other env vars:
    gcloud run services update scion-hub \
      --update-env-vars="SCION_DEPLOY=$(date +%s)" ...
-
-   # WRONG — wipes all other env vars:
-   # gcloud run services update scion-hub \
-   #   --set-env-vars="SCION_DEPLOY=$(date +%s)" ...
    ```
 
 5. **Restore Discord to min-instances=1**:
@@ -942,54 +1062,6 @@ When redeploying the Hub with a new image:
      --min-instances=1 --max-instances=1 \
      --region=$REGION --project=$PROJECT_ID --quiet
    ```
-
-### 7b. Database Reset (Clean Deploy)
-
-For a fresh schema, drop and recreate the database. Ent AutoMigrate creates all tables on
-first boot.
-
-```bash
-# Start proxy if not running
-cloud-sql-proxy $PROJECT_ID:$REGION:scion-hub-db --port 5433 &
-
-# Drop and recreate
-PGPASSWORD=$DB_PASSWORD psql -h 127.0.0.1 -p 5433 -U scion -d postgres \
-  -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='scionhub' AND pid <> pg_backend_pid();" \
-  -c "DROP DATABASE IF EXISTS scionhub;" \
-  -c "CREATE DATABASE scionhub OWNER scion;"
-```
-
-### 7c. GKE Agent Pod Cleanup
-
-Stale agent pods may accumulate. The Hub's stale sweep marks agents as offline (typically
-within 2-3 minutes of heartbeat failure), but pods may linger:
-
-```bash
-# Delete completed/failed pods
-kubectl delete pods -n scion-agents --field-selector=status.phase=Succeeded
-kubectl delete pods -n scion-agents --field-selector=status.phase=Failed
-```
-
-### 7d. Updating the Kubeconfig
-
-If the GKE cluster is recreated or credentials rotate:
-
-```bash
-KUBECONFIG=/tmp/gke-kubeconfig.yaml gcloud container clusters get-credentials \
-  scion-agents --region=$GKE_REGION --project=$PROJECT_ID
-
-# Update the secret (creates a new version)
-gcloud secrets versions add scion-gke-kubeconfig \
-  --data-file=/tmp/gke-kubeconfig.yaml \
-  --project=$PROJECT_ID
-
-# Force Hub to pick up new secret version
-gcloud run services update scion-hub \
-  --update-env-vars="SCION_DEPLOY=$(date +%s)" \
-  --region=$REGION --project=$PROJECT_ID --quiet
-
-rm /tmp/gke-kubeconfig.yaml
-```
 
 ---
 
@@ -1005,20 +1077,12 @@ active_profile: remote                 # Default dispatch runtime
 runtimes:
   remote:
     type: kubernetes
-    gke: true                          # CSI secret mounts (true) or K8s Secrets (false)
-    # context: my-context              # Optional: kubeconfig context name (for multi-cluster)
-  cr:
-    type: cloudrun                     # DO NOT name this key "cloudrun"
-    cloudrun:
-      project: your-project
-      region: us-central1
+    gke: true                          # CSI secret mounts
 
 # === PROFILE MAPPINGS ===
 profiles:
   remote:
     runtime: remote
-  cr:
-    runtime: cr
 
 # === SERVER CONFIGURATION ===
 server:
@@ -1044,7 +1108,7 @@ server:
   hub:
     admin_emails:
       - admin@example.com
-    hub_name: hub-20260723-initial
+    hub_name: hub-ha-prod
 
   storage:
     provider: gcs
@@ -1055,30 +1119,29 @@ server:
     host: 127.0.0.1
 ```
 
+---
+
 ## Appendix B: Troubleshooting Quick Reference
 
-### IAP Token for Manual API Calls
-
+### 1. IAP Token for Manual API Calls
 ```bash
 IAP_CLIENT_ID="your-oauth-client-id.apps.googleusercontent.com"
 TOKEN=$(gcloud auth print-identity-token --audiences="$IAP_CLIENT_ID")
 ```
 
-### JWT Token Debugging
-
+### 2. JWT Token Debugging
 ```bash
 # Decode a JWT to inspect claims
 echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool
 # Check: aud, iss, email, exp
 ```
 
-### Hub API Endpoints
-
+### 3. Hub API Endpoints
 ```bash
 HUB="https://scion-hub-PROJECT_NUMBER.REGION.run.app"
 
 # Health check
-curl -s "$HUB/healthz" -H "Authorization: Bearer $TOKEN"
+curl -s "$HUB/health" -H "Authorization: Bearer $TOKEN"
 
 # List agents
 curl -s "$HUB/api/v1/agents" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
@@ -1090,15 +1153,30 @@ curl -s -X POST "$HUB/api/v1/agents" \
   -d '{"name":"test-1","template":"gemini-cli","task":"echo hello"}'
 ```
 
-### Common Log Patterns
+### 4. Diagnostic Log Patterns & Opaque Failures
 
-| Log Line | Meaning | Action |
-|----------|---------|--------|
-| `Heartbeat failed: ... empty token` | Transport token not injected | Check tokenCreator IAM (Section 2c) |
-| `Heartbeat failed: ... 403: Access denied` | Transport SA lacks IAP role | Grant iap.httpsResourceAccessor (Section 2d) |
-| `dial tcp 127.0.0.1:8080: connection refused` | Hub endpoint is localhost | Update to latest Scion |
-| `driver name secrets-store.csi.x-k8s.io not found` | Wrong CSI driver name | Update to latest Scion |
-| `PermissionDenied: secretmanager.versions.access` | WI binding missing | Check Section 2f |
-| `Runtime broker using runtime: kubernetes` | Hub started correctly with GKE | All good |
-| `Heartbeat succeeded` | Agent auth working | All good |
-| `SQLSTATE 53300` | Too many DB connections | Scale dependent services first |
+#### Volume Provisioning PVC Failure (`pods "..." not found`)
+- **Symptoms:** Handlers return a generic dispatch timeout: `failed to launch container: pods "test-project--test22" not found`.
+- **Cause:** Your Hub project includes a default `scratchpad` shared directory, which mounts a `ReadWriteMany` PVC. If GKE Autopilot only has the default `standard-rwo` storage class (which only supports `ReadWriteOnce`), GKE Autopilot fails to bind the volume and immediately destroys the pod.
+- **Diagnosis:** Run `kubectl get pvc -n scion-agents` and `kubectl describe pvc -n scion-agents`. Look for: `VolumeCapabilities is invalid: specified multi writer with mount access type`.
+- **Resolution:** Delete/disable the `scratchpad` shared directory from your project settings in the Hub UI, or provision a Google Cloud Filestore backend to support ReadWriteMany PVC mounts.
+
+#### Pull Image Not Yet Implemented (`cloudrun: PullImage not yet implemented`)
+- **Symptoms:** The Hub returns a `PullImage not yet implemented` error.
+- **Cause:** The runtime broker has incorrectly attempted to route your dispatch request to a Cloud Run (`cr`) backend instead of your GKE (`remote`) backend.
+- **Resolution:** Remove any `cr` / `cloudrun` profile or runtime mappings from your `settings.yaml` secret in Secret Manager, leaving GKE (`remote`) as the sole configured profile.
+
+#### Administrative Email Changes Ignored
+- **Symptoms:** You updated `admin_emails` in `settings.yaml` and redeployed, but the added user accounts still cannot perform administrative tasks in the Hub UI.
+- **Cause:** Once the Hub database is initially booted, all YAML-configured Hub settings are written to the database. These database settings permanently supersede future YAML changes.
+- **Resolution:** Explicitly update the settings through the Hub Admin UI, or manually modify the `settings` table inside your Cloud SQL PostgreSQL database.
+
+#### Standard Error Resolution Table
+| Log Line | Root Cause | Fix |
+|----------|-----------|-----|
+| `Heartbeat failed: ... empty token` | Transport token not injected | Check `serviceAccountTokenCreator` IAM (Section 2c) |
+| `Heartbeat failed: ... 403: Access denied` | Transport SA lacks IAP role | Grant `iap.httpsResourceAccessor` (Section 2e) |
+| `dial tcp 127.0.0.1:8080: connection refused` | Hub endpoint is localhost | Upgrade Scion CLI to the latest version |
+| `driver name secrets-store.csi.x-k8s.io not found` | Wrong CSI driver name on GKE | GKE requires `secrets-store-gke.csi.k8s.io`. Ensure `gke: true` is configured in `settings.yaml`. |
+| `PermissionDenied: secretmanager.versions.access` | WI binding missing | Check GKE Workload Identity bindings (Section 2g) |
+| `SQLSTATE 53300` | Too many DB connections | Scale dependent services (like Discord) to 0 instances before upgrading. |
