@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -980,8 +981,63 @@ func TestSendGroupMessageViaHub(t *testing.T) {
 		assert.Equal(t, "group hello", s.Message)
 		require.NotNil(t, s.StructuredMsg)
 		assert.NotEmpty(t, s.StructuredMsg.Metadata["group_id"])
+		// Verify group-set type and recipients are set
+		assert.Equal(t, messages.TypeGroupSet, s.StructuredMsg.Type, "group message type should be group-set")
+		assert.NotEmpty(t, s.StructuredMsg.Recipients, "group message should have recipients populated")
+		assert.True(t, messages.IsGroupRecipient(s.StructuredMsg.Recipients), "recipients should be a valid group[] string")
 	}
 	assert.ElementsMatch(t, []string{"agent-a", "agent-b"}, names)
+}
+
+func TestSendGroupMessageViaHub_UserRecipientType(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-group-user"
+	t.Setenv("SCION_AGENT_NAME", "my-agent")
+
+	var receivedMsg *hubclient.OutboundMessageRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/outbound-message"):
+			var msg hubclient.OutboundMessageRequest
+			_ = json.NewDecoder(r.Body).Decode(&msg)
+			mu.Lock()
+			receivedMsg = &msg
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientUser, Name: "alice"},
+	}
+
+	err = sendGroupMessageViaHub(hubCtx, recipients, "hello group", false)
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotNil(t, receivedMsg)
+	assert.Equal(t, messages.TypeGroupSet, receivedMsg.Type, "user recipient in group should get type group-set")
+	assert.NotEmpty(t, receivedMsg.Metadata["recipients"], "user recipient in group should have recipients in metadata")
 }
 
 func TestSendGroupMessageViaHub_RequiresHub(t *testing.T) {

@@ -241,6 +241,37 @@ func TestStructuredMessage_ValidateChannel(t *testing.T) {
 	})
 }
 
+func TestNewGroupSet(t *testing.T) {
+	recipients := "group[user:alice,agent:coder,agent:reviewer]"
+	m := NewGroupSet("user:alice", "agent:coder", "hello team", recipients)
+	if m.Version != Version {
+		t.Errorf("version = %d, want %d", m.Version, Version)
+	}
+	if m.Type != TypeGroupSet {
+		t.Errorf("type = %q, want %q", m.Type, TypeGroupSet)
+	}
+	if m.Sender != "user:alice" {
+		t.Errorf("sender = %q, want %q", m.Sender, "user:alice")
+	}
+	if m.Recipient != "agent:coder" {
+		t.Errorf("recipient = %q, want %q", m.Recipient, "agent:coder")
+	}
+	if m.Msg != "hello team" {
+		t.Errorf("msg = %q, want %q", m.Msg, "hello team")
+	}
+	if m.Timestamp == "" {
+		t.Error("timestamp should be set")
+	}
+	if m.Recipients != recipients {
+		t.Errorf("recipients = %q, want %q", m.Recipients, recipients)
+	}
+
+	// Verify the message validates successfully
+	if err := m.Validate(); err != nil {
+		t.Errorf("unexpected validation error: %v", err)
+	}
+}
+
 func TestNewInstruction(t *testing.T) {
 	m := NewInstruction("user:alice", "agent:dev", "do something")
 	if m.Version != Version {
