@@ -291,7 +291,8 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 	}
 
 	// Handle @filename prefix for file secrets: read file content and base64-encode
-	if strings.HasPrefix(value, "@") {
+	isFileValue := strings.HasPrefix(value, "@")
+	if isFileValue {
 		filePath := value[1:]
 		// Expand ~ in source file path for reading
 		if strings.HasPrefix(filePath, "~/") {
@@ -362,6 +363,13 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		Type:         secretType,
 		Target:       secretTarget,
 		AllowProgeny: secretAllowProgeny,
+	}
+
+	// Plaintext values (not from @file syntax) must be sent with encoding "raw"
+	// so the server stores them as-is instead of attempting base64-decode.
+	// File values are already base64-encoded above and use the server's default.
+	if !isFileValue {
+		req.Encoding = "raw"
 	}
 
 	resp, err := client.Secrets().Set(ctx, key, req)
