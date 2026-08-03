@@ -1572,6 +1572,11 @@ func TestExtractMentions_Basic(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "double at with name",
+			text: "hey @@bob check this",
+			want: []string{"@bob"},
+		},
+		{
 			name: "email address not treated as mention",
 			text: "send to user@example.com",
 			want: nil,
@@ -1982,6 +1987,7 @@ func TestCCFlagValidation(t *testing.T) {
 		raw       bool
 		userRecip bool
 		in        string
+		at        string
 		wantErr   string
 	}{
 		{
@@ -2009,9 +2015,15 @@ func TestCCFlagValidation(t *testing.T) {
 			wantErr:   "--cc cannot be used with user recipients",
 		},
 		{
-			name:    "cc with scheduling",
+			name:    "cc with --in scheduling",
 			cc:      "agent-a",
 			in:      "5m",
+			wantErr: "--cc cannot be combined with --in or --at",
+		},
+		{
+			name:    "cc with --at scheduling",
+			cc:      "agent-a",
+			at:      "2026-01-01 12:00",
 			wantErr: "--cc cannot be combined with --in or --at",
 		},
 	}
@@ -2023,12 +2035,14 @@ func TestCCFlagValidation(t *testing.T) {
 			origAll := msgAll
 			origRaw := msgRaw
 			origIn := msgIn
+			origAt := msgAt
 			defer func() {
 				msgCC = origCC
 				msgBroadcast = origBroadcast
 				msgAll = origAll
 				msgRaw = origRaw
 				msgIn = origIn
+				msgAt = origAt
 			}()
 
 			msgCC = tc.cc
@@ -2036,6 +2050,7 @@ func TestCCFlagValidation(t *testing.T) {
 			msgAll = tc.all
 			msgRaw = tc.raw
 			msgIn = tc.in
+			msgAt = tc.at
 
 			var args []string
 			if tc.broadcast || tc.all {
