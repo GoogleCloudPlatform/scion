@@ -808,10 +808,15 @@ func (h *CommandHandler) HandleInfo(s *discordgo.Session, i *discordgo.Interacti
 			infoParentID, ok := threadParentID(s, i.ChannelID)
 			if !ok {
 				h.log.Error("Failed to resolve channel details for info", "channel_id", i.ChannelID)
+				// Gracefully degrade: show channel-level default only. Unlike HandleDefault
+				// and HandleStatus which abort on failure, /scion info is best-effort display
+				// and partial info is still useful.
 			}
 			if infoParentID != "" {
 				threadDefault, tdErr := h.store.GetThreadDefault(ctx, link.ChannelID, i.ChannelID)
-				if tdErr == nil && threadDefault != "" {
+				if tdErr != nil {
+					h.log.Error("Failed to get thread default for info", "error", tdErr)
+				} else if threadDefault != "" {
 					sb.WriteString(fmt.Sprintf("\n**Thread default agent:** %s", threadDefault))
 				}
 				// Show channel default as context (it's the fallback)
