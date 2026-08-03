@@ -783,6 +783,38 @@ func TestGCPSA_ProjectOwnerCanAddMembers(t *testing.T) {
 		"project owner should be able to add members to project group; got: %s", rec.Body.String())
 }
 
+func TestVerifyGCPServiceAccount_NoTokenGenerator_Returns503(t *testing.T) {
+	srv, s := testServer(t) // no token generator configured
+	projectID := createTestProjectForSA(t, srv, s)
+
+	// Create a SA to verify
+	body := map[string]string{
+		"email":     "agent@my-project.iam.gserviceaccount.com",
+		"projectId": "my-project",
+	}
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID), body)
+	require.Equal(t, http.StatusCreated, rec.Code, "create SA: %s", rec.Body.String())
+
+	var sa store.GCPServiceAccount
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
+
+	// Attempt to verify — should fail with 503 because no token generator
+	rec = doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s/verify", projectID, sa.ID), nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"verify without token generator should return 503; got: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "gcp_not_configured", errResp.Error.Code)
+
+	// Verify the SA was NOT marked as Verified=true
+	storedSA, err := s.GetGCPServiceAccount(context.Background(), sa.ID)
+	require.NoError(t, err)
+	assert.False(t, storedSA.Verified, "SA should NOT be marked as verified when token generator is nil")
+}
+
 func TestProjectIDFromServiceAccountEmail(t *testing.T) {
 	tests := []struct {
 		email string
