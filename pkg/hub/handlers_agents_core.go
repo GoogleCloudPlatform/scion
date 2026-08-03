@@ -396,6 +396,13 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Reject agent creation in template projects
+	if project.IsTemplate() {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"cannot create agents in a template project", nil)
+		return
+	}
+
 	// Resolve the runtime broker
 	runtimeBrokerID, err := s.resolveRuntimeBroker(ctx, w, req.RuntimeBrokerID, project)
 	if err != nil {

@@ -616,6 +616,76 @@ func TestProjectClone_ConcurrentClones(t *testing.T) {
 	assert.NotEqual(t, clone1.Slug, clone2.Slug)
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// AsTemplate Tests
+// ──────────────────────────────────────────────────────────────────────
+
+func TestProjectClone_AsTemplate_AdminOnly(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:         api.NewUUID(),
+		Name:       "Template Source",
+		Slug:       "template-source",
+		Visibility: store.VisibilityPrivate,
+		OwnerID:    DevUserID,
+		CreatedBy:  DevUserID,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Clone with asTemplate: true (dev user is admin)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone",
+		map[string]interface{}{"name": "My Template", "asTemplate": true})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+	// Assert clone has scion.io/template: "true" label
+	assert.Equal(t, "true", clone.Labels[store.LabelTemplate])
+
+	// Assert clone visibility is "team"
+	assert.Equal(t, store.VisibilityTeam, clone.Visibility)
+}
+
+func TestProjectClone_AsTemplate_ScionIOLabelsStripped_WhenNoAsTemplate(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create source with scion.io/template label
+	project := &store.Project{
+		ID:         api.NewUUID(),
+		Name:       "Existing Template",
+		Slug:       "existing-template",
+		Visibility: store.VisibilityTeam,
+		OwnerID:    DevUserID,
+		CreatedBy:  DevUserID,
+		Labels: map[string]string{
+			store.LabelTemplate: "true",
+			"team":              "backend",
+		},
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Clone without asTemplate — should strip scion.io/* labels
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone",
+		map[string]string{"name": "Normal Project"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+	// Assert result has NO scion.io/template label (stripped by existing logic)
+	assert.NotEqual(t, "true", clone.Labels[store.LabelTemplate])
+
+	// Assert non-system label IS preserved
+	assert.Equal(t, "backend", clone.Labels["team"])
+
+	// Assert visibility resets to private (not inherited from source)
+	assert.Equal(t, store.VisibilityPrivate, clone.Visibility)
+}
+
 func TestProjectClone_StorageFilesCopied(t *testing.T) {
 	srv, s := testServer(t)
 	src := createSourceProject(t, srv, s)
