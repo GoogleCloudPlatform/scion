@@ -162,6 +162,62 @@ user-configurable. Auto-suspend is a Hub-driven behavior and depends on the
 Hub's scheduler being operational.
 :::
 
+---
+
+## Troubleshooting & Diagnostics
+
+Most stuck, stalled, or failing agents are recoverable without deleting and recreating them. Recreating an agent should be a last resort, as it destroys unpushed working tree files and terminal history. 
+
+Always start by running `scion look <agent-name>` to inspect the active screen state and `scion logs <agent-name>` to review internal telemetry before performing recovery.
+
+### 1. Common Stuck States & Recovery (Triage Table)
+
+| Symptom | Probable Cause | Correct Recovery Action |
+|---|---|---|
+| **Transient API errors** in logs | LLM provider rate-limits, quotas, or minor timeouts. | Send a wake-up command: `scion message <agent-name> "continue"`. Do *not* recreate the agent. |
+| **`LIMITS_EXCEEDED`** state | The agent reached its configured turn, model call, or duration ceiling. | Send a continue command: `scion message <agent-name> "continue"`. This clears the ceiling for another cycle. |
+| **Cryptographic primitive error** | The Hub regenerated its signing keys (e.g., on restart) or there is a key mismatch in a multi-replica deployment. | Send `scion message <agent-name> "continue"`. Message delivery does not rely on the agent's own token. If looping, contact the operator: the Hub's `SharedSigningSecret` (`SESSION_SECRET`) must be pinned in the deploy config. |
+| **Deadlocked token refresh** (401 loops in logs) | The agent's token expired and its automatic refresh loop deadlocked. | Try sending `scion message <agent-name> "continue"`. If this has no effect, recreate the agent. |
+| **Phase `created` / lastSeen zero** for 5+ minutes | The agent creation timed out or failed to schedule. | The system is likely under heavy resource pressure. Wait a few minutes. If still stuck, delete and recreate. **To prevent:** reduce concurrent agent starts. |
+| **Start fails with `no_runtime_broker` (422)** | Temporary connection issue after a system restart or project reconnect. | Wait 30–60 seconds and try starting again. If persistent, verify broker status with `scion broker status`. |
+| **Split-Brain Configuration** (git project ignore settings) | Config files are loading incorrectly due to overlapping global vs. project settings. | Run `scion config dir` to see the effective config path. Ensure the merge chain matches: `defaults → global → in-repo → external → environment`. |
+| **Interactive prompt blocking** | The agent's harness is stuck waiting for an unhandled prompt (e.g. yes/no query). | Send the dismissive keystroke raw to the terminal: `scion message <agent-name> --raw "ENTER"` (or `"y"`, etc.). |
+
+---
+
+## Deletion Authority & Hierarchical Teardown
+
+`scion delete <agent-name> --non-interactive` immediately reclaims container resources. Since an agent's true deliverable is its **artifact** (pushed commits, opened PRs, files written to a shared volume), **deleting a completed agent is the default, recommended clean-up path.**
+
+However, to prevent premature deletion of agents with active or pending tasks, strict teardown guidelines must be followed.
+
+### 1. Who May Authorize Deletion
+
+| Agent Role | Authorized to Delete | Allowed Timing |
+|---|---|---|
+| **Worker** (Developer, Reviewer) | The agent's creator or supervisor. | Immediately once the output has been accepted and verified. |
+| **Investigator / Architect** | The agent's creator or supervisor. | **Only after all questions to humans are answered** and the investigation is explicitly concluded. |
+| **Project Initiator** (The very first agent in a project) | **Explicit human instruction only.** | Initiators carry project continuity from inception through closure and must survive worker cycles. |
+| **Project Lead / Coordinator** | **Explicit human instruction naming the workstream.** | Only when a human operator commands to close down that specific workstream. |
+
+### 2. Hierarchical (Bottom-Up) Teardown
+
+When cleaning up a complex multi-agent hierarchy, teardown must proceed **bottom-up** to avoid leaving orphaned containers running:
+
+1. The parent orchestrator learns its goal is reached and notifies the child sub-agents.
+2. The child sub-agents finish their current cycle, push their work, and signal completion.
+3. The parent orchestrator deletes the child worker agents.
+4. The parent orchestrator confirms its entire subtree is deleted and exits.
+5. The human operator or higher-level parent deletes the parent orchestrator.
+
+### 3. Safety Rules for Cleanup
+
+1. **Completion is not Deletion**: A completed task means the work is finished, not that the agent should be deleted. The user or coordinator may want to assign a follow-up task.
+2. **Unanswered Questions block Deletion**: If an agent has raised an open, unanswered question to a user, it **cannot** be deleted.
+3. **Commit is not Push**: Never delete an agent with unpushed work. Always verify that all local commits have been pushed to the remote branch, and any local deliverables have been copied to shared directories or volumes.
+
+---
+
 ## Runtime caveats
 
 Session continuation works only when the agent's **home directory** — where the
