@@ -240,6 +240,13 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// Notifications — always set from snapshot so an explicit empty DB
 	// value overrides file-loaded channels.
 	resp.Server.NotificationChannels = snap.NotificationChannels
+
+	// Auto-expose ports
+	if snap.AutoExposePortsEnabled != nil {
+		resp.AutoExposePorts = &config.AutoExposePortsSettings{
+			Enabled: snap.AutoExposePortsEnabled,
+		}
+	}
 }
 
 // buildSectionMetadata reads the OperationalSettings cache to determine
@@ -659,6 +666,10 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		keys = append(keys, "default_thinking_level")
 	}
 
+	if req.AutoExposePorts != nil {
+		keys = append(keys, "auto_expose_ports.enabled")
+	}
+
 	if req.Telemetry != nil {
 		keys = append(keys, "telemetry.enabled")
 	}
@@ -1012,6 +1023,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			d.PrivateKeyPath = ga.PrivateKeyPath
 		}
 		doc = d
+
+	case "auto_expose_ports":
+		if req.AutoExposePorts != nil {
+			doc = req.AutoExposePorts
+		} else {
+			return nil, nil
+		}
 
 	case "notifications":
 		d := &opsettings.NotificationsSettings{}

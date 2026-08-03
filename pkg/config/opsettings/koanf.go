@@ -104,6 +104,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.github_app.installation_url": "installation_url",
 		"server.github_app.private_key_path": "private_key_path",
 	},
+	"auto_expose_ports": {
+		"auto_expose_ports.enabled": "enabled",
+	},
 }
 
 // jsonFieldToKoanfPaths maps section name → json field → koanf path for the
@@ -129,6 +132,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"webhooks_enabled": "server.github_app.webhooks_enabled",
 		"installation_url": "server.github_app.installation_url",
 		"private_key_path": "server.github_app.private_key_path",
+	},
+	"auto_expose_ports": {
+		"enabled": "auto_expose_ports.enabled",
 	},
 }
 
