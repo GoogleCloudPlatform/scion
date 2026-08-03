@@ -128,6 +128,7 @@ export class ScionAgentTreeView extends LitElement {
       min-height: 340px;
       cursor: grab;
       touch-action: none;
+      user-select: none;
     }
 
     .canvas.dragging {
@@ -484,6 +485,7 @@ export class ScionAgentTreeView extends LitElement {
       const tag = (el as HTMLElement).tagName;
       if (tag === 'A' || tag === 'BUTTON' || tag === 'SL-BUTTON' || tag === 'SL-ICON-BUTTON') return;
     }
+    e.preventDefault();
     this.dragging = true;
     this.dragStartX = e.clientX;
     this.dragStartY = e.clientY;
