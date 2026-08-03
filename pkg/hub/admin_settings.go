@@ -67,6 +67,9 @@ type ServerConfigResponse struct {
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty"`
 
+	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
+	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
+
 	// EnvOverrides lists koanf keys overridden by SCION_SERVER_* env vars
 	// on this node. Present in both file-mode and DB-mode responses so the
 	// admin UI can show env-pinned fields regardless of settings tier.
@@ -99,6 +102,9 @@ type ServerConfigUpdateRequest struct {
 
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC *bool `json:"auto_inject_gcloud_adc,omitempty"`
+
+	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
+	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
 }
 
 // handleAdminServerConfig handles GET/PUT /api/v1/admin/server-config.
@@ -253,6 +259,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultModel:         vs.DefaultModel,
 		DefaultThinkingLevel: vs.DefaultThinkingLevel,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
+		AutoExposePorts:      vs.AutoExposePorts,
 	}
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
@@ -471,6 +478,9 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		} else {
 			delete(raw, "auto_inject_gcloud_adc")
 		}
+	}
+	if req.AutoExposePorts != nil {
+		raw["auto_expose_ports"] = marshalToMap(req.AutoExposePorts)
 	}
 }
 

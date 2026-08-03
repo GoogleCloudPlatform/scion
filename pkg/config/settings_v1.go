@@ -292,6 +292,14 @@ type VersionedSettings struct {
 	// Credentials file is automatically injected into agent containers in
 	// co-located (workstation) mode.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty" yaml:"auto_inject_gcloud_adc,omitempty" koanf:"auto_inject_gcloud_adc"`
+
+	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
+	AutoExposePorts *AutoExposePortsSettings `json:"auto_expose_ports,omitempty" yaml:"auto_expose_ports,omitempty" koanf:"auto_expose_ports"`
+}
+
+// AutoExposePortsSettings holds the auto-expose ports configuration.
+type AutoExposePortsSettings struct {
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 }
 
 // V1ServerConfig holds server-side configuration in the versioned settings format.
