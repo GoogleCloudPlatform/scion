@@ -31,6 +31,11 @@ type GCPServiceAccountAdmin interface {
 	// Returns the SA email and unique ID.
 	CreateServiceAccount(ctx context.Context, projectID, accountID, displayName, description string) (email string, uniqueID string, err error)
 
+	// DeleteServiceAccount deletes a service account by email. Used for
+	// best-effort cleanup when a mint operation partially succeeds (SA
+	// created but a required IAM mutation fails).
+	DeleteServiceAccount(ctx context.Context, saEmail string) error
+
 	// SetIAMPolicy grants a role to a member on a service account.
 	// Used to grant roles/iam.serviceAccountTokenCreator to the Hub SA on minted SAs.
 	SetIAMPolicy(ctx context.Context, saEmail string, member string, role string) error
@@ -66,6 +71,15 @@ func (c *IAMAdminClient) CreateServiceAccount(ctx context.Context, projectID, ac
 	}
 
 	return sa.Email, sa.UniqueId, nil
+}
+
+func (c *IAMAdminClient) DeleteServiceAccount(ctx context.Context, saEmail string) error {
+	resource := "projects/-/serviceAccounts/" + saEmail
+	_, err := c.service.Projects.ServiceAccounts.Delete(resource).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("deleting service account %s: %w", saEmail, err)
+	}
+	return nil
 }
 
 func (c *IAMAdminClient) SetIAMPolicy(ctx context.Context, saEmail string, member string, role string) error {

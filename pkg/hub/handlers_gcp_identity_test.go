@@ -168,10 +168,12 @@ func TestCreateGCPServiceAccount_Duplicate(t *testing.T) {
 
 // mockGCPServiceAccountAdmin is a test implementation of GCPServiceAccountAdmin.
 type mockGCPServiceAccountAdmin struct {
-	createErr   error
-	policyErr   error
-	createdSAs  []string // track created account IDs
-	lastEmail   string
+	createErr  error
+	policyErr  error
+	deleteErr  error
+	createdSAs []string // track created account IDs
+	deletedSAs []string // track deleted SA emails (cleanup calls)
+	lastEmail  string
 	lastProject string
 }
 
@@ -184,6 +186,11 @@ func (m *mockGCPServiceAccountAdmin) CreateServiceAccount(_ context.Context, pro
 	m.lastEmail = email
 	m.lastProject = projectID
 	return email, "unique-id-123", nil
+}
+
+func (m *mockGCPServiceAccountAdmin) DeleteServiceAccount(_ context.Context, saEmail string) error {
+	m.deletedSAs = append(m.deletedSAs, saEmail)
+	return m.deleteErr
 }
 
 func (m *mockGCPServiceAccountAdmin) SetIAMPolicy(_ context.Context, saEmail, _, _ string) error {
@@ -543,6 +550,207 @@ func TestMintGCPServiceAccount_PerProjectCap_DifferentProjects(t *testing.T) {
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID1),
 		map[string]string{})
 	require.Equal(t, http.StatusConflict, rec.Code)
+}
+
+// ============================================================================
+// Mint Failure Semantics Tests (P7C)
+// ============================================================================
+
+// TestMintGCPServiceAccount_IAMGrantFailure_NoVerifiedTrue verifies that when
+// the tokenCreator IAM grant fails, the SA is NOT stored as Verified=true and
+// the caller receives a non-2xx response.
+func TestMintGCPServiceAccount_IAMGrantFailure_NoVerifiedTrue(t *testing.T) {
+	srv, s, mock := testServerWithMinting(t)
+	mock.policyErr = fmt.Errorf("IAM policy mutation failed: permission denied")
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+
+	// Must NOT be 2xx
+	require.Equal(t, http.StatusBadGateway, rec.Code, "body: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, "IAM grants failed")
+
+	// No SA should have been stored — the mint failed before store.
+	managed := true
+	count, err := s.CountGCPServiceAccounts(context.Background(), store.GCPServiceAccountFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: projectID,
+		Managed: &managed,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "no SA should be stored when IAM grant fails")
+}
+
+// TestMintGCPServiceAccount_IAMGrantFailure_CleanupAttempted verifies that when
+// the IAM grant fails, the handler best-effort deletes the orphaned SA.
+func TestMintGCPServiceAccount_IAMGrantFailure_CleanupAttempted(t *testing.T) {
+	srv, _, mock := testServerWithMinting(t)
+	mock.policyErr = fmt.Errorf("IAM policy mutation failed")
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+
+	// The SA should have been created in GCP then deleted as cleanup.
+	require.Len(t, mock.createdSAs, 1, "SA should have been created in GCP")
+	require.Len(t, mock.deletedSAs, 1, "cleanup delete should have been attempted")
+	assert.Contains(t, mock.deletedSAs[0], "@test-hub-project.iam.gserviceaccount.com")
+}
+
+// TestMintGCPServiceAccount_IAMGrantFailure_CleanupFailsToo verifies that when
+// the IAM grant fails AND the cleanup delete also fails, the handler still
+// returns a non-2xx response and does not store a Verified=true record.
+func TestMintGCPServiceAccount_IAMGrantFailure_CleanupFailsToo(t *testing.T) {
+	srv, s, mock := testServerWithMinting(t)
+	mock.policyErr = fmt.Errorf("IAM policy mutation failed")
+	mock.deleteErr = fmt.Errorf("delete also failed")
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+
+	// Cleanup was attempted even though it failed.
+	require.Len(t, mock.deletedSAs, 1)
+
+	// No SA stored in the hub store.
+	managed := true
+	count, err := s.CountGCPServiceAccounts(context.Background(), store.GCPServiceAccountFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: projectID,
+		Managed: &managed,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
+// TestMintGCPServiceAccount_Success_StillWorks is a regression test ensuring
+// that the normal successful mint path continues to work correctly after the
+// failure-semantics fix.
+func TestMintGCPServiceAccount_Success_StillWorks(t *testing.T) {
+	srv, s, mock := testServerWithMinting(t)
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var sa store.GCPServiceAccount
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
+	assert.True(t, sa.Verified, "successful mint should be Verified=true")
+	assert.Equal(t, store.GCPVerificationVerified, sa.VerificationStatus)
+	assert.True(t, sa.Managed)
+	assert.Contains(t, sa.Email, "@test-hub-project.iam.gserviceaccount.com")
+
+	// Verify stored record is also verified.
+	stored, err := s.GetGCPServiceAccount(context.Background(), sa.ID)
+	require.NoError(t, err)
+	assert.True(t, stored.Verified)
+	assert.Equal(t, store.GCPVerificationVerified, stored.VerificationStatus)
+
+	// No cleanup deletions should have happened.
+	assert.Len(t, mock.deletedSAs, 0, "no cleanup deletes on success")
+	assert.Len(t, mock.createdSAs, 1, "exactly one SA created")
+}
+
+// TestMintGCPServiceAccount_NilTokenGenerator verifies that minting fails
+// gracefully when gcpTokenGenerator is nil. The Hub cannot impersonate any SA
+// without a token generator, so a minted SA would be unusable.
+func TestMintGCPServiceAccount_NilTokenGenerator(t *testing.T) {
+	srv, s, mock := testServerWithMinting(t)
+	// Clear the token generator — simulates misconfiguration.
+	srv.SetGCPTokenGenerator(nil)
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+
+	require.Equal(t, http.StatusBadGateway, rec.Code, "body: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, "token generator")
+
+	// SA was created in GCP then cleanup-deleted.
+	require.Len(t, mock.createdSAs, 1)
+	require.Len(t, mock.deletedSAs, 1)
+
+	// No SA stored in the hub.
+	managed := true
+	count, err := s.CountGCPServiceAccounts(context.Background(), store.GCPServiceAccountFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: projectID,
+		Managed: &managed,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
+// TestMintGCPServiceAccount_EmptyHubEmail verifies that minting fails when the
+// token generator is configured but returns an empty service account email.
+func TestMintGCPServiceAccount_EmptyHubEmail(t *testing.T) {
+	srv, s, mock := testServerWithMinting(t)
+	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: ""})
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+
+	require.Equal(t, http.StatusBadGateway, rec.Code, "body: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, "Hub service account email")
+
+	// SA was created in GCP then cleanup-deleted.
+	require.Len(t, mock.createdSAs, 1)
+	require.Len(t, mock.deletedSAs, 1)
+
+	// No SA stored in the hub.
+	managed := true
+	count, err := s.CountGCPServiceAccounts(context.Background(), store.GCPServiceAccountFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: projectID,
+		Managed: &managed,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
+// TestMintGCPServiceAccount_IAMGrantFailure_DoesNotCountAgainstQuota verifies
+// that a failed mint does not permanently consume a quota slot.
+func TestMintGCPServiceAccount_IAMGrantFailure_DoesNotCountAgainstQuota(t *testing.T) {
+	srv, _, mock := testServerWithMinting(t)
+	srv.config.GCPMintCapPerProject = 1
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	// First attempt fails on IAM grant.
+	mock.policyErr = fmt.Errorf("IAM policy failed")
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+
+	// Fix the mock and retry — should succeed since the failed attempt didn't
+	// store anything that would count against the quota.
+	mock.policyErr = nil
+	rec = doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, "retry should succeed: %s", rec.Body.String())
 }
 
 // ============================================================================

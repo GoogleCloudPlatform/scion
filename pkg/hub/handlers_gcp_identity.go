@@ -822,21 +822,58 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	// Grant token creator role to Hub SA on the new SA
-	if s.gcpTokenGenerator != nil {
-		hubEmail := s.gcpTokenGenerator.ServiceAccountEmail()
-		if hubEmail != "" {
-			member := "serviceAccount:" + hubEmail
-			if err := s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, member, "roles/iam.serviceAccountTokenCreator"); err != nil {
-				slog.Error("GCP SA mint: failed to set IAM policy",
-					"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail, "error", err)
-				// SA was created but policy failed — still store it but log the issue
-				// The user can verify later
-			}
+	// Grant token creator role to Hub SA on the new SA. This is a REQUIRED
+	// IAM mutation: without it the Hub cannot impersonate the minted SA to
+	// generate tokens, so a minted SA recorded as Verified after a failed
+	// grant claims a capability the Hub does not have. Fail the request and
+	// best-effort delete the orphaned SA if the grant fails.
+	if s.gcpTokenGenerator == nil {
+		// The Hub has no token generator configured, so it cannot impersonate
+		// any SA. A minted SA would be unusable. Fail rather than store a
+		// record that looks ready but cannot function.
+		slog.Error("GCP SA mint: token generator not configured, cannot grant tokenCreator",
+			"project_id", projectID, "sa_email", saEmail)
+		// Best-effort cleanup the just-created SA.
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint: best-effort cleanup failed after missing token generator",
+				"sa_email", saEmail, "error", delErr)
 		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but the Hub has no token generator configured; the account is not usable and has been removed", nil)
+		return
 	}
 
-	// Store the SA record
+	hubEmail := s.gcpTokenGenerator.ServiceAccountEmail()
+	if hubEmail == "" {
+		slog.Error("GCP SA mint: hub service account email is empty, cannot grant tokenCreator",
+			"project_id", projectID, "sa_email", saEmail)
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint: best-effort cleanup failed after empty hub email",
+				"sa_email", saEmail, "error", delErr)
+		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but the Hub service account email is not configured; the account is not usable and has been removed", nil)
+		return
+	}
+
+	member := "serviceAccount:" + hubEmail
+	if err := s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, member, "roles/iam.serviceAccountTokenCreator"); err != nil {
+		slog.Error("GCP SA mint: IAM grant failed — SA was created in GCP but required tokenCreator grant did not succeed",
+			"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail, "error", err)
+		// Best-effort cleanup: delete the orphaned SA from GCP.
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint: best-effort cleanup of orphaned SA failed",
+				"sa_email", saEmail, "error", delErr)
+		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but required IAM grants failed; the account is not usable. Contact your administrator.", nil)
+		return
+	}
+
+	slog.Info("GCP SA mint: SA created and tokenCreator grant succeeded",
+		"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail)
+
+	// Store the SA record — only reached when the required IAM mutation succeeded.
 	sa := &store.GCPServiceAccount{
 		ID:                 uuid.New().String(),
 		Scope:              store.ScopeProject,
