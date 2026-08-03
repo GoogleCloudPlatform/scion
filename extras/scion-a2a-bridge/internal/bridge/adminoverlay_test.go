@@ -653,6 +653,7 @@ func TestConfigure_AppliesGoodConfig(t *testing.T) {
 	broker := NewBrokerServer(nil, discardLogger(), nil)
 	baseCfg := &Config{
 		Bridge: BridgeConfig{ExternalURL: "https://base.example.com"},
+		Hub:    HubConfig{Endpoint: "https://hub.example.com", User: "test-user"},
 		Auth:   AuthConfig{Scheme: "none"},
 	}
 	snap := NewSnapshotHolder(BuildSnapshot(*baseCfg))
@@ -700,7 +701,11 @@ func TestConfigure_AppliesGoodConfig(t *testing.T) {
 
 func TestConfigure_KeepsLastGoodOnReject(t *testing.T) {
 	broker := NewBrokerServer(nil, discardLogger(), nil)
-	baseCfg := &Config{Auth: AuthConfig{Scheme: "none"}}
+	baseCfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://base.example.com"},
+		Hub:    HubConfig{Endpoint: "https://hub.example.com", User: "test-user"},
+		Auth:   AuthConfig{Scheme: "none"},
+	}
 	snap := NewSnapshotHolder(BuildSnapshot(*baseCfg))
 	broker.SetAdminConfig(baseCfg, snap, "")
 
@@ -886,7 +891,9 @@ func TestParseAdminOverlay_EmptyStringFieldsStillPresent(t *testing.T) {
 func TestConfigure_ProjectsJSONRoundTrip(t *testing.T) {
 	broker := NewBrokerServer(nil, discardLogger(), nil)
 	baseCfg := &Config{
-		Auth: AuthConfig{Scheme: "none"},
+		Bridge: BridgeConfig{ExternalURL: "https://base.example.com"},
+		Hub:    HubConfig{Endpoint: "https://hub.example.com", User: "test-user"},
+		Auth:   AuthConfig{Scheme: "none"},
 	}
 	snap := NewSnapshotHolder(BuildSnapshot(*baseCfg))
 	dir := t.TempDir()
@@ -963,7 +970,9 @@ func TestConfigure_ProjectsJSONRoundTrip(t *testing.T) {
 func TestConfigure_EmptyProjectsJSON(t *testing.T) {
 	broker := NewBrokerServer(nil, discardLogger(), nil)
 	baseCfg := &Config{
-		Auth: AuthConfig{Scheme: "none"},
+		Bridge: BridgeConfig{ExternalURL: "https://base.example.com"},
+		Hub:    HubConfig{Endpoint: "https://hub.example.com", User: "test-user"},
+		Auth:   AuthConfig{Scheme: "none"},
 		Projects: []ProjectConfig{
 			{Slug: "base-proj"},
 		},

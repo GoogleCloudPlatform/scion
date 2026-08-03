@@ -381,6 +381,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			scheme = snap.Auth.Scheme
 			uatV = snap.Auth.UATValidator
 			jwtV = snap.Auth.JWTValidator
+			if jwtV == nil {
+				jwtV = s.jwtValidator
+			}
 			configAPIKey = snap.Auth.APIKey
 		} else {
 			scheme = s.config.Auth.Scheme
@@ -483,7 +486,7 @@ func (s *Server) snapshotRateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		key := hashKey(r.Header.Get("X-API-Key"))
+		key := hashKey(extractBearerOrAPIKey(r))
 		if key == "" {
 			host, _, err := net.SplitHostPort(r.RemoteAddr)
 			if err != nil {
