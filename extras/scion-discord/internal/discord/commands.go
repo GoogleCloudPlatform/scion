@@ -823,8 +823,26 @@ func (h *CommandHandler) HandleInfo(s *discordgo.Session, i *discordgo.Interacti
 				sb.WriteString(fmt.Sprintf("\n**Server:** %s", link.GuildName))
 			}
 			sb.WriteString(fmt.Sprintf("\n**Channel project:** %s", link.ProjectSlug))
-			if link.DefaultAgent != "" {
-				sb.WriteString(fmt.Sprintf("\n**Default agent:** %s", link.DefaultAgent))
+
+			// Check for thread-level default agent.
+			// link.ChannelID is the parent channel (resolveChannelLink falls back);
+			// if it differs from i.ChannelID, we are in a thread.
+			if link.ChannelID != i.ChannelID {
+				threadDefault, tdErr := h.store.GetThreadDefault(ctx, link.ChannelID, i.ChannelID)
+				if tdErr != nil {
+					h.log.Error("Failed to get thread default for info", "error", tdErr)
+				} else if threadDefault != "" {
+					sb.WriteString(fmt.Sprintf("\n**Thread default agent:** %s", threadDefault))
+				}
+				// Show channel default as context (it's the fallback)
+				if link.DefaultAgent != "" {
+					sb.WriteString(fmt.Sprintf("\n**Channel default agent:** %s", link.DefaultAgent))
+				}
+			} else {
+				// Not in a thread — show channel default as before
+				if link.DefaultAgent != "" {
+					sb.WriteString(fmt.Sprintf("\n**Default agent:** %s", link.DefaultAgent))
+				}
 			}
 		}
 	}
