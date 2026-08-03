@@ -103,7 +103,7 @@ server:
           # Optional tuning.
           # send_queue_size: 100     # max queued messages per channel
           # send_min_delay: 50ms     # minimum delay between sends (rate limiting)
-          # agent_cache_ttl: 5m      # how long to cache agent lists from hub
+          # agent_cache_ttl: 30s     # how long to cache agent lists from hub
 ```
 
 ### 5. Start the Hub
@@ -290,7 +290,7 @@ These keys go in `plugins.broker.discord.config` in `settings.yaml`:
 | `mention_routing` | No | `true` | Enable @-mention routing for messages |
 | `send_queue_size` | No | `100` | Max queued outbound messages per channel |
 | `send_min_delay` | No | `50ms` | Minimum delay between sends (rate-limit protection) |
-| `agent_cache_ttl` | No | `5m` | TTL for cached agent lists from the hub |
+| `agent_cache_ttl` | No | `30s` | TTL for cached agent lists from the hub |
 
 ### Example settings.yaml (Complete)
 

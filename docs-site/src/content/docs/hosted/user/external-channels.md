@@ -42,14 +42,29 @@ For a guided Workstation walkthrough, see [Setting Up Telegram](/scion/getting-s
 
 ## Discord
 
-Discord integration provides **outbound-only** webhook notifications — agents can push messages to a Discord channel, but cannot receive inbound messages from Discord.
+Scion supports Discord through two separate integration pathways: the **bidirectional Discord Bot plugin** (full-featured, interactive) and **outbound-only webhook notifications** (simple, broadcast-only).
+
+### 1. Bidirectional Discord Bot Plugin
+
+The Discord plugin (`scion-plugin-discord`) provides **bidirectional messaging** — users can interact with agents from Discord channels and receive replies directly in the chat.
+
+- **Agent Identity (Webhooks):** Each agent appears in Discord with its own name and RoboHash-generated avatar (requires the **Manage Webhooks** permission on the bot).
+- **@-mention Routing:** Route messages to specific agents by mentioning them (e.g. `@mybot agent-name message`).
+- **Slash Commands:** Commands are available as subcommands under `/scion` (e.g. `/scion setup` to link a channel, `/scion register` to associate your identity, `/scion default` to set a default routing target, `/scion agents` to list agent statuses).
+- **Flexible Deployment:** Can run as a managed hub plugin or as a highly available standalone service with automatic Postgres advisory lock failover.
+
+For full setup, command reference, and standalone mode details, see [extras/scion-discord/README.md](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-discord).
+
+### 2. Outbound-Only Webhook Notifications
+
+If you only need to push status changes, alerts, and `ask_user` requests to Discord without allowing inbound replies, you can configure outbound-only webhook notifications.
 
 - **Severity-based color coding:** Messages are color-coded by severity (info, warning, error, urgent).
 - **@mentions:** Urgent messages and explicit `ask_user` requests can trigger `@user` or `@role` mentions.
 
-### Configuration
+#### Configuration
 
-Set the webhook URL in one of two ways:
+Set your webhook URL in one of two ways:
 
 - **settings.yaml:** Set `server.discord_webhook_url` in the Hub configuration.
 - **Environment variable:** Set `SCION_DISCORD_WEBHOOK_URL`.
