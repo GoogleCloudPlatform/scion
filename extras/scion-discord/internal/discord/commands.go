@@ -1263,14 +1263,20 @@ func (h *CommandHandler) HandleTerminal(s *discordgo.Session, i *discordgo.Inter
 	defer cancel()
 
 	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
-	if err != nil || link == nil {
+	if err != nil {
+		h.log.Error("Failed to get channel link", "error", err, "channel_id", i.ChannelID)
+		h.followup(s, i, "Something went wrong. Please try again.")
+		return
+	}
+	if link == nil {
 		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
 		return
 	}
 
 	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
 	if err != nil {
-		h.followup(s, i, "Failed to fetch agents. Please try again.")
+		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
+		h.followup(s, i, "Failed to fetch agents. Please try again later.")
 		return
 	}
 
