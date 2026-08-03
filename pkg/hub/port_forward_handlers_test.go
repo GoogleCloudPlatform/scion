@@ -161,6 +161,14 @@ func TestProxyErrorContentNegotiation(t *testing.T) {
 			wantHTML:      false,
 			wantSubstring: `"runtime_error"`,
 		},
+		{
+			name:          "no_tunnel_no_accept_gets_json",
+			path:          "/api/v1/agents/" + agent.ID + "/ports/3000/proxy/",
+			accept:        "",
+			wantStatus:    http.StatusServiceUnavailable,
+			wantHTML:      false,
+			wantSubstring: `"runtime_error"`,
+		},
 	}
 
 	for _, tc := range tests {

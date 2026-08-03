@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -470,13 +471,6 @@ func writeProxyErrorHTML(w http.ResponseWriter, status int, title, message strin
 // proxyErrorPageHTML returns a self-contained HTML error page with the given
 // title and message. The page uses the same design system as maintenancePageHTML.
 func proxyErrorPageHTML(title, message string) string {
-	escapeHTML := func(s string) string {
-		s = strings.ReplaceAll(s, "&", "&amp;")
-		s = strings.ReplaceAll(s, "<", "&lt;")
-		s = strings.ReplaceAll(s, ">", "&gt;")
-		s = strings.ReplaceAll(s, "\"", "&quot;")
-		return s
-	}
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -569,7 +563,7 @@ func proxyErrorPageHTML(title, message string) string {
         <span class="badge">scion</span>
     </div>
 </body>
-</html>`, escapeHTML(title), escapeHTML(title), escapeHTML(message))
+</html>`, html.EscapeString(title), html.EscapeString(title), html.EscapeString(message))
 }
 
 func (s *Server) handleAgentPortTunnel(w http.ResponseWriter, r *http.Request, agentID string) {
