@@ -147,6 +147,9 @@ Examples:
 			if msgRaw {
 				return fmt.Errorf("--cc cannot be combined with --raw")
 			}
+			if msgIn != "" || msgAt != "" {
+				return fmt.Errorf("--cc cannot be combined with --in or --at")
+			}
 			if userRecipient != "" {
 				return fmt.Errorf("--cc cannot be used with user recipients")
 			}
@@ -267,6 +270,11 @@ Examples:
 		// --notify requires Hub mode
 		if msgNotify && hubCtx == nil {
 			return fmt.Errorf("--notify requires Hub mode (use 'scion hub enable' first)")
+		}
+
+		// --cc requires Hub mode
+		if msgCC != "" && hubCtx == nil {
+			return fmt.Errorf("--cc requires Hub mode (use 'scion hub enable' first)")
 		}
 
 		// Stage attachments to shared volume (after Hub mode confirmed)
@@ -732,15 +740,10 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
 	}
 
-	if delivered == 0 {
-		return fmt.Errorf("group delivery failed: 0/%d recipients received the message", len(recipients))
-	}
-	if delivered < len(recipients) {
-		return fmt.Errorf("group delivery partially failed: %d/%d delivered", delivered, len(recipients))
-	}
-
 	// @mention and --cc fan-out for group messages: mentioned agents that are
 	// not already group recipients receive a TypeMention notification.
+	// This runs regardless of partial delivery — mention recipients are
+	// independent of the group.
 	var mentionNames []string
 	mentionNames = append(mentionNames, extractMentions(message)...)
 	mentionNames = append(mentionNames, parseCCFlag(msgCC)...)
@@ -771,6 +774,13 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		if len(filtered) > 0 {
 			sendMentionMessages(hubCtx, sender, mentionSource, message, filtered, agentSvc)
 		}
+	}
+
+	if delivered == 0 {
+		return fmt.Errorf("group delivery failed: 0/%d recipients received the message", len(recipients))
+	}
+	if delivered < len(recipients) {
+		return fmt.Errorf("group delivery partially failed: %d/%d delivered", delivered, len(recipients))
 	}
 
 	return nil

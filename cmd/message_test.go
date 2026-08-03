@@ -1911,6 +1911,68 @@ func TestSendMessageViaHub_NoMentionsInBody(t *testing.T) {
 	assert.Equal(t, "my-agent", (*sent)[0].AgentName)
 }
 
+func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "grove-msg-group-mention"
+	agents := []hubclient.Agent{
+		{Name: "agent-a", Status: "running"},
+		{Name: "agent-b", Status: "running"},
+		{Name: "agent-c", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	// Reset CC flag
+	origCC := msgCC
+	msgCC = ""
+	defer func() { msgCC = origCC }()
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-a"},
+		{Kind: messages.RecipientAgent, Name: "agent-b"},
+	}
+
+	// Send to group[a,b] with @agent-c in body
+	err = sendGroupMessageViaHub(hubCtx, recipients, "hey @agent-c check this", false)
+	require.NoError(t, err)
+
+	// Should have 3 messages: agent-a, agent-b (group), agent-c (mention)
+	require.Len(t, *sent, 3)
+
+	// Categorize messages by type
+	var groupMsgs []sentMessage
+	var mentionMsgs []sentMessage
+	for _, s := range *sent {
+		require.NotNil(t, s.StructuredMsg)
+		if s.StructuredMsg.Type == messages.TypeMention {
+			mentionMsgs = append(mentionMsgs, s)
+		} else {
+			groupMsgs = append(groupMsgs, s)
+		}
+	}
+
+	// Group recipients get instruction messages
+	require.Len(t, groupMsgs, 2)
+	groupNames := []string{groupMsgs[0].AgentName, groupMsgs[1].AgentName}
+	assert.ElementsMatch(t, []string{"agent-a", "agent-b"}, groupNames)
+
+	// agent-c gets a mention notification, not an instruction
+	require.Len(t, mentionMsgs, 1)
+	assert.Equal(t, "agent-c", mentionMsgs[0].AgentName)
+	assert.Equal(t, messages.TypeMention, mentionMsgs[0].StructuredMsg.Type)
+}
+
 func TestCCFlagValidation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1919,6 +1981,7 @@ func TestCCFlagValidation(t *testing.T) {
 		all       bool
 		raw       bool
 		userRecip bool
+		in        string
 		wantErr   string
 	}{
 		{
@@ -1945,6 +2008,12 @@ func TestCCFlagValidation(t *testing.T) {
 			userRecip: true,
 			wantErr:   "--cc cannot be used with user recipients",
 		},
+		{
+			name:    "cc with scheduling",
+			cc:      "agent-a",
+			in:      "5m",
+			wantErr: "--cc cannot be combined with --in or --at",
+		},
 	}
 
 	for _, tc := range tests {
@@ -1953,17 +2022,20 @@ func TestCCFlagValidation(t *testing.T) {
 			origBroadcast := msgBroadcast
 			origAll := msgAll
 			origRaw := msgRaw
+			origIn := msgIn
 			defer func() {
 				msgCC = origCC
 				msgBroadcast = origBroadcast
 				msgAll = origAll
 				msgRaw = origRaw
+				msgIn = origIn
 			}()
 
 			msgCC = tc.cc
 			msgBroadcast = tc.broadcast
 			msgAll = tc.all
 			msgRaw = tc.raw
+			msgIn = tc.in
 
 			var args []string
 			if tc.broadcast || tc.all {
