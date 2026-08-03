@@ -28,6 +28,7 @@ configuration from the web UI, registration, and your first message.
 
 - **@-mention routing:** Mention a specific agent (e.g., `@mybot agent-name message`) to route a message to that agent.
 - **Default agent:** Set a default agent with `/default` so untagged messages route automatically.
+- **Body mentions:** Mentions inside the body of a message (e.g., `@agent-b`) are delivered as lightweight `TypeMention` (`mention`) notifications instead of full instructions, preventing accidental multi-agent execution loops. If a message contains only body mentions, the group's default agent is restored as the primary recipient.
 - Available bot commands: `/agents` (list agents), `/default` (set default), `/settings` (configure group), `/notifications` (toggle notification types).
 
 ### Group Settings
@@ -46,6 +47,8 @@ Discord integration provides **outbound-only** webhook notifications — agents 
 
 - **Severity-based color coding:** Messages are color-coded by severity (info, warning, error, urgent).
 - **@mentions:** Urgent messages and explicit `ask_user` requests can trigger `@user` or `@role` mentions.
+- **Per-Agent Webhook Identity:** Outbound webhook messages are automatically posted under the actual sending agent's webhook identity and avatar, rather than the topic agent's.
+- **Observed Message Styling:** Relayed agent-to-agent (observed) messages feature a distinct gray-sidebar embed styling and a `Sender → Recipient` title format, making them easy to identify and distinguish from direct messages.
 
 ### Configuration
 

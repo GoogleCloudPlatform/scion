@@ -209,6 +209,12 @@ server:
 | `iap` | The **IAP OAuth client ID** (found in Cloud Console → Security → IAP → your backend → OAuth client). Format: `<client-id>.apps.googleusercontent.com` |
 | `cloudrun_invoker` | The **Hub's URL** (e.g., `https://hub.example.com`). If left empty, derived from `hub.public_url`. |
 
+:::caution[Audience Decoupling]
+`server.auth.transport.oidc_audience` and `server.auth.proxy.iap.audience` are intentionally decoupled and **must differ**:
+- `server.auth.proxy.iap.audience` is the Cloud Run native IAP audience path (e.g. `/projects/<number>/locations/<region>/services/<service>`) or GCE/GKE backend service audience path, which is used for validating incoming IAP-signed JWTs.
+- `server.auth.transport.oidc_audience` is the IAP OAuth client ID (e.g., `<client-id>.apps.googleusercontent.com`), which is used for minting OIDC tokens for dispatched agents and brokers to traverse IAP. IAP requires the OAuth client ID format for validating these tokens, not the Cloud Run resource path.
+:::
+
 :::note
 When both IAP and Cloud Run invoker guards are present on the same service, the IAP service agent carries the Cloud Run invoker role automatically. Agents send a single outer token targeting the IAP audience — no three-layer case.
 :::
@@ -264,9 +270,13 @@ gcloud iap web enable \
   --service=YOUR_BACKEND_SERVICE_NAME
 ```
 
-Note the **IAP OAuth client ID** (found in Console → Security → IAP → your backend → click the three dots → Edit OAuth Client). You will need it for both `auth.proxy.iap.audience` and `auth.transport.oidc_audience`.
+Note the **IAP OAuth client ID** (found in Console → Security → IAP → your backend → click the three dots → Edit OAuth Client). You will need this client ID for `auth.transport.oidc_audience` (it is used for minting OIDC tokens).
 
-Note the **signed header JWT audience** (found in Console → Security → IAP → your backend). This goes into `auth.proxy.iap.audience`.
+Note the **signed header JWT audience** (found in Console → Security → IAP → your backend). This goes into `auth.proxy.iap.audience` (used for validating incoming human and browser requests).
+
+:::caution[Audience Separation]
+Do **not** use the same value for both. `auth.proxy.iap.audience` requires the Cloud Run/GCE/GKE native service path (e.g. `/projects/...`), while `auth.transport.oidc_audience` requires the OAuth client ID (e.g. `<client-id>.apps.googleusercontent.com`). Using the same audience for both will cause preflight checks and token verification to fail.
+:::
 
 ### 3. Create the transport service account
 

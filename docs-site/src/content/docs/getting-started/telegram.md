@@ -227,6 +227,16 @@ with `scion start`, and confirm with `/agents`). Then, in the linked group:
 The bot strips its own mention and the `@agentslug` prefix before forwarding your text to the
 agent.
 
+### Body Mentions & Routing Behavior
+
+When messaging agents, you can reference other agents in the project using `@agentslug` inside the body of your message. Scion handles these mentions intelligently:
+
+* **TypeMention Routing:** Mentions in the body of a message (e.g., *"Hey @agent-a, please check the database with @agent-b"*) are routed to the mentioned agents as a `TypeMention` (`mention`) notification rather than a direct instruction. This allows the mentioned agent (`@agent-b`) to receive a notification without triggering an unintended full execution or multi-agent dispatch (which previously occurred due to injecting them as primary group recipients).
+* **Default Agent Restoration:** If your message contains only body mentions (which are filtered out of the direct instruction targets), Scion will automatically restore the group's (or topic's) **default agent** as the primary target. This ensures the instruction is still successfully delivered and processed by your default agent.
+* **Human-Mention and Slash-Command Guards:** This automatic restoration is guarded against unwanted runs:
+  * It will **not** trigger if the message contains mentions of human users (non-bot mentions).
+  * It will **not** trigger on slash commands (messages starting with `/` like `/default` or `/agents`).
+
 ### Seeing agent responses
 
 - **Agent replies** appear in the group, prefixed with 🤖 and the agent's slug.
