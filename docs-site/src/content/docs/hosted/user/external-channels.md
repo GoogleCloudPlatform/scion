@@ -163,17 +163,40 @@ curl -X POST https://<bridge-host>/projects/<project-slug>/agents/<agent-slug>/j
 | `agent:message` | Send messages to agents |
 | `agent:read` | List agents and read task status |
 
-#### Per-User Isolation
+### Per-User Authentication & Isolation
 
-When the bridge uses `hubUAT` or `hubJWT` auth, each user's tasks are isolated:
+When the A2A bridge is configured with per-user authentication, callers present their own individual credentials instead of a shared static API key. This activates **CallerIdentity context propagation** and granular task isolation.
 
-- You can only see and cancel tasks you created.
-- The Hub's audit logs reflect your identity, not the bridge admin's.
-- If your UAT is revoked, access stops within 60 seconds (the bridge's cache TTL).
+#### The Two Per-User Schemes
 
-:::note[Bridge operator note]
-To enable per-user auth, set `auth.scheme: hubUAT` in `scion-a2a-bridge.yaml`.
-The `auth.api_key` field is not needed for this scheme. See the
-[sample config](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-a2a-bridge/scion-a2a-bridge.yaml.sample)
-for details.
+The A2A bridge supports two per-user authentication schemes, specified via `auth.scheme` in the bridge configuration:
+
+1. **`hubUAT` (Recommended for Desktop App Federation)**:
+   - Callers present a Scion User Access Token (`Authorization: Bearer scion_pat_...`) created via `scion token create`.
+   - **Validation (`UATValidator`)**: The bridge uses a `UATValidator` component to dynamically introspect each token by calling the Hub's `/api/v1/auth/me` endpoint.
+   - **SHA-256 Keyed Cache**: To avoid overwhelming the Hub with authentication requests, validated tokens are cached in memory using a SHA-256 hash of the token as the key.
+   - **Configurable TTL**: The cache TTL is configurable via `auth.uat_cache_ttl` (default: `60s`, maximum: `300s`). If a user revokes their UAT, access is completely cut off once the cache TTL expires (within 60 seconds by default).
+2. **`hubJWT` (Recommended for CLI & Scripted Access)**:
+   - Callers present a Scion-signed User JWT.
+   - **Local Validation**: The bridge validates the JWT signature locally using the HS256 `hub.signing_key` secret. Since this happens locally, it requires no active API calls to the Hub, making it extremely fast.
+
+#### Per-User Isolation Benefits
+
+* **Task Ownership**: Users can only see, query, and cancel/interrupt tasks they created. One user cannot view or modify the active tasks of another user.
+* **Audit Trails**: All downstream Hub API calls made by the bridge (such as sending messages or interrupting containers) propagate the user's actual `CallerIdentity`. The Hub's audit logs will show the real user's identity as the initiator rather than the bridge admin's service account.
+
+:::note[Bridge Operator Configuration]
+To enable per-user authentication, edit `scion-a2a-bridge.yaml`:
+
+```yaml
+auth:
+  scheme: "hubUAT" # or "hubJWT"
+  
+  # Optional: TTL for caching validated UATs (default: 60s, max: 300s)
+  uat_cache_ttl: 60s
+```
+
+* Under these schemes, the static `auth.api_key` field is not required and can be omitted.
+* Ensure `hub.signing_key` is configured so that local JWT signature verification works for `hubJWT` or token decryption works securely.
+* For a complete configuration example, see the [sample config](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-a2a-bridge/scion-a2a-bridge.yaml.sample).
 :::
