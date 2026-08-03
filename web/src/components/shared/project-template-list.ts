@@ -364,7 +364,7 @@ export class ScionProjectTemplateList extends LitElement {
       const response = await apiFetch(`/api/v1/projects/${this.deleteTarget.id}`, {
         method: 'DELETE',
       });
-      if (!response.ok && response.status !== 204) {
+      if (!response.ok) {
         const errorText = await extractApiError(response, 'Failed to delete template');
         throw new Error(errorText);
       }

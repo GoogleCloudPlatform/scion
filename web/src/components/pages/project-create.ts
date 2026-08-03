@@ -109,6 +109,9 @@ export class ScionPageProjectCreate extends LitElement {
   @state()
   private selectedTemplateId = '';
 
+  @state()
+  private templatesLoading = false;
+
   private pathCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
   override connectedCallback(): void {
@@ -445,14 +448,19 @@ export class ScionPageProjectCreate extends LitElement {
   }
 
   private async loadTemplates(): Promise<void> {
+    this.templatesLoading = true;
     try {
       const res = await apiFetch('/api/v1/projects?isTemplate=true');
       if (res.ok) {
         const data = (await res.json()) as { projects?: Array<{id: string; name: string; slug: string}> };
         this.templates = data.projects ?? [];
+      } else {
+        this.error = 'Failed to load templates. Please try again.';
       }
-    } catch {
-      // Best-effort
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load templates.';
+    } finally {
+      this.templatesLoading = false;
     }
   }
 
@@ -802,6 +810,7 @@ export class ScionPageProjectCreate extends LitElement {
             ? html`
                 <div class="form-field">
                   <label>Template</label>
+                  ${this.templatesLoading ? html`<sl-spinner></sl-spinner>` : html`
                   <sl-select
                     placeholder="Select a template..."
                     .value=${this.selectedTemplateId}
@@ -811,6 +820,7 @@ export class ScionPageProjectCreate extends LitElement {
                       ? html`<sl-option disabled value="">No templates available</sl-option>`
                       : this.templates.map(t => html`<sl-option value=${t.id}>${t.name}</sl-option>`)}
                   </sl-select>
+                  `}
                 </div>
               `
             : nothing}
@@ -879,6 +889,7 @@ export class ScionPageProjectCreate extends LitElement {
               `
             : nothing}
 
+          ${this.mode !== 'template' ? html`
           <div class="form-field">
             <label for="slug">Slug</label>
             <sl-input
@@ -889,6 +900,7 @@ export class ScionPageProjectCreate extends LitElement {
             ></sl-input>
             <div class="hint">URL-safe identifier. Auto-derived from name if left unchanged.</div>
           </div>
+          ` : nothing}
 
           ${this.mode === 'git'
             ? html`
@@ -907,6 +919,7 @@ export class ScionPageProjectCreate extends LitElement {
               `
             : nothing}
 
+          ${this.mode !== 'template' ? html`
           <div class="form-field">
             <label for="visibility">Visibility</label>
             <sl-select
@@ -921,6 +934,7 @@ export class ScionPageProjectCreate extends LitElement {
               <sl-option value="public">Public</sl-option>
             </sl-select>
           </div>
+          ` : nothing}
 
           <div class="form-actions">
             <sl-button
