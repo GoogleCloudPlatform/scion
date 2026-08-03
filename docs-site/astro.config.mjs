@@ -30,10 +30,10 @@ const hostedUserGuide = {
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
 		{ label: 'Pre-Start Hooks', slug: 'hosted/user/pre-start-hooks' },
+		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
 		{ label: 'Scheduling & Events', slug: 'hosted/user/scheduling' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
-		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 	],
 };
 

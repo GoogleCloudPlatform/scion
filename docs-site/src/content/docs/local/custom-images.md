@@ -149,6 +149,10 @@ schema_version: "1"
 image_registry: "ghcr.io/myorg"
 ```
 
+:::note[Failing Fast]
+The Runtime Broker validates the configured `image_registry` at startup. If the setting is missing or invalid, the broker will fail fast with an explicit, actionable error rather than starting silently and causing opaque image-pull 404 errors during subsequent agent creation.
+:::
+
 **Per-profile** (different registries for different environments):
 
 ```yaml

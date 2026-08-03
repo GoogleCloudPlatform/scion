@@ -56,6 +56,9 @@ The helper utility injected into every agent container for status reporting, met
 
 ## Runtime & Workspace
 
+### Agent Port Forwarding
+A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket reverse tunnel.
+
 ### Runtime
 The container technology that executes an agent's container: Docker, Podman, Apple Container, or Kubernetes.
 

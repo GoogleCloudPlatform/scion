@@ -72,6 +72,11 @@ _Avoid_: agent tool, scion-tool
 
 ## Runtime & Workspace
 
+**Agent Port Forwarding**:
+A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket reverse tunnel.
+_Avoid_: agent tunnel, port proxy, hub reverse tunnel, web access
+_See also_: sciontool
+
 **Runtime**:
 The container technology that executes an agent's container: Docker, Podman, Apple Container, or Kubernetes.
 _Avoid_: backend, engine, executor, environment

@@ -177,8 +177,17 @@ Backend for managing encrypted secrets. The `local` backend is read-only and rej
 | `gcp_project_id` | string | | GCP Project ID for Secret Manager. Required when `backend` is `gcpsm`. |
 | `gcp_credentials` | string | | Path to GCP service account JSON or the JSON content itself. Optional if using Application Default Credentials. |
 
-:::caution
-The `local` backend does not store secret values. Any attempt to create or update secrets will fail with a 501 error. Configure `gcpsm` to use the secret management features.
+### Scheduler (`server.scheduler`)
+
+Controls the background task scheduler in the Hub. This regulates the tick interval and concurrency of recurring maintenance tasks (such as telemetry aggregation, session cleanups, and heartbeats) to match database capacity.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `interval_seconds` | integer | `60` | The root ticker interval in seconds. All recurring background tasks fire at multiples of this interval. Increasing this value reduces database connection pressure on smaller deployments. |
+| `max_concurrency` | integer | `2` | Limits the number of recurring maintenance tasks that can execute concurrently in a single tick. By default, this is capped at `2` to avoid database connection pool saturation. Set to `0` for unlimited concurrency (legacy behavior) or a higher value for larger deployments. |
+
+:::note[Database Stability]
+Configuring a modest concurrency limit (such as the default `2`) is highly recommended for small or single-node database instances to prevent sudden spikes in database connection usage.
 :::
 
 ## Environment Variables
@@ -199,6 +208,8 @@ All server settings can be overridden via environment variables using the `SCION
 - `server.secrets.backend` -> `SCION_SERVER_SECRETS_BACKEND`
 - `server.secrets.gcp_project_id` -> `SCION_SERVER_SECRETS_GCPPROJECTID`
 - `server.secrets.gcp_credentials` -> `SCION_SERVER_SECRETS_GCPCREDENTIALS`
+- `server.scheduler.interval_seconds` -> `SCION_SERVER_SCHEDULER_INTERVAL_SECONDS`
+- `server.scheduler.max_concurrency` -> `SCION_SERVER_SCHEDULER_MAX_CONCURRENCY`
 
 ### Logging Environment Variables
 

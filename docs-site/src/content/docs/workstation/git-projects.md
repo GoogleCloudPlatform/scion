@@ -254,6 +254,10 @@ scion hub disable
 - Check that the token has not expired.
 - For fine-grained PATs, confirm the target repository is included in the token's repository access list.
 
+:::note[Unclassified Clone Errors]
+When a git clone fails for reasons unrelated to `GITHUB_TOKEN` (such as network timeout or dns issues), recent versions of Scion will display a neutral "unclassified error" label instead of pointing the blame at the token. This helps avoid confusion during debugging.
+:::
+
 ### Agent clones the wrong branch
 
 Use the `--branch` flag when creating the project to set the default:
