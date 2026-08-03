@@ -399,23 +399,28 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Attempt to verify impersonation via the GCP token generator
-	if s.gcpTokenGenerator != nil {
-		if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
-			// Persist the failure status
-			sa.Verified = false
-			sa.VerificationStatus = "failed"
-			sa.VerificationError = err.Error()
-			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
+	// Fail-closed: if no token generator is configured, we cannot verify.
+	if s.gcpTokenGenerator == nil {
+		writeError(w, http.StatusServiceUnavailable, "gcp_not_configured",
+			"GCP token generation is not configured on this Hub", nil)
+		return
+	}
 
-			details := map[string]interface{}{
-				"hubServiceAccountEmail": s.gcpTokenGenerator.ServiceAccountEmail(),
-				"targetEmail":            sa.Email,
-			}
-			writeError(w, http.StatusBadGateway, "gcp_verification_failed",
-				"Failed to verify impersonation: "+err.Error(), details)
-			return
+	// Attempt to verify impersonation via the GCP token generator
+	if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
+		// Persist the failure status
+		sa.Verified = false
+		sa.VerificationStatus = "failed"
+		sa.VerificationError = err.Error()
+		_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
+
+		details := map[string]interface{}{
+			"hubServiceAccountEmail": s.gcpTokenGenerator.ServiceAccountEmail(),
+			"targetEmail":            sa.Email,
 		}
+		writeError(w, http.StatusBadGateway, "gcp_verification_failed",
+			"Failed to verify impersonation: "+err.Error(), details)
+		return
 	}
 
 	sa.Verified = true
