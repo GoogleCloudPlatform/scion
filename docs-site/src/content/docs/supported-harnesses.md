@@ -58,8 +58,11 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 
 ### Configuration
 - **scion-agent.yaml**: Can be configured via `agent_instructions` and `system_prompt` fields in the template.
-- **Config File**: `~/.claude.json`. Scion manages project-specific settings in this file to ensure the agent respects the workspace boundaries.
+- **Config File (`~/.claude.json`)**: Scion manages project-specific settings in this file to ensure the agent respects workspace boundaries.
 - **Projects**: Scion automatically configures the current workspace as a project in `.claude.json`.
+- **Environment Hardening (`~/.claude/settings.json`)**: Scion pre-populates a strict permissions deny list and security hardeners in the agent's native settings file:
+    - **Permissions Deny List**: Denies potentially hazardous operations such as `EnterPlanMode`, `ExitPlanMode`, `DesignSync`, `NotebookEdit`, `SendMessage`, `PushNotification`, `RemoteTrigger`, `ReportFindings`, `ScheduleWakeup`, `AskUserQuestion`, `CronCreate`, `CronDelete`, and `CronList`.
+    - **Hardening Flags**: Disables experimental or outbound-connecting features by setting `disableBundledSkills`, `disableWorkflows`, `disableRemoteControl`, `disableClaudeAiConnectors`, and `disableArtifacts` to `true`.
 
 ### Known Limitations
 - Claude Code is a beta tool and its configuration format may change.

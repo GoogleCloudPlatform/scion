@@ -28,14 +28,36 @@ You can tell Scion exactly which directory to use as the workspace. This is usef
 - Using a shared directory across multiple agents.
 - Working on a path outside the current repository without creating a worktree.
 
+### Absolute vs. Relative Paths
+
+The `--workspace` (or `-w`) flag accepts both **absolute host paths** and **project-relative paths**, distinguished automatically by `filepath.IsAbs()`:
+
+#### Absolute Paths
+
+If you specify an absolute host path, Scion mounts that exact directory directly.
+
 ```bash
-# Mount a specific directory
-scion start my-agent "fix bugs" --workspace ./my-service
+# Mount a specific absolute host path
+scion start my-agent "run analysis" --workspace /home/user/my-service
 ```
 
 - **Behavior**: The specified directory is mounted directly to `/workspace`.
 - **Isolation**: **None**. Changes made by the agent are immediately visible on the host and to any other agents sharing this directory.
 - **Git**: No new worktree or branch is created, even if inside a repo.
+
+#### Relative Paths (Contained Subdirectory Mounts)
+
+If you specify a relative path, it is interpreted as a subdirectory scoped to your project's **logical root** (or current working directory). This allows you to confine an agent to a specific subdirectory, such as a package in a monorepo:
+
+```bash
+# Scope the agent to a project subdirectory
+scion start my-agent "fix web bugs" --workspace packages/web
+```
+
+- **Behavior**: Scion resolves the subdirectory path against the project root, performs strict containment checks (preventing directory traversal and escaping via symlinks), and mounts only that subtree to `/workspace`.
+- **Isolation**: The agent has **full containment** — it cannot see or access any files or folders outside of that specific subdirectory.
+- **Support**: Supported for directory (non-git) projects — both linked and hub-managed.
+- **Git-Clone Projects Limitation**: Relative `--workspace` paths are **not supported** for per-agent git (clone-based) projects and will be rejected with an error. For those projects, use an absolute path or omit the `--workspace` flag.
 
 ---
 
