@@ -36,7 +36,9 @@ var versionCmd = &cobra.Command{
 				"short":     version.Short(),
 			})
 		}
-		fmt.Println(util.GetBanner())
+		if resolveMode() != ModeAgent {
+			fmt.Println(util.GetBanner())
+		}
 		fmt.Println(version.Get())
 		return nil
 	},

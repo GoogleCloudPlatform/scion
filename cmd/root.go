@@ -225,7 +225,9 @@ func commandInSubtree(cmd *cobra.Command, name string) bool {
 }
 
 func init() {
-	rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
+	if resolveMode() != ModeAgent {
+		rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
+	}
 	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
 	rootCmd.PersistentFlags().StringVar(&projectPath, "grove", "", "Deprecated alias for --project")
 	_ = rootCmd.PersistentFlags().MarkDeprecated("grove", "use --project instead")
