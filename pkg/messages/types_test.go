@@ -30,6 +30,7 @@ func TestValidateType(t *testing.T) {
 		{TypeAssistantReply, false},
 		{TypeGroupSet, false},
 		{TypeMention, false},
+		{TypeSystem, false},
 		{"unknown", true},
 		{"", true},
 	}
@@ -438,6 +439,70 @@ func TestNewMention(t *testing.T) {
 	}
 	if got := m.Metadata["mention_position"]; got != "body" {
 		t.Errorf("metadata[mention_position] = %q, want %q", got, "body")
+	}
+}
+
+func TestNewSystemMessage(t *testing.T) {
+	m := NewSystemMessage("system", "agent:dev", "Port 8080 has been auto-exposed", SystemCategoryPortForward)
+	if m.Version != Version {
+		t.Errorf("version = %d, want %d", m.Version, Version)
+	}
+	if m.Type != TypeSystem {
+		t.Errorf("type = %q, want %q", m.Type, TypeSystem)
+	}
+	if m.Sender != "system" {
+		t.Errorf("sender = %q, want %q", m.Sender, "system")
+	}
+	if m.Recipient != "agent:dev" {
+		t.Errorf("recipient = %q, want %q", m.Recipient, "agent:dev")
+	}
+	if m.Msg != "Port 8080 has been auto-exposed" {
+		t.Errorf("msg = %q, want %q", m.Msg, "Port 8080 has been auto-exposed")
+	}
+	if m.Timestamp == "" {
+		t.Error("timestamp should be set")
+	}
+	if m.Metadata == nil {
+		t.Fatal("metadata should not be nil")
+	}
+	if got := m.Metadata["system_category"]; got != SystemCategoryPortForward {
+		t.Errorf("metadata[system_category] = %q, want %q", got, SystemCategoryPortForward)
+	}
+}
+
+func TestNewSystemMessage_Categories(t *testing.T) {
+	tests := []struct {
+		category string
+		want     string
+	}{
+		{SystemCategoryScheduler, "scheduler"},
+		{SystemCategoryPortForward, "port-forward"},
+		{SystemCategoryDeliveryFailed, "delivery-failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.category, func(t *testing.T) {
+			m := NewSystemMessage("system", "agent:test", "test msg", tt.category)
+			if got := m.Metadata["system_category"]; got != tt.want {
+				t.Errorf("system_category = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStructuredMessage_ValidateSystem(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-08-03T10:00:00Z",
+		Sender:    "system",
+		Recipient: "agent:worker",
+		Msg:       "Scheduled event fired",
+		Type:      TypeSystem,
+		Metadata: map[string]string{
+			"system_category": SystemCategoryScheduler,
+		},
+	}
+	if err := m.Validate(); err != nil {
+		t.Errorf("unexpected error for valid system message: %v", err)
 	}
 }
 

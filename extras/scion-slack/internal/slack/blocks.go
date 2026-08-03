@@ -173,6 +173,36 @@ func RenderInputNeededBlocks(msg *messages.StructuredMessage, agentSlug, request
 	return blocks
 }
 
+// FormatSystemMessage formats a TypeSystem message as mrkdwn text.
+// System messages are operational notices (e.g. scheduled events, delivery
+// failures, port auto-expose) and are rendered with a gear prefix.
+func FormatSystemMessage(msg *messages.StructuredMessage) string {
+	if msg == nil {
+		return ""
+	}
+
+	category := "system"
+	if msg.Metadata != nil {
+		if cat, ok := msg.Metadata["system_category"]; ok && cat != "" {
+			category = cat
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, ":gear: *[%s]*", category)
+
+	if msg.Status != "" {
+		fmt.Fprintf(&b, " [%s]", msg.Status)
+	}
+
+	if msg.Msg != "" {
+		b.WriteString("\n")
+		b.WriteString(msg.Msg)
+	}
+
+	return truncateMessage(b.String())
+}
+
 // truncateMessage ensures the message fits within Slack's message length limit.
 func truncateMessage(text string) string {
 	if len(text) <= maxSlackMessageLength {

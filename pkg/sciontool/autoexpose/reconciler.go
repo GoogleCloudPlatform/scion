@@ -16,6 +16,7 @@ package autoexpose
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -36,6 +37,12 @@ type HubPortClient interface {
 	ListPorts(ctx context.Context) ([]scionhub.ExposedPort, error)
 }
 
+// MessageClient sends messages via the Hub API.
+// Used to notify the agent when ports are auto-exposed.
+type MessageClient interface {
+	SendSelfMessage(ctx context.Context, msg string, metadata map[string]string) error
+}
+
 // scanFunc is the function signature for scanning listeners.
 // Defaults to ScanListeners; overridable in tests.
 type scanFunc func() ([]ListenSocket, error)
@@ -44,9 +51,10 @@ type scanFunc func() ([]ListenSocket, error)
 // them with the Hub's port registry. It only manages ports it auto-exposed
 // (tracked in a local set) and never un-exposes manually-registered ports.
 type Reconciler struct {
-	client HubPortClient
-	cfg    Config
-	scan   scanFunc
+	client    HubPortClient
+	msgClient MessageClient // optional; nil means no notifications
+	cfg       Config
+	scan      scanFunc
 
 	// autoExposed tracks ports this reconciler has registered.
 	// Only these ports are candidates for auto-unexpose.
@@ -70,6 +78,12 @@ func NewReconciler(client HubPortClient, cfg Config) *Reconciler {
 		scan:        ScanListeners,
 		autoExposed: make(map[int]bool),
 	}
+}
+
+// SetMessageClient sets the optional message client used to notify the agent
+// when ports are auto-exposed. If nil (the default), notifications are skipped.
+func (r *Reconciler) SetMessageClient(mc MessageClient) {
+	r.msgClient = mc
 }
 
 // Run starts the reconciliation loop. It blocks until ctx is cancelled.
@@ -270,6 +284,16 @@ func (r *Reconciler) registerPort(ctx context.Context, port int) error {
 
 	r.autoExposed[port] = true
 	log.Info("auto-expose: exposed port %d", port)
+
+	// Notify the agent that a port was auto-exposed.
+	if r.msgClient != nil {
+		notifyMsg := fmt.Sprintf("Port %d has been auto-exposed for proxy access. Run 'sciontool port list' for the full proxy URL.", port)
+		metadata := map[string]string{"system_category": "port-forward"}
+		if err := r.msgClient.SendSelfMessage(ctx, notifyMsg, metadata); err != nil {
+			log.Error("auto-expose: failed to send notification for port %d: %v", port, err)
+		}
+	}
+
 	return nil
 }
 

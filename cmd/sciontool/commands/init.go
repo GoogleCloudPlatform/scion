@@ -626,7 +626,9 @@ func runInit(args []string) int {
 
 			// Auto-expose: detect and register listening ports
 			if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled {
-				go autoexpose.NewReconciler(hubClient, autoExposeCfg).Run(ctx)
+				reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
+				reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
+				go reconciler.Run(ctx)
 				log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
 			}
 
@@ -2037,6 +2039,20 @@ func isWorkspaceEmpty(path string) bool {
 		}
 	}
 	return true
+}
+
+// hubMessageAdapter adapts the Hub client to the autoexpose.MessageClient interface
+// so the reconciler can notify the agent about auto-exposed ports.
+type hubMessageAdapter struct {
+	client *hub.Client
+}
+
+func (a *hubMessageAdapter) SendSelfMessage(ctx context.Context, msg string, metadata map[string]string) error {
+	return a.client.SendOutboundMessage(ctx, hub.OutboundMessage{
+		Msg:      msg,
+		Type:     "system",
+		Metadata: metadata,
+	})
 }
 
 // cleanGcloudConfigForMetadata removes gcloud configuration state files from

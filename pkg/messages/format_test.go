@@ -269,6 +269,35 @@ func TestFormatForDelivery_AllMetadataFiltered(t *testing.T) {
 	}
 }
 
+func TestFormatForDelivery_SystemMessage(t *testing.T) {
+	msg := NewSystemMessage("system", "agent:dev", "Port 8080 has been auto-exposed", SystemCategoryPortForward)
+
+	result := FormatForDelivery(msg)
+
+	// Should have the intro and delimiters
+	if !strings.Contains(result, deliveryIntro) {
+		t.Error("missing delivery intro")
+	}
+	if !strings.Contains(result, beginDelimiter) {
+		t.Error("missing begin delimiter")
+	}
+
+	// Should contain system type
+	if !strings.Contains(result, `"type": "system"`) {
+		t.Error("missing system type in output")
+	}
+
+	// Should contain system_category in metadata (it's in the allowlist)
+	if !strings.Contains(result, `"system_category": "port-forward"`) {
+		t.Error("missing system_category in delivery output")
+	}
+
+	// Should contain the message body
+	if !strings.Contains(result, "Port 8080 has been auto-exposed") {
+		t.Error("missing message body in output")
+	}
+}
+
 func TestFormatForDelivery_WithAttachments(t *testing.T) {
 	msg := &StructuredMessage{
 		Version:     Version,

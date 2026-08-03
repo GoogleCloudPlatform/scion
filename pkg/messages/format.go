@@ -36,6 +36,7 @@ var deliveryMetadataAllowlist = map[string]bool{
 	"mention_position": true,
 	"channel":          true,
 	"thread_id":        true,
+	"system_category":  true,
 }
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.

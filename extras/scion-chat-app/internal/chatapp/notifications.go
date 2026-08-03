@@ -309,6 +309,8 @@ func extractActivity(msg *messages.StructuredMessage) string {
 		return "WAITING_FOR_INPUT"
 	case messages.TypeStateChange:
 		return "STATE_CHANGE"
+	case messages.TypeSystem:
+		return "SYSTEM"
 	default:
 		return "INFO"
 	}

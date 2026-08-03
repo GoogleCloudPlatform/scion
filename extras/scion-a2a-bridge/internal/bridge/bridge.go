@@ -794,13 +794,15 @@ func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage
 	if !ok {
 		return false
 	}
-	if msg.Type == messages.TypeStateChange {
+	if msg.Type == messages.TypeStateChange || msg.Type == messages.TypeSystem {
 		// Terminal state-changes must still be persisted to the DB even though
 		// we skip the waiter — otherwise the task's stored state is never updated.
-		if taskState := MapActivityToTaskState(msg.Msg); IsTerminalState(taskState) {
-			if err := b.store.UpdateTaskState(taskID, taskState); err != nil {
-				b.log.Error("failed to persist terminal state from waiter path",
-					"task_id", taskID, "state", taskState, "error", err)
+		if msg.Type == messages.TypeStateChange {
+			if taskState := MapActivityToTaskState(msg.Msg); IsTerminalState(taskState) {
+				if err := b.store.UpdateTaskState(taskID, taskState); err != nil {
+					b.log.Error("failed to persist terminal state from waiter path",
+						"task_id", taskID, "state", taskState, "error", err)
+				}
 			}
 		}
 		return true
@@ -841,6 +843,12 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 			b.unregisterActiveTask(taskID, aKey)
 			b.streams.CloseAll(taskID)
 		}
+		return
+	}
+
+	// System messages are non-conversational — log and skip content dispatch.
+	if msg.Type == messages.TypeSystem {
+		b.log.Debug("skipping system message in A2A bridge", "task_id", taskID, "sender", msg.Sender)
 		return
 	}
 

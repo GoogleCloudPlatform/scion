@@ -588,6 +588,32 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	// Determine the project and agent from the topic.
 	projectID, agentSlug := parseTopicComponents(topic)
 
+	// Route system messages to linked groups (similar to state-change
+	// with notify_in_group). System messages are operational notices and
+	// do not need DM routing.
+	if msg != nil && msg.Type == messages.TypeSystem {
+		if store != nil && projectID != "" {
+			links, _ := store.GetGroupLinksForProject(ctx, projectID)
+			for _, link := range links {
+				if link.Active && link.NotifyInGroup {
+					text := FormatSystemCard(msg)
+					if text != "" {
+						if sq != nil {
+							if _, err := sq.Send(ctx, link.ChatID, text, "HTML", nil, 0); err != nil {
+								b.log.Warn("Failed to send system message group notification",
+									"chat_id", link.ChatID, "error", err)
+							}
+						} else if _, err := api.SendMessage(ctx, link.ChatID, text, "HTML"); err != nil {
+							b.log.Warn("Failed to send system message group notification",
+								"chat_id", link.ChatID, "error", err)
+						}
+					}
+				}
+			}
+		}
+		return nil
+	}
+
 	// Route state-change notifications to the user's personal DM
 	// instead of the group chat.
 	if msg != nil && msg.Type == messages.TypeStateChange {

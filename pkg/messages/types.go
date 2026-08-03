@@ -56,6 +56,14 @@ const (
 	TypeAssistantReply = "assistant-reply"
 	TypeGroupSet       = "group-set"
 	TypeMention        = "mention"
+	TypeSystem         = "system"
+)
+
+// System message category constants identify the origin of a system message.
+const (
+	SystemCategoryScheduler       = "scheduler"
+	SystemCategoryPortForward     = "port-forward"
+	SystemCategoryDeliveryFailed  = "delivery-failed"
 )
 
 // Visibility constants control which consumers see a message.
@@ -86,6 +94,7 @@ var validTypes = map[string]bool{
 	TypeAssistantReply: true,
 	TypeGroupSet:       true,
 	TypeMention:        true,
+	TypeSystem:         true,
 }
 
 // StructuredMessage represents a formatted Scion message.
@@ -119,7 +128,7 @@ type StructuredMessage struct {
 // ValidateType returns an error if the message type is not in the closed enum.
 func ValidateType(t string) error {
 	if !validTypes[t] {
-		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change, assistant-reply, group-set, mention", t)
+		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change, assistant-reply, group-set, mention, system", t)
 	}
 	return nil
 }
@@ -214,6 +223,20 @@ func NewMention(sender, recipient, msg, mentionSource string) *StructuredMessage
 			"mention_source":   mentionSource,
 			"mention_position": "body",
 		},
+	}
+}
+
+// NewSystemMessage creates a new system-originated message with a category.
+// The category is stored in metadata["system_category"] for downstream consumers.
+func NewSystemMessage(sender, recipient, msg, category string) *StructuredMessage {
+	return &StructuredMessage{
+		Version:   Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    sender,
+		Recipient: recipient,
+		Msg:       msg,
+		Type:      TypeSystem,
+		Metadata:  map[string]string{"system_category": category},
 	}
 }
 
