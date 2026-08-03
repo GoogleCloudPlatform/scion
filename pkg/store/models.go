@@ -207,13 +207,16 @@ const (
 	ProjectTypeHubManaged = "hub-managed" // Hub-managed workspace
 )
 
+// Project classification labels.
+const (
+	// LabelTemplate marks a project as a project template.
+	LabelTemplate = "scion.io/template"
+)
+
 // Workspace mode constants for git projects.
 // When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
 const (
-	// LabelTemplate marks a project as a project template.
-	LabelTemplate = "scion.io/template"
-
 	LabelWorkspaceMode            = "scion.dev/workspace-mode"
 	WorkspaceModeShared           = "shared"
 	WorkspaceModePerAgent         = "per-agent"
@@ -365,7 +368,7 @@ func (p *Project) IsWorktreePerAgent() bool {
 
 // IsTemplate returns true if this project is marked as a project template.
 func (p *Project) IsTemplate() bool {
-	return p.Labels != nil && p.Labels[LabelTemplate] == "true"
+	return p.Labels[LabelTemplate] == "true"
 }
 
 // RuntimeBroker represents a compute node in the Hub database.
