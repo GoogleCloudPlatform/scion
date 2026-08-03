@@ -210,6 +210,11 @@ A named collection of Hub users (and nested groups) used by the Hub permissions 
 _Avoid_: team, org, role
 _See also_: Message Group (different concept — message recipients, not users)
 
+**User Access Token (UAT)**:
+A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT is scoped to a single project and carries a specific list of action permissions (scopes).
+_Avoid_: personal access token (PAT), API key, secret token
+_See also_: Hub
+
 ## Messaging
 
 **Message Group**:

@@ -21,7 +21,8 @@ The dashboard features an integrated notification framework with real-time SSE d
 ### Projects
 View and manage your registered projects.
 - **Create/Register Project**: Create a Hub-Managed workspace directly on the Hub, or connect a new remote Git repository. Includes a confirmation dialog when creating a project for an existing git repository.
-- **Project Settings**: Centralized configuration interface for managing project-scoped environment variables, secrets, and **injected skills**, including "Injection Mode" controls (Always vs. As-Needed). The settings page features a streamlined flow with a "Done" button and hides unnecessary registration options for git-backed projects.
+- **Clone Project**: Deep-copy settings, labels, environment variables, skills, lifecycle hooks, harness configurations, and templates from an existing project to a new project. Built-in defer-driven rollback ensures transactions are atomic and safe.
+- **Project Settings**: Centralized configuration interface for managing project-scoped environment variables, secrets, and **injected skills**, including "Injection Mode" controls (Always vs. As-Needed). The settings page features a streamlined flow with a "Done" button, hides unnecessary registration options for git-backed projects, and displays Hub-default placeholders for unset configurations.
   - **Batch Skill Injection**: Paste a GitHub directory URL (e.g., referencing a folder containing multiple skill subdirectories) into the skill input to trigger directory-discovery. An interactive checkbox dialog allows selecting which skills to add, and submits them as a single atomic batch, with any embedded credentials/userinfo automatically stripped before logging for safety.
 - **Workspace & File Management**: Access the comprehensive **inline file editor** to view and modify files directly in the browser, featuring integrated Markdown preview capabilities. The file browser supports **fuzzy and regex-based filtering** for fast navigation. You can also download individual workspace files or generate ZIP archives of entire projects directly from the UI.
 - **Template Management**: Direct server-side importing of templates with immediate UI feedback. Includes full template file browsing, editing, and upload capabilities directly within the dashboard.
@@ -33,6 +34,8 @@ View and manage your registered projects.
 ### Agents
 Detailed view for individual agents, featuring a high-density tabbed layout and improved breadcrumb navigation with a dedicated back button.
 - **Advanced Agent Creation**: A comprehensive form for Just-In-Time (JIT) configuration, allowing granular control over models, resource limits (`max_turns`, `max_duration`), and harness settings at creation time. It features a native **Runtime Profile Selector** that dynamically populates available profiles based on the selected broker, and **Custom Branch Targeting**, which allows users to direct agents to clone and check out specific git branches immediately upon creation.
+- **Quick-Message Button**: Found on agent details, list, and graph cards. Instantly open an interactive modal dialog to chat with an agent (use `Enter` to send, `Shift+Enter` for a newline), gated by your existing message permissions.
+- **Graph Card Terminal Shortcut**: Connect straight to an agent's interactive terminal directly from its card in the graph view via a dedicated, icon-only shortcut button. Gated by attach capability and disabled when the agent is offline.
 - **Status Tab**: Real-time view of agent lifecycle (Starting, Thinking, Waiting, etc.), including the `suspended` and `error` phases. Includes **stalled agent detection** to flag agents that are alive but hung (activity `stalled`) and offline detection for agents whose heartbeat has gone silent (activity `offline`). A crashed agent (non-zero exit) is shown in the `error` phase with a message such as `Agent crashed with exit code N`, and can be restarted from the UI.
 - **Logs Tab**: Streamed logs from the agent container via the integrated Cloud Log Viewer.
 - **Messages Tab**: A dedicated tab for viewing structured messages sent to and from the agent.
@@ -53,6 +56,7 @@ Centralized views for managing the Scion infrastructure and access control (avai
 - **Groups**: Create and manage organizational groups for policy-based authorization.
 - **Service Accounts**: Manage and validate registered Google Service Accounts for use with the metadata emulation pipeline.
 - **Brokers**: Comprehensive broker detail pages providing a grouped view of all active agents by their respective projects.
+- **Server Configuration Editor**: A full-featured settings editor at `/admin/server-config`. Restructured the **General** settings tab into three dedicated cards (General, Agent Defaults with sub-tabs, and Project Default Settings). Adds `DefaultModel` and `DefaultThinkingLevel` fields to the defaults pipeline, moves the Telemetry toggle to Agent Defaults, and groups the Message Broker configuration in the Hub Server tab.
 - **Maintenance Mode**: Toggle maintenance mode for the Hub and Web servers to facilitate safe infrastructure updates.
 
 ## Authentication

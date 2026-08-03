@@ -33,6 +33,7 @@ permissions). Available scopes:
 | Scope | Grants |
 |-------|--------|
 | `project:read` | Read project metadata |
+| `project:update` | Update project settings, configurations, and annotations |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |

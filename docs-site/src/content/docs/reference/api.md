@@ -38,6 +38,8 @@ Agent state uses a layered model:
 - `POST /register`: Register or link a project repository.
 - `GET /:id`: Get project metadata and statistics.
 - `GET /:id/secrets`: Manage environment secrets for the project.
+- `GET /:id/settings/resolved`: Get project settings indicating whether a Hub default exists per-setting (non-admin gated).
+- `POST /:id/clone`: Deep-copy settings, labels, env vars, skills, hooks, harness configs, and templates to a new project with rollback protection.
 
 #### Runtime Brokers (`/api/v1/brokers`)
 - `GET /`: List registered runtime brokers.

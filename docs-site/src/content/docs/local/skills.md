@@ -167,6 +167,30 @@ user → project → global → core
 
 More specific scopes therefore override broader ones — a user's own skill shadows a global skill of the same name.
 
+### Destination-Name Collision Resolution
+
+When multiple skills are resolved for an agent, they are mounted into the harness's skills directory. If multiple skills resolve to the same destination folder name (for example, if they share a name but come from different scopes, or use overlapping `as` aliases), Scion performs a precedence-based deduplication pass to resolve the collision rather than failing.
+
+The precedence hierarchy for resolving destination name collisions is (highest priority wins):
+
+```text
+project > template > user > hub > platform
+```
+
+- **Project**: Skills explicitly defined at the project scope.
+- **Template**: Skills mounted or supplied by the agent's template.
+- **User**: Personal/user-scoped skills.
+- **Hub**: Global skills published to the Hub's Skill Registry.
+- **Platform**: Built-in system or workspace skills injected by Scion.
+
+#### Collision Reporting
+
+When a destination-name collision is detected and resolved:
+1. Scion logs the collision and the resolution outcome in the Hub and agent dispatch logs.
+2. The collision details and final resolved mapping are recorded in a `resolved-skills.json` file inside the agent's run/state directory.
+
+Each `SkillReference` includes a `Scope` field, annotated at all injection sites, allowing full traceability of where each skill was sourced and how collisions were handled.
+
 ## Publishing a skill
 
 `scion skills publish` uploads a local skill directory to the Hub as an immutable, versioned release. A `--version` (valid [SemVer 2.0.0](https://semver.org/)) is required, and the directory must contain a `SKILL.md`.
