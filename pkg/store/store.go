@@ -324,6 +324,11 @@ type ProjectFilter struct {
 	// this value. Used with MemberProjectIDs to return "shared" projects (member
 	// but not owner).
 	ExcludeOwnerID string
+
+	// IsTemplate, when non-nil, restricts results to template projects
+	// (true) or non-template projects (false). Template projects carry the
+	// scion.io/template: "true" label.
+	IsTemplate *bool
 }
 
 // RuntimeBrokerStore defines runtime broker persistence operations.

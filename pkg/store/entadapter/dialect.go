@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 )
 
 // labelContains returns an Ent predicate restricting results to agents whose
@@ -58,6 +59,70 @@ func labelContains(key, value string) predicate.Agent {
 					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
 					WriteString(") = ").
 					Arg(value)
+			}))
+		}
+	}
+}
+
+// projectLabelContains returns an Ent predicate restricting results to
+// projects whose `labels` JSON object contains the given key-value pair.
+func projectLabelContains(key, value string) predicate.Project {
+	return func(s *entsql.Selector) {
+		col := s.C(project.FieldLabels)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString(col).
+					WriteString(" @> ").
+					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
+					WriteString("::jsonb")
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
+				b.WriteString("json_extract(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					WriteString(") = ").
+					Arg(value)
+			}))
+		}
+	}
+}
+
+// projectLabelNotContains returns an Ent predicate restricting results to
+// projects whose `labels` JSON object does NOT contain the given key-value pair
+// (label absent OR value differs).
+func projectLabelNotContains(key, value string) predicate.Project {
+	return func(s *entsql.Selector) {
+		col := s.C(project.FieldLabels)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("NOT (").
+					WriteString(col).
+					WriteString(" @> ").
+					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
+					WriteString("::jsonb)").
+					WriteString(" OR ").
+					WriteString(col).
+					WriteString(" IS NULL")
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
+				b.WriteString("(json_extract(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					WriteString(") IS NULL OR json_extract(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					WriteString(") != ").
+					Arg(value).
+					WriteString(")")
 			}))
 		}
 	}

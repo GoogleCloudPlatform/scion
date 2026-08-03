@@ -426,6 +426,13 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 	if filter.Slug != "" {
 		query.Where(project.SlugEqualFold(filter.Slug))
 	}
+	if filter.IsTemplate != nil {
+		if *filter.IsTemplate {
+			query.Where(projectLabelContains(store.LabelTemplate, "true"))
+		} else {
+			query.Where(projectLabelNotContains(store.LabelTemplate, "true"))
+		}
+	}
 
 	totalCount, err := query.Clone().Count(ctx)
 	if err != nil {
