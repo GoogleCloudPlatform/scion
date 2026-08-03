@@ -61,6 +61,8 @@ interface PlatformFieldDef {
   description: string;
   defaultValue: string;
   placeholder?: string;
+  type?: 'text' | 'select' | 'toggle';  // default 'text'
+  options?: { value: string; label: string }[];  // for 'select' type
 }
 
 interface PlatformSecretDef {
@@ -123,17 +125,47 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     { key: 'agent_cache_ttl', label: 'Agent Cache TTL', description: 'How long to cache agent info', defaultValue: '5m' },
   ],
   a2a: [
-    { key: 'external_url', label: 'External URL', description: 'Public URL for agent cards', defaultValue: '' },
-    { key: 'auth_scheme', label: 'Auth Scheme', description: 'apiKey, bearer, none, hubUAT, or hubJWT', defaultValue: 'none' },
-    { key: 'uat_cache_ttl', label: 'UAT Cache TTL', description: 'Cache duration for UAT validation results', defaultValue: '60s' },
-    { key: 'rate_limit_enabled', label: 'Rate Limiting Enabled', description: 'Enable request rate limiting (true/false)', defaultValue: 'false' },
-    { key: 'rate_limit_rps', label: 'Rate Limit (req/s)', description: 'Maximum requests per second', defaultValue: '10' },
-    { key: 'rate_limit_burst', label: 'Rate Limit Burst', description: 'Maximum burst size for rate limiter', defaultValue: '20' },
-    { key: 'send_message_timeout', label: 'Send Message Timeout', description: 'Timeout for sending messages to agents', defaultValue: '120s' },
-    { key: 'sse_keepalive', label: 'SSE Keepalive Interval', description: 'Interval for SSE keepalive pings', defaultValue: '30s' },
-    { key: 'push_retry_max', label: 'Push Notification Retries', description: 'Maximum retries for push notification delivery', defaultValue: '3' },
-    { key: 'provider_org', label: 'Provider Organization', description: 'Organization name for agent card metadata', defaultValue: '' },
-    { key: 'provider_url', label: 'Provider URL', description: 'Organization URL for agent card metadata', defaultValue: '' },
+    { key: 'external_url', label: 'External URL',
+      description: 'Public URL where the bridge serves agent cards and JSON-RPC',
+      defaultValue: '', placeholder: 'https://a2a.example.com' },
+    { key: 'auth_scheme', label: 'Auth Scheme',
+      description: 'Authentication method for A2A clients',
+      defaultValue: 'none',
+      type: 'select',
+      options: [
+        { value: 'none', label: 'None' },
+        { value: 'apiKey', label: 'API Key' },
+        { value: 'bearer', label: 'Bearer Token' },
+        { value: 'hubUAT', label: 'Hub UAT' },
+        { value: 'hubJWT', label: 'Hub JWT' },
+      ] },
+    { key: 'rate_limit_enabled', label: 'Rate Limiting',
+      description: 'Enable request rate limiting',
+      defaultValue: 'false', type: 'toggle' },
+    { key: 'rate_limit_rps', label: 'Rate Limit (req/s)',
+      description: 'Maximum requests per second',
+      defaultValue: '10', placeholder: '10' },
+    { key: 'rate_limit_burst', label: 'Rate Limit Burst',
+      description: 'Maximum burst size for rate limiter',
+      defaultValue: '20', placeholder: '20' },
+    { key: 'send_message_timeout', label: 'Send Message Timeout',
+      description: 'Timeout for sending messages to agents',
+      defaultValue: '120s', placeholder: '120s' },
+    { key: 'sse_keepalive', label: 'SSE Keepalive Interval',
+      description: 'Interval for SSE keepalive pings',
+      defaultValue: '30s', placeholder: '30s' },
+    { key: 'push_retry_max', label: 'Push Notification Retries',
+      description: 'Maximum retries for push notification delivery',
+      defaultValue: '3', placeholder: '3' },
+    { key: 'provider_org', label: 'Provider Organization',
+      description: 'Organization name for agent card metadata',
+      defaultValue: '', placeholder: 'My Organization' },
+    { key: 'provider_url', label: 'Provider URL',
+      description: 'Organization URL for agent card metadata',
+      defaultValue: '', placeholder: 'https://example.com' },
+    { key: 'uat_cache_ttl', label: 'UAT Cache TTL',
+      description: 'How long to cache UAT validation results',
+      defaultValue: '60s', placeholder: '60s' },
   ],
 };
 
@@ -1007,16 +1039,7 @@ export class ScionPageAdminIntegrations extends LitElement {
             (field) => html`
               <div class="form-field">
                 <label>${field.label}</label>
-                <sl-input
-                  .value=${this.editedSettings[field.key] ?? field.defaultValue}
-                  placeholder=${field.placeholder ?? field.defaultValue}
-                  @sl-change=${(e: Event) => {
-                    this.editedSettings = {
-                      ...this.editedSettings,
-                      [field.key]: (e.target as HTMLInputElement).value,
-                    };
-                  }}
-                ></sl-input>
+                ${this.renderFieldInput(field)}
                 <span class="hint">${field.description}</span>
               </div>
             `
@@ -1039,6 +1062,59 @@ export class ScionPageAdminIntegrations extends LitElement {
           )}
         </div>
       </div>
+    `;
+  }
+
+  private renderFieldInput(field: PlatformFieldDef) {
+    const fieldType = field.type ?? 'text';
+
+    if (fieldType === 'select' && field.options) {
+      const currentValue = this.editedSettings[field.key] ?? field.defaultValue;
+      return html`
+        <sl-select
+          .value=${currentValue}
+          @sl-change=${(e: Event) => {
+            this.editedSettings = {
+              ...this.editedSettings,
+              [field.key]: (e.target as HTMLSelectElement).value,
+            };
+          }}
+        >
+          ${field.options.map(
+            (opt) => html`<sl-option value=${opt.value}>${opt.label}</sl-option>`
+          )}
+        </sl-select>
+      `;
+    }
+
+    if (fieldType === 'toggle') {
+      const currentValue = this.editedSettings[field.key] ?? field.defaultValue;
+      const isChecked = currentValue === 'true';
+      return html`
+        <sl-switch
+          ?checked=${isChecked}
+          @sl-change=${(e: Event) => {
+            this.editedSettings = {
+              ...this.editedSettings,
+              [field.key]: (e.target as HTMLInputElement).checked ? 'true' : 'false',
+            };
+          }}
+        ></sl-switch>
+      `;
+    }
+
+    // Default: text input
+    return html`
+      <sl-input
+        .value=${this.editedSettings[field.key] ?? field.defaultValue}
+        placeholder=${field.placeholder ?? field.defaultValue}
+        @sl-change=${(e: Event) => {
+          this.editedSettings = {
+            ...this.editedSettings,
+            [field.key]: (e.target as HTMLInputElement).value,
+          };
+        }}
+      ></sl-input>
     `;
   }
 
@@ -1151,13 +1227,20 @@ export class ScionPageAdminIntegrations extends LitElement {
       ...secretKeys.filter((k) => !secretDefMap.has(k)),
     ];
 
+    // For A2A, the api_key secret is only relevant when auth_scheme is apiKey or bearer.
+    const authScheme = platform === 'a2a' ? (this.editedSettings['auth_scheme'] ?? 'none') : '';
+    const apiKeyRelevant = authScheme === 'apiKey' || authScheme === 'bearer';
+
     return html`
       <div class="section">
         <h3 class="section-title">Secrets</h3>
         ${sortedKeys.map((key) => {
+          // Conditionally hide api_key for A2A when scheme doesn't need it.
+          if (platform === 'a2a' && key === 'api_key' && !apiKeyRelevant) return nothing;
           const def = secretDefMap.get(key);
           const label = def?.label ?? key;
-          const isRequired = def?.required ?? false;
+          // For A2A, mark api_key as required when the scheme needs it.
+          const isRequired = platform === 'a2a' && key === 'api_key' ? apiKeyRelevant : (def?.required ?? false);
           const isConfigured = d.has_secrets?.[key];
           return html`
             <div class="secret-row">

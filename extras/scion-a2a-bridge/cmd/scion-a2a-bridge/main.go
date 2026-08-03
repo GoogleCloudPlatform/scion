@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -74,6 +75,30 @@ func main() {
 	}
 	defer store.Close()
 	log.Info("state database initialized", "path", dbPath)
+
+	// Determine state directory for admin overlay persistence.
+	stateDir := filepath.Dir(dbPath)
+
+	// Load and apply any persisted admin overlay (from a previous Configure push).
+	// This ensures the bridge boots with the last-known admin config, not just
+	// the base YAML, bridging the gap until the Hub's first Configure() push.
+	baseCfg := *cfg // snapshot of the base YAML config (immutable reference)
+	overlay, overlayErr := bridge.LoadPersistedOverlay(stateDir)
+	if overlayErr != nil {
+		log.Warn("failed to load persisted admin overlay, proceeding with base YAML config", "error", overlayErr)
+	}
+	if overlay != nil {
+		effective := bridge.ApplyOverlay(baseCfg, overlay)
+		cfg = &effective
+		log.Info("applied persisted admin overlay",
+			"auth_scheme", cfg.Auth.Scheme,
+			"external_url", cfg.Bridge.ExternalURL,
+			"projects", len(cfg.Projects),
+		)
+	}
+
+	// Build the initial config snapshot (base YAML + persisted overlay).
+	snapshot := bridge.NewSnapshotHolder(bridge.BuildSnapshot(*cfg))
 
 	// Load hub signing key.
 	signingKeyB64, err := loadSigningKey(cfg.Hub)
@@ -139,6 +164,10 @@ func main() {
 	// Wire broker into the bridge for subscription management.
 	b.SetBroker(broker)
 
+	// Wire admin config management: snapshot + base config + state dir.
+	b.SetSnapshot(snapshot)
+	broker.SetAdminConfig(&baseCfg, snapshot, stateDir)
+
 	// Create SDK executor and request handler.
 	// Use a route-key authenticator so the in-memory task store associates tasks
 	// with the correct project/agent pair, and a ScopedTaskStore wrapper that
@@ -174,6 +203,10 @@ func main() {
 	}
 
 	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
+	srv.SetSnapshot(snapshot)
+	if signingKey != nil {
+		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
+	}
 	srv.WarnOnOpenAuth()
 
 	httpServer := &http.Server{

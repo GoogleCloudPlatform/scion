@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -33,11 +34,13 @@ var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // Server is the A2A HTTP server that routes requests to the SDK handler.
 type Server struct {
-	bridge       *Bridge
-	config       *Config
-	metrics      *Metrics
-	log          *slog.Logger
-	sdkHandler   http.Handler // SDK JSON-RPC handler
+	bridge     *Bridge
+	config     *Config         // base config (kept for backward compat in non-snapshot paths)
+	snapshot   *SnapshotHolder // atomic snapshot of effective config (hot-apply)
+	metrics    *Metrics
+	log        *slog.Logger
+	sdkHandler http.Handler // SDK JSON-RPC handler
+	// Legacy validators — used only when snapshot is nil (tests, backward compat).
 	uatValidator *UATValidator
 	jwtValidator *JWTValidator
 }
@@ -62,10 +65,30 @@ func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger, 
 	return s
 }
 
+// SetSnapshot wires the atomic config snapshot for hot-apply support.
+// When set, auth middleware and rate limiting read from the snapshot
+// instead of the static config pointer.
+func (s *Server) SetSnapshot(snap *SnapshotHolder) {
+	s.snapshot = snap
+}
+
 // SetJWTValidator sets the JWT validator for hubJWT mode. Called after the
 // signing key is loaded (which may require Secret Manager access).
+// Also updates the snapshot if one is wired.
+//
+// NOTE: not safe for concurrent use with Configure(). Currently only called
+// once during boot before the HTTP server starts.
 func (s *Server) SetJWTValidator(v *JWTValidator) {
 	s.jwtValidator = v
+	if s.snapshot != nil {
+		snap := s.snapshot.Load()
+		if snap != nil && snap.Auth.Scheme == "hubJWT" {
+			// Create a new snapshot with the validator set.
+			newSnap := *snap
+			newSnap.Auth.JWTValidator = v
+			s.snapshot.Store(&newSnap)
+		}
+	}
 }
 
 // ValidateConfig checks that required configuration fields are present and consistent.
@@ -122,7 +145,8 @@ func ValidateConfig(cfg *Config) error {
 
 // WarnOnOpenAuth logs a warning if the auth configuration leaves the bridge open.
 func (s *Server) WarnOnOpenAuth() {
-	switch s.config.Auth.Scheme {
+	cfg := s.effectiveConfig()
+	switch cfg.Auth.Scheme {
 	case "none":
 		s.log.Warn("bridge auth is explicitly DISABLED (auth.scheme: none) — all requests will be accepted without authentication")
 	case "":
@@ -132,7 +156,7 @@ func (s *Server) WarnOnOpenAuth() {
 	case "hubJWT":
 		s.log.Info("bridge auth: hubJWT — per-user Scion JWT authentication enabled")
 	}
-	if s.config.RateLimit.TrustProxy {
+	if cfg.RateLimit.TrustProxy {
 		s.log.Warn("rate_limit.trust_proxy is enabled — X-Forwarded-For is trusted unconditionally, which allows clients to spoof their IP and bypass per-IP rate limits; consider adding network-level proxy restrictions")
 	}
 }
@@ -159,7 +183,11 @@ func (s *Server) Handler() http.Handler {
 
 	// Wrap with middleware chain: metrics -> rate limit -> auth.
 	handler := s.authMiddleware(mux)
-	handler = RateLimitMiddleware(handler, s.config.RateLimit)
+	if s.snapshot != nil {
+		handler = s.snapshotRateLimitMiddleware(handler)
+	} else {
+		handler = RateLimitMiddleware(handler, s.config.RateLimit)
+	}
 	handler = InstrumentHandler(handler, s.metrics)
 	return handler
 }
@@ -210,10 +238,11 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request) {
+	cfg := s.effectiveConfig()
 	registry := map[string]interface{}{
 		"name":        "scion-a2a-bridge",
 		"description": "Scion A2A Protocol Bridge — exposes Scion agents as A2A endpoints",
-		"url":         s.config.Bridge.ExternalURL,
+		"url":         cfg.Bridge.ExternalURL,
 		"version":     "1.0.0",
 		"capabilities": map[string]bool{
 			"streaming":         true,
@@ -221,10 +250,10 @@ func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request
 		},
 	}
 
-	if s.config.Bridge.Provider.Organization != "" {
+	if cfg.Bridge.Provider.Organization != "" {
 		registry["provider"] = map[string]string{
-			"organization": s.config.Bridge.Provider.Organization,
-			"url":          s.config.Bridge.Provider.URL,
+			"organization": cfg.Bridge.Provider.Organization,
+			"url":          cfg.Bridge.Provider.URL,
 		}
 	}
 
@@ -323,6 +352,9 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 }
 
 // authMiddleware validates authentication on non-public endpoints.
+// When a snapshot is available, auth scheme and validators are read from the
+// snapshot for hot-apply support. Each request loads the snapshot once for
+// consistency even if a config swap happens mid-flight.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public endpoints skip auth.
@@ -338,7 +370,26 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		switch s.config.Auth.Scheme {
+		// Resolve auth scheme and validators from snapshot (hot-apply) or static config.
+		var scheme string
+		var uatV *UATValidator
+		var jwtV *JWTValidator
+		var configAPIKey string
+
+		if s.snapshot != nil {
+			snap := s.snapshot.Load()
+			scheme = snap.Auth.Scheme
+			uatV = snap.Auth.UATValidator
+			jwtV = snap.Auth.JWTValidator
+			configAPIKey = snap.Auth.APIKey
+		} else {
+			scheme = s.config.Auth.Scheme
+			uatV = s.uatValidator
+			jwtV = s.jwtValidator
+			configAPIKey = s.config.Auth.APIKey
+		}
+
+		switch scheme {
 		case "none":
 			next.ServeHTTP(w, r)
 			return
@@ -349,7 +400,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				http.Error(w, "unauthorized: expected scion_pat_* token", http.StatusUnauthorized)
 				return
 			}
-			caller, err := s.uatValidator.Validate(r.Context(), token)
+			if uatV == nil {
+				s.log.Error("hubUAT scheme configured but UAT validator not initialized")
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			caller, err := uatV.Validate(r.Context(), token)
 			if err != nil {
 				s.log.Debug("UAT validation failed", "error", err)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -365,12 +421,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				http.Error(w, "unauthorized: missing bearer token", http.StatusUnauthorized)
 				return
 			}
-			if s.jwtValidator == nil {
+			if jwtV == nil {
 				s.log.Error("hubJWT scheme configured but JWT validator not initialized")
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
-			caller, err := s.jwtValidator.Validate(token)
+			caller, err := jwtV.Validate(token)
 			if err != nil {
 				s.log.Debug("JWT validation failed", "error", err)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -384,7 +440,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			// Legacy schemes: "apiKey", "bearer", or "" (accept either header).
 			// No CallerIdentity is injected.
 			var apiKey string
-			switch s.config.Auth.Scheme {
+			switch scheme {
 			case "apiKey":
 				apiKey = r.Header.Get("X-API-Key")
 			case "bearer":
@@ -399,7 +455,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 
 			// Compare SHA-256 hashes to avoid leaking key length via timing.
-			expectedHash := sha256.Sum256([]byte(s.config.Auth.APIKey))
+			expectedHash := sha256.Sum256([]byte(configAPIKey))
 			providedHash := sha256.Sum256([]byte(apiKey))
 			if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) != 1 {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -409,6 +465,61 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		}
 	})
+}
+
+// snapshotRateLimitMiddleware uses the snapshot's pre-built rate limiter.
+// A nil limiter (rate limiting disabled) passes through.
+func (s *Server) snapshotRateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip rate limiting for operational endpoints.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		snap := s.snapshot.Load()
+		if snap.Limiter == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		key := hashKey(r.Header.Get("X-API-Key"))
+		if key == "" {
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				host = r.RemoteAddr
+			}
+			if snap.Config.RateLimit.TrustProxy {
+				if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+					if i := strings.Index(xff, ","); i >= 0 {
+						host = strings.TrimSpace(xff[:i])
+					} else {
+						host = strings.TrimSpace(xff)
+					}
+				}
+			}
+			key = host
+		}
+
+		if !snap.Limiter.Allow(key) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limit exceeded"}`))
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// effectiveConfig returns the effective config from the snapshot if available,
+// or the static config as fallback.
+func (s *Server) effectiveConfig() *Config {
+	if s.snapshot != nil {
+		snap := s.snapshot.Load()
+		return &snap.Config
+	}
+	return s.config
 }
 
 // extractBearerToken extracts the token from an Authorization: Bearer header.
