@@ -82,7 +82,7 @@ All bot interactions are handled via `/scion` slash commands:
 | `/scion msg <agent> <text>` | Send a message to a specific agent. |
 | `/scion logs <agent>` | Stream/view recent logs for an agent. |
 | `/scion default [agent]` | Set or clear the default agent for the channel or thread (so unaddressed text routes automatically). |
-| `/scion send <path>` | Send a file from your workspace by path or search for files. |
+| `/scion send <path>` | Send a file from your workspace by path or search for files. Supports container-to-host path translation. |
 | `/scion thread <title> [template]` | Create a Discord thread and a Scion agent in one atomic step (see below). |
 | `/scion register` | Link your Discord account to your Scion Hub identity. |
 | `/scion unregister` | Unlink your Discord account from Scion Hub. |
@@ -105,6 +105,15 @@ The `/scion thread <title> [template]` command allows you to spin up a new conve
 
 - **Multi-Server (Multi-Guild) Support:** A single bot instance can serve multiple servers simultaneously. Admins can configure `guild_ids` for instant command registration on listed servers.
 - **Outage Protection:** Automatically deactivates channel links when the bot is removed from a server, while protecting active links against temporary Discord API outages.
+
+#### File Transfers & Attachments
+
+The Discord integration includes robust support for bidirectional file exchanges:
+
+* **Container Path Translation (`/scion send <path>`)**: Agents operate natively within their container environments where paths start with `/workspace/...`. The `/scion send` command features automatic **container-to-host path translation**. When you specify a container path (e.g. `/workspace/output.json`), the Discord plugin automatically resolves and translates this path to the correct directory on the host machine for that agent's project workspace, ensuring files are located and uploaded as Discord attachments correctly.
+* **Inbound Attachment Downloads**: When you upload an attachment to a Discord channel or thread linked to a Scion agent, the Discord broker automatically downloads the file.
+  - **Default Path**: By default, attachments are downloaded to `/home/scion/.scion/projects/<project-slug>/downloads/` on the host, which is mounted inside the agent container at `/workspace/downloads/`.
+  - **Custom Downloads Path override**: In isolated workspace modes or specialized backends where `/workspace/downloads` is not the standard target directory, you can configure the **`downloads_path`** parameter in the plugin configuration. The parameter overrides the download destination and supports the `{project_slug}` placeholder, which is expanded dynamically at runtime (e.g., `downloads_path: /custom-mounts/{project_slug}/downloads/`). When set, the agent container can access files directly at the custom path.
 
 :::tip[Workstation quick start]
 Ready to set up the bidirectional Discord bot? Follow the step-by-step

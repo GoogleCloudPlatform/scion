@@ -339,6 +339,10 @@ The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry
 _Avoid_: metrics pipeline, collector, OTel collector
 _See also_: Agent metrics
 
+**Session Metrics**:
+Database-backed summaries and aggregations computed on agent session-end (aggregated by `sciontool` and delivered as a `MetricsPayload` in the StatusUpdate protocol) and stored in the Hub's `agent_session_metrics` SQL table. They provide an IDOR-safe structural view of token usage (input, output, cached, reasoning), tool execution counts, session duration, and model usage, queried via dedicated summary API endpoints and displayed in the Web Dashboard. Contrast with raw OpenTelemetry time-series metrics.
+_Avoid_: OTel metrics (for these DB summaries), raw telemetry
+
 ## Potential Future Additions
 
 Terms that recur in the codebase and may warrant canonical entries, but are **not yet defined** here. Listed so they aren't lost; promote to full entries (verified against the code) as the glossary matures.

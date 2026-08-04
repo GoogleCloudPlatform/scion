@@ -319,6 +319,40 @@ For Gemini CLI agents, session-end events include aggregated metrics from the se
 Session files are automatically parsed from `~/.gemini/sessions/`.
 
 
+## Hub-Backed Session Metrics (M3 & M4)
+
+In addition to fanning out raw time-series metrics to standard OpenTelemetry destinations, Scion contains a native **Hub-Backed Session Metrics** engine. This system aggregates session telemetry inside the agent container and reports it directly back to the Hub on session completion for relational storage, SQL-level aggregation, and direct visualization in the Web Dashboard.
+
+### 1. Ingestion Pipeline (M3)
+At the end of an agent session, `sciontool`'s aggregation engine collects high-level statistics from the session run and sends them to the Hub over the agent status-update channel inside a JSON-serialized `MetricsPayload` structure:
+- **Session context**: Unique session UUID, start/end timestamps, final run status, model identifier, and total turn count.
+- **Token counters**: High-density counts of input, output, cached, and reasoning tokens.
+- **Tool statistics**: A dictionary of used tools detailing total execution counts, successful runs, and errors.
+- **Languages**: A list of detected languages utilized.
+
+The Hub validates this payload, verifies that the requesting agent is authorized to write its own metrics (via secure `X-Scion-Agent-Token` authentication), and persists the record into the database-backed `agent_session_metrics` SQL table.
+
+### 2. Query Endpoints & Authorization (M4)
+To surface these relational metrics safely, the Hub provides a set of IDOR-safe API endpoints that perform automatic SQL-level aggregations (averaging session duration, fanning out top-used tools, and grouping most-used models):
+
+- **Get Agent Summary**: `GET /api/v1/agents/{id}/metrics/summary`  
+  Returns aggregate statistics for a specific agent across all of its sessions (e.g., total tokens, average turn count, most-used tools, and most-used models).
+- **Get Project Summary**: `GET /api/v1/projects/{id}/metrics/summary`  
+  Returns roll-up metrics for all agents registered within a specific project.
+- **Get Individual Session Record**: `GET /api/v1/metrics/session/{id}`  
+  Returns the exact payload recorded for a single session.
+
+:::note[Access Authorization]
+These API endpoints are strictly authorization-gated. A caller must possess read access permissions to the parent project (or the agent) to query its session summaries, protecting operational and cost data from unauthorized users.
+:::
+
+### 3. Dashboard Visualization
+The aggregated relational metrics are exposed directly within the Hub's Web UI:
+- **Agent Detail "Metrics" Tab**: Displays the agent's total sessions, detailed token usage charts, and ranked list of tool invocation success rates.
+- **Agents List Stats Columns**: Displays high-level stats columns (such as total token consumption) directly on the main agents index table.
+- **Project Summary Panel**: Provides an operational cost and model usage dashboard across all agents in the selected project.
+
+
 ## Implementation Details
 
 The telemetry pipeline is implemented in `pkg/sciontool/telemetry/`:
