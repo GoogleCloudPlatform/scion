@@ -4226,3 +4226,202 @@ func TestDispatchFinalizeEnv_NoAsNeededMatches(t *testing.T) {
 		t.Errorf("expected 1 CreateAgentWithGather call, got %d", callCount)
 	}
 }
+
+// TestDispatchAgentStart_IncludesHubName verifies that when hubName is set on
+// the dispatcher, SCION_HUB_NAME is injected into resolvedEnv for DispatchAgentStart.
+func TestDispatchAgentStart_IncludesHubName(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-hubname-start"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetHubName("my-test-hub")
+
+	agent := &store.Agent{
+		ID:              tid("agent-hubname-start"),
+		Name:            "hubname-start-agent",
+		Slug:            "hubname-start-agent",
+		ProjectID:       tid("project-hubname-start"),
+		OwnerID:         tid("user-hubname-start"),
+		RuntimeBrokerID: tid("broker-hubname-start"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+		},
+	}
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
+	if err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if !mockClient.startCalled {
+		t.Fatal("expected StartAgent to be called")
+	}
+
+	if mockClient.lastResolvedEnv == nil {
+		t.Fatal("expected resolvedEnv to be non-nil")
+	}
+
+	if got, ok := mockClient.lastResolvedEnv["SCION_HUB_NAME"]; !ok {
+		t.Error("SCION_HUB_NAME missing from resolvedEnv — hubName not injected on start path")
+	} else if got != "my-test-hub" {
+		t.Errorf("SCION_HUB_NAME = %q, want %q", got, "my-test-hub")
+	}
+}
+
+// TestDispatchAgentStart_OmitsHubNameWhenEmpty verifies that when hubName is
+// NOT set on the dispatcher, SCION_HUB_NAME is absent from resolvedEnv.
+func TestDispatchAgentStart_OmitsHubNameWhenEmpty(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-hubname-empty"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	// No SetHubName call — hubName stays empty.
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-hubname-empty"),
+		Name:            "hubname-empty-agent",
+		Slug:            "hubname-empty-agent",
+		ProjectID:       tid("project-hubname-empty"),
+		OwnerID:         tid("user-hubname-empty"),
+		RuntimeBrokerID: tid("broker-hubname-empty"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+		},
+	}
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
+	if err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+
+	if !mockClient.startCalled {
+		t.Fatal("expected StartAgent to be called")
+	}
+
+	if _, ok := mockClient.lastResolvedEnv["SCION_HUB_NAME"]; ok {
+		t.Error("SCION_HUB_NAME should not be present when hubName is empty")
+	}
+}
+
+// TestDispatchAgentRestart_IncludesHubName verifies that SCION_HUB_NAME is
+// injected into resolvedEnv on the restart path when hubName is set.
+func TestDispatchAgentRestart_IncludesHubName(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-hubname-restart"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetHubName("restart-hub")
+
+	agent := &store.Agent{
+		ID:              tid("agent-hubname-restart"),
+		Name:            "hubname-restart-agent",
+		Slug:            "hubname-restart-agent",
+		ProjectID:       tid("project-hubname-restart"),
+		OwnerID:         tid("user-hubname-restart"),
+		RuntimeBrokerID: tid("broker-hubname-restart"),
+		AppliedConfig:   &store.AgentAppliedConfig{},
+	}
+
+	err := dispatcher.DispatchAgentRestart(ctx, agent)
+	if err != nil {
+		t.Fatalf("DispatchAgentRestart failed: %v", err)
+	}
+
+	if !mockClient.restartCalled {
+		t.Fatal("expected RestartAgent to be called")
+	}
+
+	env := mockClient.lastRestartResolvedEnv
+	if got, ok := env["SCION_HUB_NAME"]; !ok {
+		t.Error("SCION_HUB_NAME missing from restart resolvedEnv — hubName not injected on restart path")
+	} else if got != "restart-hub" {
+		t.Errorf("SCION_HUB_NAME = %q, want %q", got, "restart-hub")
+	}
+}
+
+// TestDispatchAgentCreate_IncludesHubName verifies that SCION_HUB_NAME is
+// injected into the create request's resolvedEnv when hubName is set.
+func TestDispatchAgentCreate_IncludesHubName(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-hubname-create"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetHubName("create-hub")
+
+	agent := &store.Agent{
+		ID:              tid("agent-hubname-create"),
+		Name:            "hubname-create-agent",
+		Slug:            "hubname-create-agent",
+		ProjectID:       tid("project-hubname-create"),
+		OwnerID:         tid("user-hubname-create"),
+		RuntimeBrokerID: tid("broker-hubname-create"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Task:          "test task",
+		},
+	}
+
+	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	if err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+
+	if !mockClient.createCalled {
+		t.Fatal("expected CreateAgent to be called")
+	}
+
+	env := mockClient.lastCreateReq.ResolvedEnv
+	if got, ok := env["SCION_HUB_NAME"]; !ok {
+		t.Error("SCION_HUB_NAME missing from create request resolvedEnv — hubName not injected on create path")
+	} else if got != "create-hub" {
+		t.Errorf("SCION_HUB_NAME = %q, want %q", got, "create-hub")
+	}
+}
