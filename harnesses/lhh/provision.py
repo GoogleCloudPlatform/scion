@@ -84,7 +84,7 @@ def _build_env_overlay(model: str) -> dict[str, str]:
         "GOOGLE_CLOUD_PROJECT": "${GOOGLE_CLOUD_PROJECT}",
         "GOOGLE_CLOUD_REGION": "${GOOGLE_CLOUD_REGION}",
         "GOOGLE_CLOUD_LOCATION": "${GOOGLE_CLOUD_REGION}",
-        "GOOGLE_GENAI_USE_VERTEXAI": "True",
+        "GOOGLE_GENAI_USE_VERTEXAI": "true",
         "LHA_ROOT_MODEL": model,
         "LHA_ENVIRONMENT_BACKEND": "local",
     }

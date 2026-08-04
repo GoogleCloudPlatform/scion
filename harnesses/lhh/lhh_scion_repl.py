@@ -312,11 +312,11 @@ async def run(initial_message: str | None, resume: bool) -> None:
                     print(f"[{event.author}]: {text_out}", flush=True)
         write_agent_status("idle")
 
-    if initial_message:
-        print(f"[user]: {initial_message}", flush=True)
-        await send(initial_message)
-
     try:
+        if initial_message:
+            print(f"[user]: {initial_message}", flush=True)
+            await send(initial_message)
+
         while True:
             try:
                 query = input("[user]: ")
