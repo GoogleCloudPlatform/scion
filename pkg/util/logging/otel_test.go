@@ -146,6 +146,92 @@ func TestInitOTelLogging_NoEndpoint(t *testing.T) {
 	cleanup() // Should not panic
 }
 
+func TestSetupWithOTel_CloudRunSuppressesStdout(t *testing.T) {
+	// When K_SERVICE is set and a cloud handler is present, the stdout base
+	// handler should be omitted to avoid duplicate Cloud Logging entries.
+	t.Setenv("K_SERVICE", "my-service")
+
+	// Use a real CloudHandler so hasCloudHandler detects it.
+	cloudHandler := &CloudHandler{}
+
+	SetupWithOTel("test-component", "", false, true, nil, cloudHandler)
+
+	// The default logger should be set (not nil).
+	logger := slog.Default()
+	if logger == nil {
+		t.Fatal("Default logger should be set")
+	}
+
+	// Verify the handler is directly the cloudHandler (no multiHandler
+	// wrapping needed when there's only one handler).
+	h := logger.Handler()
+	if _, ok := h.(*CloudHandler); !ok {
+		// If it's a multiHandler, verify it contains only the cloud handler.
+		mh, isMH := h.(*multiHandler)
+		if !isMH {
+			t.Fatalf("expected CloudHandler or multiHandler, got %T", h)
+		}
+		// Should have exactly 1 handler (the cloud handler), not 2.
+		if len(mh.handlers) != 1 {
+			t.Errorf("expected 1 handler (cloud only), got %d — stdout handler was not suppressed", len(mh.handlers))
+		}
+	}
+}
+
+func TestSetupWithOTel_NonCloudRunKeepsStdout(t *testing.T) {
+	// When K_SERVICE is NOT set, both stdout and cloud handlers should be present.
+	t.Setenv("K_SERVICE", "")
+
+	cloudHandler := slog.NewJSONHandler(nil, nil)
+
+	SetupWithOTel("test-component", "", false, true, nil, cloudHandler)
+
+	logger := slog.Default()
+	if logger == nil {
+		t.Fatal("Default logger should be set")
+	}
+
+	h := logger.Handler()
+	mh, ok := h.(*multiHandler)
+	if !ok {
+		t.Fatalf("expected multiHandler with 2 handlers, got single handler %T", h)
+	}
+	if len(mh.handlers) != 2 {
+		t.Errorf("expected 2 handlers (stdout + cloud), got %d", len(mh.handlers))
+	}
+}
+
+func TestSetupWithOTel_CloudRunNoCloudHandler(t *testing.T) {
+	// On Cloud Run but without a cloud handler — stdout should still be active.
+	t.Setenv("K_SERVICE", "my-service")
+
+	SetupWithOTel("test-component", "", false, true, nil)
+
+	logger := slog.Default()
+	if logger == nil {
+		t.Fatal("Default logger should be set")
+	}
+	// With only the base handler, the logger handler should not be a multiHandler.
+	if _, ok := logger.Handler().(*multiHandler); ok {
+		t.Error("expected single handler (base), not multiHandler")
+	}
+}
+
+func TestHasCloudHandler(t *testing.T) {
+	if hasCloudHandler(nil) {
+		t.Error("nil slice should return false")
+	}
+	if hasCloudHandler([]slog.Handler{nil, nil}) {
+		t.Error("all-nil slice should return false")
+	}
+	if hasCloudHandler([]slog.Handler{nil, slog.NewJSONHandler(nil, nil)}) {
+		t.Error("non-cloud handler (JSONHandler) should return false")
+	}
+	if !hasCloudHandler([]slog.Handler{nil, &CloudHandler{}}) {
+		t.Error("slice with CloudHandler should return true")
+	}
+}
+
 func TestEnvVarConstants(t *testing.T) {
 	// Verify constants are set correctly
 	if EnvOTelEndpoint != "SCION_OTEL_ENDPOINT" {

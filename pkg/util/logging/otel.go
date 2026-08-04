@@ -7,6 +7,7 @@ package logging
 import (
 	"context"
 	"log/slog"
+	"os"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/log"
@@ -95,11 +96,19 @@ func NewOTelHandler(component string, lp log.LoggerProvider) slog.Handler {
 // If lp is nil, falls back to standard Setup behavior.
 // Extra handlers (e.g., CloudHandler) are appended to the handler chain.
 func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.LoggerProvider, extraHandlers ...slog.Handler) {
-	// Create the base handler (same logic as Setup)
-	baseHandler := createBaseHandler(component, debug, useGCP, hubName)
-
 	// Collect all handlers
-	handlers := []slog.Handler{baseHandler}
+	var handlers []slog.Handler
+
+	// On Cloud Run (K_SERVICE set), stdout is automatically captured and
+	// forwarded to Cloud Logging by the runtime. When a direct Cloud Logging
+	// handler is also present in extraHandlers, including the stdout base
+	// handler would produce duplicate entries. Skip it in that case.
+	onCloudRun := os.Getenv("K_SERVICE") != ""
+	cloudHandlerPresent := hasCloudHandler(extraHandlers)
+	if !onCloudRun || !cloudHandlerPresent {
+		baseHandler := createBaseHandler(component, debug, useGCP, hubName)
+		handlers = append(handlers, baseHandler)
+	}
 
 	if lp != nil {
 		handlers = append(handlers, NewOTelHandler(component, lp))
@@ -116,4 +125,30 @@ func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.Lo
 
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
+}
+
+// hasCloudHandler reports whether the slice contains at least one Cloud Logging handler.
+func hasCloudHandler(handlers []slog.Handler) bool {
+	for _, h := range handlers {
+		if isCloudHandler(h) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCloudHandler reports whether h is a Cloud Logging handler.
+// It unwraps circuitGatedHandler to inspect the inner handler.
+func isCloudHandler(h slog.Handler) bool {
+	if h == nil {
+		return false
+	}
+	switch h.(type) {
+	case *CloudHandler, *messageCloudHandler:
+		return true
+	}
+	if cg, ok := h.(*circuitGatedHandler); ok {
+		return isCloudHandler(cg.inner)
+	}
+	return false
 }

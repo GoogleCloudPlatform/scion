@@ -16,9 +16,15 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"testing"
+
+	gcplog "cloud.google.com/go/logging"
+	"google.golang.org/api/option"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestNewMessageLogger_DefaultConfig(t *testing.T) {
@@ -81,6 +87,106 @@ func TestNewMessageLogger_WritesSubsystemAttrs(t *testing.T) {
 		if got != want {
 			t.Errorf("log entry[%q] = %v, want %v", key, got, want)
 		}
+	}
+}
+
+func TestNewMessageLogger_CloudRunWithoutCloudClient_KeepsStdout(t *testing.T) {
+	// On Cloud Run but WITHOUT a cloud client, the stdout handler should
+	// still be present because the suppression condition requires both
+	// K_SERVICE set AND CloudClient != nil.
+	t.Setenv("K_SERVICE", "my-service")
+
+	cfg := MessageLoggerConfig{
+		Component:   "test-server",
+		CloudClient: nil, // no cloud client → stdout must be present
+		UseGCP:      true,
+		Level:       slog.LevelInfo,
+	}
+
+	logger, cleanup, err := NewMessageLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewMessageLogger() error = %v", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if logger == nil {
+		t.Fatal("NewMessageLogger() returned nil logger")
+	}
+
+	// With CloudClient=nil and K_SERVICE set, only the stdout handler is
+	// created, so the logger handler should NOT be a multiHandler.
+	if _, ok := logger.Handler().(*multiHandler); ok {
+		t.Error("expected single stdout handler, not multiHandler — suppression should not engage without CloudClient")
+	}
+}
+
+func TestNewMessageLogger_CloudRunWithCloudClient_SuppressesStdout(t *testing.T) {
+	// On Cloud Run with a cloud client, the stdout handler should be
+	// suppressed to avoid duplicate entries (Cloud Run's runtime already
+	// forwards stdout to Cloud Logging).
+	t.Setenv("K_SERVICE", "my-service")
+
+	client, err := gcplog.NewClient(context.Background(), "projects/fake-project",
+		option.WithoutAuthentication(),
+		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
+		option.WithEndpoint("localhost:1"),
+	)
+	if err != nil {
+		t.Fatalf("failed to create test gcplog.Client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	cfg := MessageLoggerConfig{
+		Component:   "test-server",
+		CloudClient: client,
+		UseGCP:      true,
+		Level:       slog.LevelInfo,
+	}
+
+	logger, cleanup, err := NewMessageLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewMessageLogger() error = %v", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if logger == nil {
+		t.Fatal("NewMessageLogger() returned nil logger")
+	}
+
+	// With both K_SERVICE set and CloudClient non-nil, only the cloud
+	// handler should be active — the stdout handler must be suppressed.
+	// A single handler means no multiHandler wrapping.
+	h := logger.Handler()
+	if _, ok := h.(*multiHandler); ok {
+		t.Error("expected single cloud handler, not multiHandler — stdout handler was not suppressed on Cloud Run")
+	}
+	// Verify we got the cloud handler, not a stdout handler.
+	if _, ok := h.(*messageCloudHandler); !ok {
+		t.Errorf("expected *messageCloudHandler, got %T", h)
+	}
+}
+
+func TestNewMessageLogger_NonCloudRunKeepsStdout(t *testing.T) {
+	// When not on Cloud Run, stdout handler should always be present.
+	t.Setenv("K_SERVICE", "")
+
+	cfg := MessageLoggerConfig{
+		Component: "test-server",
+		UseGCP:    true,
+		Level:     slog.LevelInfo,
+	}
+
+	logger, cleanup, err := NewMessageLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewMessageLogger() error = %v", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if logger == nil {
+		t.Fatal("NewMessageLogger() returned nil logger")
 	}
 }
 

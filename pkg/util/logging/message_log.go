@@ -68,13 +68,19 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 		})
 	}
 
-	// Stdout handler for local visibility (always enabled for message log)
-	if cfg.UseGCP {
-		handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))
-	} else {
-		handlers = append(handlers, slog.NewJSONHandler(os.Stdout, opts).WithAttrs([]slog.Attr{
-			slog.String(AttrComponent, cfg.Component),
-		}))
+	// Stdout handler for local visibility.
+	// On Cloud Run (K_SERVICE set), stdout is captured and forwarded to Cloud
+	// Logging by the runtime. When a cloud handler is also active, the stdout
+	// handler would produce duplicate entries — skip it in that case.
+	onCloudRun := os.Getenv("K_SERVICE") != ""
+	if !onCloudRun || cfg.CloudClient == nil {
+		if cfg.UseGCP {
+			handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))
+		} else {
+			handlers = append(handlers, slog.NewJSONHandler(os.Stdout, opts).WithAttrs([]slog.Attr{
+				slog.String(AttrComponent, cfg.Component),
+			}))
+		}
 	}
 
 	if len(handlers) == 0 {
