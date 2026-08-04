@@ -76,8 +76,7 @@ scion harness-config update --all
 
 `--url` and `--all` are mutually exclusive. A config with no stored `sourceUrl` is skipped by
 `--all`; for a single config, pass `--url` to supply one. This CLI command is the equivalent of
-the **"Refresh from Source"** button on the harness-config detail page in the web UI. Both require
-a Hub connection.
+the **"Refresh from Source"** button on the harness-config detail page, as well as the **"Refresh All from Source"** button on the harness-configs list page in the Web UI (which triggers parallel reimport of all tracked configs with per-row progress indicators). Both require a Hub connection.
 
 ### Image status
 
