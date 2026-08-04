@@ -1454,7 +1454,7 @@ export class ScionPageAdminIntegrations extends LitElement {
             <div>
               <p class="invite-link-description">Add the bot to your Discord server</p>
               <p class="invite-link-permissions">
-                Grants required permissions: Send Messages, Read Message History, View Channels, Embed Links, Manage Webhooks
+                Grants required permissions: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Embed Links, Add Reactions, Manage Webhooks
               </p>
             </div>
           </div>
