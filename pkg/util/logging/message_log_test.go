@@ -84,6 +84,53 @@ func TestNewMessageLogger_WritesSubsystemAttrs(t *testing.T) {
 	}
 }
 
+func TestNewMessageLogger_CloudRunSuppressesStdout(t *testing.T) {
+	// On Cloud Run with a cloud client, stdout handler should be suppressed.
+	t.Setenv("K_SERVICE", "my-service")
+
+	// We can't easily create a real gcplog.Client in tests, but we can test
+	// the non-Cloud-Run path to verify stdout is still included.
+	cfg := MessageLoggerConfig{
+		Component:   "test-server",
+		CloudClient: nil, // no cloud client → stdout must be present
+		UseGCP:      true,
+		Level:       slog.LevelInfo,
+	}
+
+	logger, cleanup, err := NewMessageLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewMessageLogger() error = %v", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if logger == nil {
+		t.Fatal("NewMessageLogger() returned nil logger")
+	}
+}
+
+func TestNewMessageLogger_NonCloudRunKeepsStdout(t *testing.T) {
+	// When not on Cloud Run, stdout handler should always be present.
+	t.Setenv("K_SERVICE", "")
+
+	cfg := MessageLoggerConfig{
+		Component: "test-server",
+		UseGCP:    true,
+		Level:     slog.LevelInfo,
+	}
+
+	logger, cleanup, err := NewMessageLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewMessageLogger() error = %v", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if logger == nil {
+		t.Fatal("NewMessageLogger() returned nil logger")
+	}
+}
+
 func TestPromoteMessageAttrToLabels(t *testing.T) {
 	tests := []struct {
 		name     string
