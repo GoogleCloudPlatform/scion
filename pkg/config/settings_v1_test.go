@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/stretchr/testify/assert"
@@ -4191,6 +4192,27 @@ func TestVersionedEnvKeyMapper_Scheduler(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestConvertV1ServerToGlobalConfig_StalledThresholdValid(t *testing.T) {
+	v1 := &V1ServerConfig{
+		Hub: &V1ServerHubConfig{
+			StalledThreshold: "10m",
+		},
+	}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, 10*time.Minute, gc.Hub.StalledThreshold)
+}
+
+func TestConvertV1ServerToGlobalConfig_StalledThresholdInvalidIgnored(t *testing.T) {
+	v1 := &V1ServerConfig{
+		Hub: &V1ServerHubConfig{
+			StalledThreshold: "not-a-duration",
+		},
+	}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	// Invalid duration string should be ignored; StalledThreshold stays at zero value.
+	assert.Equal(t, time.Duration(0), gc.Hub.StalledThreshold)
 }
 
 // --- Helper ---

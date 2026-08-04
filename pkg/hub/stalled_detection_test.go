@@ -435,6 +435,46 @@ func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
 	}
 }
 
+func TestNew_ClampsStalledThresholdBelowMinimum(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Create server with StalledThreshold below the 2-minute minimum.
+	srv, err := New(ServerConfig{StalledThreshold: 30 * time.Second}, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if srv.config.StalledThreshold != 5*time.Minute {
+		t.Errorf("StalledThreshold = %v, want %v (should clamp to default)", srv.config.StalledThreshold, 5*time.Minute)
+	}
+}
+
+func TestNew_PreservesValidStalledThreshold(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Create server with a valid StalledThreshold (>= 2 minutes).
+	srv, err := New(ServerConfig{StalledThreshold: 10 * time.Minute}, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if srv.config.StalledThreshold != 10*time.Minute {
+		t.Errorf("StalledThreshold = %v, want %v", srv.config.StalledThreshold, 10*time.Minute)
+	}
+}
+
 func TestAgentStalledDetectionHandler_AutoSuspendDisabled(t *testing.T) {
 	srv, s, ep := setupStalledTestServer(t)
 	ctx := context.Background()
