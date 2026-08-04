@@ -1326,7 +1326,8 @@ func (s *Server) RuntimeCommand() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.runtime == nil {
-		return "docker" // Default fallback — should never happen
+		slog.Warn("RuntimeCommand called before runtime detection completed, falling back to docker")
+		return "docker"
 	}
 	return s.runtime.Name()
 }

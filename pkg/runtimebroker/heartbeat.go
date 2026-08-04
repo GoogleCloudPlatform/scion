@@ -201,16 +201,11 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 		Status: status,
 	}
 
-	// If we have a manager, gather per-project agent counts.
-	// Read under lock so a concurrent SwapManager is safe.
-	s.mu.Lock()
-	hasManager := s.manager != nil
-	s.mu.Unlock()
-	if hasManager {
-		projectAgents := s.gatherProjectAgents(ctx)
-		if len(projectAgents) > 0 {
-			heartbeat.Projects = projectAgents
-		}
+	// Gather per-project agent counts. gatherProjectAgents snapshots the
+	// current manager under its own lock and handles nil, so no separate
+	// nil check is needed here.
+	if projectAgents := s.gatherProjectAgents(ctx); len(projectAgents) > 0 {
+		heartbeat.Projects = projectAgents
 	}
 
 	return heartbeat

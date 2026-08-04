@@ -15,8 +15,13 @@
 package runtimebroker
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -162,5 +167,64 @@ func TestSwapRuntime(t *testing.T) {
 
 	if srv.manager == nil {
 		t.Error("manager should be re-created after swap")
+	}
+}
+
+// TestSwapRuntime_PropagatesManagerToHeartbeat verifies that SwapRuntime
+// updates the manager inside running HeartbeatService instances attached
+// to hub connections. Without this propagation the heartbeat would keep
+// using the old (possibly broken) runtime binary after an onboarding
+// runtime change.
+func TestSwapRuntime_PropagatesManagerToHeartbeat(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Wire up a HubConnection with a HeartbeatService that uses a
+	// failing manager (simulates the original runtime binary being
+	// missing, e.g. "container" on a podman-only host).
+	client := &mockRuntimeBrokerService{}
+	failingMgr := &heartbeatMockManager{
+		err: fmt.Errorf("exec: \"container\": executable file not found in $PATH"),
+	}
+	hb := NewHeartbeatService(client, "test-host", time.Hour, failingMgr, nil, slog.Default())
+
+	conn := &HubConnection{Name: "local", Heartbeat: hb}
+	srv.hubMu.Lock()
+	srv.hubConnections["local"] = conn
+	srv.hubMu.Unlock()
+
+	// Heartbeat before swap — manager fails, no projects.
+	if err := hb.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat before swap: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 || len(calls[0].Heartbeat.Projects) != 0 {
+		t.Fatalf("Expected heartbeat with 0 projects before swap, got %d calls / %d projects",
+			len(calls), len(calls[0].Heartbeat.Projects))
+	}
+
+	// Swap runtime — this should propagate the new manager to hb.
+	newRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "podman" },
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{Name: "agent-1", ProjectID: "proj-1", Phase: "running"},
+			}, nil
+		},
+	}
+	srv.SwapRuntime(newRT)
+
+	// Heartbeat after swap — should use the new manager and report agents.
+	if err := hb.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat after swap: %v", err)
+	}
+	calls = client.getHeartbeatCalls()
+	if len(calls) != 2 {
+		t.Fatalf("Expected 2 heartbeat calls, got %d", len(calls))
+	}
+	if len(calls[1].Heartbeat.Projects) != 1 {
+		t.Errorf("Expected 1 project after swap, got %d", len(calls[1].Heartbeat.Projects))
+	}
+	if calls[1].Heartbeat.Projects[0].AgentCount != 1 {
+		t.Errorf("Expected 1 agent after swap, got %d", calls[1].Heartbeat.Projects[0].AgentCount)
 	}
 }

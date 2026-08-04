@@ -718,6 +718,57 @@ func TestHeartbeatService_SwapManagerToNil(t *testing.T) {
 	}
 }
 
+// TestHeartbeatService_ConcurrentSwapDuringHeartbeat exercises SwapManager
+// racing with ForceHeartbeat to verify there are no data races. This test
+// is primarily useful under `go test -race`.
+func TestHeartbeatService_ConcurrentSwapDuringHeartbeat(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+
+	initialMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-old", ProjectID: "proj-1", Phase: "running"},
+		},
+	}
+	swappedMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-new", ProjectID: "proj-1", Phase: "running"},
+		},
+	}
+
+	svc := NewHeartbeatService(client, "test-host", time.Hour, initialMgr, nil, slog.Default())
+
+	// Run concurrent heartbeats and swaps. The race detector will flag any
+	// unsynchronised access to the manager field.
+	var wg sync.WaitGroup
+	const iterations = 50
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			_ = svc.ForceHeartbeat(context.Background())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				svc.SwapManager(swappedMgr)
+			} else {
+				svc.SwapManager(initialMgr)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// Sanity: at least some heartbeats were sent
+	calls := client.getHeartbeatCalls()
+	if len(calls) == 0 {
+		t.Fatal("Expected at least one heartbeat call")
+	}
+}
+
 func TestHeartbeatService_ManagerReturnsEmptyList(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	mgr := &heartbeatMockManager{agents: nil, err: nil}
