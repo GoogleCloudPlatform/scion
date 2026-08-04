@@ -412,19 +412,24 @@ func TestDiscoverProjects_ShadowProjectNotOrphaned(t *testing.T) {
 
 	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
+	// Create a workspace directory with a valid shadow marker
+	workspaceDir := filepath.Join(tmpHome, "remote-proj")
+	_ = os.MkdirAll(workspaceDir, 0755)
+	marker := &ProjectMarker{
+		ProjectID:   "aabb1122-0000-0000-0000-000000000000",
+		ProjectName: "remote-proj",
+		ProjectSlug: "remote-proj",
+		Type:        "shadow",
+	}
+	_ = WriteProjectMarker(filepath.Join(workspaceDir, DotScion), marker)
+
 	// Create a shadow project config directory with versioned settings
 	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "remote-proj__aabb1122")
 	scionDir := filepath.Join(projectDir, ".scion")
 	_ = os.MkdirAll(scionDir, 0755)
 
-	// Write versioned settings with project_type: shadow and hub config
-	settingsContent := `schema_version: "1"
-project_type: shadow
-hub:
-  enabled: true
-  endpoint: https://hub.example.com
-  project_id: aabb1122-0000-0000-0000-000000000000
-`
+	// Write versioned settings with project_type: shadow, hub config, and workspace_path
+	settingsContent := "schema_version: \"1\"\nproject_type: shadow\nworkspace_path: " + workspaceDir + "\nhub:\n  enabled: true\n  endpoint: https://hub.example.com\n  project_id: aabb1122-0000-0000-0000-000000000000\n"
 	_ = os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644)
 
 	projects, err := DiscoverProjects()

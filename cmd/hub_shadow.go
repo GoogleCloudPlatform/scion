@@ -87,6 +87,10 @@ func runHubShadow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get working directory: %w", err)
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to find home directory: %w", err)
+	}
 	dotScionPath := filepath.Join(wd, config.DotScion)
 	if info, err := os.Stat(dotScionPath); err == nil {
 		if info.IsDir() {
@@ -106,10 +110,6 @@ func runHubShadow(cmd *cobra.Command, args []string) error {
 	fallbackPath, _, err := config.ResolveProjectPath("")
 	if err != nil {
 		// No project found — try loading global settings directly.
-		home, homeErr := os.UserHomeDir()
-		if homeErr != nil {
-			return fmt.Errorf("failed to find home directory: %w", homeErr)
-		}
 		fallbackPath = filepath.Join(home, config.GlobalDir)
 	}
 
@@ -179,16 +179,12 @@ func runHubShadow(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create the external project-config directory with settings
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to find home directory: %w", err)
-	}
-
 	configDir := filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir, marker.DirName(), config.DotScion)
 	hubEnabled := true
 	vs := &config.VersionedSettings{
 		SchemaVersion: "1",
 		ProjectType:   string(config.ProjectTypeShadow),
+		WorkspacePath: wd,
 		Hub: &config.V1HubClientConfig{
 			Enabled:   &hubEnabled,
 			Endpoint:  endpoint,
@@ -247,9 +243,9 @@ func runHubUnshadow(cmd *cobra.Command, args []string) error {
 
 	// Clean up the settings directory under ~/.scion/project-configs/<slug>__<shortuuid>/
 	settingsCleaned := false
-	home, homeErr := os.UserHomeDir()
-	if homeErr == nil && home != "" {
-		configDir := filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir, marker.DirName())
+	globalDir, globalErr := config.GetGlobalDir()
+	if globalErr == nil && globalDir != "" {
+		configDir := filepath.Join(globalDir, config.ProjectConfigsDir, marker.DirName())
 		if err := os.RemoveAll(configDir); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not remove settings directory %s: %v\n", configDir, err)
 		} else {
