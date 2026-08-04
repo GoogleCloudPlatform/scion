@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Unit tests for the Copilot harness provisioner.
+
+Run with:  python3 -m unittest provision_test -v
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import tempfile
+import unittest
+from contextlib import contextmanager
+
+PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
+SPEC = importlib.util.spec_from_file_location("copilot_provision", PROVISION_PATH)
+assert SPEC is not None
+provision = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(provision)
+
+scion_harness = provision.scion_harness
+
+
+@contextmanager
+def temporary_home(path: str):
+    old_home = os.environ.get("HOME")
+    os.environ["HOME"] = path
+    try:
+        yield
+    finally:
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
+
+
+class TelemetryEnabledTest(unittest.TestCase):
+    """Tests for the _telemetry_enabled helper."""
+
+    def test_none_returns_false(self) -> None:
+        self.assertFalse(provision._telemetry_enabled(None))
+
+    def test_empty_dict_returns_false(self) -> None:
+        self.assertFalse(provision._telemetry_enabled({}))
+
+    def test_enabled_true(self) -> None:
+        self.assertTrue(provision._telemetry_enabled({"enabled": True}))
+
+    def test_enabled_none_defaults_true(self) -> None:
+        self.assertTrue(provision._telemetry_enabled({"enabled": None}))
+
+    def test_enabled_false(self) -> None:
+        self.assertFalse(provision._telemetry_enabled({"enabled": False}))
+
+
+class BuildTelemetryEnvTest(unittest.TestCase):
+    """Tests for _build_telemetry_env."""
+
+    def test_defaults_point_to_local_grpc_receiver(self) -> None:
+        env = provision._build_telemetry_env({"enabled": True}, None)
+        self.assertEqual(env["COPILOT_TELEMETRY_ENABLED"], "true")
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://localhost:4317")
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_PROTOCOL"], "grpc")
+        self.assertEqual(env["OTEL_METRICS_EXPORTER"], "otlp")
+        self.assertEqual(env["OTEL_LOGS_EXPORTER"], "otlp")
+        self.assertEqual(env["OTEL_METRIC_EXPORT_INTERVAL"], "30000")
+
+    def test_cloud_endpoint_override(self) -> None:
+        telemetry = {
+            "enabled": True,
+            "cloud": {
+                "endpoint": "https://otel.example.com:4317",
+                "protocol": "http",
+            },
+        }
+        env = provision._build_telemetry_env(telemetry, None)
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "https://otel.example.com:4317")
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_PROTOCOL"], "http")
+
+    def test_env_override_takes_precedence(self) -> None:
+        telemetry = {
+            "enabled": True,
+            "cloud": {
+                "endpoint": "http://cloud-collector:4317",
+                "protocol": "grpc",
+            },
+        }
+        env_overlay = {
+            "SCION_COPILOT_OTEL_ENDPOINT": "http://custom-collector:4317",
+            "SCION_COPILOT_OTEL_PROTOCOL": "http",
+        }
+        env = provision._build_telemetry_env(telemetry, env_overlay)
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://custom-collector:4317")
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_PROTOCOL"], "http")
+
+    def test_scion_otel_endpoint_fallback(self) -> None:
+        env_overlay = {"SCION_OTEL_ENDPOINT": "http://scion-collector:4317"}
+        env = provision._build_telemetry_env({"enabled": True}, env_overlay)
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://scion-collector:4317")
+
+    def test_headers_propagated(self) -> None:
+        telemetry = {
+            "enabled": True,
+            "cloud": {
+                "headers": {"authorization": "Bearer tok", "x-meta": "val"},
+            },
+        }
+        env = provision._build_telemetry_env(telemetry, None)
+        self.assertIn("OTEL_EXPORTER_OTLP_HEADERS", env)
+        # Sorted key=value pairs
+        self.assertEqual(
+            env["OTEL_EXPORTER_OTLP_HEADERS"],
+            "authorization=Bearer tok,x-meta=val",
+        )
+
+    def test_tls_ca_file_propagated(self) -> None:
+        telemetry = {
+            "enabled": True,
+            "cloud": {
+                "tls": {"ca_file": "/etc/scion/ca.pem"},
+            },
+        }
+        env = provision._build_telemetry_env(telemetry, None)
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_CERTIFICATE"], "/etc/scion/ca.pem")
+
+    def test_no_headers_when_absent(self) -> None:
+        env = provision._build_telemetry_env({"enabled": True}, None)
+        self.assertNotIn("OTEL_EXPORTER_OTLP_HEADERS", env)
+        self.assertNotIn("OTEL_EXPORTER_OTLP_CERTIFICATE", env)
+
+
+class ResolveEndpointTest(unittest.TestCase):
+    """Tests for _resolve_endpoint."""
+
+    def test_default(self) -> None:
+        self.assertEqual(provision._resolve_endpoint(None, None), "http://localhost:4317")
+
+    def test_cloud_config(self) -> None:
+        telemetry = {"cloud": {"endpoint": "https://collector:443"}}
+        self.assertEqual(provision._resolve_endpoint(telemetry, None), "https://collector:443")
+
+    def test_copilot_env_override_wins(self) -> None:
+        telemetry = {"cloud": {"endpoint": "https://collector:443"}}
+        env = {"SCION_COPILOT_OTEL_ENDPOINT": "http://custom:4317"}
+        self.assertEqual(provision._resolve_endpoint(telemetry, env), "http://custom:4317")
+
+    def test_scion_env_fallback(self) -> None:
+        env = {"SCION_OTEL_ENDPOINT": "http://scion:4317"}
+        self.assertEqual(provision._resolve_endpoint(None, env), "http://scion:4317")
+
+
+class ResolveProtocolTest(unittest.TestCase):
+    """Tests for _resolve_protocol."""
+
+    def test_default(self) -> None:
+        self.assertEqual(provision._resolve_protocol(None, None), "grpc")
+
+    def test_cloud_config(self) -> None:
+        telemetry = {"cloud": {"protocol": "http"}}
+        self.assertEqual(provision._resolve_protocol(telemetry, None), "http")
+
+    def test_copilot_env_override_wins(self) -> None:
+        telemetry = {"cloud": {"protocol": "http"}}
+        env = {"SCION_COPILOT_OTEL_PROTOCOL": "grpc"}
+        self.assertEqual(provision._resolve_protocol(telemetry, env), "grpc")
+
+
+if __name__ == "__main__":
+    unittest.main()

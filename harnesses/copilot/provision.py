@@ -121,6 +121,94 @@ def _write_mcp_config(ctx: scion_harness.ProvisionContext, servers: dict[str, An
     scion_harness.atomic_write_json(config_path, {"mcpServers": servers})
 
 
+# ---------------------------------------------------------------------------
+# Telemetry – native OTel export
+# ---------------------------------------------------------------------------
+
+# Default OTLP endpoint for sciontool's gRPC receiver.
+_DEFAULT_OTEL_ENDPOINT = "http://localhost:4317"
+_DEFAULT_OTEL_PROTOCOL = "grpc"
+
+
+def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
+    """Return True when the effective telemetry config says 'enabled'."""
+    if not telemetry:
+        return False
+    enabled = telemetry.get("enabled")
+    if enabled is None:
+        return True
+    return bool(enabled)
+
+
+def _resolve_endpoint(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> str:
+    """Resolve the OTLP endpoint from env overrides or telemetry config."""
+    env = env or {}
+    for key in ("SCION_COPILOT_OTEL_ENDPOINT", "SCION_OTEL_ENDPOINT"):
+        v = (env.get(key) or "").strip()
+        if v:
+            return v
+    if telemetry and isinstance(telemetry.get("cloud"), dict):
+        ep = (telemetry["cloud"].get("endpoint") or "").strip()
+        if ep:
+            return ep
+    return _DEFAULT_OTEL_ENDPOINT
+
+
+def _resolve_protocol(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> str:
+    """Resolve the OTLP protocol from env overrides or telemetry config."""
+    env = env or {}
+    for key in ("SCION_COPILOT_OTEL_PROTOCOL", "SCION_OTEL_PROTOCOL"):
+        v = (env.get(key) or "").strip()
+        if v:
+            return v
+    if telemetry and isinstance(telemetry.get("cloud"), dict):
+        proto = (telemetry["cloud"].get("protocol") or "").strip()
+        if proto:
+            return proto
+    return _DEFAULT_OTEL_PROTOCOL
+
+
+def _build_telemetry_env(telemetry: dict[str, Any], env: dict[str, str] | None) -> dict[str, str]:
+    """Build env vars that direct Copilot CLI's native OTel emitter to sciontool.
+
+    Copilot CLI's enterprise-managed OTel export honours standard OpenTelemetry
+    SDK environment variables (OTEL_*) and the Copilot-specific
+    COPILOT_TELEMETRY_ENABLED flag.  The env vars produced here point the
+    emitter at sciontool's local OTLP receiver and follow the same convention
+    used by the Claude Code harness (§3.4.2 in the metrics design doc).
+    """
+    endpoint = _resolve_endpoint(telemetry, env)
+    protocol = _resolve_protocol(telemetry, env)
+
+    otel_env: dict[str, str] = {
+        "COPILOT_TELEMETRY_ENABLED": "true",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
+        "OTEL_EXPORTER_OTLP_PROTOCOL": protocol,
+        "OTEL_METRICS_EXPORTER": "otlp",
+        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_METRIC_EXPORT_INTERVAL": "30000",
+    }
+
+    # Propagate custom headers when present (e.g. for authenticated collectors).
+    cloud = telemetry.get("cloud") or {}
+    if isinstance(cloud, dict) and isinstance(cloud.get("headers"), dict):
+        parts = [f"{k}={v}" for k, v in cloud["headers"].items()]
+        if parts:
+            otel_env["OTEL_EXPORTER_OTLP_HEADERS"] = ",".join(sorted(parts))
+
+    # TLS CA file for non-localhost collectors.
+    if isinstance(cloud, dict) and isinstance(cloud.get("tls"), dict):
+        ca_file = str(cloud["tls"].get("ca_file") or "").strip()
+        if ca_file:
+            otel_env["OTEL_EXPORTER_OTLP_CERTIFICATE"] = ca_file
+
+    return otel_env
+
+
+# ---------------------------------------------------------------------------
+# Hooks – sciontool event bridge
+# ---------------------------------------------------------------------------
+
 _COPILOT_HOOK_EVENTS = [
     "sessionStart",
     "sessionEnd",
@@ -234,6 +322,19 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if resolved.method == "auth-file":
         _write_copilot_config_file(ctx)
         extra = {"config_file_written": True}
+
+    # --- Telemetry: inject native OTel env vars when enabled ----------------
+    telemetry_payload = ctx.telemetry
+    telemetry = telemetry_payload.get("telemetry") if isinstance(telemetry_payload, dict) else None
+    env_overlay = telemetry_payload.get("env") if isinstance(telemetry_payload, dict) else None
+    if not isinstance(env_overlay, dict):
+        env_overlay = None
+
+    if _telemetry_enabled(telemetry if isinstance(telemetry, dict) else None):
+        otel_env = _build_telemetry_env(telemetry or {}, env_overlay)
+        env.update(otel_env)
+        ctx.info(f"telemetry: injected {len(otel_env)} OTel env var(s)")
+    # --- end telemetry ----------------------------------------------------
 
     ctx.write_outputs(resolved, env=env, extra=extra)
 
