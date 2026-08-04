@@ -605,12 +605,13 @@ type SecretKeyInfo struct {
 }
 
 type RemoteEnvRequirementsResponse struct {
-	AgentID    string                   `json:"agentId"`
-	Required   []string                 `json:"required"`
-	HubHas     []string                 `json:"hubHas"`
-	BrokerHas  []string                 `json:"brokerHas"`
-	Needs      []string                 `json:"needs"`
-	SecretInfo map[string]SecretKeyInfo `json:"secretInfo,omitempty"`
+	AgentID      string                   `json:"agentId"`
+	Required     []string                 `json:"required"`
+	HubHas       []string                 `json:"hubHas"`
+	BrokerHas    []string                 `json:"brokerHas"`
+	Needs        []string                 `json:"needs"`
+	SecretInfo   map[string]SecretKeyInfo `json:"secretInfo,omitempty"`
+	Alternatives map[string][]string      `json:"alternatives,omitempty"` // Maps canonical key in Needs to alternative key names from the same any_of group
 }
 
 // RemoteAgentInfo contains agent information from a remote runtime broker.

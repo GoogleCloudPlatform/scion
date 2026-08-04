@@ -1020,7 +1020,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	// be satisfied by as_needed env vars or secrets. If so, finalize them
 	// transparently without requiring CLI intervention.
 	if envReqs != nil && len(envReqs.Needs) > 0 {
-		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs)
+		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
 		if len(asNeededEnv) > 0 {
 			err := d.DispatchFinalizeEnv(ctx, agent, asNeededEnv)
 			if err == nil {
@@ -1108,7 +1108,7 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	if envReqs != nil && len(envReqs.Needs) > 0 {
 		// Second pass: try to satisfy remaining needs with as_needed entries,
 		// mirroring the pattern in DispatchAgentCreateWithGather.
-		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs)
+		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
 		if len(asNeededEnv) > 0 {
 			for k, v := range asNeededEnv {
 				req.ResolvedEnv[k] = v
@@ -1465,11 +1465,28 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	ctx context.Context,
 	agent *store.Agent,
 	keys []string,
+	alternatives map[string][]string,
 ) map[string]string {
 	result := make(map[string]string)
 	keySet := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
 		keySet[k] = struct{}{}
+	}
+
+	// Expand keySet with alternatives and build a reverse map so that when
+	// a stored var is keyed by an alternative name, we store its value under
+	// the canonical key (which is what the broker expects).
+	var altToCanonical map[string]string
+	resultIsCanonical := make(map[string]bool)
+	resultScopeIdx := make(map[string]int)
+	if len(alternatives) > 0 {
+		altToCanonical = make(map[string]string)
+		for canonical, alts := range alternatives {
+			for _, alt := range alts {
+				keySet[alt] = struct{}{}
+				altToCanonical[alt] = canonical
+			}
+		}
 	}
 
 	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
@@ -1487,7 +1504,24 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				continue
 			}
 			if _, needed := keySet[v.Key]; needed {
-				result[v.Key] = v.Value
+				canonical, isAlt := altToCanonical[v.Key]
+				resultKey := v.Key
+				if isAlt {
+					resultKey = canonical
+				}
+				currentScopeIdx := slices.Index(envScopePrecedence, filter.Scope)
+				isCanonical := !isAlt
+				storedScopeIdx, alreadySet := resultScopeIdx[resultKey]
+				if !alreadySet || currentScopeIdx > storedScopeIdx {
+					result[resultKey] = v.Value
+					resultIsCanonical[resultKey] = isCanonical
+					resultScopeIdx[resultKey] = currentScopeIdx
+				} else if currentScopeIdx == storedScopeIdx {
+					if isCanonical && !resultIsCanonical[resultKey] {
+						result[resultKey] = v.Value
+						resultIsCanonical[resultKey] = true
+					}
+				}
 			}
 		}
 	}
@@ -1541,8 +1575,16 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 					target = sv.Name
 				}
 				if _, needed := keySet[target]; needed {
-					if _, alreadySet := result[target]; !alreadySet {
-						result[target] = sv.Value
+					// Store under the canonical key if this was an alternative match
+					resultKey := target
+					if canonical, isAlt := altToCanonical[target]; isAlt {
+						if _, already := result[canonical]; already {
+							continue // canonical key already matched; don't overwrite
+						}
+						resultKey = canonical
+					}
+					if _, alreadySet := result[resultKey]; !alreadySet {
+						result[resultKey] = sv.Value
 					}
 				}
 			}

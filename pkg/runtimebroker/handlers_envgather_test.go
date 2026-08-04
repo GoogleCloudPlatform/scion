@@ -2033,3 +2033,82 @@ profiles:
 		t.Errorf("expected GOOGLE_CLOUD_PROJECT in needs/required when harnessAuth=vertex-ai, got needs=%v required=%v", envReqs.Needs, envReqs.Required)
 	}
 }
+
+// TestEnvGather_AlternativesForAnyOfGroup tests that when the broker returns a
+// 202 with a needed key from an any_of group, the Alternatives field maps the
+// canonical key to its alternative names from the group.
+// Regression test for the GOOGLE_CLOUD_LOCATION as_needed bug: the hub needs
+// to know that CLOUD_ML_REGION and GOOGLE_CLOUD_LOCATION are alternatives for
+// GOOGLE_CLOUD_REGION so it can match as_needed env vars stored under those names.
+func TestEnvGather_AlternativesForAnyOfGroup(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-alternatives",
+		"id": "agent-uuid-alt",
+		"gatherEnv": true,
+		"grovePath": "` + projectDir + `",
+		"resolvedEnv": {
+			"GOOGLE_CLOUD_PROJECT": "my-project"
+		},
+		"config": {"template": "claude", "harnessConfig": "claude", "profile": "default"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (vertex-ai needs region), got %d: %s", w.Code, w.Body.String())
+	}
+
+	var envReqs EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+		t.Fatal("failed to decode response:", err)
+	}
+
+	// Verify GOOGLE_CLOUD_REGION is in Needs (canonical key)
+	needsMap := make(map[string]struct{})
+	for _, k := range envReqs.Needs {
+		needsMap[k] = struct{}{}
+	}
+	if _, ok := needsMap["GOOGLE_CLOUD_REGION"]; !ok {
+		t.Fatalf("expected GOOGLE_CLOUD_REGION in Needs, got %v", envReqs.Needs)
+	}
+
+	// Verify Alternatives map contains the any_of alternatives for GOOGLE_CLOUD_REGION
+	if envReqs.Alternatives == nil {
+		t.Fatal("expected non-nil Alternatives map")
+	}
+	alts, ok := envReqs.Alternatives["GOOGLE_CLOUD_REGION"]
+	if !ok {
+		t.Fatalf("expected GOOGLE_CLOUD_REGION in Alternatives map, got %v", envReqs.Alternatives)
+	}
+
+	altSet := make(map[string]struct{}, len(alts))
+	for _, a := range alts {
+		altSet[a] = struct{}{}
+	}
+	if _, ok := altSet["CLOUD_ML_REGION"]; !ok {
+		t.Errorf("expected CLOUD_ML_REGION in alternatives for GOOGLE_CLOUD_REGION, got %v", alts)
+	}
+	if _, ok := altSet["GOOGLE_CLOUD_LOCATION"]; !ok {
+		t.Errorf("expected GOOGLE_CLOUD_LOCATION in alternatives for GOOGLE_CLOUD_REGION, got %v", alts)
+	}
+
+	// Satisfied keys should NOT appear in Alternatives
+	if _, ok := envReqs.Alternatives["GOOGLE_CLOUD_PROJECT"]; ok {
+		t.Errorf("GOOGLE_CLOUD_PROJECT should not be in Alternatives (it is satisfied)")
+	}
+}
