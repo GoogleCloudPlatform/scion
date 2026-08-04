@@ -269,20 +269,17 @@ alertPolicies:
         No metric data has been received from the OTLP exporter for 10 minutes.
         This indicates the OpenTelemetry Collector or exporter pipeline is down.
         Verify the collector is running and reachable from application pods.
-    # Design §2.3 specifies WARNING for pipeline-down, but a fully silent
-    # telemetry pipeline means we lose all observability, so we elevate to
-    # WARNING here consistent with the design.
+    # Design §2.3 specifies WARNING severity for pipeline-down.
     severity: WARNING
     metric: "custom.googleapis.com/scion.telemetry.pipeline.status"
     conditionType: ABSENCE
     aggregation:
-      alignmentPeriod: "60s"
-      perSeriesAligner: ALIGN_DELTA
+      alignmentPeriod: "300s"    # 5-minute buckets per design — avoids noise during agent lifecycle events
+      perSeriesAligner: ALIGN_MAX
     duration: "600s"             # 10 minutes of missing data
     notificationChannels:
       - email
       - slack
-      - pagerduty
 
   - displayName: "Telemetry Export Errors"
     documentation:
