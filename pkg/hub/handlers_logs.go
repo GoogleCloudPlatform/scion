@@ -123,6 +123,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 	// Parse query parameters
 	query := r.URL.Query()
 	opts := LogQueryOptions{
+		HubName:   s.config.HubName,
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
 	}
@@ -201,6 +202,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 	// Parse query filters
 	query := r.URL.Query()
 	opts := LogQueryOptions{
+		HubName: s.config.HubName,
 		AgentID: agent.ID,
 	}
 	if v := query.Get("severity"); v != "" {
@@ -300,6 +302,7 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 
 	query := r.URL.Query()
 	opts := LogQueryOptions{
+		HubName:   s.config.HubName,
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
 		LogID:     logging.MessageLogID,
@@ -370,6 +373,7 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 	}
 
 	opts := LogQueryOptions{
+		HubName:   s.config.HubName,
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
 		LogID:     logging.MessageLogID,
@@ -460,6 +464,7 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 
 	query := r.URL.Query()
 	opts := LogQueryOptions{
+		HubName:   s.config.HubName,
 		ProjectID: project.ID,
 		LogID:     logging.MessageLogID,
 	}
@@ -528,6 +533,7 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 	}
 
 	opts := LogQueryOptions{
+		HubName:   s.config.HubName,
 		ProjectID: project.ID,
 		LogID:     logging.MessageLogID,
 	}

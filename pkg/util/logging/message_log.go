@@ -41,6 +41,7 @@ type MessageLoggerConfig struct {
 	CircuitOpen func() bool    // Returns true when circuit breaker is open (nil = never open)
 	Component   string         // "scion-server", "scion-hub", "scion-broker"
 	HubName     string         // Logical hub identity for log labels
+	HubID       string         // Stable unique hub instance ID for log labels
 	UseGCP      bool           // Format output as GCP-compatible JSON
 	Level       slog.Level
 }
@@ -57,7 +58,7 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 
 	// Cloud handler with dedicated log ID and message-aware label promotion
 	if cfg.CloudClient != nil {
-		ch := newMessageCloudHandler(cfg.CloudClient, MessageLogID, cfg.Component, cfg.HubName, cfg.Level)
+		ch := newMessageCloudHandler(cfg.CloudClient, MessageLogID, cfg.Component, cfg.HubName, cfg.HubID, cfg.Level)
 		var cloudHandler slog.Handler = ch
 		if cfg.CircuitOpen != nil {
 			cloudHandler = &circuitGatedHandler{inner: ch, circuitOpen: cfg.CircuitOpen}
@@ -111,8 +112,8 @@ type messageCloudHandler struct {
 
 // newMessageCloudHandler creates a CloudHandler for the message log that
 // promotes sender, recipient, and msg_type to GCP labels.
-func newMessageCloudHandler(client *gcplog.Client, logID, component, hubName string, level slog.Level) *messageCloudHandler {
-	base := NewCloudHandlerFromClient(client, logID, component, hubName, level)
+func newMessageCloudHandler(client *gcplog.Client, logID, component, hubName, hubID string, level slog.Level) *messageCloudHandler {
+	base := NewCloudHandlerFromClient(client, logID, component, hubName, hubID, level)
 	return &messageCloudHandler{CloudHandler: *base}
 }
 
@@ -124,6 +125,9 @@ func (h *messageCloudHandler) Handle(ctx context.Context, r slog.Record) error {
 	}
 	if h.hubName != "" {
 		labels["hub"] = h.hubName
+	}
+	if h.hubID != "" {
+		labels["hub_id"] = h.hubID
 	}
 	if h.hostname != "" {
 		labels["node"] = h.hostname
@@ -188,9 +192,13 @@ func (h *messageCloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 			level:     h.level,
 			component: h.component,
 			hubName:   h.hubName,
+			hubID:     h.hubID,
 			hostname:  h.hostname,
+			projectID: h.projectID,
+			version:   h.version,
 			attrs:     newAttrs,
 			groups:    h.groups,
+			logHook:   h.logHook,
 		},
 	}
 }
@@ -207,9 +215,13 @@ func (h *messageCloudHandler) WithGroup(name string) slog.Handler {
 			level:     h.level,
 			component: h.component,
 			hubName:   h.hubName,
+			hubID:     h.hubID,
 			hostname:  h.hostname,
+			projectID: h.projectID,
+			version:   h.version,
 			attrs:     h.attrs,
 			groups:    newGroups,
+			logHook:   h.logHook,
 		},
 	}
 }

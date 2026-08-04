@@ -60,6 +60,8 @@ type CloudLoggingConfig struct {
 	Component string
 	// HubName is the logical hub identity used in the "hub" log label.
 	HubName string
+	// HubID is the stable unique hub instance ID used in the "hub_id" log label.
+	HubID string
 	// BufferedByteLimit is the maximum bytes the Cloud Logging client
 	// will buffer. Prevents unbounded memory growth when Cloud Logging
 	// is temporarily unavailable. Default: 8 MiB.
@@ -77,6 +79,7 @@ type CloudHandler struct {
 	level     slog.Level
 	component string
 	hubName   string
+	hubID     string
 	hostname  string
 	projectID string
 	version   string
@@ -134,6 +137,7 @@ func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.
 		level:     level,
 		component: config.Component,
 		hubName:   config.HubName,
+		hubID:     config.HubID,
 		hostname:  hostname,
 		projectID: projectID,
 		version:   version.Short(),
@@ -218,6 +222,9 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 	if h.hubName != "" {
 		labels["hub"] = h.hubName
 	}
+	if h.hubID != "" {
+		labels["hub_id"] = h.hubID
+	}
 	if h.hostname != "" {
 		labels["node"] = h.hostname
 	}
@@ -270,6 +277,7 @@ func (h *CloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		level:     h.level,
 		component: h.component,
 		hubName:   h.hubName,
+		hubID:     h.hubID,
 		hostname:  h.hostname,
 		projectID: h.projectID,
 		version:   h.version,
@@ -290,6 +298,7 @@ func (h *CloudHandler) WithGroup(name string) slog.Handler {
 		level:     h.level,
 		component: h.component,
 		hubName:   h.hubName,
+		hubID:     h.hubID,
 		hostname:  h.hostname,
 		projectID: h.projectID,
 		version:   h.version,
@@ -307,7 +316,8 @@ func (h *CloudHandler) Client() *gcplog.Client {
 
 // NewCloudHandlerFromClient creates a CloudHandler from an existing client.
 // This avoids opening a second connection for the request log stream.
-func NewCloudHandlerFromClient(client *gcplog.Client, logID, component, hubName string, level slog.Level) *CloudHandler {
+// hubID is optional — when non-empty, it is emitted as the "hub_id" label.
+func NewCloudHandlerFromClient(client *gcplog.Client, logID, component, hubName, hubID string, level slog.Level) *CloudHandler {
 	logger := client.Logger(logID)
 	hostname, _ := os.Hostname()
 	return &CloudHandler{
@@ -316,6 +326,7 @@ func NewCloudHandlerFromClient(client *gcplog.Client, logID, component, hubName 
 		level:     level,
 		component: component,
 		hubName:   hubName,
+		hubID:     hubID,
 		hostname:  hostname,
 		projectID: resolveProjectID(),
 		version:   version.Short(),
@@ -376,13 +387,21 @@ func resolveProjectID() string {
 	return os.Getenv(EnvGoogleCloudProject)
 }
 
+// Cloud Logging log IDs for the server's log streams.
+const (
+	// ServerLogID is the Cloud Logging log ID for the main server log.
+	ServerLogID = "scion-server"
+	// AgentLogID is the Cloud Logging log ID for the agent log.
+	AgentLogID = "scion-agents"
+)
+
 // resolveLogID returns the Cloud Logging log ID from environment variables.
-// Defaults to "scion-server" if not set.
+// Defaults to ServerLogID if not set.
 func resolveLogID() string {
 	if v := os.Getenv(EnvCloudLoggingLogID); v != "" {
 		return v
 	}
-	return "scion-server"
+	return ServerLogID
 }
 
 // isCloudLoggingEnabled checks if direct Cloud Logging is enabled via env var.

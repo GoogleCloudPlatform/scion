@@ -222,3 +222,119 @@ func TestPromoteMessageAttrToLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestMessageCloudHandler_WithAttrs_PreservesFields(t *testing.T) {
+	hookCalled := false
+	h := &messageCloudHandler{
+		CloudHandler: CloudHandler{
+			level:     slog.LevelInfo,
+			component: "test-component",
+			hubName:   "test-hub",
+			hubID:     "hub-abc-123",
+			hostname:  "node-1",
+			projectID: "my-gcp-project",
+			version:   "v1.2.3",
+			logHook:   func(e gcplog.Entry) { hookCalled = true },
+		},
+	}
+
+	derived := h.WithAttrs([]slog.Attr{slog.String("extra", "val")})
+	mch, ok := derived.(*messageCloudHandler)
+	if !ok {
+		t.Fatal("WithAttrs should return a *messageCloudHandler")
+	}
+
+	if mch.hubID != "hub-abc-123" {
+		t.Errorf("hubID = %q, want %q", mch.hubID, "hub-abc-123")
+	}
+	if mch.projectID != "my-gcp-project" {
+		t.Errorf("projectID = %q, want %q", mch.projectID, "my-gcp-project")
+	}
+	if mch.version != "v1.2.3" {
+		t.Errorf("version = %q, want %q", mch.version, "v1.2.3")
+	}
+	if mch.logHook == nil {
+		t.Fatal("logHook should be preserved, got nil")
+	}
+	if mch.component != "test-component" {
+		t.Errorf("component = %q, want %q", mch.component, "test-component")
+	}
+	if mch.hubName != "test-hub" {
+		t.Errorf("hubName = %q, want %q", mch.hubName, "test-hub")
+	}
+	if mch.hostname != "node-1" {
+		t.Errorf("hostname = %q, want %q", mch.hostname, "node-1")
+	}
+	if len(mch.attrs) != 1 {
+		t.Errorf("expected 1 attr, got %d", len(mch.attrs))
+	}
+
+	// Verify the hook is callable (same function reference)
+	mch.logHook(gcplog.Entry{})
+	if !hookCalled {
+		t.Error("logHook should be the same function as original")
+	}
+
+	// Original should be unchanged
+	if len(h.attrs) != 0 {
+		t.Error("original handler should not be modified")
+	}
+}
+
+func TestMessageCloudHandler_WithGroup_PreservesFields(t *testing.T) {
+	hookCalled := false
+	h := &messageCloudHandler{
+		CloudHandler: CloudHandler{
+			level:     slog.LevelInfo,
+			component: "test-component",
+			hubName:   "test-hub",
+			hubID:     "hub-abc-123",
+			hostname:  "node-1",
+			projectID: "my-gcp-project",
+			version:   "v1.2.3",
+			logHook:   func(e gcplog.Entry) { hookCalled = true },
+		},
+	}
+
+	derived := h.WithGroup("mygroup")
+	mch, ok := derived.(*messageCloudHandler)
+	if !ok {
+		t.Fatal("WithGroup should return a *messageCloudHandler")
+	}
+
+	if mch.hubID != "hub-abc-123" {
+		t.Errorf("hubID = %q, want %q", mch.hubID, "hub-abc-123")
+	}
+	if mch.projectID != "my-gcp-project" {
+		t.Errorf("projectID = %q, want %q", mch.projectID, "my-gcp-project")
+	}
+	if mch.version != "v1.2.3" {
+		t.Errorf("version = %q, want %q", mch.version, "v1.2.3")
+	}
+	if mch.logHook == nil {
+		t.Fatal("logHook should be preserved, got nil")
+	}
+	if mch.component != "test-component" {
+		t.Errorf("component = %q, want %q", mch.component, "test-component")
+	}
+	if mch.hubName != "test-hub" {
+		t.Errorf("hubName = %q, want %q", mch.hubName, "test-hub")
+	}
+	if mch.hostname != "node-1" {
+		t.Errorf("hostname = %q, want %q", mch.hostname, "node-1")
+	}
+	if len(mch.groups) != 1 || mch.groups[0] != "mygroup" {
+		t.Errorf("groups = %v, want [mygroup]", mch.groups)
+	}
+
+	// Verify the hook is callable (same function reference)
+	mch.logHook(gcplog.Entry{})
+	if !hookCalled {
+		t.Error("logHook should be the same function as original")
+	}
+
+	// Original should be unchanged
+	if len(h.groups) != 0 {
+		t.Error("original handler should not be modified")
+	}
+}

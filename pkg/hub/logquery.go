@@ -74,6 +74,7 @@ type LogQueryOptions struct {
 	PageToken string
 	Sources   []string // optional: "hub", "broker", "agent", "messages" — restricts to matching logs/subsystems
 	Search    string   // optional: substring match on jsonPayload.message
+	HubName   string   // optional: filter by hub label to scope logs to this hub instance
 }
 
 // LogQueryResult contains the result of a log query.
@@ -166,9 +167,14 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 	if opts.LogID != "" && len(projectID) > 0 && projectID[0] != "" {
 		parts = append(parts, fmt.Sprintf(`logName = "projects/%s/logs/%s"`, projectID[0], opts.LogID))
 	} else if len(projectID) > 0 && projectID[0] != "" {
-		// Exclude request logs from general log queries — they are high-volume
-		// server infrastructure logs that are not relevant to agent activity.
-		parts = append(parts, fmt.Sprintf(`logName != "projects/%s/logs/%s"`, projectID[0], logging.RequestLogID))
+		// Restrict to known Scion log names (whitelist). This excludes Cloud SQL,
+		// GCE audit, load balancer, and all other non-Scion logs in the project.
+		// The request log (scion_request_log) is excluded implicitly since it is
+		// not in the whitelist.
+		pid := projectID[0]
+		parts = append(parts, fmt.Sprintf(
+			`(logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s")`,
+			pid, logging.ServerLogID, pid, logging.AgentLogID, pid, logging.MessageLogID))
 	}
 	if opts.AgentID != "" && opts.LogID == logging.MessageLogID {
 		// For message logs, match where this agent is either the recipient
@@ -195,6 +201,9 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 	if opts.Severity != "" {
 		parts = append(parts, fmt.Sprintf(`severity >= %s`, strings.ToUpper(opts.Severity)))
 	}
+	if opts.HubName != "" {
+		parts = append(parts, fmt.Sprintf(`labels.hub = %q`, opts.HubName))
+	}
 
 	if len(opts.Sources) > 0 && len(projectID) > 0 && projectID[0] != "" {
 		pid := projectID[0]
@@ -203,16 +212,16 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 			switch src {
 			case "hub":
 				srcParts = append(srcParts, fmt.Sprintf(
-					`(logName = "projects/%s/logs/scion-server" AND jsonPayload.subsystem =~ "^hub\\.")`, pid))
+					`(logName = "projects/%s/logs/%s" AND jsonPayload.subsystem =~ "^hub\\.")`, pid, logging.ServerLogID))
 			case "broker":
 				srcParts = append(srcParts, fmt.Sprintf(
-					`(logName = "projects/%s/logs/scion-server" AND jsonPayload.subsystem =~ "^broker\\.")`, pid))
+					`(logName = "projects/%s/logs/%s" AND jsonPayload.subsystem =~ "^broker\\.")`, pid, logging.ServerLogID))
 			case "agent":
 				srcParts = append(srcParts, fmt.Sprintf(
-					`logName = "projects/%s/logs/scion-agents"`, pid))
+					`logName = "projects/%s/logs/%s"`, pid, logging.AgentLogID))
 			case "messages":
 				srcParts = append(srcParts, fmt.Sprintf(
-					`logName = "projects/%s/logs/scion-messages"`, pid))
+					`logName = "projects/%s/logs/%s"`, pid, logging.MessageLogID))
 			}
 		}
 		if len(srcParts) > 0 {
