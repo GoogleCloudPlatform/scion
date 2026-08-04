@@ -1517,11 +1517,10 @@ func TestSessionStore_CookieOverflowRetry(t *testing.T) {
 	// This demonstrates the root cause: the securecookie 4096-byte limit
 	// rejects sessions containing enterprise-sized Hub JWTs.
 	err = sess.Save(req, rec)
-	if err != nil {
-		assert.Contains(t, err.Error(), "the value is too long",
-			"expected securecookie overflow error for enterprise-sized session")
-		t.Logf("Confirmed: CookieStore rejects enterprise session (err=%v)", err)
-	}
+	require.Error(t, err, "enterprise-sized session must exceed the 4096-byte cookie limit")
+	assert.Contains(t, err.Error(), "the value is too long",
+		"expected securecookie overflow error for enterprise-sized session")
+	t.Logf("Confirmed: CookieStore rejects enterprise session (err=%v)", err)
 
 	// ---- Part 2: Verify retry-without-tokens would fit ----
 	// Strip the tokens and verify the reduced session fits in the cookie.
