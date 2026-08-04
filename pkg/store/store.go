@@ -204,6 +204,11 @@ type AgentStore interface {
 	// active remote brokers are left untouched. Returns the number of projects
 	// updated.
 	ReassignProjectBroker(ctx context.Context, oldBrokerID, newBrokerID string) (int, error)
+
+	// AggregateAgentHealth returns lightweight health-oriented counts and lists
+	// for the health-summary endpoint without fetching full agent records.
+	// This avoids the O(N) deserialization cost of ListAgents on large installations.
+	AggregateAgentHealth(ctx context.Context) (*AgentHealthAggregate, error)
 }
 
 // AgentFilter defines criteria for filtering agents.
@@ -236,6 +241,27 @@ type AgentFilter struct {
 	// Labels, when non-empty, restricts results to agents whose labels
 	// contain all specified key-value pairs (AND semantics).
 	Labels map[string]string
+}
+
+// AgentHealthAggregate holds pre-computed counts and short lists used by the
+// health-summary endpoint. It avoids loading full agent records.
+type AgentHealthAggregate struct {
+	Total   int            // Total number of non-deleted agents
+	ByPhase map[string]int // Count per lifecycle phase
+
+	// Per-broker counts: map[brokerID] → {count, healthy}
+	ByBroker map[string]AgentBrokerCounts
+
+	// Names of agents in unhealthy states (capped at 100 per list).
+	StalledNames []string
+	CrashedNames []string
+	ErroredNames []string
+}
+
+// AgentBrokerCounts holds per-broker agent tallies.
+type AgentBrokerCounts struct {
+	Count   int
+	Healthy int
 }
 
 // AgentStatusUpdate contains fields for status-only updates.

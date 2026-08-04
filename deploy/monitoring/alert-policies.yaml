@@ -14,6 +14,13 @@
 
 # Alert policy definitions for GCP Cloud Monitoring.
 #
+# NOTE: This file uses a custom DSL, NOT the raw GCP AlertPolicy API schema.
+# Each entry is a human-readable policy specification that must be translated
+# into GCP-native AlertPolicy resources before deployment. Use the Terraform
+# or Pulumi provisioning methods described in README.md, which read these
+# values as configuration inputs. The gcloud CLI requires manual conversion
+# (see README.md for details).
+#
 # Metrics use the custom.googleapis.com/scion.* namespace and are emitted via
 # the OTLP pipeline (see .design/hosted/metrics-system.md).
 #

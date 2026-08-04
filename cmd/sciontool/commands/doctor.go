@@ -6,6 +6,7 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -512,7 +512,9 @@ func checkWorkspaceGit(failures *int) {
 
 	fmt.Println("\n--- Workspace/Git State ---")
 
-	cmd := exec.Command("git", "-C", "/workspace", "status", "--porcelain")
+	gitCtx, gitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer gitCancel()
+	cmd := exec.CommandContext(gitCtx, "git", "-C", "/workspace", "status", "--porcelain")
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("[FAIL] Git workspace corrupted: %v\n", err)
 		*failures++
@@ -536,8 +538,8 @@ func checkHarnessProcess(failures *int) {
 				*failures++
 				return
 			}
-			// On Unix, FindProcess always succeeds; use signal 0 to check liveness.
-			if err := proc.Signal(syscall.Signal(0)); err != nil {
+			// Use platform-specific liveness check (signal 0 on Unix).
+			if err := checkProcessAlive(proc); err != nil {
 				fmt.Printf("[FAIL] Harness process (PID %d) not alive: %v\n", pid, err)
 				*failures++
 				return

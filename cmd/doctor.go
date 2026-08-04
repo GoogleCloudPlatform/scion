@@ -359,7 +359,7 @@ func checkDoctorHubConnectivity(hubEP string) scionruntime.CheckResult {
 			Remediation: "Verify the Hub is running and the endpoint is correct",
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return scionruntime.CheckResult{
@@ -656,7 +656,7 @@ func checkDoctorTelemetry() scionruntime.CheckResult {
 			Remediation: "Start the OpenTelemetry collector or check SCION_OTEL_ENDPOINT",
 		}
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	return scionruntime.CheckResult{
 		Name:    "telemetry",
@@ -688,7 +688,9 @@ func checkDoctorContainerImages() scionruntime.CheckResult {
 		}
 	}
 
-	out, err := exec.Command(containerCLI, "images", "--format", "{{.Repository}}:{{.Tag}}").Output()
+	imgCtx, imgCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer imgCancel()
+	out, err := exec.CommandContext(imgCtx, containerCLI, "images", "--format", "{{.Repository}}:{{.Tag}}").Output()
 	if err != nil {
 		return scionruntime.CheckResult{
 			Name:    "container-images",

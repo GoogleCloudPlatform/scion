@@ -945,3 +945,103 @@ func (s *AgentStore) ReassignProjectBroker(ctx context.Context, oldBrokerID, new
 	}
 	return affected, nil
 }
+
+// AggregateAgentHealth computes health-oriented counts via GROUP BY queries
+// instead of loading full agent records. The approach uses three lightweight
+// queries:
+//  1. COUNT(*) GROUP BY phase            → ByPhase + Total
+//  2. COUNT(*) GROUP BY runtime_broker_id, phase, activity → ByBroker
+//  3. SELECT name WHERE phase/activity ∈ unhealthy (limit 100 each)
+func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHealthAggregate, error) {
+	result := &store.AgentHealthAggregate{
+		ByPhase:  make(map[string]int),
+		ByBroker: make(map[string]store.AgentBrokerCounts),
+	}
+
+	// 1. Count agents by phase (non-deleted only).
+	var phaseCounts []struct {
+		Phase string `json:"phase"`
+		Count int    `json:"count"`
+	}
+	err := s.client.Agent.Query().
+		Where(agent.DeletedAtIsNil()).
+		GroupBy(agent.FieldPhase).
+		Aggregate(ent.Count()).
+		Scan(ctx, &phaseCounts)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate phase counts: %w", err)
+	}
+	for _, pc := range phaseCounts {
+		result.ByPhase[pc.Phase] += pc.Count
+		result.Total += pc.Count
+	}
+
+	// 2. Count agents by broker, phase, and activity for per-broker health tallies.
+	var brokerCounts []struct {
+		BrokerID string `json:"runtime_broker_id"`
+		Phase    string `json:"phase"`
+		Activity string `json:"activity"`
+		Count    int    `json:"count"`
+	}
+	err = s.client.Agent.Query().
+		Where(agent.DeletedAtIsNil(), agent.RuntimeBrokerIDNEQ("")).
+		GroupBy(agent.FieldRuntimeBrokerID, agent.FieldPhase, agent.FieldActivity).
+		Aggregate(ent.Count()).
+		Scan(ctx, &brokerCounts)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate broker counts: %w", err)
+	}
+	for _, bc := range brokerCounts {
+		bid := bc.BrokerID
+		if bid == "" {
+			continue
+		}
+		entry := result.ByBroker[bid]
+		entry.Count += bc.Count
+		if bc.Phase != "error" && bc.Activity != "stalled" && bc.Activity != "crashed" {
+			entry.Healthy += bc.Count
+		}
+		result.ByBroker[bid] = entry
+	}
+
+	// 3. Fetch names of unhealthy agents (capped lists).
+	const unhealthyCap = 100
+
+	stalledAgents, err := s.client.Agent.Query().
+		Where(agent.DeletedAtIsNil(), agent.ActivityEQ("stalled")).
+		Select(agent.FieldName).
+		Limit(unhealthyCap).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query stalled agents: %w", err)
+	}
+	for _, a := range stalledAgents {
+		result.StalledNames = append(result.StalledNames, a.Name)
+	}
+
+	crashedAgents, err := s.client.Agent.Query().
+		Where(agent.DeletedAtIsNil(), agent.ActivityEQ("crashed")).
+		Select(agent.FieldName).
+		Limit(unhealthyCap).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query crashed agents: %w", err)
+	}
+	for _, a := range crashedAgents {
+		result.CrashedNames = append(result.CrashedNames, a.Name)
+	}
+
+	erroredAgents, err := s.client.Agent.Query().
+		Where(agent.DeletedAtIsNil(), agent.PhaseEQ("error")).
+		Select(agent.FieldName).
+		Limit(unhealthyCap).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query errored agents: %w", err)
+	}
+	for _, a := range erroredAgents {
+		result.ErroredNames = append(result.ErroredNames, a.Name)
+	}
+
+	return result, nil
+}

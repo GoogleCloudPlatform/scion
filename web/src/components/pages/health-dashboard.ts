@@ -745,8 +745,10 @@ export class ScionPageHealthDashboard extends LitElement {
   }
 
   private timeAgo(isoDate: string): string {
+    if (!isoDate) return 'never';
     try {
       const d = new Date(isoDate);
+      if (isNaN(d.getTime())) return 'unknown';
       const now = Date.now();
       const diffMs = now - d.getTime();
       if (diffMs < 0) return 'just now';

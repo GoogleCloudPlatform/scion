@@ -6,17 +6,25 @@ platform and can be applied using any of the supported provisioning tools.
 
 ## Applying the configuration
 
-### gcloud CLI
+> **Important:** The YAML files in this directory use a custom DSL for
+> readability — they do **not** conform to the raw GCP API schemas. You cannot
+> pass them directly to `gcloud` commands. Use Terraform or Pulumi (below)
+> which consume these files as configuration inputs, or manually translate
+> each entry into a GCP-native AlertPolicy / UptimeCheckConfig / NotificationChannel
+> JSON document before using the `gcloud` CLI.
+
+### gcloud CLI (manual conversion required)
 
 ```bash
-# Create notification channels first
-gcloud beta monitoring channels create --channel-content-from-file=notification-channels.yaml
-
-# Create alert policies (one per policy document)
-gcloud alpha monitoring policies create --policy-from-file=alert-policies.yaml
-
-# Create uptime checks
-gcloud monitoring uptime create --config-from-file=uptime-checks.yaml
+# The YAML files must be converted to GCP-native API format first.
+# For each alert policy entry in alert-policies.yaml, create a separate
+# GCP AlertPolicy JSON/YAML document, then apply:
+#
+#   gcloud alpha monitoring policies create --policy-from-file=<converted-policy>.json
+#
+# Notification channels and uptime checks require the same conversion:
+#   gcloud beta monitoring channels create --channel-content-from-file=<converted-channel>.json
+#   gcloud monitoring uptime create --config-from-file=<converted-check>.json
 ```
 
 ### Terraform

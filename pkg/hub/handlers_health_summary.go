@@ -16,10 +16,10 @@ package hub
 
 import (
 	"database/sql"
+	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -121,6 +121,12 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	// Get base health info
 	healthInfo := s.GetHealthInfo(ctx)
 
+	// Determine overall status early so DB-error branches can degrade it.
+	overallStatus := "healthy"
+	if healthInfo.Status != "" && healthInfo.Status != "healthy" {
+		overallStatus = healthInfo.Status
+	}
+
 	// Build hub section
 	hubSummary := HealthSummaryHub{
 		Status:  healthInfo.Status,
@@ -154,64 +160,48 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fetch all agents once and group by broker ID to avoid N+1 queries.
-	type agentBuckets struct {
-		count   int
-		healthy int
-	}
-	agentsByBroker := make(map[string]*agentBuckets)
+	// Use aggregate queries instead of fetching full agent records.
+	// This avoids deserialising up to 10 000 structs on every 30 s poll.
 	agentsSummary := HealthSummaryAgents{
 		ByPhase: make(map[string]int),
 		Stalled: []string{},
 		Crashed: []string{},
 		Errored: []string{},
 	}
-	// Limit is a safety cap to avoid unbounded memory on very large installations.
-	// Agents beyond this cap will not appear in stalled/crashed/errored lists but
-	// TotalCount (used for the total gauge) is still accurate.
-	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 10000}); err == nil {
-		agentsSummary.Total = agentResult.TotalCount
-		for _, a := range agentResult.Items {
-			if a.Phase != "" {
-				agentsSummary.ByPhase[a.Phase]++
-			}
-			if a.Activity == string(state.ActivityStalled) {
-				agentsSummary.Stalled = append(agentsSummary.Stalled, a.Name)
-			}
-			if a.Activity == string(state.ActivityCrashed) {
-				agentsSummary.Crashed = append(agentsSummary.Crashed, a.Name)
-			}
-			if a.Phase == string(state.PhaseError) {
-				agentsSummary.Errored = append(agentsSummary.Errored, a.Name)
-			}
 
-			// Bucket by broker for per-broker counts
-			bid := a.RuntimeBrokerID
-			if bid != "" {
-				b, ok := agentsByBroker[bid]
-				if !ok {
-					b = &agentBuckets{}
-					agentsByBroker[bid] = b
-				}
-				b.count++
-				if a.Phase != string(state.PhaseError) &&
-					a.Activity != string(state.ActivityStalled) &&
-					a.Activity != string(state.ActivityCrashed) {
-					b.healthy++
-				}
-			}
+	agentAgg, err := s.store.AggregateAgentHealth(ctx)
+	if err != nil {
+		slog.Error("health summary: failed to aggregate agent health", "error", err)
+		overallStatus = "degraded"
+	} else {
+		agentsSummary.Total = agentAgg.Total
+		agentsSummary.ByPhase = agentAgg.ByPhase
+		if len(agentAgg.StalledNames) > 0 {
+			agentsSummary.Stalled = agentAgg.StalledNames
+		}
+		if len(agentAgg.CrashedNames) > 0 {
+			agentsSummary.Crashed = agentAgg.CrashedNames
+		}
+		if len(agentAgg.ErroredNames) > 0 {
+			agentsSummary.Errored = agentAgg.ErroredNames
 		}
 	}
 
-	// Build brokers section using pre-computed agent buckets
+	// Build brokers section using pre-computed agent buckets from the aggregate.
 	var brokerSummaries []HealthSummaryBrkr
-	if brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100}); err == nil {
+	brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
+	if err != nil {
+		slog.Error("health summary: failed to list runtime brokers", "error", err)
+		overallStatus = "degraded"
+	} else {
 		for _, b := range brokerResult.Items {
 			agentCount := 0
 			agentHealthy := 0
-			if bucket, ok := agentsByBroker[b.ID]; ok {
-				agentCount = bucket.count
-				agentHealthy = bucket.healthy
+			if agentAgg != nil {
+				if bucket, ok := agentAgg.ByBroker[b.ID]; ok {
+					agentCount = bucket.Count
+					agentHealthy = bucket.Healthy
+				}
 			}
 
 			// Determine runtime type from profiles
@@ -251,11 +241,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		AutoSuspend:      s.config.AutoSuspendStalled,
 	}
 
-	// Determine overall status
-	overallStatus := "healthy"
-	if healthInfo.Status == "degraded" {
-		overallStatus = "degraded"
-	}
+	// Propagate unhealthy agent/broker signals into overall status.
 	if len(agentsSummary.Stalled) > 0 || len(agentsSummary.Crashed) > 0 || len(agentsSummary.Errored) > 0 {
 		overallStatus = "degraded"
 	}
