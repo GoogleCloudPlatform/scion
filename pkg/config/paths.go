@@ -92,6 +92,30 @@ func FindProjectRoot() (string, bool) {
 	return "", false
 }
 
+// FindProjectMarkerPath walks up from the current working directory looking for a
+// .scion marker file (a regular file, not a directory). Returns the absolute path
+// to the marker file, or "" if none is found.
+func FindProjectMarkerPath() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	dir := wd
+	for {
+		p := filepath.Join(dir, DotScion)
+		info, err := os.Stat(p)
+		if err == nil && !info.IsDir() {
+			return p
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
 // GetResolvedProjectDir returns the active .scion directory based on precedence.
 // This is a convenience wrapper around ResolveProjectPath that discards the isGlobal flag.
 func GetResolvedProjectDir(explicitPath string) (string, error) {

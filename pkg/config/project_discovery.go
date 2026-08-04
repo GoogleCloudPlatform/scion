@@ -27,6 +27,7 @@ const (
 	ProjectTypeGlobal   ProjectType = "global"
 	ProjectTypeGit      ProjectType = "git"
 	ProjectTypeExternal ProjectType = "external"
+	ProjectTypeShadow   ProjectType = "shadow"
 )
 
 // ProjectStatus indicates the health of a project config.
@@ -200,11 +201,26 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 		ConfigPath: configPath,
 		Status:     ProjectStatusOK,
 	}
-	pi.AgentCount = countAgents(agentsDir)
+
+	// Check if this is a shadow project via versioned settings.
+	// A shadowed project is never orphaned — it has no local agents by design.
+	if vs, vsErr := LoadVersionedSettings(configPath); vsErr == nil && vs != nil {
+		if vs.ProjectType == string(ProjectTypeShadow) {
+			if vs.Hub != nil && vs.Hub.ProjectID != "" {
+				pi.ProjectID = vs.Hub.ProjectID
+				pi.GroveID = vs.Hub.ProjectID
+			}
+			pi.Type = ProjectTypeShadow
+			pi.Status = ProjectStatusOK
+			return pi
+		}
+	}
+
 	if settings, err := LoadSettings(configPath); err == nil {
 		pi.ProjectID = settings.ProjectID
 		pi.GroveID = settings.ProjectID
 	}
+	pi.AgentCount = countAgents(agentsDir)
 	if pi.ProjectID == "" {
 		if marker, workspacePath, err := readWorkspaceMarkerForSlug(slug); err == nil {
 			pi.ProjectID = marker.ProjectID

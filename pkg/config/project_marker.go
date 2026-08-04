@@ -32,6 +32,7 @@ type ProjectMarker struct {
 	ProjectID   string `yaml:"project-id"`
 	ProjectName string `yaml:"project-name"`
 	ProjectSlug string `yaml:"project-slug"`
+	Type        string `yaml:"type,omitempty"` // "shadow" for shadowed projects
 }
 
 // UnmarshalYAML implements custom unmarshaling to handle legacy "grove-" tags.
@@ -60,6 +61,11 @@ func (m *ProjectMarker) UnmarshalYAML(value *yaml.Node) error {
 		m.ProjectSlug = aux.GroveSlug
 	}
 	return nil
+}
+
+// IsShadow returns true if this marker represents a shadowed project.
+func (m *ProjectMarker) IsShadow() bool {
+	return m.Type == "shadow"
 }
 
 // ShortUUID returns a short form of the project ID for use in directory names.

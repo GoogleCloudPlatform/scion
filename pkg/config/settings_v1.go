@@ -262,6 +262,7 @@ func PrintDeprecationWarnings(warnings []string) {
 // VersionedSettings is the root configuration struct for versioned settings (v1+).
 type VersionedSettings struct {
 	SchemaVersion        string                        `json:"schema_version" yaml:"schema_version" koanf:"schema_version"`
+	ProjectType          string                        `json:"project_type,omitempty" yaml:"project_type,omitempty" koanf:"project_type"`
 	ActiveProfile        string                        `json:"active_profile,omitempty" yaml:"active_profile,omitempty" koanf:"active_profile"`
 	DefaultTemplate      string                        `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
 	DefaultHarnessConfig string                        `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
