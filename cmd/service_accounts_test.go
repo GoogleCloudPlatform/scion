@@ -222,7 +222,7 @@ func TestSAScopedList_AssignableWithGlobalIsRefusedLocally(t *testing.T) {
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	data, err := json.Marshal(map[string]interface{}{
 		"project_id": "proj-local",
-		"hub":      map[string]interface{}{"enabled": true, "endpoint": srv.URL, "projectId": "scion-proj-1"},
+		"hub":        map[string]interface{}{"enabled": true, "endpoint": srv.URL, "projectId": "scion-proj-1"},
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
@@ -291,7 +291,7 @@ func TestSAScopedShow_GlobalUsesTheFlatRoute(t *testing.T) {
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	data, err := json.Marshal(map[string]interface{}{
 		"project_id": "proj-local",
-		"hub":      map[string]interface{}{"enabled": true, "endpoint": srv.URL, "projectId": "scion-proj-1"},
+		"hub":        map[string]interface{}{"enabled": true, "endpoint": srv.URL, "projectId": "scion-proj-1"},
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
@@ -322,7 +322,7 @@ func TestResolveSAScope_HubScopeNeedsNoLinkedProject(t *testing.T) {
 	// Deliberately NO hub.projectId: a project that has not been linked.
 	data, err := json.Marshal(map[string]interface{}{
 		"project_id": "proj-local",
-		"hub":      map[string]interface{}{"enabled": true, "endpoint": "http://127.0.0.1:1"},
+		"hub":        map[string]interface{}{"enabled": true, "endpoint": "http://127.0.0.1:1"},
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
