@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // CloneProjectRequest is the request body for POST /api/v1/projects/{id}/clone.
@@ -32,6 +33,7 @@ type CloneProjectRequest struct {
 	Name       string `json:"name"`                 // required
 	Slug       string `json:"slug"`                 // optional explicit slug override
 	AsTemplate bool   `json:"asTemplate,omitempty"` // mark clone as template
+	GitRemote  string `json:"gitRemote,omitempty"`  // override source git remote
 }
 
 // handleProjectClone clones a project's configuration into a new project.
@@ -127,6 +129,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		OwnerID:                callerID,
 		SharedDirs:             src.SharedDirs,
 		GitIdentity:            src.GitIdentity,
+	}
+
+	// Allow callers to override the git remote (e.g. creating from a template
+	// with a different repository).
+	if req.GitRemote != "" {
+		clone.GitRemote = util.NormalizeGitRemote(req.GitRemote)
 	}
 
 	// Copy annotations: only keys in projectSettingKeys, preserving null semantics

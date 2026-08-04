@@ -617,6 +617,7 @@ type CloneProjectRequest struct {
 	Name       string `json:"name"`                 // required
 	Slug       string `json:"slug,omitempty"`       // optional explicit slug override
 	AsTemplate bool   `json:"asTemplate,omitempty"` // mark clone as template
+	GitRemote  string `json:"gitRemote,omitempty"`  // override source git remote
 }
 
 // HarnessConfigData holds harness-specific configuration.
