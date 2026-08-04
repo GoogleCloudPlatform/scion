@@ -36,6 +36,10 @@ WORKDIR /opt/lhh
 # Install LHH and its dependencies via uv
 RUN uv sync --no-dev --frozen 2>/dev/null || uv sync --no-dev
 
+# Activate the uv virtual environment for all subsequent commands and container runtime
+ENV VIRTUAL_ENV=/opt/lhh/.venv
+ENV PATH="/opt/lhh/.venv/bin:${PATH}"
+
 # Install agents-cli (useful for one-shot runs and debugging)
 RUN uv tool install google-agents-cli
 

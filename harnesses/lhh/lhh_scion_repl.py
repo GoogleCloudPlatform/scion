@@ -316,16 +316,19 @@ async def run(initial_message: str | None, resume: bool) -> None:
         print(f"[user]: {initial_message}", flush=True)
         await send(initial_message)
 
-    while True:
-        try:
-            query = input("[user]: ")
-        except (EOFError, KeyboardInterrupt):
-            break
-        if not query or not query.strip():
-            continue
-        if query.strip() == "exit":
-            break
-        await send(query)
+    try:
+        while True:
+            try:
+                query = input("[user]: ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not query or not query.strip():
+                continue
+            if query.strip() == "exit":
+                break
+            await send(query)
+    finally:
+        await runner.close()
 
 
 def main() -> None:
