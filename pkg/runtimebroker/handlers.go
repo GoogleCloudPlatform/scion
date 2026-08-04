@@ -40,7 +40,12 @@ import (
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
+
+var tracer = otel.Tracer("scion-broker")
 
 // matchesAgent checks whether an agent matches the given id and optional projectID.
 // When projectID is provided, it must match for uniqueness across projects.
@@ -373,6 +378,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx, span := tracer.Start(ctx, "broker.agent.create")
+	defer span.End()
+	span.SetAttributes(attribute.String("scion.agent.name", req.Name))
+
 	// Validate required fields
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
@@ -461,6 +470,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to resolve global dir")
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to get global dir: "+err.Error())
 			return
 		}
@@ -640,6 +650,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// N1-7: Ensure NFS shares are mounted before dispatch (no-op when backend=local).
 	if err := s.ensureNFSMountsReady(); err != nil {
 		markAttemptFailed(http.StatusServiceUnavailable, "NFS mount check failed: "+err.Error())
+		span.SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
 		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
 			"NFS workspace storage is not available: "+err.Error(), nil)
 		return
@@ -671,6 +682,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		markAttemptFailed(http.StatusInternalServerError, err.Error())
+		span.SetStatus(codes.Error, err.Error())
 		if sce, ok := err.(*startContextError); ok && sce.IsHubError {
 			if templatecache.IsHubConnectivityError(sce.OriginalErr) {
 				HubUnreachableError(w, sce.OriginalErr.Error())
@@ -695,6 +707,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			globalDir, err := config.GetGlobalDir()
 			if err != nil {
 				markAttemptFailed(http.StatusInternalServerError, "failed to resolve global dir")
+				span.SetStatus(codes.Error, err.Error())
 				RuntimeError(w, "Failed to get global dir: "+err.Error())
 				return
 			}
@@ -711,6 +724,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to create workspace directory")
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to create workspace directory: "+err.Error())
 			return
 		}
@@ -718,6 +732,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		bucket := s.config.StorageBucket
 		if bucket == "" {
 			markAttemptFailed(http.StatusInternalServerError, "storage bucket not configured")
+			span.SetStatus(codes.Error, "storage bucket not configured")
 			RuntimeError(w, "Storage bucket not configured for workspace bootstrap")
 			return
 		}
@@ -733,6 +748,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 		if err := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to download workspace from GCS")
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
 			return
 		}
@@ -806,6 +822,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		cfg, err := sc.Manager.Provision(ctx, opts)
 		if err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to provision agent: "+err.Error())
 			return
 		}
@@ -865,6 +882,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
 			}
 		}
+		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, agent.ErrContainerNameInUse) {
 			Conflict(w, err.Error())
 		} else {
@@ -1138,6 +1156,14 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID 
 
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
+
+	ctx, span := tracer.Start(ctx, "broker.agent.delete")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.agent.id", id),
+		attribute.String("scion.project.id", projectID),
+	)
+
 	query := r.URL.Query()
 
 	deleteFiles := query.Get("deleteFiles") == "true"
@@ -1193,6 +1219,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 
 	_, err = mgr.Delete(ctx, id, deleteFiles, projectPath, removeBranch)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		if strings.Contains(err.Error(), "not found") {
 			NotFound(w, "Agent")
 			return
@@ -1251,6 +1278,13 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
+
+	ctx, span := tracer.Start(ctx, "broker.agent.start")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.agent.id", id),
+		attribute.String("scion.project.id", projectID),
+	)
 
 	// Read optional task, projectPath, projectSlug, harnessConfig, and resolvedEnv from request body
 	var startReq struct {
@@ -1318,6 +1352,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		HTTPRequest:     r,
 	})
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		RuntimeError(w, err.Error())
 		return
 	}
@@ -1327,6 +1362,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" && opts.ProjectPath == "" {
 		agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
 		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to list agents: "+err.Error())
 			return
 		}
@@ -1367,6 +1403,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	mgr := s.resolveManagerForOpts(opts)
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		s.agentLifecycleLog.Error("Agent start failed",
 			"agent_id", id, "error", err)
 		if errors.Is(err, agent.ErrContainerNameInUse) {
@@ -1494,6 +1531,13 @@ func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) 
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
+	ctx, span := tracer.Start(ctx, "broker.agent.stop")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.agent.id", id),
+		attribute.String("scion.project.id", projectID),
+	)
+
 	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 
 	// Resolve the project-scoped container so that same-slug agents in
@@ -1520,6 +1564,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 				"agent_id", id,
 				"phase", string(state.PhaseStopped))
 		} else {
+			span.SetStatus(codes.Error, err.Error())
 			RuntimeError(w, "Failed to stop agent: "+err.Error())
 			return
 		}
@@ -1630,6 +1675,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
+	ctx, span := tracer.Start(ctx, "broker.message.inject")
+	defer span.End()
+	span.SetAttributes(attribute.String("scion.agent.id", id))
+
 	var req MessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -1654,6 +1703,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	isRaw := req.StructuredMessage != nil && req.StructuredMessage.Raw
 	if isRaw {
 		if err := mgr.MessageRaw(ctx, id, projectID, deliveryText); err != nil {
+			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "not found") {
 				NotFound(w, "Agent")
 				return
@@ -1663,6 +1713,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 		}
 	} else {
 		if err := mgr.Message(ctx, id, projectID, deliveryText, req.Interrupt); err != nil {
+			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "not found") {
 				NotFound(w, "Agent")
 				return

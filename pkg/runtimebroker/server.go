@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
@@ -1650,6 +1652,10 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.brokerAuthMiddleware != nil {
 		h = s.brokerAuthMiddleware.Middleware(h)
 	}
+
+	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
+	h = otelhttp.NewHandler(h, "broker")
+
 	return h
 }
 

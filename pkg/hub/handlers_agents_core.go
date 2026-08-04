@@ -34,7 +34,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	gouuid "github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
+
+var tracer = otel.Tracer("scion-hub")
 
 // parseLabelFilters parses label=key=value query parameters into a map and
 // validates the resulting labels against constraint rules.
@@ -383,6 +387,13 @@ func (s *Server) createAgentInProject(
 	notifySubscriberID string,
 ) {
 	ctx := r.Context()
+	ctx, span := tracer.Start(ctx, "hub.agent.create")
+	defer span.End()
+	// Note: HTTP error status is recorded by the otelhttp parent span.
+	span.SetAttributes(
+		attribute.String("scion.agent.name", req.Name),
+		attribute.String("scion.project.id", projectID),
+	)
 	hubCreateStart := time.Now()
 
 	// Verify project exists and get its configuration
@@ -1795,6 +1806,12 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id string) 
 // Hard-delete: permanently removes the agent record from the store.
 func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
+	ctx, span := tracer.Start(ctx, "hub.agent.delete")
+	defer span.End()
+	// Note: HTTP error status is recorded by the otelhttp parent span.
+	span.SetAttributes(
+		attribute.String("scion.agent.id", agent.ID),
+	)
 
 	// Enforce policy-based authorization: only the agent's creator (owner) or admins can delete
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
@@ -1954,6 +1971,15 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		MethodNotAllowed(w)
 		return
 	}
+
+	ctx, span := tracer.Start(r.Context(), "hub.agent.action")
+	defer span.End()
+	// Note: HTTP error status is recorded by the otelhttp parent span.
+	span.SetAttributes(
+		attribute.String("scion.agent.id", id),
+		attribute.String("scion.agent.action", action),
+	)
+	r = r.WithContext(ctx)
 
 	// For actions other than status/token refresh and outbound-message
 	// (self-access), we require user or agent authentication

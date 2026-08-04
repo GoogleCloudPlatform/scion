@@ -38,6 +38,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -879,17 +880,27 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(agent *store.Agent, resp *Remo
 
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
+	ctx, span := tracer.Start(ctx, "hub.dispatch.create")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.agent.id", agent.ID),
+		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
+	)
+
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
 	req, err := d.buildCreateRequest(ctx, agent, "DispatchAgentCreate")
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
@@ -900,6 +911,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		}
 	}
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
@@ -1598,12 +1610,21 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 // of truth for resume: callers compute it from the agent's stored phase
 // (suspended → resume).
 func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.agent.id", agent.ID),
+		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
+	)
+
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
@@ -1846,6 +1867,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		})
 	}
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 

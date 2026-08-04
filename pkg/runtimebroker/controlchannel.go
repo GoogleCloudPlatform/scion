@@ -30,6 +30,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -534,10 +538,20 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 		return
 	}
 
+	// Extract trace context from request envelope headers for cross-component propagation.
+	ctx := otel.GetTextMapPropagator().Extract(context.Background(), propagation.MapCarrier(req.Headers))
+	ctx, span := tracer.Start(ctx, "broker.controlchannel.dispatch")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.request.method", req.Method),
+		attribute.String("scion.request.path", req.Path),
+	)
+
 	// Recover from panics (e.g. httptest.NewRequest on malformed URLs) to
 	// prevent crashing the broker process. Send a 400 error back instead.
 	defer func() {
 		if r := recover(); r != nil {
+			span.SetStatus(codes.Error, fmt.Sprintf("panic: %v", r))
 			c.log.Error("Panic in control channel request handler", "panic", r, "method", req.Method, "path", req.Path)
 			resp := wsprotocol.NewResponseEnvelope(req.RequestID, http.StatusBadRequest, nil, []byte(fmt.Sprintf(`{"error":"request caused panic: %v"}`, r)))
 			if writeErr := conn.WriteJSON(resp); writeErr != nil {
@@ -558,6 +572,7 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 	}
 
 	httpReq := httptest.NewRequest(req.Method, path, body)
+	httpReq = httpReq.WithContext(ctx)
 	for key, value := range req.Headers {
 		httpReq.Header.Set(key, value)
 	}
@@ -584,6 +599,7 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 	resp := wsprotocol.NewResponseEnvelope(req.RequestID, result.StatusCode, headers, respBody)
 
 	if err := conn.WriteJSON(resp); err != nil {
+		span.SetStatus(codes.Error, "failed to send response: "+err.Error())
 		c.log.Error("Failed to send response", "error", err, "requestID", req.RequestID)
 	}
 }

@@ -32,6 +32,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // startContext holds all the resolved state needed to start an agent.
@@ -102,10 +104,15 @@ type startContextInputs struct {
 // The caller may further customize the returned startContext before calling
 // mgr.Start or mgr.Provision.
 func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (*startContext, error) {
+	ctx, span := tracer.Start(ctx, "broker.agent.provision")
+	defer span.End()
+	span.SetAttributes(attribute.String("scion.agent.name", in.Name))
+
 	// --- Hub-managed project path resolution ---
 	if in.ProjectSlug != "" && in.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "Failed to get global dir: " + err.Error()}
 		}
 		projectsPath := filepath.Join(globalDir, "projects", in.ProjectSlug)
@@ -428,6 +435,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if hubConn != nil && in.Config != nil {
 		templatePath, err := s.hydrateTemplate(ctx, in.Config, hubConn)
 		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{
 				Status:      http.StatusInternalServerError,
 				Message:     "Failed to hydrate template: " + err.Error(),
@@ -449,6 +457,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if hubConn != nil && in.Config != nil {
 		hcPath, err := s.hydrateHarnessConfig(ctx, in.Config, hubConn)
 		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{
 				Status:      http.StatusInternalServerError,
 				Message:     "Failed to hydrate harness-config: " + err.Error(),

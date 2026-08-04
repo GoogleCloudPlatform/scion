@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // handleMessages handles GET /api/v1/messages.
@@ -159,6 +160,12 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	}
 
 	ctx := r.Context()
+	ctx, span := tracer.Start(ctx, "hub.message.list")
+	defer span.End()
+	// Note: HTTP error status is recorded by the otelhttp parent span.
+	span.SetAttributes(
+		attribute.String("scion.agent.id", agentID),
+	)
 	user := GetUserIdentityFromContext(ctx)
 	if user == nil {
 		Forbidden(w)

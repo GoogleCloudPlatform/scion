@@ -49,6 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -252,6 +253,24 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubSrv, hubInitErr = initHubServer(ctx, cfg, s, entClient, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
+		}
+
+		// Wire hub OTel tracing export to Cloud Trace.
+		if os.Getenv("SCION_TRACING_ENABLED") == "true" && cfg.Hub.GCPProjectID != "" {
+			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID,
+				hubtracing.WithHubID(hubSrv.HubID()),
+				hubtracing.WithHubName(cfg.Hub.ResolveHubName()),
+			)
+			if tpErr != nil {
+				log.Printf("WARNING: hub tracing export disabled: %v", tpErr)
+			} else {
+				defer func() {
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_ = tp.Shutdown(shutdownCtx)
+				}()
+				log.Printf("Hub OTel tracing enabled (project: %s)", cfg.Hub.GCPProjectID)
+			}
 		}
 
 		// Wire hub OTel metrics export to Cloud Monitoring.

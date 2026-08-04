@@ -28,6 +28,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // ControlChannelConfig holds configuration for the control channel.
@@ -491,12 +495,31 @@ func (m *ControlChannelManager) IsConnected(brokerID string) bool {
 
 // TunnelRequest sends an HTTP request through the control channel.
 func (m *ControlChannelManager) TunnelRequest(ctx context.Context, brokerID string, req *wsprotocol.RequestEnvelope) (*wsprotocol.ResponseEnvelope, error) {
+	ctx, span := tracer.Start(ctx, "hub.controlchannel.tunnel")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("scion.broker.id", brokerID),
+		attribute.String("scion.request.method", req.Method),
+	)
+
+	// Inject trace context into the request envelope headers for cross-component propagation.
+	if req.Headers == nil {
+		req.Headers = make(map[string]string)
+	}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(req.Headers))
+
 	hc := m.GetConnection(brokerID)
 	if hc == nil {
-		return nil, fmt.Errorf("broker %s not connected", brokerID)
+		err := fmt.Errorf("broker %s not connected", brokerID)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
-	return hc.TunnelRequest(ctx, req)
+	resp, err := hc.TunnelRequest(ctx, req)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return resp, err
 }
 
 // OpenStream opens a new multiplexed stream to a broker.

@@ -22,6 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // ReconcileBroker is the exported entry point used by the command-bus signal
@@ -107,7 +108,20 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 // deserialize args from the dispatch row and call the local dispatcher, which
 // delivers over the in-memory control-channel socket. Unknown ops fail cleanly
 // (and are retryable).
-func (s *Server) executeDispatch(ctx context.Context, d store.BrokerDispatch) (string, error) {
+func (s *Server) executeDispatch(ctx context.Context, d store.BrokerDispatch) (result string, err error) {
+	ctx, span := tracer.Start(ctx, "hub.dispatch.execute")
+	defer func() {
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+	span.SetAttributes(
+		attribute.String("scion.dispatch.id", d.ID),
+		attribute.String("scion.dispatch.op", d.Op),
+		attribute.String("scion.agent.id", d.AgentID),
+	)
+
 	switch d.Op {
 	case "start":
 		return s.execDispatchStart(ctx, d)
