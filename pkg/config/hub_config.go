@@ -80,6 +80,10 @@ type HubServerConfig struct {
 	// suspended (container stopped, phase set to "suspended"). Default: false.
 	AutoSuspendStalled bool `json:"autoSuspendStalled" yaml:"autoSuspendStalled" koanf:"autoSuspendStalled"`
 
+	// StalledThreshold is how long an agent can go without activity events
+	// before being marked as stalled. Default: 5 minutes.
+	StalledThreshold time.Duration `json:"stalledThreshold" yaml:"stalledThreshold" koanf:"stalledThreshold"`
+
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback introduced during GCS namespace migration. When true,
 	// only hub-scoped paths are checked; legacy paths are never consulted.
@@ -779,6 +783,7 @@ var snakeCaseFields = map[string]string{
 	"slowrequestthreshold":  "slow_request_threshold",
 	"softdeleteretainfiles": "soft_delete_retain_files",
 	"softdeleteretention":   "soft_delete_retention",
+	"stalledthreshold":      "stalled_threshold",
 	"useraccessmode":        "user_access_mode",
 	"webhooksenabled":       "webhooks_enabled",
 	// Layer-0 compound segments (from layer0Prefixes)

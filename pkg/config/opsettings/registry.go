@@ -52,7 +52,7 @@ func init() {
 		},
 		{
 			Name:       "lifecycle",
-			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files"},
+			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files"},
 			New:        func() any { return &LifecycleSettings{} },
 		},
 		{
@@ -254,6 +254,7 @@ func compileSchemas() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"auto_suspend_stalled":     getSchemaProperty(root, "server", "hub", "auto_suspend_stalled"),
+				"stalled_threshold":        getSchemaProperty(root, "server", "hub", "stalled_threshold"),
 				"soft_delete_retention":    getSchemaProperty(root, "server", "hub", "soft_delete_retention"),
 				"soft_delete_retain_files": getSchemaProperty(root, "server", "hub", "soft_delete_retain_files"),
 			},

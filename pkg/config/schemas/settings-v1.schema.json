@@ -791,6 +791,12 @@
           "description": "Automatically suspend stalled agents.",
           "x-env-var": "SCION_SERVER_HUB_AUTO_SUSPEND_STALLED",
           "x-since": "1"
+        },
+        "stalled_threshold": {
+          "type": "string",
+          "description": "Duration before marking agents as stalled (e.g. '5m', '10m', '30m').",
+          "x-env-var": "SCION_SERVER_HUB_STALLED_THRESHOLD",
+          "x-since": "1"
         }
       }
     },

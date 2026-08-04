@@ -68,6 +68,7 @@ type Layer1Snapshot struct {
 
 	// Lifecycle
 	AutoSuspendStalled    bool
+	StalledThreshold      string // postgres-mode only (see type comment)
 	SoftDeleteRetention   string // postgres-mode only (see type comment)
 	SoftDeleteRetainFiles bool   // postgres-mode only (see type comment)
 
@@ -562,6 +563,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 
 	// Lifecycle
 	snap.AutoSuspendStalled = k.Bool("server.hub.auto_suspend_stalled")
+	snap.StalledThreshold = k.String("server.hub.stalled_threshold")
 	snap.SoftDeleteRetention = k.String("server.hub.soft_delete_retention")
 	snap.SoftDeleteRetainFiles = k.Bool("server.hub.soft_delete_retain_files")
 
@@ -715,6 +717,22 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.config.AutoSuspendStalled = snap.AutoSuspendStalled
 	if oldAutoSuspend != snap.AutoSuspendStalled {
 		applied = append(applied, "auto_suspend_stalled")
+	}
+
+	// Stalled threshold
+	if snap.StalledThreshold != "" {
+		if d, err := time.ParseDuration(snap.StalledThreshold); err == nil {
+			if d < 2*time.Minute {
+				slog.Warn("stalled_threshold below minimum 2m, using default 5m", "configured", snap.StalledThreshold)
+				d = 5 * time.Minute
+			}
+			if s.config.StalledThreshold != d {
+				applied = append(applied, "stalled_threshold")
+			}
+			s.config.StalledThreshold = d
+		} else {
+			slog.Warn("invalid stalled_threshold duration, keeping current value", "value", snap.StalledThreshold, "error", err)
+		}
 	}
 
 	// User access mode
