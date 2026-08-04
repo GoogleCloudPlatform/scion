@@ -224,7 +224,7 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 		// Escape backslashes first, then double quotes, to avoid double-escaping.
 		escaped := strings.ReplaceAll(opts.Search, `\`, `\\`)
 		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-		parts = append(parts, fmt.Sprintf(`jsonPayload.message =~ "%s"`, escaped))
+		parts = append(parts, fmt.Sprintf(`jsonPayload.message:"%s"`, escaped))
 	}
 
 	return strings.Join(parts, " AND ")

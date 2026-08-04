@@ -125,8 +125,8 @@ func TestClassifySource(t *testing.T) {
 			expected: "agent",
 		},
 		{
-			name: "empty entry defaults to server",
-			entry: CloudLogEntry{},
+			name:     "empty entry defaults to server",
+			entry:    CloudLogEntry{},
 			expected: "server",
 		},
 		{
@@ -276,14 +276,14 @@ func TestBuildLogFilter_Search(t *testing.T) {
 			opts: LogQueryOptions{
 				Search: "connection refused",
 			},
-			expected: `jsonPayload.message =~ "connection refused"`,
+			expected: `jsonPayload.message:"connection refused"`,
 		},
 		{
 			name: "search with double quotes escaped",
 			opts: LogQueryOptions{
 				Search: `error "timeout"`,
 			},
-			expected: `jsonPayload.message =~ "error \"timeout\""`,
+			expected: `jsonPayload.message:"error \"timeout\""`,
 		},
 		{
 			name: "search combined with severity",
@@ -291,21 +291,21 @@ func TestBuildLogFilter_Search(t *testing.T) {
 				Search:   "dispatch",
 				Severity: "WARNING",
 			},
-			expected: `severity >= WARNING AND jsonPayload.message =~ "dispatch"`,
+			expected: `severity >= WARNING AND jsonPayload.message:"dispatch"`,
 		},
 		{
 			name: "search with backslashes escaped before quotes",
 			opts: LogQueryOptions{
 				Search: `C:\Users\admin`,
 			},
-			expected: `jsonPayload.message =~ "C:\\Users\\admin"`,
+			expected: `jsonPayload.message:"C:\\Users\\admin"`,
 		},
 		{
 			name: "search with backslash and quote combined",
 			opts: LogQueryOptions{
 				Search: `error\"timeout`,
 			},
-			expected: `jsonPayload.message =~ "error\\\"timeout"`,
+			expected: `jsonPayload.message:"error\\\"timeout"`,
 		},
 	}
 

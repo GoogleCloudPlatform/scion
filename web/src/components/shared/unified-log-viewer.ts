@@ -451,6 +451,12 @@ export class ScionUnifiedLogViewer extends LitElement {
       this.eventSource = null;
     }
     this.streaming = false;
+    this.reconnecting = false;
+    this.reconnectAttempt = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
   private reconnectWithBackoff(): void {
@@ -531,11 +537,12 @@ export class ScionUnifiedLogViewer extends LitElement {
 
     // Cap buffer — evict oldest entries
     if (this.entries.length > MAX_BUFFER) {
-      const evicted = this.entries.splice(0, this.entries.length - MAX_BUFFER);
+      const overflow = this.entries.length - MAX_BUFFER;
+      const evicted = this.entries.slice(0, overflow);
       for (const e of evicted) {
         this.entryMap.delete(e.insertId);
       }
-      this.entries = [...this.entries]; // trigger reactivity after splice
+      this.entries = this.entries.slice(overflow);
     }
 
     // Auto-scroll after render
