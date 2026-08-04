@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -411,39 +410,6 @@ func TestGCPIdentityConfig_JSONRoundTrip(t *testing.T) {
 	require.NotNil(t, decoded.GCPIdentity)
 	assert.Equal(t, store.GCPMetadataModeAssign, decoded.GCPIdentity.MetadataMode)
 	assert.Equal(t, "test-sa-id", decoded.GCPIdentity.ServiceAccountID)
-}
-
-// ---------------------------------------------------------------------------
-// Helper: createAgentDispatcherForDefault builds a fixture with a project
-// default SA and returns the fixture ready for authorization tests.
-// ---------------------------------------------------------------------------
-
-// projectDefaultFixture creates a bypassAgentsFixture with a project-default
-// SA and returns the fixture along with the SA.
-func projectDefaultFixture(t *testing.T, verified bool) (*bypassAgentsFixture, *store.GCPServiceAccount) {
-	t.Helper()
-	f := bypassAgentsSetup(t)
-	sa := bypassAgentsCreateSA(t, f, f.proj.ID, verified)
-
-	ctx := context.Background()
-	proj, err := f.store.GetProject(ctx, f.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeAssign
-	proj.Annotations[projectSettingDefaultGCPIdentitySAID] = sa.ID
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
-	return f, sa
-}
-
-// createAgentAsAgent creates an agent via agent-to-agent API call.
-func createAgentAsAgent(t *testing.T, f *bypassAgentsFixture, name string) *httptest.ResponseRecorder {
-	t.Helper()
-	return f.asAgent(t, http.MethodPost,
-		"/api/v1/projects/"+f.proj.ID+"/agents",
-		CreateAgentRequest{Name: name},
-		ScopeAgentCreate)
 }
 
 // ---------------------------------------------------------------------------

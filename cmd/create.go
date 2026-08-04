@@ -236,12 +236,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
-	if serviceAccountFlag != "" {
-		req.GCPIdentity = &hubclient.GCPIdentityConfig{
-			MetadataMode:     "assign",
-			ServiceAccountID: serviceAccountFlag,
-		}
-	}
+	applyServiceAccountFlag(req, serviceAccountFlag)
 
 	if agentImage != "" {
 		req.Config = &api.ScionConfig{

@@ -16,9 +16,13 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAgentService_List_QueryParameters(t *testing.T) {
@@ -147,4 +151,23 @@ func TestSubscriptionTemplateService_List_QueryParameters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}
+}
+
+func TestCreateAgentRequest_GCPIdentity_JSONRoundTrip(t *testing.T) {
+	req := CreateAgentRequest{
+		GCPIdentity: &GCPIdentityConfig{
+			MetadataMode:     "assign",
+			ServiceAccountID: "sa-123",
+		},
+	}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+	// Verify the JSON keys match what the hub expects.
+	assert.Contains(t, string(data), `"metadata_mode":"assign"`)
+	assert.Contains(t, string(data), `"service_account_id":"sa-123"`)
+	// Round-trip.
+	var decoded CreateAgentRequest
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, "assign", decoded.GCPIdentity.MetadataMode)
+	assert.Equal(t, "sa-123", decoded.GCPIdentity.ServiceAccountID)
 }
