@@ -387,13 +387,21 @@ func resolveProjectID() string {
 	return os.Getenv(EnvGoogleCloudProject)
 }
 
+// Cloud Logging log IDs for the server's log streams.
+const (
+	// ServerLogID is the Cloud Logging log ID for the main server log.
+	ServerLogID = "scion-server"
+	// AgentLogID is the Cloud Logging log ID for the agent log.
+	AgentLogID = "scion-agents"
+)
+
 // resolveLogID returns the Cloud Logging log ID from environment variables.
-// Defaults to "scion-server" if not set.
+// Defaults to ServerLogID if not set.
 func resolveLogID() string {
 	if v := os.Getenv(EnvCloudLoggingLogID); v != "" {
 		return v
 	}
-	return "scion-server"
+	return ServerLogID
 }
 
 // isCloudLoggingEnabled checks if direct Cloud Logging is enabled via env var.

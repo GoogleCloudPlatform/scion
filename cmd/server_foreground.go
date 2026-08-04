@@ -671,6 +671,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	}
 
 	hubName := resolveHubNameFromEnv()
+	hubID := resolveHubIDFromEnv()
 
 	// Initialize OTel logging
 	ctx := context.Background()
@@ -704,7 +705,6 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	var cloudHandler slog.Handler
 	if cloudLoggingEnabled {
 		logLevel := logging.ResolveLogLevel(enableDebug)
-		hubID := resolveHubIDFromEnv()
 		logCfg := logging.CloudLoggingConfig{
 			Component: component,
 			HubName:   hubName,
@@ -728,7 +728,6 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	logging.SetupWithOTel(component, hubName, enableDebug, useGCP, logProvider, cloudHandler)
 
 	// Initialize request logger
-	hubID := resolveHubIDFromEnv()
 	reqLogCfg := logging.RequestLoggerConfig{
 		FilePath:   os.Getenv(logging.EnvRequestLogPath),
 		Component:  component,

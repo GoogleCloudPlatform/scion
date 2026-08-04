@@ -173,8 +173,8 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 		// not in the whitelist.
 		pid := projectID[0]
 		parts = append(parts, fmt.Sprintf(
-			`(logName = "projects/%s/logs/scion-server" OR logName = "projects/%s/logs/scion-agents" OR logName = "projects/%s/logs/scion-messages")`,
-			pid, pid, pid))
+			`(logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s" OR logName = "projects/%s/logs/%s")`,
+			pid, logging.ServerLogID, pid, logging.AgentLogID, pid, logging.MessageLogID))
 	}
 	if opts.AgentID != "" && opts.LogID == logging.MessageLogID {
 		// For message logs, match where this agent is either the recipient
@@ -212,16 +212,16 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 			switch src {
 			case "hub":
 				srcParts = append(srcParts, fmt.Sprintf(
-					`(logName = "projects/%s/logs/scion-server" AND jsonPayload.subsystem =~ "^hub\\.")`, pid))
+					`(logName = "projects/%s/logs/%s" AND jsonPayload.subsystem =~ "^hub\\.")`, pid, logging.ServerLogID))
 			case "broker":
 				srcParts = append(srcParts, fmt.Sprintf(
-					`(logName = "projects/%s/logs/scion-server" AND jsonPayload.subsystem =~ "^broker\\.")`, pid))
+					`(logName = "projects/%s/logs/%s" AND jsonPayload.subsystem =~ "^broker\\.")`, pid, logging.ServerLogID))
 			case "agent":
 				srcParts = append(srcParts, fmt.Sprintf(
-					`logName = "projects/%s/logs/scion-agents"`, pid))
+					`logName = "projects/%s/logs/%s"`, pid, logging.AgentLogID))
 			case "messages":
 				srcParts = append(srcParts, fmt.Sprintf(
-					`logName = "projects/%s/logs/scion-messages"`, pid))
+					`logName = "projects/%s/logs/%s"`, pid, logging.MessageLogID))
 			}
 		}
 		if len(srcParts) > 0 {
