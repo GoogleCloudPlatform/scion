@@ -570,7 +570,7 @@ class ScionServicesYamlTest(unittest.TestCase):
             # Ready check
             self.assertIn("ready_check:", content)
             self.assertIn("type: tcp", content)
-            self.assertIn('target: "localhost:9119"', content)
+            self.assertIn('target: "127.0.0.1:9119"', content)
             self.assertIn("timeout:", content)
 
 

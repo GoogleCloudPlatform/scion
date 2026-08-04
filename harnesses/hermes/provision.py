@@ -213,14 +213,14 @@ _SCION_SERVICES_YAML = """\
   restart: always
   ready_check:
     type: tcp
-    target: "localhost:9119"
+    target: "127.0.0.1:9119"
     timeout: "15s"
 """
 
 
 def _write_scion_services() -> None:
     """Write scion-services.yaml so the init process starts the Hermes dashboard."""
-    scion_dir = os.path.expanduser("~/.scion")
+    scion_dir = scion_harness.expand_path("~/.scion")
     os.makedirs(scion_dir, exist_ok=True)
     target = os.path.join(scion_dir, "scion-services.yaml")
     scion_harness.atomic_write_text(target, _SCION_SERVICES_YAML)
