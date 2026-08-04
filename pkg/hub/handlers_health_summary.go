@@ -47,6 +47,10 @@ type HealthSummaryHub struct {
 }
 
 // HealthSummaryDB contains database health information.
+// Fields are sourced from Go's sql.DBStats (runtime pool counters) rather than
+// the OTel-based metrics described in the design doc. sql.DBStats provides
+// accurate, zero-latency pool stats without depending on the metrics pipeline,
+// which may itself be the thing that is unhealthy.
 type HealthSummaryDB struct {
 	Status    string `json:"status"`
 	PoolActive int64 `json:"pool_active"`

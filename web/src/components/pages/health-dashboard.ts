@@ -635,6 +635,7 @@ export class ScionPageHealthDashboard extends LitElement {
                 </div>
                 <div class="broker-stat">Agents: ${b.agent_healthy}/${b.agent_count} healthy</div>
                 <div class="broker-stat">Runtime: ${b.runtime} ${b.runtime_available ? '✓' : '✗'}</div>
+                <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">NFS: not reported</div>
                 ${b.last_heartbeat ? html`<div class="broker-stat">Heartbeat: ${this.timeAgo(b.last_heartbeat)}</div>` : nothing}
               </div>
             `)}

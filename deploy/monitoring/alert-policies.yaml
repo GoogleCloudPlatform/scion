@@ -304,6 +304,9 @@ alertPolicies:
   # Hub Auth (2 alerts)
   # ---------------------------------------------------------------------------
 
+  # Prerequisite: the metric scion.hub.auth.broker.verify.failures must be
+  # promoted to OTel (registered in otel_metrics.go) before these policies
+  # can fire. See design doc §2.5 prerequisites.
   - displayName: "Broker HMAC Verify Failures"
     documentation:
       content: |
