@@ -153,8 +153,13 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 	return hubCtx, nil
 }
 
-// resolveProjectOnHub resolves a project reference on the hub, trying multiple
+// ResolveProjectOnHub resolves a project reference on the hub, trying multiple
 // strategies in order: UUID, git URL, slug, name.
+func ResolveProjectOnHub(ctx context.Context, client hubclient.Client, ref string) (*hubclient.Project, error) {
+	return resolveProjectOnHub(ctx, client, ref)
+}
+
+// resolveProjectOnHub is the internal implementation of ResolveProjectOnHub.
 func resolveProjectOnHub(ctx context.Context, client hubclient.Client, ref string) (*hubclient.Project, error) {
 	// 1. Try as UUID
 	if _, err := uuid.Parse(ref); err == nil {

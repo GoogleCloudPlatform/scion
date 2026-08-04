@@ -404,6 +404,60 @@ func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
 	}
 }
 
+func TestDiscoverProjects_ShadowProjectNotOrphaned(t *testing.T) {
+	tmpHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+
+	// Create a workspace directory with a valid shadow marker
+	workspaceDir := filepath.Join(tmpHome, "remote-proj")
+	_ = os.MkdirAll(workspaceDir, 0755)
+	marker := &ProjectMarker{
+		ProjectID:   "aabb1122-0000-0000-0000-000000000000",
+		ProjectName: "remote-proj",
+		ProjectSlug: "remote-proj",
+		Type:        "shadow",
+	}
+	_ = WriteProjectMarker(filepath.Join(workspaceDir, DotScion), marker)
+
+	// Create a shadow project config directory with versioned settings
+	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "remote-proj__aabb1122")
+	scionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(scionDir, 0755)
+
+	// Write versioned settings with project_type: shadow, hub config, and workspace_path
+	settingsContent := "schema_version: \"1\"\nproject_type: shadow\nworkspace_path: " + workspaceDir + "\nhub:\n  enabled: true\n  endpoint: https://hub.example.com\n  project_id: aabb1122-0000-0000-0000-000000000000\n"
+	_ = os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644)
+
+	projects, err := DiscoverProjects()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var shadow *ProjectInfo
+	for i := range projects {
+		if projects[i].Name == "remote-proj" {
+			shadow = &projects[i]
+			break
+		}
+	}
+	if shadow == nil {
+		t.Fatal("expected to find shadow project")
+	}
+	if shadow.Type != ProjectTypeShadow {
+		t.Errorf("expected type %q, got %q", ProjectTypeShadow, shadow.Type)
+	}
+	if shadow.Status != ProjectStatusOK {
+		t.Errorf("expected status %q for shadow project (should not be orphaned), got %q", ProjectStatusOK, shadow.Status)
+	}
+	if shadow.ProjectID != "aabb1122-0000-0000-0000-000000000000" {
+		t.Errorf("expected project ID from hub config, got %q", shadow.ProjectID)
+	}
+}
+
 func TestDiscoverProjects_GitProjectExternal(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")

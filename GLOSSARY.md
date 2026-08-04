@@ -181,6 +181,11 @@ _Avoid_: hub-native, hub-native project, hub workspace, hub-project, hosted proj
 A project whose workspace is a pre-existing path on a broker machine, linked to a Hub for cross-broker visibility — as opposed to a Hub-managed project. May be plain or git-backed.
 _Avoid_: local project, imported project, registered project
 
+**Shadowed project**:
+A local directory associated with a Hub project purely for CLI routing, with no workspace content, no provider registration, and no broker involvement — as opposed to a *Linked project*, whose workspace is a real pre-existing path on a broker machine.
+_Avoid_: linked, mounted, cloned
+_See also_: Hub-managed project
+
 **Server**:
 The `scion server` command group, and the single combined process it manages — one or more server components run together as a background daemon (or with `--foreground`) via `start`/`stop`/`restart`/`status`.
 _Avoid_: daemon, service, backend

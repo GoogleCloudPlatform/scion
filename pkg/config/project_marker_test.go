@@ -20,6 +20,31 @@ import (
 	"testing"
 )
 
+func TestProjectMarker_IsShadow(t *testing.T) {
+	tests := []struct {
+		name     string
+		typ      string
+		expected bool
+	}{
+		{"shadow type returns true", "shadow", true},
+		{"empty type returns false", "", false},
+		{"other type returns false", "other", false},
+		{"workspace type returns false", "workspace", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &ProjectMarker{
+				ProjectID:   "test-id",
+				ProjectSlug: "test",
+				Type:        tt.typ,
+			}
+			if got := m.IsShadow(); got != tt.expected {
+				t.Errorf("IsShadow() with Type=%q = %v, want %v", tt.typ, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestProjectMarker_ShortUUID(t *testing.T) {
 	tests := []struct {
 		projectID string

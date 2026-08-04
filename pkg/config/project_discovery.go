@@ -27,6 +27,7 @@ const (
 	ProjectTypeGlobal   ProjectType = "global"
 	ProjectTypeGit      ProjectType = "git"
 	ProjectTypeExternal ProjectType = "external"
+	ProjectTypeShadow   ProjectType = "shadow"
 )
 
 // ProjectStatus indicates the health of a project config.
@@ -130,10 +131,14 @@ func scanConfigDir(projects []ProjectInfo, configDir string, seenSlugs map[strin
 		var pi ProjectInfo
 		switch {
 		case scionExists:
-			// .scion/ exists — distinguish external vs git by checking for
-			// a workspace_path in settings (external projects point back to
-			// their original project directory).
-			if settings, err := LoadSettings(configPath); err == nil && settings.WorkspacePath != "" {
+			// .scion/ exists — distinguish external vs git vs shadow.
+			// Shadow projects store workspace_path for orphan detection but
+			// are not external (non-git) projects; route them through the
+			// git-external handler which has shadow-aware logic.
+			if vs, vsErr := LoadVersionedSettings(configPath); vsErr == nil && vs != nil && vs.ProjectType == string(ProjectTypeShadow) {
+				agentsDir := filepath.Join(configPath, "agents")
+				pi = projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug)
+			} else if settings, err := LoadSettings(configPath); err == nil && settings.WorkspacePath != "" {
 				pi = projectInfoFromExternal(configPath, dirName, slug)
 			} else {
 				agentsDir := filepath.Join(configPath, "agents")
@@ -200,11 +205,29 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 		ConfigPath: configPath,
 		Status:     ProjectStatusOK,
 	}
-	pi.AgentCount = countAgents(agentsDir)
+
+	// Check if this is a shadow project via versioned settings.
+	if vs, vsErr := LoadVersionedSettings(configPath); vsErr == nil && vs != nil {
+		if vs.ProjectType == string(ProjectTypeShadow) {
+			if vs.Hub != nil && vs.Hub.ProjectID != "" {
+				pi.ProjectID = vs.Hub.ProjectID
+				pi.GroveID = vs.Hub.ProjectID
+			}
+			pi.Type = ProjectTypeShadow
+			pi.WorkspacePath = vs.WorkspacePath
+			pi.Status = ProjectStatusOK
+			if vs.WorkspacePath == "" || !isValidWorkspace(vs.WorkspacePath, pi.ProjectID, configPath) {
+				pi.Status = ProjectStatusOrphaned
+			}
+			return pi
+		}
+	}
+
 	if settings, err := LoadSettings(configPath); err == nil {
 		pi.ProjectID = settings.ProjectID
 		pi.GroveID = settings.ProjectID
 	}
+	pi.AgentCount = countAgents(agentsDir)
 	if pi.ProjectID == "" {
 		if marker, workspacePath, err := readWorkspaceMarkerForSlug(slug); err == nil {
 			pi.ProjectID = marker.ProjectID

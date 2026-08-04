@@ -91,6 +91,12 @@ return an error instead of blocking.`,
 		case "init":
 			// Both top-level init and project init don't require existing project
 			requiresProject = false
+		case "shadow", "unshadow":
+			// hub shadow/unshadow create/remove the project marker — they must
+			// run in a directory with no existing project.
+			if parentName == "hub" {
+				requiresProject = false
+			}
 		case "scion":
 			// Root command itself doesn't require project
 			requiresProject = false
@@ -163,6 +169,12 @@ return an error instead of blocking.`,
 		}
 		if requiresRegistry && config.IsHubContext() {
 			requiresRegistry = false
+		}
+		// Shadow projects never launch containers locally — skip registry check.
+		if requiresRegistry {
+			if isShadowProject() {
+				requiresRegistry = false
+			}
 		}
 		if requiresRegistry {
 			if err := config.RequireImageRegistry(projectPath, profile); err != nil {
@@ -451,6 +463,33 @@ func usesWorktrees(cmd *cobra.Command) bool {
 		return true
 	}
 	return false
+}
+
+// isShadowProject returns true if the current directory is inside a shadowed
+// project (a directory linked to a hub project purely for CLI routing, with no
+// local workspace or broker involvement). It reads the .scion marker file from
+// the project root discovered via FindProjectRoot.
+func isShadowProject() bool {
+	root, found := config.FindProjectRoot()
+	if !found {
+		return false
+	}
+	// The marker file is the .scion regular file in the workspace directory,
+	// not the resolved external config path. Walk up from cwd to find it.
+	markerPath := config.FindProjectMarkerPath()
+	if markerPath == "" {
+		// Fallback: if root itself looks like an external config, we can't
+		// directly read the workspace marker. Check versioned settings instead.
+		if vs, err := config.LoadVersionedSettings(root); err == nil && vs != nil {
+			return vs.ProjectType == string(config.ProjectTypeShadow)
+		}
+		return false
+	}
+	marker, err := config.ReadProjectMarker(markerPath)
+	if err != nil {
+		return false
+	}
+	return marker.IsShadow()
 }
 
 // isLocalEndpoint returns true if the given endpoint URL points to a local address
