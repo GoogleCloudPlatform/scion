@@ -17,6 +17,8 @@ package hub
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"google.golang.org/api/cloudresourcemanager/v1"
@@ -140,6 +142,33 @@ func (c *IAMAdminClient) SetIAMPolicy(ctx context.Context, saEmail string, membe
 }
 
 func (c *IAMAdminClient) AddProjectIAMBinding(ctx context.Context, projectID, member, role string) error {
+	const maxRetries = 3
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Short backoff before retry: 250ms, 500ms.
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+		}
+
+		err := c.addProjectIAMBindingOnce(ctx, projectID, member, role)
+		if err == nil {
+			return nil
+		}
+		// Retry on 409 Conflict (etag mismatch from concurrent modification).
+		if strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "conflict") {
+			lastErr = err
+			continue
+		}
+		// Non-retryable error — return immediately.
+		return err
+	}
+	return fmt.Errorf("AddProjectIAMBinding failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+// addProjectIAMBindingOnce performs a single read-modify-write of the project
+// IAM policy. Extracted for retry by AddProjectIAMBinding.
+func (c *IAMAdminClient) addProjectIAMBindingOnce(ctx context.Context, projectID, member, role string) error {
 	// Read-modify-write the project IAM policy.
 	policy, err := c.crmService.Projects.GetIamPolicy(projectID,
 		&cloudresourcemanager.GetIamPolicyRequest{}).Context(ctx).Do()

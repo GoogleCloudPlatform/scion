@@ -177,6 +177,11 @@ type mockGCPServiceAccountAdmin struct {
 	lastEmail         string
 	lastProject       string
 
+	// policyErrOnCall, when > 0, causes SetIAMPolicy to return policyErr only
+	// on the Nth call (1-indexed) and succeed on all others. When 0 (default),
+	// policyErr applies to every call.
+	policyErrOnCall int
+
 	// Track IAM mutations for assertions.
 	iamPolicies     []mockIAMPolicyCall     // SA-level SetIAMPolicy calls
 	projectBindings []mockProjectBindingCall // project-level AddProjectIAMBinding calls
@@ -216,6 +221,13 @@ func (m *mockGCPServiceAccountAdmin) SetIAMPolicy(_ context.Context, saEmail, me
 		Member:  member,
 		Role:    role,
 	})
+	if m.policyErr != nil && m.policyErrOnCall > 0 {
+		// Fail only on the Nth call (1-indexed).
+		if len(m.iamPolicies) == m.policyErrOnCall {
+			return m.policyErr
+		}
+		return nil
+	}
 	return m.policyErr
 }
 

@@ -739,44 +739,49 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 	ptChecker := s.mintPTChecker
 	s.mu.RUnlock()
 
-	if ptChecker != nil {
-		userEmail := user.Email()
-		projectResource := fmt.Sprintf(
-			"//cloudresourcemanager.googleapis.com/projects/%s", hubGCPProjectID)
+	if ptChecker == nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"service account minting requires permission verification (Policy Troubleshooter); "+
+				"PT is not configured on this Hub", nil)
+		return
+	}
 
-		// 1. Requester must have iam.serviceAccounts.create on the Hub project.
-		result, err := ptChecker.CheckPermission(r.Context(), userEmail, projectResource, PermissionSACreate)
-		if err != nil {
-			slog.Error("GCP SA mint: PT check failed for serviceAccounts.create",
-				"user", userEmail, "project", hubGCPProjectID, "error", err)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"unable to verify permission to create service accounts: "+result.Reason, nil)
-			return
-		}
-		if !result.Allowed {
-			slog.Warn("GCP SA mint: requester lacks iam.serviceAccounts.create",
-				"user", userEmail, "project", hubGCPProjectID, "reason", result.Reason)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"you do not have permission to create service accounts in the Hub GCP project: "+result.Reason, nil)
-			return
-		}
+	userEmail := user.Email()
+	projectResource := fmt.Sprintf(
+		"//cloudresourcemanager.googleapis.com/projects/%s", hubGCPProjectID)
 
-		// 2. Requester must have aiplatform.endpoints.predict on the Hub project.
-		result, err = ptChecker.CheckPermission(r.Context(), userEmail, projectResource, PermissionAgentPlatform)
-		if err != nil {
-			slog.Error("GCP SA mint: PT check failed for aiplatform.endpoints.predict",
-				"user", userEmail, "project", hubGCPProjectID, "error", err)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"unable to verify agent platform permission: "+result.Reason, nil)
-			return
-		}
-		if !result.Allowed {
-			slog.Warn("GCP SA mint: requester lacks aiplatform.endpoints.predict",
-				"user", userEmail, "project", hubGCPProjectID, "reason", result.Reason)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"you do not have agent platform permission on the Hub GCP project: "+result.Reason, nil)
-			return
-		}
+	// 1. Requester must have iam.serviceAccounts.create on the Hub project.
+	result, err := ptChecker.CheckPermission(r.Context(), userEmail, projectResource, PermissionSACreate)
+	if err != nil {
+		slog.Error("GCP SA mint: PT check failed for serviceAccounts.create",
+			"user", userEmail, "project", hubGCPProjectID, "error", err)
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"unable to verify permission to create service accounts; the permission check could not be performed", nil)
+		return
+	}
+	if !result.Allowed {
+		slog.Warn("GCP SA mint: requester lacks iam.serviceAccounts.create",
+			"user", userEmail, "project", hubGCPProjectID, "reason", result.Reason)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"you do not have permission to create service accounts in the Hub GCP project: "+result.Reason, nil)
+		return
+	}
+
+	// 2. Requester must have aiplatform.endpoints.predict on the Hub project.
+	result, err = ptChecker.CheckPermission(r.Context(), userEmail, projectResource, PermissionAgentPlatform)
+	if err != nil {
+		slog.Error("GCP SA mint: PT check failed for aiplatform.endpoints.predict",
+			"user", userEmail, "project", hubGCPProjectID, "error", err)
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"unable to verify agent platform permission; the permission check could not be performed", nil)
+		return
+	}
+	if !result.Allowed {
+		slog.Warn("GCP SA mint: requester lacks aiplatform.endpoints.predict",
+			"user", userEmail, "project", hubGCPProjectID, "reason", result.Reason)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"you do not have agent platform permission on the Hub GCP project: "+result.Reason, nil)
+		return
 	}
 
 	var req mintGCPServiceAccountRequest

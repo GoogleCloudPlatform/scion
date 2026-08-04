@@ -243,26 +243,11 @@ func TestMintP11_ProjectBindingFailure_NoVerifiedTrue(t *testing.T) {
 	assert.Equal(t, 0, count, "no SA should be stored when project binding fails")
 }
 
-func TestMintP11_SAUserGrantFailure_NoVerifiedTrue(t *testing.T) {
+func TestMintP11_TokenCreatorGrantFailure_NoVerifiedTrue(t *testing.T) {
 	srv, s, mock, _ := testServerWithMintingAndPT(t)
-	// policyErr applies to SetIAMPolicy which is used for both tokenCreator and
-	// serviceAccountUser. We need to simulate failure on the second call only.
-	// The simplest approach: make policyErr non-nil but only after the first call.
-	// Instead, we use a custom mock approach.
-
-	// Use a wrapper that fails on the second SetIAMPolicy call.
-	callCount := 0
-	origPolicyErr := mock.policyErr
-	mock.policyErr = nil // Clear so tokenCreator succeeds
-
-	// We can't easily intercept individual calls on the mock, so instead
-	// we'll test the project binding failure path (already tested above)
-	// and trust that the handler's cleanupAndFail pattern is applied uniformly.
-	// However, let's test by setting policyErr which will fail on the first
-	// SetIAMPolicy call (tokenCreator).
-	_ = callCount
-	_ = origPolicyErr
+	// Fail on the first SetIAMPolicy call (tokenCreator grant).
 	mock.policyErr = fmt.Errorf("SA IAM policy mutation failed")
+	mock.policyErrOnCall = 1
 	projectID := createTestProjectForSA(t, srv, nil)
 
 	rec := doRequest(t, srv, http.MethodPost,
@@ -278,7 +263,41 @@ func TestMintP11_SAUserGrantFailure_NoVerifiedTrue(t *testing.T) {
 		Managed: &managed,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 0, count, "no SA should be stored when SA IAM grant fails")
+	assert.Equal(t, 0, count, "no SA should be stored when tokenCreator grant fails")
+
+	// Verify cleanup was attempted.
+	assert.Len(t, mock.deletedSAs, 1, "cleanup should delete the orphaned SA")
+}
+
+func TestMintP11_SAUserGrantFailure_NoVerifiedTrue(t *testing.T) {
+	srv, s, mock, _ := testServerWithMintingAndPT(t)
+	// Fail on the second SetIAMPolicy call (serviceAccountUser grant) while
+	// letting tokenCreator (first call) succeed.
+	mock.policyErr = fmt.Errorf("serviceAccountUser IAM policy mutation failed")
+	mock.policyErrOnCall = 2
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+
+	require.Equal(t, http.StatusBadGateway, rec.Code, "body: %s", rec.Body.String())
+
+	// Verify the first SetIAMPolicy call (tokenCreator) succeeded.
+	require.True(t, len(mock.iamPolicies) >= 1, "tokenCreator grant should have been attempted")
+	assert.Equal(t, "roles/iam.serviceAccountTokenCreator", mock.iamPolicies[0].Role)
+
+	managed := true
+	count, err := s.CountGCPServiceAccounts(context.Background(), store.GCPServiceAccountFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: projectID,
+		Managed: &managed,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "no SA should be stored when serviceAccountUser grant fails")
+
+	// Verify cleanup was attempted.
+	assert.Len(t, mock.deletedSAs, 1, "cleanup should delete the orphaned SA")
 }
 
 func TestMintP11_ProjectBindingFailure_CleanupAttempted(t *testing.T) {
@@ -425,11 +444,12 @@ func TestMintP11_SuccessWithAllGrants(t *testing.T) {
 	assert.True(t, stored.Verified)
 }
 
-// TestMintP11_NoPTChecker_SkipsPermissionChecks verifies that when the PT
-// checker is not configured (nil), minting proceeds without permission checks.
-// This is the backward-compatible case where PT is unavailable.
-func TestMintP11_NoPTChecker_SkipsPermissionChecks(t *testing.T) {
-	srv, _, mock := testServerWithMinting(t)
+// TestMintP11_NoPTChecker_DeniesWithServiceUnavailable verifies that when the
+// PT checker is not configured (nil), minting is denied with 503. Minting
+// creates new GCP authority (D6) and must never proceed without permission
+// verification.
+func TestMintP11_NoPTChecker_DeniesWithServiceUnavailable(t *testing.T) {
+	srv, s, _ := testServerWithMinting(t)
 	// Do NOT set a PT checker — mintPTChecker stays nil.
 	projectID := createTestProjectForSA(t, srv, nil)
 
@@ -437,9 +457,21 @@ func TestMintP11_NoPTChecker_SkipsPermissionChecks(t *testing.T) {
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{})
 
-	// Without a PT checker, the mint should still succeed (backward-compatible).
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-	assert.Len(t, mock.createdSAs, 1)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, "Policy Troubleshooter")
+
+	// No SA should have been created.
+	managed := true
+	count, err := s.CountGCPServiceAccounts(context.Background(), store.GCPServiceAccountFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: projectID,
+		Managed: &managed,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "no SA should be created when PT checker is nil")
 }
 
 // TestMintP11_PTTransportError_DeniesGracefully verifies that a transport error
@@ -453,8 +485,8 @@ func TestMintP11_PTTransportError_DeniesGracefully(t *testing.T) {
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{})
 
-	require.Equal(t, http.StatusForbidden, rec.Code,
-		"PT transport error should fail closed; body: %s", rec.Body.String())
+	require.Equal(t, http.StatusBadGateway, rec.Code,
+		"PT transport error should fail closed with 502; body: %s", rec.Body.String())
 }
 
 // TestMintP11_CorrectIAMGrantOrder verifies that the IAM grants are applied in
