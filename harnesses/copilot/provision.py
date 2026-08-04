@@ -145,7 +145,7 @@ def _resolve_endpoint(telemetry: dict[str, Any] | None, env: dict[str, str] | No
     """Resolve the OTLP endpoint from env overrides or telemetry config."""
     env = env or {}
     for key in ("SCION_COPILOT_OTEL_ENDPOINT", "SCION_OTEL_ENDPOINT"):
-        v = (env.get(key) or "").strip()
+        v = (env.get(key) or os.environ.get(key) or "").strip()
         if v:
             return v
     if telemetry and isinstance(telemetry.get("cloud"), dict):
@@ -159,7 +159,7 @@ def _resolve_protocol(telemetry: dict[str, Any] | None, env: dict[str, str] | No
     """Resolve the OTLP protocol from env overrides or telemetry config."""
     env = env or {}
     for key in ("SCION_COPILOT_OTEL_PROTOCOL", "SCION_OTEL_PROTOCOL"):
-        v = (env.get(key) or "").strip()
+        v = (env.get(key) or os.environ.get(key) or "").strip()
         if v:
             return v
     if telemetry and isinstance(telemetry.get("cloud"), dict):
@@ -178,6 +178,7 @@ def _build_telemetry_env(telemetry: dict[str, Any], env: dict[str, str] | None) 
     emitter at sciontool's local OTLP receiver and follow the same convention
     used by the Claude Code harness (§3.4.2 in the metrics design doc).
     """
+    env = env or {}
     endpoint = _resolve_endpoint(telemetry, env)
     protocol = _resolve_protocol(telemetry, env)
 
@@ -191,17 +192,40 @@ def _build_telemetry_env(telemetry: dict[str, Any], env: dict[str, str] | None) 
     }
 
     # Propagate custom headers when present (e.g. for authenticated collectors).
-    cloud = telemetry.get("cloud") or {}
-    if isinstance(cloud, dict) and isinstance(cloud.get("headers"), dict):
-        parts = [f"{k}={quote(v, safe='')}" for k, v in cloud["headers"].items()]
-        if parts:
-            otel_env["OTEL_EXPORTER_OTLP_HEADERS"] = ",".join(sorted(parts))
+    # Check env overlay / os.environ first, then fall back to telemetry config.
+    headers: dict[str, str] = {}
+    for key in ("SCION_COPILOT_OTEL_HEADERS", "SCION_OTEL_HEADERS"):
+        v = (env.get(key) or os.environ.get(key) or "").strip()
+        if v:
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, dict):
+                    headers = parsed
+                    break
+            except json.JSONDecodeError:
+                pass
+    if not headers:
+        cloud = telemetry.get("cloud") or {}
+        if isinstance(cloud, dict) and isinstance(cloud.get("headers"), dict):
+            headers = cloud["headers"]
+    if headers:
+        parts = [f"{k}={quote(str(v), safe='')}" for k, v in headers.items()]
+        otel_env["OTEL_EXPORTER_OTLP_HEADERS"] = ",".join(sorted(parts))
 
     # TLS CA file for non-localhost collectors.
-    if isinstance(cloud, dict) and isinstance(cloud.get("tls"), dict):
-        ca_file = str(cloud["tls"].get("ca_file") or "").strip()
-        if ca_file:
-            otel_env["OTEL_EXPORTER_OTLP_CERTIFICATE"] = ca_file
+    # Check env overlay / os.environ first, then fall back to telemetry config.
+    ca_file = ""
+    for key in ("SCION_COPILOT_OTEL_CA_FILE", "SCION_OTEL_CA_FILE"):
+        v = (env.get(key) or os.environ.get(key) or "").strip()
+        if v:
+            ca_file = v
+            break
+    if not ca_file:
+        cloud = telemetry.get("cloud") or {}
+        if isinstance(cloud, dict) and isinstance(cloud.get("tls"), dict):
+            ca_file = str(cloud["tls"].get("ca_file") or "").strip()
+    if ca_file:
+        otel_env["OTEL_EXPORTER_OTLP_CERTIFICATE"] = ca_file
 
     return otel_env
 
