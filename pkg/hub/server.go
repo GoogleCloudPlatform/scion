@@ -2008,6 +2008,11 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 		slog.Info("Configure via: hub.endpoint in server.yaml or SCION_SERVER_HUB_ENDPOINT env var")
 	}
 
+	// Set Hub name so agent log entries carry the hub label.
+	if s.config.HubName != "" {
+		dispatcher.SetHubName(s.config.HubName)
+	}
+
 	// Pass hub ID and secret backend to dispatcher if configured
 	dispatcher.SetHubID(s.hubID)
 	if s.secretBackend != nil {

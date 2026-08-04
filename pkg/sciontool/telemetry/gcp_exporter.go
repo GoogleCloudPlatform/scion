@@ -14,6 +14,7 @@ import (
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
 	texporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	scionlog "github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -103,6 +104,9 @@ func NewGCPExporter(config *Config) (*GCPExporter, error) {
 	} else if projectID == "" && legacyProjectID != "" {
 		commonLabels["project_id"] = legacyProjectID
 	}
+	if hubName := os.Getenv("SCION_HUB_NAME"); hubName != "" {
+		commonLabels["hub"] = hubName
+	}
 
 	var loggerOpts []logging.LoggerOption
 	if len(commonLabels) > 0 {
@@ -113,7 +117,7 @@ func NewGCPExporter(config *Config) (*GCPExporter, error) {
 		traceExporter:  traceExp,
 		metricExporter: metricExporter,
 		logClient:      logClient,
-		logger:         logClient.Logger("scion-agents", loggerOpts...),
+		logger:         logClient.Logger(scionlog.AgentLogID, loggerOpts...),
 		projectID:      config.ProjectID,
 		metricsDebug:   config.MetricsDebug,
 	}, nil

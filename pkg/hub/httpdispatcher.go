@@ -141,6 +141,7 @@ type HTTPAgentDispatcher struct {
 	authzService      *AuthzService        // Optional authz service for progeny secret verification
 	githubAppMinter   GitHubAppTokenMinter // Optional GitHub App token minter
 	hubEndpoint       string               // Hub endpoint URL for agents to call back
+	hubName           string               // Hub display name for agent log labeling
 	hubID             string               // Hub instance ID for hub-scoped queries
 	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
 	transportMinter   TransportTokenMinter // Optional transport token minter for OIDC dispatch
@@ -203,6 +204,13 @@ func (d *HTTPAgentDispatcher) SetTokenGenerator(gen AgentTokenGenerator) {
 // SetHubEndpoint sets the Hub endpoint URL that agents will use to call back.
 func (d *HTTPAgentDispatcher) SetHubEndpoint(endpoint string) {
 	d.hubEndpoint = endpoint
+}
+
+// SetHubName sets the hub display name for agent log labeling.
+// When set, agents receive SCION_HUB_NAME so their Cloud Logging entries
+// carry a "hub" label matching the hub-scoped log query filter.
+func (d *HTTPAgentDispatcher) SetHubName(name string) {
+	d.hubName = name
 }
 
 // SetSecretBackend sets the secret backend for resolving secrets.
@@ -524,6 +532,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	}
 	injectModelEnv(req.ResolvedEnv, agent.AppliedConfig)
 	injectThinkingLevelEnv(req.ResolvedEnv, agent.AppliedConfig)
+
+	// Inject hub name so agents can label their Cloud Logging entries with the
+	// hub identity, matching the hub-scoped log query filter (labels.hub).
+	if d.hubName != "" {
+		req.ResolvedEnv["SCION_HUB_NAME"] = d.hubName
+	}
 
 	// Resolve env vars from Hub storage (user/project/broker scopes) and merge.
 	// Storage env vars fill in keys not already set (with a non-empty value)
@@ -1750,6 +1764,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// brokers. Including it here ensures the broker always has the endpoint.
 	if d.hubEndpoint != "" {
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+	}
+	// Include hub name so agents can label their Cloud Logging entries with
+	// the hub identity, matching the hub-scoped log query filter (labels.hub).
+	if d.hubName != "" {
+		resolvedEnv["SCION_HUB_NAME"] = d.hubName
 	}
 
 	// Inject canonical workspace sharing mode and git-ness so the broker can
