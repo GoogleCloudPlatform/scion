@@ -90,6 +90,7 @@ export class ScionUnifiedLogViewer extends LitElement {
 
   private eventSource: EventSource | null = null;
   private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private logViewerRef: Element | null = null;
 
   static override styles = css`
@@ -360,6 +361,10 @@ export class ScionUnifiedLogViewer extends LitElement {
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
   private async loadInitialData(): Promise<void> {
@@ -458,7 +463,8 @@ export class ScionUnifiedLogViewer extends LitElement {
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30000);
     this.reconnectAttempt++;
 
-    setTimeout(async () => {
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
       // Gap-fill: fetch entries since our last entry
       if (this.entries.length > 0) {
         try {
