@@ -209,7 +209,7 @@ func TestRequestLogMiddleware_ProducesCorrectJSON(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	handler := RequestLogMiddleware(logger, "hub", HubPathPatterns())(
+	handler := RequestLogMiddleware(logger, "hub", HubPathPatterns(), 0)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
@@ -266,7 +266,7 @@ func TestRequestLogMiddleware_TraceIDGeneration(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
-	handler := RequestLogMiddleware(logger, "test", nil)(
+	handler := RequestLogMiddleware(logger, "test", nil, 0)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Verify meta is in context
 			meta := RequestMetaFromContext(r.Context())
@@ -312,7 +312,7 @@ func TestRequestLogMiddleware_TraceIDFromHeader(t *testing.T) {
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
-			handler := RequestLogMiddleware(logger, "test", nil)(
+			handler := RequestLogMiddleware(logger, "test", nil, 0)(
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusOK)
 				}),
@@ -336,7 +336,7 @@ func TestRequestLogMiddleware_HandlerEnrichment(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
-	handler := RequestLogMiddleware(logger, "hub", nil)(
+	handler := RequestLogMiddleware(logger, "hub", nil, 0)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Handler enriches metadata after middleware parsed the URL
 			SetRequestProjectID(r.Context(), "enriched-project")
@@ -373,7 +373,7 @@ func TestRequestLogMiddleware_FileOutput(t *testing.T) {
 	}
 	defer cleanup()
 
-	handler := RequestLogMiddleware(logger, "test", nil)(
+	handler := RequestLogMiddleware(logger, "test", nil, 0)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok"))
@@ -424,7 +424,7 @@ func TestNewRequestLogger_ForegroundSuppression(t *testing.T) {
 	}
 
 	// The logger should not panic and should handle calls gracefully
-	handler := RequestLogMiddleware(logger, "test", nil)(
+	handler := RequestLogMiddleware(logger, "test", nil, 0)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}),
@@ -451,7 +451,7 @@ func TestNewRequestLogger_ForegroundWithFile(t *testing.T) {
 	}
 	defer cleanup()
 
-	handler := RequestLogMiddleware(logger, "test", nil)(
+	handler := RequestLogMiddleware(logger, "test", nil, 0)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}),
@@ -512,7 +512,7 @@ func TestRequestLogMiddleware_StatusLevels(t *testing.T) {
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-			handler := RequestLogMiddleware(logger, "test", nil)(
+			handler := RequestLogMiddleware(logger, "test", nil, 0)(
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(tt.status)
 				}),

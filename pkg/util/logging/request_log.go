@@ -280,9 +280,19 @@ func extractIDsFromPath(path string, patterns []PathPattern) (projectID, agentID
 	return
 }
 
+// DefaultSlowRequestThreshold is the default duration after which an HTTP
+// request is logged as slow when no explicit threshold is configured.
+const DefaultSlowRequestThreshold = 10 * time.Second
+
 // RequestLogMiddleware creates HTTP middleware that logs each request
 // to the dedicated request logger using the HttpRequest format.
-func RequestLogMiddleware(logger *slog.Logger, component string, patterns []PathPattern) func(http.Handler) http.Handler {
+// slowThreshold controls when a request is logged as slow; zero uses
+// DefaultSlowRequestThreshold. Streaming responses (Content-Type:
+// text/event-stream) are exempt from the slow request check.
+func RequestLogMiddleware(logger *slog.Logger, component string, patterns []PathPattern, slowThreshold time.Duration) func(http.Handler) http.Handler {
+	if slowThreshold <= 0 {
+		slowThreshold = DefaultSlowRequestThreshold
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -343,9 +353,12 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 				Protocol:      r.Proto,
 			}
 
-			// Warn on slow requests (>2s) via the default logger
-			if duration > 2*time.Second {
-				slog.Warn("Slow request",
+			// Log slow requests via the default logger, exempting streaming responses.
+			contentType := strings.ToLower(wrapped.Header().Get("Content-Type"))
+			isStreaming := strings.HasPrefix(contentType, "text/event-stream")
+			isUpgrade := r.Header.Get("Upgrade") != ""
+			if !isStreaming && !isUpgrade && duration > slowThreshold {
+				slog.Info("Slow request",
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),
 					slog.Duration("elapsed", duration),

@@ -80,6 +80,9 @@ type ServerConfig struct {
 
 	// Debug enables verbose debug logging.
 	Debug bool
+	// SlowRequestThreshold is the duration after which an HTTP request is
+	// logged as slow. Zero uses logging.DefaultSlowRequestThreshold.
+	SlowRequestThreshold time.Duration
 
 	// Hub integration settings
 	// HubEnabled indicates whether this Runtime Broker should connect to a Hub
@@ -1663,7 +1666,7 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
 	h = s.recoveryMiddleware(h)
 	if s.requestLogger != nil {
-		h = logging.RequestLogMiddleware(s.requestLogger, "broker", logging.BrokerPathPatterns())(h)
+		h = logging.RequestLogMiddleware(s.requestLogger, "broker", logging.BrokerPathPatterns(), s.config.SlowRequestThreshold)(h)
 	} else {
 		h = s.loggingMiddleware(h)
 	}

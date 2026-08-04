@@ -150,6 +150,9 @@ type WebServerConfig struct {
 	// the server proactively closes it so the client can reconnect cleanly.
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
 	SSEMaxConnectionAge time.Duration
+	// SlowRequestThreshold is the duration after which an HTTP request is
+	// logged as slow. Zero uses logging.DefaultSlowRequestThreshold.
+	SlowRequestThreshold time.Duration
 }
 
 // WebServer serves the web frontend SPA shell and static assets.
@@ -1976,7 +1979,7 @@ func (ws *WebServer) buildHandler() http.Handler {
 
 	// Request logging (outermost)
 	if ws.requestLogger != nil {
-		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil)(handler)
+		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold)(handler)
 	} else {
 		handler = ws.loggingMiddleware(handler)
 	}
