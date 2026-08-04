@@ -358,6 +358,10 @@ type GlobalConfig struct {
 
 	// Scheduler settings
 	Scheduler SchedulerConfig `json:"scheduler" yaml:"scheduler" koanf:"scheduler"`
+
+	// SlowRequestThreshold is the duration after which an HTTP request is
+	// logged as slow. Default: 10s when unset/zero.
+	SlowRequestThreshold time.Duration `json:"slowRequestThreshold,omitempty" yaml:"slowRequestThreshold,omitempty" koanf:"slowRequestThreshold"`
 }
 
 // SchedulerConfig holds configuration for the Hub background task scheduler.
@@ -772,6 +776,7 @@ var snakeCaseFields = map[string]string{
 	"publicurl":             "public_url",
 	"reportinterval":        "report_interval",
 	"respectdebugmode":      "respect_debug_mode",
+	"slowrequestthreshold":  "slow_request_threshold",
 	"softdeleteretainfiles": "soft_delete_retain_files",
 	"softdeleteretention":   "soft_delete_retention",
 	"useraccessmode":        "user_access_mode",
@@ -837,6 +842,7 @@ var camelCaseFields = map[string]string{
 	"readtimeout":                   "readTimeout",
 	"requiretrustedproxyip":         "requireTrustedProxyIP",
 	"runtimebroker":                 "runtimeBroker",
+	"slowrequestthreshold":          "slowRequestThreshold",
 	"softdeleteretainfiles":         "softDeleteRetainFiles",
 	"softdeleteretention":           "softDeleteRetention",
 	"telemetryenabled":              "telemetryEnabled",

@@ -1349,6 +1349,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		AdminEmails:                  adminEmailList,
 		UserAccessMode:               cfg.Auth.UserAccessMode,
 		HubEndpoint:                  hubEndpoint,
+		SlowRequestThreshold:         cfg.SlowRequestThreshold,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
 		AdminMode:                    adminMode,
@@ -1977,8 +1978,9 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		UserAccessMode:     cfg.Auth.UserAccessMode,
 		AdminMode:          adminMode,
 		MaintenanceMessage: maintenanceMessage,
-		EnableTestLogin:    enableTestLogin,
-		ProxyAuthenticator: webProxyAuth,
+		EnableTestLogin:      enableTestLogin,
+		ProxyAuthenticator:   webProxyAuth,
+		SlowRequestThreshold: cfg.SlowRequestThreshold,
 	}
 	if enableTestLogin {
 		slog.Warn("Test login endpoint is enabled (--enable-test-login). This allows bypass of authentication and MUST NOT be used in production!")
@@ -2191,6 +2193,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		Debug:                         enableDebug,
+		SlowRequestThreshold:         cfg.SlowRequestThreshold,
 
 		HubEnabled:           hubEndpointForRH != "",
 		HubToken:             devAuthToken,

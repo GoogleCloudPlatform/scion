@@ -128,6 +128,9 @@ type ServerConfig struct {
 	BrokerAuthConfig BrokerAuthConfig
 	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
 	HubEndpoint string
+	// SlowRequestThreshold is the duration after which an HTTP request is
+	// logged as slow. Zero uses logging.DefaultSlowRequestThreshold.
+	SlowRequestThreshold time.Duration
 	// StalledThreshold is how long an agent can go without activity events
 	// before being marked as stalled (default: 5 minutes). Only applies to
 	// agents with a recent heartbeat (not already offline).
@@ -3091,7 +3094,7 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
 	h = s.recoveryMiddleware(h)
 	if s.requestLogger != nil {
-		h = logging.RequestLogMiddleware(s.requestLogger, "hub", logging.HubPathPatterns())(h)
+		h = logging.RequestLogMiddleware(s.requestLogger, "hub", logging.HubPathPatterns(), s.config.SlowRequestThreshold)(h)
 	} else {
 		h = s.loggingMiddleware(h)
 	}
@@ -3226,8 +3229,15 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			level = slog.LevelWarn
 		}
 
-		if duration > 2*time.Second {
-			slog.Warn("Slow request",
+		// Log slow requests, exempting streaming responses.
+		contentType := wrapped.Header().Get("Content-Type")
+		isStreaming := strings.HasPrefix(contentType, "text/event-stream")
+		slowThreshold := s.config.SlowRequestThreshold
+		if slowThreshold <= 0 {
+			slowThreshold = logging.DefaultSlowRequestThreshold
+		}
+		if !isStreaming && duration > slowThreshold {
+			slog.Info("Slow request",
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Duration("elapsed", duration),
