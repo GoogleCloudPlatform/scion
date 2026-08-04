@@ -149,6 +149,11 @@ type StatusUpdate struct {
 
 	// Exit tracking
 	ExitCode *int `json:"exitCode,omitempty"`
+
+	// Telemetry health flag — reports whether the agent's telemetry pipeline
+	// is running and exporting successfully. Set by sciontool during status
+	// updates so the Hub can aggregate pipeline health across agents.
+	TelemetryHealthy *bool `json:"telemetryHealthy,omitempty"`
 }
 
 // Client is a Hub API client for sciontool.

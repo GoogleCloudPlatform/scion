@@ -3016,6 +3016,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/integrations/", s.handleAdminIntegrationByName)
 	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs/stream", s.handleDiagnosticsLogsStream)
 	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs", s.handleDiagnosticsLogs)
+	s.mux.HandleFunc("/api/v1/admin/health/summary", s.handleHealthSummary)
 	s.mux.HandleFunc("/api/v1/metrics/", s.handleMetricsDashboard)
 	s.mux.HandleFunc("/api/v1/admin/metrics-dashboard", s.handleAdminMetricsDashboard) // legacy backward-compat
 
