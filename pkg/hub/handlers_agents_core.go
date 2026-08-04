@@ -972,66 +972,68 @@ func (s *Server) createAgentInProject(
 				// caller-supplied assign sites. A project may legitimately nominate
 				// a hub-scoped account as its default, and the old ScopeID equality
 				// silently refused one.
-				//
-				// NO authorization check here, deliberately and by ruling. Unlike
-				// the assign sites, the account is not caller-supplied — it comes
-				// from project settings, so there is no caller-elected privilege to
-				// authorize. Gating it on the caller's permissions would turn a
-				// project-admin decision into a per-caller lottery and break
-				// routine agent creation. Converting the scope predicate and adding
-				// a gate are two different passes over these lines; only the first
-				// belongs here.
-				//
-				// The else branch below is a known defect, filed separately and
-				// deliberately left alone: nothing validates the SA ID when it is
-				// written to project settings, so an unusable default falls through
-				// to metadata mode "block" and every agent in the project silently
-				// gets no identity, with no error surfaced anywhere. This
-				// conversion removes hub-scoped accounts as one cause of that; it
-				// does not fix the silence.
-				if err == nil && sa.ReachableFromProject(projectID) && sa.Verified {
-					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-						MetadataMode:        store.GCPMetadataModeAssign,
-						ServiceAccountID:    sa.ID,
-						ServiceAccountEmail: sa.Email,
-						ProjectID:           sa.ProjectID,
-					}
+				if err != nil || !sa.ReachableFromProject(projectID) {
+					// SA not found or not reachable — fail agent creation.
+					// P10 changes: a project-default SA that fails checks is an
+					// error, not a silent fallback to block. The operator set the
+					// default; if the SA is unreachable, the operator needs to know.
+					slog.Warn("project-default SA assignment failed: service account not available",
+						"surface", SurfaceProjectDefault,
+						"project_id", projectID,
+						"sa_id", projectSettings.DefaultGCPIdentityServiceAccountID,
+						"err", err)
+					writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+						"project default GCP service account is not available in this project; "+
+							"update the project's default GCP identity setting", nil)
+					return
+				}
+				if !sa.Verified {
+					slog.Warn("project-default SA assignment failed: service account not verified",
+						"surface", SurfaceProjectDefault,
+						"project_id", projectID,
+						"sa_id", sa.ID, "sa_email", sa.Email)
+					writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+						"project default GCP service account is not verified; "+
+							"verify it before it can be assigned to agents", nil)
+					return
+				}
 
-					// A service account was just bound to an agent, so it is
-					// recorded (design §7). This is a BINDING record and not a
-					// decision record: no permission was checked, because the
-					// account is not caller-supplied. See
-					// store.MechanismProjectDefault.
-					//
-					// ⚠️ THIS ADDS AUDIT ONLY. It does not gate anything, and it
-					// must not: the ruling above stands. Do not "upgrade" this to
-					// EvaluateActAs — the binding carries no ActAsOutcome
-					// precisely so that anyone later driving enforcement from
-					// these records cannot fail this path closed by accident.
-					//
-					// Recorded here rather than skipped because item D's
-					// compliance report has to be able to find these bindings,
-					// and a binding that produces no record is indistinguishable
-					// from no binding at all.
-					//
-					// The caller is recorded as the actor, not as an evaluated
-					// principal. An error resolving it is not fatal to agent
-					// creation: an unattributed record still beats none, and the
-					// zero Principal renders as kind "unknown".
-					principal, perr := s.callerPrincipal(ctx)
-					if perr != nil {
-						slog.Debug("project-default SA binding: caller could not be resolved for the audit record",
-							"surface", SurfaceProjectDefault, "error", perr.Error())
-					}
-					store.RecordSABinding(ctx, s.GetAuditLogger(), SurfaceProjectDefault,
-						principal, sa,
-						"service account came from project settings, not from the caller, "+
-							"so no caller permission was evaluated")
-				} else {
-					// SA not found/invalid — fall back to block
-					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-						MetadataMode: store.GCPMetadataModeBlock,
-					}
+				// P10: Authorization gate for project-default SA assignment.
+				//
+				// Design §4.5 (ruled by ptone): project-default assignment checks
+				// the immediate agent creator. The principal is:
+				//   - for a human-created agent: the human creator;
+				//   - for agent-creates-agent: the creating agent's assigned SA.
+				//
+				// This REPLACES the former "NO authorization check here,
+				// deliberately and by ruling (P4 item F)" comment. P10 changes
+				// the ruling: the project operator selected an available default,
+				// but did not grant every future creator permission to act as it.
+				//
+				// authorizeSAAssignment runs:
+				//   1. Hub-scoped mode coupling (D4) — denies hub-scoped SAs
+				//      when gcpIamCheckMode != enforce.
+				//   2. Hub ActionAssign authorization.
+				//   3. GCP actAs check via callerPrincipal.
+				//   4. Audit record via EvaluateActAs with SurfaceProjectDefault.
+				//
+				// On failure, authorizeSAAssignment writes the HTTP error and
+				// returns false. Agent creation FAILS rather than silently
+				// falling back to block — a failed default is an error, not a
+				// degradation.
+				if !s.authorizeSAAssignment(w, r, sa, SurfaceProjectDefault) {
+					slog.Warn("project-default SA assignment denied by authorization gate",
+						"surface", SurfaceProjectDefault,
+						"project_id", projectID,
+						"sa_id", sa.ID, "sa_email", sa.Email)
+					return
+				}
+
+				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+					MetadataMode:        store.GCPMetadataModeAssign,
+					ServiceAccountID:    sa.ID,
+					ServiceAccountEmail: sa.Email,
+					ProjectID:           sa.ProjectID,
 				}
 			} else {
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{

@@ -189,6 +189,25 @@ type CreateAgentRequest struct {
 
 	// AgentRole specifies the requested authorization role.
 	AgentRole string `json:"agentRole,omitempty"`
+
+	// GCPIdentity specifies the GCP identity assignment for the agent.
+	// Controls metadata server behavior and optional service account binding.
+	// When nil, the project default (if any) is applied by the Hub.
+	GCPIdentity *GCPIdentityConfig `json:"gcp_identity,omitempty"`
+}
+
+// GCPIdentityConfig specifies GCP identity configuration for agent creation.
+// Mirrors the Hub's GCPIdentityAssignment structure.
+type GCPIdentityConfig struct {
+	// MetadataMode controls the GCE metadata server behavior for the agent:
+	//   "block" — metadata server is blocked (default)
+	//   "passthrough" — metadata server passes through the broker host identity
+	//   "assign" — a specific service account is bound to the agent
+	MetadataMode string `json:"metadata_mode"`
+
+	// ServiceAccountID is the Scion resource ID of the service account to assign.
+	// Required when MetadataMode is "assign", must be empty otherwise.
+	ServiceAccountID string `json:"service_account_id,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.

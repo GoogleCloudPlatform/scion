@@ -79,6 +79,7 @@ var (
 	modelFlag             string
 	thinkingLevelFlag     int = -1
 	agentRoleFlag         string
+	serviceAccountFlag    string
 )
 
 func parseLabels(raw []string) (map[string]string, error) {
@@ -785,6 +786,14 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		GatherEnv:       true, // Enable env-gather flow
 		Notify:          !startNoNotify,
 		AgentRole:       agentRoleFlag,
+	}
+
+	// Wire --service-account flag into the GCP identity assignment.
+	if serviceAccountFlag != "" {
+		req.GCPIdentity = &hubclient.GCPIdentityConfig{
+			MetadataMode:     "assign",
+			ServiceAccountID: serviceAccountFlag,
+		}
 	}
 
 	// Thread inline config from --config flag into the Hub request.

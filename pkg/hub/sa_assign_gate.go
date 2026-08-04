@@ -44,10 +44,11 @@ const (
 	// SurfaceAgentPatch is assignment onto an already-existing agent.
 	SurfaceAgentPatch = "agent-patch"
 
-	// SurfaceProjectDefault is an SA bound from project settings rather than
-	// supplied by the caller. ⚠️ This surface produces BINDING records, never
-	// decision records: nothing is authorized there, by ruling (P4 item F). See
-	// store.MechanismProjectDefault.
+	// SurfaceProjectDefault is an SA assigned from project settings rather than
+	// supplied by the caller. P10 changed the ruling: project-default assignment
+	// now runs the full authorization gate (ActionAssign + actAs) against the
+	// immediate agent creator. This surface produces DECISION records via
+	// authorizeSAAssignment, not the binding records it produced before P10.
 	SurfaceProjectDefault = "project-default"
 )
 
