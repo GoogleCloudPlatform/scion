@@ -752,6 +752,66 @@ func TestResolveAsNeededForKeys_AlternativeKeyMatchingSecrets(t *testing.T) {
 	}
 }
 
+func TestResolveAsNeededForKeys_CanonicalKeyWinsOverAlternative(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	hubID := "test-hub-canonical-wins"
+
+	// Store BOTH the canonical key and an alternative in the same scope.
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("env-canonical"),
+		Key:           "GOOGLE_CLOUD_REGION",
+		Value:         "us-central1",
+		Scope:         store.ScopeHub,
+		ScopeID:       hubID,
+		InjectionMode: store.InjectionModeAsNeeded,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("env-alt-dup"),
+		Key:           "GOOGLE_CLOUD_LOCATION",
+		Value:         "europe-west4",
+		Scope:         store.ScopeHub,
+		ScopeID:       hubID,
+		InjectionMode: store.InjectionModeAsNeeded,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	d.SetHubID(hubID)
+
+	agent := &store.Agent{
+		ID:            "agent-canonical-wins",
+		Name:          "canonical-wins",
+		OwnerID:       "user-1",
+		ProjectID:     "project-1",
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+
+	alternatives := map[string][]string{
+		"GOOGLE_CLOUD_REGION": {"CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"},
+	}
+
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, alternatives)
+
+	// The canonical key's value must be preserved — the alternative must not
+	// overwrite it regardless of ListEnvVars iteration order.
+	if v, ok := result["GOOGLE_CLOUD_REGION"]; !ok {
+		t.Error("expected GOOGLE_CLOUD_REGION in result")
+	} else if v != "us-central1" {
+		t.Errorf("GOOGLE_CLOUD_REGION = %q, want %q (canonical value should win over alternative)", v, "us-central1")
+	}
+
+	// Only one entry should be in the result.
+	if len(result) != 1 {
+		t.Errorf("expected 1 result entry, got %d: %v", len(result), result)
+	}
+}
+
 func TestResolveAsNeededForKeys_NilAlternatives(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)

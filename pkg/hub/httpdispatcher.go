@@ -1476,11 +1476,14 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// Expand keySet with alternatives and build a reverse map so that when
 	// a stored var is keyed by an alternative name, we store its value under
 	// the canonical key (which is what the broker expects).
-	altToCanonical := make(map[string]string)
-	for canonical, alts := range alternatives {
-		for _, alt := range alts {
-			keySet[alt] = struct{}{}
-			altToCanonical[alt] = canonical
+	var altToCanonical map[string]string
+	if len(alternatives) > 0 {
+		altToCanonical = make(map[string]string)
+		for canonical, alts := range alternatives {
+			for _, alt := range alts {
+				keySet[alt] = struct{}{}
+				altToCanonical[alt] = canonical
+			}
 		}
 	}
 
@@ -1502,6 +1505,9 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				// Store under the canonical key if this was an alternative match
 				resultKey := v.Key
 				if canonical, isAlt := altToCanonical[v.Key]; isAlt {
+					if _, already := result[canonical]; already {
+						continue // canonical key already matched; don't overwrite
+					}
 					resultKey = canonical
 				}
 				result[resultKey] = v.Value
@@ -1561,6 +1567,9 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 					// Store under the canonical key if this was an alternative match
 					resultKey := target
 					if canonical, isAlt := altToCanonical[target]; isAlt {
+						if _, already := result[canonical]; already {
+							continue // canonical key already matched; don't overwrite
+						}
 						resultKey = canonical
 					}
 					if _, alreadySet := result[resultKey]; !alreadySet {
