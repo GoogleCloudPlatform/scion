@@ -124,7 +124,7 @@ Scion includes an **Auto-Expose** engine that can automatically detect listening
 3. **Policy Evaluation**: The scanned ports are filtered against configured minimums, allowlists, or denylists.
 4. **Hub Registration**: Any eligible newly discovered ports are registered with the Hub using the label **`auto-scan`** (allowing operators and users to distinguish them from manually registered ports).
 5. **Reconciliation & Unexposure**: If a port was auto-exposed but the service subsequently stops listening (is no longer found in `procfs` scans), `sciontool` automatically deregisters and unexposes the port from the Hub.
-6. **System Notifications**: When a port is auto-exposed, the reconciler optionally sends a platform event message to the agent channel with category `system_category: agent:port:forward`, generating a notification.
+6. **System Notifications**: When a port is auto-exposed, the reconciler optionally sends a platform event message to the agent channel with category `system_category: agent:port:forward`, generating a notification. This notification suggests sharing the proxy URL with collaborating users so they can collaborate on the exposed service.
 
 :::note[Manual Exclude]
 Auto-expose will never unexpose or overwrite a port that was manually registered (without the `auto-scan` label). It only manages and cleans up the ports that it registered itself.

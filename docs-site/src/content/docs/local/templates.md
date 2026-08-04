@@ -295,7 +295,9 @@ scion templates pull code-reviewer --to .scion/templates/code-reviewer
 scion templates status
 ```
 
-`sync` is content-aware: it hashes files and uploads only what changed, and templates carry a content hash for traceability (visible in `scion templates list`, `scion templates show`, and the Web UI). Beyond the CLI, a connected Hub can import a whole repository of templates server-side via the **Load Templates** action in the Web UI, and imported templates can be browsed and edited directly in the dashboard.
+`sync` is content-aware: it hashes files and uploads only what changed, and templates carry a content hash for traceability (visible in `scion templates list`, `scion templates show`, and the Web UI). 
+
+Beyond the CLI, project templates are a **fully managed Hub-level resource** with full CRUD, SDK, and Web UI support. A connected Hub can import a whole repository of templates server-side via the **Load Templates** action in the Web UI, and imported templates can be browsed, edited, and deleted directly within the dashboard.
 
 For the condensed command list, see the [CLI reference](/scion/reference/cli/#template-management).
 

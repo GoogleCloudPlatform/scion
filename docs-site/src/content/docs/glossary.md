@@ -22,7 +22,7 @@ An agent spawned by another agent; "sub" only from the orchestrating user's view
 A namespace and collection of agents and configuration, represented by a `.scion` directory and usually one-to-one with a git repository. Not the same as a **Group**.
 
 ### Template
-A harness-agnostic folder resource defining a generic agent — its system prompt, agent instructions, skills, services, and more — containing nothing specific to any one harness. The harness-agnostic counterpart to a **Harness-config**.
+A harness-agnostic folder resource defining a generic agent — its system prompt, agent instructions, skills, services, and more — containing nothing specific to any one harness. Templates can live locally (project or global scope) or be managed as fully fledged Hub-level resources with CRUD, CLI, SDK, and Web UI support. The harness-agnostic counterpart to a **Harness-config**.
 
 ### Harness
 The external, vendor-supplied agent software that Scion drives, such as Claude Code, Gemini CLI, Codex, or OpenCode. Provided outside Scion; Scion only configures and runs it. A harness is **not** a plugin.
@@ -251,3 +251,6 @@ Telemetry about what agents and their harnesses are doing — token usage, tool 
 
 ### Telemetry pipeline
 The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry`) that collects traces, metrics, and logs from the harness and exports them to a cloud backend (GCP Cloud Monitoring, Cloud Trace, Cloud Logging). Requires the `scion-telemetry-gcp-credentials` secret for cloud export; runs in local-only mode without it.
+
+### Session metrics
+Database-backed summaries and aggregations computed on agent session-end (aggregated by `sciontool` and delivered as a `MetricsPayload` in the StatusUpdate protocol) and stored in the Hub's `agent_session_metrics` SQL table. They provide an IDOR-safe structural view of token usage (input, output, cached, reasoning), tool execution counts, session duration, and model usage, queried via dedicated summary API endpoints and displayed in the Web Dashboard. Contrast with raw OpenTelemetry time-series metrics.

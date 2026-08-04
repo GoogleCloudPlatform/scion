@@ -19,7 +19,7 @@ A namespace and collection of agents and configuration, represented by a `.scion
 _Avoid_: grove, group, repo, workspace
 
 **Template**:
-A harness-agnostic folder resource defining a generic agent — its system prompt, agent instructions, skills, services, and more — containing nothing specific to any one harness. A default harness-config may optionally be named, but is not required.
+A harness-agnostic folder resource defining a generic agent — its system prompt, agent instructions, skills, services, and more — containing nothing specific to any one harness. Templates can live locally (in project or global scopes) or be managed as fully fledged Hub-level resources with CRUD, CLI, SDK, and Web UI support. A default harness-config may optionally be named, but is not required.
 _Avoid_: role, blueprint, profile, config
 _See also_: Harness-config (its harness-specific counterpart), Skill
 
@@ -343,6 +343,10 @@ _See also_: Infrastructure metrics (the other family), Telemetry pipeline
 The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry`) that collects traces, metrics, and logs from the harness and exports them to a cloud backend (GCP Cloud Monitoring, Cloud Trace, Cloud Logging). Requires the `scion-telemetry-gcp-credentials` secret for cloud export; runs in local-only mode without it.
 _Avoid_: metrics pipeline, collector, OTel collector
 _See also_: Agent metrics
+
+**Session Metrics**:
+Database-backed summaries and aggregations computed on agent session-end (aggregated by `sciontool` and delivered as a `MetricsPayload` in the StatusUpdate protocol) and stored in the Hub's `agent_session_metrics` SQL table. They provide an IDOR-safe structural view of token usage (input, output, cached, reasoning), tool execution counts, session duration, and model usage, queried via dedicated summary API endpoints and displayed in the Web Dashboard. Contrast with raw OpenTelemetry time-series metrics.
+_Avoid_: OTel metrics (for these DB summaries), raw telemetry
 
 ## Potential Future Additions
 

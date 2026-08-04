@@ -83,6 +83,16 @@ scion server start --enable-hub
 
 Both approaches can be used simultaneously — OTel for the full telemetry pipeline and Cloud Logging for direct log delivery.
 
+### Google Cloud Error Reporting Integration
+
+For platform operators running in Google Cloud, Scion's logging handlers (`GCPHandler` and `CloudHandler`) natively integrate with **Google Cloud Error Reporting** to automatically discover, group, and track application errors:
+
+1.  **Service Context Grouping**: The loggers automatically inject a `serviceContext` group containing the system component name (e.g. `scion-hub`, `scion-broker`, or `scion-server`) and its build version on all log entries across all severity levels.
+2.  **Automated Error Capture**: On any log entry of severity `ERROR` or higher, the loggers automatically parse the caller's stack frame and inject a `stack_trace` string along with a specific `@type` metadata annotation (set to `type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent`).
+3.  **Preservation of Custom Annotations**: These attributes allow GCP Error Reporting to instantly parse and group log entries. If your application or a custom hook logs a pre-structured error that already specifies a custom `@type` field, Scion preserves your custom annotation instead of overriding it.
+
+This features works transparently with both the standard OTel log-bridging handler and the direct `cloud.google.com/go/logging` client library.
+
 ### Configuring Agent Telemetry
 
 Agents use `sciontool` as their init process, which includes an embedded OTLP forwarder. This forwarder must be configured to point to your cloud backend.
@@ -147,6 +157,10 @@ The `sciontool` utility ensures that `agent.log` is owned by the `scion` user du
 ## Telemetry Collection
 
 The telemetry pipeline in sciontool collects and forwards OpenTelemetry (OTLP) data from agents. See the [Metrics & OpenTelemetry guide](/scion/hosted/single-node/metrics/) for deep configuration details.
+
+### Telemetry Export Resilience
+
+To safeguard against transient network issues or temporary destination outages, `sciontool`'s telemetry pipeline includes automated **retry with exponential backoff** for all cloud OTLP exports. When an export attempt fails (e.g. due to rate limits or transient 5xx errors from the cloud backend), the pipeline retries with a progressively increasing delay, ensuring high telemetry delivery reliability and preventing data loss.
 
 ### What's Collected
 
@@ -228,6 +242,8 @@ Hub and Broker logs include a `subsystem` attribute that identifies the internal
 | `broker.messages` | Message injection into agent tmux sessions |
 | `broker.heartbeat` | Periodic broker status reports to hub |
 | `broker.env-secrets` | Broker-side environment gathering and finalization |
+
+With the complete roll-out of Tier 3 subsystem logging, dotted logging tags now systematically cover all CRUD handlers across these subsystems, providing comprehensive filtering and tracing for all resource-management actions.
 
 In combo server mode (`scion-server`), both `hub.*` and `broker.*` subsystem logs appear in the same stream. The dotted prefix distinguishes them without requiring separate processes.
 
