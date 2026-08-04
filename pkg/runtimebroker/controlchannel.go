@@ -539,11 +539,7 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 	}
 
 	// Extract trace context from request envelope headers for cross-component propagation.
-	carrier := propagation.MapCarrier{}
-	for k, v := range req.Headers {
-		carrier.Set(k, v)
-	}
-	ctx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
+	ctx := otel.GetTextMapPropagator().Extract(context.Background(), propagation.MapCarrier(req.Headers))
 	ctx, span := tracer.Start(ctx, "broker.controlchannel.dispatch")
 	defer span.End()
 	span.SetAttributes(

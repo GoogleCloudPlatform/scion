@@ -503,16 +503,10 @@ func (m *ControlChannelManager) TunnelRequest(ctx context.Context, brokerID stri
 	)
 
 	// Inject trace context into the request envelope headers for cross-component propagation.
-	carrier := propagation.MapCarrier{}
-	otel.GetTextMapPropagator().Inject(ctx, carrier)
 	if req.Headers == nil {
 		req.Headers = make(map[string]string)
 	}
-	for _, key := range []string{"traceparent", "tracestate"} {
-		if v := carrier.Get(key); v != "" {
-			req.Headers[key] = v
-		}
-	}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(req.Headers))
 
 	hc := m.GetConnection(brokerID)
 	if hc == nil {
