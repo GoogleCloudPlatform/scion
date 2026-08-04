@@ -192,9 +192,13 @@ func (h *messageCloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 			level:     h.level,
 			component: h.component,
 			hubName:   h.hubName,
+			hubID:     h.hubID,
 			hostname:  h.hostname,
+			projectID: h.projectID,
+			version:   h.version,
 			attrs:     newAttrs,
 			groups:    h.groups,
+			logHook:   h.logHook,
 		},
 	}
 }
@@ -211,9 +215,13 @@ func (h *messageCloudHandler) WithGroup(name string) slog.Handler {
 			level:     h.level,
 			component: h.component,
 			hubName:   h.hubName,
+			hubID:     h.hubID,
 			hostname:  h.hostname,
+			projectID: h.projectID,
+			version:   h.version,
 			attrs:     h.attrs,
 			groups:    newGroups,
+			logHook:   h.logHook,
 		},
 	}
 }
