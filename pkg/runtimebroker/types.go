@@ -462,12 +462,13 @@ type CreateAgentResponse struct {
 // and the merged environment is missing required keys. The broker returns
 // HTTP 202 with this payload instead of starting the agent.
 type EnvRequirementsResponse struct {
-	AgentID    string                       `json:"agentId"`
-	Required   []string                     `json:"required"`
-	HubHas     []string                     `json:"hubHas"`
-	BrokerHas  []string                     `json:"brokerHas"` // Deprecated: always empty; kept for API compatibility
-	Needs      []string                     `json:"needs"`
-	SecretInfo map[string]api.SecretKeyInfo `json:"secretInfo,omitempty"`
+	AgentID      string                       `json:"agentId"`
+	Required     []string                     `json:"required"`
+	HubHas       []string                     `json:"hubHas"`
+	BrokerHas    []string                     `json:"brokerHas"` // Deprecated: always empty; kept for API compatibility
+	Needs        []string                     `json:"needs"`
+	SecretInfo   map[string]api.SecretKeyInfo `json:"secretInfo,omitempty"`
+	Alternatives map[string][]string          `json:"alternatives,omitempty"` // Maps canonical key in Needs to alternative key names from the same any_of group
 }
 
 // ============================================================================

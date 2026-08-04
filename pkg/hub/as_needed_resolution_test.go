@@ -69,7 +69,7 @@ func TestResolveAsNeededForKeys_EnvVars(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GEMINI_API_KEY", "OTHER_KEY"})
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GEMINI_API_KEY", "OTHER_KEY"}, nil)
 
 	if v, ok := result["GEMINI_API_KEY"]; !ok {
 		t.Error("expected GEMINI_API_KEY in result")
@@ -141,7 +141,7 @@ func TestResolveAsNeededForKeys_Secrets(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GEMINI_API_KEY", "ALWAYS_SECRET", "/tmp/secret.json"})
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GEMINI_API_KEY", "ALWAYS_SECRET", "/tmp/secret.json"}, nil)
 
 	if v, ok := result["GEMINI_API_KEY"]; !ok {
 		t.Error("expected GEMINI_API_KEY in result (as_needed environment secret)")
@@ -191,7 +191,7 @@ func TestResolveAsNeededForKeys_SecretNameFallback(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"MY_API_KEY"})
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"MY_API_KEY"}, nil)
 
 	if v, ok := result["MY_API_KEY"]; !ok {
 		t.Error("expected MY_API_KEY in result (secret with empty Target should fall back to Name)")
@@ -242,7 +242,7 @@ func TestResolveAsNeededForKeys_ScopePrecedence(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"API_KEY"})
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"API_KEY"}, nil)
 
 	// User scope should win over hub scope (higher precedence, last-wins)
 	if v, ok := result["API_KEY"]; !ok {
@@ -269,7 +269,7 @@ func TestResolveAsNeededForKeys_NoBackend(t *testing.T) {
 	}
 
 	// Should not panic with nil secret backend
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"SOME_KEY"})
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"SOME_KEY"}, nil)
 
 	if len(result) != 0 {
 		t.Errorf("expected empty result with no matching env vars and no secret backend, got %v", result)
@@ -292,7 +292,7 @@ func TestResolveAsNeededForKeys_EmptyKeys(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{})
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{}, nil)
 
 	if len(result) != 0 {
 		t.Errorf("expected empty result for empty keys, got %v", result)
@@ -344,7 +344,7 @@ func TestResolveAsNeededForKeys_EnvVarPriorityOverSecret(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	result := d.resolveAsNeededForKeys(ctx, agent, []string{"SHARED_KEY"})
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"SHARED_KEY"}, nil)
 
 	// Env var should be found first; secret should not overwrite (alreadySet check)
 	if v, ok := result["SHARED_KEY"]; !ok {
@@ -647,6 +647,148 @@ func TestDispatchAgentCreateWithGather_NoNeeds(t *testing.T) {
 	// Should only be called once
 	if mockClient.callCount != 1 {
 		t.Errorf("expected 1 broker call, got %d", mockClient.callCount)
+	}
+}
+
+// --- resolveAsNeededForKeys tests with alternatives ---
+
+func TestResolveAsNeededForKeys_AlternativeKeyMatching(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	hubID := "test-hub-alternatives"
+
+	// Store GOOGLE_CLOUD_LOCATION (an alternative name, not the canonical key)
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("env-alt-location"),
+		Key:           "GOOGLE_CLOUD_LOCATION",
+		Value:         "us-central1",
+		Scope:         store.ScopeHub,
+		ScopeID:       hubID,
+		InjectionMode: store.InjectionModeAsNeeded,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	d.SetHubID(hubID)
+
+	agent := &store.Agent{
+		ID:            "agent-alt-test",
+		Name:          "alt-test",
+		OwnerID:       "user-1",
+		ProjectID:     "project-1",
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+
+	// The broker reports canonical key GOOGLE_CLOUD_REGION in Needs,
+	// with alternatives that include GOOGLE_CLOUD_LOCATION.
+	alternatives := map[string][]string{
+		"GOOGLE_CLOUD_REGION": {"CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"},
+	}
+
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, alternatives)
+
+	// The stored var GOOGLE_CLOUD_LOCATION should match via alternatives and be
+	// stored under the canonical key GOOGLE_CLOUD_REGION.
+	if v, ok := result["GOOGLE_CLOUD_REGION"]; !ok {
+		t.Error("expected GOOGLE_CLOUD_REGION in result (matched via alternative GOOGLE_CLOUD_LOCATION)")
+	} else if v != "us-central1" {
+		t.Errorf("GOOGLE_CLOUD_REGION = %q, want %q", v, "us-central1")
+	}
+
+	// GOOGLE_CLOUD_LOCATION should NOT appear as a separate key in the result
+	if _, ok := result["GOOGLE_CLOUD_LOCATION"]; ok {
+		t.Error("GOOGLE_CLOUD_LOCATION should not be in result as a separate key; it should be mapped to the canonical key")
+	}
+}
+
+func TestResolveAsNeededForKeys_AlternativeKeyMatchingSecrets(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	hubID := "test-hub-alt-secrets"
+
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	d.SetHubID(hubID)
+	d.SetSecretBackend(&mockSecretBackend{
+		secrets: []secret.SecretWithValue{
+			{
+				SecretMeta: secret.SecretMeta{
+					Name:          "cloud-location",
+					SecretType:    "environment",
+					Target:        "GOOGLE_CLOUD_LOCATION",
+					Scope:         "hub",
+					ScopeID:       hubID,
+					InjectionMode: "as_needed",
+				},
+				Value: "europe-west1",
+			},
+		},
+	})
+
+	agent := &store.Agent{
+		ID:            "agent-alt-secret-test",
+		Name:          "alt-secret-test",
+		OwnerID:       "user-1",
+		ProjectID:     "project-1",
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+
+	alternatives := map[string][]string{
+		"GOOGLE_CLOUD_REGION": {"CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"},
+	}
+
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, alternatives)
+
+	// The secret targeting GOOGLE_CLOUD_LOCATION should match and be stored under
+	// the canonical key GOOGLE_CLOUD_REGION.
+	if v, ok := result["GOOGLE_CLOUD_REGION"]; !ok {
+		t.Error("expected GOOGLE_CLOUD_REGION in result (matched via secret targeting alternative GOOGLE_CLOUD_LOCATION)")
+	} else if v != "europe-west1" {
+		t.Errorf("GOOGLE_CLOUD_REGION = %q, want %q", v, "europe-west1")
+	}
+}
+
+func TestResolveAsNeededForKeys_NilAlternatives(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	hubID := "test-hub-nil-alt"
+
+	// Store canonical key directly
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("env-nil-alt"),
+		Key:           "GOOGLE_CLOUD_REGION",
+		Value:         "us-east1",
+		Scope:         store.ScopeHub,
+		ScopeID:       hubID,
+		InjectionMode: store.InjectionModeAsNeeded,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	d.SetHubID(hubID)
+
+	agent := &store.Agent{
+		ID:            "agent-nil-alt-test",
+		Name:          "nil-alt-test",
+		OwnerID:       "user-1",
+		ProjectID:     "project-1",
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+
+	// nil alternatives should behave exactly like the old code path
+	result := d.resolveAsNeededForKeys(ctx, agent, []string{"GOOGLE_CLOUD_REGION"}, nil)
+
+	if v, ok := result["GOOGLE_CLOUD_REGION"]; !ok {
+		t.Error("expected GOOGLE_CLOUD_REGION in result (exact match, nil alternatives)")
+	} else if v != "us-east1" {
+		t.Errorf("GOOGLE_CLOUD_REGION = %q, want %q", v, "us-east1")
 	}
 }
 

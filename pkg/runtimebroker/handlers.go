@@ -524,7 +524,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		required, secretInfo := s.extractRequiredEnvKeys(req, hydratedHCPath)
+		required, secretInfo, alternatives := s.extractRequiredEnvKeys(req, hydratedHCPath)
 		if s.config.Debug {
 			s.envSecretLog.Debug("Env-gather: evaluating env completeness",
 				"gatherEnv", req.GatherEnv,
@@ -594,12 +594,24 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 
+				// Build alternatives for needed keys only
+				var respAlternatives map[string][]string
+				for _, key := range needs {
+					if alts, ok := alternatives[key]; ok {
+						if respAlternatives == nil {
+							respAlternatives = make(map[string][]string)
+						}
+						respAlternatives[key] = alts
+					}
+				}
+
 				resp := EnvRequirementsResponse{
-					AgentID:    agentKey,
-					Required:   required,
-					HubHas:     hubHas,
-					Needs:      needs,
-					SecretInfo: respSecretInfo,
+					AgentID:      agentKey,
+					Required:     required,
+					HubHas:       hubHas,
+					Needs:        needs,
+					SecretInfo:   respSecretInfo,
+					Alternatives: respAlternatives,
 				}
 				if attempt != nil {
 					s.dispatchAttemptsMu.Lock()
@@ -2026,8 +2038,9 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 // config directory that supplements the on-disk search. This allows env-gather
 // to see auth metadata from hub-managed harness-configs that haven't been
 // downloaded to the standard on-disk locations yet.
-func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo) {
+func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string) {
 	required := make(map[string]struct{})
+	alternatives := make(map[string][]string)
 
 	var settings *config.VersionedSettings
 	settingsPath := req.ProjectPath
@@ -2244,6 +2257,11 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 					canonicalKey := group[0]
 					required[canonicalKey] = struct{}{}
 					secretInfo[canonicalKey] = api.SecretKeyInfo{Source: "auth"}
+					// Record alternative key names so the hub can match
+					// as_needed env vars stored under non-canonical names.
+					if len(group) > 1 {
+						alternatives[canonicalKey] = group[1:]
+					}
 				}
 			}
 		}
@@ -2393,7 +2411,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 	for k := range required {
 		keys = append(keys, k)
 	}
-	return keys, secretInfo
+	return keys, secretInfo, alternatives
 }
 
 // resolveHarnessConfigForEnvGather determines the harness-config name for the

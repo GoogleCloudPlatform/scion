@@ -276,7 +276,7 @@ auth:
 			HarnessConfig: "custom-auth",
 		},
 	}
-	required, _ := srv.extractRequiredEnvKeys(req)
+	required, _, _ := srv.extractRequiredEnvKeys(req)
 
 	// Build a set for stable lookup.
 	got := make(map[string]bool)
@@ -314,7 +314,7 @@ auth:
 			HarnessConfig: "claude-legacy",
 		},
 	}
-	required, _ := srv.extractRequiredEnvKeys(req)
+	required, _, _ := srv.extractRequiredEnvKeys(req)
 
 	got := make(map[string]bool)
 	for _, k := range required {
