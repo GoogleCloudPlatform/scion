@@ -122,6 +122,7 @@ export class ScionPageTerminal extends LitElement {
   private sseClient: SSEClient | null = null;
   private sseUpdateHandler: ((e: CustomEvent<SSEUpdateEvent>) => void) | null = null;
   private _dragCounter = 0;
+  private _errorTimer: ReturnType<typeof setTimeout> | null = null;
   private _windowDragOver: ((e: DragEvent) => void) | null = null;
   private _windowDrop: ((e: DragEvent) => void) | null = null;
 
@@ -553,7 +554,7 @@ export class ScionPageTerminal extends LitElement {
 
       // Resolve upload target shared dir (best-effort, non-blocking for terminal init)
       if (this.projectId) {
-        this.resolveUploadTarget();
+        void this.resolveUploadTarget();
       }
 
       if (!isTerminalAvailable(agent)) {
@@ -1012,13 +1013,14 @@ export class ScionPageTerminal extends LitElement {
   }
 
   private _showUploadError(msg: string): void {
+    if (this._errorTimer) clearTimeout(this._errorTimer);
     this.uploadStatus = msg;
     this.isUploading = false;
-    // Keep the overlay visible with the error for 4 seconds
     this.isDragOver = true;
-    setTimeout(() => {
+    this._errorTimer = setTimeout(() => {
       this.uploadStatus = '';
       this.isDragOver = false;
+      this._errorTimer = null;
     }, 4000);
   }
 
@@ -1048,6 +1050,10 @@ export class ScionPageTerminal extends LitElement {
     if (this.resizeTimer) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
+    }
+    if (this._errorTimer) {
+      clearTimeout(this._errorTimer);
+      this._errorTimer = null;
     }
     this.fitAddon = null;
     this.clipboardAddon = null;
