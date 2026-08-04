@@ -559,6 +559,90 @@ func TestResolveProjectPath_ProjectNotGlobal(t *testing.T) {
 	}
 }
 
+func TestFindProjectMarkerPath_MarkerFile(t *testing.T) {
+	// Directory with .scion file -> returns path
+	tmpDir := t.TempDir()
+	markerPath := filepath.Join(tmpDir, DotScion)
+	_ = os.WriteFile(markerPath, []byte("project-id: test-id\nproject-slug: test\n"), 0644)
+
+	origWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(tmpDir)
+
+	got := FindProjectMarkerPath()
+	if got != markerPath {
+		t.Errorf("FindProjectMarkerPath() = %q, want %q", got, markerPath)
+	}
+}
+
+func TestFindProjectMarkerPath_Directory(t *testing.T) {
+	// Directory with .scion directory -> returns "" (the R1 fix)
+	tmpDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmpDir, DotScion), 0755)
+
+	origWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(tmpDir)
+
+	got := FindProjectMarkerPath()
+	if got != "" {
+		t.Errorf("FindProjectMarkerPath() = %q, want empty string when .scion is a directory", got)
+	}
+}
+
+func TestFindProjectMarkerPath_WalkUpFindsParent(t *testing.T) {
+	// Walk-up: marker in parent dir, none in cwd -> returns parent path
+	parentDir := t.TempDir()
+	markerPath := filepath.Join(parentDir, DotScion)
+	_ = os.WriteFile(markerPath, []byte("project-id: test-id\nproject-slug: test\n"), 0644)
+
+	childDir := filepath.Join(parentDir, "subdir")
+	_ = os.MkdirAll(childDir, 0755)
+
+	origWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(childDir)
+
+	got := FindProjectMarkerPath()
+	if got != markerPath {
+		t.Errorf("FindProjectMarkerPath() = %q, want %q", got, markerPath)
+	}
+}
+
+func TestFindProjectMarkerPath_DirInCwdBlocksParentMarker(t *testing.T) {
+	// Walk-up: .scion dir in cwd, .scion file in parent -> returns "" (stops at dir)
+	parentDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(parentDir, DotScion), []byte("project-id: parent-id\nproject-slug: parent\n"), 0644)
+
+	childDir := filepath.Join(parentDir, "subdir")
+	_ = os.MkdirAll(filepath.Join(childDir, DotScion), 0755) // .scion directory in child
+
+	origWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(childDir)
+
+	got := FindProjectMarkerPath()
+	if got != "" {
+		t.Errorf("FindProjectMarkerPath() = %q, want empty string when .scion dir in cwd blocks walk-up to parent marker", got)
+	}
+}
+
+func TestFindProjectMarkerPath_NoScionAnywhere(t *testing.T) {
+	// No .scion anywhere -> returns ""
+	tmpDir := t.TempDir()
+	childDir := filepath.Join(tmpDir, "a", "b", "c")
+	_ = os.MkdirAll(childDir, 0755)
+
+	origWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(childDir)
+
+	got := FindProjectMarkerPath()
+	if got != "" {
+		t.Errorf("FindProjectMarkerPath() = %q, want empty string when no .scion exists", got)
+	}
+}
+
 func containsSubstring(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstringHelper(s, substr))
 }

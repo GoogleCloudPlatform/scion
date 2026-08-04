@@ -95,6 +95,11 @@ func FindProjectRoot() (string, bool) {
 // FindProjectMarkerPath walks up from the current working directory looking for a
 // .scion marker file (a regular file, not a directory). Returns the absolute path
 // to the marker file, or "" if none is found.
+//
+// The walk stops at the first .scion entry it encounters, regardless of type.
+// If the entry is a regular file, its path is returned. If it is a directory,
+// "" is returned immediately — this keeps the walk consistent with
+// FindProjectRoot, which also stops at the first .scion it finds.
 func FindProjectMarkerPath() string {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -104,8 +109,11 @@ func FindProjectMarkerPath() string {
 	for {
 		p := filepath.Join(dir, DotScion)
 		info, err := os.Stat(p)
-		if err == nil && !info.IsDir() {
-			return p
+		if err == nil {
+			if !info.IsDir() {
+				return p // found a marker file
+			}
+			return "" // found a .scion directory — not a marker
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {

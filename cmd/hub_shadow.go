@@ -245,7 +245,22 @@ func runHubUnshadow(cmd *cobra.Command, args []string) error {
 
 	util.Debugf("Removed shadow marker for project %s (ID: %s)", marker.ProjectName, marker.ProjectID)
 
+	// Clean up the settings directory under ~/.scion/project-configs/<slug>__<shortuuid>/
+	settingsCleaned := false
+	home, homeErr := os.UserHomeDir()
+	if homeErr == nil && home != "" {
+		configDir := filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir, marker.DirName())
+		if err := os.RemoveAll(configDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not remove settings directory %s: %v\n", configDir, err)
+		} else {
+			settingsCleaned = true
+		}
+	}
+
 	fmt.Printf("Removed shadow for project '%s' from this directory.\n", marker.ProjectName)
+	if settingsCleaned {
+		fmt.Println("Local settings directory cleaned up.")
+	}
 	fmt.Println("The project and its agents remain on the Hub.")
 
 	return nil
