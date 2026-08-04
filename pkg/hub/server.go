@@ -822,9 +822,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
-		if cfg.StalledThreshold > 0 {
-			slog.Warn("stalled_threshold below minimum 2m, using default 5m",
-				"configured", cfg.StalledThreshold)
+		if cfg.StalledThreshold != 0 {
+			slog.Warn("stalled_threshold below minimum 2m, using default",
+				"configured", cfg.StalledThreshold, "default", defaults.StalledThreshold)
 		}
 		cfg.StalledThreshold = defaults.StalledThreshold
 	}

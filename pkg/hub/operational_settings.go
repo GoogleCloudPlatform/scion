@@ -723,8 +723,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.StalledThreshold != "" {
 		if d, err := time.ParseDuration(snap.StalledThreshold); err == nil {
 			if d < 2*time.Minute {
-				slog.Warn("stalled_threshold below minimum 2m, using default 5m", "configured", snap.StalledThreshold)
-				d = 5 * time.Minute
+				defaultThreshold := DefaultServerConfig().StalledThreshold
+				slog.Warn("stalled_threshold below minimum 2m, using default",
+					"configured", snap.StalledThreshold, "default", defaultThreshold)
+				d = defaultThreshold
 			}
 			if s.config.StalledThreshold != d {
 				applied = append(applied, "stalled_threshold")

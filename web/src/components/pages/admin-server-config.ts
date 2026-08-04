@@ -1765,7 +1765,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
-    if (ok('server.hub.stalled_threshold') && this.hubStalledThreshold)
+    if (ok('server.hub.stalled_threshold'))
       hub.stalled_threshold = this.hubStalledThreshold;
     server.hub = hub;
 

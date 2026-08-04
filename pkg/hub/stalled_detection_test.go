@@ -430,8 +430,9 @@ func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	if srv.config.StalledThreshold != 5*time.Minute {
-		t.Errorf("StalledThreshold = %v, want %v", srv.config.StalledThreshold, 5*time.Minute)
+	defaultThreshold := DefaultServerConfig().StalledThreshold
+	if srv.config.StalledThreshold != defaultThreshold {
+		t.Errorf("StalledThreshold = %v, want %v", srv.config.StalledThreshold, defaultThreshold)
 	}
 }
 
@@ -450,8 +451,10 @@ func TestNew_ClampsStalledThresholdBelowMinimum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	if srv.config.StalledThreshold != 5*time.Minute {
-		t.Errorf("StalledThreshold = %v, want %v (should clamp to default)", srv.config.StalledThreshold, 5*time.Minute)
+	defaultThreshold := DefaultServerConfig().StalledThreshold
+	if srv.config.StalledThreshold != defaultThreshold {
+		t.Errorf("StalledThreshold = %v, want %v (should clamp to default)",
+			srv.config.StalledThreshold, defaultThreshold)
 	}
 }
 
