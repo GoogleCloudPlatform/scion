@@ -637,6 +637,138 @@ func TestHeartbeatService_DefaultManagerFailsNoAuxiliary(t *testing.T) {
 	}
 }
 
+// TestHeartbeatService_SwapManagerUpdatesRuntime verifies that calling
+// SwapManager replaces the agent manager used by the heartbeat, so that
+// after a runtime swap (e.g. from a missing "container" binary to
+// podman), the heartbeat uses the new working manager instead of the
+// stale one that was captured at construction time.
+func TestHeartbeatService_SwapManagerUpdatesRuntime(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+
+	// Original manager fails (simulates missing "container" binary)
+	oldMgr := &heartbeatMockManager{
+		err: fmt.Errorf("exec: \"container\": executable file not found in $PATH"),
+	}
+
+	svc := NewHeartbeatService(client, "test-host", time.Hour, oldMgr, nil, slog.Default())
+
+	// First heartbeat: old manager fails, no agents reported
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat (before swap) failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+	if len(calls[0].Heartbeat.Projects) != 0 {
+		t.Errorf("Expected 0 projects before swap, got %d", len(calls[0].Heartbeat.Projects))
+	}
+
+	// Swap to a working manager (simulates runtime detection fixing the binary)
+	newMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running"},
+		},
+	}
+	svc.SwapManager(newMgr)
+
+	// Second heartbeat: new manager works, agents are reported
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat (after swap) failed: %v", err)
+	}
+	calls = client.getHeartbeatCalls()
+	if len(calls) != 2 {
+		t.Fatalf("Expected 2 heartbeat calls, got %d", len(calls))
+	}
+	heartbeat := calls[1].Heartbeat
+	if len(heartbeat.Projects) != 1 {
+		t.Fatalf("Expected 1 project after swap, got %d", len(heartbeat.Projects))
+	}
+	if heartbeat.Projects[0].AgentCount != 1 {
+		t.Errorf("Expected 1 agent after swap, got %d", heartbeat.Projects[0].AgentCount)
+	}
+}
+
+// TestHeartbeatService_SwapManagerToNil verifies that swapping the manager
+// to nil (e.g. when the runtime is removed) gracefully produces an empty
+// heartbeat rather than panicking.
+func TestHeartbeatService_SwapManagerToNil(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+
+	mgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running"},
+		},
+	}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, mgr, nil, slog.Default())
+
+	// Swap to nil
+	svc.SwapManager(nil)
+
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat after swap to nil failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+	if len(calls[0].Heartbeat.Projects) != 0 {
+		t.Errorf("Expected 0 projects after swap to nil, got %d", len(calls[0].Heartbeat.Projects))
+	}
+}
+
+// TestHeartbeatService_ConcurrentSwapDuringHeartbeat exercises SwapManager
+// racing with ForceHeartbeat to verify there are no data races. This test
+// is primarily useful under `go test -race`.
+func TestHeartbeatService_ConcurrentSwapDuringHeartbeat(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+
+	initialMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-old", ProjectID: "proj-1", Phase: "running"},
+		},
+	}
+	swappedMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-new", ProjectID: "proj-1", Phase: "running"},
+		},
+	}
+
+	svc := NewHeartbeatService(client, "test-host", time.Hour, initialMgr, nil, slog.Default())
+
+	// Run concurrent heartbeats and swaps. The race detector will flag any
+	// unsynchronised access to the manager field.
+	var wg sync.WaitGroup
+	const iterations = 50
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			_ = svc.ForceHeartbeat(context.Background())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				svc.SwapManager(swappedMgr)
+			} else {
+				svc.SwapManager(initialMgr)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// Sanity: at least some heartbeats were sent
+	calls := client.getHeartbeatCalls()
+	if len(calls) == 0 {
+		t.Fatal("Expected at least one heartbeat call")
+	}
+}
+
 func TestHeartbeatService_ManagerReturnsEmptyList(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	mgr := &heartbeatMockManager{agents: nil, err: nil}

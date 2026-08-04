@@ -80,6 +80,16 @@ type HeartbeatService struct {
 	doneCh chan struct{}
 }
 
+// SwapManager replaces the agent manager used by the heartbeat service.
+// This is called when the broker's container runtime changes (e.g. via
+// Server.SwapRuntime during onboarding) so the heartbeat picks up the
+// new runtime without being restarted.
+func (s *HeartbeatService) SwapManager(m agent.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.manager = m
+}
+
 // NewHeartbeatService creates a new heartbeat service.
 // The client must be an authenticated hubclient.RuntimeBrokerService.
 // The manager is used to gather agent status information.
@@ -191,12 +201,11 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 		Status: status,
 	}
 
-	// If we have a manager, gather per-project agent counts
-	if s.manager != nil {
-		projectAgents := s.gatherProjectAgents(ctx)
-		if len(projectAgents) > 0 {
-			heartbeat.Projects = projectAgents
-		}
+	// Gather per-project agent counts. gatherProjectAgents snapshots the
+	// current manager under its own lock and handles nil, so no separate
+	// nil check is needed here.
+	if projectAgents := s.gatherProjectAgents(ctx); len(projectAgents) > 0 {
+		heartbeat.Projects = projectAgents
 	}
 
 	return heartbeat
@@ -204,14 +213,21 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 
 // gatherProjectAgents collects agent information grouped by project.
 func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.ProjectHeartbeat {
-	if s.manager == nil {
+	// Snapshot the current manager under the lock so that a concurrent
+	// SwapManager call (triggered by Server.SwapRuntime) is picked up
+	// on the next heartbeat tick rather than racing with this one.
+	s.mu.Lock()
+	mgr := s.manager
+	s.mu.Unlock()
+
+	if mgr == nil {
 		return nil
 	}
 
 	// List all agents managed by this broker (default runtime).
 	// If the default manager fails (e.g. its runtime binary is missing),
 	// log a warning and continue — auxiliary managers may still work.
-	agents, err := s.manager.List(ctx, nil)
+	agents, err := mgr.List(ctx, nil)
 	if err != nil {
 		s.log.Warn("Default runtime agent listing failed for heartbeat, trying auxiliary runtimes", "error", err)
 		agents = nil

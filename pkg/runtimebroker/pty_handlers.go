@@ -322,6 +322,13 @@ type LocalPTYSession struct {
 // newLocalPTYSession creates a new local PTY session.
 func newLocalPTYSession(ctx context.Context, agentID, containerID, runtimeCmd, execUser, namespace string, conn *websocket.Conn, cols, rows int, k8sConfig *rest.Config, k8sClientset kubernetes.Interface) *LocalPTYSession {
 	if runtimeCmd == "" {
+		// The caller (handleAgentAttach) resolves runtimeCmd from the agent's
+		// RuntimeName or the server's detected RuntimeCommand, so this branch
+		// should not be reached. Log a warning so the fallback is visible
+		// rather than silently using a binary that may not exist on podman-only
+		// or non-standard-path hosts.
+		slog.Warn("PTY session created without explicit runtime command, falling back to docker",
+			"agent_id", agentID)
 		runtimeCmd = "docker"
 	}
 	execUser = sanitizeExecUser(execUser)
