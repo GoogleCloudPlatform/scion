@@ -1431,6 +1431,18 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	// would be ownerless — a condition that should be detected and reported.
 	// Full probe deferred to a follow-up change.
 
+	// Step 0.7: Check bot has permission to create threads in the target channel.
+	botPerms, permErr := s.State.UserChannelPermissions(s.State.User.ID, channelID)
+	if permErr == nil {
+		const createPublicThreads int64 = 0x800000000
+		if botPerms&createPublicThreads == 0 {
+			h.followup(s, i, "The bot does not have **Create Public Threads** permission in this channel. "+
+				"Please re-invite the bot using the invite link from the admin settings page, "+
+				"or grant the permission manually in Server Settings > Roles.")
+			return
+		}
+	}
+
 	// --- Phase 6: Concurrent fan-out ---
 	h.log.Info("Thread command validation passed, starting orchestration",
 		"title", title,
@@ -1511,11 +1523,15 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 		h.log.Error("Thread command: both agent and thread creation failed",
 			"agent_error", agentErr, "thread_error", threadErr,
 			"slug", slug, "title", title)
+		threadErrMsg := threadErr.Error()
+		if strings.Contains(threadErrMsg, "403") || strings.Contains(threadErrMsg, "Missing Access") {
+			threadErrMsg += " (This may be a permissions issue — try re-inviting the bot from the admin settings page.)"
+		}
 		h.followup(s, i, fmt.Sprintf(
 			"Failed to create both the agent and the thread.\n"+
 				"Agent error: %s\n"+
 				"Thread error: %s",
-			agentErr.Error(), threadErr.Error()))
+			agentErr.Error(), threadErrMsg))
 		return
 
 	case agentErr != nil && threadErr == nil:
@@ -1540,11 +1556,15 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 		// Agent OK, thread failed — ephemeral reply MUST name the slug.
 		h.log.Error("Thread command: thread creation failed but agent was created",
 			"thread_error", threadErr, "slug", agentResp.Slug)
+		threadErrMsg := threadErr.Error()
+		if strings.Contains(threadErrMsg, "403") || strings.Contains(threadErrMsg, "Missing Access") {
+			threadErrMsg += " (This may be a permissions issue — try re-inviting the bot from the admin settings page.)"
+		}
 		h.followup(s, i, fmt.Sprintf(
 			"Agent **%s** was created but the Discord thread could not be created.\n"+
 				"Error: %s\n"+
 				"The agent is running. Create a thread manually and run `/scion default %s` in it to bind.",
-			agentResp.Slug, threadErr.Error(), agentResp.Slug))
+			agentResp.Slug, threadErrMsg, agentResp.Slug))
 		return
 	}
 
