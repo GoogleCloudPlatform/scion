@@ -447,6 +447,8 @@ export class ScionPageProjectCreate extends LitElement {
     this.mode = (e.target as HTMLElement & { value: string }).value as ProjectMode;
     if (this.mode === 'template') {
       void this.loadTemplates();
+    } else {
+      this.templateGitRemote = '';
     }
   }
 
