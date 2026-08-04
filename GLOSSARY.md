@@ -19,7 +19,7 @@ A namespace and collection of agents and configuration, represented by a `.scion
 _Avoid_: grove, group, repo, workspace
 
 **Template**:
-A harness-agnostic folder resource defining a generic agent — its system prompt, agent instructions, skills, services, and more — containing nothing specific to any one harness. A default harness-config may optionally be named, but is not required.
+A harness-agnostic folder resource defining a generic agent — its system prompt, agent instructions, skills, services, and more — containing nothing specific to any one harness. Templates can live locally (in project or global scopes) or be managed as fully fledged Hub-level resources with CRUD, CLI, SDK, and Web UI support. A default harness-config may optionally be named, but is not required.
 _Avoid_: role, blueprint, profile, config
 _See also_: Harness-config (its harness-specific counterpart), Skill
 

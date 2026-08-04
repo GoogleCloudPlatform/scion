@@ -22,7 +22,7 @@ An agent spawned by another agent; "sub" only from the orchestrating user's view
 A namespace and collection of agents and configuration, represented by a `.scion` directory and usually one-to-one with a git repository. Not the same as a **Group**.
 
 ### Template
-A harness-agnostic folder resource defining a generic agent — its system prompt, agent instructions, skills, services, and more — containing nothing specific to any one harness. The harness-agnostic counterpart to a **Harness-config**.
+A harness-agnostic folder resource defining a generic agent — its system prompt, agent instructions, skills, services, and more — containing nothing specific to any one harness. Templates can live locally (project or global scope) or be managed as fully fledged Hub-level resources with CRUD, CLI, SDK, and Web UI support. The harness-agnostic counterpart to a **Harness-config**.
 
 ### Harness
 The external, vendor-supplied agent software that Scion drives, such as Claude Code, Gemini CLI, Codex, or OpenCode. Provided outside Scion; Scion only configures and runs it. A harness is **not** a plugin.
