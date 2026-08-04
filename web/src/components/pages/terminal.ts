@@ -104,6 +104,15 @@ export class ScionPageTerminal extends LitElement {
   @state()
   private captureAuthConflicts: string[] | null = null;
 
+  // --- Drag-and-drop file upload state ---
+  @state() private uploadEnabled = false;
+  @state() private uploadDisabledReason = '';
+  @state() private uploadTargetDir = '';     // shared dir name (e.g. "scratchpad")
+  @state() private uploadBasePath = '';      // container path (e.g. "/scion-volumes/scratchpad")
+  @state() private isDragOver = false;
+  @state() private isUploading = false;
+  @state() private uploadStatus = '';        // progress/error message in overlay
+
   private terminal: Terminal | null = null;
   private fitAddon: FitAddon | null = null;
   private clipboardAddon: ClipboardAddon | null = null;
@@ -112,6 +121,9 @@ export class ScionPageTerminal extends LitElement {
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private sseClient: SSEClient | null = null;
   private sseUpdateHandler: ((e: CustomEvent<SSEUpdateEvent>) => void) | null = null;
+  private _dragCounter = 0;
+  private _windowDragOver: ((e: DragEvent) => void) | null = null;
+  private _windowDrop: ((e: DragEvent) => void) | null = null;
 
   static override styles = css`
     :host {
@@ -304,6 +316,47 @@ export class ScionPageTerminal extends LitElement {
       text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
     }
 
+    .drop-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.6);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      z-index: 11;
+      pointer-events: none;
+      border: 2px dashed transparent;
+      font-size: 1rem;
+      color: #94a3b8;
+    }
+
+    .drop-overlay.visible {
+      display: flex;
+    }
+
+    .drop-overlay.visible:not(.disabled) {
+      border-color: #60a5fa;
+    }
+
+    .drop-overlay.disabled {
+      border-color: #ef4444;
+      color: #ef4444;
+    }
+
+    .drop-overlay sl-spinner {
+      font-size: 1.5rem;
+      --indicator-color: #60a5fa;
+    }
+
+    .drop-overlay sl-icon {
+      font-size: 2rem;
+    }
+
     .loading-state,
     .error-state {
       display: flex;
@@ -458,6 +511,15 @@ export class ScionPageTerminal extends LitElement {
         this.agentId = match[1];
       }
     }
+
+    // Prevent the browser from navigating to a dropped file (which would
+    // destroy the terminal session). Must be on window, not the drop target,
+    // to catch near-miss drops outside the wrapper.
+    this._windowDragOver = (e: DragEvent) => { e.preventDefault(); };
+    this._windowDrop = (e: DragEvent) => { e.preventDefault(); };
+    window.addEventListener('dragover', this._windowDragOver);
+    window.addEventListener('drop', this._windowDrop);
+
     void this.loadAgentInfo();
   }
 
@@ -488,6 +550,11 @@ export class ScionPageTerminal extends LitElement {
       this.exposedPorts = agent.exposedPorts ?? [];
       dispatchPageTitle(this, 'Terminal', agent.name || this.agentId);
       this.connectSSE();
+
+      // Resolve upload target shared dir (best-effort, non-blocking for terminal init)
+      if (this.projectId) {
+        this.resolveUploadTarget();
+      }
 
       if (!isTerminalAvailable(agent)) {
         this.error = agent.activity === 'offline'
@@ -827,9 +894,145 @@ export class ScionPageTerminal extends LitElement {
     }
   }
 
+  // --- Drag-and-drop file upload ---
+
+  private async resolveUploadTarget(): Promise<void> {
+    try {
+      const resp = await apiFetch(`/api/v1/projects/${this.projectId}/shared-dirs`);
+      if (!resp.ok) {
+        this.uploadEnabled = false;
+        this.uploadDisabledReason = 'Could not determine shared directories for file upload';
+        return;
+      }
+      const data = await resp.json();
+      const dirs = (data.sharedDirs ?? []) as Array<{ name: string; read_only?: boolean; in_workspace?: boolean }>;
+      // Filter: writable, non-in_workspace
+      const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace);
+      const target = candidates.find((d) => d.name === 'scratchpad') || candidates[0];
+      if (target) {
+        this.uploadEnabled = true;
+        this.uploadTargetDir = target.name;
+        this.uploadBasePath = `/scion-volumes/${target.name}`;
+      } else {
+        this.uploadEnabled = false;
+        this.uploadDisabledReason = 'No writable shared directory available for file upload';
+      }
+    } catch {
+      this.uploadEnabled = false;
+      this.uploadDisabledReason = 'Could not determine shared directories for file upload';
+    }
+  }
+
+  private _onDragEnter(e: DragEvent): void {
+    e.preventDefault();
+    this._dragCounter++;
+    if (this._dragCounter === 1) this.isDragOver = true;
+  }
+
+  private _onDragLeave(_e: DragEvent): void {
+    this._dragCounter--;
+    if (this._dragCounter === 0) this.isDragOver = false;
+  }
+
+  private _onDragOver(e: DragEvent): void {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = this.uploadEnabled ? 'copy' : 'none';
+  }
+
+  private async _onDrop(e: DragEvent): Promise<void> {
+    e.preventDefault();
+    this._dragCounter = 0;
+    this.isDragOver = false;
+    if (!this.uploadEnabled || !e.dataTransfer?.files.length) return;
+    await this._handleFileDrop(e.dataTransfer.files);
+  }
+
+  private async _handleFileDrop(files: FileList): Promise<void> {
+    // Client-side size validation
+    const MAX_FILE = 50 * 1024 * 1024;  // 50MB
+    const MAX_TOTAL = 100 * 1024 * 1024; // 100MB
+    let total = 0;
+    for (const f of files) {
+      if (f.size > MAX_FILE) {
+        this._showUploadError(`File "${f.name}" exceeds 50MB limit`);
+        return;
+      }
+      total += f.size;
+    }
+    if (total > MAX_TOTAL) {
+      this._showUploadError('Total upload exceeds 100MB limit');
+      return;
+    }
+
+    this.isUploading = true;
+    const batchId = crypto.randomUUID();
+    const formData = new FormData();
+    const paths: string[] = [];
+
+    for (const file of files) {
+      const relPath = `.attachments/_web/${batchId}/${file.name}`;
+      formData.append(relPath, file);
+      paths.push(`${this.uploadBasePath}/.attachments/_web/${batchId}/${file.name}`);
+    }
+
+    this.uploadStatus = `Uploading ${files.length} file${files.length > 1 ? 's' : ''}...`;
+
+    try {
+      const resp = await apiFetch(
+        `/api/v1/projects/${this.projectId}/shared-dirs/${this.uploadTargetDir}/files`,
+        { method: 'POST', body: formData }
+      );
+      if (!resp.ok) {
+        if (resp.status === 409) {
+          this._showUploadError('File upload requires a co-located runtime broker');
+          this.uploadEnabled = false;
+          this.uploadDisabledReason = 'File upload requires a co-located runtime broker';
+          return;
+        }
+        const err = await extractApiError(resp, 'Upload failed');
+        this._showUploadError(err);
+        return;
+      }
+
+      // Inject paths into terminal
+      const quoted = paths.map((p) => this._quoteForShell(p));
+      this.sendData(quoted.join(' ') + ' ');
+      this.terminal?.focus();
+    } catch {
+      this._showUploadError('Upload failed: network error');
+    } finally {
+      this.isUploading = false;
+      this.uploadStatus = '';
+    }
+  }
+
+  private _quoteForShell(path: string): string {
+    if (/^[A-Za-z0-9._\/-]+$/.test(path)) return path;
+    return "'" + path.replace(/'/g, "'\\''") + "'";
+  }
+
+  private _showUploadError(msg: string): void {
+    this.uploadStatus = msg;
+    this.isUploading = false;
+    // Keep the overlay visible with the error for 4 seconds
+    this.isDragOver = true;
+    setTimeout(() => {
+      this.uploadStatus = '';
+      this.isDragOver = false;
+    }, 4000);
+  }
+
   private cleanup(): void {
     this.sendTmuxDetach();
     this.disconnectSSE();
+    if (this._windowDragOver) {
+      window.removeEventListener('dragover', this._windowDragOver);
+      this._windowDragOver = null;
+    }
+    if (this._windowDrop) {
+      window.removeEventListener('drop', this._windowDrop);
+      this._windowDrop = null;
+    }
     if (this.socket) {
       this.socket.close(1000, 'detach');
       this.socket = null;
@@ -1149,13 +1352,29 @@ export class ScionPageTerminal extends LitElement {
             </div>
           `
         : ''}
-      <div class="terminal-wrapper">
+      <div
+        class="terminal-wrapper"
+        @dragenter=${(e: DragEvent) => this._onDragEnter(e)}
+        @dragleave=${(e: DragEvent) => this._onDragLeave(e)}
+        @dragover=${(e: DragEvent) => this._onDragOver(e)}
+        @drop=${(e: DragEvent) => this._onDrop(e)}
+      >
         <div class="terminal-container"></div>
         ${!this.connected && this.wasConnected
           ? html`<div class="disconnected-overlay">
               <span class="overlay-text">DISCONNECTED</span>
             </div>`
           : ''}
+        <div class="drop-overlay ${this.isDragOver || this.uploadStatus ? 'visible' : ''} ${!this.uploadEnabled ? 'disabled' : ''}">
+          ${this.isUploading
+            ? html`<sl-spinner></sl-spinner><span>${this.uploadStatus}</span>`
+            : this.uploadStatus
+              ? html`<sl-icon name="x-circle"></sl-icon><span>${this.uploadStatus}</span>`
+              : this.uploadEnabled
+                ? html`<sl-icon name="cloud-upload"></sl-icon><span>Drop files to upload</span>`
+                : html`<sl-icon name="x-circle"></sl-icon><span>${this.uploadDisabledReason}</span>`
+          }
+        </div>
       </div>
       ${this.renderCaptureAuthConflictDialog()}
     `;
