@@ -121,7 +121,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				agents[i].Activity = ""
 				// Best-effort convergence: only persist if on-disk state
 				// differs from the terminal phase we want to record.
-				if parsedInfo == nil || parsedInfo.Phase != terminalPhase || parsedInfo.Activity != "" {
+				if parsedInfo != nil && (parsedInfo.Phase != terminalPhase || parsedInfo.Activity != "") {
 					if err := persistAgentInfoState(agentInfoJSON, terminalPhase, ""); err != nil {
 						slog.Debug("failed to persist terminal agent state", "path", agentInfoJSON, "err", err)
 					}
