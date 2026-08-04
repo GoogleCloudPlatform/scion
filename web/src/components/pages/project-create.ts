@@ -112,6 +112,9 @@ export class ScionPageProjectCreate extends LitElement {
   @state()
   private templatesLoading = false;
 
+  @state()
+  private templateGitRemote = '';
+
   private pathCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
   override connectedCallback(): void {
@@ -444,6 +447,8 @@ export class ScionPageProjectCreate extends LitElement {
     this.mode = (e.target as HTMLElement & { value: string }).value as ProjectMode;
     if (this.mode === 'template') {
       void this.loadTemplates();
+    } else {
+      this.templateGitRemote = '';
     }
   }
 
@@ -552,7 +557,10 @@ export class ScionPageProjectCreate extends LitElement {
         const response = await apiFetch(`/api/v1/projects/${this.selectedTemplateId}/clone`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: this.name.trim() }),
+          body: JSON.stringify({
+            name: this.name.trim(),
+            ...(this.templateGitRemote ? { gitRemote: this.templateGitRemote } : {}),
+          }),
         });
         if (!response.ok) {
           const errorText = await extractApiError(response, 'Failed to create project from template');
@@ -821,6 +829,17 @@ export class ScionPageProjectCreate extends LitElement {
                       : this.templates.map(t => html`<sl-option value=${t.id}>${t.name}</sl-option>`)}
                   </sl-select>
                   `}
+                </div>
+                <div class="form-field">
+                  <label>Git Remote URL (optional)</label>
+                  <sl-input
+                    placeholder="https://github.com/org/repo.git"
+                    .value=${this.templateGitRemote}
+                    @sl-input=${(e: Event) => { this.templateGitRemote = (e.target as HTMLElement & {value: string}).value; }}
+                  ></sl-input>
+                  <div class="hint">
+                    Override the git remote from the template. Leave blank to use the template's default.
+                  </div>
                 </div>
               `
             : nothing}

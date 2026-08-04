@@ -320,6 +320,40 @@ func TestProjectClone_HappyPath(t *testing.T) {
 	assert.Equal(t, "my-template", cloneTpls.Items[0].Slug)
 }
 
+func TestProjectClone_GitRemoteOverride(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+
+	overrideURL := "https://github.com/other-org/other-repo.git"
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]interface{}{"name": "Override Remote", "gitRemote": overrideURL})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+	// The clone should have the overridden git remote (normalized), not the source's
+	assert.NotEqual(t, src.GitRemote, clone.GitRemote)
+	// NormalizeGitRemote strips scheme and .git suffix
+	assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
+}
+
+func TestProjectClone_NoGitRemoteOverride(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]interface{}{"name": "No Override"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+	// Without override, the clone should keep the source's git remote
+	assert.Equal(t, src.GitRemote, clone.GitRemote)
+}
+
 func TestProjectClone_UnsetAnnotations(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

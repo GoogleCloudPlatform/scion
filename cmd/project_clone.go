@@ -25,9 +25,10 @@ import (
 )
 
 var (
-	cloneProjectName string
-	cloneProjectSlug string
-	cloneAsTemplate  bool
+	cloneProjectName      string
+	cloneProjectSlug      string
+	cloneAsTemplate       bool
+	cloneProjectGitRemote string
 )
 
 var projectCloneCmd = &cobra.Command{
@@ -84,6 +85,7 @@ Requires Hub connectivity.`,
 			Name:       name,
 			Slug:       cloneProjectSlug,
 			AsTemplate: cloneAsTemplate,
+			GitRemote:  cloneProjectGitRemote,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to clone project: %w", err)
@@ -112,5 +114,6 @@ func init() {
 	projectCloneCmd.Flags().StringVar(&cloneProjectName, "name", "", "Name for the cloned project (default: \"<source> copy\")")
 	projectCloneCmd.Flags().StringVar(&cloneProjectSlug, "slug", "", "Explicit slug for the cloned project (default: auto-generated from name)")
 	projectCloneCmd.Flags().BoolVar(&cloneAsTemplate, "as-template", false, "Mark the cloned project as a template (admin-only)")
+	projectCloneCmd.Flags().StringVar(&cloneProjectGitRemote, "git-remote", "", "Override the git remote URL for the cloned project")
 	projectCmd.AddCommand(projectCloneCmd)
 }
