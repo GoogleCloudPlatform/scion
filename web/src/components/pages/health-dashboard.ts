@@ -71,7 +71,7 @@ interface HealthSummary {
   dispatch: {
     stuck_messages: number;
     failed_1h: number;
-  };
+  } | null;
   stall_config: {
     threshold_seconds: number;
     auto_suspend: boolean;
@@ -94,9 +94,6 @@ export class ScionPageHealthDashboard extends LitElement {
 
   @state()
   private editingStall = false;
-
-  @state()
-  private stallThresholdMinutes = 5;
 
   @state()
   private stallAutoSuspend = false;
@@ -151,7 +148,6 @@ export class ScionPageHealthDashboard extends LitElement {
       this.error = null;
       // Sync stall config editor state
       if (this.data && !this.editingStall) {
-        this.stallThresholdMinutes = Math.round(this.data.stall_config.threshold_seconds / 60);
         this.stallAutoSuspend = this.data.stall_config.auto_suspend;
       }
     } catch (e) {
@@ -683,6 +679,17 @@ export class ScionPageHealthDashboard extends LitElement {
   }
 
   private renderDispatchCard(d: HealthSummary) {
+    if (!d.dispatch) {
+      return html`
+        <div class="card">
+          <div class="card-title">Dispatch Pipeline</div>
+          <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
+            Dispatch metrics not yet available. A future update will expose dispatch
+            pipeline stats via the health summary API.
+          </div>
+        </div>
+      `;
+    }
     return html`
       <div class="card">
         <div class="card-title">Dispatch Pipeline</div>
@@ -702,16 +709,18 @@ export class ScionPageHealthDashboard extends LitElement {
       return html`
         <div class="card">
           <div class="card-title">Stall Detection Settings</div>
+          <!-- Threshold is a startup-time ServerConfig setting and cannot be
+               changed at runtime via the operational settings API. Display it
+               as read-only. Only auto_suspend_stalled is a runtime setting. -->
+          <div class="stat-row" style="margin-bottom:0.75rem">
+            <span class="label">Stalled Threshold</span>
+            <span>${Math.round(d.stall_config.threshold_seconds / 60)} min <span style="font-size:0.75rem;color:var(--scion-text-muted,#94a3b8)">(set at startup)</span></span>
+          </div>
           <div class="stall-edit-form">
-            <label>
-              Threshold (min):
-              <input type="number" min="1" max="60" .value=${String(this.stallThresholdMinutes)}
-                @input=${(e: InputEvent) => { this.stallThresholdMinutes = parseInt((e.target as HTMLInputElement).value) || 5; }} />
-            </label>
             <label style="display:flex;align-items:center;gap:0.375rem">
               <input type="checkbox" .checked=${this.stallAutoSuspend}
                 @change=${() => { this.stallAutoSuspend = !this.stallAutoSuspend; }} />
-              Auto-suspend stalled
+              Auto-suspend stalled agents
             </label>
             <button class="save-btn" ?disabled=${this.savingStall} @click=${() => void this.saveStallConfig()}>
               ${this.savingStall ? 'Saving...' : 'Save'}

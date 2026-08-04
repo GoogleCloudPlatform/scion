@@ -452,11 +452,18 @@ func checkDoctorBrokerConnectivity(hubEP string, hubConnected bool, client hubcl
 			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
 		}
 	}
-	if !hubConnected || client == nil {
+	if !hubConnected {
 		return scionruntime.CheckResult{
 			Name:    "broker-connectivity",
 			Status:  "skip",
-			Message: "Skipped (Hub connectivity check failed)",
+			Message: "Skipped (Hub unreachable)",
+		}
+	}
+	if client == nil {
+		return scionruntime.CheckResult{
+			Name:    "broker-connectivity",
+			Status:  "skip",
+			Message: "Skipped (Hub client not available)",
 		}
 	}
 
@@ -515,11 +522,18 @@ func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Cl
 			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
 		}
 	}
-	if !hubConnected || client == nil {
+	if !hubConnected {
 		return scionruntime.CheckResult{
 			Name:    "agent-health",
 			Status:  "skip",
-			Message: "Skipped (Hub connectivity check failed)",
+			Message: "Skipped (Hub unreachable)",
+		}
+	}
+	if client == nil {
+		return scionruntime.CheckResult{
+			Name:    "agent-health",
+			Status:  "skip",
+			Message: "Skipped (Hub client not available)",
 		}
 	}
 
@@ -592,33 +606,28 @@ func checkDoctorNFSMounts(hubEP string, hubConnected bool, client hubclient.Clie
 			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
 		}
 	}
-	if !hubConnected || client == nil {
+	if !hubConnected {
 		return scionruntime.CheckResult{
 			Name:    "nfs-mounts",
 			Status:  "skip",
-			Message: "Skipped (Hub connectivity check failed)",
+			Message: "Skipped (Hub unreachable)",
 		}
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	resp, err := client.RuntimeBrokers().List(ctx, nil)
-	if err != nil || len(resp.Brokers) == 0 {
+	if client == nil {
 		return scionruntime.CheckResult{
 			Name:    "nfs-mounts",
 			Status:  "skip",
-			Message: "No brokers available to check NFS status",
+			Message: "Skipped (Hub client not available)",
 		}
 	}
 
 	// NFS health info would come from broker capabilities if reported.
-	// Currently broker capabilities do not expose NFS-specific health,
-	// so this is a best-effort pass when brokers are reachable.
+	// Currently the broker heartbeat protocol does not expose NFS-specific
+	// health data, so we cannot evaluate this check.
 	return scionruntime.CheckResult{
 		Name:    "nfs-mounts",
-		Status:  "pass",
-		Message: "NFS mount status not reported by brokers (no issues detected)",
+		Status:  "skip",
+		Message: "NFS health not yet reported by broker API",
 	}
 }
 
@@ -657,6 +666,10 @@ func checkDoctorTelemetry() scionruntime.CheckResult {
 }
 
 // checkDoctorContainerImages performs D7: Container images check (local).
+// Note: This is a simplified check that scans for any images with "scion" in
+// the name. The design specifies checking per-configured-harness images, but
+// that requires loading the project's harness config which adds complexity.
+// A future enhancement could load harness configs and verify each image.
 func checkDoctorContainerImages() scionruntime.CheckResult {
 	// Find a container CLI (docker or podman)
 	var containerCLI string

@@ -27,13 +27,13 @@ import (
 // GET /api/v1/admin/health/summary. It aggregates all subsystem health
 // into a single response for the health dashboard.
 type HealthSummaryResponse struct {
-	Status   string               `json:"status"`
-	Hub      HealthSummaryHub     `json:"hub"`
-	Database HealthSummaryDB      `json:"database"`
-	Brokers  []HealthSummaryBrkr  `json:"brokers"`
-	Agents   HealthSummaryAgents  `json:"agents"`
-	Dispatch HealthSummaryDispatch `json:"dispatch"`
-	Stall    HealthSummaryStall   `json:"stall_config"`
+	Status   string                `json:"status"`
+	Hub      HealthSummaryHub      `json:"hub"`
+	Database HealthSummaryDB       `json:"database"`
+	Brokers  []HealthSummaryBrkr   `json:"brokers"`
+	Agents   HealthSummaryAgents   `json:"agents"`
+	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when dispatch metrics are unavailable
+	Stall    HealthSummaryStall    `json:"stall_config"`
 }
 
 // HealthSummaryHub contains hub-level health information.
@@ -48,11 +48,13 @@ type HealthSummaryHub struct {
 
 // HealthSummaryDB contains database health information.
 type HealthSummaryDB struct {
-	Status      string `json:"status"`
-	PoolActive  int64  `json:"pool_active"`
-	PoolMax     int64  `json:"pool_max"`
-	PoolWaiting int64  `json:"pool_waiting"`
-	PoolIdle    int64  `json:"pool_idle"`
+	Status    string `json:"status"`
+	PoolActive int64 `json:"pool_active"`
+	PoolMax    int64 `json:"pool_max"`
+	PoolIdle   int64 `json:"pool_idle"`
+	// PoolWaitCountTotal is the cumulative number of times a caller had to wait
+	// for a DB connection (monotonically increasing counter from sql.DBStats.WaitCount).
+	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
 }
 
 // HealthSummaryBrkr contains per-broker health information.
@@ -65,6 +67,10 @@ type HealthSummaryBrkr struct {
 	AgentCount       int       `json:"agent_count"`
 	AgentHealthy     int       `json:"agent_healthy"`
 	LastHeartbeat    time.Time `json:"last_heartbeat"`
+	// NFS health fields are not yet populated — the broker heartbeat protocol
+	// does not currently report NFS mount status. Tracked as a follow-up to
+	// the health monitoring design (§4.1 D5). TODO: wire NFS health once the
+	// broker API exposes it.
 }
 
 // HealthSummaryAgents contains agent health summary.
@@ -77,6 +83,7 @@ type HealthSummaryAgents struct {
 }
 
 // HealthSummaryDispatch contains dispatch pipeline health.
+// When nil in HealthSummaryResponse, dispatch metrics are not available.
 type HealthSummaryDispatch struct {
 	StuckMessages int `json:"stuck_messages"`
 	Failed1h      int `json:"failed_1h"`
@@ -90,9 +97,18 @@ type HealthSummaryStall struct {
 
 // handleHealthSummary handles GET /api/v1/admin/health/summary.
 // Returns a composite health summary aggregating all subsystems.
+// Requires admin role.
 func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
+		return
+	}
+
+	// Enforce admin authorization — this endpoint exposes sensitive infrastructure
+	// details (DB pool stats, broker hostnames, agent states, dispatch status).
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil || user.Role() != "admin" {
+		Forbidden(w)
 		return
 	}
 
@@ -129,25 +145,66 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 			stats := db.Stats()
 			dbSummary.PoolActive = int64(stats.InUse)
 			dbSummary.PoolIdle = int64(stats.Idle)
-			dbSummary.PoolWaiting = stats.WaitCount
+			dbSummary.PoolWaitCountTotal = stats.WaitCount
 			dbSummary.PoolMax = int64(stats.MaxOpenConnections)
 		}
 	}
 
-	// Build brokers section
+	// Fetch all agents once and group by broker ID to avoid N+1 queries.
+	type agentBuckets struct {
+		count   int
+		healthy int
+	}
+	agentsByBroker := make(map[string]*agentBuckets)
+	agentsSummary := HealthSummaryAgents{
+		ByPhase: make(map[string]int),
+		Stalled: []string{},
+		Crashed: []string{},
+		Errored: []string{},
+	}
+	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 10000}); err == nil {
+		agentsSummary.Total = agentResult.TotalCount
+		for _, a := range agentResult.Items {
+			if a.Phase != "" {
+				agentsSummary.ByPhase[a.Phase]++
+			}
+			if a.Activity == string(state.ActivityStalled) {
+				agentsSummary.Stalled = append(agentsSummary.Stalled, a.Name)
+			}
+			if a.Activity == string(state.ActivityCrashed) {
+				agentsSummary.Crashed = append(agentsSummary.Crashed, a.Name)
+			}
+			if a.Phase == string(state.PhaseError) {
+				agentsSummary.Errored = append(agentsSummary.Errored, a.Name)
+			}
+
+			// Bucket by broker for per-broker counts
+			bid := a.RuntimeBrokerID
+			if bid != "" {
+				b, ok := agentsByBroker[bid]
+				if !ok {
+					b = &agentBuckets{}
+					agentsByBroker[bid] = b
+				}
+				b.count++
+				if a.Phase != string(state.PhaseError) &&
+					a.Activity != string(state.ActivityStalled) &&
+					a.Activity != string(state.ActivityCrashed) {
+					b.healthy++
+				}
+			}
+		}
+	}
+
+	// Build brokers section using pre-computed agent buckets
 	var brokerSummaries []HealthSummaryBrkr
 	if brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100}); err == nil {
 		for _, b := range brokerResult.Items {
-			// Count agents on this broker
 			agentCount := 0
 			agentHealthy := 0
-			if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{RuntimeBrokerID: b.ID}, store.ListOptions{Limit: 1000}); err == nil {
-				agentCount = agentResult.TotalCount
-				for _, a := range agentResult.Items {
-					if a.Phase != string(state.PhaseError) && a.Activity != string(state.ActivityStalled) && a.Activity != string(state.ActivityCrashed) {
-						agentHealthy++
-					}
-				}
+			if bucket, ok := agentsByBroker[b.ID]; ok {
+				agentCount = bucket.count
+				agentHealthy = bucket.healthy
 			}
 
 			// Determine runtime type from profiles
@@ -174,49 +231,18 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		brokerSummaries = []HealthSummaryBrkr{}
 	}
 
-	// Build agents section
-	agentsSummary := HealthSummaryAgents{
-		ByPhase: make(map[string]int),
-		Stalled: []string{},
-		Crashed: []string{},
-		Errored: []string{},
-	}
-	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 10000}); err == nil {
-		agentsSummary.Total = agentResult.TotalCount
-		for _, a := range agentResult.Items {
-			if a.Phase != "" {
-				agentsSummary.ByPhase[a.Phase]++
-			}
-			if a.Activity == string(state.ActivityStalled) {
-				agentsSummary.Stalled = append(agentsSummary.Stalled, a.Name)
-			}
-			if a.Activity == string(state.ActivityCrashed) {
-				agentsSummary.Crashed = append(agentsSummary.Crashed, a.Name)
-			}
-			if a.Phase == string(state.PhaseError) {
-				agentsSummary.Errored = append(agentsSummary.Errored, a.Name)
-			}
-		}
-	}
-
-	// Build dispatch section
-	dispatchSummary := HealthSummaryDispatch{}
-	// Dispatch stats are available via metrics snapshot if configured
-	if s.metrics != nil {
-		snap := s.metrics.GetSnapshot()
-		if snap != nil {
-			dispatchSummary.StuckMessages = 0 // Stuck messages gauge not in snapshot
-		}
-	}
+	// Dispatch section: the dispatchmetrics.Recorder does not currently expose a
+	// Stats() method for reading in-process counters. Rather than returning
+	// hardcoded zeros (which would mislead operators), we omit the dispatch data
+	// and let the dashboard render "data not available". TODO: add a Stats()
+	// method to dispatchmetrics.Recorder to populate this section.
+	var dispatchSummary *HealthSummaryDispatch // nil = unavailable
 
 	// Build stall config section
 	stallConfig := HealthSummaryStall{
 		ThresholdSeconds: int(s.config.StalledThreshold.Seconds()),
 		AutoSuspend:      s.config.AutoSuspendStalled,
 	}
-	// Operational settings may override the stall config; the values from
-	// ServerConfig already reflect the effective merge (bootstrap + env + DB)
-	// so no additional lookup is needed here.
 
 	// Determine overall status
 	overallStatus := "healthy"

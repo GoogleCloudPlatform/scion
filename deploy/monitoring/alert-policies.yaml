@@ -260,6 +260,47 @@ alertPolicies:
       - slack
 
   # ---------------------------------------------------------------------------
+  # Telemetry Pipeline (2 alerts)
+  # ---------------------------------------------------------------------------
+
+  - displayName: "Telemetry Pipeline Down"
+    documentation:
+      content: |
+        No metric data has been received from the OTLP exporter for 10 minutes.
+        This indicates the OpenTelemetry Collector or exporter pipeline is down.
+        Verify the collector is running and reachable from application pods.
+    severity: CRITICAL
+    metric: "custom.googleapis.com/scion.telemetry.exporter.points"
+    conditionType: ABSENCE
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_DELTA
+    duration: "600s"             # 10 minutes of missing data
+    notificationChannels:
+      - email
+      - slack
+      - pagerduty
+
+  - displayName: "Telemetry Export Errors"
+    documentation:
+      content: |
+        The OTLP exporter has reported more than 10 export errors in a 5-minute
+        window. Metrics may be lost or delayed. Investigate the collector
+        configuration, backend connectivity, and error logs.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.telemetry.exporter.errors"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 10
+    aggregation:
+      alignmentPeriod: "300s"    # 5-minute window
+      perSeriesAligner: ALIGN_DELTA
+    duration: "0s"               # Fire immediately when the 5-min delta exceeds 10
+    notificationChannels:
+      - email
+      - slack
+
+  # ---------------------------------------------------------------------------
   # Hub Auth (2 alerts)
   # ---------------------------------------------------------------------------
 
