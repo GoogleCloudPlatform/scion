@@ -1432,14 +1432,15 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	// Full probe deferred to a follow-up change.
 
 	// Step 0.7: Check bot has permission to create threads in the target channel.
-	botPerms, permErr := s.State.UserChannelPermissions(s.State.User.ID, channelID)
-	if permErr == nil {
-		const createPublicThreads int64 = 0x800000000
-		if botPerms&createPublicThreads == 0 {
-			h.followup(s, i, "The bot does not have **Create Public Threads** permission in this channel. "+
-				"Please re-invite the bot using the invite link from the admin settings page, "+
-				"or grant the permission manually in Server Settings > Roles.")
-			return
+	if s.State != nil && s.State.User != nil {
+		botPerms, permErr := s.State.UserChannelPermissions(s.State.User.ID, channelID)
+		if permErr == nil {
+			if botPerms&discordgo.PermissionCreatePublicThreads == 0 {
+				h.followup(s, i, "The bot does not have **Create Public Threads** permission in this channel. "+
+					"Please re-invite the bot using the invite link from the admin settings page, "+
+					"or grant the permission manually in Server Settings > Roles.")
+				return
+			}
 		}
 	}
 
