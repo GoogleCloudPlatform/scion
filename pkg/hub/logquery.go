@@ -51,6 +51,7 @@ type CloudLogEntry struct {
 	JSONPayload    map[string]interface{} `json:"jsonPayload,omitempty"`
 	InsertID       string                 `json:"insertId"`
 	SourceLocation *LogSourceLocation     `json:"sourceLocation,omitempty"`
+	LogName        string                 `json:"logName,omitempty"` // Full Cloud Logging log name (e.g. "projects/my-project/logs/scion-server")
 }
 
 // LogSourceLocation identifies the source code location of a log entry.
@@ -71,6 +72,8 @@ type LogQueryOptions struct {
 	Until     time.Time
 	Severity  string
 	PageToken string
+	Sources   []string // optional: "hub", "broker", "agent", "messages" — restricts to matching logs/subsystems
+	Search    string   // optional: substring match on jsonPayload.message
 }
 
 // LogQueryResult contains the result of a log query.
@@ -193,6 +196,37 @@ func BuildLogFilter(opts LogQueryOptions, projectID ...string) string {
 		parts = append(parts, fmt.Sprintf(`severity >= %s`, strings.ToUpper(opts.Severity)))
 	}
 
+	if len(opts.Sources) > 0 && len(projectID) > 0 && projectID[0] != "" {
+		pid := projectID[0]
+		var srcParts []string
+		for _, src := range opts.Sources {
+			switch src {
+			case "hub":
+				srcParts = append(srcParts, fmt.Sprintf(
+					`(logName = "projects/%s/logs/scion-server" AND jsonPayload.subsystem =~ "^hub\\.")`, pid))
+			case "broker":
+				srcParts = append(srcParts, fmt.Sprintf(
+					`(logName = "projects/%s/logs/scion-server" AND jsonPayload.subsystem =~ "^broker\\.")`, pid))
+			case "agent":
+				srcParts = append(srcParts, fmt.Sprintf(
+					`logName = "projects/%s/logs/scion-agents"`, pid))
+			case "messages":
+				srcParts = append(srcParts, fmt.Sprintf(
+					`logName = "projects/%s/logs/scion-messages"`, pid))
+			}
+		}
+		if len(srcParts) > 0 {
+			parts = append(parts, "("+strings.Join(srcParts, " OR ")+")")
+		}
+	}
+
+	if opts.Search != "" {
+		// Escape backslashes first, then double quotes, to avoid double-escaping.
+		escaped := strings.ReplaceAll(opts.Search, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		parts = append(parts, fmt.Sprintf(`jsonPayload.message:"%s"`, escaped))
+	}
+
 	return strings.Join(parts, " AND ")
 }
 
@@ -203,6 +237,7 @@ func ConvertLogEntry(entry *gcplog.Entry) CloudLogEntry {
 		Severity:  entry.Severity.String(),
 		Labels:    entry.Labels,
 		InsertID:  entry.InsertID,
+		LogName:   entry.LogName,
 	}
 
 	// Extract payload
@@ -317,6 +352,7 @@ func ConvertProtoLogEntry(entry *loggingpb.LogEntry) CloudLogEntry {
 		Severity: entry.GetSeverity().String(),
 		Labels:   entry.GetLabels(),
 		InsertID: entry.GetInsertId(),
+		LogName:  entry.GetLogName(),
 	}
 
 	if ts := entry.GetTimestamp(); ts != nil {
