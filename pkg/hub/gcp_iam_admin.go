@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"cloud.google.com/go/compute/metadata"
+	"google.golang.org/api/cloudresourcemanager/v1"
 	"google.golang.org/api/iam/v1"
 	"google.golang.org/api/option"
 )
@@ -39,21 +40,33 @@ type GCPServiceAccountAdmin interface {
 	// SetIAMPolicy grants a role to a member on a service account.
 	// Used to grant roles/iam.serviceAccountTokenCreator to the Hub SA on minted SAs.
 	SetIAMPolicy(ctx context.Context, saEmail string, member string, role string) error
+
+	// AddProjectIAMBinding grants a role to a member at the GCP project level.
+	// This is distinct from SetIAMPolicy because it operates on the PROJECT IAM
+	// policy (different blast radius than SA-level IAM). Used to grant minted SAs
+	// project-level roles like roles/aiplatform.user.
+	AddProjectIAMBinding(ctx context.Context, projectID, member, role string) error
 }
 
-// IAMAdminClient implements GCPServiceAccountAdmin using the GCP IAM Admin API.
+// IAMAdminClient implements GCPServiceAccountAdmin using the GCP IAM Admin API
+// and the Cloud Resource Manager API (for project-level IAM bindings).
 type IAMAdminClient struct {
-	service *iam.Service
+	service    *iam.Service
+	crmService *cloudresourcemanager.Service
 }
 
 // NewIAMAdminClient creates a new IAMAdminClient. It uses Application Default
-// Credentials to authenticate with the IAM Admin API.
+// Credentials to authenticate with the IAM Admin API and Cloud Resource Manager API.
 func NewIAMAdminClient(ctx context.Context, opts ...option.ClientOption) (*IAMAdminClient, error) {
 	svc, err := iam.NewService(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating IAM admin service: %w", err)
 	}
-	return &IAMAdminClient{service: svc}, nil
+	crmSvc, err := cloudresourcemanager.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("creating Cloud Resource Manager service: %w", err)
+	}
+	return &IAMAdminClient{service: svc, crmService: crmSvc}, nil
 }
 
 func (c *IAMAdminClient) CreateServiceAccount(ctx context.Context, projectID, accountID, displayName, description string) (string, string, error) {
@@ -123,6 +136,46 @@ func (c *IAMAdminClient) SetIAMPolicy(ctx context.Context, saEmail string, membe
 		return fmt.Errorf("setting IAM policy for %s: %w", saEmail, err)
 	}
 
+	return nil
+}
+
+func (c *IAMAdminClient) AddProjectIAMBinding(ctx context.Context, projectID, member, role string) error {
+	// Read-modify-write the project IAM policy.
+	policy, err := c.crmService.Projects.GetIamPolicy(projectID,
+		&cloudresourcemanager.GetIamPolicyRequest{}).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("getting project IAM policy for %s: %w", projectID, err)
+	}
+
+	// Add the binding — check if the role already exists.
+	found := false
+	for _, binding := range policy.Bindings {
+		if binding.Role == role {
+			for _, m := range binding.Members {
+				if m == member {
+					// Already bound — nothing to do.
+					return nil
+				}
+			}
+			binding.Members = append(binding.Members, member)
+			found = true
+			break
+		}
+	}
+	if !found {
+		policy.Bindings = append(policy.Bindings, &cloudresourcemanager.Binding{
+			Role:    role,
+			Members: []string{member},
+		})
+	}
+
+	_, err = c.crmService.Projects.SetIamPolicy(projectID,
+		&cloudresourcemanager.SetIamPolicyRequest{
+			Policy: policy,
+		}).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("setting project IAM policy for %s: %w", projectID, err)
+	}
 	return nil
 }
 

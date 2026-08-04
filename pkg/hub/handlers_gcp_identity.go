@@ -31,6 +31,28 @@ import (
 	"github.com/google/uuid"
 )
 
+// Mint-time permission constants. These are checked via Policy Troubleshooter
+// before any GCP SA is created. They are independent of gcpIamCheckMode because
+// minting creates new GCP authority (D6, design §4.6).
+const (
+	// PermissionSACreate is the IAM permission required to create service
+	// accounts in the Hub GCP project.
+	PermissionSACreate = "iam.serviceAccounts.create"
+
+	// PermissionAgentPlatform is the representative Agent Platform User
+	// permission (D6, design §4.6). Defined as a named constant so it can be
+	// changed deliberately if the product chooses a different operation.
+	PermissionAgentPlatform = "aiplatform.endpoints.predict"
+
+	// RoleAIPlatformUser is the project-level role granted to minted SAs for
+	// inference access.
+	RoleAIPlatformUser = "roles/aiplatform.user"
+
+	// RoleSAUser is the SA-level role granted to the requester on the minted
+	// SA so that mint-then-assign works under enforce mode.
+	RoleSAUser = "roles/iam.serviceAccountUser"
+)
+
 // handleProjectGCPServiceAccounts handles /api/v1/projects/{projectId}/gcp-service-accounts
 func (s *Server) handleProjectGCPServiceAccounts(w http.ResponseWriter, r *http.Request, projectID string) {
 	switch r.Method {
@@ -709,6 +731,54 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	// ----------------------------------------------------------------
+	// PT permission checks — ALWAYS run, independent of gcpIamCheckMode.
+	// Minting creates new GCP authority; it is not merely assignment (D6).
+	// ----------------------------------------------------------------
+	s.mu.RLock()
+	ptChecker := s.mintPTChecker
+	s.mu.RUnlock()
+
+	if ptChecker != nil {
+		userEmail := user.Email()
+		projectResource := fmt.Sprintf(
+			"//cloudresourcemanager.googleapis.com/projects/%s", hubGCPProjectID)
+
+		// 1. Requester must have iam.serviceAccounts.create on the Hub project.
+		result, err := ptChecker.CheckPermission(r.Context(), userEmail, projectResource, PermissionSACreate)
+		if err != nil {
+			slog.Error("GCP SA mint: PT check failed for serviceAccounts.create",
+				"user", userEmail, "project", hubGCPProjectID, "error", err)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"unable to verify permission to create service accounts: "+result.Reason, nil)
+			return
+		}
+		if !result.Allowed {
+			slog.Warn("GCP SA mint: requester lacks iam.serviceAccounts.create",
+				"user", userEmail, "project", hubGCPProjectID, "reason", result.Reason)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"you do not have permission to create service accounts in the Hub GCP project: "+result.Reason, nil)
+			return
+		}
+
+		// 2. Requester must have aiplatform.endpoints.predict on the Hub project.
+		result, err = ptChecker.CheckPermission(r.Context(), userEmail, projectResource, PermissionAgentPlatform)
+		if err != nil {
+			slog.Error("GCP SA mint: PT check failed for aiplatform.endpoints.predict",
+				"user", userEmail, "project", hubGCPProjectID, "error", err)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"unable to verify agent platform permission: "+result.Reason, nil)
+			return
+		}
+		if !result.Allowed {
+			slog.Warn("GCP SA mint: requester lacks aiplatform.endpoints.predict",
+				"user", userEmail, "project", hubGCPProjectID, "reason", result.Reason)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"you do not have agent platform permission on the Hub GCP project: "+result.Reason, nil)
+			return
+		}
+	}
+
 	var req mintGCPServiceAccountRequest
 	if r.Body != nil {
 		if err := readJSON(r, &req); err != nil {
@@ -826,18 +896,28 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	// Grant token creator role to Hub SA on the new SA. This is a REQUIRED
-	// IAM mutation: without it the Hub cannot impersonate the minted SA to
-	// generate tokens, so a minted SA recorded as Verified after a failed
-	// grant claims a capability the Hub does not have. Fail the request and
-	// best-effort delete the orphaned SA if the grant fails.
+	// ================================================================
+	// IAM mutations — all are REQUIRED. If any fails, the mint is a
+	// failure: do NOT store Verified=true, best-effort delete the SA.
+	// ================================================================
+
+	// Helper to clean up on any required IAM mutation failure.
+	cleanupAndFail := func(mutation string, mutErr error) {
+		slog.Error("GCP SA mint: required IAM mutation failed",
+			"mutation", mutation, "project_id", projectID,
+			"sa_email", saEmail, "error", mutErr)
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint: best-effort cleanup of orphaned SA failed",
+				"sa_email", saEmail, "error", delErr)
+		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but required IAM grants failed; the account is not usable. Contact your administrator.", nil)
+	}
+
+	// 1. Token generator must be configured.
 	if s.gcpTokenGenerator == nil {
-		// The Hub has no token generator configured, so it cannot impersonate
-		// any SA. A minted SA would be unusable. Fail rather than store a
-		// record that looks ready but cannot function.
 		slog.Error("GCP SA mint: token generator not configured, cannot grant tokenCreator",
 			"project_id", projectID, "sa_email", saEmail)
-		// Best-effort cleanup the just-created SA.
 		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
 			slog.Error("GCP SA mint: best-effort cleanup failed after missing token generator",
 				"sa_email", saEmail, "error", delErr)
@@ -860,29 +940,38 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	member := "serviceAccount:" + hubEmail
-	if err := s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, member, "roles/iam.serviceAccountTokenCreator"); err != nil {
-		slog.Error("GCP SA mint: IAM grant failed — SA was created in GCP but required tokenCreator grant did not succeed",
-			"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail, "error", err)
-		// Best-effort cleanup: delete the orphaned SA from GCP.
-		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
-			slog.Error("GCP SA mint: best-effort cleanup of orphaned SA failed",
-				"sa_email", saEmail, "error", delErr)
-		}
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-			"service account was created but required IAM grants failed; the account is not usable. Contact your administrator.", nil)
+	// 2. Grant Hub SA tokenCreator on the minted SA.
+	hubMember := "serviceAccount:" + hubEmail
+	if err := s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, hubMember, "roles/iam.serviceAccountTokenCreator"); err != nil {
+		cleanupAndFail("tokenCreator grant on minted SA", err)
 		return
 	}
 
-	slog.Info("GCP SA mint: SA created and tokenCreator grant succeeded",
-		"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail)
+	// 3. Grant the minted SA roles/aiplatform.user at the project level.
+	saMember := "serviceAccount:" + saEmail
+	if err := s.gcpIAMAdmin.AddProjectIAMBinding(r.Context(), hubGCPProjectID, saMember, RoleAIPlatformUser); err != nil {
+		cleanupAndFail("project-level aiplatform.user grant for minted SA", err)
+		return
+	}
 
-	// Invalidate cached actAs decisions for the minted SA. The IAM mutation
-	// above may have changed who can act as this SA, so any prior cached
-	// denial (or allow against a stale policy) must be cleared.
+	// 4. Grant requester roles/iam.serviceAccountUser on the minted SA.
+	// This lets the requester assign the minted SA under enforce mode.
+	requesterMember := "user:" + user.Email()
+	if err := s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, requesterMember, RoleSAUser); err != nil {
+		cleanupAndFail("serviceAccountUser grant for requester on minted SA", err)
+		return
+	}
+
+	slog.Info("GCP SA mint: SA created and all IAM grants succeeded",
+		"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail,
+		"requester", user.Email())
+
+	// Invalidate cached actAs decisions for the minted SA. The IAM mutations
+	// above changed who can act as this SA, so any prior cached denial (or
+	// allow against a stale policy) must be cleared.
 	s.invalidateActAsCache(saEmail)
 
-	// Store the SA record — only reached when the required IAM mutation succeeded.
+	// Store the SA record — only reached when ALL required IAM mutations succeeded.
 	sa := &store.GCPServiceAccount{
 		ID:                 uuid.New().String(),
 		Scope:              store.ScopeProject,

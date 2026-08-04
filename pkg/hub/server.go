@@ -732,6 +732,12 @@ type Server struct {
 	// GCP IAM admin for minting service accounts (nil = minting disabled)
 	gcpIAMAdmin GCPServiceAccountAdmin
 
+	// Raw PT checker for mint-time permission checks. Unlike
+	// saAssignChecker (which is cached and gated by gcpIamCheckMode),
+	// this is always consulted during minting because minting creates
+	// new GCP authority (D6, design §4.6). Nil when PT is unavailable.
+	mintPTChecker *PolicyTroubleshooterChecker
+
 	// Caller-permission checker for the agent service-account assignment
 	// surface, and the mode gating whether it is consulted. Both are ALWAYS
 	// set explicitly in NewServer — nil is a wiring bug and denies, it is not
@@ -2024,6 +2030,15 @@ func (s *Server) SetGCPServiceAccountAdmin(a GCPServiceAccountAdmin) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gcpIAMAdmin = a
+}
+
+// SetMintPTChecker sets the Policy Troubleshooter checker used for mint-time
+// permission verification. This is separate from the cached actAs checker
+// because mint checks are always performed regardless of gcpIamCheckMode.
+func (s *Server) SetMintPTChecker(c *PolicyTroubleshooterChecker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mintPTChecker = c
 }
 
 // SetSAAssignChecker replaces the caller-permission checker for the agent

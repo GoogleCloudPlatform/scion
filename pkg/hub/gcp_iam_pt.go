@@ -244,5 +244,76 @@ func (c *PolicyTroubleshooterChecker) buildUnknownReason(
 	return base
 }
 
+// PermissionCheckResult is the outcome of a generic permission check via Policy
+// Troubleshooter. It mirrors the actAs result but is not tied to a specific
+// permission constant or service-account target.
+type PermissionCheckResult struct {
+	// Allowed is true only when PT returned CAN_ACCESS.
+	Allowed bool
+
+	// Reason is a human-readable explanation, suitable for an error message on
+	// denial. Empty when Allowed is true.
+	Reason string
+}
+
+// CheckPermission uses the Policy Troubleshooter to verify that principalEmail
+// has the given permission on resourceName. resourceName must be a full GCP
+// resource name (e.g. "//cloudresourcemanager.googleapis.com/projects/my-proj").
+//
+// This is a general-purpose check used for mint-time permission verification
+// (iam.serviceAccounts.create, aiplatform.endpoints.predict) — it is NOT gated
+// by gcpIamCheckMode, because minting creates new GCP authority and must always
+// be checked (D6, design §4.6).
+func (c *PolicyTroubleshooterChecker) CheckPermission(
+	ctx context.Context,
+	principalEmail string,
+	fullResourceName string,
+	permission string,
+) (PermissionCheckResult, error) {
+	if principalEmail == "" {
+		return PermissionCheckResult{
+			Reason: "caller has no GCP principal email; cannot verify " + permission,
+		}, nil
+	}
+
+	// Construct the IAM principal identifier. User emails get "user:" prefix;
+	// service account emails get "serviceAccount:".
+	principalID := "user:" + principalEmail
+	if strings.HasSuffix(principalEmail, ".gserviceaccount.com") {
+		principalID = "serviceAccount:" + principalEmail
+	}
+
+	resp, err := c.client.TroubleshootIamPolicy(ctx, &policytroubleshooterpb.TroubleshootIamPolicyRequest{
+		AccessTuple: &policytroubleshooterpb.AccessTuple{
+			Principal:        principalID,
+			FullResourceName: fullResourceName,
+			Permission:       permission,
+		},
+	})
+	if err != nil {
+		return PermissionCheckResult{
+			Reason: fmt.Sprintf("Policy Troubleshooter API call failed for %s on %s", permission, fullResourceName),
+		}, fmt.Errorf("policy troubleshooter call for %s checking %s: %w", principalID, permission, err)
+	}
+
+	overall := resp.GetOverallAccessState()
+	switch overall {
+	case policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS:
+		return PermissionCheckResult{Allowed: true}, nil
+
+	case policytroubleshooterpb.TroubleshootIamPolicyResponse_CANNOT_ACCESS:
+		return PermissionCheckResult{
+			Reason: fmt.Sprintf("%s does not have %s on the Hub GCP project", principalID, permission),
+		}, nil
+
+	default:
+		// UNKNOWN_INFO, UNKNOWN_CONDITIONAL, unrecognised — fail closed.
+		return PermissionCheckResult{
+			Reason: fmt.Sprintf("Policy Troubleshooter returned indeterminate result (%v) "+
+				"for %s checking %s; denying (fail-closed)", overall, principalID, permission),
+		}, nil
+	}
+}
+
 // Compile-time assertion that PolicyTroubleshooterChecker satisfies the interface.
 var _ store.CallerPermissionChecker = (*PolicyTroubleshooterChecker)(nil)

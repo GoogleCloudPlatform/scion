@@ -1647,6 +1647,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		hubSrv.SetHookIdentityChecker(cached)
 		// Both surfaces share one checker instance and one cache.
 		log.Printf("Policy Troubleshooter checker configured for actAs checks")
+		// Also set the raw PT checker for mint-time permission verification.
+		// Mint checks are independent of gcpIamCheckMode (D6).
+		hubSrv.SetMintPTChecker(checker)
 	}
 
 	if hostedMode {

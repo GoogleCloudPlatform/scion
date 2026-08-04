@@ -450,3 +450,154 @@ func TestPolicyTroubleshooterChecker_AllMappingsAreAttributed(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// CheckPermission Tests (P11 — Mint Permission Checks)
+// ============================================================================
+
+func TestCheckPermission_Allowed(t *testing.T) {
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"alice@example.com",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionSACreate)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Allowed {
+		t.Error("expected Allowed=true")
+	}
+
+	// Verify PT request was constructed correctly.
+	tuple := fake.captured.GetAccessTuple()
+	if tuple.GetPrincipal() != "user:alice@example.com" {
+		t.Errorf("unexpected principal: %q", tuple.GetPrincipal())
+	}
+	if tuple.GetPermission() != PermissionSACreate {
+		t.Errorf("unexpected permission: %q", tuple.GetPermission())
+	}
+	if tuple.GetFullResourceName() != "//cloudresourcemanager.googleapis.com/projects/hub-project" {
+		t.Errorf("unexpected resource: %q", tuple.GetFullResourceName())
+	}
+}
+
+func TestCheckPermission_Denied(t *testing.T) {
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CANNOT_ACCESS,
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"bob@example.com",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionAgentPlatform)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Allowed {
+		t.Error("expected Allowed=false for CANNOT_ACCESS")
+	}
+	if !strings.Contains(result.Reason, "does not have") {
+		t.Errorf("reason should explain denial: %q", result.Reason)
+	}
+}
+
+func TestCheckPermission_UnknownFailsClosed(t *testing.T) {
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"bob@example.com",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionSACreate)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Allowed {
+		t.Error("expected Allowed=false for UNKNOWN_INFO (fail-closed)")
+	}
+	if !strings.Contains(result.Reason, "indeterminate") {
+		t.Errorf("reason should mention indeterminate: %q", result.Reason)
+	}
+}
+
+func TestCheckPermission_TransportError(t *testing.T) {
+	fake := &fakePTClient{
+		err: status.Error(codes.Unavailable, "service unavailable"),
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"alice@example.com",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionSACreate)
+
+	if err == nil {
+		t.Fatal("expected an error for transport failure")
+	}
+	if result.Allowed {
+		t.Error("transport error must not allow")
+	}
+}
+
+func TestCheckPermission_EmptyPrincipal(t *testing.T) {
+	fake := &fakePTClient{}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionSACreate)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Allowed {
+		t.Error("empty principal must not allow")
+	}
+	if !strings.Contains(result.Reason, "no GCP principal") {
+		t.Errorf("reason should explain missing principal: %q", result.Reason)
+	}
+}
+
+func TestCheckPermission_ServiceAccountPrincipal(t *testing.T) {
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"my-sa@proj.iam.gserviceaccount.com",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionSACreate)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Allowed {
+		t.Error("expected Allowed=true")
+	}
+
+	// Verify SA email gets serviceAccount: prefix.
+	tuple := fake.captured.GetAccessTuple()
+	if tuple.GetPrincipal() != "serviceAccount:my-sa@proj.iam.gserviceaccount.com" {
+		t.Errorf("SA emails should get serviceAccount: prefix, got %q", tuple.GetPrincipal())
+	}
+}

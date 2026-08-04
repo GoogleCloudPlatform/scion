@@ -168,13 +168,30 @@ func TestCreateGCPServiceAccount_Duplicate(t *testing.T) {
 
 // mockGCPServiceAccountAdmin is a test implementation of GCPServiceAccountAdmin.
 type mockGCPServiceAccountAdmin struct {
-	createErr  error
-	policyErr  error
-	deleteErr  error
-	createdSAs []string // track created account IDs
-	deletedSAs []string // track deleted SA emails (cleanup calls)
-	lastEmail  string
-	lastProject string
+	createErr         error
+	policyErr         error
+	deleteErr         error
+	projectBindingErr error
+	createdSAs        []string // track created account IDs
+	deletedSAs        []string // track deleted SA emails (cleanup calls)
+	lastEmail         string
+	lastProject       string
+
+	// Track IAM mutations for assertions.
+	iamPolicies     []mockIAMPolicyCall     // SA-level SetIAMPolicy calls
+	projectBindings []mockProjectBindingCall // project-level AddProjectIAMBinding calls
+}
+
+type mockIAMPolicyCall struct {
+	SAEmail string
+	Member  string
+	Role    string
+}
+
+type mockProjectBindingCall struct {
+	ProjectID string
+	Member    string
+	Role      string
 }
 
 func (m *mockGCPServiceAccountAdmin) CreateServiceAccount(_ context.Context, projectID, accountID, _, _ string) (string, string, error) {
@@ -193,8 +210,22 @@ func (m *mockGCPServiceAccountAdmin) DeleteServiceAccount(_ context.Context, saE
 	return m.deleteErr
 }
 
-func (m *mockGCPServiceAccountAdmin) SetIAMPolicy(_ context.Context, saEmail, _, _ string) error {
+func (m *mockGCPServiceAccountAdmin) SetIAMPolicy(_ context.Context, saEmail, member, role string) error {
+	m.iamPolicies = append(m.iamPolicies, mockIAMPolicyCall{
+		SAEmail: saEmail,
+		Member:  member,
+		Role:    role,
+	})
 	return m.policyErr
+}
+
+func (m *mockGCPServiceAccountAdmin) AddProjectIAMBinding(_ context.Context, projectID, member, role string) error {
+	m.projectBindings = append(m.projectBindings, mockProjectBindingCall{
+		ProjectID: projectID,
+		Member:    member,
+		Role:      role,
+	})
+	return m.projectBindingErr
 }
 
 func testServerWithMinting(t *testing.T) (*Server, store.Store, *mockGCPServiceAccountAdmin) {
