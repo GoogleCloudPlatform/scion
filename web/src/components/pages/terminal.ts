@@ -1002,8 +1002,11 @@ export class ScionPageTerminal extends LitElement {
     } catch {
       this._showUploadError('Upload failed: network error');
     } finally {
-      this.isUploading = false;
-      this.uploadStatus = '';
+      // Only clear on success — error paths use _showUploadError which manages its own state
+      if (this.isUploading) {
+        this.isUploading = false;
+        this.uploadStatus = '';
+      }
     }
   }
 

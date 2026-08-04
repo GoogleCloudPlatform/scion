@@ -319,6 +319,118 @@ describe('terminal — resolveUploadTarget', () => {
   });
 });
 
+// ── _handleFileDrop upload paths (409, network error, success) ────────────
+
+describe('terminal — _handleFileDrop upload paths', () => {
+  beforeAll(async () => {
+    await import('./terminal.js');
+  });
+
+  afterEach(cleanup);
+
+  /** Create a small valid file and wrap it in a FileList-like object. */
+  function makeFileList(...files: File[]): FileList {
+    const fl: any = {
+      length: files.length,
+      [Symbol.iterator]: function* () { for (const f of files) yield f; },
+    };
+    files.forEach((f, i) => { fl[i] = f; });
+    return fl as FileList;
+  }
+
+  /** Set up an element ready for upload tests with the given fetch mock. */
+  function setupElement(fetchMock: typeof fetch): any {
+    vi.stubGlobal('fetch', fetchMock);
+    const el = createElement();
+    el.uploadEnabled = true;
+    el.uploadTargetDir = 'scratchpad';
+    el.uploadBasePath = '/scion-volumes/scratchpad';
+    el.projectId = 'test-project';
+    return el;
+  }
+
+  it('shows error and disables upload on 409 response', async () => {
+    const el = setupElement(vi.fn(async () =>
+      jsonResponse({ error: { message: 'upload failed' } }, 409)
+    ));
+
+    const file = new File(['hello'], 'test.txt');
+    await (el as any)._handleFileDrop(makeFileList(file));
+
+    // Error message should be preserved (not clobbered by finally)
+    expect(el.uploadStatus).toContain('co-located runtime broker');
+    expect(el.isUploading).toBe(false);
+    expect(el.uploadEnabled).toBe(false);
+    // Overlay should be visible to show the error
+    expect(el.isDragOver).toBe(true);
+  });
+
+  it('shows error on non-ok HTTP response', async () => {
+    const el = setupElement(vi.fn(async () =>
+      jsonResponse({ error: { message: 'server error details' } }, 500)
+    ));
+
+    const file = new File(['hello'], 'test.txt');
+    await (el as any)._handleFileDrop(makeFileList(file));
+
+    // Should show the extracted error message
+    expect(el.uploadStatus).toBeTruthy();
+    expect(el.isUploading).toBe(false);
+    expect(el.isDragOver).toBe(true);
+  });
+
+  it('shows error on network failure', async () => {
+    const el = setupElement(vi.fn(async () => {
+      throw new Error('Network failure');
+    }));
+
+    const file = new File(['hello'], 'test.txt');
+    await (el as any)._handleFileDrop(makeFileList(file));
+
+    expect(el.uploadStatus).toContain('network error');
+    expect(el.isUploading).toBe(false);
+    expect(el.isDragOver).toBe(true);
+  });
+
+  it('calls sendData with shell-quoted paths on success', async () => {
+    const el = setupElement(vi.fn(async () =>
+      jsonResponse({ ok: true }, 200)
+    ));
+    // Mock sendData to capture what gets sent to the terminal
+    const sendDataCalls: string[] = [];
+    el.sendData = (data: string) => { sendDataCalls.push(data); };
+
+    const file = new File(['hello'], 'test.txt');
+    await (el as any)._handleFileDrop(makeFileList(file));
+
+    // Should have sent the path to the terminal
+    expect(sendDataCalls.length).toBe(1);
+    expect(sendDataCalls[0]).toContain('/scion-volumes/scratchpad/.attachments/_web/');
+    expect(sendDataCalls[0]).toContain('test.txt');
+    // Upload state should be cleared on success
+    expect(el.isUploading).toBe(false);
+    expect(el.uploadStatus).toBe('');
+  });
+
+  it('sends multiple shell-quoted paths on multi-file success', async () => {
+    const el = setupElement(vi.fn(async () =>
+      jsonResponse({ ok: true }, 200)
+    ));
+    const sendDataCalls: string[] = [];
+    el.sendData = (data: string) => { sendDataCalls.push(data); };
+
+    const file1 = new File(['a'], 'doc.pdf');
+    const file2 = new File(['b'], 'has spaces.txt');
+    await (el as any)._handleFileDrop(makeFileList(file1, file2));
+
+    expect(sendDataCalls.length).toBe(1);
+    // "has spaces.txt" should be quoted
+    expect(sendDataCalls[0]).toContain("'");
+    expect(sendDataCalls[0]).toContain('doc.pdf');
+    expect(sendDataCalls[0]).toContain('has spaces.txt');
+  });
+});
+
 // ── _onDragEnter / _onDragLeave counter ─────────────────────────────────────
 
 describe('terminal — drag enter/leave counter', () => {
