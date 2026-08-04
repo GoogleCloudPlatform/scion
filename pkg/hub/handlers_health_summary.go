@@ -162,6 +162,9 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		Crashed: []string{},
 		Errored: []string{},
 	}
+	// Limit is a safety cap to avoid unbounded memory on very large installations.
+	// Agents beyond this cap will not appear in stalled/crashed/errored lists but
+	// TotalCount (used for the total gauge) is still accurate.
 	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 10000}); err == nil {
 		agentsSummary.Total = agentResult.TotalCount
 		for _, a := range agentResult.Items {

@@ -48,7 +48,7 @@ interface HealthSummary {
     status: string;
     pool_active: number;
     pool_max: number;
-    pool_waiting: number;
+    pool_wait_count_total: number;
     pool_idle: number;
   };
   brokers: Array<{
@@ -604,7 +604,7 @@ export class ScionPageHealthDashboard extends LitElement {
         </div>
         <div class="stat-row"><span class="label">Pool</span><span>${d.database.pool_active}/${d.database.pool_max} active (${poolUtil}%)</span></div>
         <div class="stat-row"><span class="label">Idle</span><span>${d.database.pool_idle}</span></div>
-        <div class="stat-row"><span class="label">Waiting</span><span>${d.database.pool_waiting}</span></div>
+        <div class="stat-row"><span class="label">Wait Count (Total)</span><span>${d.database.pool_wait_count_total}</span></div>
       </div>
     `;
   }

@@ -44,7 +44,7 @@ Use the `gcp.monitoring.AlertPolicy`, `gcp.monitoring.UptimeCheckConfig`, and
 
 | File | Contents |
 |------|----------|
-| `alert-policies.yaml` | 13 alert policies covering DB health, dispatch health, and Hub auth |
+| `alert-policies.yaml` | 15 alert policies covering DB health, dispatch health, telemetry pipeline, and Hub auth |
 | `uptime-checks.yaml` | 4 uptime checks for Hub and Broker health/readiness endpoints |
 | `notification-channels.yaml` | 3 notification channel definitions (email, Slack, PagerDuty) |
 
