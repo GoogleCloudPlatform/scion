@@ -196,6 +196,37 @@ def _apply_mcp_servers(ctx: scion_harness.ProvisionContext) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Sidecar service: Hermes web dashboard
+# ---------------------------------------------------------------------------
+
+_SCION_SERVICES_YAML = """\
+- name: hermes-dashboard
+  command:
+    - hermes
+    - dashboard
+    - "--no-open"
+    - "--skip-build"
+    - "--host"
+    - "127.0.0.1"
+    - "--port"
+    - "9119"
+  restart: always
+  ready_check:
+    type: tcp
+    target: "127.0.0.1:9119"
+    timeout: "15s"
+"""
+
+
+def _write_scion_services() -> None:
+    """Write scion-services.yaml so the init process starts the Hermes dashboard."""
+    scion_dir = scion_harness.expand_path("~/.scion")
+    os.makedirs(scion_dir, exist_ok=True)
+    target = os.path.join(scion_dir, "scion-services.yaml")
+    scion_harness.atomic_write_text(target, _SCION_SERVICES_YAML)
+
+
+# ---------------------------------------------------------------------------
 # Provision logic
 # ---------------------------------------------------------------------------
 
@@ -258,6 +289,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     # MCP server configuration.
     _apply_mcp_servers(ctx)
+
+    # Write scion-services.yaml so the Hermes dashboard starts as a sidecar.
+    _write_scion_services()
 
     ctx.info(f"method={resolved.method}")
 

@@ -513,5 +513,66 @@ class MCPEntryBuildingTest(unittest.TestCase):
         self.assertIn("missing url", stderr.getvalue())
 
 
+class ScionServicesYamlTest(unittest.TestCase):
+    """Test that provision() writes scion-services.yaml for the Hermes dashboard."""
+
+    def test_provision_writes_scion_services_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, clean_vertex_env():
+            home = os.path.join(tmp, "home")
+            bundle = os.path.join(tmp, "bundle")
+            os.makedirs(os.path.join(bundle, "outputs"))
+            os.makedirs(home)
+
+            # Stage a secret file so api-key auth succeeds.
+            secrets_dir = os.path.join(bundle, "secrets")
+            os.makedirs(secrets_dir, exist_ok=True)
+            secret_path = os.path.join(secrets_dir, "GOOGLE_API_KEY")
+            with open(secret_path, "w") as f:
+                f.write("test-key-value")
+
+            ctx = _make_ctx(
+                bundle,
+                env_vars=["GOOGLE_API_KEY"],
+                env_secret_files={"GOOGLE_API_KEY": secret_path},
+                harness_config={
+                    "instructions_file": "AGENTS.md",
+                    "skills_dir": ".hermes/skills",
+                    "system_prompt_mode": "none",
+                },
+            )
+
+            stderr = io.StringIO()
+            with temporary_home(home), redirect_stderr(stderr):
+                provision.provision(ctx)
+
+            services_path = os.path.join(home, ".scion", "scion-services.yaml")
+            self.assertTrue(
+                os.path.isfile(services_path),
+                "scion-services.yaml should be written by provision()",
+            )
+
+            with open(services_path, "r") as f:
+                content = f.read()
+
+            # Service name
+            self.assertIn("hermes-dashboard", content)
+            # Command components
+            self.assertIn("hermes", content)
+            self.assertIn("dashboard", content)
+            self.assertIn("--no-open", content)
+            self.assertIn("--skip-build", content)
+            self.assertIn("--host", content)
+            self.assertIn("127.0.0.1", content)
+            self.assertIn("--port", content)
+            self.assertIn("9119", content)
+            # Restart policy
+            self.assertIn("restart: always", content)
+            # Ready check
+            self.assertIn("ready_check:", content)
+            self.assertIn("type: tcp", content)
+            self.assertIn('target: "127.0.0.1:9119"', content)
+            self.assertIn("timeout:", content)
+
+
 if __name__ == "__main__":
     unittest.main()

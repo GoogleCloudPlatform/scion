@@ -16,6 +16,11 @@ harness: hermes
 image: scion-hermes:latest
 user: scion
 
+env:
+  SCION_AUTO_EXPOSE_PORTS: "true"
+  SCION_AUTO_EXPOSE_MODE: "allowlist"
+  SCION_AUTO_EXPOSE_PORTS_LIST: "9119"
+
 provisioner:
   type: container-script
   interface_version: 1
