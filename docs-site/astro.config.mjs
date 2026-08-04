@@ -93,6 +93,7 @@ export default defineConfig({
 						{ label: 'Supported Harnesses', slug: 'supported-harnesses' },
 						{ label: 'Glossary', slug: 'glossary' },
 						{ label: 'Release Notes', slug: 'release-notes' },
+						{ label: 'Release Notes Archive', slug: 'release-notes-archive' },
 					],
 				},
 				{
