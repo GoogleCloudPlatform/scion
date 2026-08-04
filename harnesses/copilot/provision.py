@@ -37,6 +37,7 @@ import json
 import os
 import sys
 from typing import Any
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -192,7 +193,7 @@ def _build_telemetry_env(telemetry: dict[str, Any], env: dict[str, str] | None) 
     # Propagate custom headers when present (e.g. for authenticated collectors).
     cloud = telemetry.get("cloud") or {}
     if isinstance(cloud, dict) and isinstance(cloud.get("headers"), dict):
-        parts = [f"{k}={v}" for k, v in cloud["headers"].items()]
+        parts = [f"{k}={quote(v, safe='')}" for k, v in cloud["headers"].items()]
         if parts:
             otel_env["OTEL_EXPORTER_OTLP_HEADERS"] = ",".join(sorted(parts))
 

@@ -112,7 +112,7 @@ class BuildTelemetryEnvTest(unittest.TestCase):
         env = provision._build_telemetry_env({"enabled": True}, env_overlay)
         self.assertEqual(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://scion-collector:4317")
 
-    def test_headers_propagated(self) -> None:
+    def test_headers_propagated_and_percent_encoded(self) -> None:
         telemetry = {
             "enabled": True,
             "cloud": {
@@ -121,10 +121,11 @@ class BuildTelemetryEnvTest(unittest.TestCase):
         }
         env = provision._build_telemetry_env(telemetry, None)
         self.assertIn("OTEL_EXPORTER_OTLP_HEADERS", env)
-        # Sorted key=value pairs
+        # Values must be percent-encoded per the OTel SDK spec.
+        # "Bearer tok" → "Bearer%20tok", "val" → "val" (no special chars).
         self.assertEqual(
             env["OTEL_EXPORTER_OTLP_HEADERS"],
-            "authorization=Bearer tok,x-meta=val",
+            "authorization=Bearer%20tok,x-meta=val",
         )
 
     def test_tls_ca_file_propagated(self) -> None:
@@ -158,6 +159,13 @@ class ResolveEndpointTest(unittest.TestCase):
         env = {"SCION_COPILOT_OTEL_ENDPOINT": "http://custom:4317"}
         self.assertEqual(provision._resolve_endpoint(telemetry, env), "http://custom:4317")
 
+    def test_copilot_env_takes_precedence_over_scion_env(self) -> None:
+        env = {
+            "SCION_COPILOT_OTEL_ENDPOINT": "http://copilot-specific:4317",
+            "SCION_OTEL_ENDPOINT": "http://generic-scion:4317",
+        }
+        self.assertEqual(provision._resolve_endpoint(None, env), "http://copilot-specific:4317")
+
     def test_scion_env_fallback(self) -> None:
         env = {"SCION_OTEL_ENDPOINT": "http://scion:4317"}
         self.assertEqual(provision._resolve_endpoint(None, env), "http://scion:4317")
@@ -177,6 +185,10 @@ class ResolveProtocolTest(unittest.TestCase):
         telemetry = {"cloud": {"protocol": "http"}}
         env = {"SCION_COPILOT_OTEL_PROTOCOL": "grpc"}
         self.assertEqual(provision._resolve_protocol(telemetry, env), "grpc")
+
+    def test_scion_env_fallback(self) -> None:
+        env = {"SCION_OTEL_PROTOCOL": "http"}
+        self.assertEqual(provision._resolve_protocol(None, env), "http")
 
 
 if __name__ == "__main__":
