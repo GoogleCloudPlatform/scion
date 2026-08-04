@@ -92,8 +92,16 @@ export default defineConfig({
 						{ label: 'Philosophy', slug: 'philosophy' },
 						{ label: 'Supported Harnesses', slug: 'supported-harnesses' },
 						{ label: 'Glossary', slug: 'glossary' },
-						{ label: 'Release Notes', slug: 'release-notes' },
-						{ label: 'Release Notes Archive', slug: 'release-notes-archive' },
+						{
+							label: 'Release Notes',
+							items: [
+								{ label: 'Overview', slug: 'release-notes' },
+								{ label: 'Jul 27 -- Aug 2', slug: 'release-notes/2026-07-27' },
+								{ label: 'Jul 19 -- 25', slug: 'release-notes/2026-07-19' },
+								{ label: 'Jul 12 -- 19', slug: 'release-notes/2026-07-12' },
+								{ label: 'Archive (Daily)', slug: 'release-notes-archive' },
+							],
+						},
 					],
 				},
 				{
