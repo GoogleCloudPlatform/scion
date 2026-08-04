@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -133,12 +134,12 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 			expected:  `(labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123")`,
 		},
 		{
-			name: "no logID with project ID excludes request log",
+			name: "no logID with project ID uses whitelist filter",
 			opts: LogQueryOptions{
 				AgentID: "agent-123",
 			},
 			projectID: "my-project",
-			expected:  `logName != "projects/my-project/logs/scion_request_log" AND labels.agent_id = "agent-123"`,
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages") AND labels.agent_id = "agent-123"`,
 		},
 		{
 			name: "message log uses ID-based sender and recipient filter",
@@ -168,6 +169,138 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 				t.Errorf("BuildLogFilter() = %q, want %q", result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestBuildLogFilter_Whitelist(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      LogQueryOptions
+		projectID string
+		expected  string
+	}{
+		{
+			name:      "default filter produces whitelist not exclusion",
+			opts:      LogQueryOptions{},
+			projectID: "my-project",
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages")`,
+		},
+		{
+			name:      "whitelist excludes Cloud SQL logs implicitly",
+			opts:      LogQueryOptions{},
+			projectID: "my-project",
+			// The whitelist only admits scion-server, scion-agents, scion-messages.
+			// A Cloud SQL logName like "projects/my-project/logs/cloudsql.googleapis.com%2Fpostgres.log"
+			// would NOT match any of these, so it is excluded.
+			expected: `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages")`,
+		},
+		{
+			name:      "whitelist excludes request log implicitly",
+			opts:      LogQueryOptions{},
+			projectID: "my-project",
+			// scion_request_log is NOT in the whitelist, so it is excluded.
+			expected: `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages")`,
+		},
+		{
+			name: "explicit LogID overrides whitelist",
+			opts: LogQueryOptions{
+				LogID: "scion-messages",
+			},
+			projectID: "my-project",
+			expected:  `logName = "projects/my-project/logs/scion-messages"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := BuildLogFilter(tt.opts, tt.projectID)
+			if result != tt.expected {
+				t.Errorf("BuildLogFilter() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildLogFilter_HubName(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      LogQueryOptions
+		projectID string
+		expected  string
+	}{
+		{
+			name: "HubName filter emitted when set",
+			opts: LogQueryOptions{
+				HubName: "scion-community",
+			},
+			projectID: "my-project",
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages") AND labels.hub = "scion-community"`,
+		},
+		{
+			name: "HubName filter omitted when empty",
+			opts: LogQueryOptions{
+				HubName: "",
+			},
+			projectID: "my-project",
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages")`,
+		},
+		{
+			name: "HubName filter with agent and severity",
+			opts: LogQueryOptions{
+				AgentID:  "agent-123",
+				HubName:  "scion-gteam",
+				Severity: "ERROR",
+			},
+			projectID: "my-project",
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages") AND labels.agent_id = "agent-123" AND severity >= ERROR AND labels.hub = "scion-gteam"`,
+		},
+		{
+			name: "HubName filter without project ID",
+			opts: LogQueryOptions{
+				HubName: "scion-community",
+			},
+			expected: `labels.hub = "scion-community"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := BuildLogFilter(tt.opts, tt.projectID)
+			if result != tt.expected {
+				t.Errorf("BuildLogFilter() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildLogFilter_CloudSQLExclusion(t *testing.T) {
+	// Verify that the whitelist approach excludes non-Scion log names.
+	// Cloud SQL logs like "cloudsql.googleapis.com/postgres.log" would have
+	// logName = "projects/my-project/logs/cloudsql.googleapis.com%2Fpostgres.log"
+	// which does NOT match any of the whitelisted Scion log names.
+	filter := BuildLogFilter(LogQueryOptions{}, "my-project")
+
+	// The filter should be a positive whitelist — it should contain OR clauses
+	// for scion-server, scion-agents, scion-messages only.
+	if !strings.Contains(filter, `logName = "projects/my-project/logs/scion-server"`) {
+		t.Error("filter should include scion-server in whitelist")
+	}
+	if !strings.Contains(filter, `logName = "projects/my-project/logs/scion-agents"`) {
+		t.Error("filter should include scion-agents in whitelist")
+	}
+	if !strings.Contains(filter, `logName = "projects/my-project/logs/scion-messages"`) {
+		t.Error("filter should include scion-messages in whitelist")
+	}
+	// Should NOT contain a negative filter
+	if strings.Contains(filter, `logName !=`) {
+		t.Error("filter should not use negative logName filter")
+	}
+	// Should NOT contain cloudsql or request log in the filter
+	if strings.Contains(filter, "cloudsql") {
+		t.Error("filter should not reference cloudsql logs")
+	}
+	if strings.Contains(filter, "scion_request_log") {
+		t.Error("filter should not reference scion_request_log (it should be excluded by omission from whitelist)")
 	}
 }
 

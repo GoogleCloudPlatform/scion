@@ -165,6 +165,7 @@ type RequestLoggerConfig struct {
 	ProjectID   string         // For trace URL formatting
 	Component   string         // "scion-server", "scion-hub", "scion-broker"
 	HubName     string         // Logical hub identity for log labels
+	HubID       string         // Stable unique hub instance ID for log labels
 	UseGCP      bool           // Format output as GCP-compatible JSON
 	Foreground  bool           // If true, suppress stdout output
 	Level       slog.Level
@@ -193,7 +194,7 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 
 	// Cloud handler
 	if cfg.CloudClient != nil {
-		ch := NewCloudHandlerFromClient(cfg.CloudClient, RequestLogID, cfg.Component, cfg.HubName, cfg.Level)
+		ch := NewCloudHandlerFromClient(cfg.CloudClient, RequestLogID, cfg.Component, cfg.HubName, cfg.HubID, cfg.Level)
 		var cloudHandler slog.Handler = ch
 		if cfg.CircuitOpen != nil {
 			cloudHandler = &circuitGatedHandler{inner: ch, circuitOpen: cfg.CircuitOpen}

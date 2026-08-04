@@ -704,11 +704,13 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	var cloudHandler slog.Handler
 	if cloudLoggingEnabled {
 		logLevel := logging.ResolveLogLevel(enableDebug)
-		cfg := logging.CloudLoggingConfig{
+		hubID := resolveHubIDFromEnv()
+		logCfg := logging.CloudLoggingConfig{
 			Component: component,
 			HubName:   hubName,
+			HubID:     hubID,
 		}
-		ch, cloudLogCleanup, cloudErr := logging.NewCloudHandler(ctx, cfg, logLevel)
+		ch, cloudLogCleanup, cloudErr := logging.NewCloudHandler(ctx, logCfg, logLevel)
 		if cloudErr != nil {
 			log.Printf("Warning: failed to initialize Cloud Logging: %v", cloudErr)
 		} else {
@@ -726,10 +728,12 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	logging.SetupWithOTel(component, hubName, enableDebug, useGCP, logProvider, cloudHandler)
 
 	// Initialize request logger
+	hubID := resolveHubIDFromEnv()
 	reqLogCfg := logging.RequestLoggerConfig{
 		FilePath:   os.Getenv(logging.EnvRequestLogPath),
 		Component:  component,
 		HubName:    hubName,
+		HubID:      hubID,
 		UseGCP:     useGCP,
 		Foreground: serverStartForeground,
 		Level:      logging.ResolveLogLevel(enableDebug),
@@ -752,6 +756,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	msgLogCfg := logging.MessageLoggerConfig{
 		Component: component,
 		HubName:   hubName,
+		HubID:     hubID,
 		UseGCP:    useGCP,
 		Level:     logging.ResolveLogLevel(enableDebug),
 	}
@@ -1287,6 +1292,16 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 		log.Printf("Admin emails configured: %v", adminEmailList)
 	}
 	return adminEmailList
+}
+
+// resolveHubIDFromEnv resolves the hub instance ID from environment variables,
+// falling back to the deterministic hostname-derived default. This is used
+// during early logging init before the full config is loaded.
+func resolveHubIDFromEnv() string {
+	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
+		return v
+	}
+	return config.DefaultHubID()
 }
 
 // resolveHubNameFromEnv resolves the hub display name from environment variables,

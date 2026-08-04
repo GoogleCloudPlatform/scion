@@ -49,7 +49,9 @@ func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	// Parse query parameters
-	opts := LogQueryOptions{}
+	opts := LogQueryOptions{
+		HubName: s.config.HubName,
+	}
 
 	if v := query.Get("tail"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -139,7 +141,9 @@ func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Requ
 	query := r.URL.Query()
 
 	// Parse query filters — no LogID or AgentID to stream all system logs
-	opts := LogQueryOptions{}
+	opts := LogQueryOptions{
+		HubName: s.config.HubName,
+	}
 	if v := query.Get("severity"); v != "" {
 		opts.Severity = v
 	}
