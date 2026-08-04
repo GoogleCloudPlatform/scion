@@ -1477,6 +1477,8 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// a stored var is keyed by an alternative name, we store its value under
 	// the canonical key (which is what the broker expects).
 	var altToCanonical map[string]string
+	resultIsCanonical := make(map[string]bool)
+	resultScopeIdx := make(map[string]int)
 	if len(alternatives) > 0 {
 		altToCanonical = make(map[string]string)
 		for canonical, alts := range alternatives {
@@ -1502,15 +1504,24 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				continue
 			}
 			if _, needed := keySet[v.Key]; needed {
-				// Store under the canonical key if this was an alternative match
+				canonical, isAlt := altToCanonical[v.Key]
 				resultKey := v.Key
-				if canonical, isAlt := altToCanonical[v.Key]; isAlt {
-					if _, already := result[canonical]; already {
-						continue // canonical key already matched; don't overwrite
-					}
+				if isAlt {
 					resultKey = canonical
 				}
-				result[resultKey] = v.Value
+				currentScopeIdx := slices.Index(envScopePrecedence, filter.Scope)
+				isCanonical := !isAlt
+				storedScopeIdx, alreadySet := resultScopeIdx[resultKey]
+				if !alreadySet || currentScopeIdx > storedScopeIdx {
+					result[resultKey] = v.Value
+					resultIsCanonical[resultKey] = isCanonical
+					resultScopeIdx[resultKey] = currentScopeIdx
+				} else if currentScopeIdx == storedScopeIdx {
+					if isCanonical && !resultIsCanonical[resultKey] {
+						result[resultKey] = v.Value
+						resultIsCanonical[resultKey] = true
+					}
+				}
 			}
 		}
 	}
