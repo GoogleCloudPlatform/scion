@@ -15,6 +15,9 @@
 package hub
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -290,6 +293,20 @@ func TestBuildLogFilter_Search(t *testing.T) {
 			},
 			expected: `severity >= WARNING AND jsonPayload.message =~ "dispatch"`,
 		},
+		{
+			name: "search with backslashes escaped before quotes",
+			opts: LogQueryOptions{
+				Search: `C:\Users\admin`,
+			},
+			expected: `jsonPayload.message =~ "C:\\Users\\admin"`,
+		},
+		{
+			name: "search with backslash and quote combined",
+			opts: LogQueryOptions{
+				Search: `error\"timeout`,
+			},
+			expected: `jsonPayload.message =~ "error\\\"timeout"`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -299,5 +316,138 @@ func TestBuildLogFilter_Search(t *testing.T) {
 				t.Errorf("BuildLogFilter() = %q, want %q", result, tt.expected)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Handler-level tests for handleDiagnosticsLogs
+// ---------------------------------------------------------------------------
+
+func TestHandleDiagnosticsLogs_Unauthenticated(t *testing.T) {
+	srv := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/diagnostics/logs", nil)
+	// No identity in context
+	rr := httptest.NewRecorder()
+	srv.handleDiagnosticsLogs(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleDiagnosticsLogs_NonAdmin(t *testing.T) {
+	srv := &Server{}
+	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/diagnostics/logs", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	rr := httptest.NewRecorder()
+	srv.handleDiagnosticsLogs(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleDiagnosticsLogs_NoLogQueryService(t *testing.T) {
+	srv := &Server{} // logQueryService is nil
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/diagnostics/logs", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleDiagnosticsLogs(rr, req)
+
+	if rr.Code != http.StatusNotImplemented {
+		t.Errorf("expected 501, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	errObj, ok := body["error"].(map[string]interface{})
+	if !ok {
+		t.Fatal("response missing 'error' object")
+	}
+	if code, _ := errObj["code"].(string); code != "not_implemented" {
+		t.Errorf("error code = %q, want %q", code, "not_implemented")
+	}
+}
+
+func TestHandleDiagnosticsLogs_MethodNotAllowed(t *testing.T) {
+	srv := &Server{}
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/diagnostics/logs", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleDiagnosticsLogs(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Handler-level tests for handleDiagnosticsLogsStream
+// ---------------------------------------------------------------------------
+
+func TestHandleDiagnosticsLogsStream_Unauthenticated(t *testing.T) {
+	srv := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/diagnostics/logs/stream", nil)
+	rr := httptest.NewRecorder()
+	srv.handleDiagnosticsLogsStream(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleDiagnosticsLogsStream_NonAdmin(t *testing.T) {
+	srv := &Server{}
+	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/diagnostics/logs/stream", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	rr := httptest.NewRecorder()
+	srv.handleDiagnosticsLogsStream(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleDiagnosticsLogsStream_NoLogQueryService(t *testing.T) {
+	srv := &Server{}
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/diagnostics/logs/stream", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleDiagnosticsLogsStream(rr, req)
+
+	if rr.Code != http.StatusNotImplemented {
+		t.Errorf("expected 501, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+	errObj, ok := body["error"].(map[string]interface{})
+	if !ok {
+		t.Fatal("response missing 'error' object")
+	}
+	if code, _ := errObj["code"].(string); code != "not_implemented" {
+		t.Errorf("error code = %q, want %q", code, "not_implemented")
+	}
+}
+
+func TestHandleDiagnosticsLogsStream_MethodNotAllowed(t *testing.T) {
+	srv := &Server{}
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/diagnostics/logs/stream", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleDiagnosticsLogsStream(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d: %s", rr.Code, rr.Body.String())
 	}
 }

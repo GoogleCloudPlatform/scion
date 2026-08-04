@@ -40,6 +40,7 @@ interface DiagnosticLogEntry {
   sourceLocation?: { file?: string; line?: string; function?: string };
   logName?: string;
   source: string; // "hub", "broker", "agent", "messages", "server"
+  _ts?: number; // cached numeric timestamp for sort performance
 }
 
 interface DiagnosticsLogResponse {
@@ -415,7 +416,8 @@ export class ScionUnifiedLogViewer extends LitElement {
         ) as DiagnosticLogEntry;
         this.mergeEntries([entry]);
 
-        if (!this.autoScroll) {
+        // Only count entries that pass current filters for the "new entries" banner
+        if (!this.autoScroll && this.entryPassesFilters(entry)) {
           this.newEntriesBelowCount++;
         }
       } catch {
@@ -462,8 +464,8 @@ export class ScionUnifiedLogViewer extends LitElement {
         try {
           const params = new URLSearchParams({ tail: '200' });
           if (this.severity) params.set('severity', this.severity);
-          // Entries are sorted newest-first, so [0] is the latest
-          params.set('since', this.entries[0].timestamp);
+          // Entries are sorted oldest-first (ascending), so last element is the latest
+          params.set('since', this.entries[this.entries.length - 1].timestamp);
           const res = await apiFetch(
             `/api/v1/admin/diagnostics/logs?${params}`
           );
@@ -483,28 +485,52 @@ export class ScionUnifiedLogViewer extends LitElement {
   // Buffer Management
   // ---------------------------------------------------------------------------
 
+  /** Cache numeric timestamp on an entry for sort performance. */
+  private ensureTimestamp(entry: DiagnosticLogEntry): number {
+    if (entry._ts === undefined) {
+      entry._ts = new Date(entry.timestamp).getTime();
+    }
+    return entry._ts;
+  }
+
   private mergeEntries(newEntries: DiagnosticLogEntry[]): void {
+    // Collect genuinely new entries (not already in the dedup map)
+    const toInsert: DiagnosticLogEntry[] = [];
     for (const entry of newEntries) {
       if (!this.entryMap.has(entry.insertId)) {
+        this.ensureTimestamp(entry);
         this.entryMap.set(entry.insertId, entry);
+        toInsert.push(entry);
       }
     }
 
-    // Sort by timestamp ascending (oldest first for log view)
-    const sorted = Array.from(this.entryMap.values()).sort(
-      (a, b) =>
-        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    );
+    if (toInsert.length === 0) return;
+
+    if (this.entries.length === 0) {
+      // First load: sort the full batch once
+      toInsert.sort((a, b) => a._ts! - b._ts!);
+      this.entries = toInsert;
+    } else if (
+      toInsert.length === 1 &&
+      toInsert[0]._ts! >= this.entries[this.entries.length - 1]._ts!
+    ) {
+      // Common case: single stream entry newer than latest — append directly
+      this.entries = [...this.entries, toInsert[0]];
+    } else {
+      // Multiple entries or out-of-order: merge and sort
+      const merged = [...this.entries, ...toInsert];
+      merged.sort((a, b) => a._ts! - b._ts!);
+      this.entries = merged;
+    }
 
     // Cap buffer — evict oldest entries
-    if (sorted.length > MAX_BUFFER) {
-      const evicted = sorted.splice(0, sorted.length - MAX_BUFFER);
+    if (this.entries.length > MAX_BUFFER) {
+      const evicted = this.entries.splice(0, this.entries.length - MAX_BUFFER);
       for (const e of evicted) {
         this.entryMap.delete(e.insertId);
       }
+      this.entries = [...this.entries]; // trigger reactivity after splice
     }
-
-    this.entries = sorted;
 
     // Auto-scroll after render
     if (this.autoScroll) {
@@ -512,17 +538,18 @@ export class ScionUnifiedLogViewer extends LitElement {
     }
   }
 
+  /** Check if a single entry passes current client-side filters. */
+  private entryPassesFilters(entry: DiagnosticLogEntry): boolean {
+    if (!this.enabledSources.has(entry.source)) return false;
+    if (this.searchText) {
+      const text = this.searchText.toLowerCase();
+      if (!entry.message?.toLowerCase().includes(text)) return false;
+    }
+    return true;
+  }
+
   private getFilteredEntries(): DiagnosticLogEntry[] {
-    return this.entries.filter((entry) => {
-      // Source filter
-      if (!this.enabledSources.has(entry.source)) return false;
-      // Search filter
-      if (this.searchText) {
-        const text = this.searchText.toLowerCase();
-        if (!entry.message?.toLowerCase().includes(text)) return false;
-      }
-      return true;
-    });
+    return this.entries.filter((entry) => this.entryPassesFilters(entry));
   }
 
   // ---------------------------------------------------------------------------
@@ -530,8 +557,15 @@ export class ScionUnifiedLogViewer extends LitElement {
   // ---------------------------------------------------------------------------
 
   private handleSeverityChange(e: Event): void {
-    const select = e.target as HTMLSelectElement;
-    this.severity = select.value;
+    this.severity = (e.target as unknown as { value: string }).value;
+    // Notify parent of severity change (used by popout link)
+    this.dispatchEvent(
+      new CustomEvent('severity-change', {
+        detail: { severity: this.severity },
+        bubbles: true,
+        composed: true,
+      })
+    );
     this.stopStream();
     this.entryMap.clear();
     this.entries = [];
@@ -551,8 +585,7 @@ export class ScionUnifiedLogViewer extends LitElement {
   }
 
   private handleSearchInput(e: Event): void {
-    const input = e.target as HTMLInputElement;
-    const value = input.value;
+    const value = (e.target as unknown as { value: string }).value;
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
@@ -617,10 +650,12 @@ export class ScionUnifiedLogViewer extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    // Compute filtered entries once and pass to both sub-renders to avoid double-filtering.
+    const filteredEntries = this.getFilteredEntries();
     return html`
       ${this.renderFilterBar()}
-      ${this.renderLogContainer()}
-      ${this.renderStatusBar()}
+      ${this.renderLogContainer(filteredEntries)}
+      ${this.renderStatusBar(filteredEntries)}
     `;
   }
 
@@ -680,7 +715,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     `;
   }
 
-  private renderLogContainer() {
+  private renderLogContainer(filteredEntries: DiagnosticLogEntry[]) {
     return html`
       <div class="log-container">
         ${this.loading && this.entries.length === 0
@@ -695,7 +730,7 @@ export class ScionUnifiedLogViewer extends LitElement {
               `
             : html`
                 <div class="log-scroller" @scroll=${this.handleScroll}>
-                  ${this.renderEntries()}
+                  ${this.renderEntries(filteredEntries)}
                   ${!this.autoScroll && this.newEntriesBelowCount > 0
                     ? html`
                         <div class="new-entries-banner" @click=${this.handleNewEntriesClick}>
@@ -709,9 +744,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     `;
   }
 
-  private renderEntries() {
-    const filtered = this.getFilteredEntries();
-
+  private renderEntries(filtered: DiagnosticLogEntry[]) {
     if (filtered.length === 0 && this.entries.length > 0) {
       return html`
         <div class="state-msg">
@@ -841,8 +874,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     return obj;
   }
 
-  private renderStatusBar() {
-    const filtered = this.getFilteredEntries();
+  private renderStatusBar(filtered: DiagnosticLogEntry[]) {
     const streamState = this.streaming
       ? 'Streaming'
       : this.reconnecting

@@ -41,6 +41,7 @@ export class ScionPageDiagnostics extends LitElement {
   @state() private cloudLoggingAvailable = false;
   @state() private cloudLoggingChecked = false;
   @state() private gcpProjectId = '';
+  @state() private currentSeverity = 'INFO';
 
   static override styles = css`
     :host {
@@ -266,7 +267,7 @@ export class ScionPageDiagnostics extends LitElement {
                 size="small"
                 variant="default"
                 class="popout-button"
-                href=${this.buildCloudLoggingUrl('INFO')}
+                href=${this.buildCloudLoggingUrl(this.currentSeverity)}
                 target="_blank"
               >
                 <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
@@ -338,11 +339,17 @@ export class ScionPageDiagnostics extends LitElement {
     `;
   }
 
+  private handleSeverityChange(e: Event): void {
+    const detail = (e as CustomEvent<{ severity: string }>).detail;
+    this.currentSeverity = detail.severity;
+  }
+
   private renderLogViewer() {
     return html`
       <scion-unified-log-viewer
         .gcpProjectId=${this.gcpProjectId}
         initialSeverity="INFO"
+        @severity-change=${this.handleSeverityChange}
       ></scion-unified-log-viewer>
     `;
   }
