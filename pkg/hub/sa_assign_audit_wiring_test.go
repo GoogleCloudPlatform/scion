@@ -172,20 +172,12 @@ func TestSAAudit_AgentPatch_RecordsItsOwnSurface(t *testing.T) {
 // Surface 3: project default
 // ---------------------------------------------------------------------------
 
-// TestSAAudit_ProjectDefault_RecordsABindingNotADecision is the surface with
-// the ruling attached. Nothing is authorized when a project's default account
-// is bound — the account is not caller-supplied, so there is no caller-elected
-// privilege to evaluate — but a binding did happen, and a binding that produces
-// no record is indistinguishable from no binding at all.
-//
-// ⚠️ The record therefore carries NO ActAsOutcome. Not Allowed (nothing allowed
-// it), not Denied, and emphatically not the zero value: ActAsIndeterminate
-// DENIES, so the moment this record carried it, the next person to wire
-// enforcement to the audit records — a reasonable thing to do, since that is
-// where the decisions are — would fail routine agent creation closed. This
-// assertion is what stops an audit change from becoming an outage on a
-// P3-protected path.
-func TestSAAudit_ProjectDefault_RecordsABindingNotADecision(t *testing.T) {
+// P10 CHANGED: TestSAAudit_ProjectDefault_RecordsADecision. Project-default
+// assignment now runs the full authorization gate (authorizeSAAssignment),
+// which produces a DECISION record via EvaluateActAs, not a binding record.
+// The ruling changed in P10: the project operator selected an available
+// default but did not grant every future creator permission to act as it.
+func TestSAAudit_ProjectDefault_RecordsADecision(t *testing.T) {
 	srv, s, project, audit := auditingServer(t)
 	sa := wiringSA(t, s, store.ScopeProject, project.ID, "audit-default@p.iam.gserviceaccount.com")
 
@@ -205,17 +197,21 @@ func TestSAAudit_ProjectDefault_RecordsABindingNotADecision(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
+	// P10: the project-default path now produces a decision record, not a
+	// binding record, because authorizeSAAssignment runs EvaluateActAs.
 	ev := onlySAEvent(t, audit)
-	assert.Equal(t, store.SAAssignmentBinding, ev.Type)
+	assert.Equal(t, store.SAAssignmentDecision, ev.Type,
+		"P10: project-default now produces a decision record via authorizeSAAssignment")
 	assert.Equal(t, SurfaceProjectDefault, ev.Surface)
 	assert.Equal(t, sa.ID, ev.TargetSAID)
-	assert.Nil(t, ev.Decision, "a binding record must carry no verdict")
-	assert.Empty(t, ev.Permission, "nothing was checked, so naming a permission would be a false claim")
+	assert.Equal(t, sa.Email, ev.TargetSAEmail)
+	assert.Equal(t, store.PermissionActAs, ev.Permission)
+	require.NotNil(t, ev.Decision, "P10: decision record must carry a verdict")
+	assert.Equal(t, store.ActAsAllowed, *ev.Decision)
 
-	// "ungated" would read as a gap and invite someone to close it. The
-	// mechanism has to say there is nothing to close.
-	assert.Equal(t, store.MechanismProjectDefault, ev.Mechanism)
-	assert.NotEmpty(t, ev.Reason)
+	// With the gate inert (default), the mechanism records check-disabled.
+	assert.Equal(t, store.MechanismCheckDisabled, ev.Mechanism,
+		"the record must say the allow came from the toggle, not from a check")
 }
 
 // TestSAAudit_ProjectDefault_StillBindsWhenTheSinkIsMissing. The emit sits

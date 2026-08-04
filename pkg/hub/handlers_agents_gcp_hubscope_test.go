@@ -678,18 +678,20 @@ func createdAgentIdentity(t *testing.T, f *bypassAgentsFixture, name string) *st
 	return got.AppliedConfig.GCPIdentity
 }
 
-// The silent one. A project whose default service account was hub-scoped fell
-// through to metadata mode "block": every agent created there got no identity
-// and no error was surfaced anywhere, so the operator sees "GCP access is
-// mysteriously broken" rather than a rejection.
+// P10 CHANGED: Project-default assignment now runs the full authorization
+// gate (ActionAssign + actAs). The account is not caller-supplied, but the
+// design ruling changed: the project operator selected an available default
+// but did not grant every future creator permission to act as it. The gate
+// checks the immediate agent creator.
 //
-// Note there is no authorization check at this site and this test must not
-// grow one. The account is not caller-supplied — it comes from project
-// settings — so there is no caller-elected privilege to authorize, and gating
-// it on the caller would turn a project-admin decision into a per-caller
-// lottery. Hub membership is therefore deliberately NOT granted here.
+// Hub membership and mode=enforce are now REQUIRED for hub-scoped defaults
+// because authorizeSAAssignment enforces mode coupling (D4) and Hub policy.
 func TestAgentCreate_HubScopedProjectDefault_IsApplied(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	// P10: mode=enforce + hub membership required for hub-scoped default
+	setMode(f.srv, SAAssignCheckEnforce)
+	f.srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})
+	ensureHubMembership(context.Background(), f.store, f.owner.ID)
 	sa := hubScopedSAForAgent(t, f, true)
 	setProjectDefaultSA(t, f, sa.ID)
 
@@ -726,15 +728,20 @@ func TestAgentCreate_HubScopedProjectDefault_IsApplied(t *testing.T) {
 // the stale case alone, and it is why the setup bypasses HTTP. The refusal
 // itself is covered at the boundary by
 // TestProjectSettings_DefaultGCPIdentity_OtherProjectSAIsNotAnOracle.
-func TestAgentCreate_OtherProjectDefault_StillFallsThroughToBlock(t *testing.T) {
+// P10 CHANGED: an unreachable project default now fails agent creation with
+// a 400 error instead of silently falling back to block. The operator set
+// the default; if the SA is unreachable, the error surfaces immediately.
+func TestAgentCreate_OtherProjectDefault_FailsWithError(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.other.ID, true)
 	setStaleProjectDefaultSA(t, f, sa.ID)
 
-	identity := createdAgentIdentity(t, f, "bad-default-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
-		"another project's SA must not be applied as this project's default")
-	assert.Empty(t, identity.ServiceAccountID)
+	rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: "bad-default-agent"})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"P10: an unreachable project-default SA must fail agent creation, not silently degrade; got: %s",
+		rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "project default GCP service account is not available",
+		"error must indicate the project default SA is the issue")
 }
 
 // An unverified hub-scoped default is still refused. Same independence of
@@ -751,12 +758,17 @@ func TestAgentCreate_OtherProjectDefault_StillFallsThroughToBlock(t *testing.T) 
 // default at all; the state now arises only by an account losing verification
 // after it was validly set. The write-time refusal is covered at the boundary
 // by TestProjectSettings_DefaultGCPIdentity_RejectsUnverifiedHubScopedSA.
-func TestAgentCreate_UnverifiedHubScopedDefault_FallsThroughToBlock(t *testing.T) {
+// P10 CHANGED: an unverified project default now fails agent creation with
+// a 400 error instead of silently falling back to block.
+func TestAgentCreate_UnverifiedHubScopedDefault_FailsWithError(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	sa := hubScopedSAForAgent(t, f, false)
 	setStaleProjectDefaultSA(t, f, sa.ID)
 
-	identity := createdAgentIdentity(t, f, "unverified-default-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
-		"an unverified hub-scoped default must not be applied")
+	rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: "unverified-default-agent"})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"P10: an unverified project-default SA must fail agent creation, not silently degrade; got: %s",
+		rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not verified",
+		"error must indicate the SA is not verified")
 }
