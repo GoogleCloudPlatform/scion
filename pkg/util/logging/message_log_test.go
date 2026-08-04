@@ -135,7 +135,7 @@ func TestNewMessageLogger_CloudRunWithCloudClient_SuppressesStdout(t *testing.T)
 	if err != nil {
 		t.Fatalf("failed to create test gcplog.Client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	cfg := MessageLoggerConfig{
 		Component:   "test-server",

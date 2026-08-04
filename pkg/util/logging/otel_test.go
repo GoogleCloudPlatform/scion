@@ -151,8 +151,8 @@ func TestSetupWithOTel_CloudRunSuppressesStdout(t *testing.T) {
 	// handler should be omitted to avoid duplicate Cloud Logging entries.
 	t.Setenv("K_SERVICE", "my-service")
 
-	// Use a minimal handler as the "cloud handler" stand-in.
-	cloudHandler := slog.NewJSONHandler(nil, nil)
+	// Use a real CloudHandler so hasCloudHandler detects it.
+	cloudHandler := &CloudHandler{}
 
 	SetupWithOTel("test-component", "", false, true, nil, cloudHandler)
 
@@ -165,11 +165,11 @@ func TestSetupWithOTel_CloudRunSuppressesStdout(t *testing.T) {
 	// Verify the handler is directly the cloudHandler (no multiHandler
 	// wrapping needed when there's only one handler).
 	h := logger.Handler()
-	if _, ok := h.(*slog.JSONHandler); !ok {
+	if _, ok := h.(*CloudHandler); !ok {
 		// If it's a multiHandler, verify it contains only the cloud handler.
 		mh, isMH := h.(*multiHandler)
 		if !isMH {
-			t.Fatalf("expected cloud handler or multiHandler, got %T", h)
+			t.Fatalf("expected CloudHandler or multiHandler, got %T", h)
 		}
 		// Should have exactly 1 handler (the cloud handler), not 2.
 		if len(mh.handlers) != 1 {
@@ -217,15 +217,18 @@ func TestSetupWithOTel_CloudRunNoCloudHandler(t *testing.T) {
 	}
 }
 
-func TestHasNonNilHandler(t *testing.T) {
-	if hasNonNilHandler(nil) {
+func TestHasCloudHandler(t *testing.T) {
+	if hasCloudHandler(nil) {
 		t.Error("nil slice should return false")
 	}
-	if hasNonNilHandler([]slog.Handler{nil, nil}) {
+	if hasCloudHandler([]slog.Handler{nil, nil}) {
 		t.Error("all-nil slice should return false")
 	}
-	if !hasNonNilHandler([]slog.Handler{nil, slog.NewJSONHandler(nil, nil)}) {
-		t.Error("slice with non-nil handler should return true")
+	if hasCloudHandler([]slog.Handler{nil, slog.NewJSONHandler(nil, nil)}) {
+		t.Error("non-cloud handler (JSONHandler) should return false")
+	}
+	if !hasCloudHandler([]slog.Handler{nil, &CloudHandler{}}) {
+		t.Error("slice with CloudHandler should return true")
 	}
 }
 

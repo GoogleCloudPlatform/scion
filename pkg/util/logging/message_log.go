@@ -73,7 +73,7 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 	// Logging by the runtime. When a cloud handler is also active, the stdout
 	// handler would produce duplicate entries — skip it in that case.
 	onCloudRun := os.Getenv("K_SERVICE") != ""
-	if !(onCloudRun && cfg.CloudClient != nil) {
+	if !onCloudRun || cfg.CloudClient == nil {
 		if cfg.UseGCP {
 			handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))
 		} else {

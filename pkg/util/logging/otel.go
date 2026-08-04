@@ -104,8 +104,8 @@ func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.Lo
 	// handler is also present in extraHandlers, including the stdout base
 	// handler would produce duplicate entries. Skip it in that case.
 	onCloudRun := os.Getenv("K_SERVICE") != ""
-	hasCloudHandler := hasNonNilHandler(extraHandlers)
-	if !(onCloudRun && hasCloudHandler) {
+	cloudHandlerPresent := hasCloudHandler(extraHandlers)
+	if !onCloudRun || !cloudHandlerPresent {
 		baseHandler := createBaseHandler(component, debug, useGCP, hubName)
 		handlers = append(handlers, baseHandler)
 	}
@@ -127,12 +127,28 @@ func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.Lo
 	slog.SetDefault(logger)
 }
 
-// hasNonNilHandler reports whether the slice contains at least one non-nil handler.
-func hasNonNilHandler(handlers []slog.Handler) bool {
+// hasCloudHandler reports whether the slice contains at least one Cloud Logging handler.
+func hasCloudHandler(handlers []slog.Handler) bool {
 	for _, h := range handlers {
-		if h != nil {
+		if isCloudHandler(h) {
 			return true
 		}
+	}
+	return false
+}
+
+// isCloudHandler reports whether h is a Cloud Logging handler.
+// It unwraps circuitGatedHandler to inspect the inner handler.
+func isCloudHandler(h slog.Handler) bool {
+	if h == nil {
+		return false
+	}
+	switch h.(type) {
+	case *CloudHandler, *messageCloudHandler:
+		return true
+	}
+	if cg, ok := h.(*circuitGatedHandler); ok {
+		return isCloudHandler(cg.inner)
 	}
 	return false
 }
