@@ -1,0 +1,356 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Alert policy definitions for GCP Cloud Monitoring.
+#
+# NOTE: This file uses a custom DSL, NOT the raw GCP AlertPolicy API schema.
+# Each entry is a human-readable policy specification that must be translated
+# into GCP-native AlertPolicy resources before deployment. Use the Terraform
+# or Pulumi provisioning methods described in README.md, which read these
+# values as configuration inputs. The gcloud CLI requires manual conversion
+# (see README.md for details).
+#
+# Metrics use the custom.googleapis.com/scion.* namespace and are emitted via
+# the OTLP pipeline (see .design/hosted/metrics-system.md).
+#
+# Severity labels:
+#   WARNING  - investigate during business hours; may self-resolve
+#   CRITICAL - immediate action required; potential user-facing impact
+
+alertPolicies:
+
+  # ---------------------------------------------------------------------------
+  # DB Health (5 alerts)
+  # ---------------------------------------------------------------------------
+
+  - displayName: "DB Pool Near Exhaustion"
+    documentation:
+      content: |
+        The ratio of active database connections to the pool maximum has exceeded
+        85% for 5 minutes. Investigate query load and consider increasing the
+        pool size or optimizing long-running queries.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.db.pool.connections.active"
+    # Condition: active / max > 0.85
+    # The ratio is computed by dividing the active gauge by the max gauge.
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 0.85
+    # MQL equivalent:
+    #   fetch generic_node
+    #   | metric 'custom.googleapis.com/scion.db.pool.connections.active'
+    #   | div (metric 'custom.googleapis.com/scion.db.pool.connections.max')
+    #   | every 1m
+    #   | condition val() > 0.85 '1'
+    denominatorMetric: "custom.googleapis.com/scion.db.pool.connections.max"
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_MEAN
+    duration: "300s"           # 5 minutes
+    notificationChannels:
+      - email
+      - slack
+
+  - displayName: "DB Pool Exhausted"
+    documentation:
+      content: |
+        The ratio of active database connections to the pool maximum has exceeded
+        95% for 2 minutes. The application is at risk of connection starvation.
+        Immediate action required.
+    severity: CRITICAL
+    metric: "custom.googleapis.com/scion.db.pool.connections.active"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 0.95
+    denominatorMetric: "custom.googleapis.com/scion.db.pool.connections.max"
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_MEAN
+    duration: "120s"           # 2 minutes
+    notificationChannels:
+      - email
+      - slack
+      - pagerduty
+
+  - displayName: "DB Listener Reconnect Spike"
+    documentation:
+      content: |
+        The PostgreSQL LISTEN/NOTIFY listener has reconnected more than 3 times
+        in a 5-minute window. This may indicate network instability between the
+        application and the database, or the database is cycling connections.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.db.notify.listener.reconnects"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 3
+    aggregation:
+      alignmentPeriod: "300s"  # 5-minute window
+      perSeriesAligner: ALIGN_DELTA
+    duration: "0s"             # Fire immediately when the 5-min delta exceeds 3
+    notificationChannels:
+      - email
+      - slack
+
+  - displayName: "DB Notifications Dropped"
+    documentation:
+      content: |
+        One or more LISTEN/NOTIFY messages were dropped and not delivered to
+        subscribers. This indicates the notification queue overflowed or a
+        subscriber could not keep up. Investigate subscriber health and
+        notification volume.
+    severity: CRITICAL
+    metric: "custom.googleapis.com/scion.db.notify.dropped"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 0
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_DELTA
+    duration: "300s"           # Sustained for 5 minutes
+    notificationChannels:
+      - email
+      - slack
+      - pagerduty
+
+  - displayName: "DB Subscriber Lag Elevated"
+    documentation:
+      content: |
+        The P95 subscriber lag for database LISTEN/NOTIFY delivery has exceeded
+        5 seconds for 10 minutes. Subscribers are falling behind on processing
+        notifications. Check subscriber throughput and system load.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.db.notify.subscriber.lag"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 5.0             # 5 seconds
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_PERCENTILE_95
+    duration: "600s"           # 10 minutes
+    notificationChannels:
+      - email
+      - slack
+
+  # ---------------------------------------------------------------------------
+  # Dispatch Health (6 alerts)
+  # ---------------------------------------------------------------------------
+
+  - displayName: "Stuck Messages"
+    documentation:
+      content: |
+        One or more messages in the dispatch pipeline have been stuck (neither
+        delivered nor failed) for more than 5 minutes. This may indicate a
+        deadlock, a crashed worker, or a message that cannot be routed.
+        Investigate the dispatch queue immediately.
+    severity: CRITICAL
+    metric: "custom.googleapis.com/scion.dispatch.message.stuck"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 0
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_MAX
+    duration: "300s"           # 5 minutes
+    notificationChannels:
+      - email
+      - slack
+      - pagerduty
+
+  - displayName: "Dispatch Failure Spike"
+    documentation:
+      content: |
+        More than 5 dispatch failures occurred in a 5-minute window. A transient
+        burst of failures may indicate a downstream service degradation or a
+        misconfigured message route.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.dispatch.failed"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 5
+    aggregation:
+      alignmentPeriod: "300s"  # 5-minute window
+      perSeriesAligner: ALIGN_DELTA
+    duration: "0s"             # Fire immediately when the 5-min delta exceeds 5
+    notificationChannels:
+      - email
+      - slack
+
+  - displayName: "Dispatch Failure Sustained"
+    documentation:
+      content: |
+        Dispatch failures have been occurring continuously for 15 minutes. Even
+        a low rate of sustained failures indicates a systemic problem that will
+        not self-resolve. Investigate the dispatch pipeline, downstream services,
+        and message routing configuration.
+    severity: CRITICAL
+    metric: "custom.googleapis.com/scion.dispatch.failed"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 0
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_DELTA
+    duration: "900s"           # 15 minutes
+    notificationChannels:
+      - email
+      - slack
+      - pagerduty
+
+  - displayName: "Dispatch Latency P95 Elevated"
+    documentation:
+      content: |
+        The P95 end-to-end dispatch latency (intent to done) has exceeded 30
+        seconds for 10 minutes. Messages are taking longer than expected to
+        process. Check worker capacity, downstream latency, and queue depth.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.dispatch.intent_to_done.duration"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 30.0            # 30 seconds
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_PERCENTILE_95
+    duration: "600s"           # 10 minutes
+    notificationChannels:
+      - email
+      - slack
+
+  - displayName: "Dispatch Latency P95 Critical"
+    documentation:
+      content: |
+        The P95 end-to-end dispatch latency has exceeded 120 seconds for 5
+        minutes. The dispatch pipeline is severely degraded. Users will
+        experience significant delays. Immediate investigation required.
+    severity: CRITICAL
+    metric: "custom.googleapis.com/scion.dispatch.intent_to_done.duration"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 120.0           # 120 seconds
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_PERCENTILE_95
+    duration: "300s"           # 5 minutes
+    notificationChannels:
+      - email
+      - slack
+      - pagerduty
+
+  - displayName: "Command Bus Reconnect Storm"
+    documentation:
+      content: |
+        The command bus (used for dispatching commands between Hub and Broker)
+        has reconnected more than 5 times in a 5-minute window. Frequent
+        reconnections cause message delivery delays and potential duplicates.
+        Investigate network stability and command bus server health.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.dispatch.cmdbus.reconnects"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 5
+    aggregation:
+      alignmentPeriod: "300s"  # 5-minute window
+      perSeriesAligner: ALIGN_DELTA
+    duration: "0s"             # Fire immediately when the 5-min delta exceeds 5
+    notificationChannels:
+      - email
+      - slack
+
+  # ---------------------------------------------------------------------------
+  # Telemetry Pipeline (2 alerts)
+  # ---------------------------------------------------------------------------
+
+  - displayName: "Telemetry Pipeline Down"
+    documentation:
+      content: |
+        No metric data has been received from the OTLP exporter for 10 minutes.
+        This indicates the OpenTelemetry Collector or exporter pipeline is down.
+        Verify the collector is running and reachable from application pods.
+    # Design §2.3 specifies WARNING severity for pipeline-down.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.telemetry.pipeline.status"
+    conditionType: ABSENCE
+    aggregation:
+      alignmentPeriod: "300s"    # 5-minute buckets per design — avoids noise during agent lifecycle events
+      perSeriesAligner: ALIGN_MAX
+    duration: "600s"             # 10 minutes of missing data
+    notificationChannels:
+      - email
+      - slack
+
+  - displayName: "Telemetry Export Errors"
+    documentation:
+      content: |
+        The OTLP exporter has reported more than 10 export errors in a 5-minute
+        window. Metrics may be lost or delayed. Investigate the collector
+        configuration, backend connectivity, and error logs.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.telemetry.export.errors"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 10
+    aggregation:
+      alignmentPeriod: "300s"    # 5-minute window
+      perSeriesAligner: ALIGN_DELTA
+    duration: "0s"               # Fire immediately when the 5-min delta exceeds 10
+    notificationChannels:
+      - email
+      - slack
+
+  # ---------------------------------------------------------------------------
+  # Hub Auth (2 alerts)
+  # ---------------------------------------------------------------------------
+
+  # Prerequisite: the metric scion.hub.auth.broker.verify.failures must be
+  # promoted to OTel (registered in otel_metrics.go) before these policies
+  # can fire. See design doc §2.5 prerequisites.
+  - displayName: "Broker HMAC Verify Failures"
+    documentation:
+      content: |
+        More than 5 HMAC verification failures occurred on the Hub's broker
+        authentication endpoint in a 5-minute window. This may indicate a
+        misconfigured broker, a key rotation issue, or an unauthorized party
+        attempting to connect.
+    severity: WARNING
+    metric: "custom.googleapis.com/scion.hub.auth.broker.verify.failures"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 5
+    aggregation:
+      alignmentPeriod: "300s"  # 5-minute window
+      perSeriesAligner: ALIGN_DELTA
+    duration: "0s"             # Fire immediately when the 5-min delta exceeds 5
+    notificationChannels:
+      - email
+      - slack
+
+  - displayName: "Broker HMAC Verify Failures Sustained"
+    documentation:
+      content: |
+        HMAC verification failures on the Hub's broker authentication endpoint
+        have been occurring continuously for 15 minutes. Sustained auth failures
+        suggest a persistent misconfiguration or an ongoing attack. Rotate keys
+        if compromise is suspected.
+    severity: CRITICAL
+    metric: "custom.googleapis.com/scion.hub.auth.broker.verify.failures"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 0
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_DELTA
+    duration: "900s"           # 15 minutes
+    notificationChannels:
+      - email
+      - slack
+      - pagerduty

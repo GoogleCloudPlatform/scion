@@ -1,0 +1,142 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Uptime check definitions for GCP Cloud Monitoring.
+#
+# Hub endpoints are public-facing and checked via the global GCP uptime-check
+# infrastructure. Broker endpoints are internal and checked from within the
+# private network (requires a private checker or internal uptime check config).
+
+uptimeChecks:
+
+  # ---------------------------------------------------------------------------
+  # Hub checks (public HTTPS)
+  # ---------------------------------------------------------------------------
+
+  - displayName: "Hub /healthz"
+    description: |
+      Liveness check for the Scion Hub. Verifies the server process is running
+      and able to serve HTTP requests. A failure here means the Hub is down or
+      unreachable from the public internet.
+    monitoredResource:
+      type: uptime_url
+      labels:
+        # Replace with the actual Hub hostname before applying.
+        host: "hub.scion.example.com"
+    httpCheck:
+      path: "/healthz"
+      port: 443
+      useSsl: true
+      validateSsl: true
+      requestMethod: GET
+    contentMatchers:
+      - content: "healthy"
+        matcher: CONTAINS_STRING
+    period: "60s"              # Check every 1 minute
+    timeout: "10s"
+    notificationChannels:
+      - email
+      - slack
+      - pagerduty
+
+  - displayName: "Hub /readyz"
+    description: |
+      Readiness check for the Scion Hub. Verifies the server has completed
+      startup, established database connections, and is ready to handle
+      requests. A failure here means the Hub is alive but not yet ready to
+      serve traffic (e.g., during a rolling deploy).
+    monitoredResource:
+      type: uptime_url
+      labels:
+        host: "hub.scion.example.com"
+    httpCheck:
+      path: "/readyz"
+      port: 443
+      useSsl: true
+      validateSsl: true
+      requestMethod: GET
+    contentMatchers:
+      - content: "ready"
+        matcher: CONTAINS_STRING
+    period: "60s"              # Check every 1 minute
+    timeout: "10s"
+    notificationChannels:
+      - email
+      - slack
+      - pagerduty
+
+  # ---------------------------------------------------------------------------
+  # Broker checks (internal HTTP)
+  # ---------------------------------------------------------------------------
+
+  - displayName: "Broker /healthz"
+    description: |
+      Liveness check for the Runtime Broker. The Broker is an internal service
+      not exposed to the public internet, so this check runs from within the
+      private network using an internal uptime check configuration. A failure
+      indicates the Broker process is down or the internal network path is
+      broken.
+    monitoredResource:
+      type: uptime_url
+      labels:
+        # Internal hostname or IP; replace before applying.
+        host: "broker.internal.scion.example.com"
+    httpCheck:
+      path: "/healthz"
+      port: 8080
+      useSsl: false
+      requestMethod: GET
+    contentMatchers:
+      - content: "healthy"
+        matcher: CONTAINS_STRING
+    # Internal checks use a longer period since the Broker is not user-facing.
+    period: "300s"             # Check every 5 minutes
+    timeout: "10s"
+    internalCheckers:
+      # Requires a GCP private uptime check configuration.
+      # See: https://cloud.google.com/monitoring/uptime-checks/private-checks
+      - gcpZone: "us-central1-a"
+        network: "default"
+        projectId: "${GCP_PROJECT_ID}"
+    notificationChannels:
+      - email
+      - slack
+
+  - displayName: "Broker /readyz"
+    description: |
+      Readiness check for the Runtime Broker. Verifies the Broker has
+      established connections to the Hub, the command bus, and the container
+      runtime. A failure here means the Broker is alive but cannot process
+      agent lifecycle requests.
+    monitoredResource:
+      type: uptime_url
+      labels:
+        host: "broker.internal.scion.example.com"
+    httpCheck:
+      path: "/readyz"
+      port: 8080
+      useSsl: false
+      requestMethod: GET
+    contentMatchers:
+      - content: "ready"
+        matcher: CONTAINS_STRING
+    period: "300s"             # Check every 5 minutes
+    timeout: "10s"
+    internalCheckers:
+      - gcpZone: "us-central1-a"
+        network: "default"
+        projectId: "${GCP_PROJECT_ID}"
+    notificationChannels:
+      - email
+      - slack

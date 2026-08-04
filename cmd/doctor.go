@@ -15,13 +15,20 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	goruntime "runtime"
+	"strings"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
@@ -53,6 +60,70 @@ func runDoctor() error {
 	checkGit()
 	checkTmux()
 
+	// Hub Health checks
+	fmt.Printf("\n%sHub Health%s\n", util.Bold, util.Reset)
+	var hubChecks []scionruntime.CheckResult
+
+	// Resolve hub endpoint
+	hubEP := hubEndpoint
+	if hubEP == "" {
+		hubEP = os.Getenv("SCION_HUB_ENDPOINT")
+	}
+	if hubEP == "" {
+		hubEP = os.Getenv("SCION_HUB_URL")
+	}
+
+	// D1: Hub Connectivity
+	d1 := checkDoctorHubConnectivity(hubEP)
+	hubChecks = append(hubChecks, d1)
+	printCheck(d1.Name, d1.Status, d1.Message, d1.Remediation)
+
+	hubConnected := d1.Status == "pass" || d1.Status == "warn"
+
+	// Create authenticated client for D2-D5 if Hub is reachable
+	var hubClient hubclient.Client
+	if hubEP != "" && hubConnected {
+		settings, _ := config.LoadSettings(projectPath)
+		if c, err := getHubClient(settings); err == nil {
+			hubClient = c
+		}
+	}
+
+	// D2: Hub Authentication
+	d2 := checkDoctorHubAuth(hubEP, hubConnected, hubClient)
+	hubChecks = append(hubChecks, d2)
+	printCheck(d2.Name, d2.Status, d2.Message, d2.Remediation)
+
+	// D3: Broker Connectivity
+	d3 := checkDoctorBrokerConnectivity(hubEP, hubConnected, hubClient)
+	hubChecks = append(hubChecks, d3)
+	printCheck(d3.Name, d3.Status, d3.Message, d3.Remediation)
+
+	// D4: Agent Health Summary
+	d4 := checkDoctorAgentHealth(hubEP, hubConnected, hubClient)
+	hubChecks = append(hubChecks, d4)
+	printCheck(d4.Name, d4.Status, d4.Message, d4.Remediation)
+
+	// D5: NFS Mount Status
+	d5 := checkDoctorNFSMounts(hubEP, hubConnected, hubClient)
+	hubChecks = append(hubChecks, d5)
+	printCheck(d5.Name, d5.Status, d5.Message, d5.Remediation)
+
+	// D6: Telemetry Pipeline (local check)
+	d6 := checkDoctorTelemetry()
+	hubChecks = append(hubChecks, d6)
+	printCheck(d6.Name, d6.Status, d6.Message, d6.Remediation)
+
+	// D7: Container Images (local check)
+	d7 := checkDoctorContainerImages()
+	hubChecks = append(hubChecks, d7)
+	printCheck(d7.Name, d7.Status, d7.Message, d7.Remediation)
+
+	// D8: Credential Validity (local check)
+	d8 := checkDoctorCredentialValidity()
+	hubChecks = append(hubChecks, d8)
+	printCheck(d8.Name, d8.Status, d8.Message, d8.Remediation)
+
 	// Resolve the active runtime
 	fmt.Printf("\n%sRuntime%s\n", util.Bold, util.Reset)
 
@@ -60,7 +131,7 @@ func runDoctor() error {
 	if err != nil {
 		printCheck("project", "warn", "No project found — skipping runtime checks", "Run 'scion init' to create a project.")
 		if outputFormat == "json" {
-			return outputDoctorJSON(nil)
+			return outputDoctorJSON(nil, hubChecks)
 		}
 		return nil
 	}
@@ -92,7 +163,7 @@ func runDoctor() error {
 		report := diag.RunDiagnostics(opts)
 
 		if outputFormat == "json" {
-			return outputDoctorJSON(&report)
+			return outputDoctorJSON(&report, hubChecks)
 		}
 
 		for _, check := range report.Checks {
@@ -238,11 +309,14 @@ func printCheck(name, status, message, remediation string) {
 	}
 }
 
-func outputDoctorJSON(report *scionruntime.DiagnosticReport) error {
+func outputDoctorJSON(report *scionruntime.DiagnosticReport, hubChecks []scionruntime.CheckResult) error {
 	out := map[string]interface{}{}
 	if report != nil {
 		out["runtime"] = report.Runtime
 		out["checks"] = report.Checks
+	}
+	if len(hubChecks) > 0 {
+		out["hubChecks"] = hubChecks
 	}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
@@ -250,6 +324,450 @@ func outputDoctorJSON(report *scionruntime.DiagnosticReport) error {
 	}
 	_, _ = fmt.Fprintln(os.Stdout, string(data))
 	return nil
+}
+
+// checkDoctorHubConnectivity performs D1: Hub connectivity check via /healthz.
+func checkDoctorHubConnectivity(hubEP string) scionruntime.CheckResult {
+	if hubEP == "" {
+		return scionruntime.CheckResult{
+			Name:        "hub-connectivity",
+			Status:      "skip",
+			Message:     "No Hub endpoint configured",
+			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hubEP+"/healthz", nil)
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:        "hub-connectivity",
+			Status:      "fail",
+			Message:     fmt.Sprintf("Invalid Hub endpoint: %v", err),
+			Remediation: "Check the Hub endpoint URL",
+		}
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:        "hub-connectivity",
+			Status:      "fail",
+			Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", hubEP, err),
+			Remediation: "Verify the Hub is running and the endpoint is correct",
+		}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return scionruntime.CheckResult{
+			Name:        "hub-connectivity",
+			Status:      "fail",
+			Message:     fmt.Sprintf("Hub returned HTTP %d", resp.StatusCode),
+			Remediation: "Check Hub server logs",
+		}
+	}
+
+	var healthResp struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&healthResp); err != nil {
+		return scionruntime.CheckResult{
+			Name:    "hub-connectivity",
+			Status:  "warn",
+			Message: "Hub reachable but health response could not be parsed",
+		}
+	}
+
+	if healthResp.Status == "degraded" {
+		return scionruntime.CheckResult{
+			Name:    "hub-connectivity",
+			Status:  "warn",
+			Message: fmt.Sprintf("Hub at %s is degraded", hubEP),
+		}
+	}
+
+	return scionruntime.CheckResult{
+		Name:    "hub-connectivity",
+		Status:  "pass",
+		Message: fmt.Sprintf("Hub at %s is healthy", hubEP),
+	}
+}
+
+// checkDoctorHubAuth performs D2: Hub authentication check.
+func checkDoctorHubAuth(hubEP string, hubConnected bool, client hubclient.Client) scionruntime.CheckResult {
+	if hubEP == "" {
+		return scionruntime.CheckResult{
+			Name:        "hub-auth",
+			Status:      "skip",
+			Message:     "No Hub endpoint configured",
+			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
+		}
+	}
+	if !hubConnected {
+		return scionruntime.CheckResult{
+			Name:    "hub-auth",
+			Status:  "skip",
+			Message: "Skipped (Hub connectivity check failed)",
+		}
+	}
+	if client == nil {
+		return scionruntime.CheckResult{
+			Name:        "hub-auth",
+			Status:      "fail",
+			Message:     "Failed to create authenticated Hub client",
+			Remediation: "Run 'scion hub auth login' to authenticate",
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := client.Auth().Me(ctx)
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:        "hub-auth",
+			Status:      "fail",
+			Message:     fmt.Sprintf("Authentication failed: %v", err),
+			Remediation: "Run 'scion hub auth login' to authenticate",
+		}
+	}
+
+	return scionruntime.CheckResult{
+		Name:    "hub-auth",
+		Status:  "pass",
+		Message: "Authenticated with Hub",
+	}
+}
+
+// checkDoctorBrokerConnectivity performs D3: Broker connectivity check.
+func checkDoctorBrokerConnectivity(hubEP string, hubConnected bool, client hubclient.Client) scionruntime.CheckResult {
+	if hubEP == "" {
+		return scionruntime.CheckResult{
+			Name:        "broker-connectivity",
+			Status:      "skip",
+			Message:     "No Hub endpoint configured",
+			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
+		}
+	}
+	if !hubConnected {
+		return scionruntime.CheckResult{
+			Name:    "broker-connectivity",
+			Status:  "skip",
+			Message: "Skipped (Hub unreachable)",
+		}
+	}
+	if client == nil {
+		return scionruntime.CheckResult{
+			Name:    "broker-connectivity",
+			Status:  "skip",
+			Message: "Skipped (Hub client not available)",
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := client.RuntimeBrokers().List(ctx, nil)
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:        "broker-connectivity",
+			Status:      "fail",
+			Message:     fmt.Sprintf("Failed to query brokers: %v", err),
+			Remediation: "Check Hub server logs",
+		}
+	}
+
+	if len(resp.Brokers) == 0 {
+		return scionruntime.CheckResult{
+			Name:        "broker-connectivity",
+			Status:      "fail",
+			Message:     "No runtime brokers registered",
+			Remediation: "Register a broker with 'scion server start'",
+		}
+	}
+
+	onlineCount := 0
+	for _, broker := range resp.Brokers {
+		if broker.Status == "online" {
+			onlineCount++
+		}
+	}
+
+	if onlineCount == 0 {
+		return scionruntime.CheckResult{
+			Name:        "broker-connectivity",
+			Status:      "fail",
+			Message:     fmt.Sprintf("%d broker(s) registered but none online", len(resp.Brokers)),
+			Remediation: "Start a broker or check broker connectivity",
+		}
+	}
+
+	return scionruntime.CheckResult{
+		Name:    "broker-connectivity",
+		Status:  "pass",
+		Message: fmt.Sprintf("%d/%d broker(s) online", onlineCount, len(resp.Brokers)),
+	}
+}
+
+// checkDoctorAgentHealth performs D4: Agent health summary check.
+func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Client) scionruntime.CheckResult {
+	if hubEP == "" {
+		return scionruntime.CheckResult{
+			Name:        "agent-health",
+			Status:      "skip",
+			Message:     "No Hub endpoint configured",
+			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
+		}
+	}
+	if !hubConnected {
+		return scionruntime.CheckResult{
+			Name:    "agent-health",
+			Status:  "skip",
+			Message: "Skipped (Hub unreachable)",
+		}
+	}
+	if client == nil {
+		return scionruntime.CheckResult{
+			Name:    "agent-health",
+			Status:  "skip",
+			Message: "Skipped (Hub client not available)",
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := client.Agents().List(ctx, nil)
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:        "agent-health",
+			Status:      "fail",
+			Message:     fmt.Sprintf("Failed to query agents: %v", err),
+			Remediation: "Check Hub server logs",
+		}
+	}
+
+	if len(resp.Agents) == 0 {
+		return scionruntime.CheckResult{
+			Name:    "agent-health",
+			Status:  "pass",
+			Message: "No agents registered",
+		}
+	}
+
+	stalled, crashed, errored := 0, 0, 0
+	for _, agent := range resp.Agents {
+		switch {
+		case agent.Activity == "stalled":
+			stalled++
+		case agent.Activity == "crashed":
+			crashed++
+		case agent.Phase == "error":
+			errored++
+		}
+	}
+
+	unhealthy := stalled + crashed + errored
+	if unhealthy > 0 {
+		var parts []string
+		if stalled > 0 {
+			parts = append(parts, fmt.Sprintf("%d stalled", stalled))
+		}
+		if crashed > 0 {
+			parts = append(parts, fmt.Sprintf("%d crashed", crashed))
+		}
+		if errored > 0 {
+			parts = append(parts, fmt.Sprintf("%d in error", errored))
+		}
+		return scionruntime.CheckResult{
+			Name:    "agent-health",
+			Status:  "warn",
+			Message: fmt.Sprintf("%d/%d agent(s) unhealthy: %s", unhealthy, len(resp.Agents), strings.Join(parts, ", ")),
+		}
+	}
+
+	return scionruntime.CheckResult{
+		Name:    "agent-health",
+		Status:  "pass",
+		Message: fmt.Sprintf("All %d agent(s) healthy", len(resp.Agents)),
+	}
+}
+
+// checkDoctorNFSMounts performs D5: NFS mount status check.
+func checkDoctorNFSMounts(hubEP string, hubConnected bool, client hubclient.Client) scionruntime.CheckResult {
+	if hubEP == "" {
+		return scionruntime.CheckResult{
+			Name:        "nfs-mounts",
+			Status:      "skip",
+			Message:     "No Hub endpoint configured",
+			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
+		}
+	}
+	if !hubConnected {
+		return scionruntime.CheckResult{
+			Name:    "nfs-mounts",
+			Status:  "skip",
+			Message: "Skipped (Hub unreachable)",
+		}
+	}
+	if client == nil {
+		return scionruntime.CheckResult{
+			Name:    "nfs-mounts",
+			Status:  "skip",
+			Message: "Skipped (Hub client not available)",
+		}
+	}
+
+	// NFS health info would come from broker capabilities if reported.
+	// Currently the broker heartbeat protocol does not expose NFS-specific
+	// health data, so we cannot evaluate this check.
+	return scionruntime.CheckResult{
+		Name:    "nfs-mounts",
+		Status:  "skip",
+		Message: "NFS health not yet reported by broker API",
+	}
+}
+
+// checkDoctorTelemetry performs D6: Telemetry pipeline check (local).
+func checkDoctorTelemetry() scionruntime.CheckResult {
+	enabled := os.Getenv("SCION_TELEMETRY_ENABLED")
+	if enabled == "" || enabled == "false" || enabled == "0" {
+		return scionruntime.CheckResult{
+			Name:    "telemetry",
+			Status:  "pass",
+			Message: "Telemetry not enabled",
+		}
+	}
+
+	endpoint := os.Getenv("SCION_OTEL_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "localhost:4317"
+	}
+
+	conn, err := net.DialTimeout("tcp", endpoint, 3*time.Second)
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:        "telemetry",
+			Status:      "fail",
+			Message:     fmt.Sprintf("Telemetry endpoint %s unreachable: %v", endpoint, err),
+			Remediation: "Start the OpenTelemetry collector or check SCION_OTEL_ENDPOINT",
+		}
+	}
+	_ = conn.Close()
+
+	return scionruntime.CheckResult{
+		Name:    "telemetry",
+		Status:  "pass",
+		Message: fmt.Sprintf("Telemetry endpoint %s is reachable", endpoint),
+	}
+}
+
+// checkDoctorContainerImages performs D7: Container images check (local).
+// Note: This is a simplified check that scans for any images with "scion" in
+// the name. The design specifies checking per-configured-harness images, but
+// that requires loading the project's harness config which adds complexity.
+// A future enhancement could load harness configs and verify each image.
+func checkDoctorContainerImages() scionruntime.CheckResult {
+	// Find a container CLI (docker or podman)
+	var containerCLI string
+	for _, cli := range []string{"docker", "podman"} {
+		if _, err := exec.LookPath(cli); err == nil {
+			containerCLI = cli
+			break
+		}
+	}
+
+	if containerCLI == "" {
+		return scionruntime.CheckResult{
+			Name:    "container-images",
+			Status:  "skip",
+			Message: "No container runtime CLI found (docker/podman)",
+		}
+	}
+
+	imgCtx, imgCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer imgCancel()
+	out, err := exec.CommandContext(imgCtx, containerCLI, "images", "--format", "{{.Repository}}:{{.Tag}}").Output()
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:    "container-images",
+			Status:  "skip",
+			Message: fmt.Sprintf("Could not list %s images: %v", containerCLI, err),
+		}
+	}
+
+	imageOutput := strings.TrimSpace(string(out))
+	if imageOutput == "" {
+		return scionruntime.CheckResult{
+			Name:        "container-images",
+			Status:      "warn",
+			Message:     fmt.Sprintf("No scion container images found via %s", containerCLI),
+			Remediation: "Pull scion images or check image_registry configuration",
+		}
+	}
+
+	images := strings.Split(imageOutput, "\n")
+	scionImageCount := 0
+	for _, img := range images {
+		if strings.Contains(img, "scion") {
+			scionImageCount++
+		}
+	}
+
+	if scionImageCount == 0 {
+		return scionruntime.CheckResult{
+			Name:        "container-images",
+			Status:      "warn",
+			Message:     fmt.Sprintf("No scion container images found via %s", containerCLI),
+			Remediation: "Pull scion images or check image_registry configuration",
+		}
+	}
+
+	return scionruntime.CheckResult{
+		Name:    "container-images",
+		Status:  "pass",
+		Message: fmt.Sprintf("%d scion image(s) found via %s", scionImageCount, containerCLI),
+	}
+}
+
+// checkDoctorCredentialValidity performs D8: Broker credential validity check (local).
+func checkDoctorCredentialValidity() scionruntime.CheckResult {
+	store := brokercredentials.NewStore("")
+	if !store.Exists() {
+		return scionruntime.CheckResult{
+			Name:    "broker-credentials",
+			Status:  "skip",
+			Message: "No broker credentials found (not a broker host)",
+		}
+	}
+
+	creds, err := store.Load()
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:        "broker-credentials",
+			Status:      "fail",
+			Message:     fmt.Sprintf("Failed to load broker credentials: %v", err),
+			Remediation: "Re-register the broker with 'scion server start'",
+		}
+	}
+
+	if creds.SecretKey == "" {
+		return scionruntime.CheckResult{
+			Name:        "broker-credentials",
+			Status:      "fail",
+			Message:     "Broker HMAC key is empty",
+			Remediation: "Re-register the broker with 'scion server start'",
+		}
+	}
+
+	return scionruntime.CheckResult{
+		Name:    "broker-credentials",
+		Status:  "pass",
+		Message: "Broker credentials valid",
+	}
 }
 
 func trimNewline(s string) string {

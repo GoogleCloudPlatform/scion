@@ -1,0 +1,67 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Notification channel definitions for GCP Cloud Monitoring.
+#
+# These channels must be created before any alert policy or uptime check that
+# references them. Alert policies reference channels by the logical name used
+# in notificationChannels lists (e.g., "email", "slack", "pagerduty").
+#
+# Channel routing by severity:
+#   WARNING  -> email, slack
+#   CRITICAL -> email, slack, pagerduty
+
+notificationChannels:
+
+  - name: email
+    displayName: "Scion Alerts Email"
+    description: |
+      Primary email notification channel. All alert severities are routed here.
+      This channel should always be enabled as the baseline notification path.
+    type: email
+    labels:
+      # Replace with the actual team distribution list before applying.
+      email_address: "scion-alerts@example.com"
+    enabled: true
+    # Email is used for all severities (WARNING and CRITICAL).
+
+  - name: slack
+    displayName: "Scion Alerts Slack (#scion-alerts)"
+    description: |
+      Slack notification channel posting to the #scion-alerts channel. All alert
+      severities are routed here for team visibility. Requires a Slack webhook
+      URL or the GCP Slack integration.
+    type: slack
+    labels:
+      # Replace with the actual Slack channel name.
+      channel_name: "#scion-alerts"
+      # The auth_token is configured via the GCP Console Slack integration or
+      # by providing a webhook URL. Do not store tokens in this file.
+    enabled: true
+    # Slack is used for all severities (WARNING and CRITICAL).
+
+  - name: pagerduty
+    displayName: "Scion PagerDuty (Critical Only)"
+    description: |
+      PagerDuty notification channel for critical alerts requiring immediate
+      on-call response. Only CRITICAL severity alerts are routed here.
+      This channel is optional and should be enabled only when a PagerDuty
+      integration is configured.
+    type: pagerduty
+    labels:
+      # The service_key (integration key) must be provided at apply time.
+      # Do not commit the actual key to source control.
+      service_key: "${PAGERDUTY_SERVICE_KEY}"
+    enabled: false             # Enable when PagerDuty integration is configured.
+    # PagerDuty is used for CRITICAL severity only.

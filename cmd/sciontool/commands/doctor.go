@@ -6,12 +6,16 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,6 +82,15 @@ func runDoctor() int {
 
 	// --- GitHub Token ---
 	checkGitHubToken(&failures)
+
+	// --- Telemetry Pipeline ---
+	checkTelemetryPipeline(&failures)
+
+	// --- Workspace/Git State ---
+	checkWorkspaceGit(&failures)
+
+	// --- Harness Process ---
+	checkHarnessProcess(&failures)
 
 	// --- Remediation ---
 	printRemediation(tokenExpiry, tokenSubject, tokenValid)
@@ -466,6 +479,89 @@ func checkGitHubToken(failures *int) {
 		} else {
 			fmt.Printf("[ OK ] GitHub token valid until %s\n", expiry.Format(time.RFC3339))
 		}
+	}
+}
+
+func checkTelemetryPipeline(failures *int) {
+	telemetryEnabled := os.Getenv("SCION_TELEMETRY_ENABLED")
+	if telemetryEnabled == "" || telemetryEnabled == "false" || telemetryEnabled == "0" {
+		return
+	}
+
+	fmt.Println("\n--- Telemetry Pipeline ---")
+
+	addr := "localhost:4317"
+	if endpoint := os.Getenv("SCION_OTEL_ENDPOINT"); endpoint != "" {
+		addr = endpoint
+	}
+
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		fmt.Printf("[FAIL] Telemetry pipeline unreachable at %s: %v\n", addr, err)
+		*failures++
+		return
+	}
+	_ = conn.Close()
+	fmt.Printf("[ OK ] Telemetry pipeline healthy (port %s)\n", addr)
+}
+
+func checkWorkspaceGit(failures *int) {
+	if os.Getenv("SCION_WORKSPACE_GIT") == "" {
+		return
+	}
+
+	fmt.Println("\n--- Workspace/Git State ---")
+
+	gitCtx, gitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer gitCancel()
+	cmd := exec.CommandContext(gitCtx, "git", "-C", "/workspace", "status", "--porcelain")
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("[FAIL] Git workspace corrupted: %v\n", err)
+		*failures++
+		return
+	}
+	fmt.Println("[ OK ] Git workspace intact")
+}
+
+func checkHarnessProcess(failures *int) {
+	fmt.Println("\n--- Harness Process ---")
+
+	pidStr := os.Getenv("SCION_HARNESS_PID")
+	if pidStr != "" {
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			fmt.Printf("[WARN] SCION_HARNESS_PID invalid: %s\n", pidStr)
+		} else {
+			proc, err := os.FindProcess(pid)
+			if err != nil {
+				fmt.Printf("[FAIL] Harness process (PID %d) not found\n", pid)
+				*failures++
+				return
+			}
+			// Use platform-specific liveness check (signal 0 on Unix).
+			if err := checkProcessAlive(proc); err != nil {
+				fmt.Printf("[FAIL] Harness process (PID %d) not alive: %v\n", pid, err)
+				*failures++
+				return
+			}
+			fmt.Printf("[ OK ] Harness process alive (PID %d)\n", pid)
+			return
+		}
+	}
+
+	// Fallback: search for known harness process names.
+	cmd := exec.Command("pgrep", "-f", "claude|gemini|codex")
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Println("[INFO] Cannot determine harness process status")
+		return
+	}
+	pids := strings.TrimSpace(string(output))
+	if pids != "" {
+		lines := strings.Split(pids, "\n")
+		fmt.Printf("[ OK ] Harness process(es) found (%d match)\n", len(lines))
+	} else {
+		fmt.Println("[INFO] No harness process detected")
 	}
 }
 
