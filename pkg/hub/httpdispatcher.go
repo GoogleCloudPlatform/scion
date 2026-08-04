@@ -2032,6 +2032,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if d.hubEndpoint != "" {
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
 	}
+	// Include hub name so agents can label their Cloud Logging entries with
+	// the hub identity, matching the hub-scoped log query filter (labels.hub).
+	if d.hubName != "" {
+		resolvedEnv["SCION_HUB_NAME"] = d.hubName
+	}
 
 	// Inject canonical workspace sharing mode and git-ness so the broker can
 	// surface them in the container env on the restart path.  Follows the same
