@@ -1,0 +1,114 @@
+harness: lhh
+image: scion-lhh:latest
+user: scion
+
+provisioner:
+  type: container-script
+  interface_version: 1
+  lib: vendored
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
+  timeout: 30s
+  lifecycle_events:
+    - pre-start
+  required_image_tools:
+    - python3
+
+config_dir: .lhh
+instructions_file: .lhh/AGENTS.md
+system_prompt_mode: prepend_to_instructions
+# No skills_dir — LHH has its own skill system (horizon/tools/skill_loader.py)
+# Scion skills are inlined into the instructions file instead.
+
+interrupt_key: C-c
+
+model_aliases:
+  small: gemini-flash-lite
+  medium: gemini-3.6-flash
+  large: gemini-3.1-pro-preview
+  extra-large: gemini-3.1-pro-preview
+
+command:
+  base: ["/home/scion/.scion/harness/lhh-start.sh"]
+  task_flag: "--input"
+  task_position: after_base_args
+  resume_flag: "--resume"
+
+env:
+  GOOGLE_GENAI_USE_VERTEXAI: "true"
+  LHA_ENVIRONMENT_BACKEND: "local"
+  LHA_ADK_SKIP_APP_BUILD: ""
+
+capabilities:
+  limits:
+    max_turns:
+      support: "yes"
+    max_model_calls:
+      support: "no"
+      reason: "ADK callbacks do not emit model-start/model-end events through sciontool hook"
+    max_duration:
+      support: "yes"
+  telemetry:
+    enabled:
+      support: "no"
+      reason: "LHH has its own OTEL setup; Scion telemetry reconciliation not wired"
+    native_emitter:
+      support: "no"
+  prompts:
+    system_prompt:
+      support: "partial"
+      reason: "System prompt is prepended to instructions file, not native channel"
+    agent_instructions:
+      support: "yes"
+  auth:
+    api_key:
+      support: "no"
+      reason: "LHH uses Vertex AI exclusively, not API keys"
+    auth_file:
+      support: "yes"
+      reason: "ADC JSON file for Vertex AI"
+    oauth_token:
+      support: "no"
+    vertex_ai:
+      support: "yes"
+  mcp:
+    stdio:
+      support: "no"
+      reason: "LHH uses its own ADK tool system, not MCP"
+    sse:
+      support: "no"
+    streamable_http:
+      support: "no"
+    project_scope:
+      support: "no"
+  resume:
+    support: "yes"
+    reason: "LHH has built-in ResumabilityConfig; session ID persisted across restarts"
+
+no_auth:
+  behavior: drop-to-shell
+  message: |
+    This agent started without Vertex AI credentials.
+    Run: gcloud auth application-default login
+    Then run: python3 /home/scion/.scion/harness/capture_auth.py
+
+auth:
+  default_type: vertex-ai
+  types:
+    vertex-ai:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for Vertex AI"
+          field: GoogleAppCredentials
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
+  autodetect:
+    env:
+      GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
+      GOOGLE_CLOUD_PROJECT: vertex-ai
+    files:
+      gcloud-adc: vertex-ai

@@ -1,0 +1,17 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "vertex-ai",
+    "harness": "lhh",
+    "vertex_ai": true,
+    "env_var": "GOOGLE_CLOUD_PROJECT"
+  },
+  "env": {
+    "GOOGLE_CLOUD_PROJECT": "${GOOGLE_CLOUD_PROJECT}",
+    "GOOGLE_CLOUD_REGION": "${GOOGLE_CLOUD_REGION}",
+    "GOOGLE_CLOUD_LOCATION": "${GOOGLE_CLOUD_REGION}",
+    "GOOGLE_GENAI_USE_VERTEXAI": "True",
+    "LHA_ROOT_MODEL": "gemini-3.6-flash",
+    "LHA_ENVIRONMENT_BACKEND": "local"
+  }
+}
