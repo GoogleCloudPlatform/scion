@@ -132,11 +132,27 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 	}
 
 	// 2. Owner bypass
+	//
+	// ⚠️ D7 exception: the OwnerID lever must NOT confer assignment of a
+	// hub-scoped service account. A former hub member who created the SA must
+	// not be able to assign it solely via OwnerID; current hub membership is
+	// required (step 2.7). The owner bypass is suppressed for ActionAssign on
+	// parentless gcp_service_account resources (parentless == hub-scoped,
+	// because gcpServiceAccountResource sets ParentType/ParentID only for
+	// project-scoped SAs).
+	//
+	// Other actions (read, delete, verify) on owned resources are unaffected:
+	// the creator keeps those rights. Only assignment requires the additional
+	// hub membership check. Admin bypass (step 1) is not affected.
 	if resource.OwnerID != "" && resource.OwnerID == user.ID() {
-		return Decision{
-			Allowed: true,
-			Reason:  "resource owner",
+		if !(action == ActionAssign && resource.Type == "gcp_service_account" &&
+			resource.ParentType == "" && resource.ParentID == "") {
+			return Decision{
+				Allowed: true,
+				Reason:  "resource owner",
+			}
 		}
+		// Fall through to step 2.7, which checks current hub membership.
 	}
 
 	// 2.5. Ancestry-based transitive access
@@ -156,6 +172,40 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 			return Decision{
 				Allowed: true,
 				Reason:  "project owner/admin",
+			}
+		}
+	}
+
+	// 2.7. Hub-scoped service-account assign baseline (D5).
+	//
+	// Current hub members may assign hub-scoped SAs. This is the Option B
+	// code baseline ruled by ptone: a narrow code path for current hub members,
+	// not a seed policy, because the policy engine has no hub-scope resource arm
+	// and a hub-scoped policy would over-match.
+	//
+	// Four properties are load-bearing:
+	//
+	//   1. Position. This runs AFTER the owner and project-owner baselines
+	//      (which already allowed the creator and project admins) and BEFORE
+	//      policy evaluation. It is therefore revocable by an explicit deny
+	//      policy, and it does not shadow any baseline that already applied.
+	//   2. The parentless guard. gcpServiceAccountResource gives a project
+	//      parent only to project-scoped SAs; hub-scoped SAs are parentless.
+	//      This arm fires only for parentless resources, which means it cannot
+	//      match project-scoped SAs — they have a parent and are handled by
+	//      the per-project assign policy in seed.go.
+	//   3. Current hub membership. The user must be a current member of the
+	//      hub-members group. OwnerID (CreatedBy) alone is NOT sufficient:
+	//      a former hub member who created the SA loses assign when removed
+	//      from the group. This is D7's OwnerID lever constraint.
+	//   4. Action + type. Only ActionAssign on gcp_service_account.
+	if action == ActionAssign && resource.Type == "gcp_service_account" &&
+		resource.ParentType == "" && resource.ParentID == "" {
+		if a.isCurrentHubMember(ctx, user.ID()) {
+			return Decision{
+				Allowed: true,
+				Reason:  "hub member hub-scoped assign baseline",
+				Scope:   "hub",
 			}
 		}
 	}
@@ -609,6 +659,30 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		}
 	}
 	return false
+}
+
+// hubMembersSlug is the slug of the seeded hub-members group. It is the same
+// value seed.go uses when creating the group; kept as a constant so tests and
+// production code agree on the lookup key.
+const hubMembersSlug = "hub-members"
+
+// isCurrentHubMember reports whether the user is a current member of the
+// hub-members group. "Current" means an active membership record exists; a
+// former member who was removed returns false regardless of OwnerID on any
+// resource they created. This is the D7 OwnerID lever constraint: the SA
+// creator is not sufficient to assign, only current hub membership is.
+func (a *AuthzService) isCurrentHubMember(ctx context.Context, userID string) bool {
+	if userID == "" {
+		return false
+	}
+	group, err := a.store.GetGroupBySlug(ctx, hubMembersSlug)
+	if err != nil {
+		// Group does not exist or lookup failed: not a member.
+		return false
+	}
+	_, err = a.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	// Any role (member, admin, owner) counts as current membership.
+	return err == nil
 }
 
 // evaluateTimeConditions checks time-based conditions.

@@ -16,10 +16,13 @@ package hub
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // Top-level, scope-addressed GCP service account routes (P4 item C).
@@ -535,15 +538,7 @@ func (s *Server) createGCPServiceAccountScoped(w http.ResponseWriter, r *http.Re
 		s.createGCPServiceAccount(w, r, req.scopeID)
 
 	case store.ScopeHub:
-		// P4 item A, held. Hub-scoped creation is gated on the resolution of
-		// whether it requires gcpIamCheckMode to be "enforce"; until that is
-		// settled the write path stays shut rather than shipping under a
-		// permission model that may change.
-		//
-		// Refused explicitly instead of being left unrouted: a 404 here would
-		// read as "wrong URL" and send P5 looking for a route that does exist.
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"hub-scoped service account creation is not enabled on this hub", nil)
+		s.createHubScopedGCPServiceAccount(w, r)
 
 	default:
 		// parseGCPScopeRequest admits no other value; this is here so that
@@ -551,4 +546,105 @@ func (s *Server) createGCPServiceAccountScoped(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"unsupported scope for service account creation", nil)
 	}
+}
+
+// createHubScopedGCPServiceAccount registers a BYO (bring-your-own) hub-scoped
+// service account. This is D7: non-admin users may register an SA resource by
+// providing the email of an SA they own/control. The admin gate is on MINTING,
+// not on BYO registration.
+//
+// Authorization: any current hub member may register a hub-scoped SA. The
+// assignment gate (authorizeSAAssignment + mode coupling) prevents the SA from
+// being assigned until gcpIamCheckMode=enforce and the caller passes actAs.
+func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.Request) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	var req createGCPServiceAccountRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body: "+err.Error(), nil)
+		return
+	}
+
+	if req.Email == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "missing required field(s): email", nil)
+		return
+	}
+
+	if req.ProjectID == "" {
+		req.ProjectID = projectIDFromServiceAccountEmail(req.Email)
+	}
+	if req.ProjectID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"could not infer projectId from email; please provide it explicitly", nil)
+		return
+	}
+
+	// Authorization: current hub member may register (BYO) a hub-scoped SA.
+	// Admin and owner bypass are already handled by CheckAccess; this check
+	// is for ordinary hub members who are neither.
+	if user.Role() != "admin" {
+		if !s.authzService.isCurrentHubMember(r.Context(), user.ID()) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You must be a hub member to register a hub-scoped service account", nil)
+			return
+		}
+	}
+
+	sa := &store.GCPServiceAccount{
+		ID:            uuid.New().String(),
+		Scope:         store.ScopeHub,
+		ScopeID:       s.HubID(),
+		Email:         req.Email,
+		ProjectID:     req.ProjectID,
+		DisplayName:   req.DisplayName,
+		DefaultScopes: req.Scopes,
+		CreatedBy:     user.ID(),
+		CreatedAt:     time.Now(),
+	}
+
+	if len(sa.DefaultScopes) == 0 {
+		sa.DefaultScopes = []string{"https://www.googleapis.com/auth/cloud-platform"}
+	}
+
+	if err := s.store.CreateGCPServiceAccount(r.Context(), sa); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"a service account with this email already exists", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	slog.Info("hub-scoped GCP SA registered (BYO)",
+		"sa_id", sa.ID, "email", sa.Email, "createdBy", user.ID())
+
+	// Auto-verify impersonation after registration
+	resp := createGCPServiceAccountResponse{GCPServiceAccount: *sa}
+	if s.gcpTokenGenerator != nil {
+		if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
+			sa.Verified = false
+			sa.VerificationStatus = store.GCPVerificationFailed
+			sa.VerificationError = err.Error()
+			resp.VerificationFailed = true
+			resp.VerificationDetails = &verificationFailedDetails{
+				HubServiceAccountEmail: s.gcpTokenGenerator.ServiceAccountEmail(),
+				TargetEmail:            sa.Email,
+			}
+		} else {
+			sa.Verified = true
+			sa.VerifiedAt = time.Now()
+			sa.VerificationStatus = store.GCPVerificationVerified
+		}
+		if updateErr := s.store.UpdateGCPServiceAccount(r.Context(), sa); updateErr != nil {
+			slog.Error("failed to update SA verification status", "sa_id", sa.ID, "error", updateErr)
+		}
+		resp.GCPServiceAccount = *sa
+	}
+
+	writeJSON(w, http.StatusCreated, resp)
 }

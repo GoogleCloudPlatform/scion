@@ -374,6 +374,15 @@ func TestAuthz_GCPServiceAccount_HubScoped_NoProjectOwnerBypass(t *testing.T) {
 	assert.NotEqual(t, "project owner/admin", decision.Reason)
 }
 
+// ⚠️ SECURITY-RELEVANT (P9 update): This test is modified by P9 to reflect
+// the D5 hub member baseline. Alice is a current hub member, so the baseline
+// now grants ActionAssign on hub-scoped SAs. The project-owner bypass still
+// does NOT fire for hub-scoped SAs (the engine property that confines it is
+// unchanged), but the hub member baseline adds assign to the allowed set.
+//
+// The assertion for hub-scoped SAs changes from ["read"] to ["read", "assign"]
+// because alice is a hub member and the D5 baseline applies. The project-scoped
+// control is unchanged.
 func TestCapabilities_GCPServiceAccount_HubScoped_NoProjectOwnerBypass(t *testing.T) {
 	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
@@ -401,12 +410,13 @@ func TestCapabilities_GCPServiceAccount_HubScoped_NoProjectOwnerBypass(t *testin
 
 	user := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, "member", "api")
 
-	// "read" survives via the seeded hub-member-read-all policy, which is
-	// unrelated to the parent bypass. Everything the bypass would have granted
-	// is gone.
+	// P9: "read" still comes from hub-member-read-all. "assign" now comes
+	// from the D5 hub member baseline for hub-scoped SAs (alice is a current
+	// hub member). The project-owner bypass still does NOT fire for hub-scoped
+	// SAs — that engine property is unchanged.
 	hubCaps := srv.authzService.ComputeCapabilities(ctx, user, gcpServiceAccountResource(sa))
-	assert.Equal(t, []string{"read"}, hubCaps.Actions,
-		"ComputeCapabilities must not advertise actions the project-owner bypass no longer grants")
+	assert.Equal(t, []string{"read", "assign"}, hubCaps.Actions,
+		"hub member should see read (hub-member-read-all) + assign (D5 baseline) on hub-scoped SA")
 
 	projectCaps := srv.authzService.ComputeCapabilities(ctx, user, gcpServiceAccountResource(saProject))
 	assert.Equal(t, []string{"read", "delete", "verify", "assign"}, projectCaps.Actions,

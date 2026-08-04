@@ -207,20 +207,10 @@ func TestGCPSA_TopLevel_CreateProjectScope_MatchesNestedAuthz(t *testing.T) {
 	require.Contains(t, emails, "new-sa@p.iam.gserviceaccount.com")
 }
 
-// P4 item A is held, so hub-scoped creation is refused. Pinned as a 400 with a
-// body rather than left to a 404: a 404 would read as "wrong URL" and send the
-// P5 client looking for a route that does exist. When item A lands this test
-// gets replaced, and its presence is what makes that replacement deliberate.
-func TestGCPSA_TopLevel_CreateHubScope_NotEnabled(t *testing.T) {
-	srv, _, owner, _, _, _ := setupGCPAuthzTest(t)
-
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/gcp-service-accounts?scope=hub",
-		map[string]any{"email": "hub-new@p.iam.gserviceaccount.com", "projectId": "gcp-proj"})
-	require.Equal(t, http.StatusBadRequest, rec.Code,
-		"hub-scoped creation is not enabled yet (P4 item A); got: %s", rec.Body.String())
-	require.Contains(t, rec.Body.String(), "not enabled",
-		"the refusal should say why, so a caller does not read it as a malformed request")
-}
+// P9: TestGCPSA_TopLevel_CreateHubScope_NotEnabled removed.
+// The tripwire was a deliberate hold until hub-scoped BYO registration could
+// safely open. P9 completes that: hub-scoped creation is now enabled for hub
+// members (BYO registration), guarded at assignment by mode coupling + actAs.
 
 func TestGCPSA_TopLevel_MethodNotAllowed(t *testing.T) {
 	srv, _, owner, _, _, _ := setupGCPAuthzTest(t)

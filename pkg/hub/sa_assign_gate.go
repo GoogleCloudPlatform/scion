@@ -260,6 +260,25 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 		return false
 	}
 
+	// Precondition: hub-scoped SA assignment requires gcpIamCheckMode=enforce.
+	//
+	// This is D4: assignment-time coupling, not registration-time. Registration
+	// checks are insufficient because the mode can be switched off later.
+	// gcpIamCheckMode=off remains a transitional escape hatch for project-scoped
+	// assignment only; hub-scoped SAs carry hub-wide blast radius and must not
+	// become assignable when the GCP permission check is disabled.
+	if sa.Scope == store.ScopeHub {
+		s.mu.RLock()
+		mode := s.saAssignCheckMode
+		s.mu.RUnlock()
+		if mode != SAAssignCheckEnforce {
+			slog.Warn("hub-scoped SA assignment denied: gcpIamCheckMode is not enforce",
+				"surface", surface, "targetSA", sa.Email, "mode", mode)
+			writeForbidden(w, "Hub-scoped service account assignment requires gcpIamCheckMode=enforce")
+			return false
+		}
+	}
+
 	// Layer 1: Hub policy.
 	if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionAssign,
 		"You don't have permission to assign this GCP service account") {
