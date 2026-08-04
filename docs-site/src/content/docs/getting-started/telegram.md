@@ -191,6 +191,7 @@ Useful group commands once linked:
 | :--- | :--- |
 | `/agents` | List the project's agents with live status (💤 idle, ⚙️ executing, 💭 thinking, ✅ completed, …). |
 | `/default` | Set, change, or clear the default agent for the group. |
+| `/terminal <agent>` | Resolve an agent name via the Hub API and return its interactive web terminal URL. |
 | `/settings` | Toggle group options (see below). |
 | `/unlink` | Unlink the group from its project (only the person who linked it can unlink). |
 | `/help` | Show the available commands. The output also displays the plugin's build version and git commit hash (injected via build-time `ldflags`). |

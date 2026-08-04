@@ -29,7 +29,7 @@ configuration from the web UI, registration, and your first message.
 - **@-mention routing:** Mention a specific agent (e.g., `@mybot agent-name message`) to route a message to that agent.
 - **Default agent:** Set a default agent with `/default` so untagged messages route automatically.
 - **Body mentions:** Mentions inside the body of a message (e.g., `@agent-b`) are delivered as lightweight `TypeMention` (`mention`) notifications instead of full instructions, preventing accidental multi-agent execution loops. If a message contains only body mentions, the group's default agent is restored as the primary recipient.
-- Available bot commands: `/agents` (list agents), `/default` (set default), `/settings` (configure group), `/notifications` (toggle notification types).
+- Available bot commands: `/agents` (list agents), `/default` (set default), `/terminal <agent>` (get web terminal URL), `/settings` (configure group), `/notifications` (toggle notification types).
 
 ### Group Settings
 
@@ -87,7 +87,8 @@ All bot interactions are handled via `/scion` slash commands:
 | `/scion register` | Link your Discord account to your Scion Hub identity. |
 | `/scion unregister` | Unlink your Discord account from Scion Hub. |
 | `/scion settings` | Configure channel-specific notification settings. |
-| `/scion info` | Display your linked Scion Hub registration info. |
+| `/scion terminal <agent>` | Resolve an agent name via the Hub API and return its interactive web terminal URL. |
+| `/scion info` | Display your linked Scion Hub registration info. When run from a thread, displays both the thread and channel defaults. |
 | `/scion help` | Show the help menu. Includes the plugin's build version and git commit hash (injected via build-time `ldflags`). |
 
 #### One-Step Thread & Agent Creation (`/scion thread`)

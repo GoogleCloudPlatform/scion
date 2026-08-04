@@ -141,8 +141,9 @@ Run `/scion help` to see all available commands under the `/scion` root:
 | `/scion default` | Set or clear the channel's default agent. |
 | `/scion agents` | List agents and their real-time state. |
 | `/scion status <slug>`| Display detailed state of a specific agent. |
+| `/scion terminal <agent>` | Resolve an agent name via the Hub API and return its interactive web terminal URL. |
 | `/scion register` | Securely link your account. |
-| `/scion info` | Show active channel links and user registration status. |
+| `/scion info` | Show active channel links and user registration status. When invoked from a thread, displays both the thread and channel defaults. |
 
 ### Routing Messages to Agents
 In Discord, messages are routed using `@mention` triggers. If a default agent is set, you can also send plain-text messages directly.
