@@ -220,6 +220,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// true/false, so that a DB-explicit false overrides a file-loaded true.
 	b := snap.AutoSuspendStalled
 	resp.Server.Hub.AutoSuspendStalled = &b
+	resp.Server.Hub.StalledThreshold = snap.StalledThreshold
 	resp.Server.Hub.SoftDeleteRetention = snap.SoftDeleteRetention
 	b2 := snap.SoftDeleteRetainFiles
 	resp.Server.Hub.SoftDeleteRetainFiles = &b2
@@ -717,6 +718,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.AutoSuspendStalled != nil {
 				keys = append(keys, "server.hub.auto_suspend_stalled")
 			}
+			if hub.StalledThreshold != "" {
+				keys = append(keys, "server.hub.stalled_threshold")
+			}
 			if hub.SoftDeleteRetention != "" {
 				keys = append(keys, "server.hub.soft_delete_retention")
 			}
@@ -946,6 +950,9 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		d := &opsettings.LifecycleSettings{}
 		if req.Server != nil && req.Server.Hub != nil {
 			d.AutoSuspendStalled = req.Server.Hub.AutoSuspendStalled
+			if req.Server.Hub.StalledThreshold != "" {
+				d.StalledThreshold = req.Server.Hub.StalledThreshold
+			}
 			if req.Server.Hub.SoftDeleteRetention != "" {
 				d.SoftDeleteRetention = req.Server.Hub.SoftDeleteRetention
 			}

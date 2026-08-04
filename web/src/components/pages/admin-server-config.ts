@@ -50,6 +50,7 @@ interface V1ServerHubConfig {
   soft_delete_retention?: string;
   soft_delete_retain_files?: boolean;
   auto_suspend_stalled?: boolean;
+  stalled_threshold?: string;
 }
 
 interface V1BrokerConfig {
@@ -321,6 +322,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'server.auth.authorized_domains': 'Authorized Domains',
   // lifecycle section
   'server.hub.auto_suspend_stalled': 'Auto-Suspend Stalled Agents',
+  'server.hub.stalled_threshold': 'Stalled Threshold',
   'server.hub.soft_delete_retention': 'Soft Delete Retention',
   'server.hub.soft_delete_retain_files': 'Retain Files on Soft Delete',
   // auto_expose_ports section
@@ -435,6 +437,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubSoftDeleteRetention = '';
   @state() private hubSoftDeleteRetainFiles = false;
   @state() private hubAutoSuspendStalled = false;
+  @state() private hubStalledThreshold = '';
 
   // Runtime Broker
   @state() private brokerEnabled = false;
@@ -1373,6 +1376,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.hubSoftDeleteRetention = srv.hub.soft_delete_retention || '';
         this.hubSoftDeleteRetainFiles = srv.hub.soft_delete_retain_files || false;
         this.hubAutoSuspendStalled = srv.hub.auto_suspend_stalled || false;
+        this.hubStalledThreshold = srv.hub.stalled_threshold || '';
       }
 
       // Broker
@@ -1600,6 +1604,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
+    if (ok('server.hub.stalled_threshold'))
+      hub.stalled_threshold = this.hubStalledThreshold;
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -1759,6 +1765,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
+    if (ok('server.hub.stalled_threshold'))
+      hub.stalled_threshold = this.hubStalledThreshold;
     server.hub = hub;
 
     // Broker
@@ -3142,6 +3150,23 @@ export class ScionPageAdminServerConfig extends LitElement {
               >When enabled, agents detected as stalled are automatically suspended (container
               stopped, session preserved for resume).</span
             >
+          </div>
+          <div class="form-field">
+            <label>Stalled Threshold</label>
+            <span class="hint"
+              >Duration before marking agents as stalled (e.g. 5m, 10m, 30m). Minimum 2m.</span
+            >
+            ${this.renderFieldValue(
+              'server.hub.stalled_threshold',
+              this.hubStalledThreshold || '5m (default)',
+              html`${this.renderEnvBadge('server.hub.stalled_threshold')}<sl-input
+                value=${this.hubStalledThreshold}
+                placeholder="5m"
+                @sl-input=${(e: Event) => {
+                  this.hubStalledThreshold = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>

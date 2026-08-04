@@ -33,6 +33,7 @@ type AccessSettings struct {
 // LifecycleSettings holds Layer-1 agent lifecycle settings.
 type LifecycleSettings struct {
 	AutoSuspendStalled    *bool  `json:"auto_suspend_stalled,omitempty"`
+	StalledThreshold      string `json:"stalled_threshold,omitempty"`
 	SoftDeleteRetention   string `json:"soft_delete_retention,omitempty"`
 	SoftDeleteRetainFiles *bool  `json:"soft_delete_retain_files,omitempty"`
 }
