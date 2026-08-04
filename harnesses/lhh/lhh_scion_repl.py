@@ -319,7 +319,7 @@ async def run(initial_message: str | None, resume: bool) -> None:
 
         while True:
             try:
-                query = input("[user]: ")
+                query = await asyncio.to_thread(input, "[user]: ")
             except (EOFError, KeyboardInterrupt):
                 break
             if not query or not query.strip():

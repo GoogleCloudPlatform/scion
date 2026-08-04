@@ -26,4 +26,4 @@ WEB_PID=$!
 trap "kill $WEB_PID 2>/dev/null; wait $WEB_PID 2>/dev/null" EXIT
 
 # Run the REPL in foreground — passes through all args from Scion
-exec python3 /opt/lhh/lhh_scion_repl.py "$@"
+python3 /opt/lhh/lhh_scion_repl.py "$@"

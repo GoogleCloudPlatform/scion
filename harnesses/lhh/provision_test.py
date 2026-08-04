@@ -239,8 +239,8 @@ class LHHProvisionTest(unittest.TestCase):
         env = provision._build_env_overlay("gemini-3.6-flash")
         self.assertEqual(env["GOOGLE_CLOUD_PROJECT"], "${GOOGLE_CLOUD_PROJECT}")
         self.assertEqual(env["GOOGLE_CLOUD_REGION"], "${GOOGLE_CLOUD_REGION}")
-        self.assertEqual(env["GOOGLE_CLOUD_LOCATION"], "${GOOGLE_CLOUD_REGION}")
-        self.assertEqual(env["GOOGLE_GENAI_USE_VERTEXAI"], "True")
+        self.assertEqual(env["GOOGLE_CLOUD_LOCATION"], "${GOOGLE_CLOUD_LOCATION}")
+        self.assertEqual(env["GOOGLE_GENAI_USE_VERTEXAI"], "true")
         self.assertEqual(env["LHA_ROOT_MODEL"], "gemini-3.6-flash")
         self.assertEqual(env["LHA_ENVIRONMENT_BACKEND"], "local")
 

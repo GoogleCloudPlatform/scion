@@ -34,7 +34,7 @@ RUN git clone --depth 1 --branch ${LHH_VERSION} \
 WORKDIR /opt/lhh
 
 # Install LHH and its dependencies via uv
-RUN uv sync --no-dev --frozen 2>/dev/null || uv sync --no-dev
+RUN uv sync --no-dev
 
 # Activate the uv virtual environment for all subsequent commands and container runtime
 ENV VIRTUAL_ENV=/opt/lhh/.venv
