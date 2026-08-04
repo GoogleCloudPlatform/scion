@@ -354,9 +354,10 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			}
 
 			// Log slow requests via the default logger, exempting streaming responses.
-			contentType := wrapped.Header().Get("Content-Type")
+			contentType := strings.ToLower(wrapped.Header().Get("Content-Type"))
 			isStreaming := strings.HasPrefix(contentType, "text/event-stream")
-			if !isStreaming && duration > slowThreshold {
+			isUpgrade := r.Header.Get("Upgrade") != ""
+			if !isStreaming && !isUpgrade && duration > slowThreshold {
 				slog.Info("Slow request",
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),

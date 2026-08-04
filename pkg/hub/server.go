@@ -3230,13 +3230,14 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Log slow requests, exempting streaming responses.
-		contentType := wrapped.Header().Get("Content-Type")
+		contentType := strings.ToLower(wrapped.Header().Get("Content-Type"))
 		isStreaming := strings.HasPrefix(contentType, "text/event-stream")
+		isUpgrade := r.Header.Get("Upgrade") != ""
 		slowThreshold := s.config.SlowRequestThreshold
 		if slowThreshold <= 0 {
 			slowThreshold = logging.DefaultSlowRequestThreshold
 		}
-		if !isStreaming && duration > slowThreshold {
+		if !isStreaming && !isUpgrade && duration > slowThreshold {
 			slog.Info("Slow request",
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
