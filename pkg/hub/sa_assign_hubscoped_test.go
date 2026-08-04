@@ -50,9 +50,9 @@ import (
 type hubScopedAssignFixture struct {
 	srv     *Server
 	store   store.Store
-	owner   *store.User   // project owner, hub member
-	member  *store.User   // plain hub member, not project owner
-	admin   *store.User   // hub admin
+	owner   *store.User // project owner, hub member
+	member  *store.User // plain hub member, not project owner
+	admin   *store.User // hub admin
 	project *store.Project
 }
 

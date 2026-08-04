@@ -289,7 +289,9 @@ func TestConfigFromEnv_ModeAllowList(t *testing.T) {
 			if tt.set {
 				t.Setenv("SCION_METADATA_MODE", tt.raw)
 			} else {
-				os.Unsetenv("SCION_METADATA_MODE")
+				if err := os.Unsetenv("SCION_METADATA_MODE"); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			cfg := ConfigFromEnv()

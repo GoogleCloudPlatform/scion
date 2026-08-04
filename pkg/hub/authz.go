@@ -145,8 +145,8 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 	// the creator keeps those rights. Only assignment requires the additional
 	// hub membership check. Admin bypass (step 1) is not affected.
 	if resource.OwnerID != "" && resource.OwnerID == user.ID() {
-		if !(action == ActionAssign && resource.Type == "gcp_service_account" &&
-			resource.ParentType == "" && resource.ParentID == "") {
+		if action != ActionAssign || resource.Type != "gcp_service_account" ||
+			resource.ParentType != "" || resource.ParentID != "" {
 			return Decision{
 				Allowed: true,
 				Reason:  "resource owner",

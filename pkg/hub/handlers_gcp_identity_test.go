@@ -183,7 +183,7 @@ type mockGCPServiceAccountAdmin struct {
 	policyErrOnCall int
 
 	// Track IAM mutations for assertions.
-	iamPolicies     []mockIAMPolicyCall     // SA-level SetIAMPolicy calls
+	iamPolicies     []mockIAMPolicyCall      // SA-level SetIAMPolicy calls
 	projectBindings []mockProjectBindingCall // project-level AddProjectIAMBinding calls
 }
 
