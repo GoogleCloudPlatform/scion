@@ -349,13 +349,30 @@ func (s *Server) RuntimeName() string {
 // SwapRuntime replaces the broker's container runtime and agent manager.
 // This is called when the co-located hub detects a runtime configuration
 // change (e.g. during onboarding) so the broker picks up the new engine
-// without requiring a full server restart.
+// without requiring a full server restart. Running heartbeat services are
+// updated to use the new manager so they don't continue shelling out to
+// the old (possibly missing) runtime binary.
 func (s *Server) SwapRuntime(rt scionrt.Runtime) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	old := s.runtime.Name()
 	s.runtime = rt
-	s.manager = agent.NewManager(rt)
+	newMgr := agent.NewManager(rt)
+	s.manager = newMgr
+	s.mu.Unlock()
+
+	// Propagate the new manager to all running heartbeat services so they
+	// use the detected runtime binary instead of the stale one.
+	s.hubMu.RLock()
+	for _, conn := range s.hubConnections {
+		conn.mu.RLock()
+		hb := conn.Heartbeat
+		conn.mu.RUnlock()
+		if hb != nil {
+			hb.SwapManager(newMgr)
+		}
+	}
+	s.hubMu.RUnlock()
+
 	slog.Info("Runtime broker swapped container runtime",
 		"old", old,
 		"new", rt.Name(),
@@ -1302,10 +1319,14 @@ func agentsForProject(agents []api.AgentInfo, projectID string) []api.AgentInfo 
 }
 
 // RuntimeCommand implements AgentLookup interface.
-// It returns the container runtime command (e.g., "docker", "container").
+// It returns the container runtime command (e.g., "docker", "podman", "container").
+// The result reflects the currently detected runtime, which may change at any
+// time via SwapRuntime, so callers should not cache the return value.
 func (s *Server) RuntimeCommand() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.runtime == nil {
-		return "docker" // Default fallback
+		return "docker" // Default fallback — should never happen
 	}
 	return s.runtime.Name()
 }

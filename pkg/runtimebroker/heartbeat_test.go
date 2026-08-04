@@ -637,6 +637,87 @@ func TestHeartbeatService_DefaultManagerFailsNoAuxiliary(t *testing.T) {
 	}
 }
 
+// TestHeartbeatService_SwapManagerUpdatesRuntime verifies that calling
+// SwapManager replaces the agent manager used by the heartbeat, so that
+// after a runtime swap (e.g. from a missing "container" binary to
+// podman), the heartbeat uses the new working manager instead of the
+// stale one that was captured at construction time.
+func TestHeartbeatService_SwapManagerUpdatesRuntime(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+
+	// Original manager fails (simulates missing "container" binary)
+	oldMgr := &heartbeatMockManager{
+		err: fmt.Errorf("exec: \"container\": executable file not found in $PATH"),
+	}
+
+	svc := NewHeartbeatService(client, "test-host", time.Hour, oldMgr, nil, slog.Default())
+
+	// First heartbeat: old manager fails, no agents reported
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat (before swap) failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+	if len(calls[0].Heartbeat.Projects) != 0 {
+		t.Errorf("Expected 0 projects before swap, got %d", len(calls[0].Heartbeat.Projects))
+	}
+
+	// Swap to a working manager (simulates runtime detection fixing the binary)
+	newMgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running"},
+		},
+	}
+	svc.SwapManager(newMgr)
+
+	// Second heartbeat: new manager works, agents are reported
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat (after swap) failed: %v", err)
+	}
+	calls = client.getHeartbeatCalls()
+	if len(calls) != 2 {
+		t.Fatalf("Expected 2 heartbeat calls, got %d", len(calls))
+	}
+	heartbeat := calls[1].Heartbeat
+	if len(heartbeat.Projects) != 1 {
+		t.Fatalf("Expected 1 project after swap, got %d", len(heartbeat.Projects))
+	}
+	if heartbeat.Projects[0].AgentCount != 1 {
+		t.Errorf("Expected 1 agent after swap, got %d", heartbeat.Projects[0].AgentCount)
+	}
+}
+
+// TestHeartbeatService_SwapManagerToNil verifies that swapping the manager
+// to nil (e.g. when the runtime is removed) gracefully produces an empty
+// heartbeat rather than panicking.
+func TestHeartbeatService_SwapManagerToNil(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+
+	mgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running"},
+		},
+	}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, mgr, nil, slog.Default())
+
+	// Swap to nil
+	svc.SwapManager(nil)
+
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat after swap to nil failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+	if len(calls[0].Heartbeat.Projects) != 0 {
+		t.Errorf("Expected 0 projects after swap to nil, got %d", len(calls[0].Heartbeat.Projects))
+	}
+}
+
 func TestHeartbeatService_ManagerReturnsEmptyList(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	mgr := &heartbeatMockManager{agents: nil, err: nil}
