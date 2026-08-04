@@ -66,8 +66,8 @@ capabilities:
     max_model_calls: { support: "no", reason: "Copilot CLI does not expose model-call start/end events" }
     max_duration: { support: "yes" }
   telemetry:
-    enabled: { support: "no", reason: "Copilot telemetry config surface is undocumented" }
-    native_emitter: { support: "no" }
+    enabled: { support: "yes" }
+    native_emitter: { support: "yes" }
   prompts:
     system_prompt: { support: "partial", reason: "System prompt is prepended to copilot-instructions.md" }
     agent_instructions: { support: "yes" }
