@@ -167,7 +167,7 @@ All icons use the Shoelace `<sl-icon>` component, which provides [Bootstrap Icon
 
 The `PAGE_TITLES` map in `web/src/components/app-shell.ts` controls the h1 header text displayed on each page. It maps route paths to display titles (e.g. `'/health': 'Health'`).
 
-**When adding a new route, you MUST add an entry to `PAGE_TITLES`.** If a route is missing from this map, the page header will display "Page Not Found" even though the page itself renders correctly. This is a common pitfall — the page works but the header is wrong, which confuses users.
+**When adding a new route, you MUST add an entry to PAGE_TITLES (or handle it in the pattern matches of getPageTitle()).** If a route is missing from both, the page header will display "Page Not Found" even though the page itself renders correctly. This is a common pitfall — the page works but the header is wrong, which confuses users.
 
 ## Key Patterns
 
