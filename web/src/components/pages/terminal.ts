@@ -927,11 +927,18 @@ export class ScionPageTerminal extends LitElement {
   private _onDragEnter(e: DragEvent): void {
     e.preventDefault();
     this._dragCounter++;
-    if (this._dragCounter === 1) this.isDragOver = true;
+    if (this._dragCounter === 1) {
+      if (this._errorTimer) {
+        clearTimeout(this._errorTimer);
+        this._errorTimer = null;
+        this.uploadStatus = '';
+      }
+      this.isDragOver = true;
+    }
   }
 
   private _onDragLeave(_e: DragEvent): void {
-    this._dragCounter--;
+    this._dragCounter = Math.max(0, this._dragCounter - 1);
     if (this._dragCounter === 0) this.isDragOver = false;
   }
 
@@ -966,7 +973,9 @@ export class ScionPageTerminal extends LitElement {
     }
 
     this.isUploading = true;
-    const batchId = crypto.randomUUID();
+    const batchId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+      ? crypto.randomUUID()
+      : Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
     const formData = new FormData();
     const paths: string[] = [];
 
