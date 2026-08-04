@@ -120,9 +120,9 @@ func TestHandleHealthSummary_AgentAggregation(t *testing.T) {
 
 	// Create a broker
 	broker := &store.RuntimeBroker{
-		ID:   tid("broker-1"),
-		Name: "Broker One",
-		Slug: "broker-one",
+		ID:     tid("broker-1"),
+		Name:   "Broker One",
+		Slug:   "broker-one",
 		Status: "online",
 		Profiles: []store.BrokerProfile{
 			{Name: "default", Type: "docker", Available: true},
@@ -197,11 +197,11 @@ func TestHandleHealthSummary_BrokerMixedStatus(t *testing.T) {
 
 	// Create brokers with different statuses
 	brokers := []struct {
-		id       string
-		name     string
-		slug     string
-		status   string
-		runtime  string
+		id        string
+		name      string
+		slug      string
+		status    string
+		runtime   string
 		available bool
 	}{
 		{"broker-online", "Online Broker", "online-broker", "online", "docker", true},

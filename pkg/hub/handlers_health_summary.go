@@ -27,13 +27,13 @@ import (
 // GET /api/v1/admin/health/summary. It aggregates all subsystem health
 // into a single response for the health dashboard.
 type HealthSummaryResponse struct {
-	Status   string                `json:"status"`
-	Hub      HealthSummaryHub      `json:"hub"`
-	Database HealthSummaryDB       `json:"database"`
-	Brokers  []HealthSummaryBrkr   `json:"brokers"`
-	Agents   HealthSummaryAgents   `json:"agents"`
+	Status   string                 `json:"status"`
+	Hub      HealthSummaryHub       `json:"hub"`
+	Database HealthSummaryDB        `json:"database"`
+	Brokers  []HealthSummaryBrkr    `json:"brokers"`
+	Agents   HealthSummaryAgents    `json:"agents"`
 	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when dispatch metrics are unavailable
-	Stall    HealthSummaryStall    `json:"stall_config"`
+	Stall    HealthSummaryStall     `json:"stall_config"`
 }
 
 // HealthSummaryHub contains hub-level health information.
@@ -52,10 +52,10 @@ type HealthSummaryHub struct {
 // accurate, zero-latency pool stats without depending on the metrics pipeline,
 // which may itself be the thing that is unhealthy.
 type HealthSummaryDB struct {
-	Status    string `json:"status"`
-	PoolActive int64 `json:"pool_active"`
-	PoolMax    int64 `json:"pool_max"`
-	PoolIdle   int64 `json:"pool_idle"`
+	Status     string `json:"status"`
+	PoolActive int64  `json:"pool_active"`
+	PoolMax    int64  `json:"pool_max"`
+	PoolIdle   int64  `json:"pool_idle"`
 	// PoolWaitCountTotal is the cumulative number of times a caller had to wait
 	// for a DB connection (monotonically increasing counter from sql.DBStats.WaitCount).
 	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
