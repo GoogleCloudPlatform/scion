@@ -327,6 +327,8 @@ export class ScionPageProjectDetail extends LitElement {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
       gap: 1.5rem;
+      max-height: 26rem;
+      overflow-y: auto;
     }
 
     .agent-card {
@@ -414,7 +416,8 @@ export class ScionPageProjectDetail extends LitElement {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
-      overflow: hidden;
+      max-height: 26rem;
+      overflow-y: auto;
     }
 
     .agent-table-container table {
