@@ -95,7 +95,8 @@ func TestPolicyTroubleshooterChecker_CallerHasActAsDirectly(t *testing.T) {
 		t.Fatal("PT client was not called")
 	}
 	tuple := fake.captured.GetAccessTuple()
-	if tuple.GetPrincipal() != "serviceAccount:agent@my-project.iam.gserviceaccount.com" {
+	// PT v3 expects bare email, not IAM-prefixed form.
+	if tuple.GetPrincipal() != "agent@my-project.iam.gserviceaccount.com" {
 		t.Errorf("unexpected principal: %q", tuple.GetPrincipal())
 	}
 	if tuple.GetPermission() != store.PermissionActAs {
@@ -317,10 +318,10 @@ func TestPolicyTroubleshooterChecker_AgentCaller(t *testing.T) {
 	if result.Outcome != store.ActAsAllowed {
 		t.Errorf("expected ActAsAllowed for agent caller, got %v", result.Outcome)
 	}
-	// Verify the principal was formatted as serviceAccount:
+	// PT v3 expects bare email, not IAM-prefixed form.
 	tuple := fake.captured.GetAccessTuple()
-	if !strings.HasPrefix(tuple.GetPrincipal(), "serviceAccount:") {
-		t.Errorf("agent caller should produce serviceAccount: principal, got %q", tuple.GetPrincipal())
+	if tuple.GetPrincipal() != "agent@my-project.iam.gserviceaccount.com" {
+		t.Errorf("agent caller should produce bare email principal, got %q", tuple.GetPrincipal())
 	}
 }
 
@@ -340,13 +341,10 @@ func TestPolicyTroubleshooterChecker_HumanCaller(t *testing.T) {
 	if result.Outcome != store.ActAsAllowed {
 		t.Errorf("expected ActAsAllowed for human caller, got %v", result.Outcome)
 	}
-	// Verify the principal was formatted as user:
+	// PT v3 expects bare email, not IAM-prefixed form.
 	tuple := fake.captured.GetAccessTuple()
-	if !strings.HasPrefix(tuple.GetPrincipal(), "user:") {
-		t.Errorf("human caller should produce user: principal, got %q", tuple.GetPrincipal())
-	}
-	if tuple.GetPrincipal() != "user:alice@example.com" {
-		t.Errorf("unexpected principal: %q", tuple.GetPrincipal())
+	if tuple.GetPrincipal() != "alice@example.com" {
+		t.Errorf("human caller should produce bare email principal, got %q", tuple.GetPrincipal())
 	}
 }
 
@@ -477,7 +475,8 @@ func TestCheckPermission_Allowed(t *testing.T) {
 
 	// Verify PT request was constructed correctly.
 	tuple := fake.captured.GetAccessTuple()
-	if tuple.GetPrincipal() != "user:alice@example.com" {
+	// PT v3 expects bare email, not IAM-prefixed form.
+	if tuple.GetPrincipal() != "alice@example.com" {
 		t.Errorf("unexpected principal: %q", tuple.GetPrincipal())
 	}
 	if tuple.GetPermission() != PermissionSACreate {
@@ -595,9 +594,51 @@ func TestCheckPermission_ServiceAccountPrincipal(t *testing.T) {
 		t.Error("expected Allowed=true")
 	}
 
-	// Verify SA email gets serviceAccount: prefix.
+	// PT v3 expects bare email, not IAM-prefixed form.
 	tuple := fake.captured.GetAccessTuple()
-	if tuple.GetPrincipal() != "serviceAccount:my-sa@proj.iam.gserviceaccount.com" {
-		t.Errorf("SA emails should get serviceAccount: prefix, got %q", tuple.GetPrincipal())
+	if tuple.GetPrincipal() != "my-sa@proj.iam.gserviceaccount.com" {
+		t.Errorf("SA emails should be bare email for PT v3, got %q", tuple.GetPrincipal())
+	}
+}
+
+// ============================================================================
+// ptPrincipal Tests
+// ============================================================================
+
+func TestPtPrincipal(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "user prefix",
+			input: "user:foo@bar.com",
+			want:  "foo@bar.com",
+		},
+		{
+			name:  "serviceAccount prefix",
+			input: "serviceAccount:sa@proj.iam.gserviceaccount.com",
+			want:  "sa@proj.iam.gserviceaccount.com",
+		},
+		{
+			name:  "no prefix",
+			input: "foo@bar.com",
+			want:  "foo@bar.com",
+		},
+		{
+			name:  "empty string",
+			input: "",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ptPrincipal(tt.input)
+			if got != tt.want {
+				t.Errorf("ptPrincipal(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }

@@ -99,9 +99,10 @@ func (c *PolicyTroubleshooterChecker) CanActAs(
 	}
 
 	// 3. Call TroubleshootIamPolicy.
+	// PT v3 requires bare email, not IAM "type:email" form.
 	resp, err := c.client.TroubleshootIamPolicy(ctx, &policytroubleshooterpb.TroubleshootIamPolicyRequest{
 		AccessTuple: &policytroubleshooterpb.AccessTuple{
-			Principal:        principalID,
+			Principal:        ptPrincipal(principalID),
 			FullResourceName: fullResourceName,
 			Permission:       store.PermissionActAs,
 		},
@@ -283,9 +284,10 @@ func (c *PolicyTroubleshooterChecker) CheckPermission(
 		principalID = "serviceAccount:" + principalEmail
 	}
 
+	// PT v3 requires bare email, not IAM "type:email" form.
 	resp, err := c.client.TroubleshootIamPolicy(ctx, &policytroubleshooterpb.TroubleshootIamPolicyRequest{
 		AccessTuple: &policytroubleshooterpb.AccessTuple{
-			Principal:        principalID,
+			Principal:        ptPrincipal(principalID),
 			FullResourceName: fullResourceName,
 			Permission:       permission,
 		},
@@ -313,6 +315,15 @@ func (c *PolicyTroubleshooterChecker) CheckPermission(
 				"for %s checking %s; denying (fail-closed)", overall, principalID, permission),
 		}, nil
 	}
+}
+
+// ptPrincipal returns the principal string for the PT v3 API.
+// PT v3 expects bare email addresses, not IAM "type:email" form.
+func ptPrincipal(principalID string) string {
+	if idx := strings.Index(principalID, ":"); idx >= 0 {
+		return principalID[idx+1:]
+	}
+	return principalID
 }
 
 // Compile-time assertion that PolicyTroubleshooterChecker satisfies the interface.
