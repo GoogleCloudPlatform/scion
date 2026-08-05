@@ -146,7 +146,6 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
                 f"ADC auth requires AGY CLI >= 1.1.10, found {ver_str}"
             )
         is_adc = True
-        has_token = False
         env_overlay["AGY_ADC_AUTH"] = "true"
 
         # Resolve GOOGLE_APPLICATION_CREDENTIALS from staged file secret or env.
@@ -380,7 +379,9 @@ def _generate_wrapper_script(
 # ADC uses GOOGLE_APPLICATION_CREDENTIALS, not the keyring-based OAuth flow.
 echo "agy-wrapper: ADC auth mode — skipping keyring initialization" >&2
 
-# Export AGY_ADC_AUTH for the AGY process
+# Export AGY_ADC_AUTH for the AGY process. Belt-and-suspenders: env_overlay
+# sets this via env.json, but we also export it here as a backup so the
+# variable is guaranteed present even if env.json injection is skipped.
 export AGY_ADC_AUTH=true
 """
     else:
