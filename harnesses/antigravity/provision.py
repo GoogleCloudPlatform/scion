@@ -201,9 +201,20 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     # vertex-ai is enterprise/GCP mode. oauth-token is also enterprise when
     # GOOGLE_CLOUD_PROJECT is present (wrapper script handles GCP settings).
+    # Use ctx.read_secret so staged secrets are checked, not just os.environ.
+    project = ctx.read_secret("GOOGLE_CLOUD_PROJECT", env_fallback=True)
     is_enterprise = method == "vertex-ai" or (
-        method == "oauth-token" and bool(os.environ.get("GOOGLE_CLOUD_PROJECT"))
+        method == "oauth-token" and bool(project)
     )
+    if is_enterprise and method == "oauth-token":
+        if project:
+            env_overlay["GOOGLE_CLOUD_PROJECT"] = project
+        location = (
+            ctx.read_secret("GOOGLE_CLOUD_LOCATION", env_fallback=True)
+            or ctx.read_secret("GOOGLE_CLOUD_REGION", env_fallback=True)
+        )
+        if location:
+            env_overlay["GOOGLE_CLOUD_LOCATION"] = location
 
     instructions_file = ctx.harness_config.get("instructions_file") or "GEMINI.md"
     model = (
