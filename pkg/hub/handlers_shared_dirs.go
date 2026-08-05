@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -172,6 +174,23 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 		if err := s.store.UpdateProject(ctx, project); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
+		}
+
+		// Best-effort host directory cleanup. The CLI does this via
+		// config.RemoveSharedDir(); the hub resolves the host path through
+		// its co-located broker (or hub-managed project path) and removes
+		// the directory directly. If the path cannot be resolved (e.g. no
+		// co-located broker), we log and continue — the DB record is already
+		// removed.
+		resolution, resolveErr := s.resolveSharedDirPath(ctx, project, name)
+		if resolveErr == nil && resolution.IsLocal {
+			if removeErr := os.RemoveAll(resolution.Path); removeErr != nil {
+				slog.WarnContext(ctx, "failed to remove shared directory host path",
+					"project_id", projectID, "name", name, "path", resolution.Path, "error", removeErr)
+			}
+		} else if resolveErr != nil {
+			slog.WarnContext(ctx, "could not resolve shared directory host path for cleanup",
+				"project_id", projectID, "name", name, "error", resolveErr)
 		}
 
 		s.events.PublishProjectUpdated(ctx, project)
