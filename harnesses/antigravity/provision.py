@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -56,6 +57,18 @@ AGY_MCP_MAPPING: dict[str, Any] = {
     },
 }
 
+def _get_agy_version() -> tuple[int, ...] | None:
+    """Parse AGY CLI version into a comparable tuple, e.g. (1, 1, 10)."""
+    try:
+        out = subprocess.check_output(
+            ["agy", "--version"], text=True, timeout=5
+        ).strip()
+        parts = out.split(".")
+        return tuple(int(p) for p in parts)
+    except (subprocess.SubprocessError, ValueError):
+        return None
+
+
 ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
     "antigravity",
     [
@@ -65,6 +78,13 @@ ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
             any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"],
             env_fallback=True,
             hint="set AGY_TOKEN, GOOGLE_CLOUD_PROJECT, and GOOGLE_CLOUD_LOCATION",
+        ),
+        scion_harness.env_method(
+            "adc",
+            all_of=["GOOGLE_CLOUD_PROJECT"],
+            any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"],
+            env_fallback=True,
+            hint="set GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION with gcloud-adc file",
         ),
         scion_harness.env_method(
             "oauth-token",
@@ -114,7 +134,44 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     method = resolved.method
 
     has_token = False
-    if method in ("oauth-token", "vertex-ai"):
+    is_adc = False
+    env_overlay: dict[str, str] = {}
+
+    if method == "adc":
+        # ADC auth: validate version and wire ADC environment.
+        ver = _get_agy_version()
+        if ver is None or ver < (1, 1, 10):
+            ver_str = ".".join(str(v) for v in ver) if ver else "unknown"
+            raise scion_harness.ProvisionError(
+                f"ADC auth requires AGY CLI >= 1.1.10, found {ver_str}"
+            )
+        is_adc = True
+        has_token = False
+        env_overlay["AGY_ADC_AUTH"] = "true"
+
+        # Resolve GOOGLE_APPLICATION_CREDENTIALS from staged file secret or env.
+        gac_path = ctx.file_secret_files.get("gcloud-adc")
+        if gac_path:
+            env_overlay["GOOGLE_APPLICATION_CREDENTIALS"] = scion_harness.expand_path(gac_path)
+        else:
+            gac_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+            if gac_env:
+                env_overlay["GOOGLE_APPLICATION_CREDENTIALS"] = gac_env
+
+        # Resolve GCP project/location (same pattern as vertex-ai).
+        project = ctx.read_secret("GOOGLE_CLOUD_PROJECT", env_fallback=True)
+        if project:
+            env_overlay["GOOGLE_CLOUD_PROJECT"] = project
+        location = (
+            ctx.read_secret("GOOGLE_CLOUD_LOCATION", env_fallback=True)
+            or ctx.read_secret("GOOGLE_CLOUD_REGION", env_fallback=True)
+        )
+        if location:
+            env_overlay["GOOGLE_CLOUD_LOCATION"] = location
+
+        ctx.info(f"ADC auth: AGY version {'.'.join(str(v) for v in ver)}")
+
+    elif method in ("oauth-token", "vertex-ai"):
         token_raw = _read_agy_token(ctx)
         if not token_raw:
             oauth_token_path = os.path.join(
@@ -150,7 +207,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
             )
         has_token = True
 
-    is_enterprise = method == "vertex-ai"
+    # ADC and vertex-ai are both enterprise/GCP modes.
+    is_enterprise = method in ("vertex-ai", "adc")
 
     instructions_file = ctx.harness_config.get("instructions_file") or "GEMINI.md"
     model = (
@@ -167,8 +225,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     else:
         ctx.info(f"model={model} thinking_level=unset (using AGY default)")
 
-    _generate_wrapper_script(ctx.home, has_token, is_enterprise, thinking_tier=thinking_tier)
-    ctx.write_outputs(resolved, env={})
+    _generate_wrapper_script(ctx.home, has_token, is_enterprise, is_adc=is_adc, thinking_tier=thinking_tier)
+    ctx.write_outputs(resolved, env=env_overlay)
     _copy_instructions(ctx.bundle_dir, ctx.home, instructions_file)
     _generate_hooks_json(ctx.home)
     _prestage_onboarding(
@@ -265,6 +323,7 @@ def _generate_hooks_json(home: str) -> None:
 
 def _generate_wrapper_script(
     home: str, has_token: bool, is_enterprise: bool,
+    is_adc: bool = False,
     thinking_tier: str | None = None,
 ) -> None:
     """Generate agy-wrapper.sh that inits keyring and execs AGY.
@@ -280,6 +339,10 @@ def _generate_wrapper_script(
     GCP/enterprise settings are also patched here at runtime for the same
     reason — GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION and AGY_USE_GCP
     are only available in the child environment.
+
+    When is_adc=True, keyring/DBUS init and token injection are skipped
+    because ADC auth uses GOOGLE_APPLICATION_CREDENTIALS instead of the
+    keyring-based OAuth flow. GCP settings patching still runs.
     """
     secret_path = os.path.join(
         home, ".scion", "harness", "secrets", "AGY_TOKEN"
@@ -295,7 +358,7 @@ def _generate_wrapper_script(
     )
 
     # Enterprise marker: provisioner writes this when explicit vertex-ai
-    # is selected. The wrapper checks both this file and AGY_USE_GCP env.
+    # or adc is selected. The wrapper checks both this file and AGY_USE_GCP env.
     enterprise_marker = os.path.join(
         home, ".scion", "harness", ".enterprise-mode"
     )
@@ -305,14 +368,23 @@ def _generate_wrapper_script(
             f.write("1")
     elif os.path.exists(enterprise_marker):
         # Idempotent reprovision: if the auth mode switched away from
-        # vertex-ai (e.g. to oauth-token), remove the stale marker so the
+        # vertex-ai/adc (e.g. to oauth-token), remove the stale marker so the
         # wrapper does not keep running in enterprise/GCP mode.
         os.remove(enterprise_marker)
 
-    script = f"""#!/bin/bash
-# Generated by antigravity provision.py {PROVISION_VERSION}
-set -e
+    # Build keyring/token injection block — skipped for ADC auth since ADC
+    # uses GOOGLE_APPLICATION_CREDENTIALS, not the keyring-based OAuth flow.
+    if is_adc:
+        keyring_block = """
+# ADC auth: skip keyring/DBUS init and token injection.
+# ADC uses GOOGLE_APPLICATION_CREDENTIALS, not the keyring-based OAuth flow.
+echo "agy-wrapper: ADC auth mode — skipping keyring initialization" >&2
 
+# Export AGY_ADC_AUTH for the AGY process
+export AGY_ADC_AUTH=true
+"""
+    else:
+        keyring_block = f"""
 # Initialize DBUS session bus
 eval $(dbus-launch --sh-syntax)
 export DBUS_SESSION_BUS_ADDRESS
@@ -350,9 +422,14 @@ elif [ -n "${{AGY_TOKEN:-}}" ]; then
 else
     echo "agy-wrapper: no token available, AGY will prompt for login" >&2
 fi
+"""
 
+    script = f"""#!/bin/bash
+# Generated by antigravity provision.py {PROVISION_VERSION}
+set -e
+{keyring_block}
 # GCP/enterprise mode: patch settings.json with gcp block and mark
-# enterprise onboarding complete. Triggered by explicit vertex-ai auth
+# enterprise onboarding complete. Triggered by explicit vertex-ai/adc auth
 # (marker file) or AGY_USE_GCP=true env var.
 _use_gcp=false
 if [ -f "{enterprise_marker}" ]; then
