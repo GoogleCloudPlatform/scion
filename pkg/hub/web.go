@@ -609,6 +609,19 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 
 		accessToken, _ := session.Values[sessKeyHubAccessToken].(string)
 		if accessToken == "" {
+			// Session has no Hub token — this happens when the OAuth callback's
+			// cookie-overflow retry stripped tokens to fit in the 4096-byte limit.
+			// Generate a per-request Bearer token from session identity so the
+			// Hub API request succeeds. Do NOT persist back to the session cookie
+			// (it would overflow again).
+			if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" && ws.userTokenSvc != nil {
+				email, _ := session.Values[sessKeyUserEmail].(string)
+				name, _ := session.Values[sessKeyUserName].(string)
+				role, _ := session.Values[sessKeyUserRole].(string)
+				if tok, _, err := ws.userTokenSvc.GenerateAccessToken(uid, email, name, role, ClientTypeWeb); err == nil {
+					r.Header.Set("Authorization", "Bearer "+tok)
+				}
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
