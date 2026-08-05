@@ -35,6 +35,7 @@ import (
 
 	policytroubleshooteriam "cloud.google.com/go/policytroubleshooter/iam/apiv3"
 	"github.com/google/uuid"
+	"google.golang.org/api/option"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -1628,28 +1629,35 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// Initialize Policy Troubleshooter checker for actAs checks.
 	// Non-fatal if the PT API is not available — the existing disabled checker
 	// remains in place and denies when mode is "enforce" (fail-closed by
-	// construction). Requires the GCP token generator to be available so we
-	// can read the Hub SA email for diagnostic messages.
-	ptClient, ptErr := policytroubleshooteriam.NewPolicyTroubleshooterClient(ctx)
-	if ptErr != nil {
-		log.Printf("Policy Troubleshooter not available (actAs check will be unavailable): %v", ptErr)
+	// construction). Requires a GCP project ID for quota/billing context and
+	// the GCP token generator for diagnostic messages.
+	ptProjectID, ptProjErr := hub.ResolveGCPProjectID(cfg.Hub.GCPProjectID)
+	if ptProjErr != nil {
+		log.Printf("Policy Troubleshooter: no GCP project ID available (actAs check will be unavailable): %v", ptProjErr)
 	} else {
-		hubSAEmail := ""
-		if gcpErr == nil {
-			hubSAEmail = gcpGen.ServiceAccountEmail()
-		}
-		checker := hub.NewPolicyTroubleshooterChecker(ptClient, hubSAEmail)
-		cached := hub.NewCachedCallerPermissionChecker(checker,
-			60*time.Second, // allowTTL
-			10*time.Second, // denyTTL
+		ptClient, ptErr := policytroubleshooteriam.NewPolicyTroubleshooterClient(ctx,
+			option.WithQuotaProject(ptProjectID),
 		)
-		hubSrv.SetSAAssignChecker(cached)
-		hubSrv.SetHookIdentityChecker(cached)
-		// Both surfaces share one checker instance and one cache.
-		log.Printf("Policy Troubleshooter checker configured for actAs checks")
-		// Also set the raw PT checker for mint-time permission verification.
-		// Mint checks are independent of gcpIamCheckMode (D6).
-		hubSrv.SetMintPTChecker(checker)
+		if ptErr != nil {
+			log.Printf("Policy Troubleshooter not available (actAs check will be unavailable; ensure Policy Troubleshooter API is enabled and Hub SA has serviceUsage.serviceUsageConsumer role): %v", ptErr)
+		} else {
+			hubSAEmail := ""
+			if gcpErr == nil {
+				hubSAEmail = gcpGen.ServiceAccountEmail()
+			}
+			checker := hub.NewPolicyTroubleshooterChecker(ptClient, hubSAEmail)
+			cached := hub.NewCachedCallerPermissionChecker(checker,
+				60*time.Second, // allowTTL
+				10*time.Second, // denyTTL
+			)
+			hubSrv.SetSAAssignChecker(cached)
+			hubSrv.SetHookIdentityChecker(cached)
+			// Both surfaces share one checker instance and one cache.
+			log.Printf("Policy Troubleshooter checker configured for actAs checks (quota project: %s)", ptProjectID)
+			// Also set the raw PT checker for mint-time permission verification.
+			// Mint checks are independent of gcpIamCheckMode (D6).
+			hubSrv.SetMintPTChecker(checker)
+		}
 	}
 
 	if hostedMode {
