@@ -183,14 +183,21 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 		// co-located broker), we log and continue — the DB record is already
 		// removed.
 		resolution, resolveErr := s.resolveSharedDirPath(ctx, project, name)
-		if resolveErr == nil && resolution.IsLocal {
+		switch {
+		case resolveErr != nil:
+			slog.WarnContext(ctx, "could not resolve shared directory host path for cleanup",
+				"project_id", projectID, "name", name, "error", resolveErr)
+		case !resolution.IsLocal:
+			slog.WarnContext(ctx, "shared directory path is not local, skipping host cleanup",
+				"project_id", projectID, "name", name)
+		case resolution.Path == "" || resolution.Path == "/":
+			slog.WarnContext(ctx, "resolved shared directory path is empty or root, skipping removal",
+				"project_id", projectID, "name", name, "path", resolution.Path)
+		default:
 			if removeErr := os.RemoveAll(resolution.Path); removeErr != nil {
 				slog.WarnContext(ctx, "failed to remove shared directory host path",
 					"project_id", projectID, "name", name, "path", resolution.Path, "error", removeErr)
 			}
-		} else if resolveErr != nil {
-			slog.WarnContext(ctx, "could not resolve shared directory host path for cleanup",
-				"project_id", projectID, "name", name, "error", resolveErr)
 		}
 
 		s.events.PublishProjectUpdated(ctx, project)
