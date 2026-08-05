@@ -100,6 +100,11 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 			attribute.String("scion.broker", broker),
 		))
 	}
+	if gcpProjectID := os.Getenv(EnvProjectID); gcpProjectID != "" {
+		attrs = append(attrs, resource.WithAttributes(
+			attribute.String("gcp.project_id", gcpProjectID),
+		))
+	}
 	res, err := resource.New(ctx, attrs...)
 	if err != nil {
 		return nil, fmt.Errorf("creating resource: %w", err)
