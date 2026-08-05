@@ -193,19 +193,22 @@ func (p *BrokerPlugin) Client(broker *goplugin.MuxBroker, c *rpc.Client) (interf
 // BrokerRPCServer wraps a MessageBrokerPluginInterface to serve RPC requests.
 // This runs inside the plugin binary.
 type BrokerRPCServer struct {
-	Impl      MessageBrokerPluginInterface
-	muxBroker *goplugin.MuxBroker
+	Impl                   MessageBrokerPluginInterface
+	muxBroker              *goplugin.MuxBroker
+	hostCallbacksConnected bool
 }
 
 func (s *BrokerRPCServer) Configure(args *ConfigureArgs, _ *struct{}) error {
 	// If the host indicated that callbacks are available, establish the
 	// reverse RPC channel and inject it into the plugin implementation.
-	if args.Config != nil && args.Config[hostCallbacksConfigKey] == "true" && s.muxBroker != nil {
+	if args.Config != nil && args.Config[hostCallbacksConfigKey] == "true" &&
+		s.muxBroker != nil && !s.hostCallbacksConnected {
 		conn, err := s.muxBroker.Dial(hostCallbacksMuxID)
 		if err != nil {
 			slog.Warn("failed to dial host callbacks reverse channel",
 				"error", err, "mux_id", hostCallbacksMuxID)
 		} else {
+			s.hostCallbacksConnected = true
 			callbacks := &HostCallbacksRPCClient{client: rpc.NewClient(conn)}
 			if aware, ok := s.Impl.(HostCallbacksAware); ok {
 				aware.SetHostCallbacks(callbacks)

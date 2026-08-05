@@ -155,6 +155,7 @@ type DiscordBroker struct {
 	webhooks  *WebhookManager
 
 	gatewayConnected bool // set true in handleReady, false on disconnect
+	bootstrapDone    bool // set true after first successful bootstrap subscription
 
 	threadParents map[string]string // channelID -> parentID (cached thread lookups)
 
@@ -219,6 +220,18 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 	// Phase 1: Bot token configuration.
 	botToken, hasBotToken := config["bot_token"]
 	if hasBotToken && botToken != "" {
+		// Close old session if one exists (handles Restart/reconfigure).
+		// Clearing subs ensures Subscribe("*") triggers startGateway() on the new session.
+		if b.session != nil {
+			oldSession := b.session
+			b.session = nil
+			b.subs = make(map[string]bool)
+			b.gatewayConnected = false
+			b.bootstrapDone = false // allow bootstrap to re-run
+			// session.Close() is safe to call under lock — it just closes the websocket.
+			_ = oldSession.Close()
+		}
+
 		// Create a discordgo session but do NOT open the gateway yet.
 		// Gateway connection happens on first Subscribe().
 		session, err := discordgo.New("Bot " + botToken)
@@ -383,24 +396,29 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		// Subscribe(), which triggers startGateway() on the first call.
 		// Host callbacks are wired after Configure() returns, so we defer
 		// the request in a goroutine that retries until they're available.
-		go func() {
-			for i := 0; i < 20; i++ {
-				time.Sleep(500 * time.Millisecond)
-				b.mu.RLock()
-				hc := b.hostCallbacks
-				b.mu.RUnlock()
-				if hc == nil {
-					continue
+		if !b.bootstrapDone {
+			go func() {
+				for i := 0; i < 20; i++ {
+					time.Sleep(500 * time.Millisecond)
+					b.mu.RLock()
+					hc := b.hostCallbacks
+					b.mu.RUnlock()
+					if hc == nil {
+						continue
+					}
+					if err := hc.RequestSubscription(projectcompat.AllProjectsPattern()); err != nil {
+						b.log.Warn("Failed to request bootstrap subscription", "error", err)
+						continue
+					}
+					b.mu.Lock()
+					b.bootstrapDone = true
+					b.mu.Unlock()
+					b.log.Info("Requested bootstrap subscription for Discord Gateway")
+					return
 				}
-				if err := hc.RequestSubscription(projectcompat.AllProjectsPattern()); err != nil {
-					b.log.Warn("Failed to request bootstrap subscription", "error", err)
-					continue
-				}
-				b.log.Info("Requested bootstrap subscription for Discord Gateway")
-				return
-			}
-			b.log.Error("Bootstrap subscription timed out — host callbacks never became available")
-		}()
+				b.log.Error("Bootstrap subscription timed out — host callbacks never became available")
+			}()
+		}
 	}
 
 	return nil
