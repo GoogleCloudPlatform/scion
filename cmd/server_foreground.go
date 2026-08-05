@@ -1453,10 +1453,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 				},
 			},
 		},
-		MaintenanceConfig: resolveMaintenanceConfig(cfg),
-		SecretBackend:     secretBackend,
-		GCPIAMCheckMode:   cfg.Hub.GCPIAMCheckMode,
-		GCPProjectID:      cfg.Hub.GCPProjectID,
+		MaintenanceConfig:       resolveMaintenanceConfig(cfg),
+		SecretBackend:           secretBackend,
+		GCPIAMCheckMode:         cfg.Hub.GCPIAMCheckMode,
+		GCPIAMDenyUnknownPolicy: cfg.Hub.GCPIAMDenyUnknownPolicy,
+		GCPProjectID:            cfg.Hub.GCPProjectID,
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived
@@ -1645,7 +1646,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			if gcpErr == nil {
 				hubSAEmail = gcpGen.ServiceAccountEmail()
 			}
-			checker := hub.NewPolicyTroubleshooterChecker(ptClient, hubSAEmail)
+			checker := hub.NewPolicyTroubleshooterChecker(ptClient, hubSAEmail, hubSrv.DenyUnknownFailOpen())
 			cached := hub.NewCachedCallerPermissionChecker(checker,
 				60*time.Second, // allowTTL
 				10*time.Second, // denyTTL

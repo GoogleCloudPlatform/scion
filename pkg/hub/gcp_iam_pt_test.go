@@ -73,7 +73,7 @@ func TestPolicyTroubleshooterChecker_CallerHasActAsDirectly(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -117,7 +117,7 @@ func TestPolicyTroubleshooterChecker_CallerHasActAsViaProjectBinding(t *testing.
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -135,7 +135,7 @@ func TestPolicyTroubleshooterChecker_CallerDoesNotHaveActAs(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CANNOT_ACCESS,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -163,7 +163,7 @@ func TestPolicyTroubleshooterChecker_DenyPolicyOverridesAllow(t *testing.T) {
 			},
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -201,7 +201,7 @@ func TestPolicyTroubleshooterChecker_GroupBindingUnresolvable(t *testing.T) {
 			},
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -225,7 +225,7 @@ func TestPolicyTroubleshooterChecker_ConditionalBinding(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_CONDITIONAL,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -244,7 +244,7 @@ func TestPolicyTroubleshooterChecker_GRPCUnavailable(t *testing.T) {
 	fake := &fakePTClient{
 		err: status.Error(codes.Unavailable, "service unavailable"),
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -263,7 +263,7 @@ func TestPolicyTroubleshooterChecker_GRPCPermissionDenied(t *testing.T) {
 	fake := &fakePTClient{
 		err: status.Error(codes.PermissionDenied, "caller does not have permission"),
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -281,7 +281,7 @@ func TestPolicyTroubleshooterChecker_EmptyProjectID(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	noProjectSA := &store.GCPServiceAccount{
 		ID:    "sa-no-project",
@@ -308,7 +308,7 @@ func TestPolicyTroubleshooterChecker_AgentCaller(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -331,7 +331,7 @@ func TestPolicyTroubleshooterChecker_HumanCaller(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testHumanCaller, testTargetSA)
 
@@ -355,7 +355,7 @@ func TestPolicyTroubleshooterChecker_UnrecognisedState(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_OverallAccessState(999),
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -378,7 +378,7 @@ func TestPolicyTroubleshooterChecker_UnknownInfoWithoutGroupDetails(t *testing.T
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -400,7 +400,7 @@ func TestPolicyTroubleshooterChecker_NoHubSAEmail(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, "") // no hub SA email
+	checker := NewPolicyTroubleshooterChecker(fake, "", true) // no hub SA email
 
 	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 
@@ -433,7 +433,7 @@ func TestPolicyTroubleshooterChecker_AllMappingsAreAttributed(t *testing.T) {
 					OverallAccessState: s,
 				},
 			}
-			checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+			checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 			result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
 			if err != nil {
@@ -450,6 +450,206 @@ func TestPolicyTroubleshooterChecker_AllMappingsAreAttributed(t *testing.T) {
 }
 
 // ============================================================================
+// Deny-Unknown Fallback Tests (INV-6)
+// ============================================================================
+
+func TestMapResponse_UnknownInfo_FailOpenAllowGrantedDenyUnknown(t *testing.T) {
+	// When denyUnknownFailOpen=true, allow=GRANTED, deny=UNKNOWN (not DENIED),
+	// the result should be ActAsAllowed.
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
+			AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+				AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+			},
+			DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+				DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_UNKNOWN_INFO,
+			},
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
+
+	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != store.ActAsAllowed {
+		t.Errorf("expected ActAsAllowed with fail-open, got %v", result.Outcome)
+	}
+	if !strings.Contains(result.Reason, "fail-open") {
+		t.Errorf("reason should mention fail-open: %q", result.Reason)
+	}
+}
+
+func TestMapResponse_UnknownInfo_FailClosedAllowGrantedDenyUnknown(t *testing.T) {
+	// When denyUnknownFailOpen=false, even if allow=GRANTED and deny=UNKNOWN,
+	// the result should be ActAsIndeterminate (fail-closed).
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
+			AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+				AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+			},
+			DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+				DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_UNKNOWN_INFO,
+			},
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, false)
+
+	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != store.ActAsIndeterminate {
+		t.Errorf("expected ActAsIndeterminate with fail-closed, got %v", result.Outcome)
+	}
+}
+
+func TestMapResponse_UnknownInfo_FailOpenAllowNotGranted(t *testing.T) {
+	// When denyUnknownFailOpen=true but allow is NOT granted, the result
+	// should still be ActAsIndeterminate (fail-open only applies when allow
+	// is explicitly granted).
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
+			AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+				AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_UNKNOWN_INFO,
+			},
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
+
+	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != store.ActAsIndeterminate {
+		t.Errorf("expected ActAsIndeterminate when allow not granted, got %v", result.Outcome)
+	}
+}
+
+func TestMapResponse_UnknownInfo_FailOpenDenyDenied(t *testing.T) {
+	// When denyUnknownFailOpen=true but deny is explicitly DENIED,
+	// the result should be ActAsIndeterminate (deny takes precedence).
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
+			AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+				AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+			},
+			DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+				DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_DENIED,
+			},
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
+
+	result, err := checker.CanActAs(context.Background(), testCaller, testTargetSA)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != store.ActAsIndeterminate {
+		t.Errorf("expected ActAsIndeterminate when deny=DENIED, got %v", result.Outcome)
+	}
+}
+
+func TestCheckSubExplanations(t *testing.T) {
+	tests := []struct {
+		name           string
+		resp           *policytroubleshooterpb.TroubleshootIamPolicyResponse
+		wantAllow      bool
+		wantDenyNotDen bool
+	}{
+		{
+			name: "allow granted, deny unknown",
+			resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+				AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+					AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+				},
+				DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+					DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_UNKNOWN_INFO,
+				},
+			},
+			wantAllow:      true,
+			wantDenyNotDen: true,
+		},
+		{
+			name: "allow granted, deny denied",
+			resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+				AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+					AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+				},
+				DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+					DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_DENIED,
+				},
+			},
+			wantAllow:      true,
+			wantDenyNotDen: false,
+		},
+		{
+			name: "allow not granted, deny unknown",
+			resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+				AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+					AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_NOT_GRANTED,
+				},
+				DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+					DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_UNKNOWN_INFO,
+				},
+			},
+			wantAllow:      false,
+			wantDenyNotDen: true,
+		},
+		{
+			name:           "nil explanations",
+			resp:           &policytroubleshooterpb.TroubleshootIamPolicyResponse{},
+			wantAllow:      false,
+			wantDenyNotDen: true,
+		},
+		{
+			name: "allow granted, no deny explanation",
+			resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+				AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+					AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+				},
+			},
+			wantAllow:      true,
+			wantDenyNotDen: true,
+		},
+		{
+			name: "deny not denied (not_found)",
+			resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+				AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+					AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+				},
+				DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+					DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_NOT_DENIED,
+				},
+			},
+			wantAllow:      true,
+			wantDenyNotDen: true,
+		},
+	}
+
+	checker := NewPolicyTroubleshooterChecker(nil, testHubSAEmail, true)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotAllow, gotDenyNotDen := checker.checkSubExplanations(tt.resp)
+			if gotAllow != tt.wantAllow {
+				t.Errorf("allowGranted = %v, want %v", gotAllow, tt.wantAllow)
+			}
+			if gotDenyNotDen != tt.wantDenyNotDen {
+				t.Errorf("denyNotDenied = %v, want %v", gotDenyNotDen, tt.wantDenyNotDen)
+			}
+		})
+	}
+}
+
+// ============================================================================
 // CheckPermission Tests (P11 — Mint Permission Checks)
 // ============================================================================
 
@@ -459,7 +659,7 @@ func TestCheckPermission_Allowed(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CheckPermission(context.Background(),
 		"alice@example.com",
@@ -493,7 +693,7 @@ func TestCheckPermission_Denied(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CANNOT_ACCESS,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CheckPermission(context.Background(),
 		"bob@example.com",
@@ -517,7 +717,7 @@ func TestCheckPermission_UnknownFailsClosed(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CheckPermission(context.Background(),
 		"bob@example.com",
@@ -539,7 +739,7 @@ func TestCheckPermission_TransportError(t *testing.T) {
 	fake := &fakePTClient{
 		err: status.Error(codes.Unavailable, "service unavailable"),
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CheckPermission(context.Background(),
 		"alice@example.com",
@@ -556,7 +756,7 @@ func TestCheckPermission_TransportError(t *testing.T) {
 
 func TestCheckPermission_EmptyPrincipal(t *testing.T) {
 	fake := &fakePTClient{}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CheckPermission(context.Background(),
 		"",
@@ -580,7 +780,7 @@ func TestCheckPermission_ServiceAccountPrincipal(t *testing.T) {
 			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_CAN_ACCESS,
 		},
 	}
-	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail)
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
 
 	result, err := checker.CheckPermission(context.Background(),
 		"my-sa@proj.iam.gserviceaccount.com",

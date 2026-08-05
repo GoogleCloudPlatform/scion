@@ -200,6 +200,11 @@ type ServerConfig struct {
 	// binding a GCP service account to an agent.
 	// "off" (default) or "enforce". See sa_assign_gate.go for the constants.
 	GCPIAMCheckMode string
+	// GCPIAMDenyUnknownPolicy controls behavior when the Policy Troubleshooter
+	// cannot evaluate deny policies (e.g., Hub SA lacks org-level permissions).
+	// "fail-open" (default): if allow is granted and deny is unknown, treat as
+	// allowed. "fail-closed": treat as indeterminate (denied).
+	GCPIAMDenyUnknownPolicy string
 	// GCPProjectID is the GCP project ID used for minting service accounts.
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string
@@ -744,8 +749,9 @@ type Server struct {
 	// a way to switch the check off. Turning the check off is done by
 	// installing store.NewDisabledCallerPermissionChecker, which is a value
 	// somebody has to construct and pass. See saAssignCheckerFor.
-	saAssignChecker   store.CallerPermissionChecker
-	saAssignCheckMode string
+	saAssignChecker     store.CallerPermissionChecker
+	saAssignCheckMode   string
+	denyUnknownFailOpen bool
 
 	// The same pair for the lifecycle-hook execution-identity surface. A
 	// SEPARATE field rather than a shared one, deliberately: the two surfaces
@@ -1176,6 +1182,22 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		srv.saAssignCheckMode = SAAssignCheckOff
 		srv.hookIdentityCheckMode = SAAssignCheckOff
 	}
+
+	// Parse deny-unknown fallback policy (default: fail-open).
+	srv.denyUnknownFailOpen = true
+	switch cfg.GCPIAMDenyUnknownPolicy {
+	case "fail-closed":
+		srv.denyUnknownFailOpen = false
+	case "fail-open", "":
+		srv.denyUnknownFailOpen = true
+	default:
+		slog.Warn("unrecognised gcpIamDenyUnknownPolicy value, defaulting to fail-open",
+			"value", cfg.GCPIAMDenyUnknownPolicy)
+	}
+	slog.Info("GCP deny-unknown fallback policy",
+		"policy", cfg.GCPIAMDenyUnknownPolicy,
+		"failOpen", srv.denyUnknownFailOpen)
+
 	srv.saAssignChecker = store.NewDisabledCallerPermissionChecker()
 	if srv.saAssignCheckMode == SAAssignCheckOff {
 		// Names the SURFACE and what it degrades to, not the feature. The same
@@ -2035,6 +2057,12 @@ func (s *Server) SetGCPServiceAccountAdmin(a GCPServiceAccountAdmin) {
 // SetMintPTChecker sets the Policy Troubleshooter checker used for mint-time
 // permission verification. This is separate from the cached actAs checker
 // because mint checks are always performed regardless of gcpIamCheckMode.
+// DenyUnknownFailOpen returns the configured deny-unknown fallback policy.
+// Used by server_foreground.go to pass the setting to the PT checker constructor.
+func (s *Server) DenyUnknownFailOpen() bool {
+	return s.denyUnknownFailOpen
+}
+
 func (s *Server) SetMintPTChecker(c *PolicyTroubleshooterChecker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

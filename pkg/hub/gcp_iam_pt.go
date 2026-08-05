@@ -55,15 +55,24 @@ type PolicyTroubleshooterChecker struct {
 	// diagnostic messages ("the Hub SA needs..."). Never sent as a
 	// principal to PT — the principal is always the CALLER.
 	hubSAEmail string
+
+	// denyUnknownFailOpen controls behavior when PT v3 returns
+	// UNKNOWN_INFO overall because deny policies could not be evaluated.
+	// When true (default): if allow=GRANTED and deny=UNKNOWN (not DENIED),
+	// treat as allowed. When false: treat as indeterminate (fail-closed).
+	denyUnknownFailOpen bool
 }
 
 // NewPolicyTroubleshooterChecker creates a new PolicyTroubleshooterChecker.
 // client must be a Policy Troubleshooter v3 client (or a fake for tests).
 // hubSAEmail is used only in diagnostic reason strings.
-func NewPolicyTroubleshooterChecker(client PTClient, hubSAEmail string) *PolicyTroubleshooterChecker {
+// denyUnknownFailOpen controls the UNKNOWN_INFO fallback: true means
+// allow-granted + deny-unknown is treated as allowed (fail-open).
+func NewPolicyTroubleshooterChecker(client PTClient, hubSAEmail string, denyUnknownFailOpen bool) *PolicyTroubleshooterChecker {
 	return &PolicyTroubleshooterChecker{
-		client:     client,
-		hubSAEmail: hubSAEmail,
+		client:              client,
+		hubSAEmail:          hubSAEmail,
+		denyUnknownFailOpen: denyUnknownFailOpen,
 	}
 }
 
@@ -152,6 +161,21 @@ func (c *PolicyTroubleshooterChecker) mapResponse(
 		}
 
 	case policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO:
+		// Check if the allow sub-explanation shows GRANTED.
+		// When deny is UNKNOWN (not DENIED) and allow is GRANTED,
+		// the configurable fallback policy determines the outcome.
+		if c.denyUnknownFailOpen {
+			if allowGranted, denyNotDenied := c.checkSubExplanations(resp); allowGranted && denyNotDenied {
+				return store.ActAsResult{
+					Outcome:   store.ActAsAllowed,
+					Mechanism: MechanismPolicyTroubleshooter,
+					Reason: fmt.Sprintf("%s has %s on %s (allow policy granted; "+
+						"deny policy evaluation inconclusive, fail-open policy applied)",
+						principalID, store.PermissionActAs, targetSAEmail),
+				}
+			}
+		}
+		// Fall through to indeterminate if fail-closed or if allow is not granted.
 		reason := c.buildUnknownReason(resp, principalID, targetSAEmail)
 		return store.ActAsResult{
 			Outcome:   store.ActAsIndeterminate,
@@ -177,6 +201,26 @@ func (c *PolicyTroubleshooterChecker) mapResponse(
 				overall, principalID, targetSAEmail),
 		}
 	}
+}
+
+// checkSubExplanations inspects the allow and deny sub-explanations in a PT v3
+// response. Returns (allowGranted, denyNotDenied).
+func (c *PolicyTroubleshooterChecker) checkSubExplanations(
+	resp *policytroubleshooterpb.TroubleshootIamPolicyResponse,
+) (bool, bool) {
+	allowGranted := false
+	if allowExpl := resp.GetAllowPolicyExplanation(); allowExpl != nil {
+		allowGranted = allowExpl.GetAllowAccessState() == policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED
+	}
+
+	denyNotDenied := true
+	if denyExpl := resp.GetDenyPolicyExplanation(); denyExpl != nil {
+		if denyExpl.GetDenyAccessState() == policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_DENIED {
+			denyNotDenied = false
+		}
+	}
+
+	return allowGranted, denyNotDenied
 }
 
 // buildDenialReason constructs a human-readable reason for a CANNOT_ACCESS result.

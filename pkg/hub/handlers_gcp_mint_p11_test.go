@@ -93,7 +93,7 @@ func testServerWithMintingAndPT(t *testing.T) (*Server, store.Store, *mockGCPSer
 	t.Helper()
 	srv, s, mock := testServerWithMinting(t)
 	ptClient := newAllowAllPTClient()
-	checker := NewPolicyTroubleshooterChecker(ptClient, "hub-sa@test-hub-project.iam.gserviceaccount.com")
+	checker := NewPolicyTroubleshooterChecker(ptClient, "hub-sa@test-hub-project.iam.gserviceaccount.com", true)
 	srv.SetMintPTChecker(checker)
 	return srv, s, mock, ptClient
 }
