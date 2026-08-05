@@ -220,16 +220,29 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 	// Phase 1: Bot token configuration.
 	botToken, hasBotToken := config["bot_token"]
 	if hasBotToken && botToken != "" {
-		// Close old session if one exists (handles Restart/reconfigure).
+		// Close old session, store, and sendQueue if they exist (handles Restart/reconfigure).
 		// Clearing subs ensures Subscribe("*") triggers startGateway() on the new session.
 		if b.session != nil {
 			oldSession := b.session
+			oldStore := b.store
+			oldSendQueue := b.sendQueue
 			b.session = nil
+			b.store = nil
+			b.sendQueue = nil
 			b.subs = make(map[string]bool)
 			b.gatewayConnected = false
 			b.bootstrapDone = false // allow bootstrap to re-run
-			// session.Close() is safe to call under lock — it just closes the websocket.
-			_ = oldSession.Close()
+			if closeErr := oldSession.Close(); closeErr != nil {
+				b.log.Warn("Failed to close old discord session on reconfigure", "error", closeErr)
+			}
+			if oldSendQueue != nil {
+				oldSendQueue.Close()
+			}
+			if oldStore != nil {
+				if closeErr := oldStore.Close(); closeErr != nil {
+					b.log.Warn("Failed to close old store on reconfigure", "error", closeErr)
+				}
+			}
 		}
 
 		// Create a discordgo session but do NOT open the gateway yet.
