@@ -61,6 +61,7 @@ capabilities:
     auth_file: { support: "yes", reason: "Via AGY_TOKEN file secret at ~/.gemini/antigravity-cli/antigravity-oauth-token" }
     oauth_token: { support: "no", reason: "AGY uses file-based OAuth token, not raw token injection" }
     vertex_ai: { support: "yes", reason: "Enterprise/GCP mode via AGY_TOKEN + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION" }
+    adc: { support: "yes", reason: "ADC via AGY_ADC_AUTH env, requires AGY CLI >= 1.1.10" }
 
 no_auth:
   behavior: drop-to-shell
@@ -89,6 +90,20 @@ auth:
           type: file
           description: "Antigravity OAuth token JSON file"
           target_suffix: "/.gemini/antigravity-cli/antigravity-oauth-token"
+    adc:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for ADC authentication"
+          field: GoogleAppCredentials
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
   autodetect:
     env:
       AGY_TOKEN: oauth-token
+    files:
+      gcloud-adc: adc
