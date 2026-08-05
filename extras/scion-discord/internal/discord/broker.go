@@ -231,7 +231,11 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			b.sendQueue = nil
 			b.subs = make(map[string]bool)
 			b.gatewayConnected = false
-			b.bootstrapDone = false // allow bootstrap to re-run
+			b.bootstrapDone = false
+			// Release lock while closing old resources — session.Close() sleeps
+			// for 1s internally, and store/sendQueue may block on cleanup.
+			// Matches the pattern in Close() (lines 802-831).
+			b.mu.Unlock()
 			if closeErr := oldSession.Close(); closeErr != nil {
 				b.log.Warn("Failed to close old discord session on reconfigure", "error", closeErr)
 			}
@@ -243,6 +247,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 					b.log.Warn("Failed to close old store on reconfigure", "error", closeErr)
 				}
 			}
+			b.mu.Lock()
 		}
 
 		// Create a discordgo session but do NOT open the gateway yet.
@@ -410,6 +415,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		// Host callbacks are wired after Configure() returns, so we defer
 		// the request in a goroutine that retries until they're available.
 		if !b.bootstrapDone {
+			b.bootstrapDone = true // set immediately to prevent duplicate goroutines
 			go func() {
 				for i := 0; i < 20; i++ {
 					time.Sleep(500 * time.Millisecond)
@@ -423,13 +429,14 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 						b.log.Warn("Failed to request bootstrap subscription", "error", err)
 						continue
 					}
-					b.mu.Lock()
-					b.bootstrapDone = true
-					b.mu.Unlock()
 					b.log.Info("Requested bootstrap subscription for Discord Gateway")
 					return
 				}
 				b.log.Error("Bootstrap subscription timed out — host callbacks never became available")
+				// Reset flag so a future Configure can retry bootstrap.
+				b.mu.Lock()
+				b.bootstrapDone = false
+				b.mu.Unlock()
 			}()
 		}
 	}
