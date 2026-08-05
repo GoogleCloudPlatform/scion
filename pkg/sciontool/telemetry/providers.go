@@ -63,6 +63,11 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 	if agentID := os.Getenv("SCION_AGENT_ID"); agentID != "" {
 		attrs = append(attrs, resource.WithAttributes(semconv.ServiceInstanceID(agentID)))
 	}
+	if agentSlug := os.Getenv("SCION_AGENT_SLUG"); agentSlug != "" {
+		attrs = append(attrs, resource.WithAttributes(
+			attribute.String("scion.agent.slug", agentSlug),
+		))
+	}
 	projectID := os.Getenv("SCION_PROJECT_ID")
 	if projectID == "" {
 		projectID = os.Getenv("SCION_GROVE_ID") // fallback for older dispatchers
