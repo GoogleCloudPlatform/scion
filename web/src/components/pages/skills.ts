@@ -335,6 +335,7 @@ export class ScionPageSkills extends LitElement {
         <div class="header-actions">
           <scion-view-toggle
             .view=${this.viewMode}
+            .showGraph=${false}
             storageKey="scion-view-skills"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
