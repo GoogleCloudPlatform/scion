@@ -146,10 +146,14 @@ func (s *Server) callerPrincipal(ctx context.Context) (store.Principal, error) {
 //
 // The three outcomes, in the order the brief requires:
 //
-//  1. Mode off — the configured checker, which is the disabled one. Skips the
-//     GCP call and allows, recording Mechanism "check-disabled". This case
-//     dominates: with checking off, a missing generator is not a problem
-//     because nothing was going to call it.
+//  1. Mode off — the disabled checker, unconditionally. Skips the GCP call
+//     and allows, recording Mechanism "check-disabled". This case dominates:
+//     with checking off, a missing generator is not a problem because nothing
+//     was going to call it. The disabled checker is constructed here rather
+//     than read from s.saAssignChecker so that the mode decision is
+//     authoritative: SetSAAssignChecker (called unconditionally during
+//     server_foreground startup) overwrites the field with the PT checker,
+//     which would otherwise be returned when mode=off, defeating the switch.
 //  2. Mode on, no generator — the unavailable checker, which DENIES. An absent
 //     capability must never become an implicit pass. This is the exact defect
 //     in verifyGCPServiceAccount (handlers_gcp_identity.go, tracked as #29),
@@ -169,7 +173,7 @@ func (s *Server) saAssignCheckerFor() store.CallerPermissionChecker {
 	defer s.mu.RUnlock()
 
 	if s.saAssignCheckMode == SAAssignCheckOff {
-		return s.saAssignChecker
+		return store.NewDisabledCallerPermissionChecker()
 	}
 	if s.gcpTokenGenerator == nil {
 		return store.NewUnavailableCallerPermissionChecker(
@@ -194,7 +198,7 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 	defer s.mu.RUnlock()
 
 	if s.hookIdentityCheckMode == SAAssignCheckOff {
-		return s.hookIdentityChecker
+		return store.NewDisabledCallerPermissionChecker()
 	}
 	if s.gcpTokenGenerator == nil {
 		return store.NewUnavailableCallerPermissionChecker(

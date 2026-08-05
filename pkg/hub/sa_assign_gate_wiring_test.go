@@ -348,6 +348,65 @@ func TestHookIdentityGate_IsOnTheHTTPPath(t *testing.T) {
 // The toggle itself
 // ---------------------------------------------------------------------------
 
+// TestModeOffIgnoresSetSAAssignChecker proves the INV-4 fix: when
+// saAssignCheckMode is off, saAssignCheckerFor returns the disabled checker
+// even after SetSAAssignChecker has overwritten the field with a real checker.
+// Without the fix, server_foreground.go's unconditional SetSAAssignChecker
+// call replaces the disabled checker with the PT checker, causing every
+// mode=off assignment to hit GCP and potentially be denied.
+func TestModeOffIgnoresSetSAAssignChecker(t *testing.T) {
+	t.Run("saAssignCheckerFor returns disabled checker despite SetSAAssignChecker", func(t *testing.T) {
+		srv, _ := testServer(t)
+
+		// Precondition: mode is off (the default set by NewServer).
+		require.Equal(t, SAAssignCheckOff, srv.saAssignCheckMode,
+			"test assumes mode defaults to off")
+
+		// Simulate what server_foreground.go does: overwrite the checker.
+		realChecker := store.NewFakeCallerPermissionChecker().
+			DenyTarget("any@test.iam.gserviceaccount.com", "should never be consulted")
+		srv.SetSAAssignChecker(realChecker)
+
+		// The resolver must return the disabled checker, not the one just set.
+		got := srv.saAssignCheckerFor()
+		result, err := got.CanActAs(context.Background(), store.Principal{
+			Kind: store.PrincipalUser, ID: "u1", Email: "u1@test.com",
+		}, &store.GCPServiceAccount{Email: "any@test.iam.gserviceaccount.com"})
+
+		require.NoError(t, err)
+		assert.Equal(t, store.ActAsAllowed, result.Outcome,
+			"mode=off must allow; the overwritten checker would have denied")
+		assert.Equal(t, store.MechanismCheckDisabled, result.Mechanism,
+			"mechanism must be check-disabled, proving the disabled checker was used")
+		assert.Equal(t, 0, realChecker.CallCount(),
+			"the real checker must not be consulted when mode=off")
+	})
+
+	t.Run("hookIdentityCheckerFor returns disabled checker despite SetHookIdentityChecker", func(t *testing.T) {
+		srv, _ := testServer(t)
+
+		require.Equal(t, SAAssignCheckOff, srv.hookIdentityCheckMode,
+			"test assumes hook identity mode defaults to off")
+
+		realChecker := store.NewFakeCallerPermissionChecker().
+			DenyTarget("any@test.iam.gserviceaccount.com", "should never be consulted")
+		srv.SetHookIdentityChecker(realChecker)
+
+		got := srv.hookIdentityCheckerFor()
+		result, err := got.CanActAs(context.Background(), store.Principal{
+			Kind: store.PrincipalUser, ID: "u1", Email: "u1@test.com",
+		}, &store.GCPServiceAccount{Email: "any@test.iam.gserviceaccount.com"})
+
+		require.NoError(t, err)
+		assert.Equal(t, store.ActAsAllowed, result.Outcome,
+			"mode=off must allow; the overwritten checker would have denied")
+		assert.Equal(t, store.MechanismCheckDisabled, result.Mechanism,
+			"mechanism must be check-disabled, proving the disabled checker was used")
+		assert.Equal(t, 0, realChecker.CallCount(),
+			"the real checker must not be consulted when mode=off")
+	})
+}
+
 // TestSAAssignGate_EnforceWithoutGeneratorRefuses pins the other thing the mode
 // field controls, and the one with the sharpest failure mode if it regresses.
 //
