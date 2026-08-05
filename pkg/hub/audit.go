@@ -221,6 +221,8 @@ func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAu
 	level := slog.LevelInfo
 	if !event.Success {
 		level = slog.LevelWarn
+	} else if event.EventType == BrokerAuthEventAuthSuccess {
+		level = slog.LevelDebug
 	}
 
 	attrs := []slog.Attr{
