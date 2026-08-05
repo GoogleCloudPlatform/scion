@@ -184,17 +184,15 @@ func runInit(args []string) int {
 		} else {
 			telemetryPipeline = pipeline
 			log.Info("Telemetry pipeline started")
-		}
-		defer func() {
-			if telemetryPipeline != nil {
+			defer func() {
 				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				if err := telemetryPipeline.Stop(shutdownCtx); err != nil {
 					log.Error("Failed to stop telemetry: %v", err)
 				}
 				shutdownCancel()
-			}
-			telemetryCancel()
-		}()
+				telemetryCancel()
+			}()
+		}
 	}
 
 	// Initialize lifecycle hooks manager
