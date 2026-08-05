@@ -128,30 +128,6 @@ func runInit(args []string) int {
 		}
 	}
 
-	// Start telemetry pipeline if configured
-	var telemetryPipeline *telemetry.Pipeline
-	if pipeline := telemetry.New(); pipeline != nil {
-		telemetryCtx, telemetryCancel := context.WithCancel(context.Background())
-		if err := pipeline.Start(telemetryCtx); err != nil {
-			log.Error("Failed to start telemetry: %v", err)
-			telemetryCancel()
-			// Continue anyway - telemetry failure shouldn't block agent
-		} else {
-			telemetryPipeline = pipeline
-			log.Info("Telemetry pipeline started")
-		}
-		defer func() {
-			if telemetryPipeline != nil {
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				if err := telemetryPipeline.Stop(shutdownCtx); err != nil {
-					log.Error("Failed to stop telemetry: %v", err)
-				}
-				shutdownCancel()
-			}
-			telemetryCancel()
-		}()
-	}
-
 	// Resolve the scion user's home directory early. Init runs as root
 	// (HOME=/root), but agent-info.json and other agent state files live
 	// in the scion user's home directory. This must happen before the
@@ -177,7 +153,9 @@ func runInit(args []string) int {
 	// serializes file and variable secrets into this single base64 blob
 	// instead of bind-mounting them from the host filesystem. We decode and
 	// write them before anything else so they are available to hooks and
-	// the harness.
+	// the harness. This must happen before telemetry pipeline initialization
+	// because the GCP credentials file (pointed to by SCION_OTEL_GCP_CREDENTIALS)
+	// must exist on disk when the telemetry pipeline starts.
 	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
 		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
@@ -191,6 +169,30 @@ func runInit(args []string) int {
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
 		log.Info("Staged %d file secret(s) and %d variable secret(s)",
 			len(staged.FileSecrets), len(staged.VariableSecrets))
+	}
+
+	// Start telemetry pipeline if configured. This must happen after
+	// staged secrets are written so that the GCP credentials file
+	// referenced by SCION_OTEL_GCP_CREDENTIALS exists on disk.
+	var telemetryPipeline *telemetry.Pipeline
+	if pipeline := telemetry.New(); pipeline != nil {
+		telemetryCtx, telemetryCancel := context.WithCancel(context.Background())
+		if err := pipeline.Start(telemetryCtx); err != nil {
+			log.Error("Failed to start telemetry: %v", err)
+			telemetryCancel()
+			// Continue anyway - telemetry failure shouldn't block agent
+		} else {
+			telemetryPipeline = pipeline
+			log.Info("Telemetry pipeline started")
+			defer func() {
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := telemetryPipeline.Stop(shutdownCtx); err != nil {
+					log.Error("Failed to stop telemetry: %v", err)
+				}
+				shutdownCancel()
+				telemetryCancel()
+			}()
+		}
 	}
 
 	// Initialize lifecycle hooks manager
