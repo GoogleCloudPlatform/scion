@@ -1643,3 +1643,54 @@ func TestDownloadDiscordAttachment_CustomPath_CreatesSubdir(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fileContent, data)
 }
+
+// --- RPC bootstrap regression tests ---
+
+func TestConfigure_SessionReplacement_ClearsSubs(t *testing.T) {
+	b := &DiscordBroker{
+		log:              discardLogger(),
+		session:          &discordgo.Session{}, // simulate existing session
+		subs:             map[string]bool{"*": true},
+		sentIDs:          make(map[string]time.Time),
+		gatewayConnected: true,
+		bootstrapDone:    true,
+	}
+
+	// Calling Configure with bot_token should close old session and clear subs.
+	err := b.Configure(map[string]string{
+		"bot_token": "Bot fake-token-for-test",
+	})
+	require.NoError(t, err)
+
+	// After Phase 1 reconfigure:
+	// - Old subs should be cleared (so Subscribe("*") would trigger startGateway)
+	// - gatewayConnected should be reset
+	// - bootstrapDone should be reset
+	assert.Empty(t, b.subs, "subs should be cleared after session replacement")
+	assert.False(t, b.gatewayConnected, "gatewayConnected should be reset")
+	assert.False(t, b.bootstrapDone, "bootstrapDone should be reset")
+	assert.NotNil(t, b.session, "new session should be created")
+}
+
+func TestConfigure_BootstrapSkippedWhenDone(t *testing.T) {
+	b := &DiscordBroker{
+		log:           discardLogger(),
+		subs:          make(map[string]bool),
+		sentIDs:       make(map[string]time.Time),
+		bootstrapDone: true,
+		hubURL:        "http://localhost:8080",
+		hmacKey:       "test-key",
+		brokerID:      "test-broker",
+	}
+
+	// Configure Phase 2 (hub_url present) should skip bootstrap goroutine
+	// because bootstrapDone is already true.
+	err := b.Configure(map[string]string{
+		"hub_url":  "http://localhost:8080",
+		"hmac_key": "test-key",
+	})
+	require.NoError(t, err)
+
+	// bootstrapDone should still be true (not reset by Phase 2 alone).
+	assert.True(t, b.bootstrapDone, "bootstrapDone should remain true when no session replacement")
+}

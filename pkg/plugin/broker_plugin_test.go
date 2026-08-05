@@ -208,3 +208,21 @@ func TestBrokerPluginAdapter_Close(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, mock.closed)
 }
+
+func TestBrokerRPCServer_HostCallbacksConnectedGuard(t *testing.T) {
+	mock := &mockBrokerPlugin{}
+	server := &BrokerRPCServer{Impl: mock, muxBroker: nil}
+
+	// First Configure with _host_callbacks=true but nil muxBroker:
+	// should not set hostCallbacksConnected (Dial is skipped when muxBroker is nil).
+	args := &ConfigureArgs{Config: map[string]string{
+		hostCallbacksConfigKey: "true",
+		"some_key":             "some_value",
+	}}
+	err := server.Configure(args, nil)
+	require.NoError(t, err)
+	assert.False(t, server.hostCallbacksConnected, "should not be connected when muxBroker is nil")
+
+	// Verify Configure still passed through to Impl.
+	assert.Equal(t, args.Config, mock.configured)
+}
