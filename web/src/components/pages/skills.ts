@@ -202,6 +202,9 @@ export class ScionPageSkills extends LitElement {
     const stored = localStorage.getItem('scion-view-skills') as ViewMode | null;
     if (stored === 'grid' || stored === 'list') {
       this.viewMode = stored;
+    } else {
+      this.viewMode = 'grid';
+      localStorage.setItem('scion-view-skills', 'grid');
     }
 
     const storedSort = localStorage.getItem('scion-sort-skills');
@@ -335,6 +338,7 @@ export class ScionPageSkills extends LitElement {
         <div class="header-actions">
           <scion-view-toggle
             .view=${this.viewMode}
+            .showGraph=${false}
             storageKey="scion-view-skills"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
