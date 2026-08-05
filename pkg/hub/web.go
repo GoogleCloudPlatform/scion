@@ -1756,9 +1756,17 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	delete(session.Values, sessKeyReturnTo)
 
 	if err := session.Save(r, w); err != nil {
-		ws.logger().Error("Failed to save session after OAuth callback", "error", err)
-		http.Redirect(w, r, "/login?error=session_error", http.StatusFound)
-		return
+		ws.logger().Warn("Failed to save session after OAuth callback, retrying without tokens", "error", err)
+		// The most likely cause is cookie size overflow from large JWT tokens.
+		// Drop the tokens and try again so the user can still log in.
+		delete(session.Values, sessKeyHubAccessToken)
+		delete(session.Values, sessKeyHubRefreshToken)
+		delete(session.Values, sessKeyHubTokenExpiry)
+		if err2 := session.Save(r, w); err2 != nil {
+			ws.logger().Error("Failed to save session even without tokens", "error", err2)
+			http.Redirect(w, r, "/login?error=session_error", http.StatusFound)
+			return
+		}
 	}
 
 	if returnTo == "" {
