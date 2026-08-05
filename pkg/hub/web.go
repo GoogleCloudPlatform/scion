@@ -619,11 +619,14 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 				name, _ := session.Values[sessKeyUserName].(string)
 				role, _ := session.Values[sessKeyUserRole].(string)
 				if tok, _, err := ws.userTokenSvc.GenerateAccessToken(uid, email, name, role, ClientTypeWeb); err == nil {
-					r.Header.Set("Authorization", "Bearer "+tok)
+					accessToken = tok
 				} else {
 					ws.logger().Warn("Failed to regenerate Bearer token for cookie-overflow session", "error", err, "user", uid)
 				}
 			}
+		}
+
+		if accessToken == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
