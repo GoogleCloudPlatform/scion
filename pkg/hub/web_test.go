@@ -828,6 +828,68 @@ func TestSessionToBearerMiddleware_NoToken(t *testing.T) {
 	assert.Empty(t, capturedAuthHeader, "no session = no Authorization header")
 }
 
+func TestSessionToBearerMiddleware_TokenRegeneration(t *testing.T) {
+	// Simulate a cookie-overflow session: user identity is present but Hub
+	// tokens were stripped by the OAuth callback retry. The middleware must
+	// generate a per-request Bearer token so the Hub API call succeeds.
+	const secret = "test-session-secret-for-token-regen-1234567890abcdef"
+
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret: secret,
+	})
+
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+
+	// Mock Hub handler that captures the Authorization header.
+	var capturedAuthHeader string
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuthHeader = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	})
+	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
+
+	handler := ws.Handler()
+
+	// ---- Step 1: Pre-seed a session with user identity but NO Hub tokens ----
+	reqSetup := httptest.NewRequest(http.MethodGet, "/", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+
+	sess.Values[sessKeyUserID] = "user_overflow_123"
+	sess.Values[sessKeyUserEmail] = "overflow-user@enterprise.example.com"
+	sess.Values[sessKeyUserName] = "Overflow User"
+	sess.Values[sessKeyUserRole] = "admin"
+	// Deliberately omit sessKeyHubAccessToken, sessKeyHubRefreshToken, sessKeyHubTokenExpiry
+	// to simulate the cookie-overflow retry path.
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies, "setup must produce a session cookie")
+
+	// ---- Step 2: Make an API request through the middleware ----
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// ---- Step 3: Verify the request got an Authorization header injected ----
+	assert.Equal(t, http.StatusOK, rec.Result().StatusCode,
+		"request must not return 401 — middleware should regenerate a Bearer token")
+	assert.True(t, strings.HasPrefix(capturedAuthHeader, "Bearer "),
+		"middleware must inject a Bearer token for cookie-overflow sessions, got %q", capturedAuthHeader)
+
+	// Verify the generated token is valid.
+	tokenStr := strings.TrimPrefix(capturedAuthHeader, "Bearer ")
+	claims, err := tokenSvc.ValidateUserToken(tokenStr)
+	require.NoError(t, err, "regenerated token must be valid")
+	assert.Equal(t, "user_overflow_123", claims.UserID)
+	assert.Equal(t, "overflow-user@enterprise.example.com", claims.Email)
+}
+
 func TestDevAuthMiddleware_GeneratesHubTokens(t *testing.T) {
 	// When userTokenSvc is available, dev-auth should generate Hub JWTs in the session.
 	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
