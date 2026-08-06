@@ -28,7 +28,8 @@ type InviteCreateRequest struct {
 	ExpiresIn string `json:"expiresIn"`
 	MaxUses   int    `json:"maxUses"`
 	Note      string `json:"note"`
-	Email     string `json:"email,omitempty"` // Optional: link invite to allow-list entry
+	// Email field removed: invite codes are standalone bearer tokens,
+	// fully decoupled from users/emails (Phase 1, invite-flow-ux).
 }
 
 type InviteCreateResponse struct {
@@ -168,19 +169,6 @@ func (s *Server) handleAdminInvitesCreate(w http.ResponseWriter, r *http.Request
 		slog.Error("failed to create invite", "error", err)
 		InternalError(w)
 		return
-	}
-
-	// If email is provided, link the invite to the allow-list entry.
-	if req.Email != "" {
-		emailLower := strings.ToLower(strings.TrimSpace(req.Email))
-		if err := s.store.UpdateAllowListEntryInviteID(r.Context(), emailLower, invite.ID); err != nil {
-			// Log but don't fail — the invite was created successfully.
-			slog.Warn("failed to link invite to allow-list entry",
-				"email", emailLower,
-				"invite_id", invite.ID,
-				"error", err,
-			)
-		}
 	}
 
 	inviteURL := s.config.HubEndpoint + "/invite?code=" + code

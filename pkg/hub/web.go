@@ -1727,6 +1727,13 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	} else {
+		// Reject suspended users
+		if user.Status == store.UserStatusSuspended {
+			ws.logger().Warn("login rejected: user is suspended", "email", userInfo.Email)
+			http.Redirect(w, r, "/login?error=suspended", http.StatusFound)
+			return
+		}
+
 		if user.Status == store.UserStatusInvited {
 			// Transition invited → active on first login
 			// TODO(NG4): This duplicates the invited→active logic in provisionUser.

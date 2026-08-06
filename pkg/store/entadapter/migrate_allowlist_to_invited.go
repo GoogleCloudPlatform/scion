@@ -78,9 +78,9 @@ func (c *CompositeStore) MigrateAllowListToInvitedUsers(ctx context.Context) err
 
 		// User does not exist — create with status=invited.
 		uid := uuid.New()
-		created_at := entry.Created
-		if created_at.IsZero() {
-			created_at = time.Now()
+		createdAt := entry.Created
+		if createdAt.IsZero() {
+			createdAt = time.Now()
 		}
 
 		createOp := c.client.User.Create().
@@ -89,7 +89,7 @@ func (c *CompositeStore) MigrateAllowListToInvitedUsers(ctx context.Context) err
 			SetDisplayName(""). // Will be populated on first login
 			SetStatus(user.StatusInvited).
 			SetRole(user.RoleMember).
-			SetCreated(created_at)
+			SetCreated(createdAt)
 
 		if entry.AddedBy != "" {
 			createOp.SetInvitedBy(entry.AddedBy)
