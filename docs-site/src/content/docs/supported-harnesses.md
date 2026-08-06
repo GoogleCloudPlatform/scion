@@ -201,7 +201,7 @@ Antigravity uses **OAuth** (auth type `oauth-token`), with an optional **Vertex 
 (`vertex-ai`) mode for enterprise/GCP deployments. It does not use API keys.
 
 - **OAuth token** (`oauth-token`): provide a JSON file secret named `AGY_TOKEN` containing a `refresh_token`. Scion stages it at `~/.gemini/antigravity-cli/antigravity-oauth-token` and injects it into the container's gnome-keyring at launch.
-- **Vertex AI** (`vertex-ai`): requires `AGY_TOKEN` plus `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` (or `GOOGLE_CLOUD_REGION`). Tried before OAuth when configured.
+- **Vertex AI** (`vertex-ai`): Google Cloud's Vertex AI mode using Google Cloud Application Default Credentials (ADC) plus `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` (or `GOOGLE_CLOUD_REGION`). This mode no longer requires `AGY_TOKEN`. It uses the `gcloud-adc` file secret or automatically resolves ADC via the assigned GCP Service Account (Hub-managed GCP Identity). Requires AGY CLI >= 1.1.10.
 
 If no token is available, run `agy` interactively to log in, then capture the credential with
 the Antigravity bundle's `capture_auth.py` (which can also extract the token from gnome-keyring).
