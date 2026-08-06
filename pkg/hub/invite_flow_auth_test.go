@@ -235,17 +235,6 @@ func TestProvisionUser_NewUser_OpenMode(t *testing.T) {
 	assert.Equal(t, "New User", user.DisplayName)
 }
 
-// Helper to create a test Server with required config.
-func newTestProvisionServer(st store.Store) *Server {
-	return &Server{
-		store:       st,
-		auditLogger: &LogAuditLogger{},
-		config: ServerConfig{
-			UserAccessMode: "open",
-		},
-	}
-}
-
 // Verify that existing behavior is unchanged: in open mode, provisionUser
 // creates a new user with status=active.
 func TestProvisionUser_ExistingBehavior_ActiveUserLogin(t *testing.T) {

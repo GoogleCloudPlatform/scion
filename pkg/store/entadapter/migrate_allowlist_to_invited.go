@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
@@ -53,19 +54,30 @@ func (c *CompositeStore) MigrateAllowListToInvitedUsers(ctx context.Context) err
 
 	for _, entry := range entries {
 		email := normalizeEmail(entry.Email)
+		if strings.TrimSpace(email) == "" {
+			skipped++
+			continue
+		}
 
 		// Check if a User with this email already exists.
 		existing, err := c.client.User.Query().
 			Where(user.EmailEqualFold(email)).
 			Only(ctx)
 		if err == nil {
-			// User exists — optionally backfill invited_by if not already set.
+			// User exists — optionally backfill invited_by / invite_note if not already set.
+			needsBackfill := false
+			updateOp := c.client.User.UpdateOneID(existing.ID)
 			if existing.InvitedBy == nil && entry.AddedBy != "" {
-				addedBy := entry.AddedBy
-				if err := c.client.User.UpdateOneID(existing.ID).
-					SetInvitedBy(addedBy).
-					Exec(ctx); err != nil {
-					slog.Warn("allowlist→invited migration: failed to backfill invited_by",
+				updateOp.SetInvitedBy(entry.AddedBy)
+				needsBackfill = true
+			}
+			if existing.InviteNote == nil && entry.Note != "" {
+				updateOp.SetInviteNote(entry.Note)
+				needsBackfill = true
+			}
+			if needsBackfill {
+				if err := updateOp.Exec(ctx); err != nil {
+					slog.Warn("allowlist→invited migration: failed to backfill user fields",
 						"email", email, "error", err)
 				} else {
 					backfilled++

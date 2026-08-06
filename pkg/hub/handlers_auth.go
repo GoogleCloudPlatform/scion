@@ -1228,8 +1228,12 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			// Transition invited → active on first login
 			slog.Info("user activated from invited state", "email", info.Email, "user_id", user.ID)
 			user.Status = store.UserStatusActive
-			user.DisplayName = info.DisplayName
-			user.AvatarURL = info.AvatarURL
+			if info.DisplayName != "" {
+				user.DisplayName = info.DisplayName
+			}
+			if info.AvatarURL != "" {
+				user.AvatarURL = info.AvatarURL
+			}
 			user.LastLogin = time.Now()
 			user.Role = s.getUserRole(info.Email)
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, info.Email, "", user.ID, info.Email, nil)
@@ -1248,7 +1252,10 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 				user.Role = newRole
 			}
 		}
-		_ = s.store.UpdateUser(ctx, user)
+		if err := s.store.UpdateUser(ctx, user); err != nil {
+			slog.Error("failed to update user on login", "email", info.Email, "user_id", user.ID, "error", err)
+			return nil, fmt.Errorf("update user: %w", err)
+		}
 	}
 
 	// Ensure user is a member of the hub-members group

@@ -215,7 +215,7 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	// Runs after schema migration (which adds the "invited" status enum value)
 	// so the new status is available. Idempotent — safe to run on every startup.
 	if err := c.MigrateAllowListToInvitedUsers(ctx); err != nil {
-		slog.Warn("allowlist→invited migration failed (non-fatal)", "error", err)
+		slog.Error("allowlist→invited migration failed (non-fatal)", "error", err)
 	}
 
 	return c.SeedMaintenanceOperations(ctx)

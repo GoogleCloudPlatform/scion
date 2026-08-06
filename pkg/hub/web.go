@@ -1740,8 +1740,12 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			// Consolidate into a shared function in a future refactor.
 			ws.logger().Info("user activated from invited state", "email", userInfo.Email, "user_id", user.ID)
 			user.Status = store.UserStatusActive
-			user.DisplayName = userInfo.DisplayName
-			user.AvatarURL = userInfo.AvatarURL
+			if userInfo.DisplayName != "" {
+				user.DisplayName = userInfo.DisplayName
+			}
+			if userInfo.AvatarURL != "" {
+				user.AvatarURL = userInfo.AvatarURL
+			}
 			user.LastLogin = time.Now()
 			user.Role = determineUserRole(userInfo.Email, ws.config.AdminEmails)
 			// Log the activation via slog (WebServer does not have a structured
