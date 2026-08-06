@@ -157,4 +157,13 @@ func TestValidateHostedHAPreflight(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "server.auth.proxy.iap.audience")
 	})
+
+	t.Run("trailing slash is normalized in config", func(t *testing.T) {
+		withHostedHAGuards(t)
+		cfg := validHostedHAConfig()
+		cfg.Auth.Proxy.IAP.Audience = "/projects/123/global/backendServices/456/"
+		require.NoError(t, validateHostedHAPreflight(cfg))
+		assert.Equal(t, "/projects/123/global/backendServices/456", cfg.Auth.Proxy.IAP.Audience,
+			"preflight should strip trailing slash so downstream IAP validation uses the canonical audience")
+	})
 }

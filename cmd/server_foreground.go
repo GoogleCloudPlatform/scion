@@ -939,6 +939,11 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	if !isSupportedIAPAudience(proxyAudience) {
 		return fmt.Errorf("hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got %q", proxyAudience)
 	}
+	// Normalize the audience in-place so downstream consumers (IAP JWT
+	// validation, endpoint derivation) see the trimmed value.  Without this
+	// a trailing slash would pass preflight but cause a runtime audience
+	// mismatch in IAP token verification.
+	cfg.Auth.Proxy.IAP.Audience = proxyAudience
 
 	if cfg.Auth.Transport == nil {
 		return fmt.Errorf("hosted HA deployment requires server.auth.transport; do not use server.transport")
