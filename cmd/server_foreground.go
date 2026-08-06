@@ -923,7 +923,7 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	}
 
 	if cfg.Auth.Mode != "proxy" {
-		return fmt.Errorf("hosted HA deployment requires server.auth.mode=proxy for Cloud Run IAP; got %q", cfg.Auth.Mode)
+		return fmt.Errorf("hosted HA deployment requires server.auth.mode=proxy for IAP authentication; got %q", cfg.Auth.Mode)
 	}
 	if cfg.Auth.Proxy == nil || cfg.Auth.Proxy.Provider != "iap" {
 		provider := ""
@@ -936,9 +936,14 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 		return fmt.Errorf("hosted HA deployment requires server.auth.proxy.iap.audience")
 	}
 	proxyAudience := strings.TrimRight(strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience), "/")
-	if !isCloudRunIAPAudience(proxyAudience) {
-		return fmt.Errorf("hosted HA deployment requires a Cloud Run native IAP audience (/projects/<number>/locations/<region>/services/<service>); got %q", proxyAudience)
+	if !isSupportedIAPAudience(proxyAudience) {
+		return fmt.Errorf("hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got %q", proxyAudience)
 	}
+	// Normalize the audience in-place so downstream consumers (IAP JWT
+	// validation, endpoint derivation) see the trimmed value.  Without this
+	// a trailing slash would pass preflight but cause a runtime audience
+	// mismatch in IAP token verification.
+	cfg.Auth.Proxy.IAP.Audience = proxyAudience
 
 	if cfg.Auth.Transport == nil {
 		return fmt.Errorf("hosted HA deployment requires server.auth.transport; do not use server.transport")
@@ -951,11 +956,11 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 		return fmt.Errorf("hosted HA deployment requires server.auth.transport.oidc_audience")
 	}
 	// Note: transport.oidc_audience and proxy.iap.audience are intentionally
-	// allowed to differ. proxy.iap.audience is the Cloud Run native IAP
-	// audience path used for validating incoming IAP-signed JWTs, while
+	// allowed to differ. proxy.iap.audience is the IAP audience resource path
+	// (Cloud Run or GCLB) used for validating incoming IAP-signed JWTs, while
 	// transport.oidc_audience is the audience minted into OIDC tokens for
 	// dispatched agents (typically the IAP OAuth client ID). IAP requires
-	// the OAuth client ID format for token validation, not the Cloud Run path.
+	// the OAuth client ID format for token validation, not the resource path.
 	if strings.TrimSpace(cfg.Auth.Transport.PlatformAuthSA) == "" {
 		return fmt.Errorf("hosted HA deployment requires server.auth.transport.platform_auth_sa")
 	}
@@ -963,15 +968,32 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	return nil
 }
 
-func isCloudRunIAPAudience(audience string) bool {
+// isSupportedIAPAudience returns true when audience is a recognised IAP
+// audience path.  Two formats are accepted:
+//
+//   - Cloud Run:  /projects/<number>/locations/<region>/services/<service>
+//   - GCLB:       /projects/<number>/global/backendServices/<id>
+//
+// Everything else is rejected (fail-closed).
+func isSupportedIAPAudience(audience string) bool {
 	parts := strings.Split(strings.TrimSpace(audience), "/")
-	if len(parts) != 7 {
-		return false
-	}
-	return parts[0] == "" &&
+	// Cloud Run format: 7 parts ["", "projects", <n>, "locations", <r>, "services", <s>]
+	if len(parts) == 7 &&
+		parts[0] == "" &&
 		parts[1] == "projects" && parts[2] != "" &&
 		parts[3] == "locations" && parts[4] != "" &&
-		parts[5] == "services" && parts[6] != ""
+		parts[5] == "services" && parts[6] != "" {
+		return true
+	}
+	// GCLB backend-service format: 6 parts ["", "projects", <n>, "global", "backendServices", <id>]
+	if len(parts) == 6 &&
+		parts[0] == "" &&
+		parts[1] == "projects" && parts[2] != "" &&
+		parts[3] == "global" &&
+		parts[4] == "backendServices" && parts[5] != "" {
+		return true
+	}
+	return false
 }
 
 // checkServerPorts checks that required server ports are available.
@@ -1237,6 +1259,12 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 		if cloudRunURL := iapAudienceToCloudRunURL(cfg.Auth.Proxy.IAP.Audience); cloudRunURL != "" {
 			log.Printf("Hub endpoint derived from IAP audience: %s", cloudRunURL)
 			return cloudRunURL
+		}
+		// GCLB/GKE audiences cannot be used to derive a URL; warn if no
+		// explicit base URL was provided (all earlier return paths above
+		// would have caught an explicit one).
+		if isSupportedIAPAudience(strings.TrimRight(strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience), "/")) {
+			log.Println("Warning: GKE/GCLB IAP audience detected but SCION_SERVER_BASE_URL not set; hub endpoint will fall back to localhost which is likely unreachable from dispatched agents")
 		}
 	}
 

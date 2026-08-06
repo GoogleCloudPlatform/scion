@@ -89,14 +89,9 @@ func TestValidateHostedHAPreflightRejectsUnsafeBackends(t *testing.T) {
 			},
 			wantErr: "requires server.auth.transport.mode=iap",
 		},
-		{
-			name: "backend service audience",
-			mutate: func(cfg *config.GlobalConfig) {
-				cfg.Auth.Proxy.IAP.Audience = "/projects/123456789/global/backendServices/987654321"
-				cfg.Auth.Transport.OIDCAudience = cfg.Auth.Proxy.IAP.Audience
-			},
-			wantErr: "Cloud Run native IAP audience",
-		},
+		// Note: "backend service audience" case was moved to
+		// TestValidateHostedHAPreflightAcceptsGCLBAudience because GCLB
+		// backend-service audiences are now accepted (GKE HA support).
 		// Note: "transport audience mismatch" case was removed because PR #814
 		// intentionally decoupled transport.oidc_audience from proxy.iap.audience.
 		// transport.oidc_audience is the IAP OAuth client ID used for minting OIDC
@@ -115,6 +110,15 @@ func TestValidateHostedHAPreflightRejectsUnsafeBackends(t *testing.T) {
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestValidateHostedHAPreflightAcceptsGCLBAudience(t *testing.T) {
+	withHostedHAGuards(t)
+	cfg := validHostedHAConfig()
+	cfg.Auth.Proxy.IAP.Audience = "/projects/123456789/global/backendServices/987654321"
+	cfg.Auth.Transport.OIDCAudience = cfg.Auth.Proxy.IAP.Audience
+
+	require.NoError(t, validateHostedHAPreflight(cfg))
 }
 
 func TestValidateHostedHAPreflightRequiresSessionSecret(t *testing.T) {
@@ -247,8 +251,8 @@ func TestNewEventPublisherFallsBackOutsideHostedHA(t *testing.T) {
 	require.IsType(t, &hub.ChannelEventPublisher{}, pub)
 }
 
-func TestCloudRunIAPAudienceShape(t *testing.T) {
-	require.True(t, isCloudRunIAPAudience("/projects/123/locations/us-central1/services/scion"))
-	require.False(t, isCloudRunIAPAudience("/projects/123/global/backendServices/456"))
-	require.False(t, isCloudRunIAPAudience(strings.TrimSpace("")))
+func TestIAPAudienceShape(t *testing.T) {
+	require.True(t, isSupportedIAPAudience("/projects/123/locations/us-central1/services/scion"))
+	require.True(t, isSupportedIAPAudience("/projects/123/global/backendServices/456"))
+	require.False(t, isSupportedIAPAudience(strings.TrimSpace("")))
 }
