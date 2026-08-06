@@ -802,6 +802,137 @@ func TestCheckPermission_ServiceAccountPrincipal(t *testing.T) {
 }
 
 // ============================================================================
+// CheckPermission Deny-Unknown Fallback Tests (INV-7)
+// ============================================================================
+
+func TestCheckPermission_UnknownInfo_FailOpenAllowGrantedDenyUnknown(t *testing.T) {
+	// denyUnknownFailOpen=true, allow=GRANTED, deny=UNKNOWN → Allowed=true
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
+			AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+				AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+			},
+			DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+				DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_UNKNOWN_INFO,
+			},
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"alice@example.com",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionSACreate)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Allowed {
+		t.Error("expected Allowed=true with fail-open, allow=GRANTED, deny=UNKNOWN")
+	}
+	if !strings.Contains(result.Reason, "fail-open") {
+		t.Errorf("reason should mention fail-open: %q", result.Reason)
+	}
+	if result.Reason == "" {
+		t.Error("reason must be populated even when Allowed=true (audit logging)")
+	}
+}
+
+func TestCheckPermission_UnknownInfo_FailClosedAllowGrantedDenyUnknown(t *testing.T) {
+	// denyUnknownFailOpen=false, allow=GRANTED, deny=UNKNOWN → Allowed=false
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
+			AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+				AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+			},
+			DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+				DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_UNKNOWN_INFO,
+			},
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, false)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"alice@example.com",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionSACreate)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Allowed {
+		t.Error("expected Allowed=false with fail-closed, even when allow=GRANTED")
+	}
+	if !strings.Contains(result.Reason, "fail-closed") {
+		t.Errorf("reason should mention fail-closed: %q", result.Reason)
+	}
+}
+
+func TestCheckPermission_UnknownInfo_FailOpenAllowNotGranted(t *testing.T) {
+	// denyUnknownFailOpen=true, allow=NOT_GRANTED, deny=UNKNOWN → Allowed=false
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
+			AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+				AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_NOT_GRANTED,
+			},
+			DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+				DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_UNKNOWN_INFO,
+			},
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"alice@example.com",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionSACreate)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Allowed {
+		t.Error("expected Allowed=false when allow is NOT_GRANTED, even with fail-open")
+	}
+	if !strings.Contains(result.Reason, "fail-closed") {
+		t.Errorf("reason should mention fail-closed: %q", result.Reason)
+	}
+}
+
+func TestCheckPermission_UnknownInfo_FailOpenDenyDenied(t *testing.T) {
+	// denyUnknownFailOpen=true, allow=GRANTED, deny=DENIED → Allowed=false
+	fake := &fakePTClient{
+		resp: &policytroubleshooterpb.TroubleshootIamPolicyResponse{
+			OverallAccessState: policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO,
+			AllowPolicyExplanation: &policytroubleshooterpb.AllowPolicyExplanation{
+				AllowAccessState: policytroubleshooterpb.AllowAccessState_ALLOW_ACCESS_STATE_GRANTED,
+			},
+			DenyPolicyExplanation: &policytroubleshooterpb.DenyPolicyExplanation{
+				DenyAccessState: policytroubleshooterpb.DenyAccessState_DENY_ACCESS_STATE_DENIED,
+			},
+		},
+	}
+	checker := NewPolicyTroubleshooterChecker(fake, testHubSAEmail, true)
+
+	result, err := checker.CheckPermission(context.Background(),
+		"alice@example.com",
+		"//cloudresourcemanager.googleapis.com/projects/hub-project",
+		PermissionSACreate)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Allowed {
+		t.Error("expected Allowed=false when deny=DENIED, even with fail-open")
+	}
+	if !strings.Contains(result.Reason, "fail-closed") {
+		t.Errorf("reason should mention fail-closed: %q", result.Reason)
+	}
+}
+
+// ============================================================================
 // ptPrincipal Tests
 // ============================================================================
 

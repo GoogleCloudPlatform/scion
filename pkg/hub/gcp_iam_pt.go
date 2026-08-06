@@ -352,8 +352,25 @@ func (c *PolicyTroubleshooterChecker) CheckPermission(
 			Reason: fmt.Sprintf("%s does not have %s on the Hub GCP project", principalID, permission),
 		}, nil
 
+	case policytroubleshooterpb.TroubleshootIamPolicyResponse_UNKNOWN_INFO:
+		if c.denyUnknownFailOpen {
+			if allowGranted, denyNotDenied := c.checkSubExplanations(resp); allowGranted && denyNotDenied {
+				return PermissionCheckResult{
+					Allowed: true,
+					Reason: fmt.Sprintf("%s has %s (allow policy granted; "+
+						"deny policy evaluation inconclusive, fail-open policy applied)",
+						principalID, permission),
+				}, nil
+			}
+		}
+		// Fall through to fail-closed
+		return PermissionCheckResult{
+			Reason: fmt.Sprintf("Policy Troubleshooter returned indeterminate result (%v) "+
+				"for %s checking %s; denying (fail-closed)", overall, principalID, permission),
+		}, nil
+
 	default:
-		// UNKNOWN_INFO, UNKNOWN_CONDITIONAL, unrecognised — fail closed.
+		// UNKNOWN_CONDITIONAL, unrecognised — always fail closed.
 		return PermissionCheckResult{
 			Reason: fmt.Sprintf("Policy Troubleshooter returned indeterminate result (%v) "+
 				"for %s checking %s; denying (fail-closed)", overall, principalID, permission),
