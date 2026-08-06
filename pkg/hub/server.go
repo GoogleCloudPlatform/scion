@@ -3014,6 +3014,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.handleAdminScheduler)
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.handleAdminAllowList)
 	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail)
+	s.mux.HandleFunc("/api/v1/admin/users/invite/bulk", s.handleAdminUserInviteBulk)
+	s.mux.HandleFunc("/api/v1/admin/users/invite", s.handleAdminUserInvite)
 	s.mux.HandleFunc("/api/v1/admin/invites", s.handleAdminInvites)
 	s.mux.HandleFunc("/api/v1/admin/invites/", s.handleAdminInviteByID)
 	s.mux.HandleFunc("/api/v1/admin/server-config/schema", s.handleAdminServerConfigSchema)
