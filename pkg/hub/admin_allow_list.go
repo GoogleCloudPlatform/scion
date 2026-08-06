@@ -86,14 +86,13 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	setDeprecationHeader(w)
-
 	// Extract sub-path
 	subPath := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/allow-list/")
 
 	// Route special sub-paths
 	switch subPath {
 	case "import":
+		setDeprecationHeader(w)
 		if r.Method != http.MethodPost {
 			MethodNotAllowed(w)
 			return
@@ -101,6 +100,7 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		s.handleAdminAllowListImport(w, r, user)
 		return
 	case "domains":
+		// Not deprecated — no Deprecation header.
 		if r.Method != http.MethodGet {
 			MethodNotAllowed(w)
 			return
@@ -108,6 +108,9 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		s.handleAdminAllowListDomains(w, r)
 		return
 	}
+
+	// DELETE /api/v1/admin/allow-list/{email} — deprecated
+	setDeprecationHeader(w)
 
 	if r.Method != http.MethodDelete {
 		MethodNotAllowed(w)
@@ -348,6 +351,7 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		if err != store.ErrNotFound {
+			slog.Error("failed to check existing user during import", "email", email, "error", err)
 			continue
 		}
 
@@ -373,6 +377,12 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 		}
 
 		added++
+	}
+
+	// Backward compatibility: return 400 if no emails were processed
+	if added == 0 && skipped == 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "no valid emails found", nil)
+		return
 	}
 
 	slog.Info("allow list bulk import (deprecated: created invited users)",

@@ -200,7 +200,7 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 
 	invitedBy := user.ID()
 	var invited, skipped int
-	var errors []string
+	var errMsgs []string
 
 	for _, e := range emails {
 		email := strings.TrimSpace(strings.ToLower(e.Email))
@@ -215,7 +215,8 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		if err != store.ErrNotFound {
-			errors = append(errors, fmt.Sprintf("error checking %s: %v", email, err))
+			slog.Error("bulk invite: failed to check existing user", "email", email, "error", err)
+			errMsgs = append(errMsgs, fmt.Sprintf("failed to process %s", email))
 			continue
 		}
 
@@ -238,7 +239,8 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 				skipped++
 				continue
 			}
-			errors = append(errors, fmt.Sprintf("error inviting %s: %v", email, err))
+			slog.Error("bulk invite: failed to create user", "email", email, "error", err)
+			errMsgs = append(errMsgs, fmt.Sprintf("failed to process %s", email))
 			continue
 		}
 
@@ -248,7 +250,8 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 	slog.Info("bulk user invite",
 		"invited", invited,
 		"skipped", skipped,
-		"total", invited+skipped,
+		"total", invited+skipped+len(errMsgs),
+		"errors", len(errMsgs),
 		"invited_by", user.Email(),
 	)
 
@@ -270,7 +273,7 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, UserInviteBulkResponse{
 		Invited: invited,
 		Skipped: skipped,
-		Total:   invited + skipped,
-		Errors:  errors,
+		Total:   invited + skipped + len(errMsgs),
+		Errors:  errMsgs,
 	})
 }

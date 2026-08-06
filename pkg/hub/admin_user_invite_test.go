@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"testing"
@@ -228,6 +229,23 @@ func TestAdminUserInviteBulk_MixedSuccessSkip(t *testing.T) {
 	}
 }
 
+func TestAdminUserInviteBulk_ExceedsLimit(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Build a request with 1001 emails
+	emails := make([]UserInviteRequest, 1001)
+	for i := range emails {
+		emails[i] = UserInviteRequest{Email: fmt.Sprintf("user%d@example.com", i)}
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{
+		Emails: emails,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for >1000 emails, got %d", rec.Code)
+	}
+}
+
 func TestAdminUserInviteBulk_EmptyList(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -426,6 +444,20 @@ func TestDeprecatedAllowListImport_CreatesInvitedUsers(t *testing.T) {
 	}
 	if user.Status != store.UserStatusInvited {
 		t.Errorf("expected status invited, got %q", user.Status)
+	}
+}
+
+func TestAllowListDomains_NoDeprecationHeader(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/allow-list/domains", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Domains endpoint is NOT deprecated — must not have Deprecation header
+	if dep := rec.Header().Get("Deprecation"); dep != "" {
+		t.Errorf("domains endpoint should NOT have Deprecation header, got %q", dep)
 	}
 }
 
