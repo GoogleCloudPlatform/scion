@@ -17,7 +17,6 @@ package cmd
 import (
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -124,72 +123,36 @@ func TestIapAudienceToCloudRunURL(t *testing.T) {
 	}
 }
 
-// validHAConfig returns a fully-valid HA config that passes all preflight
-// checks. Tests modify individual fields to exercise specific validation paths.
-func validHAConfig(audience string) *config.GlobalConfig {
-	return &config.GlobalConfig{
-		Database: config.DatabaseConfig{
-			Driver: "postgres",
-			URL:    "postgres://localhost/scion",
-		},
-		Storage: config.StorageConfig{
-			Provider: "gcs",
-			Bucket:   "test-bucket",
-		},
-		Auth: config.DevAuthConfig{
-			Mode: "proxy",
-			Proxy: &config.ProxyAuthConfig{
-				Provider: "iap",
-				IAP: &config.IAPAuthConfig{
-					Audience: audience,
-				},
-			},
-			Transport: &config.TransportAuthConfig{
-				Mode:           "iap",
-				OIDCAudience:   "client-id.apps.googleusercontent.com",
-				PlatformAuthSA: "sa@project.iam.gserviceaccount.com",
-			},
-		},
-	}
-}
-
 func TestValidateHostedHAPreflight(t *testing.T) {
-	// Save and restore globals that validateHostedHAPreflight depends on.
-	origHostedMode := hostedMode
-	origEnableHub := enableHub
-	origSessionSecret := webSessionSecret
-	t.Cleanup(func() {
-		hostedMode = origHostedMode
-		enableHub = origEnableHub
-		webSessionSecret = origSessionSecret
-	})
-
-	// Set globals so hostedHAGuardsRequired returns true.
-	hostedMode = true
-	enableHub = true
-	webSessionSecret = "test-secret"
+	// Uses validHostedHAConfig (defined in server_ha_preflight_test.go)
+	// and withHostedHAGuards to set the required package-level globals.
 
 	t.Run("GCLB audience passes", func(t *testing.T) {
-		cfg := validHAConfig("/projects/123/global/backendServices/456")
-		err := validateHostedHAPreflight(cfg)
-		require.NoError(t, err)
+		withHostedHAGuards(t)
+		cfg := validHostedHAConfig()
+		cfg.Auth.Proxy.IAP.Audience = "/projects/123/global/backendServices/456"
+		require.NoError(t, validateHostedHAPreflight(cfg))
 	})
 
 	t.Run("Cloud Run audience passes", func(t *testing.T) {
-		cfg := validHAConfig("/projects/123/locations/us-central1/services/my-svc")
-		err := validateHostedHAPreflight(cfg)
-		require.NoError(t, err)
+		withHostedHAGuards(t)
+		cfg := validHostedHAConfig()
+		require.NoError(t, validateHostedHAPreflight(cfg))
 	})
 
 	t.Run("malformed audience fails", func(t *testing.T) {
-		cfg := validHAConfig("/projects/123/foo/bar")
+		withHostedHAGuards(t)
+		cfg := validHostedHAConfig()
+		cfg.Auth.Proxy.IAP.Audience = "/projects/123/foo/bar"
 		err := validateHostedHAPreflight(cfg)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "supported IAP audience")
 	})
 
 	t.Run("empty audience fails", func(t *testing.T) {
-		cfg := validHAConfig("")
+		withHostedHAGuards(t)
+		cfg := validHostedHAConfig()
+		cfg.Auth.Proxy.IAP.Audience = ""
 		err := validateHostedHAPreflight(cfg)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "server.auth.proxy.iap.audience")

@@ -951,11 +951,11 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 		return fmt.Errorf("hosted HA deployment requires server.auth.transport.oidc_audience")
 	}
 	// Note: transport.oidc_audience and proxy.iap.audience are intentionally
-	// allowed to differ. proxy.iap.audience is the Cloud Run native IAP
-	// audience path used for validating incoming IAP-signed JWTs, while
+	// allowed to differ. proxy.iap.audience is the IAP audience resource path
+	// (Cloud Run or GCLB) used for validating incoming IAP-signed JWTs, while
 	// transport.oidc_audience is the audience minted into OIDC tokens for
 	// dispatched agents (typically the IAP OAuth client ID). IAP requires
-	// the OAuth client ID format for token validation, not the Cloud Run path.
+	// the OAuth client ID format for token validation, not the resource path.
 	if strings.TrimSpace(cfg.Auth.Transport.PlatformAuthSA) == "" {
 		return fmt.Errorf("hosted HA deployment requires server.auth.transport.platform_auth_sa")
 	}

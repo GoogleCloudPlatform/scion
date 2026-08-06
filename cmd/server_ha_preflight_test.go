@@ -251,7 +251,7 @@ func TestNewEventPublisherFallsBackOutsideHostedHA(t *testing.T) {
 	require.IsType(t, &hub.ChannelEventPublisher{}, pub)
 }
 
-func TestCloudRunIAPAudienceShape(t *testing.T) {
+func TestIAPAudienceShape(t *testing.T) {
 	require.True(t, isSupportedIAPAudience("/projects/123/locations/us-central1/services/scion"))
 	require.True(t, isSupportedIAPAudience("/projects/123/global/backendServices/456"))
 	require.False(t, isSupportedIAPAudience(strings.TrimSpace("")))
