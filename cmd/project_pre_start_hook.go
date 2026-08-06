@@ -183,7 +183,7 @@ func readScriptContent(path string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("open script file: %w", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		r = f
 	}
 	// Read at most scriptMaxBytes+1 so we can detect over-limit files without
