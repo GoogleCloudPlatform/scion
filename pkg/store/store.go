@@ -600,6 +600,11 @@ type UserStore interface {
 
 	// ListUsers returns users matching the filter criteria.
 	ListUsers(ctx context.Context, filter UserFilter, opts ListOptions) (*ListResult[User], error)
+
+	// IsUserInvitedOrActive returns true if a User record exists with the
+	// given email and status in ("invited", "active"). Used by the
+	// invite_only authorization gate as a replacement for IsEmailAllowListed.
+	IsUserInvitedOrActive(ctx context.Context, email string) (bool, error)
 }
 
 // UserFilter defines criteria for filtering users.

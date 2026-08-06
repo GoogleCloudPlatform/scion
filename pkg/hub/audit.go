@@ -96,6 +96,7 @@ const (
 	InviteAuditInviteRevoked    InviteAuditEventType = "invite_revoked"
 	InviteAuditInviteDeleted    InviteAuditEventType = "invite_deleted"
 	InviteAuditLoginDenied      InviteAuditEventType = "login_denied"
+	InviteAuditUserActivated    InviteAuditEventType = "user_activated"
 )
 
 // InviteAuditEvent represents an auditable event for the invite/allow-list system.

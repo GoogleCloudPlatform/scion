@@ -42720,6 +42720,8 @@ type UserMutation struct {
 	status                 *user.Status
 	preferences            **schema.UserPreferences
 	created                *time.Time
+	invited_by             *string
+	invite_note            *string
 	last_login             *time.Time
 	last_seen              *time.Time
 	clearedFields          map[string]struct{}
@@ -43119,6 +43121,104 @@ func (m *UserMutation) ResetCreated() {
 	m.created = nil
 }
 
+// SetInvitedBy sets the "invited_by" field.
+func (m *UserMutation) SetInvitedBy(s string) {
+	m.invited_by = &s
+}
+
+// InvitedBy returns the value of the "invited_by" field in the mutation.
+func (m *UserMutation) InvitedBy() (r string, exists bool) {
+	v := m.invited_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInvitedBy returns the old "invited_by" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldInvitedBy(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInvitedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInvitedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInvitedBy: %w", err)
+	}
+	return oldValue.InvitedBy, nil
+}
+
+// ClearInvitedBy clears the value of the "invited_by" field.
+func (m *UserMutation) ClearInvitedBy() {
+	m.invited_by = nil
+	m.clearedFields[user.FieldInvitedBy] = struct{}{}
+}
+
+// InvitedByCleared returns if the "invited_by" field was cleared in this mutation.
+func (m *UserMutation) InvitedByCleared() bool {
+	_, ok := m.clearedFields[user.FieldInvitedBy]
+	return ok
+}
+
+// ResetInvitedBy resets all changes to the "invited_by" field.
+func (m *UserMutation) ResetInvitedBy() {
+	m.invited_by = nil
+	delete(m.clearedFields, user.FieldInvitedBy)
+}
+
+// SetInviteNote sets the "invite_note" field.
+func (m *UserMutation) SetInviteNote(s string) {
+	m.invite_note = &s
+}
+
+// InviteNote returns the value of the "invite_note" field in the mutation.
+func (m *UserMutation) InviteNote() (r string, exists bool) {
+	v := m.invite_note
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInviteNote returns the old "invite_note" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldInviteNote(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInviteNote is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInviteNote requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInviteNote: %w", err)
+	}
+	return oldValue.InviteNote, nil
+}
+
+// ClearInviteNote clears the value of the "invite_note" field.
+func (m *UserMutation) ClearInviteNote() {
+	m.invite_note = nil
+	m.clearedFields[user.FieldInviteNote] = struct{}{}
+}
+
+// InviteNoteCleared returns if the "invite_note" field was cleared in this mutation.
+func (m *UserMutation) InviteNoteCleared() bool {
+	_, ok := m.clearedFields[user.FieldInviteNote]
+	return ok
+}
+
+// ResetInviteNote resets all changes to the "invite_note" field.
+func (m *UserMutation) ResetInviteNote() {
+	m.invite_note = nil
+	delete(m.clearedFields, user.FieldInviteNote)
+}
+
 // SetLastLogin sets the "last_login" field.
 func (m *UserMutation) SetLastLogin(t time.Time) {
 	m.last_login = &t
@@ -43413,7 +43513,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 11)
 	if m.email != nil {
 		fields = append(fields, user.FieldEmail)
 	}
@@ -43434,6 +43534,12 @@ func (m *UserMutation) Fields() []string {
 	}
 	if m.created != nil {
 		fields = append(fields, user.FieldCreated)
+	}
+	if m.invited_by != nil {
+		fields = append(fields, user.FieldInvitedBy)
+	}
+	if m.invite_note != nil {
+		fields = append(fields, user.FieldInviteNote)
 	}
 	if m.last_login != nil {
 		fields = append(fields, user.FieldLastLogin)
@@ -43463,6 +43569,10 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.Preferences()
 	case user.FieldCreated:
 		return m.Created()
+	case user.FieldInvitedBy:
+		return m.InvitedBy()
+	case user.FieldInviteNote:
+		return m.InviteNote()
 	case user.FieldLastLogin:
 		return m.LastLogin()
 	case user.FieldLastSeen:
@@ -43490,6 +43600,10 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldPreferences(ctx)
 	case user.FieldCreated:
 		return m.OldCreated(ctx)
+	case user.FieldInvitedBy:
+		return m.OldInvitedBy(ctx)
+	case user.FieldInviteNote:
+		return m.OldInviteNote(ctx)
 	case user.FieldLastLogin:
 		return m.OldLastLogin(ctx)
 	case user.FieldLastSeen:
@@ -43552,6 +43666,20 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetCreated(v)
 		return nil
+	case user.FieldInvitedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInvitedBy(v)
+		return nil
+	case user.FieldInviteNote:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInviteNote(v)
+		return nil
 	case user.FieldLastLogin:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -43602,6 +43730,12 @@ func (m *UserMutation) ClearedFields() []string {
 	if m.FieldCleared(user.FieldPreferences) {
 		fields = append(fields, user.FieldPreferences)
 	}
+	if m.FieldCleared(user.FieldInvitedBy) {
+		fields = append(fields, user.FieldInvitedBy)
+	}
+	if m.FieldCleared(user.FieldInviteNote) {
+		fields = append(fields, user.FieldInviteNote)
+	}
 	if m.FieldCleared(user.FieldLastLogin) {
 		fields = append(fields, user.FieldLastLogin)
 	}
@@ -43627,6 +43761,12 @@ func (m *UserMutation) ClearField(name string) error {
 		return nil
 	case user.FieldPreferences:
 		m.ClearPreferences()
+		return nil
+	case user.FieldInvitedBy:
+		m.ClearInvitedBy()
+		return nil
+	case user.FieldInviteNote:
+		m.ClearInviteNote()
 		return nil
 	case user.FieldLastLogin:
 		m.ClearLastLogin()
@@ -43662,6 +43802,12 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldCreated:
 		m.ResetCreated()
+		return nil
+	case user.FieldInvitedBy:
+		m.ResetInvitedBy()
+		return nil
+	case user.FieldInviteNote:
+		m.ResetInviteNote()
 		return nil
 	case user.FieldLastLogin:
 		m.ResetLastLogin()

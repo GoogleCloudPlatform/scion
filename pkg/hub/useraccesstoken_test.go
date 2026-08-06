@@ -153,6 +153,9 @@ func (m *mockUserStore) ListUsers(context.Context, store.UserFilter, store.ListO
 }
 func (m *mockUserStore) DeleteUser(context.Context, string) error                    { return nil }
 func (m *mockUserStore) UpdateUserLastSeen(context.Context, string, time.Time) error { return nil }
+func (m *mockUserStore) IsUserInvitedOrActive(context.Context, string) (bool, error) {
+	return false, nil
+}
 
 // mockProjectStore implements store.ProjectStore for testing (minimal).
 type mockProjectStore struct {

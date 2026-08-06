@@ -102,6 +102,34 @@ func (_c *UserCreate) SetNillableCreated(v *time.Time) *UserCreate {
 	return _c
 }
 
+// SetInvitedBy sets the "invited_by" field.
+func (_c *UserCreate) SetInvitedBy(v string) *UserCreate {
+	_c.mutation.SetInvitedBy(v)
+	return _c
+}
+
+// SetNillableInvitedBy sets the "invited_by" field if the given value is not nil.
+func (_c *UserCreate) SetNillableInvitedBy(v *string) *UserCreate {
+	if v != nil {
+		_c.SetInvitedBy(*v)
+	}
+	return _c
+}
+
+// SetInviteNote sets the "invite_note" field.
+func (_c *UserCreate) SetInviteNote(v string) *UserCreate {
+	_c.mutation.SetInviteNote(v)
+	return _c
+}
+
+// SetNillableInviteNote sets the "invite_note" field if the given value is not nil.
+func (_c *UserCreate) SetNillableInviteNote(v *string) *UserCreate {
+	if v != nil {
+		_c.SetInviteNote(*v)
+	}
+	return _c
+}
+
 // SetLastLogin sets the "last_login" field.
 func (_c *UserCreate) SetLastLogin(v time.Time) *UserCreate {
 	_c.mutation.SetLastLogin(v)
@@ -338,6 +366,14 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 		_spec.SetField(user.FieldCreated, field.TypeTime, value)
 		_node.Created = value
 	}
+	if value, ok := _c.mutation.InvitedBy(); ok {
+		_spec.SetField(user.FieldInvitedBy, field.TypeString, value)
+		_node.InvitedBy = &value
+	}
+	if value, ok := _c.mutation.InviteNote(); ok {
+		_spec.SetField(user.FieldInviteNote, field.TypeString, value)
+		_node.InviteNote = &value
+	}
 	if value, ok := _c.mutation.LastLogin(); ok {
 		_spec.SetField(user.FieldLastLogin, field.TypeTime, value)
 		_node.LastLogin = &value
@@ -530,6 +566,42 @@ func (u *UserUpsert) ClearPreferences() *UserUpsert {
 	return u
 }
 
+// SetInvitedBy sets the "invited_by" field.
+func (u *UserUpsert) SetInvitedBy(v string) *UserUpsert {
+	u.Set(user.FieldInvitedBy, v)
+	return u
+}
+
+// UpdateInvitedBy sets the "invited_by" field to the value that was provided on create.
+func (u *UserUpsert) UpdateInvitedBy() *UserUpsert {
+	u.SetExcluded(user.FieldInvitedBy)
+	return u
+}
+
+// ClearInvitedBy clears the value of the "invited_by" field.
+func (u *UserUpsert) ClearInvitedBy() *UserUpsert {
+	u.SetNull(user.FieldInvitedBy)
+	return u
+}
+
+// SetInviteNote sets the "invite_note" field.
+func (u *UserUpsert) SetInviteNote(v string) *UserUpsert {
+	u.Set(user.FieldInviteNote, v)
+	return u
+}
+
+// UpdateInviteNote sets the "invite_note" field to the value that was provided on create.
+func (u *UserUpsert) UpdateInviteNote() *UserUpsert {
+	u.SetExcluded(user.FieldInviteNote)
+	return u
+}
+
+// ClearInviteNote clears the value of the "invite_note" field.
+func (u *UserUpsert) ClearInviteNote() *UserUpsert {
+	u.SetNull(user.FieldInviteNote)
+	return u
+}
+
 // SetLastLogin sets the "last_login" field.
 func (u *UserUpsert) SetLastLogin(v time.Time) *UserUpsert {
 	u.Set(user.FieldLastLogin, v)
@@ -712,6 +784,48 @@ func (u *UserUpsertOne) UpdatePreferences() *UserUpsertOne {
 func (u *UserUpsertOne) ClearPreferences() *UserUpsertOne {
 	return u.Update(func(s *UserUpsert) {
 		s.ClearPreferences()
+	})
+}
+
+// SetInvitedBy sets the "invited_by" field.
+func (u *UserUpsertOne) SetInvitedBy(v string) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetInvitedBy(v)
+	})
+}
+
+// UpdateInvitedBy sets the "invited_by" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateInvitedBy() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateInvitedBy()
+	})
+}
+
+// ClearInvitedBy clears the value of the "invited_by" field.
+func (u *UserUpsertOne) ClearInvitedBy() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.ClearInvitedBy()
+	})
+}
+
+// SetInviteNote sets the "invite_note" field.
+func (u *UserUpsertOne) SetInviteNote(v string) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetInviteNote(v)
+	})
+}
+
+// UpdateInviteNote sets the "invite_note" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateInviteNote() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateInviteNote()
+	})
+}
+
+// ClearInviteNote clears the value of the "invite_note" field.
+func (u *UserUpsertOne) ClearInviteNote() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.ClearInviteNote()
 	})
 }
 
@@ -1070,6 +1184,48 @@ func (u *UserUpsertBulk) UpdatePreferences() *UserUpsertBulk {
 func (u *UserUpsertBulk) ClearPreferences() *UserUpsertBulk {
 	return u.Update(func(s *UserUpsert) {
 		s.ClearPreferences()
+	})
+}
+
+// SetInvitedBy sets the "invited_by" field.
+func (u *UserUpsertBulk) SetInvitedBy(v string) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetInvitedBy(v)
+	})
+}
+
+// UpdateInvitedBy sets the "invited_by" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateInvitedBy() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateInvitedBy()
+	})
+}
+
+// ClearInvitedBy clears the value of the "invited_by" field.
+func (u *UserUpsertBulk) ClearInvitedBy() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.ClearInvitedBy()
+	})
+}
+
+// SetInviteNote sets the "invite_note" field.
+func (u *UserUpsertBulk) SetInviteNote(v string) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetInviteNote(v)
+	})
+}
+
+// UpdateInviteNote sets the "invite_note" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateInviteNote() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateInviteNote()
+	})
+}
+
+// ClearInviteNote clears the value of the "invite_note" field.
+func (u *UserUpsertBulk) ClearInviteNote() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.ClearInviteNote()
 	})
 }
 

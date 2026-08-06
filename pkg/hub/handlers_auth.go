@@ -1224,18 +1224,29 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			return nil, ErrUserSuspended
 		}
 
-		// Update last login and backfill profile
-		user.LastLogin = time.Now()
-		if info.AvatarURL != "" && user.AvatarURL == "" {
-			user.AvatarURL = info.AvatarURL
-		}
-		if info.DisplayName != "" && user.DisplayName == "" {
+		if user.Status == store.UserStatusInvited {
+			// Transition invited → active on first login
+			slog.Info("user activated from invited state", "email", info.Email, "user_id", user.ID)
+			user.Status = store.UserStatusActive
 			user.DisplayName = info.DisplayName
-		}
-		// Re-evaluate admin status on every login
-		if newRole := s.getUserRole(info.Email); user.Role != newRole {
-			slog.Info("User role changed on login", "email", info.Email, "old_role", user.Role, "new_role", newRole)
-			user.Role = newRole
+			user.AvatarURL = info.AvatarURL
+			user.LastLogin = time.Now()
+			user.Role = s.getUserRole(info.Email)
+			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, info.Email, "", user.ID, info.Email, nil)
+		} else {
+			// Update last login and backfill profile
+			user.LastLogin = time.Now()
+			if info.AvatarURL != "" && user.AvatarURL == "" {
+				user.AvatarURL = info.AvatarURL
+			}
+			if info.DisplayName != "" && user.DisplayName == "" {
+				user.DisplayName = info.DisplayName
+			}
+			// Re-evaluate admin status on every login
+			if newRole := s.getUserRole(info.Email); user.Role != newRole {
+				slog.Info("User role changed on login", "email", info.Email, "old_role", user.Role, "new_role", newRole)
+				user.Role = newRole
+			}
 		}
 		_ = s.store.UpdateUser(ctx, user)
 	}
@@ -1280,15 +1291,15 @@ func checkUserAuthorized(ctx context.Context, email string, authorizedDomains, a
 	switch accessMode {
 	case "invite_only":
 		if st == nil {
-			slog.Error("allow list check failed: store is nil", "email", emailLower)
+			slog.Error("user authorization check failed: store is nil", "email", emailLower)
 			return false
 		}
-		allowed, err := st.IsEmailAllowListed(ctx, emailLower)
+		found, err := st.IsUserInvitedOrActive(ctx, emailLower)
 		if err != nil {
-			slog.Error("allow list check failed", "email", emailLower, "error", err)
+			slog.Error("user authorization check failed", "email", emailLower, "error", err)
 			return false
 		}
-		return allowed
+		return found
 	case "domain_restricted":
 		if len(authorizedDomains) == 0 {
 			slog.Warn("user_access_mode is domain_restricted but no authorized_domains configured; all users will be blocked",

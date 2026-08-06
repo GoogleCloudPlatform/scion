@@ -30,6 +30,10 @@ const (
 	FieldPreferences = "preferences"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
+	// FieldInvitedBy holds the string denoting the invited_by field in the database.
+	FieldInvitedBy = "invited_by"
+	// FieldInviteNote holds the string denoting the invite_note field in the database.
+	FieldInviteNote = "invite_note"
 	// FieldLastLogin holds the string denoting the last_login field in the database.
 	FieldLastLogin = "last_login"
 	// FieldLastSeen holds the string denoting the last_seen field in the database.
@@ -75,6 +79,8 @@ var Columns = []string{
 	FieldStatus,
 	FieldPreferences,
 	FieldCreated,
+	FieldInvitedBy,
+	FieldInviteNote,
 	FieldLastLogin,
 	FieldLastSeen,
 }
@@ -135,6 +141,7 @@ const DefaultStatus = StatusActive
 const (
 	StatusActive    Status = "active"
 	StatusSuspended Status = "suspended"
+	StatusInvited   Status = "invited"
 )
 
 func (s Status) String() string {
@@ -144,7 +151,7 @@ func (s Status) String() string {
 // StatusValidator is a validator for the "status" field enum values. It is called by the builders before save.
 func StatusValidator(s Status) error {
 	switch s {
-	case StatusActive, StatusSuspended:
+	case StatusActive, StatusSuspended, StatusInvited:
 		return nil
 	default:
 		return fmt.Errorf("user: invalid enum value for status field: %q", s)
@@ -187,6 +194,16 @@ func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 // ByCreated orders the results by the created field.
 func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreated, opts...).ToFunc()
+}
+
+// ByInvitedBy orders the results by the invited_by field.
+func ByInvitedBy(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInvitedBy, opts...).ToFunc()
+}
+
+// ByInviteNote orders the results by the invite_note field.
+func ByInviteNote(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInviteNote, opts...).ToFunc()
 }
 
 // ByLastLogin orders the results by the last_login field.

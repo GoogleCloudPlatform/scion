@@ -88,6 +88,8 @@ func entUserToStore(u *ent.User) *store.User {
 		AvatarURL:   u.AvatarURL,
 		Role:        string(u.Role),
 		Status:      string(u.Status),
+		InvitedBy:   u.InvitedBy,
+		InviteNote:  u.InviteNote,
 		Preferences: entPrefsToStore(u.Preferences),
 		Created:     u.Created,
 	}
@@ -129,6 +131,12 @@ func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
 	}
 	if u.Status != "" {
 		create.SetStatus(user.Status(u.Status))
+	}
+	if u.InvitedBy != nil {
+		create.SetInvitedBy(*u.InvitedBy)
+	}
+	if u.InviteNote != nil {
+		create.SetInviteNote(*u.InviteNote)
 	}
 	if u.Preferences != nil {
 		create.SetPreferences(storePrefsToEnt(u.Preferences))
@@ -198,6 +206,16 @@ func (s *UserStore) UpdateUser(ctx context.Context, u *store.User) error {
 	}
 	if u.Status != "" {
 		update.SetStatus(user.Status(u.Status))
+	}
+	if u.InvitedBy != nil {
+		update.SetInvitedBy(*u.InvitedBy)
+	} else {
+		update.ClearInvitedBy()
+	}
+	if u.InviteNote != nil {
+		update.SetInviteNote(*u.InviteNote)
+	} else {
+		update.ClearInviteNote()
 	}
 	if u.Preferences != nil {
 		update.SetPreferences(storePrefsToEnt(u.Preferences))
@@ -323,4 +341,16 @@ func (s *UserStore) ListUsers(ctx context.Context, filter store.UserFilter, opts
 		result.NextCursor = strconv.Itoa(offset + limit)
 	}
 	return result, nil
+}
+
+// IsUserInvitedOrActive returns true if a User record exists with the given
+// email and status in ("invited", "active"). Used by the invite_only
+// authorization gate as a replacement for IsEmailAllowListed.
+func (s *UserStore) IsUserInvitedOrActive(ctx context.Context, email string) (bool, error) {
+	return s.client.User.Query().
+		Where(
+			user.EmailEqualFold(normalizeEmail(email)),
+			user.StatusIn(user.StatusInvited, user.StatusActive),
+		).
+		Exist(ctx)
 }
