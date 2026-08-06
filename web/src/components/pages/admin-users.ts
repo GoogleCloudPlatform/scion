@@ -28,7 +28,7 @@ import type { AdminUser, UserRole } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import { extractApiError } from '../../client/api.js';
 
-type SortField = 'name' | 'created' | 'lastSeen';
+type SortField = 'name' | 'created';
 type SortDir = 'asc' | 'desc';
 type AdminTab = 'users' | 'invites';
 type StatusFilter = 'all' | 'invited' | 'active' | 'suspended';
