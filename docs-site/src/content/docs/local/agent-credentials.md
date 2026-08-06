@@ -216,7 +216,7 @@ For the Claude harness, Scion automatically translates `GOOGLE_CLOUD_PROJECT` to
 :::
 
 :::tip[Antigravity Vertex AI & ADC]
-For the Antigravity harness, `vertex-ai` authentication is powered entirely by Google Cloud Application Default Credentials (ADC) plus the Google Cloud project and location/region environment variables, and no longer requires `AGY_TOKEN`. At runtime, Scion sets the `AGY_ADC_AUTH` environment variable to `true` and maps `gcloud-adc` (if uploaded) to `GOOGLE_APPLICATION_CREDENTIALS`. This mode requires AGY CLI >= 1.1.10.
+For the Antigravity harness, `vertex-ai` authentication is powered entirely by Google Cloud Application Default Credentials (ADC) plus the Google Cloud project (`GOOGLE_CLOUD_PROJECT`) and location/region (`GOOGLE_CLOUD_LOCATION` or `GOOGLE_CLOUD_REGION`) environment variables, and no longer requires `AGY_TOKEN`. At runtime, Scion sets the `AGY_ADC_AUTH` environment variable to `true` and maps `gcloud-adc` (if uploaded) to `GOOGLE_APPLICATION_CREDENTIALS`. This mode requires AGY CLI >= 1.1.10.
 :::
 
 :::caution[Defensive Auth Protection]
