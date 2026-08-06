@@ -34,6 +34,10 @@ type User struct {
 	Preferences *schema.UserPreferences `json:"preferences,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
+	// ID or email of the admin who created this invited-user record
+	InvitedBy *string `json:"invited_by,omitempty"`
+	// Optional note from the admin who invited this user
+	InviteNote *string `json:"invite_note,omitempty"`
 	// LastLogin holds the value of the "last_login" field.
 	LastLogin *time.Time `json:"last_login,omitempty"`
 	// LastSeen holds the value of the "last_seen" field.
@@ -91,7 +95,7 @@ func (*User) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case user.FieldPreferences:
 			values[i] = new([]byte)
-		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus:
+		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote:
 			values[i] = new(sql.NullString)
 		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen:
 			values[i] = new(sql.NullTime)
@@ -161,6 +165,20 @@ func (_m *User) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
 			} else if value.Valid {
 				_m.Created = value.Time
+			}
+		case user.FieldInvitedBy:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field invited_by", values[i])
+			} else if value.Valid {
+				_m.InvitedBy = new(string)
+				*_m.InvitedBy = value.String
+			}
+		case user.FieldInviteNote:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field invite_note", values[i])
+			} else if value.Valid {
+				_m.InviteNote = new(string)
+				*_m.InviteNote = value.String
 			}
 		case user.FieldLastLogin:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -247,6 +265,16 @@ func (_m *User) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.InvitedBy; v != nil {
+		builder.WriteString("invited_by=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.InviteNote; v != nil {
+		builder.WriteString("invite_note=")
+		builder.WriteString(*v)
+	}
 	builder.WriteString(", ")
 	if v := _m.LastLogin; v != nil {
 		builder.WriteString("last_login=")

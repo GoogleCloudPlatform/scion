@@ -1708,7 +1708,8 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Find or create user
 	user, err := ws.store.GetUserByEmail(ctx, userInfo.Email)
 	if err != nil {
-		// Create new user
+		// Create new user (only reachable in open/domain_restricted modes;
+		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
 		role := determineUserRole(userInfo.Email, ws.config.AdminEmails)
 		user = &store.User{
 			ID:          generateID(),
@@ -1726,19 +1727,45 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	} else {
-		// Update last login
-		user.LastLogin = time.Now()
-		if userInfo.AvatarURL != "" && user.AvatarURL == "" {
-			user.AvatarURL = userInfo.AvatarURL
+		// Reject suspended users
+		if user.Status == store.UserStatusSuspended {
+			ws.logger().Warn("login rejected: user is suspended", "email", userInfo.Email)
+			http.Redirect(w, r, "/login?error=suspended", http.StatusFound)
+			return
 		}
-		if userInfo.DisplayName != "" && user.DisplayName == "" {
-			user.DisplayName = userInfo.DisplayName
-		}
-		// Re-evaluate admin status on every login
-		newRole := determineUserRole(userInfo.Email, ws.config.AdminEmails)
-		if user.Role != newRole {
-			ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", user.Role, "new_role", newRole)
-			user.Role = newRole
+
+		if user.Status == store.UserStatusInvited {
+			// Transition invited → active on first login
+			// TODO(NG4): This duplicates the invited→active logic in provisionUser.
+			// Consolidate into a shared function in a future refactor.
+			ws.logger().Info("user activated from invited state", "email", userInfo.Email, "user_id", user.ID)
+			user.Status = store.UserStatusActive
+			if userInfo.DisplayName != "" {
+				user.DisplayName = userInfo.DisplayName
+			}
+			if userInfo.AvatarURL != "" {
+				user.AvatarURL = userInfo.AvatarURL
+			}
+			user.LastLogin = time.Now()
+			user.Role = determineUserRole(userInfo.Email, ws.config.AdminEmails)
+			// Log the activation via slog (WebServer does not have a structured
+			// audit logger; the hub.Server audit path covers API/CLI auth).
+			ws.logger().Info("invite audit: user_activated", "email", userInfo.Email, "user_id", user.ID)
+		} else {
+			// Update last login
+			user.LastLogin = time.Now()
+			if userInfo.AvatarURL != "" && user.AvatarURL == "" {
+				user.AvatarURL = userInfo.AvatarURL
+			}
+			if userInfo.DisplayName != "" && user.DisplayName == "" {
+				user.DisplayName = userInfo.DisplayName
+			}
+			// Re-evaluate admin status on every login
+			newRole := determineUserRole(userInfo.Email, ws.config.AdminEmails)
+			if user.Role != newRole {
+				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", user.Role, "new_role", newRole)
+				user.Role = newRole
+			}
 		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {
 			ws.logger().Warn("Failed to update user on login", "email", userInfo.Email, "error", err)

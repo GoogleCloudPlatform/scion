@@ -76,6 +76,16 @@ func Created(v time.Time) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldCreated, v))
 }
 
+// InvitedBy applies equality check predicate on the "invited_by" field. It's identical to InvitedByEQ.
+func InvitedBy(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldInvitedBy, v))
+}
+
+// InviteNote applies equality check predicate on the "invite_note" field. It's identical to InviteNoteEQ.
+func InviteNote(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldInviteNote, v))
+}
+
 // LastLogin applies equality check predicate on the "last_login" field. It's identical to LastLoginEQ.
 func LastLogin(v time.Time) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldLastLogin, v))
@@ -379,6 +389,156 @@ func CreatedLT(v time.Time) predicate.User {
 // CreatedLTE applies the LTE predicate on the "created" field.
 func CreatedLTE(v time.Time) predicate.User {
 	return predicate.User(sql.FieldLTE(FieldCreated, v))
+}
+
+// InvitedByEQ applies the EQ predicate on the "invited_by" field.
+func InvitedByEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldInvitedBy, v))
+}
+
+// InvitedByNEQ applies the NEQ predicate on the "invited_by" field.
+func InvitedByNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldInvitedBy, v))
+}
+
+// InvitedByIn applies the In predicate on the "invited_by" field.
+func InvitedByIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldInvitedBy, vs...))
+}
+
+// InvitedByNotIn applies the NotIn predicate on the "invited_by" field.
+func InvitedByNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldInvitedBy, vs...))
+}
+
+// InvitedByGT applies the GT predicate on the "invited_by" field.
+func InvitedByGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldInvitedBy, v))
+}
+
+// InvitedByGTE applies the GTE predicate on the "invited_by" field.
+func InvitedByGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldInvitedBy, v))
+}
+
+// InvitedByLT applies the LT predicate on the "invited_by" field.
+func InvitedByLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldInvitedBy, v))
+}
+
+// InvitedByLTE applies the LTE predicate on the "invited_by" field.
+func InvitedByLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldInvitedBy, v))
+}
+
+// InvitedByContains applies the Contains predicate on the "invited_by" field.
+func InvitedByContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldInvitedBy, v))
+}
+
+// InvitedByHasPrefix applies the HasPrefix predicate on the "invited_by" field.
+func InvitedByHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldInvitedBy, v))
+}
+
+// InvitedByHasSuffix applies the HasSuffix predicate on the "invited_by" field.
+func InvitedByHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldInvitedBy, v))
+}
+
+// InvitedByIsNil applies the IsNil predicate on the "invited_by" field.
+func InvitedByIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldInvitedBy))
+}
+
+// InvitedByNotNil applies the NotNil predicate on the "invited_by" field.
+func InvitedByNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldInvitedBy))
+}
+
+// InvitedByEqualFold applies the EqualFold predicate on the "invited_by" field.
+func InvitedByEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldInvitedBy, v))
+}
+
+// InvitedByContainsFold applies the ContainsFold predicate on the "invited_by" field.
+func InvitedByContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldInvitedBy, v))
+}
+
+// InviteNoteEQ applies the EQ predicate on the "invite_note" field.
+func InviteNoteEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldInviteNote, v))
+}
+
+// InviteNoteNEQ applies the NEQ predicate on the "invite_note" field.
+func InviteNoteNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldInviteNote, v))
+}
+
+// InviteNoteIn applies the In predicate on the "invite_note" field.
+func InviteNoteIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldInviteNote, vs...))
+}
+
+// InviteNoteNotIn applies the NotIn predicate on the "invite_note" field.
+func InviteNoteNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldInviteNote, vs...))
+}
+
+// InviteNoteGT applies the GT predicate on the "invite_note" field.
+func InviteNoteGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldInviteNote, v))
+}
+
+// InviteNoteGTE applies the GTE predicate on the "invite_note" field.
+func InviteNoteGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldInviteNote, v))
+}
+
+// InviteNoteLT applies the LT predicate on the "invite_note" field.
+func InviteNoteLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldInviteNote, v))
+}
+
+// InviteNoteLTE applies the LTE predicate on the "invite_note" field.
+func InviteNoteLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldInviteNote, v))
+}
+
+// InviteNoteContains applies the Contains predicate on the "invite_note" field.
+func InviteNoteContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldInviteNote, v))
+}
+
+// InviteNoteHasPrefix applies the HasPrefix predicate on the "invite_note" field.
+func InviteNoteHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldInviteNote, v))
+}
+
+// InviteNoteHasSuffix applies the HasSuffix predicate on the "invite_note" field.
+func InviteNoteHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldInviteNote, v))
+}
+
+// InviteNoteIsNil applies the IsNil predicate on the "invite_note" field.
+func InviteNoteIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldInviteNote))
+}
+
+// InviteNoteNotNil applies the NotNil predicate on the "invite_note" field.
+func InviteNoteNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldInviteNote))
+}
+
+// InviteNoteEqualFold applies the EqualFold predicate on the "invite_note" field.
+func InviteNoteEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldInviteNote, v))
+}
+
+// InviteNoteContainsFold applies the ContainsFold predicate on the "invite_note" field.
+func InviteNoteContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldInviteNote, v))
 }
 
 // LastLoginEQ applies the EQ predicate on the "last_login" field.

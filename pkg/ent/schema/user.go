@@ -59,13 +59,21 @@ func (User) Fields() []ent.Field {
 			Values("admin", "member", "viewer").
 			Default("member"),
 		field.Enum("status").
-			Values("active", "suspended").
+			Values("active", "suspended", "invited").
 			Default("active"),
 		field.JSON("preferences", &UserPreferences{}).
 			Optional(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
+		field.String("invited_by").
+			Optional().
+			Nillable().
+			Comment("ID or email of the admin who created this invited-user record"),
+		field.String("invite_note").
+			Optional().
+			Nillable().
+			Comment("Optional note from the admin who invited this user"),
 		field.Time("last_login").
 			Optional().
 			Nillable(),

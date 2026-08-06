@@ -940,7 +940,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	srv.uatService = NewUserAccessTokenService(s, s, s)
 
 	// Initialize invite code service
-	srv.inviteService = NewInviteService(s, s)
+	srv.inviteService = NewInviteService(s)
 
 	// Initialize Telegram link service
 	srv.telegramLinkService = NewTelegramLinkService()

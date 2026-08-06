@@ -706,7 +706,11 @@ type User struct {
 
 	// Access control
 	Role   string `json:"role"`   // admin, member, viewer
-	Status string `json:"status"` // active, suspended
+	Status string `json:"status"` // active, suspended, invited
+
+	// Invite provenance (populated for status=invited users)
+	InvitedBy  *string `json:"invitedBy,omitempty"`  // ID or email of admin who invited this user
+	InviteNote *string `json:"inviteNote,omitempty"` // Optional note from the inviting admin
 
 	// Preferences (stored as JSON)
 	Preferences *UserPreferences `json:"preferences,omitempty"`
@@ -729,6 +733,13 @@ const (
 	UserRoleAdmin  = "admin"
 	UserRoleMember = "member"
 	UserRoleViewer = "viewer"
+)
+
+// UserStatus constants
+const (
+	UserStatusActive    = "active"
+	UserStatusSuspended = "suspended"
+	UserStatusInvited   = "invited"
 )
 
 // Visibility constants - re-exported from api package for convenience.

@@ -60,6 +60,9 @@ func (s *entUserAllowStore) DeleteUser(ctx context.Context, id string) error {
 func (s *entUserAllowStore) ListUsers(ctx context.Context, filter store.UserFilter, opts store.ListOptions) (*store.ListResult[store.User], error) {
 	return s.users.ListUsers(ctx, filter, opts)
 }
+func (s *entUserAllowStore) IsUserInvitedOrActive(ctx context.Context, email string) (bool, error) {
+	return s.users.IsUserInvitedOrActive(ctx, email)
+}
 
 // AllowListStore overrides.
 

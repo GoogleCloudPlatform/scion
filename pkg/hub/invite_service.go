@@ -39,16 +39,18 @@ var (
 )
 
 // InviteService handles invite code generation, validation, and redemption.
+//
+// Phase 1 (invite-flow-ux): the AllowListStore dependency was removed because
+// invite codes are now standalone bearer tokens fully decoupled from the allow
+// list. Redeeming a code no longer creates an AllowListEntry.
 type InviteService struct {
-	invites   store.InviteCodeStore
-	allowList store.AllowListStore
+	invites store.InviteCodeStore
 }
 
 // NewInviteService creates a new invite service.
-func NewInviteService(invites store.InviteCodeStore, allowList store.AllowListStore) *InviteService {
+func NewInviteService(invites store.InviteCodeStore) *InviteService {
 	return &InviteService{
-		invites:   invites,
-		allowList: allowList,
+		invites: invites,
 	}
 }
 
@@ -127,17 +129,20 @@ func (s *InviteService) ValidateCode(ctx context.Context, code string) (*store.I
 	return invite, nil
 }
 
-// RedeemCode validates an invite code and adds the email to the allow list.
-// Returns nil if the email is already on the allow list (idempotent).
+// RedeemCode validates an invite code and atomically claims a use slot.
+//
+// Phase 1 (invite-flow-ux): invite codes are standalone bearer tokens fully
+// decoupled from users and emails. Redeeming a code no longer creates an
+// AllowListEntry — the invite_only auth gate now checks User(status=invited|active)
+// via IsUserInvitedOrActive. Invite-code-based authorization for users who
+// don't already have a User record is tracked as NG1 (non-goal for Phase 1).
 func (s *InviteService) RedeemCode(ctx context.Context, code, email, userID string) (*store.InviteCode, error) {
 	invite, err := s.ValidateCode(ctx, code)
 	if err != nil {
 		return nil, err
 	}
 
-	emailLower := strings.ToLower(email)
-
-	// Atomically claim a use slot before modifying the allow list.
+	// Atomically claim a use slot.
 	// IncrementInviteUseCount uses a conditional UPDATE (WHERE use_count < max_uses)
 	// so only one concurrent request can claim the last slot.
 	if err := s.invites.IncrementInviteUseCount(ctx, invite.ID); err != nil {
@@ -145,22 +150,6 @@ func (s *InviteService) RedeemCode(ctx context.Context, code, email, userID stri
 			return nil, ErrInviteExhausted
 		}
 		return nil, fmt.Errorf("failed to increment use count: %w", err)
-	}
-
-	entry := &store.AllowListEntry{
-		ID:       uuid.New().String(),
-		Email:    emailLower,
-		Note:     fmt.Sprintf("Added via invite code %s", invite.CodePrefix),
-		AddedBy:  userID,
-		InviteID: invite.ID,
-	}
-
-	if err := s.allowList.AddAllowListEntry(ctx, entry); err != nil {
-		if errors.Is(err, store.ErrAlreadyExists) {
-			// Already on the allow list — idempotent success.
-			return invite, nil
-		}
-		return nil, fmt.Errorf("failed to add to allow list: %w", err)
 	}
 
 	invite.UseCount++

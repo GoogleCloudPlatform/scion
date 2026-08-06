@@ -121,6 +121,46 @@ func (_u *UserUpdate) ClearPreferences() *UserUpdate {
 	return _u
 }
 
+// SetInvitedBy sets the "invited_by" field.
+func (_u *UserUpdate) SetInvitedBy(v string) *UserUpdate {
+	_u.mutation.SetInvitedBy(v)
+	return _u
+}
+
+// SetNillableInvitedBy sets the "invited_by" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableInvitedBy(v *string) *UserUpdate {
+	if v != nil {
+		_u.SetInvitedBy(*v)
+	}
+	return _u
+}
+
+// ClearInvitedBy clears the value of the "invited_by" field.
+func (_u *UserUpdate) ClearInvitedBy() *UserUpdate {
+	_u.mutation.ClearInvitedBy()
+	return _u
+}
+
+// SetInviteNote sets the "invite_note" field.
+func (_u *UserUpdate) SetInviteNote(v string) *UserUpdate {
+	_u.mutation.SetInviteNote(v)
+	return _u
+}
+
+// SetNillableInviteNote sets the "invite_note" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableInviteNote(v *string) *UserUpdate {
+	if v != nil {
+		_u.SetInviteNote(*v)
+	}
+	return _u
+}
+
+// ClearInviteNote clears the value of the "invite_note" field.
+func (_u *UserUpdate) ClearInviteNote() *UserUpdate {
+	_u.mutation.ClearInviteNote()
+	return _u
+}
+
 // SetLastLogin sets the "last_login" field.
 func (_u *UserUpdate) SetLastLogin(v time.Time) *UserUpdate {
 	_u.mutation.SetLastLogin(v)
@@ -356,6 +396,18 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.PreferencesCleared() {
 		_spec.ClearField(user.FieldPreferences, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.InvitedBy(); ok {
+		_spec.SetField(user.FieldInvitedBy, field.TypeString, value)
+	}
+	if _u.mutation.InvitedByCleared() {
+		_spec.ClearField(user.FieldInvitedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.InviteNote(); ok {
+		_spec.SetField(user.FieldInviteNote, field.TypeString, value)
+	}
+	if _u.mutation.InviteNoteCleared() {
+		_spec.ClearField(user.FieldInviteNote, field.TypeString)
 	}
 	if value, ok := _u.mutation.LastLogin(); ok {
 		_spec.SetField(user.FieldLastLogin, field.TypeTime, value)
@@ -609,6 +661,46 @@ func (_u *UserUpdateOne) SetPreferences(v *schema.UserPreferences) *UserUpdateOn
 // ClearPreferences clears the value of the "preferences" field.
 func (_u *UserUpdateOne) ClearPreferences() *UserUpdateOne {
 	_u.mutation.ClearPreferences()
+	return _u
+}
+
+// SetInvitedBy sets the "invited_by" field.
+func (_u *UserUpdateOne) SetInvitedBy(v string) *UserUpdateOne {
+	_u.mutation.SetInvitedBy(v)
+	return _u
+}
+
+// SetNillableInvitedBy sets the "invited_by" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableInvitedBy(v *string) *UserUpdateOne {
+	if v != nil {
+		_u.SetInvitedBy(*v)
+	}
+	return _u
+}
+
+// ClearInvitedBy clears the value of the "invited_by" field.
+func (_u *UserUpdateOne) ClearInvitedBy() *UserUpdateOne {
+	_u.mutation.ClearInvitedBy()
+	return _u
+}
+
+// SetInviteNote sets the "invite_note" field.
+func (_u *UserUpdateOne) SetInviteNote(v string) *UserUpdateOne {
+	_u.mutation.SetInviteNote(v)
+	return _u
+}
+
+// SetNillableInviteNote sets the "invite_note" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableInviteNote(v *string) *UserUpdateOne {
+	if v != nil {
+		_u.SetInviteNote(*v)
+	}
+	return _u
+}
+
+// ClearInviteNote clears the value of the "invite_note" field.
+func (_u *UserUpdateOne) ClearInviteNote() *UserUpdateOne {
+	_u.mutation.ClearInviteNote()
 	return _u
 }
 
@@ -877,6 +969,18 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	}
 	if _u.mutation.PreferencesCleared() {
 		_spec.ClearField(user.FieldPreferences, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.InvitedBy(); ok {
+		_spec.SetField(user.FieldInvitedBy, field.TypeString, value)
+	}
+	if _u.mutation.InvitedByCleared() {
+		_spec.ClearField(user.FieldInvitedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.InviteNote(); ok {
+		_spec.SetField(user.FieldInviteNote, field.TypeString, value)
+	}
+	if _u.mutation.InviteNoteCleared() {
+		_spec.ClearField(user.FieldInviteNote, field.TypeString)
 	}
 	if value, ok := _u.mutation.LastLogin(); ok {
 		_spec.SetField(user.FieldLastLogin, field.TypeTime, value)
