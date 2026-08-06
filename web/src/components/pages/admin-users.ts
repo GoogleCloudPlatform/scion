@@ -26,7 +26,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import type { AdminUser, UserRole } from '../../shared/types.js';
 import '../shared/status-badge.js';
-import { extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created';
 type SortDir = 'asc' | 'desc';
@@ -989,9 +989,8 @@ export class ScionPageAdminUsers extends LitElement {
 
     this.inviteUserInProgress = true;
     try {
-      const response = await fetch('/api/v1/admin/users/invite', {
+      const response = await apiFetch('/api/v1/admin/users/invite', {
         method: 'POST',
-        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, note: this.inviteUserNote }),
       });
@@ -1031,9 +1030,8 @@ export class ScionPageAdminUsers extends LitElement {
 
     this.importInProgress = true;
     try {
-      const response = await fetch('/api/v1/admin/users/invite/bulk', {
+      const response = await apiFetch('/api/v1/admin/users/invite/bulk', {
         method: 'POST',
-        credentials: 'include',
         body: formData,
       });
       if (!response.ok) {
@@ -1060,18 +1058,16 @@ export class ScionPageAdminUsers extends LitElement {
   private async loadInvites(): Promise<void> {
     this.invitesLoading = true;
     try {
-      const response = await fetch('/api/v1/admin/invites', {
-        credentials: 'include',
-      });
+      const response = await apiFetch('/api/v1/admin/invites');
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
       const data = (await response.json()) as {
-        items: InviteCodeEntry[];
-        totalCount: number;
-      };
-      this.invites = data.items || [];
-      this.invitesTotalCount = data.totalCount ?? 0;
+        items?: InviteCodeEntry[];
+        totalCount?: number;
+      } | null;
+      this.invites = data?.items || [];
+      this.invitesTotalCount = data?.totalCount ?? 0;
     } catch (err) {
       this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to load invites');
     } finally {
@@ -1094,9 +1090,8 @@ export class ScionPageAdminUsers extends LitElement {
         maxUses: this.createInviteMaxUses,
         note: this.createInviteNote,
       };
-      const response = await fetch('/api/v1/admin/invites', {
+      const response = await apiFetch('/api/v1/admin/invites', {
         method: 'POST',
-        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
@@ -1119,9 +1114,8 @@ export class ScionPageAdminUsers extends LitElement {
 
   private async revokeInvite(id: string): Promise<void> {
     try {
-      const response = await fetch(`/api/v1/admin/invites/${encodeURIComponent(id)}/revoke`, {
+      const response = await apiFetch(`/api/v1/admin/invites/${encodeURIComponent(id)}/revoke`, {
         method: 'POST',
-        credentials: 'include',
       });
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
@@ -1135,9 +1129,8 @@ export class ScionPageAdminUsers extends LitElement {
 
   private async deleteInvite(id: string): Promise<void> {
     try {
-      const response = await fetch(`/api/v1/admin/invites/${encodeURIComponent(id)}`, {
+      const response = await apiFetch(`/api/v1/admin/invites/${encodeURIComponent(id)}`, {
         method: 'DELETE',
-        credentials: 'include',
       });
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
@@ -1694,7 +1687,12 @@ export class ScionPageAdminUsers extends LitElement {
 
   private renderInvitesTab() {
     if (this.invitesLoading) {
-      return this.renderLoading();
+      return html`
+        <div class="loading-state">
+          <sl-spinner></sl-spinner>
+          <p>Loading invite codes...</p>
+        </div>
+      `;
     }
 
     return html`
