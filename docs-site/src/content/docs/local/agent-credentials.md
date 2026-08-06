@@ -175,7 +175,7 @@ This is also the token that Claude's `capture_auth.py` stores automatically afte
 
 ### Vertex Model Garden (`vertex-ai`)
 
-Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (ADC). Scion supports two primary ways to authenticate in Hub mode: via an assigned GCP Identity (Service Account) or an injected ADC file secret. Supported by Claude, Gemini, and OpenCode (Codex, Copilot, and Hermes do not support Vertex AI).
+Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (ADC). Scion supports two primary ways to authenticate in Hub mode: via an assigned GCP Identity (Service Account) or an injected ADC file secret. Supported by Claude, Gemini, OpenCode, and Antigravity (Codex, Copilot, and Hermes do not support Vertex AI).
 
 **Required Sources:**
 - **Assigned GCP Identity** (Hub Mode): If the agent is assigned a Hub-managed GCP Service Account via metadata emulation, Vertex AI will automatically use it. This is the recommended and most secure approach.
@@ -213,6 +213,10 @@ The `gcloud-adc` secret automatically writes the ADC file to the well-known GCP 
 
 :::tip[Claude Vertex AI Translation]
 For the Claude harness, Scion automatically translates `GOOGLE_CLOUD_PROJECT` to the `ANTHROPIC_VERTEX_PROJECT_ID` environment variable during container provisioning. This ensures that Claude Code's native Vertex AI client authenticates and operates correctly with Vertex Model Garden endpoints without manual environment adjustments.
+:::
+
+:::tip[Antigravity Vertex AI & ADC]
+For the Antigravity harness, `vertex-ai` authentication is powered entirely by Google Cloud Application Default Credentials (ADC) plus the Google Cloud project (`GOOGLE_CLOUD_PROJECT`) and location/region (`GOOGLE_CLOUD_LOCATION` or `GOOGLE_CLOUD_REGION`) environment variables, and no longer requires `AGY_TOKEN`. At runtime, Scion sets the `AGY_ADC_AUTH` environment variable to `true` and maps `gcloud-adc` (if uploaded) to `GOOGLE_APPLICATION_CREDENTIALS`. This mode requires AGY CLI >= 1.1.10.
 :::
 
 :::caution[Defensive Auth Protection]
