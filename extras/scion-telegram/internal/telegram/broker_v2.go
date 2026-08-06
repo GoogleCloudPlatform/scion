@@ -2241,8 +2241,14 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 const maxTelegramFileSize = 20 * 1024 * 1024 // 20 MB
 
 // downloadTelegramFile downloads a photo, document, audio, or video from a
-// Telegram message and saves it to the configured downloads directory.
-// Returns the agent-relative path and a placeholder string for the message body.
+// Telegram message and saves it so the agent can access it. Returns the
+// agent-visible path and a placeholder string for the message body.
+//
+// The function uses a three-tier fallback for the destination directory:
+//  1. downloadsPath config (highest priority)
+//  2. Shared dir infrastructure via config.SharedDirHostPath — writes to the host
+//     and exposes the file at /scion-volumes/scratchpad/.attachments/_telegram/
+//  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
 func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMessage, projectSlug, projectID string) (agentPath, placeholder string, err error) {
 	var fileID, fileName, fileType string
 	var fileSize int64
@@ -2311,7 +2317,7 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 	}
 	defer body.Close()
 
-	timestamp := time.Now().Unix()
+	timestamp := time.Now().UnixNano()
 	destName := fmt.Sprintf("tg_%d_%s", timestamp, fileName)
 
 	// Route attachments through the shared dir infrastructure so container-based
@@ -2323,6 +2329,11 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 	} else if projectID != "" {
 		home, homeErr := os.UserHomeDir()
 		if homeErr == nil {
+			// NOTE: SharedDirHostPath is a pure path computation; it does not verify that
+			// "scratchpad" is actually configured on the project. If it is not configured,
+			// the file will be written to the host but won't be visible inside the agent
+			// container. Projects using container-based agents should always have
+			// scratchpad configured.
 			sharedDirBase := config.SharedDirHostPath(home, projectSlug, projectID, "scratchpad")
 			hostDir = filepath.Join(sharedDirBase, ".attachments", "_telegram")
 			useSharedDir = true

@@ -2020,14 +2020,14 @@ func (b *DiscordBroker) resolveProjectSlug(ctx context.Context, projectID string
 const maxDiscordAttachmentSize = 25 * 1024 * 1024 // 25 MB
 
 // downloadDiscordAttachment downloads a file from a Discord message attachment
-// and saves it to the agent's workspace downloads directory. Returns the
-// agent-relative path and a placeholder string for the message body.
+// and saves it so the agent can access it. Returns the agent-visible path and
+// a placeholder string for the message body.
 //
-// NOTE: This writes to the host filesystem at /home/scion/.scion/projects/<slug>/downloads/.
-// The agent container must share this volume mount for the file to be visible
-// at /workspace/downloads/. This works in single-VM / shared-dir setups but
-// will NOT work when agents and the plugin run in separate pods with isolated
-// volumes. See #397 for the tracked fix.
+// The function uses a three-tier fallback for the destination directory:
+//  1. downloadsPath config (highest priority, supports {project_slug} placeholder)
+//  2. Shared dir infrastructure via config.SharedDirHostPath — writes to the host
+//     and exposes the file at /scion-volumes/scratchpad/.attachments/_discord/
+//  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
 func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *discordgo.MessageAttachment, projectSlug, projectID string) (agentPath, placeholder string, err error) {
 	if projectSlug == "" {
 		return "", "", fmt.Errorf("project slug is empty")
@@ -2056,7 +2056,7 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	if fileName == "" || fileName == "." || fileName == "/" {
 		fileName = att.ID
 	}
-	timestamp := time.Now().Unix()
+	timestamp := time.Now().UnixNano()
 	destName := fmt.Sprintf("discord_%d_%s", timestamp, fileName)
 
 	// Route attachments through the shared dir infrastructure so container-based
@@ -2069,6 +2069,11 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	} else if projectID != "" {
 		home, homeErr := os.UserHomeDir()
 		if homeErr == nil {
+			// NOTE: SharedDirHostPath is a pure path computation; it does not verify that
+			// "scratchpad" is actually configured on the project. If it is not configured,
+			// the file will be written to the host but won't be visible inside the agent
+			// container. Projects using container-based agents should always have
+			// scratchpad configured.
 			sharedDirBase := config.SharedDirHostPath(home, projectSlug, projectID, "scratchpad")
 			hostDir = filepath.Join(sharedDirBase, ".attachments", "_discord")
 			useSharedDir = true

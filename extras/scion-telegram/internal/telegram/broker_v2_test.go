@@ -2104,7 +2104,9 @@ func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
 	assert.Contains(t, deliveredMsg.Msg, "📎")
 	assert.Contains(t, deliveredMsg.Msg, "Photo attached")
 	assert.Len(t, deliveredMsg.Attachments, 1)
-	assert.Contains(t, deliveredMsg.Attachments[0], "/workspace/downloads/")
+	// With a non-empty projectID and no downloadsPath, the attachment
+	// routes through the shared dir infrastructure.
+	assert.Contains(t, deliveredMsg.Attachments[0], "/scion-volumes/scratchpad/.attachments/_telegram/")
 }
 
 func TestV2_HandleIncoming_DocumentWithCaption(t *testing.T) {
@@ -2216,7 +2218,7 @@ func TestV2_DownloadTelegramFile_PhotoPicksLargest(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "/workspace/downloads/")
 	assert.Contains(t, agentPath, "photo_u3.jpg")
@@ -2243,7 +2245,7 @@ func TestV2_DownloadTelegramFile_DocumentFallbackName(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "docuniq99")
 	assert.Contains(t, placeholder, "Document attached")
@@ -2264,7 +2266,7 @@ func TestV2_DownloadTelegramFile_TooLarge(t *testing.T) {
 		},
 	}
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug")
+	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug", "test-project-id")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "file too large")
 }
@@ -2276,7 +2278,7 @@ func TestV2_DownloadTelegramFile_NoAttachment(t *testing.T) {
 	ctx := context.Background()
 	tgMsg := &TGMessage{Text: "just text"}
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug")
+	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug", "test-project-id")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no downloadable attachment")
 }
@@ -2314,7 +2316,7 @@ func TestV2_DownloadTelegramFile_DownloadFailure(t *testing.T) {
 		},
 	}
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug")
+	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug", "test-project-id")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "download file")
 }
@@ -2337,7 +2339,7 @@ func TestV2_DownloadTelegramFile_AudioWithFilename(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "song.mp3")
 	assert.Contains(t, placeholder, "Audio attached")
@@ -2362,7 +2364,7 @@ func TestV2_DownloadTelegramFile_AudioFallbackName(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "My Song.ogg")
 	assert.Contains(t, placeholder, "Audio attached")
@@ -2377,7 +2379,7 @@ func TestV2_DownloadTelegramFile_AudioFallbackName(t *testing.T) {
 		},
 	}
 
-	agentPath2, _, err := b.downloadTelegramFile(ctx, tgMsg2, slug)
+	agentPath2, _, err := b.downloadTelegramFile(ctx, tgMsg2, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath2, "audio_audiouniq3.ogg")
 }
@@ -2402,7 +2404,7 @@ func TestV2_DownloadTelegramFile_Video(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "clip.mp4")
 	assert.Contains(t, placeholder, "Video attached")
@@ -2427,7 +2429,7 @@ func TestV2_DownloadTelegramFile_VideoFallbackName(t *testing.T) {
 		},
 	}
 
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "video_viduniq2.mp4")
 }
@@ -2569,7 +2571,7 @@ func TestV2_DownloadTelegramFile_ConfiguredDownloadsPath(t *testing.T) {
 		},
 	}
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "any-slug")
+	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "any-slug", "test-project-id")
 	require.NoError(t, err)
 
 	// Verify the file was saved in the custom directory.
@@ -2966,7 +2968,7 @@ func TestV2_DownloadTelegramFile_AudioTitlePathTraversal(t *testing.T) {
 		},
 	}
 
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
 	require.NoError(t, err)
 	// The path-traversal components must be stripped — the file should be
 	// named "passwd.ogg" (filepath.Base of "../../etc/passwd.ogg"), not
@@ -2997,7 +2999,7 @@ func TestV2_DownloadTelegramFile_ConfiguredDownloadsPathAgentPath(t *testing.T) 
 		},
 	}
 
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, "any-slug")
+	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, "any-slug", "test-project-id")
 	require.NoError(t, err)
 
 	// agentPath must start with the custom downloads path, NOT /workspace/downloads.
@@ -3005,6 +3007,102 @@ func TestV2_DownloadTelegramFile_ConfiguredDownloadsPathAgentPath(t *testing.T) 
 		"agentPath %q should start with custom downloads dir %q", agentPath, customDir)
 	assert.NotContains(t, agentPath, "/workspace/downloads")
 	assert.Contains(t, agentPath, "report.pdf")
+}
+
+func TestV2_DownloadTelegramFile_SharedDirPath(t *testing.T) {
+	// When projectID is non-empty and downloadsPath is empty, the function
+	// should route through the shared dir infrastructure.
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	// Point HOME to a temp dir so SharedDirHostPath resolves there.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	ctx := context.Background()
+	tgMsg := &TGMessage{
+		Document: &TGDocument{
+			FileID:       "doc-shared-001",
+			FileUniqueID: "docuniqshared1",
+			FileName:     "shared-report.pdf",
+			MimeType:     "application/pdf",
+			FileSize:     1024,
+		},
+	}
+
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, "my-project", "abcd1234-ef56-7890-abcd-ef1234567890")
+	require.NoError(t, err)
+
+	// Agent path should use the shared dir prefix.
+	assert.True(t, strings.HasPrefix(agentPath, "/scion-volumes/scratchpad/.attachments/_telegram/"),
+		"agentPath %q should start with shared dir prefix", agentPath)
+	assert.Contains(t, agentPath, "shared-report.pdf")
+	assert.Contains(t, placeholder, "Document attached")
+
+	// Verify the file was actually written to the host-side shared dir path.
+	expectedHostBase := filepath.Join(fakeHome, ".scion", "project-configs", "my-project__abcd1234", "shared-dirs", "scratchpad", ".attachments", "_telegram")
+	entries, err := os.ReadDir(expectedHostBase)
+	require.NoError(t, err, "shared dir host path should exist")
+	require.Len(t, entries, 1)
+	assert.Contains(t, entries[0].Name(), "shared-report.pdf")
+}
+
+func TestV2_DownloadTelegramFile_EmptyProjectID_LegacyPath(t *testing.T) {
+	// When projectID is empty and downloadsPath is empty, the function should
+	// fall back to the legacy /workspace/downloads/ agent path.
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	ctx := context.Background()
+	slug := filepath.Base(t.TempDir())
+
+	tgMsg := &TGMessage{
+		Document: &TGDocument{
+			FileID:       "doc-legacy-001",
+			FileUniqueID: "docuniqlegacy1",
+			FileName:     "legacy.txt",
+			MimeType:     "text/plain",
+			FileSize:     256,
+		},
+	}
+
+	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	require.NoError(t, err)
+
+	// Legacy agent path should be /workspace/downloads/<name>.
+	assert.True(t, strings.HasPrefix(agentPath, "/workspace/downloads/"),
+		"agentPath %q should start with legacy prefix", agentPath)
+	assert.Contains(t, agentPath, "legacy.txt")
+}
+
+func TestV2_DownloadTelegramFile_DownloadsPathOverridesSharedDir(t *testing.T) {
+	// When downloadsPath is set, it takes priority over shared dir even if
+	// projectID is non-empty.
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	customDir := filepath.Join(t.TempDir(), "custom-override")
+	b.downloadsPath = customDir
+
+	ctx := context.Background()
+	tgMsg := &TGMessage{
+		Document: &TGDocument{
+			FileID:       "doc-priority-001",
+			FileUniqueID: "docuniqpriority1",
+			FileName:     "priority.pdf",
+			MimeType:     "application/pdf",
+			FileSize:     512,
+		},
+	}
+
+	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, "my-project", "abcd1234-ef56-7890-abcd-ef1234567890")
+	require.NoError(t, err)
+
+	// Agent path should use the custom downloads path, not shared dir.
+	assert.True(t, strings.HasPrefix(agentPath, customDir),
+		"agentPath %q should start with custom dir %q", agentPath, customDir)
+	assert.NotContains(t, agentPath, "/scion-volumes/scratchpad/")
+	assert.Contains(t, agentPath, "priority.pdf")
 }
 
 func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
