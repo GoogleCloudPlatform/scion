@@ -19,7 +19,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"gopkg.in/yaml.v3"
 
@@ -518,27 +517,6 @@ func equalGroups(a, b [][]string) bool {
 	}
 	for i := range a {
 		if !reflect.DeepEqual(a[i], b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// equalRequiredSecrets compares two []api.RequiredSecret slices, treating
-// nil and length-0 as equivalent. AlternativeEnvKeys is normalized so a nil
-// slice matches an empty one.
-func equalRequiredSecrets(a, b []api.RequiredSecret) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Key != b[i].Key || a[i].Type != b[i].Type || a[i].Description != b[i].Description {
-			return false
-		}
-		if !reflect.DeepEqual(append([]string{}, a[i].AlternativeEnvKeys...), append([]string{}, b[i].AlternativeEnvKeys...)) {
 			return false
 		}
 	}
