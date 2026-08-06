@@ -1401,7 +1401,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		if att == nil || att.URL == "" {
 			continue
 		}
-		agentPath, placeholder, err := b.downloadDiscordAttachment(ctx, att, link.ProjectSlug)
+		agentPath, placeholder, err := b.downloadDiscordAttachment(ctx, att, link.ProjectSlug, link.ProjectID)
 		if err != nil {
 			b.log.Error("Failed to download Discord attachment",
 				"filename", att.Filename, "error", err)
@@ -2020,15 +2020,15 @@ func (b *DiscordBroker) resolveProjectSlug(ctx context.Context, projectID string
 const maxDiscordAttachmentSize = 25 * 1024 * 1024 // 25 MB
 
 // downloadDiscordAttachment downloads a file from a Discord message attachment
-// and saves it to the agent's workspace downloads directory. Returns the
-// agent-relative path and a placeholder string for the message body.
+// and saves it so the agent can access it. Returns the agent-visible path and
+// a placeholder string for the message body.
 //
-// NOTE: This writes to the host filesystem at /home/scion/.scion/projects/<slug>/downloads/.
-// The agent container must share this volume mount for the file to be visible
-// at /workspace/downloads/. This works in single-VM / shared-dir setups but
-// will NOT work when agents and the plugin run in separate pods with isolated
-// volumes. See #397 for the tracked fix.
-func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *discordgo.MessageAttachment, projectSlug string) (agentPath, placeholder string, err error) {
+// The function uses a three-tier fallback for the destination directory:
+//  1. downloadsPath config (highest priority, supports {project_slug} placeholder)
+//  2. Shared dir infrastructure via config.SharedDirHostPath — writes to the host
+//     and exposes the file at /scion-volumes/scratchpad/.attachments/_discord/
+//  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
+func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *discordgo.MessageAttachment, projectSlug, projectID string) (agentPath, placeholder string, err error) {
 	if projectSlug == "" {
 		return "", "", fmt.Errorf("project slug is empty")
 	}
@@ -2056,14 +2056,31 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	if fileName == "" || fileName == "." || fileName == "/" {
 		fileName = att.ID
 	}
-	timestamp := time.Now().Unix()
+	timestamp := time.Now().UnixNano()
 	destName := fmt.Sprintf("discord_%d_%s", timestamp, fileName)
 
-	// Use configured downloads_path if set; otherwise default to project dir.
+	// Route attachments through the shared dir infrastructure so container-based
+	// agents can access them at /scion-volumes/scratchpad/.attachments/_discord/.
+	// Use configured downloads_path as highest-priority override for edge cases.
 	var hostDir string
+	var useSharedDir bool
 	if b.downloadsPath != "" {
 		hostDir = strings.ReplaceAll(b.downloadsPath, "{project_slug}", projectSlug)
-	} else {
+	} else if projectID != "" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr == nil {
+			// NOTE: SharedDirHostPath is a pure path computation; it does not verify that
+			// "scratchpad" is actually configured on the project. If it is not configured,
+			// the file will be written to the host but won't be visible inside the agent
+			// container. Projects using container-based agents should always have
+			// scratchpad configured.
+			sharedDirBase := config.SharedDirHostPath(home, projectSlug, projectID, "scratchpad")
+			hostDir = filepath.Join(sharedDirBase, ".attachments", "_discord")
+			useSharedDir = true
+		}
+	}
+	if hostDir == "" {
+		// Fallback to legacy path when shared dir resolution fails.
 		hostDir = filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
 	}
 	if err := os.MkdirAll(hostDir, 0o755); err != nil {
@@ -2083,14 +2100,15 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 		return "", "", fmt.Errorf("write file: %w", err)
 	}
 
-	// Derive the agent-visible path from the same base used to save the file.
-	// When a custom downloads_path is configured, the agent sees that path
-	// directly; otherwise it sees the conventional /workspace/downloads mount.
+	// Derive the agent-visible path.
 	if b.downloadsPath != "" {
 		agentPath = filepath.Join(strings.ReplaceAll(b.downloadsPath, "{project_slug}", projectSlug), destName)
+	} else if useSharedDir {
+		agentPath = filepath.Join("/scion-volumes/scratchpad/.attachments/_discord", destName)
 	} else {
 		agentPath = filepath.Join("/workspace/downloads", destName)
 	}
+	agentPath = filepath.ToSlash(agentPath)
 	contentType := att.ContentType
 	if contentType == "" {
 		contentType = "file"
