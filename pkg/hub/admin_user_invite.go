@@ -176,7 +176,7 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 		}
 		// Convert AllowListAddRequest to UserInviteRequest
 		for _, p := range parsed {
-			emails = append(emails, UserInviteRequest{Email: p.Email, Note: p.Note})
+			emails = append(emails, UserInviteRequest(p))
 		}
 	} else {
 		// JSON body
