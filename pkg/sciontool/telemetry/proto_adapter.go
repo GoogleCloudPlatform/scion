@@ -205,9 +205,9 @@ func anyValueToString(v *commonpb.AnyValue) string {
 		}
 		return "false"
 	case *commonpb.AnyValue_IntValue:
-		return attribute.Int64Value(val.IntValue).Emit()
+		return attribute.Int64Value(val.IntValue).String()
 	case *commonpb.AnyValue_DoubleValue:
-		return attribute.Float64Value(val.DoubleValue).Emit()
+		return attribute.Float64Value(val.DoubleValue).String()
 	default:
 		return "<complex>"
 	}
