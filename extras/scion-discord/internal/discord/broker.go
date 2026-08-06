@@ -2108,6 +2108,7 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	} else {
 		agentPath = filepath.Join("/workspace/downloads", destName)
 	}
+	agentPath = filepath.ToSlash(agentPath)
 	contentType := att.ContentType
 	if contentType == "" {
 		contentType = "file"
