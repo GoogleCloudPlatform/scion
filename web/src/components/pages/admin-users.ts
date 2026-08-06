@@ -17,7 +17,8 @@
 /**
  * Admin Users page component
  *
- * View of all users with admin actions: promote/demote, suspend/reactivate, delete
+ * View of all users with admin actions: promote/demote, suspend/reactivate, delete.
+ * Supports invite-based user creation and status filtering (invited/active/suspended).
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -29,7 +30,8 @@ import { extractApiError } from '../../client/api.js';
 
 type SortField = 'name' | 'created' | 'lastSeen';
 type SortDir = 'asc' | 'desc';
-type AdminTab = 'users' | 'allow-list' | 'invites';
+type AdminTab = 'users' | 'invites';
+type StatusFilter = 'all' | 'invited' | 'active' | 'suspended';
 
 interface ConfirmAction {
   title: string;
@@ -38,22 +40,6 @@ interface ConfirmAction {
   confirmLabel: string;
   user: AdminUser;
   action: () => Promise<void>;
-}
-
-interface AllowListEntry {
-  id: string;
-  email: string;
-  note: string;
-  addedBy: string;
-  inviteId?: string;
-  created: string;
-  // Enriched invite details from joined query
-  inviteCodePrefix?: string;
-  inviteMaxUses?: number;
-  inviteUseCount?: number;
-  inviteExpiresAt?: string;
-  inviteRevoked?: boolean;
-  inviteExpired?: boolean;
 }
 
 interface InviteCodeEntry {
@@ -133,36 +119,29 @@ export class ScionPageAdminUsers extends LitElement {
   private activeTab: AdminTab = 'users';
 
   @state()
-  private allowListEntries: AllowListEntry[] = [];
+  private statusFilter: StatusFilter = 'all';
+
+  // Invite user dialog state
+  @state()
+  private showInviteUserDialog = false;
 
   @state()
-  private allowListLoading = false;
+  private inviteUserEmail = '';
 
   @state()
-  private allowListTotalCount = 0;
+  private inviteUserNote = '';
 
   @state()
-  private showAddEmailDialog = false;
+  private inviteUserInProgress = false;
 
-  @state()
-  private addEmailValue = '';
-
-  @state()
-  private addEmailNote = '';
-
-  @state()
-  private addEmailInProgress = false;
-
+  // Bulk import dialog state
   @state()
   private showImportDialog = false;
 
   @state()
   private importInProgress = false;
 
-  @state()
-  private emailDomains: string[] = [];
-
-  // Invites tab state
+  // Invite codes tab state
   @state()
   private invites: InviteCodeEntry[] = [];
 
@@ -189,9 +168,6 @@ export class ScionPageAdminUsers extends LitElement {
 
   @state()
   private createdInviteResult: InviteCreateResult | null = null;
-
-  @state()
-  private generateInviteForEmail: string | null = null;
 
   @state()
   private inviteCopied = false;
@@ -308,6 +284,11 @@ export class ScionPageAdminUsers extends LitElement {
       object-fit: cover;
     }
 
+    .user-avatar.invited {
+      background: var(--sl-color-primary-200, #bfdbfe);
+      color: var(--sl-color-primary-700, #1d4ed8);
+    }
+
     .user-info {
       display: flex;
       flex-direction: column;
@@ -327,6 +308,12 @@ export class ScionPageAdminUsers extends LitElement {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    .user-invited-by {
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #64748b);
+      font-style: italic;
     }
 
     .role-badge {
@@ -351,6 +338,31 @@ export class ScionPageAdminUsers extends LitElement {
     .role-badge.viewer {
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #64748b);
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+
+    .status-badge.active {
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-700, #15803d);
+    }
+
+    .status-badge.invited {
+      background: var(--sl-color-primary-100, #dbeafe);
+      color: var(--sl-color-primary-700, #1d4ed8);
+      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+    }
+
+    .status-badge.suspended {
+      background: var(--sl-color-danger-100, #fee2e2);
+      color: var(--sl-color-danger-700, #b91c1c);
     }
 
     .status-cell {
@@ -568,7 +580,9 @@ export class ScionPageAdminUsers extends LitElement {
       border: none;
       border-bottom: 2px solid transparent;
       cursor: pointer;
-      transition: color 0.15s, border-color 0.15s;
+      transition:
+        color 0.15s,
+        border-color 0.15s;
     }
 
     .tab-btn:hover {
@@ -580,35 +594,31 @@ export class ScionPageAdminUsers extends LitElement {
       border-bottom-color: var(--scion-primary, #3b82f6);
     }
 
-    .allow-list-header {
+    .users-toolbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
       margin-bottom: 1rem;
+      flex-wrap: wrap;
+      gap: 0.5rem;
     }
 
-    .allow-list-header span {
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
+    .users-toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
     }
 
-    .add-email-form {
+    .users-toolbar-right {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .invite-form {
       display: flex;
       flex-direction: column;
       gap: 1rem;
-    }
-
-    .domain-suggestions {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.375rem;
-      margin-top: -0.5rem;
-    }
-
-    .domain-label {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
     }
 
     .invite-status {
@@ -681,6 +691,18 @@ export class ScionPageAdminUsers extends LitElement {
       border: 1px solid var(--sl-color-warning-200, #fde68a);
     }
 
+    .invites-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+
+    .invites-header span {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
@@ -719,13 +741,18 @@ export class ScionPageAdminUsers extends LitElement {
       if (cursor) {
         params.set('cursor', cursor);
       }
+      if (this.statusFilter !== 'all') {
+        params.set('status', this.statusFilter);
+      }
 
       const response = await fetch(`/api/v1/users?${params.toString()}`, {
         credentials: 'include',
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const data = (await response.json()) as {
@@ -762,7 +789,10 @@ export class ScionPageAdminUsers extends LitElement {
     void this.loadUsers(cursor);
   }
 
-  private async updateUser(userId: string, updates: { role?: string; status?: string }): Promise<void> {
+  private async updateUser(
+    userId: string,
+    updates: { role?: string; status?: string }
+  ): Promise<void> {
     const response = await fetch(`/api/v1/users/${userId}`, {
       method: 'PATCH',
       credentials: 'include',
@@ -796,7 +826,9 @@ export class ScionPageAdminUsers extends LitElement {
       action: async () => {
         await this.updateUser(user.id, { role: newRole });
         this.showFeedback('success', `${user.displayName || user.email} is now ${roleLabel}.`);
-        void this.loadUsers(this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined);
+        void this.loadUsers(
+          this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
+        );
       },
     };
   }
@@ -807,30 +839,45 @@ export class ScionPageAdminUsers extends LitElement {
       title: suspending ? 'Suspend user' : 'Reactivate user',
       message: suspending
         ? 'This user will be unable to sign in or use the system while suspended.'
-        : 'This will restore the user\'s access to the system.',
+        : "This will restore the user's access to the system.",
       variant: suspending ? 'warning' : 'primary',
       confirmLabel: suspending ? 'Suspend' : 'Reactivate',
       user,
       action: async () => {
         const newStatus = suspending ? 'suspended' : 'active';
         await this.updateUser(user.id, { status: newStatus });
-        this.showFeedback('success', `${user.displayName || user.email} has been ${suspending ? 'suspended' : 'reactivated'}.`);
-        void this.loadUsers(this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined);
+        this.showFeedback(
+          'success',
+          `${user.displayName || user.email} has been ${suspending ? 'suspended' : 'reactivated'}.`
+        );
+        void this.loadUsers(
+          this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
+        );
       },
     };
   }
 
   private promptDelete(user: AdminUser): void {
+    const label = user.status === 'invited' ? 'Remove invited user' : 'Delete user';
+    const message =
+      user.status === 'invited'
+        ? 'This will remove the invitation. The user will no longer be able to sign in.'
+        : 'This action is permanent and cannot be undone. All data associated with this user will be removed.';
     this.confirmAction = {
-      title: 'Delete user',
-      message: 'This action is permanent and cannot be undone. All data associated with this user will be removed.',
+      title: label,
+      message,
       variant: 'danger',
-      confirmLabel: 'Delete',
+      confirmLabel: user.status === 'invited' ? 'Remove' : 'Delete',
       user,
       action: async () => {
         await this.deleteUser(user.id);
-        this.showFeedback('success', `${user.displayName || user.email} has been deleted.`);
-        void this.loadUsers(this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined);
+        this.showFeedback(
+          'success',
+          `${user.displayName || user.email} has been ${user.status === 'invited' ? 'removed' : 'deleted'}.`
+        );
+        void this.loadUsers(
+          this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
+        );
       },
     };
   }
@@ -850,7 +897,9 @@ export class ScionPageAdminUsers extends LitElement {
 
   private showFeedback(variant: 'success' | 'danger', message: string): void {
     this.actionFeedback = { variant, message };
-    setTimeout(() => { this.actionFeedback = null; }, 5000);
+    setTimeout(() => {
+      this.actionFeedback = null;
+    }, 5000);
   }
 
   private isSelf(user: AdminUser): boolean {
@@ -923,591 +972,51 @@ export class ScionPageAdminUsers extends LitElement {
     return Math.min(this.currentPage * PAGE_SIZE, this.totalCount);
   }
 
-  override render() {
-    return html`
-      <div class="header">
-        <h1>Users</h1>
-      </div>
-
-      ${this.actionFeedback
-        ? html`
-            <sl-alert
-              class="feedback-alert"
-              variant=${this.actionFeedback.variant}
-              open
-              closable
-              duration="5000"
-              @sl-after-hide=${() => { this.actionFeedback = null; }}
-            >
-              <sl-icon slot="icon" name=${this.actionFeedback.variant === 'success' ? 'check-circle' : 'exclamation-triangle'}></sl-icon>
-              ${this.actionFeedback.message}
-            </sl-alert>
-          `
-        : nothing}
-
-      <div class="tabs" role="tablist">
-        <button
-          role="tab"
-          aria-selected=${this.activeTab === 'users'}
-          aria-controls="panel-users"
-          class="tab-btn ${this.activeTab === 'users' ? 'active' : ''}"
-          @click=${() => { this.activeTab = 'users'; }}
-        >Users ${!this.loading ? `(${this.totalCount})` : ''}</button>
-        <button
-          role="tab"
-          aria-selected=${this.activeTab === 'allow-list'}
-          aria-controls="panel-allow-list"
-          class="tab-btn ${this.activeTab === 'allow-list' ? 'active' : ''}"
-          @click=${() => { this.activeTab = 'allow-list'; this.loadAllowList(); }}
-        >Members ${this.allowListTotalCount > 0 ? `(${this.allowListTotalCount})` : ''}</button>
-        <button
-          role="tab"
-          aria-selected=${this.activeTab === 'invites'}
-          aria-controls="panel-invites"
-          class="tab-btn ${this.activeTab === 'invites' ? 'active' : ''}"
-          @click=${() => { this.activeTab = 'invites'; this.loadInvites(); }}
-        >All Invites ${this.invitesTotalCount > 0 ? `(${this.invitesTotalCount})` : ''}</button>
-      </div>
-
-      ${this.activeTab === 'users'
-        ? this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderUsers()
-        : this.activeTab === 'allow-list'
-          ? this.renderAllowListTab()
-          : this.renderInvitesTab()}
-
-      ${this.renderConfirmDialog()}
-      ${this.renderAddEmailDialog()}
-      ${this.renderImportDialog()}
-      ${this.renderCreateInviteDialog()}
-      ${this.renderInviteRevealDialog()}
-    `;
+  private setStatusFilter(filter: StatusFilter): void {
+    if (this.statusFilter === filter) return;
+    this.statusFilter = filter;
+    this.currentPage = 1;
+    this.cursorHistory = [];
+    this.nextCursor = null;
+    void this.loadUsers();
   }
 
-  private renderLoading() {
-    return html`
-      <div class="loading-state">
-        <sl-spinner></sl-spinner>
-        <p>Loading users...</p>
-      </div>
-    `;
-  }
+  // ==================== Invite User ====================
 
-  private renderError() {
-    return html`
-      <div class="error-state">
-        <sl-icon name="exclamation-triangle"></sl-icon>
-        <h2>Failed to Load Users</h2>
-        <p>There was a problem connecting to the API.</p>
-        <div class="error-details">${this.error}</div>
-        <sl-button variant="primary" @click=${() => this.loadUsers()}>
-          <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-          Retry
-        </sl-button>
-      </div>
-    `;
-  }
-
-  private renderUsers() {
-    if (this.users.length === 0) {
-      return html`
-        <div class="empty-state">
-          <sl-icon name="people"></sl-icon>
-          <h2>No Users Found</h2>
-          <p>There are no users registered in the system.</p>
-        </div>
-      `;
-    }
-
-    const hasPagination = this.totalCount > PAGE_SIZE;
-
-    return html`
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th
-                class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('name')}
-              >
-                User
-                <span class="sort-indicator">${this.sortIndicator('name')}</span>
-              </th>
-              <th>Role</th>
-              <th
-                class="sortable ${this.sortField === 'lastSeen' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('lastSeen')}
-              >
-                Status
-                <span class="sort-indicator">${this.sortIndicator('lastSeen')}</span>
-              </th>
-              <th class="hide-mobile">Last Login</th>
-              <th
-                class="hide-mobile sortable ${this.sortField === 'created' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('created')}
-              >
-                Created
-                <span class="sort-indicator">${this.sortIndicator('created')}</span>
-              </th>
-              <th class="actions-cell"></th>
-            </tr>
-          </thead>
-          <tbody>
-            ${this.users.map((user) => this.renderUserRow(user))}
-          </tbody>
-        </table>
-        ${hasPagination ? this.renderPagination() : ''}
-      </div>
-    `;
-  }
-
-  private renderPagination() {
-    return html`
-      <div class="pagination">
-        <span class="pagination-info">
-          Showing ${this.rangeStart}-${this.rangeEnd} of ${this.totalCount}
-        </span>
-        <div class="pagination-controls">
-          <sl-button
-            size="small"
-            variant="default"
-            ?disabled=${this.currentPage <= 1}
-            @click=${() => this.goToPrevPage()}
-          >
-            <sl-icon slot="prefix" name="chevron-left"></sl-icon>
-            Previous
-          </sl-button>
-          <span class="page-indicator">Page ${this.currentPage} of ${this.totalPages}</span>
-          <sl-button
-            size="small"
-            variant="default"
-            ?disabled=${!this.nextCursor}
-            @click=${() => this.goToNextPage()}
-          >
-            Next
-            <sl-icon slot="suffix" name="chevron-right"></sl-icon>
-          </sl-button>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderUserRow(user: AdminUser) {
-    const self = this.isSelf(user);
-    return html`
-      <tr>
-        <td>
-          <div class="user-identity">
-            <div class="user-avatar">
-              ${user.avatarUrl
-                ? html`<img src="${user.avatarUrl}" alt="${user.displayName}" />`
-                : this.getInitials(user.displayName || user.email)}
-            </div>
-            <div class="user-info">
-              <span class="user-name">${user.displayName || user.email}</span>
-              <span class="user-email">${user.email}</span>
-            </div>
-          </div>
-        </td>
-        <td>
-          <span class="role-badge ${user.role}">${user.role}</span>
-        </td>
-        <td>
-          <div class="status-cell">
-            <span class="status-dot ${user.status}">${user.status}</span>
-            ${user.lastSeen
-              ? html`<span class="last-seen-text">${this.formatRelativeTime(user.lastSeen)}</span>`
-              : ''}
-          </div>
-        </td>
-        <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(user.lastLogin)}</span>
-        </td>
-        <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(user.created)}</span>
-        </td>
-        <td class="actions-cell">
-          ${self
-            ? nothing
-            : html`
-                <sl-dropdown placement="bottom-end" hoist>
-                  <sl-button slot="trigger" size="small" variant="text" caret>
-                    <sl-icon name="three-dots-vertical"></sl-icon>
-                  </sl-button>
-                  <sl-menu>
-                    ${user.role !== 'admin'
-                      ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'admin')}>
-                          <sl-icon slot="prefix" name="shield-check"></sl-icon>
-                          Promote to Admin
-                        </sl-menu-item>`
-                      : nothing}
-                    ${user.role === 'admin'
-                      ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'member')}>
-                          <sl-icon slot="prefix" name="person"></sl-icon>
-                          Demote to Member
-                        </sl-menu-item>`
-                      : nothing}
-                    ${user.role !== 'viewer'
-                      ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'viewer')}>
-                          <sl-icon slot="prefix" name="eye"></sl-icon>
-                          Set as Viewer
-                        </sl-menu-item>`
-                      : nothing}
-                    <sl-divider></sl-divider>
-                    ${user.status === 'active'
-                      ? html`<sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
-                          <sl-icon slot="prefix" name="slash-circle"></sl-icon>
-                          Suspend
-                        </sl-menu-item>`
-                      : html`<sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
-                          <sl-icon slot="prefix" name="check-circle"></sl-icon>
-                          Reactivate
-                        </sl-menu-item>`}
-                    <sl-divider></sl-divider>
-                    <sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
-                      <sl-icon slot="prefix" name="trash"></sl-icon>
-                      Delete
-                    </sl-menu-item>
-                  </sl-menu>
-                </sl-dropdown>
-              `}
-        </td>
-      </tr>
-    `;
-  }
-
-  private async loadAllowList(): Promise<void> {
-    this.allowListLoading = true;
-    try {
-      const response = await fetch('/api/v1/admin/allow-list', {
-        credentials: 'include',
-      });
-      if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
-      }
-      const data = (await response.json()) as {
-        items: AllowListEntry[];
-        totalCount: number;
-      };
-      this.allowListEntries = data.items || [];
-      this.allowListTotalCount = data.totalCount ?? 0;
-    } catch (err) {
-      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to load allow list');
-    } finally {
-      this.allowListLoading = false;
-    }
-  }
-
-  private async loadEmailDomains(): Promise<void> {
-    try {
-      const response = await fetch('/api/v1/admin/allow-list/domains', {
-        credentials: 'include',
-      });
-      if (response.ok) {
-        const data = (await response.json()) as { domains: string[] };
-        this.emailDomains = data.domains || [];
-      }
-    } catch {
-      // Non-critical, ignore
-    }
-  }
-
-  private async addToAllowList(): Promise<void> {
-    const email = this.addEmailValue.trim().toLowerCase();
+  private async inviteUser(): Promise<void> {
+    const email = this.inviteUserEmail.trim().toLowerCase();
     if (!email || !email.includes('@')) return;
 
-    this.addEmailInProgress = true;
+    this.inviteUserInProgress = true;
     try {
-      const response = await fetch('/api/v1/admin/allow-list', {
+      const response = await fetch('/api/v1/admin/users/invite', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, note: this.addEmailNote }),
+        body: JSON.stringify({ email, note: this.inviteUserNote }),
       });
+      if (response.status === 409) {
+        this.showFeedback('danger', 'User already exists.');
+        return;
+      }
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
-      this.showFeedback('success', `Added ${email} to the allow list.`);
-      this.showAddEmailDialog = false;
-      this.addEmailValue = '';
-      this.addEmailNote = '';
-      void this.loadAllowList();
-      // Immediately offer to generate an invite for the new member
-      this.openGenerateInviteForMember(email);
+      this.showFeedback('success', `Invited ${email}.`);
+      this.showInviteUserDialog = false;
+      this.inviteUserEmail = '';
+      this.inviteUserNote = '';
+      void this.loadUsers(
+        this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
+      );
     } catch (err) {
-      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to add email');
+      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to invite user');
     } finally {
-      this.addEmailInProgress = false;
+      this.inviteUserInProgress = false;
     }
   }
 
-  private async removeFromAllowList(email: string): Promise<void> {
-    try {
-      const response = await fetch(`/api/v1/admin/allow-list/${encodeURIComponent(email)}`, {
-        method: 'DELETE',
-        credentials: 'include',
-      });
-      if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
-      }
-      this.showFeedback('success', `Removed ${email} from the allow list.`);
-      void this.loadAllowList();
-    } catch (err) {
-      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to remove email');
-    }
-  }
-
-  private getAllowListInviteStatus(entry: AllowListEntry): string | null {
-    if (!entry.inviteId || !entry.inviteCodePrefix) return null;
-    if (entry.inviteRevoked) return 'revoked';
-    if (entry.inviteExpired) return 'expired';
-    if (entry.inviteMaxUses && entry.inviteMaxUses > 0
-        && entry.inviteUseCount !== undefined
-        && entry.inviteUseCount >= entry.inviteMaxUses) return 'exhausted';
-    return 'active';
-  }
-
-  private canGenerateInvite(entry: AllowListEntry): boolean {
-    const status = this.getAllowListInviteStatus(entry);
-    return status === null || status === 'expired' || status === 'revoked' || status === 'exhausted';
-  }
-
-  private openGenerateInviteForMember(email: string): void {
-    this.generateInviteForEmail = email;
-    this.createInviteMaxUses = 1;
-    this.createInviteNote = email;
-    this.createInviteExpiry = '24h';
-    this.showCreateInviteDialog = true;
-  }
-
-  private renderAllowListTab() {
-    if (this.allowListLoading) {
-      return this.renderLoading();
-    }
-
-    return html`
-      <div class="allow-list-header">
-        <span>${this.allowListTotalCount} member${this.allowListTotalCount !== 1 ? 's' : ''} on the allow list</span>
-        <div style="display: flex; gap: 0.5rem">
-          <sl-button size="small" variant="default" @click=${() => { this.showImportDialog = true; }}>
-            <sl-icon slot="prefix" name="upload"></sl-icon>
-            Import CSV
-          </sl-button>
-          <sl-button size="small" variant="primary" @click=${() => { this.showAddEmailDialog = true; this.loadEmailDomains(); }}>
-            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-            Add Member
-          </sl-button>
-        </div>
-      </div>
-
-      ${this.allowListEntries.length === 0
-        ? html`
-            <div class="empty-state">
-              <sl-icon name="shield-lock"></sl-icon>
-              <h2>No Members</h2>
-              <p>When invite-only mode is enabled, only emails on this list (and admin emails) can log in. Add a member and generate their invite link.</p>
-            </div>
-          `
-        : html`
-            <div class="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Email</th>
-                    <th>Invite</th>
-                    <th class="hide-mobile">Note</th>
-                    <th class="hide-mobile">Added</th>
-                    <th class="actions-cell"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${this.allowListEntries.map(
-                    (entry) => this.renderAllowListRow(entry),
-                  )}
-                </tbody>
-              </table>
-            </div>
-          `}
-    `;
-  }
-
-  private renderAllowListRow(entry: AllowListEntry) {
-    const inviteStatus = this.getAllowListInviteStatus(entry);
-    const canGenerate = this.canGenerateInvite(entry);
-
-    return html`
-      <tr>
-        <td>${entry.email}</td>
-        <td>
-          ${inviteStatus
-            ? html`<span class="invite-status ${inviteStatus}">${inviteStatus}</span>`
-            : html`<span class="meta-text">—</span>`}
-        </td>
-        <td class="hide-mobile"><span class="meta-text">${entry.note || '-'}</span></td>
-        <td class="hide-mobile"><span class="meta-text">${this.formatRelativeTime(entry.created)}</span></td>
-        <td class="actions-cell">
-          <sl-dropdown placement="bottom-end" hoist>
-            <sl-button slot="trigger" size="small" variant="text" caret>
-              <sl-icon name="three-dots-vertical"></sl-icon>
-            </sl-button>
-            <sl-menu>
-              ${canGenerate
-                ? html`<sl-menu-item @click=${() => this.openGenerateInviteForMember(entry.email)}>
-                    <sl-icon slot="prefix" name="send"></sl-icon>
-                    Generate Invite
-                  </sl-menu-item>`
-                : nothing}
-              ${inviteStatus === 'active' && entry.inviteId
-                ? html`<sl-menu-item @click=${() => this.revokeInvite(entry.inviteId!)}>
-                    <sl-icon slot="prefix" name="slash-circle"></sl-icon>
-                    Revoke Invite
-                  </sl-menu-item>`
-                : nothing}
-              ${canGenerate || inviteStatus === 'active' ? html`<sl-divider></sl-divider>` : nothing}
-              <sl-menu-item class="menu-item-danger" @click=${() => this.removeFromAllowList(entry.email)}>
-                <sl-icon slot="prefix" name="trash"></sl-icon>
-                Remove
-              </sl-menu-item>
-            </sl-menu>
-          </sl-dropdown>
-        </td>
-      </tr>
-    `;
-  }
-
-  private renderAddEmailDialog() {
-    if (!this.showAddEmailDialog) return nothing;
-
-    // Show domain suggestions when user has typed something but no @ yet, or partial domain
-    const val = this.addEmailValue.trim();
-    const atIdx = val.indexOf('@');
-    const showDomainSuggestions = this.emailDomains.length > 0 && val.length > 0 && (atIdx === -1 || (atIdx > 0 && atIdx === val.length - 1));
-    const username = atIdx > 0 ? val.substring(0, atIdx) : val;
-
-    return html`
-      <sl-dialog
-        label="Add Member"
-        open
-        @sl-request-close=${() => { if (!this.addEmailInProgress) this.showAddEmailDialog = false; }}
-      >
-        <div class="add-email-form">
-          <sl-input
-            label="Email address"
-            type="email"
-            placeholder="user@example.com"
-            .value=${this.addEmailValue}
-            @sl-input=${(e: Event) => { this.addEmailValue = (e.target as HTMLInputElement).value; }}
-            required
-          ></sl-input>
-          ${showDomainSuggestions ? html`
-            <div class="domain-suggestions">
-              <span class="domain-label">Suggested domains:</span>
-              ${this.emailDomains.slice(0, 5).map(domain => html`
-                <sl-tag
-                  size="small"
-                  pill
-                  style="cursor: pointer"
-                  @click=${() => { this.addEmailValue = `${username}@${domain}`; }}
-                >@${domain}</sl-tag>
-              `)}
-            </div>
-          ` : nothing}
-          <sl-input
-            label="Note (optional)"
-            placeholder="e.g., New hire, Q3 contractor"
-            .value=${this.addEmailNote}
-            @sl-input=${(e: Event) => { this.addEmailNote = (e.target as HTMLInputElement).value; }}
-          ></sl-input>
-        </div>
-        <sl-button
-          slot="footer"
-          variant="default"
-          ?disabled=${this.addEmailInProgress}
-          @click=${() => { this.showAddEmailDialog = false; }}
-        >Cancel</sl-button>
-        <sl-button
-          slot="footer"
-          variant="primary"
-          ?loading=${this.addEmailInProgress}
-          ?disabled=${!this.addEmailValue.trim().includes('@')}
-          @click=${() => this.addToAllowList()}
-        >Add</sl-button>
-      </sl-dialog>
-    `;
-  }
-
-  private renderConfirmDialog() {
-    const action = this.confirmAction;
-    if (!action) return nothing;
-    return html`
-      <sl-dialog
-        label=${action.title}
-        open
-        @sl-request-close=${() => { if (!this.actionInProgress) this.confirmAction = null; }}
-      >
-        <div class="confirm-body">
-          <div class="confirm-user">
-            <div class="user-avatar">
-              ${action.user.avatarUrl
-                ? html`<img src="${action.user.avatarUrl}" alt="${action.user.displayName}" />`
-                : this.getInitials(action.user.displayName || action.user.email)}
-            </div>
-            <div class="user-info">
-              <span class="user-name">${action.user.displayName || action.user.email}</span>
-              <span class="user-email">${action.user.email}</span>
-            </div>
-          </div>
-          <p>${action.message}</p>
-        </div>
-        <sl-button
-          slot="footer"
-          variant="default"
-          ?disabled=${this.actionInProgress}
-          @click=${() => { this.confirmAction = null; }}
-        >Cancel</sl-button>
-        <sl-button
-          slot="footer"
-          variant=${action.variant}
-          ?loading=${this.actionInProgress}
-          @click=${() => this.executeConfirmedAction()}
-        >${action.confirmLabel}</sl-button>
-      </sl-dialog>
-    `;
-  }
-
-  private renderImportDialog() {
-    if (!this.showImportDialog) return nothing;
-    return html`
-      <sl-dialog
-        label="Import Emails from CSV"
-        open
-        @sl-request-close=${() => { if (!this.importInProgress) this.showImportDialog = false; }}
-      >
-        <div class="import-form">
-          <p style="margin: 0 0 1rem; font-size: 0.875rem; color: var(--scion-text-muted)">
-            Upload a CSV file with one email per line. An optional second column can contain notes.
-          </p>
-          <input
-            type="file"
-            accept=".csv,.txt"
-            id="import-file-input"
-            style="margin-bottom: 1rem"
-          />
-        </div>
-        <sl-button
-          slot="footer"
-          variant="default"
-          ?disabled=${this.importInProgress}
-          @click=${() => { this.showImportDialog = false; }}
-        >Cancel</sl-button>
-        <sl-button
-          slot="footer"
-          variant="primary"
-          ?loading=${this.importInProgress}
-          @click=${() => this.importCSV()}
-        >Import</sl-button>
-      </sl-dialog>
-    `;
-  }
+  // ==================== Bulk Import ====================
 
   private async importCSV(): Promise<void> {
     const input = this.shadowRoot?.querySelector('#import-file-input') as HTMLInputElement;
@@ -1522,7 +1031,7 @@ export class ScionPageAdminUsers extends LitElement {
 
     this.importInProgress = true;
     try {
-      const response = await fetch('/api/v1/admin/allow-list/import', {
+      const response = await fetch('/api/v1/admin/users/invite/bulk', {
         method: 'POST',
         credentials: 'include',
         body: formData,
@@ -1530,10 +1039,15 @@ export class ScionPageAdminUsers extends LitElement {
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
-      const result = (await response.json()) as { added: number; skipped: number; total: number };
-      this.showFeedback('success', `Import complete: ${result.added} added, ${result.skipped} skipped.`);
+      const result = (await response.json()) as { invited: number; skipped: number; total: number };
+      this.showFeedback(
+        'success',
+        `Import complete: ${result.invited} invited, ${result.skipped} skipped.`
+      );
       this.showImportDialog = false;
-      void this.loadAllowList();
+      void this.loadUsers(
+        this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
+      );
     } catch (err) {
       this.showFeedback('danger', err instanceof Error ? err.message : 'Import failed');
     } finally {
@@ -1541,7 +1055,7 @@ export class ScionPageAdminUsers extends LitElement {
     }
   }
 
-  // ==================== Invites Tab ====================
+  // ==================== Invite Codes Tab ====================
 
   private async loadInvites(): Promise<void> {
     this.invitesLoading = true;
@@ -1580,9 +1094,6 @@ export class ScionPageAdminUsers extends LitElement {
         maxUses: this.createInviteMaxUses,
         note: this.createInviteNote,
       };
-      if (this.generateInviteForEmail) {
-        body.email = this.generateInviteForEmail;
-      }
       const response = await fetch('/api/v1/admin/invites', {
         method: 'POST',
         credentials: 'include',
@@ -1598,12 +1109,7 @@ export class ScionPageAdminUsers extends LitElement {
       this.createInviteExpiry = '1h';
       this.createInviteMaxUses = 1;
       this.createInviteNote = '';
-      this.generateInviteForEmail = null;
       void this.loadInvites();
-      // Also refresh allow list to show updated inline invite status
-      if (this.activeTab === 'allow-list') {
-        void this.loadAllowList();
-      }
     } catch (err) {
       this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to create invite');
     } finally {
@@ -1622,10 +1128,6 @@ export class ScionPageAdminUsers extends LitElement {
       }
       this.showFeedback('success', 'Invite code revoked.');
       void this.loadInvites();
-      // Also refresh allow list to update inline invite status
-      if (this.activeTab === 'allow-list') {
-        void this.loadAllowList();
-      }
     } catch (err) {
       this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to revoke invite');
     }
@@ -1652,7 +1154,9 @@ export class ScionPageAdminUsers extends LitElement {
     try {
       await navigator.clipboard.writeText(this.createdInviteResult.inviteUrl);
       this.inviteCopied = true;
-      setTimeout(() => { this.inviteCopied = false; }, 2000);
+      setTimeout(() => {
+        this.inviteCopied = false;
+      }, 2000);
     } catch {
       const input = document.createElement('input');
       input.value = this.createdInviteResult.inviteUrl;
@@ -1661,9 +1165,532 @@ export class ScionPageAdminUsers extends LitElement {
       document.execCommand('copy');
       document.body.removeChild(input);
       this.inviteCopied = true;
-      setTimeout(() => { this.inviteCopied = false; }, 2000);
+      setTimeout(() => {
+        this.inviteCopied = false;
+      }, 2000);
     }
   }
+
+  // ==================== Render Methods ====================
+
+  override render() {
+    return html`
+      <div class="header">
+        <h1>Users</h1>
+      </div>
+
+      ${this.actionFeedback
+        ? html`
+            <sl-alert
+              class="feedback-alert"
+              variant=${this.actionFeedback.variant}
+              open
+              closable
+              duration="5000"
+              @sl-after-hide=${() => {
+                this.actionFeedback = null;
+              }}
+            >
+              <sl-icon
+                slot="icon"
+                name=${this.actionFeedback.variant === 'success'
+                  ? 'check-circle'
+                  : 'exclamation-triangle'}
+              ></sl-icon>
+              ${this.actionFeedback.message}
+            </sl-alert>
+          `
+        : nothing}
+
+      <div class="tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected=${this.activeTab === 'users'}
+          aria-controls="panel-users"
+          class="tab-btn ${this.activeTab === 'users' ? 'active' : ''}"
+          @click=${() => {
+            this.activeTab = 'users';
+          }}
+        >
+          Users ${!this.loading ? `(${this.totalCount})` : ''}
+        </button>
+        <button
+          role="tab"
+          aria-selected=${this.activeTab === 'invites'}
+          aria-controls="panel-invites"
+          class="tab-btn ${this.activeTab === 'invites' ? 'active' : ''}"
+          @click=${() => {
+            this.activeTab = 'invites';
+            void this.loadInvites();
+          }}
+        >
+          Invite Codes ${this.invitesTotalCount > 0 ? `(${this.invitesTotalCount})` : ''}
+        </button>
+      </div>
+
+      ${this.activeTab === 'users'
+        ? this.loading
+          ? this.renderLoading()
+          : this.error
+            ? this.renderError()
+            : this.renderUsers()
+        : this.renderInvitesTab()}
+      ${this.renderConfirmDialog()} ${this.renderInviteUserDialog()} ${this.renderImportDialog()}
+      ${this.renderCreateInviteDialog()} ${this.renderInviteRevealDialog()}
+    `;
+  }
+
+  private renderLoading() {
+    return html`
+      <div class="loading-state">
+        <sl-spinner></sl-spinner>
+        <p>Loading users...</p>
+      </div>
+    `;
+  }
+
+  private renderError() {
+    return html`
+      <div class="error-state">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        <h2>Failed to Load Users</h2>
+        <p>There was a problem connecting to the API.</p>
+        <div class="error-details">${this.error}</div>
+        <sl-button variant="primary" @click=${() => this.loadUsers()}>
+          <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+          Retry
+        </sl-button>
+      </div>
+    `;
+  }
+
+  private renderStatusFilter() {
+    const filters: { label: string; value: StatusFilter }[] = [
+      { label: 'All', value: 'all' },
+      { label: 'Invited', value: 'invited' },
+      { label: 'Active', value: 'active' },
+      { label: 'Suspended', value: 'suspended' },
+    ];
+    return html`
+      <sl-select
+        size="small"
+        value=${this.statusFilter}
+        @sl-change=${(e: Event) => {
+          this.setStatusFilter((e.target as HTMLSelectElement).value as StatusFilter);
+        }}
+        style="min-width: 8rem"
+      >
+        ${filters.map((f) => html`<sl-option value=${f.value}>${f.label}</sl-option>`)}
+      </sl-select>
+    `;
+  }
+
+  private renderUsers() {
+    if (this.users.length === 0 && this.statusFilter === 'all') {
+      return html`
+        <div class="empty-state">
+          <sl-icon name="people"></sl-icon>
+          <h2>No Users Found</h2>
+          <p>There are no users registered in the system. Invite users to get started.</p>
+          <sl-button
+            variant="primary"
+            style="margin-top: 1rem"
+            @click=${() => {
+              this.showInviteUserDialog = true;
+            }}
+          >
+            <sl-icon slot="prefix" name="person-plus"></sl-icon>
+            Invite User
+          </sl-button>
+        </div>
+      `;
+    }
+
+    const hasPagination = this.totalCount > PAGE_SIZE;
+
+    return html`
+      <div class="users-toolbar">
+        <div class="users-toolbar-left">
+          ${this.renderStatusFilter()}
+          <span class="meta-text">${this.totalCount} user${this.totalCount !== 1 ? 's' : ''}</span>
+        </div>
+        <div class="users-toolbar-right">
+          <sl-button
+            size="small"
+            variant="default"
+            @click=${() => {
+              this.showImportDialog = true;
+            }}
+          >
+            <sl-icon slot="prefix" name="upload"></sl-icon>
+            Import CSV
+          </sl-button>
+          <sl-button
+            size="small"
+            variant="primary"
+            @click=${() => {
+              this.showInviteUserDialog = true;
+            }}
+          >
+            <sl-icon slot="prefix" name="person-plus"></sl-icon>
+            Invite User
+          </sl-button>
+        </div>
+      </div>
+
+      ${this.users.length === 0
+        ? html`
+            <div class="empty-state">
+              <sl-icon name="people"></sl-icon>
+              <h2>No Users Found</h2>
+              <p>No users match the selected filter.</p>
+            </div>
+          `
+        : html`
+            <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th
+                      class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
+                      @click=${() => this.toggleSort('name')}
+                    >
+                      User
+                      <span class="sort-indicator">${this.sortIndicator('name')}</span>
+                    </th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th class="hide-mobile">Last Login</th>
+                    <th
+                      class="hide-mobile sortable ${this.sortField === 'created' ? 'sorted' : ''}"
+                      @click=${() => this.toggleSort('created')}
+                    >
+                      Created
+                      <span class="sort-indicator">${this.sortIndicator('created')}</span>
+                    </th>
+                    <th class="actions-cell"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${this.users.map((user) => this.renderUserRow(user))}
+                </tbody>
+              </table>
+              ${hasPagination ? this.renderPagination() : ''}
+            </div>
+          `}
+    `;
+  }
+
+  private renderPagination() {
+    return html`
+      <div class="pagination">
+        <span class="pagination-info">
+          Showing ${this.rangeStart}-${this.rangeEnd} of ${this.totalCount}
+        </span>
+        <div class="pagination-controls">
+          <sl-button
+            size="small"
+            variant="default"
+            ?disabled=${this.currentPage <= 1}
+            @click=${() => this.goToPrevPage()}
+          >
+            <sl-icon slot="prefix" name="chevron-left"></sl-icon>
+            Previous
+          </sl-button>
+          <span class="page-indicator">Page ${this.currentPage} of ${this.totalPages}</span>
+          <sl-button
+            size="small"
+            variant="default"
+            ?disabled=${!this.nextCursor}
+            @click=${() => this.goToNextPage()}
+          >
+            Next
+            <sl-icon slot="suffix" name="chevron-right"></sl-icon>
+          </sl-button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderUserRow(user: AdminUser) {
+    const self = this.isSelf(user);
+    const isInvited = user.status === 'invited';
+    return html`
+      <tr>
+        <td>
+          <div class="user-identity">
+            ${isInvited
+              ? html`
+                  <div class="user-avatar invited">
+                    <sl-icon name="envelope"></sl-icon>
+                  </div>
+                `
+              : html`
+                  <div class="user-avatar">
+                    ${user.avatarUrl
+                      ? html`<img src="${user.avatarUrl}" alt="${user.displayName}" />`
+                      : this.getInitials(user.displayName || user.email)}
+                  </div>
+                `}
+            <div class="user-info">
+              <span class="user-name"
+                >${isInvited ? user.email : user.displayName || user.email}</span
+              >
+              ${!isInvited && user.displayName
+                ? html`<span class="user-email">${user.email}</span>`
+                : nothing}
+              ${isInvited && user.invitedBy
+                ? html`<span class="user-invited-by">Invited by ${user.invitedBy}</span>`
+                : nothing}
+            </div>
+          </div>
+        </td>
+        <td>
+          <span class="role-badge ${user.role}">${user.role}</span>
+        </td>
+        <td>
+          <span class="status-badge ${user.status}">${user.status}</span>
+        </td>
+        <td class="hide-mobile">
+          <span class="meta-text"
+            >${isInvited ? '—' : this.formatRelativeTime(user.lastLogin)}</span
+          >
+        </td>
+        <td class="hide-mobile">
+          <span class="meta-text">${this.formatRelativeTime(user.created)}</span>
+        </td>
+        <td class="actions-cell">${self ? nothing : this.renderUserActions(user)}</td>
+      </tr>
+    `;
+  }
+
+  private renderUserActions(user: AdminUser) {
+    if (user.status === 'invited') {
+      // Invited users: only Remove action
+      return html`
+        <sl-dropdown placement="bottom-end" hoist>
+          <sl-button slot="trigger" size="small" variant="text" caret>
+            <sl-icon name="three-dots-vertical"></sl-icon>
+          </sl-button>
+          <sl-menu>
+            <sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
+              <sl-icon slot="prefix" name="trash"></sl-icon>
+              Remove
+            </sl-menu-item>
+          </sl-menu>
+        </sl-dropdown>
+      `;
+    }
+
+    if (user.status === 'suspended') {
+      // Suspended users: Reactivate, Delete
+      return html`
+        <sl-dropdown placement="bottom-end" hoist>
+          <sl-button slot="trigger" size="small" variant="text" caret>
+            <sl-icon name="three-dots-vertical"></sl-icon>
+          </sl-button>
+          <sl-menu>
+            <sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
+              <sl-icon slot="prefix" name="check-circle"></sl-icon>
+              Reactivate
+            </sl-menu-item>
+            <sl-divider></sl-divider>
+            <sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
+              <sl-icon slot="prefix" name="trash"></sl-icon>
+              Delete
+            </sl-menu-item>
+          </sl-menu>
+        </sl-dropdown>
+      `;
+    }
+
+    // Active users: Change role, Suspend, Delete
+    return html`
+      <sl-dropdown placement="bottom-end" hoist>
+        <sl-button slot="trigger" size="small" variant="text" caret>
+          <sl-icon name="three-dots-vertical"></sl-icon>
+        </sl-button>
+        <sl-menu>
+          ${user.role !== 'admin'
+            ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'admin')}>
+                <sl-icon slot="prefix" name="shield-check"></sl-icon>
+                Promote to Admin
+              </sl-menu-item>`
+            : nothing}
+          ${user.role === 'admin'
+            ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'member')}>
+                <sl-icon slot="prefix" name="person"></sl-icon>
+                Demote to Member
+              </sl-menu-item>`
+            : nothing}
+          ${user.role !== 'viewer'
+            ? html`<sl-menu-item @click=${() => this.promptChangeRole(user, 'viewer')}>
+                <sl-icon slot="prefix" name="eye"></sl-icon>
+                Set as Viewer
+              </sl-menu-item>`
+            : nothing}
+          <sl-divider></sl-divider>
+          <sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
+            <sl-icon slot="prefix" name="slash-circle"></sl-icon>
+            Suspend
+          </sl-menu-item>
+          <sl-divider></sl-divider>
+          <sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
+            <sl-icon slot="prefix" name="trash"></sl-icon>
+            Delete
+          </sl-menu-item>
+        </sl-menu>
+      </sl-dropdown>
+    `;
+  }
+
+  private renderConfirmDialog() {
+    const action = this.confirmAction;
+    if (!action) return nothing;
+    return html`
+      <sl-dialog
+        label=${action.title}
+        open
+        @sl-request-close=${() => {
+          if (!this.actionInProgress) this.confirmAction = null;
+        }}
+      >
+        <div class="confirm-body">
+          <div class="confirm-user">
+            ${action.user.status === 'invited'
+              ? html`<div class="user-avatar invited"><sl-icon name="envelope"></sl-icon></div>`
+              : html`
+                  <div class="user-avatar">
+                    ${action.user.avatarUrl
+                      ? html`<img
+                          src="${action.user.avatarUrl}"
+                          alt="${action.user.displayName}"
+                        />`
+                      : this.getInitials(action.user.displayName || action.user.email)}
+                  </div>
+                `}
+            <div class="user-info">
+              <span class="user-name">${action.user.displayName || action.user.email}</span>
+              <span class="user-email">${action.user.email}</span>
+            </div>
+          </div>
+          <p>${action.message}</p>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.actionInProgress}
+          @click=${() => {
+            this.confirmAction = null;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant=${action.variant}
+          ?loading=${this.actionInProgress}
+          @click=${() => this.executeConfirmedAction()}
+          >${action.confirmLabel}</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+
+  private renderInviteUserDialog() {
+    if (!this.showInviteUserDialog) return nothing;
+
+    return html`
+      <sl-dialog
+        label="Invite User"
+        open
+        @sl-request-close=${() => {
+          if (!this.inviteUserInProgress) this.showInviteUserDialog = false;
+        }}
+      >
+        <div class="invite-form">
+          <sl-input
+            label="Email address"
+            type="email"
+            placeholder="user@example.com"
+            .value=${this.inviteUserEmail}
+            @sl-input=${(e: Event) => {
+              this.inviteUserEmail = (e.target as HTMLInputElement).value;
+            }}
+            required
+          ></sl-input>
+          <sl-input
+            label="Note (optional)"
+            placeholder="e.g., New hire, Q3 contractor"
+            .value=${this.inviteUserNote}
+            @sl-input=${(e: Event) => {
+              this.inviteUserNote = (e.target as HTMLInputElement).value;
+            }}
+          ></sl-input>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.inviteUserInProgress}
+          @click=${() => {
+            this.showInviteUserDialog = false;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.inviteUserInProgress}
+          ?disabled=${!this.inviteUserEmail.trim().includes('@')}
+          @click=${() => this.inviteUser()}
+          >Invite User</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+
+  private renderImportDialog() {
+    if (!this.showImportDialog) return nothing;
+    return html`
+      <sl-dialog
+        label="Import Users from CSV"
+        open
+        @sl-request-close=${() => {
+          if (!this.importInProgress) this.showImportDialog = false;
+        }}
+      >
+        <div class="import-form">
+          <p style="margin: 0 0 1rem; font-size: 0.875rem; color: var(--scion-text-muted)">
+            Upload a CSV file with one email per line. An optional second column can contain notes.
+            Users will be created with <strong>invited</strong> status.
+          </p>
+          <input
+            type="file"
+            accept=".csv,.txt"
+            id="import-file-input"
+            style="margin-bottom: 1rem"
+          />
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.importInProgress}
+          @click=${() => {
+            this.showImportDialog = false;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.importInProgress}
+          @click=${() => this.importCSV()}
+          >Import</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+
+  // ==================== Invite Codes Tab Rendering ====================
 
   private renderInvitesTab() {
     if (this.invitesLoading) {
@@ -1671,11 +1698,17 @@ export class ScionPageAdminUsers extends LitElement {
     }
 
     return html`
-      <div class="allow-list-header">
-        <span>${this.invitesTotalCount} invite${this.invitesTotalCount !== 1 ? 's' : ''}</span>
-        <sl-button size="small" variant="primary" @click=${() => { this.showCreateInviteDialog = true; }}>
+      <div class="invites-header">
+        <span>${this.invitesTotalCount} invite code${this.invitesTotalCount !== 1 ? 's' : ''}</span>
+        <sl-button
+          size="small"
+          variant="primary"
+          @click=${() => {
+            this.showCreateInviteDialog = true;
+          }}
+        >
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-          Create Invite
+          Create Invite Code
         </sl-button>
       </div>
 
@@ -1711,9 +1744,7 @@ export class ScionPageAdminUsers extends LitElement {
 
   private renderInviteRow(invite: InviteCodeEntry) {
     const status = this.getInviteStatus(invite);
-    const uses = invite.maxUses > 0
-      ? `${invite.useCount}/${invite.maxUses}`
-      : `${invite.useCount}`;
+    const uses = invite.maxUses > 0 ? `${invite.useCount}/${invite.maxUses}` : `${invite.useCount}`;
     return html`
       <tr>
         <td>
@@ -1737,10 +1768,10 @@ export class ScionPageAdminUsers extends LitElement {
             <sl-menu>
               ${status === 'active'
                 ? html`<sl-menu-item @click=${() => this.revokeInvite(invite.id)}>
-                    <sl-icon slot="prefix" name="slash-circle"></sl-icon>
-                    Revoke
-                  </sl-menu-item>
-                  <sl-divider></sl-divider>`
+                      <sl-icon slot="prefix" name="slash-circle"></sl-icon>
+                      Revoke
+                    </sl-menu-item>
+                    <sl-divider></sl-divider>`
                 : nothing}
               <sl-menu-item class="menu-item-danger" @click=${() => this.deleteInvite(invite.id)}>
                 <sl-icon slot="prefix" name="trash"></sl-icon>
@@ -1755,34 +1786,30 @@ export class ScionPageAdminUsers extends LitElement {
 
   private renderCreateInviteDialog() {
     if (!this.showCreateInviteDialog) return nothing;
-    const dialogLabel = this.generateInviteForEmail
-      ? `Generate Invite`
-      : 'Create Invite Code';
     return html`
       <sl-dialog
-        label=${dialogLabel}
+        label="Create Invite Code"
         open
-        @sl-request-close=${() => { if (!this.createInviteInProgress) { this.showCreateInviteDialog = false; this.generateInviteForEmail = null; } }}
+        @sl-request-close=${() => {
+          if (!this.createInviteInProgress) this.showCreateInviteDialog = false;
+        }}
       >
         <div class="create-invite-form">
-          ${this.generateInviteForEmail
-            ? html`<p style="margin: 0; font-size: 0.875rem; color: var(--scion-text-muted, #64748b)">
-                Generating invite for <strong style="color: var(--scion-text, #1e293b)">${this.generateInviteForEmail}</strong>
-              </p>`
-            : nothing}
           <sl-select
             label="Expiration"
             .value=${this.createInviteExpiry}
-            @sl-change=${(e: Event) => { this.createInviteExpiry = (e.target as HTMLSelectElement).value; }}
+            @sl-change=${(e: Event) => {
+              this.createInviteExpiry = (e.target as HTMLSelectElement).value;
+            }}
           >
-            ${EXPIRY_PRESETS.map((p) => html`
-              <sl-option value=${p.value}>${p.label}</sl-option>
-            `)}
+            ${EXPIRY_PRESETS.map((p) => html` <sl-option value=${p.value}>${p.label}</sl-option> `)}
           </sl-select>
           <sl-select
             label="Max uses"
             .value=${String(this.createInviteMaxUses)}
-            @sl-change=${(e: Event) => { this.createInviteMaxUses = parseInt((e.target as HTMLSelectElement).value, 10); }}
+            @sl-change=${(e: Event) => {
+              this.createInviteMaxUses = parseInt((e.target as HTMLSelectElement).value, 10);
+            }}
           >
             <sl-option value="1">Single use</sl-option>
             <sl-option value="5">5 uses</sl-option>
@@ -1794,21 +1821,27 @@ export class ScionPageAdminUsers extends LitElement {
             label="Note (optional)"
             placeholder="e.g., Workshop, new team member"
             .value=${this.createInviteNote}
-            @sl-input=${(e: Event) => { this.createInviteNote = (e.target as HTMLInputElement).value; }}
+            @sl-input=${(e: Event) => {
+              this.createInviteNote = (e.target as HTMLInputElement).value;
+            }}
           ></sl-input>
         </div>
         <sl-button
           slot="footer"
           variant="default"
           ?disabled=${this.createInviteInProgress}
-          @click=${() => { this.showCreateInviteDialog = false; this.generateInviteForEmail = null; }}
-        >Cancel</sl-button>
+          @click=${() => {
+            this.showCreateInviteDialog = false;
+          }}
+          >Cancel</sl-button
+        >
         <sl-button
           slot="footer"
           variant="primary"
           ?loading=${this.createInviteInProgress}
           @click=${() => this.createInvite()}
-        >${this.generateInviteForEmail ? 'Generate' : 'Create'}</sl-button>
+          >Create</sl-button
+        >
       </sl-dialog>
     `;
   }
@@ -1819,12 +1852,19 @@ export class ScionPageAdminUsers extends LitElement {
       <sl-dialog
         label="Invite Created"
         open
-        @sl-request-close=${() => { this.createdInviteResult = null; this.inviteCopied = false; }}
+        @sl-request-close=${() => {
+          this.createdInviteResult = null;
+          this.inviteCopied = false;
+        }}
       >
         <div class="reveal-code">
-          <p style="margin: 0; font-size: 0.875rem">Your invite link has been created. Copy it now — it will not be shown again.</p>
+          <p style="margin: 0; font-size: 0.875rem">
+            Your invite link has been created. Copy it now — it will not be shown again.
+          </p>
           <div>
-            <label style="font-size: 0.75rem; font-weight: 600; color: var(--scion-text-muted)">Invite Link</label>
+            <label style="font-size: 0.75rem; font-weight: 600; color: var(--scion-text-muted)"
+              >Invite Link</label
+            >
             <div class="link-display">${this.createdInviteResult.inviteUrl}</div>
           </div>
           <div class="reveal-warning">
@@ -1834,13 +1874,13 @@ export class ScionPageAdminUsers extends LitElement {
         <sl-button
           slot="footer"
           variant="default"
-          @click=${() => { this.createdInviteResult = null; this.inviteCopied = false; }}
-        >Close</sl-button>
-        <sl-button
-          slot="footer"
-          variant="primary"
-          @click=${() => this.copyInviteLink()}
+          @click=${() => {
+            this.createdInviteResult = null;
+            this.inviteCopied = false;
+          }}
+          >Close</sl-button
         >
+        <sl-button slot="footer" variant="primary" @click=${() => this.copyInviteLink()}>
           <sl-icon slot="prefix" name=${this.inviteCopied ? 'check' : 'clipboard'}></sl-icon>
           ${this.inviteCopied ? 'Copied!' : 'Copy Link'}
         </sl-button>
