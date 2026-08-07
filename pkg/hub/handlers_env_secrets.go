@@ -964,23 +964,8 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 
 	ctx := r.Context()
 
-	// Agent-only: require agent identity from JWT.
-	agentIdent := GetAgentIdentityFromContext(ctx)
-	if agentIdent == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "This endpoint requires agent authentication", nil)
-		return
-	}
-
-	// The agentID in the URL path must match the JWT subject.
-	if agentIdent.ID() != agentID {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token does not match the agent ID in the URL", nil)
-		return
-	}
-
-	// Extract project ID from agent token claims.
-	projectID := agentIdent.ProjectID()
-	if projectID == "" {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token lacks project context", nil)
+	projectID, ok := s.validateAgentSecretAccess(w, r, agentID)
+	if !ok {
 		return
 	}
 
@@ -1105,39 +1090,55 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	}
 }
 
-// agentGetSecret handles GET /api/v1/agents/{agentID}/secrets/{key}.
-// Returns the secret value (base64-encoded) along with type and target metadata.
-func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID, key string) {
+// validateAgentSecretAccess checks that the request is from an authenticated agent
+// whose JWT subject matches the agentID in the URL, and extracts the project ID.
+// On failure it writes an HTTP error response and returns ("", false).
+func (s *Server) validateAgentSecretAccess(w http.ResponseWriter, r *http.Request, agentID string) (projectID string, ok bool) {
 	ctx := r.Context()
 
 	// Agent-only: require agent identity from JWT.
 	agentIdent := GetAgentIdentityFromContext(ctx)
 	if agentIdent == nil {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "This endpoint requires agent authentication", nil)
-		return
+		return "", false
 	}
 
 	// The agentID in the URL path must match the JWT subject.
 	if agentIdent.ID() != agentID {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token does not match the agent ID in the URL", nil)
-		return
+		return "", false
 	}
 
 	// Extract project ID from agent token claims.
-	projectID := agentIdent.ProjectID()
+	projectID = agentIdent.ProjectID()
 	if projectID == "" {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token lacks project context", nil)
+		return "", false
+	}
+
+	return projectID, true
+}
+
+// agentGetSecret handles GET /api/v1/agents/{agentID}/secrets/{key}.
+// Returns the secret value (base64-encoded) along with type and target metadata.
+func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID, key string) {
+	ctx := r.Context()
+
+	projectID, ok := s.validateAgentSecretAccess(w, r, agentID)
+	if !ok {
+		LogAgentSecretRead(ctx, s.auditLogger, agentID, "", key, false, "auth failed")
 		return
 	}
 
 	// Retrieve the secret including its value.
 	secretVal, err := s.secretBackend.Get(ctx, key, store.ScopeProject, projectID)
 	if err != nil {
+		LogAgentSecretRead(ctx, s.auditLogger, agentID, projectID, key, false, err.Error())
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Audit log the read.
+	// Audit log the successful read.
 	LogAgentSecretRead(ctx, s.auditLogger, agentID, projectID, key, true, "")
 
 	writeJSON(w, http.StatusOK, AgentGetSecretResponse{
@@ -1153,23 +1154,8 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentID string) {
 	ctx := r.Context()
 
-	// Agent-only: require agent identity from JWT.
-	agentIdent := GetAgentIdentityFromContext(ctx)
-	if agentIdent == nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "This endpoint requires agent authentication", nil)
-		return
-	}
-
-	// The agentID in the URL path must match the JWT subject.
-	if agentIdent.ID() != agentID {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token does not match the agent ID in the URL", nil)
-		return
-	}
-
-	// Extract project ID from agent token claims.
-	projectID := agentIdent.ProjectID()
-	if projectID == "" {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token lacks project context", nil)
+	projectID, ok := s.validateAgentSecretAccess(w, r, agentID)
+	if !ok {
 		return
 	}
 
