@@ -363,7 +363,7 @@ func TestStreamTaskEvents(t *testing.T) {
 		Final:   true,
 	})
 
-	ch := streamTaskEvents(ctx, store, "task-1", 0, 10)
+	ch := streamTaskEvents(ctx, store, "task-1", 0, 10, nil)
 
 	// Should receive the status event.
 	select {
@@ -413,7 +413,7 @@ func TestStreamTaskEvents_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Start streaming with no events — will poll indefinitely.
-	ch := streamTaskEvents(ctx, store, "task-no-events", 0, 10)
+	ch := streamTaskEvents(ctx, store, "task-no-events", 0, 10, nil)
 
 	// Cancel should cause the channel to close.
 	cancel()

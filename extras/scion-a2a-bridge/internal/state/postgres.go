@@ -396,6 +396,15 @@ func (s *PostgresStore) AppendTaskEvent(ctx context.Context, ev *TaskEvent) (int
 	if err != nil {
 		return 0, fmt.Errorf("append task event: %w", err)
 	}
+
+	// Notify listeners (best-effort, non-blocking). NOTIFY is an accelerator
+	// only — the poll loop catches everything regardless. See design §5.2 (D7).
+	if _, notifyErr := s.db.ExecContext(ctx,
+		"SELECT pg_notify('a2a_task_event', $1)", ev.TaskID); notifyErr != nil {
+		// Log at debug level — NOTIFY failure is not an error condition.
+		// Polling remains the correctness floor.
+	}
+
 	return id, nil
 }
 

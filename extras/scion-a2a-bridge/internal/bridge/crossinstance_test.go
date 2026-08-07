@@ -58,7 +58,7 @@ func TestCrossInstanceCorrelation(t *testing.T) {
 	// 3. Start a polling reader on "instance A" (simulating blocking read).
 	pollCtx, pollCancel := context.WithCancel(ctx)
 	defer pollCancel()
-	eventsCh := streamTaskEvents(pollCtx, store, taskID, 0, 10)
+	eventsCh := streamTaskEvents(pollCtx, store, taskID, 0, 10, nil)
 
 	// 4. Simulate Publish on "instance B" — write event to the store directly.
 	time.Sleep(50 * time.Millisecond) // ensure the reader is polling
@@ -129,7 +129,7 @@ func TestCrossInstanceSSEPath(t *testing.T) {
 	session := NewStreamSession(taskID, 0, store)
 	pollCtx, pollCancel := context.WithCancel(ctx)
 	defer pollCancel()
-	ch := streamTaskEvents(pollCtx, store, taskID, session.Cursor(), 10)
+	ch := streamTaskEvents(pollCtx, store, taskID, session.Cursor(), 10, nil)
 
 	// Instance B writes multiple events.
 	for i := 0; i < 3; i++ {

@@ -1093,7 +1093,7 @@ func TestTerminalStateWritesFinalEvent(t *testing.T) {
 	// Start polling the event log.
 	pollCtx, pollCancel := context.WithCancel(context.Background())
 	defer pollCancel()
-	ch := streamTaskEvents(pollCtx, store, taskID, 0, 10)
+	ch := streamTaskEvents(pollCtx, store, taskID, 0, 10, nil)
 
 	// Send a terminal state-change.
 	completedMsg := &messages.StructuredMessage{
@@ -1145,7 +1145,7 @@ func TestTerminalStateFailedWritesFinalEvent(t *testing.T) {
 
 	pollCtx, pollCancel := context.WithCancel(context.Background())
 	defer pollCancel()
-	ch := streamTaskEvents(pollCtx, store, taskID, 0, 10)
+	ch := streamTaskEvents(pollCtx, store, taskID, 0, 10, nil)
 
 	failMsg := &messages.StructuredMessage{
 		Version:   1,

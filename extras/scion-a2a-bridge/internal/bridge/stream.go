@@ -143,8 +143,9 @@ func (ss *StreamSession) Cursor() int64 {
 
 // streamTaskEvents polls the event log for a task and sends StreamEvents on
 // the returned channel. The channel is closed when a final event is read,
-// the context is cancelled, or an error occurs.
-func streamTaskEvents(ctx context.Context, store state.Store, taskID string, cursor int64, batchLimit int) <-chan StreamEvent {
+// the context is cancelled, or an error occurs. If a Notifier is provided
+// (non-nil), notifications accelerate the poll loop by waking it immediately.
+func streamTaskEvents(ctx context.Context, store state.Store, taskID string, cursor int64, batchLimit int, notifier *Notifier) <-chan StreamEvent {
 	ch := make(chan StreamEvent, 16)
 	go func() {
 		defer close(ch)
@@ -152,6 +153,14 @@ func streamTaskEvents(ctx context.Context, store state.Store, taskID string, cur
 		interval := 100 * time.Millisecond
 		pollTimer := time.NewTimer(interval)
 		defer pollTimer.Stop()
+
+		// Register for NOTIFY acceleration (no-op if notifier is nil).
+		var notifyCh <-chan struct{}
+		var cleanup func()
+		if notifier != nil {
+			notifyCh, cleanup = notifier.Register(taskID)
+			defer cleanup()
+		}
 
 		for {
 			events, err := session.ReadNext(ctx, batchLimit)
@@ -190,6 +199,16 @@ func streamTaskEvents(ctx context.Context, store state.Store, taskID string, cur
 			}
 
 			select {
+			case <-notifyCh:
+				// NOTIFY woke us — immediately re-read (reset backoff).
+				interval = 100 * time.Millisecond
+				if !pollTimer.Stop() {
+					select {
+					case <-pollTimer.C:
+					default:
+					}
+				}
+				pollTimer.Reset(interval)
 			case <-pollTimer.C:
 				interval = backoffInterval(interval)
 				pollTimer.Reset(interval)
@@ -295,7 +314,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 
 	// Start polling the event log for this task.
 	pollCtx, pollCancel := context.WithCancel(b.shutdownCtx)
-	events := streamTaskEvents(pollCtx, b.store, taskID, 0, 10)
+	events := streamTaskEvents(pollCtx, b.store, taskID, 0, 10, b.notifier)
 
 	scionMsg := TranslateA2AToScion(parts)
 	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
@@ -391,7 +410,7 @@ func (b *Bridge) SubscribeToTaskFromCursor(ctx context.Context, taskID string, c
 	}
 
 	pollCtx, pollCancel := context.WithCancel(ctx)
-	events := streamTaskEvents(pollCtx, b.store, taskID, cursor, 10)
+	events := streamTaskEvents(pollCtx, b.store, taskID, cursor, 10, b.notifier)
 
 	cleanup := func() {
 		pollCancel()

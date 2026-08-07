@@ -76,6 +76,10 @@ type Bridge struct {
 	// wg tracks background goroutines to drain on shutdown.
 	wg sync.WaitGroup
 
+	// notifier accelerates event delivery via PostgreSQL NOTIFY/LISTEN.
+	// nil in plugin/SQLite mode; polling remains the correctness floor.
+	notifier *Notifier
+
 	// agentCache caches lookupAgent results to avoid listing all agents per call.
 	agentCacheMu sync.RWMutex
 	agentCache   map[string]*agentCacheEntry
@@ -246,6 +250,13 @@ func (b *Bridge) SetBroker(broker *BrokerServer) {
 	b.broker = broker
 }
 
+// SetNotifier wires the NOTIFY accelerator. When set, waitForTaskEvent
+// and streamTaskEvents wake immediately on notification instead of waiting
+// for the next poll timer. Pass nil to disable (SQLite / plugin mode).
+func (b *Bridge) SetNotifier(n *Notifier) {
+	b.notifier = n
+}
+
 // SetSnapshot wires the atomic config snapshot for hot-apply support.
 func (b *Bridge) SetSnapshot(snap *SnapshotHolder) {
 	b.snapshot = snap
@@ -282,6 +293,14 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 	pollTimer := time.NewTimer(interval)
 	defer pollTimer.Stop()
 
+	// Register for NOTIFY acceleration (no-op if notifier is nil).
+	var notifyCh <-chan struct{}
+	if b.notifier != nil {
+		var cleanup func()
+		notifyCh, cleanup = b.notifier.Register(taskID)
+		defer cleanup()
+	}
+
 	for {
 		events, err := b.store.ReadTaskEvents(ctx, taskID, cursor, 10)
 		if err != nil {
@@ -311,6 +330,16 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		}
 
 		select {
+		case <-notifyCh:
+			// NOTIFY woke us — immediately re-read (reset backoff).
+			interval = 100 * time.Millisecond
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
+			}
+			pollTimer.Reset(interval)
 		case <-pollTimer.C:
 			interval = backoffInterval(interval)
 			pollTimer.Reset(interval)

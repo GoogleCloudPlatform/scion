@@ -419,6 +419,12 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	// 8. Create core bridge.
 	b := bridge.New(store, hubClient, minter, cfg, metrics, log.With("component", "bridge"))
 
+	// Create and wire the NOTIFY accelerator for reduced latency on
+	// blocking SendMessage and SSE streaming. Purely additive — polling
+	// remains the correctness floor (design §5.2, D7).
+	notifier := bridge.NewNotifier(databaseURL, log.With("component", "notifier"))
+	b.SetNotifier(notifier)
+
 	// Wire broker handler and admin config into the broker server.
 	brokerServer.SetHandler(b.HandleBrokerMessage)
 	b.SetBroker(brokerServer)
@@ -533,6 +539,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		grpcServer.Stop()
 	}
 
+	notifier.Stop()
 	b.Shutdown()
 	log.Info("scion-a2a-bridge stopped (standalone)")
 }
