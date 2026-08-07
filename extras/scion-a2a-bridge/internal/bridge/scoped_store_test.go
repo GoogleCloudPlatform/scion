@@ -163,55 +163,92 @@ func TestScopedStoreGetRequiresRouteInfo(t *testing.T) {
 	}
 }
 
-// --- Empty UserID edge case (Optional-1) ---
+// --- Empty UserID edge case: fail-closed ---
 
-func TestScopedStoreEmptyUserIDFallback(t *testing.T) {
-	// When CallerIdentity is present but UserID is empty, the ownership key
-	// should fall back to route-only keying (project:agent). This documents
-	// current defense-in-depth behavior: a broken validator that produces an
-	// empty UserID does not silently create a separate namespace — instead it
-	// falls back to the shared route key (and a warning is logged).
+func TestScopedStoreEmptyUserIDRejected(t *testing.T) {
+	// When CallerIdentity is present but UserID is empty, the request must be
+	// rejected (fail-closed). Falling back to route-only keying would silently
+	// restore the cross-user vulnerability that per-user scoping is meant to fix.
 	store := newScopedStore(t)
-	ctxRouteOnly := ctxForRoute("proj-a", "agent-1")
 	ctxEmptyUser := ctxForRouteAndCaller("proj-a", "agent-1", "")
 
-	// Create a task with a route-only context (no CallerIdentity).
-	task := &a2a.Task{
-		ID:        "task-empty-uid",
-		ContextID: "ctx-1",
-		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
-	}
-	if _, err := store.Create(ctxRouteOnly, task); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	t.Run("Create rejected", func(t *testing.T) {
+		task := &a2a.Task{
+			ID:        "task-empty-uid",
+			ContextID: "ctx-1",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
+		}
+		_, err := store.Create(ctxEmptyUser, task)
+		if err == nil {
+			t.Fatal("expected error when CallerIdentity has empty UserID")
+		}
+		if !errors.Is(err, a2a.ErrUnauthenticated) {
+			t.Errorf("error = %v, want ErrUnauthenticated in chain", err)
+		}
+	})
 
-	// A context with CallerIdentity{UserID: ""} should resolve to the same
-	// route-only key and therefore be able to access the task.
-	stored, err := store.Get(ctxEmptyUser, "task-empty-uid")
-	if err != nil {
-		t.Fatalf("Get (empty UserID, same route): %v", err)
-	}
-	if stored.Task.ID != "task-empty-uid" {
-		t.Errorf("task ID = %q, want %q", stored.Task.ID, "task-empty-uid")
-	}
+	t.Run("Get rejected", func(t *testing.T) {
+		// First create a task with a valid context so there's something to Get.
+		ctxValid := ctxForRouteAndCaller("proj-a", "agent-1", "valid-user")
+		task := &a2a.Task{
+			ID:        "task-valid-for-get",
+			ContextID: "ctx-1",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
+		}
+		if _, err := store.Create(ctxValid, task); err != nil {
+			t.Fatalf("Create (valid user): %v", err)
+		}
 
-	// Verify the reverse: a task created with empty UserID should also be
-	// visible to a route-only context.
-	task2 := &a2a.Task{
-		ID:        "task-empty-uid-2",
-		ContextID: "ctx-1",
-		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
-	}
-	if _, err := store.Create(ctxEmptyUser, task2); err != nil {
-		t.Fatalf("Create (empty UserID): %v", err)
-	}
-	stored2, err := store.Get(ctxRouteOnly, "task-empty-uid-2")
-	if err != nil {
-		t.Fatalf("Get (route-only for empty-UserID task): %v", err)
-	}
-	if stored2.Task.ID != "task-empty-uid-2" {
-		t.Errorf("task ID = %q, want %q", stored2.Task.ID, "task-empty-uid-2")
-	}
+		// Getting with empty UserID must fail.
+		_, err := store.Get(ctxEmptyUser, "task-valid-for-get")
+		if err == nil {
+			t.Fatal("expected error when CallerIdentity has empty UserID")
+		}
+		if !errors.Is(err, a2a.ErrUnauthenticated) {
+			t.Errorf("error = %v, want ErrUnauthenticated in chain", err)
+		}
+	})
+
+	t.Run("Update rejected", func(t *testing.T) {
+		ctxValid := ctxForRouteAndCaller("proj-a", "agent-1", "valid-user")
+		task := &a2a.Task{
+			ID:        "task-valid-for-upd",
+			ContextID: "ctx-1",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
+		}
+		version, err := store.Create(ctxValid, task)
+		if err != nil {
+			t.Fatalf("Create (valid user): %v", err)
+		}
+
+		// Updating with empty UserID must fail.
+		updatedTask := &a2a.Task{
+			ID:        "task-valid-for-upd",
+			ContextID: "ctx-1",
+			Status:    a2a.TaskStatus{State: a2a.TaskStateFailed},
+		}
+		_, err = store.Update(ctxEmptyUser, &taskstore.UpdateRequest{
+			Task:        updatedTask,
+			PrevVersion: version,
+		})
+		if err == nil {
+			t.Fatal("expected error when CallerIdentity has empty UserID")
+		}
+		if !errors.Is(err, a2a.ErrUnauthenticated) {
+			t.Errorf("error = %v, want ErrUnauthenticated in chain", err)
+		}
+	})
+
+	t.Run("List rejected", func(t *testing.T) {
+		// List goes through RouteKeyAuthenticator which also calls buildOwnerKey.
+		_, err := store.List(ctxEmptyUser, &a2a.ListTasksRequest{ContextID: "ctx-1"})
+		if err == nil {
+			t.Fatal("expected error when CallerIdentity has empty UserID")
+		}
+		if !errors.Is(err, a2a.ErrUnauthenticated) {
+			t.Errorf("error = %v, want ErrUnauthenticated in chain", err)
+		}
+	})
 }
 
 // --- Cross-user isolation tests (per-user auth: hubJWT/hubUAT) ---

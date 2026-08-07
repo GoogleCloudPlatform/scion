@@ -55,33 +55,37 @@ func NewScopedTaskStore(inner taskstore.Store) *ScopedTaskStore {
 //
 // Both ownerKey() and RouteKeyAuthenticator() delegate here to ensure the key
 // format stays consistent across Create/Get/Update and List operations.
-func buildOwnerKey(ctx context.Context) (string, bool) {
+func buildOwnerKey(ctx context.Context) (string, bool, error) {
 	route, ok := RouteInfoFrom(ctx)
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
 	key := route.ProjectSlug + ":" + route.AgentSlug
 	if caller := callerIdentityFromContext(ctx); caller != nil {
 		if caller.UserID != "" {
 			key += ":" + caller.UserID
 		} else {
-			slog.Warn("CallerIdentity present but UserID is empty; falling back to route-only key",
+			slog.Warn("CallerIdentity present but UserID is empty; rejecting request",
 				"project", route.ProjectSlug,
 				"agent", route.AgentSlug,
 			)
+			return "", true, fmt.Errorf("CallerIdentity present but UserID is empty: %w", a2a.ErrUnauthenticated)
 		}
 	}
-	return key, true
+	return key, true, nil
 }
 
 // ownerKey returns the ownership key derived from the request context.
-func ownerKey(ctx context.Context) (string, bool) {
+func ownerKey(ctx context.Context) (string, bool, error) {
 	return buildOwnerKey(ctx)
 }
 
 // Create stores the task and records its ownership based on the route info in context.
 func (s *ScopedTaskStore) Create(ctx context.Context, task *a2a.Task) (taskstore.TaskVersion, error) {
-	owner, ok := ownerKey(ctx)
+	owner, ok, err := ownerKey(ctx)
+	if err != nil {
+		return taskstore.TaskVersionMissing, fmt.Errorf("task creation rejected: %w", err)
+	}
 	if !ok {
 		return taskstore.TaskVersionMissing, fmt.Errorf("missing route info for task creation: %w", a2a.ErrInternalError)
 	}
@@ -100,7 +104,10 @@ func (s *ScopedTaskStore) Create(ctx context.Context, task *a2a.Task) (taskstore
 
 // Update verifies ownership before delegating to the inner store.
 func (s *ScopedTaskStore) Update(ctx context.Context, update *taskstore.UpdateRequest) (taskstore.TaskVersion, error) {
-	owner, ok := ownerKey(ctx)
+	owner, ok, err := ownerKey(ctx)
+	if err != nil {
+		return taskstore.TaskVersionMissing, fmt.Errorf("task update rejected: %w", err)
+	}
 	if !ok {
 		return taskstore.TaskVersionMissing, fmt.Errorf("missing route info for task update: %w", a2a.ErrInternalError)
 	}
@@ -118,7 +125,10 @@ func (s *ScopedTaskStore) Update(ctx context.Context, update *taskstore.UpdateRe
 
 // Get retrieves a task and verifies that the caller owns it.
 func (s *ScopedTaskStore) Get(ctx context.Context, taskID a2a.TaskID) (*taskstore.StoredTask, error) {
-	owner, ok := ownerKey(ctx)
+	owner, ok, err := ownerKey(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("task get rejected: %w", err)
+	}
 	if !ok {
 		return nil, fmt.Errorf("missing route info for task get: %w", a2a.ErrInternalError)
 	}
@@ -150,7 +160,10 @@ func (s *ScopedTaskStore) List(ctx context.Context, req *a2a.ListTasksRequest) (
 // the identity is based solely on the route (project + agent pair).
 func RouteKeyAuthenticator() taskstore.Authenticator {
 	return func(ctx context.Context) (string, error) {
-		key, ok := buildOwnerKey(ctx)
+		key, ok, err := buildOwnerKey(ctx)
+		if err != nil {
+			return "", err
+		}
 		if !ok {
 			return "", fmt.Errorf("missing route info: %w", a2a.ErrUnauthenticated)
 		}
