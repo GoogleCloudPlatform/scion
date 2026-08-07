@@ -81,10 +81,23 @@ server:
 
 The `audience` value must match the audience claim (`aud`) in the IAP-signed JWT. The format depends on the backend type:
 
+- **Cloud Run**: `/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE_NAME>`
 - **GCE/GKE backend service**: `/projects/<PROJECT_NUMBER>/global/backendServices/<BACKEND_SERVICE_ID>`
 - **App Engine**: `/projects/<PROJECT_NUMBER>/apps/<PROJECT_ID>`
 
 You can find this value in the Google Cloud Console under **Security → Identity-Aware Proxy** → select your backend → **Signed Header JWT Audience**.
+
+:::note[Preflight Validation & Normalization]
+During startup in Hosted HA mode, Scion performs strict preflight checks to validate and normalize the `audience` configuration:
+1. **Normalization**: Any leading/trailing whitespaces or trailing slashes are trimmed, and the normalized audience is written back to the configuration in-place. This prevents runtime signature verification failures caused by minor formatting differences.
+2. **Format Enforcement**: The audience path must follow either the Cloud Run format or the GCLB/GKE backend service format. Other formats are rejected (fail-closed) with a detailed startup error.
+3. **Endpoint Derivation Warning**:
+   - For **Cloud Run** audiences, Scion can automatically derive the Hub's public URL format from the audience.
+   - For **GCLB/GKE** backend-service audiences, Scion *cannot* automatically derive the public endpoint URL because a backend service ID does not contain regional or routing information. You **must explicitly configure the public URL** using the `SCION_SERVER_BASE_URL` environment variable (or `server.hub.public_url` / `SCION_SERVER_HUB_PUBLIC_URL`). If missing, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents:
+     ```
+     Warning: GKE/GCLB IAP audience detected but SCION_SERVER_BASE_URL not set; hub endpoint will fall back to localhost which is likely unreachable from dispatched agents
+     ```
+:::
 
 #### Issuer and JWKS overrides
 
