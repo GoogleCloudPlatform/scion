@@ -98,9 +98,27 @@ Persistence settings for the Hub.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `dev_mode` | bool | `false` | Enable insecure development authentication. |
+| `mode` | string | `"oauth"` | Selects the exclusive human auth mode: `"oauth"` (default), `"proxy"`, or `"dev"`. |
+| `dev_mode` | bool | `false` | Enable insecure development authentication (used in `"dev"` mode). |
 | `dev_token` | string | | Static token for dev mode. |
 | `authorized_domains` | list | `[]` | Limit access to specific email domains. |
+
+### Proxy Auth (`server.auth.proxy`)
+
+Proxy authentication configuration (consulted when `server.auth.mode` is set to `"proxy"`). See [Proxy Auth (Google IAP)](/scion/hosted/ha/auth-proxy-iap/) for the full deployment guide.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `provider` | string | | Selects the proxy auth provider: `"iap"` or `"header"`. |
+| `require_trusted_proxy_ip` | bool | `false` | Enables defense-in-depth IP allowlisting. Uses the trusted_proxies CIDR list. |
+
+#### Google IAP Settings (`server.auth.proxy.iap`)
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `audience` | string | | **MANDATORY for IAP.** The expected audience claim (`aud`) in the IAP-signed JWT assertion. Supported formats are Cloud Run native path or GCE/GKE GCLB backend service path. |
+| `issuer` | string | `"https://cloud.google.com/iap"` | The expected JWT issuer. Override only for mock/testing setups. |
+| `jwks_url` | string | `"https://www.gstatic.com/iap/verify/public_key-jwk"` | The URL to retrieve public keys for signature verification. Override only for testing. |
 
 ### Transport Auth (`server.auth.transport`)
 
@@ -234,7 +252,10 @@ When `server.hub.public_url` is not explicitly set, the Hub endpoint injected in
 1. `SCION_SERVER_HUB_PUBLIC_URL` or `server.hub.public_url` — explicit Hub public URL.
 2. Project-level `hub.endpoint` setting.
 3. `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
-4. Auto-computed `http://localhost:{port}` (last resort).
+4. **IAP Audience Derivation** (in Hosted HA mode with IAP authentication):
+   - For **Cloud Run** IAP audiences (`/projects/<number>/locations/<region>/services/<service>`), Scion can auto-derive the Hub's URL using the legacy Cloud Run URL format (`https://<service>-<number>.<region>.run.app`). Newer Cloud Run services use a different URL format (`https://<service>-<hash>-<region>.a.run.app`) where the hash cannot be derived from the project number — for those services, set `SCION_SERVER_BASE_URL` explicitly instead of relying on auto-derivation.
+   - For **GKE/GCLB** backend-service IAP audiences (`/projects/<number>/global/backendServices/<id>`), a URL cannot be derived from the ID. If `SCION_SERVER_BASE_URL` (or other explicit URL settings) is not set, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents.
+5. Auto-computed `http://localhost:{port}` (last resort).
 
 For local development where the Hub runs on `localhost` but agents are in containers, set `server.broker.container_hub_endpoint` to a container-accessible address like `http://host.containers.internal:8080`.
 
