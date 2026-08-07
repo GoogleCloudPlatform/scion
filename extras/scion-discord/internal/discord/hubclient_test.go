@@ -137,3 +137,162 @@ func TestHTTPHubClient_PlainClient_WhenNoIAP(t *testing.T) {
 	assert.Len(t, projects, 1)
 	assert.Equal(t, "test", projects[0].Slug)
 }
+
+// ---------------------------------------------------------------------------
+// Secrets API methods
+// ---------------------------------------------------------------------------
+
+func TestHTTPHubClient_ListSecrets(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Equal(t, "/api/v1/secrets", r.URL.Path)
+		assert.Equal(t, "project", r.URL.Query().Get("scope"))
+		assert.Equal(t, "proj-1", r.URL.Query().Get("scopeId"))
+
+		json.NewEncoder(w).Encode(hubListSecretsResponse{
+			Secrets: []SecretInfo{
+				{Key: "API_KEY", Type: "environment", Scope: "project"},
+				{Key: "DB_PASS", Type: "environment", Scope: "project", Description: "Database password"},
+			},
+		})
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	secrets, err := client.ListSecrets(context.Background(), "project", "proj-1")
+	require.NoError(t, err)
+	assert.Len(t, secrets, 2)
+	assert.Equal(t, "API_KEY", secrets[0].Key)
+	assert.Equal(t, "DB_PASS", secrets[1].Key)
+	assert.Equal(t, "Database password", secrets[1].Description)
+}
+
+func TestHTTPHubClient_ListSecrets_Error(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	_, err := client.ListSecrets(context.Background(), "project", "proj-1")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "status 500")
+}
+
+func TestHTTPHubClient_GetSecret(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Equal(t, "/api/v1/secrets/MY_KEY", r.URL.Path)
+		assert.Equal(t, "project", r.URL.Query().Get("scope"))
+
+		json.NewEncoder(w).Encode(SecretInfo{
+			Key:     "MY_KEY",
+			Type:    "environment",
+			Scope:   "project",
+			Version: 3,
+			Updated: "2026-01-01T00:00:00Z",
+		})
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	info, err := client.GetSecret(context.Background(), "MY_KEY", "project", "proj-1")
+	require.NoError(t, err)
+	assert.Equal(t, "MY_KEY", info.Key)
+	assert.Equal(t, 3, info.Version)
+}
+
+func TestHTTPHubClient_GetSecret_NotFound(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	_, err := client.GetSecret(context.Background(), "MISSING", "project", "proj-1")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestHTTPHubClient_SetSecret(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "PUT", r.Method)
+		assert.Equal(t, "/api/v1/secrets/NEW_KEY", r.URL.Path)
+		assert.Equal(t, "user:alice@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
+		assert.Equal(t, "x-scion-on-behalf-of", r.Header.Get("X-Scion-Signed-Headers"))
+
+		var payload setSecretPayload
+		err := json.NewDecoder(r.Body).Decode(&payload)
+		require.NoError(t, err)
+		assert.Equal(t, "my-secret-value", payload.Value)
+		assert.Equal(t, "raw", payload.Encoding)
+		assert.Equal(t, "project", payload.Scope)
+		assert.Equal(t, "proj-1", payload.ScopeID)
+
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{"created": true})
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	err := client.SetSecret(context.Background(), "NEW_KEY", "my-secret-value", "project", "proj-1", "user:alice@example.com")
+	assert.NoError(t, err)
+}
+
+func TestHTTPHubClient_SetSecret_Error(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "forbidden", "message": "no access"})
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	err := client.SetSecret(context.Background(), "KEY", "val", "project", "p1", "user:bob@example.com")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "status 403")
+}
+
+func TestHTTPHubClient_DeleteSecret(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "DELETE", r.Method)
+		assert.Equal(t, "/api/v1/secrets/OLD_KEY", r.URL.Path)
+		assert.Equal(t, "project", r.URL.Query().Get("scope"))
+		assert.Equal(t, "proj-1", r.URL.Query().Get("scopeId"))
+		assert.Equal(t, "user:alice@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
+
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	err := client.DeleteSecret(context.Background(), "OLD_KEY", "project", "proj-1", "user:alice@example.com")
+	assert.NoError(t, err)
+}
+
+func TestHTTPHubClient_DeleteSecret_Error(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_found", "message": "secret not found"})
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	err := client.DeleteSecret(context.Background(), "MISSING", "project", "proj-1", "user:alice@example.com")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "status 404")
+}
+
+func TestHTTPHubClient_SetSecret_NoOnBehalfOf(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// When onBehalfOf is empty, headers should not be set.
+		assert.Empty(t, r.Header.Get("X-Scion-On-Behalf-Of"))
+		assert.Empty(t, r.Header.Get("X-Scion-Signed-Headers"))
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{"created": false})
+	}))
+	defer hub.Close()
+
+	client := NewHTTPHubClient(hub.URL, "", "", nil)
+	err := client.SetSecret(context.Background(), "KEY", "val", "project", "p1", "")
+	assert.NoError(t, err)
+}

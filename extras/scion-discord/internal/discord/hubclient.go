@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -392,6 +393,165 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 
 func (c *httpHubClient) HubBaseURL() string {
 	return c.hubURL
+}
+
+// --- Secrets API ---
+
+// SecretInfo holds metadata about a secret for display in Discord.
+// Values are never included.
+type SecretInfo struct {
+	Key         string `json:"key"`
+	Type        string `json:"type"`
+	Scope       string `json:"scope"`
+	ScopeID     string `json:"scopeId"`
+	Description string `json:"description,omitempty"`
+	Updated     string `json:"updated,omitempty"`
+	Version     int    `json:"version"`
+}
+
+// setSecretPayload is the JSON body sent to PUT /api/v1/secrets/{key}.
+type setSecretPayload struct {
+	Value    string `json:"value"`
+	Encoding string `json:"encoding"`
+	Scope    string `json:"scope"`
+	ScopeID  string `json:"scopeId"`
+}
+
+// hubListSecretsResponse mirrors the hub's list-secrets JSON envelope.
+type hubListSecretsResponse struct {
+	Secrets []SecretInfo `json:"secrets"`
+}
+
+func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID string) ([]SecretInfo, error) {
+	u := fmt.Sprintf("%s/api/v1/secrets?scope=%s&scopeId=%s",
+		c.hubURL, url.QueryEscape(scope), url.QueryEscape(scopeID))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create list secrets request: %w", err)
+	}
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list secrets request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("list secrets returned status %d: %s", resp.StatusCode, he.Message)
+	}
+
+	var result hubListSecretsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode list secrets response: %w", err)
+	}
+	return result.Secrets, nil
+}
+
+func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID string) (*SecretInfo, error) {
+	u := fmt.Sprintf("%s/api/v1/secrets/%s?scope=%s&scopeId=%s",
+		c.hubURL, url.PathEscape(key), url.QueryEscape(scope), url.QueryEscape(scopeID))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create get secret request: %w", err)
+	}
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get secret request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("secret %q not found", key)
+	}
+	if resp.StatusCode != http.StatusOK {
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("get secret returned status %d: %s", resp.StatusCode, he.Message)
+	}
+
+	var info SecretInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("decode get secret response: %w", err)
+	}
+	return &info, nil
+}
+
+func (c *httpHubClient) SetSecret(ctx context.Context, key, value, scope, scopeID, onBehalfOf string) error {
+	u := fmt.Sprintf("%s/api/v1/secrets/%s", c.hubURL, url.PathEscape(key))
+
+	payload := setSecretPayload{
+		Value:    value,
+		Encoding: "raw",
+		Scope:    scope,
+		ScopeID:  scopeID,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal set secret request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "PUT", u, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create set secret request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if onBehalfOf != "" {
+		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
+		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
+	}
+	if err := c.signRequest(httpReq); err != nil {
+		return fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("set secret request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		he := parseHubError(resp)
+		return fmt.Errorf("set secret returned status %d: %s", resp.StatusCode, he.Message)
+	}
+	return nil
+}
+
+func (c *httpHubClient) DeleteSecret(ctx context.Context, key, scope, scopeID, onBehalfOf string) error {
+	u := fmt.Sprintf("%s/api/v1/secrets/%s?scope=%s&scopeId=%s",
+		c.hubURL, url.PathEscape(key), url.QueryEscape(scope), url.QueryEscape(scopeID))
+
+	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", u, nil)
+	if err != nil {
+		return fmt.Errorf("create delete secret request: %w", err)
+	}
+	if onBehalfOf != "" {
+		httpReq.Header.Set("X-Scion-On-Behalf-Of", onBehalfOf)
+		httpReq.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
+	}
+	if err := c.signRequest(httpReq); err != nil {
+		return fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("delete secret request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		he := parseHubError(resp)
+		return fmt.Errorf("delete secret returned status %d: %s", resp.StatusCode, he.Message)
+	}
+	return nil
 }
 
 func (c *httpHubClient) signRequest(req *http.Request) error {
