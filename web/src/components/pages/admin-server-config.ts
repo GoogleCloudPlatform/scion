@@ -1694,12 +1694,15 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
     if (ok('workspace_path')) payload.workspace_path = this.workspacePath || undefined;
 
-    // Default agent limits
-    if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns || undefined;
+    // Default agent limits — send zero/empty values so the backend can clear
+    // the field (delete from settings.yaml). Using `|| undefined` here would
+    // convert 0/"" to undefined, omitting the key from JSON and preventing
+    // the user from resetting a limit to null. See ptone/scion#860.
+    if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns;
     if (ok('default_max_model_calls'))
-      payload.default_max_model_calls = this.defaultMaxModelCalls || undefined;
+      payload.default_max_model_calls = this.defaultMaxModelCalls;
     if (ok('default_max_duration'))
-      payload.default_max_duration = this.defaultMaxDuration || undefined;
+      payload.default_max_duration = this.defaultMaxDuration;
     if (
       ok('default_resources') &&
       (this.defaultResCpuReq ||
