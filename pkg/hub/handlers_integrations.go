@@ -601,6 +601,15 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 		}
 	}
 
+	// Ensure the plugin is listed in message_broker.types on disk so it
+	// survives future restarts/rebuilds that re-read settings.yaml.
+	settingsWriteMu.Lock()
+	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
+		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
+		// Non-fatal — continue with the config update.
+	}
+	settingsWriteMu.Unlock()
+
 	// Reconfigure the running integration with updated config.
 	// For HA integrations the DB write + NOTIFY is the reconfigure path —
 	// pushing a hub-side merge over gRPC would race with the DB-backed reload.
@@ -642,6 +651,15 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 		NotFound(w, "integration")
 		return
 	}
+
+	// Ensure the plugin is listed in message_broker.types on disk so it
+	// survives future restarts/rebuilds that re-read settings.yaml.
+	settingsWriteMu.Lock()
+	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
+		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
+		// Non-fatal — continue with the restart.
+	}
+	settingsWriteMu.Unlock()
 
 	// reconfigureIntegration pushes new config to the running plugin process
 	// (via ReplaceBrokerConfig) without killing it, so the existing spoke's
@@ -753,6 +771,15 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	defer releasePluginBuildLock(name)
+
+	// Ensure the plugin is listed in message_broker.types on disk so it
+	// survives future restarts/rebuilds that re-read settings.yaml.
+	settingsWriteMu.Lock()
+	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
+		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
+		// Non-fatal — continue with the update.
+	}
+	settingsWriteMu.Unlock()
 
 	if err := mgr.UpdatePlugin(name, repoPath); err != nil {
 		slog.Error("Failed to update integration", "plugin", name, "error", err)
@@ -1138,6 +1165,15 @@ func (s *Server) handleRebuildSelfManaged(w http.ResponseWriter, _ *http.Request
 
 	slog.Info("Self-managed plugin binary rebuilt successfully",
 		"plugin", kp.Name, "binary", binaryPath)
+
+	// Ensure the plugin is listed in message_broker.types on disk so it
+	// survives future restarts/rebuilds that re-read settings.yaml.
+	settingsWriteMu.Lock()
+	if err := config.AddPluginToMessageBrokerTypes(kp.Name); err != nil {
+		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", kp.Name, "error", err)
+		// Non-fatal — continue with the rebuild response.
+	}
+	settingsWriteMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":      "rebuilt",
