@@ -32,7 +32,7 @@ type ScopedTaskStore struct {
 	inner taskstore.Store
 
 	mu        sync.RWMutex
-	ownership map[a2a.TaskID]string // taskID → "projectSlug:agentSlug"
+	ownership map[a2a.TaskID]string // taskID → "projectSlug:agentSlug[:userID]"
 }
 
 var _ taskstore.Store = (*ScopedTaskStore)(nil)
@@ -45,13 +45,22 @@ func NewScopedTaskStore(inner taskstore.Store) *ScopedTaskStore {
 	}
 }
 
-// ownerKey returns the ownership key from the route info in context.
+// ownerKey returns the ownership key derived from the request context.
+// When a CallerIdentity is present (per-user auth schemes like hubJWT/hubUAT),
+// the caller's UserID is incorporated into the key so that different users on
+// the same project/agent route get isolated task namespaces. For legacy auth
+// schemes (apiKey/bearer/none) where no CallerIdentity exists, the key is
+// based solely on the route (project + agent), preserving backward compatibility.
 func ownerKey(ctx context.Context) (string, bool) {
 	route, ok := RouteInfoFrom(ctx)
 	if !ok {
 		return "", false
 	}
-	return route.ProjectSlug + ":" + route.AgentSlug, true
+	key := route.ProjectSlug + ":" + route.AgentSlug
+	if caller := callerIdentityFromContext(ctx); caller != nil && caller.UserID != "" {
+		key += ":" + caller.UserID
+	}
+	return key, true
 }
 
 // Create stores the task and records its ownership based on the route info in context.
@@ -118,15 +127,21 @@ func (s *ScopedTaskStore) List(ctx context.Context, req *a2a.ListTasksRequest) (
 }
 
 // RouteKeyAuthenticator returns a taskstore.Authenticator that derives the
-// "user" identity from the RouteInfo in the request context. This ensures
-// the in-memory task store's built-in user-filtering on List matches tasks
-// to the correct project/agent pair.
+// "user" identity from the request context. When a CallerIdentity is present
+// (per-user auth schemes like hubJWT/hubUAT), the caller's UserID is included
+// in the identity key so the in-memory task store's built-in user-filtering on
+// List isolates tasks per caller. For legacy auth schemes (apiKey/bearer/none),
+// the identity is based solely on the route (project + agent pair).
 func RouteKeyAuthenticator() taskstore.Authenticator {
 	return func(ctx context.Context) (string, error) {
 		route, ok := RouteInfoFrom(ctx)
 		if !ok {
 			return "", fmt.Errorf("missing route info: %w", a2a.ErrUnauthenticated)
 		}
-		return route.ProjectSlug + ":" + route.AgentSlug, nil
+		key := route.ProjectSlug + ":" + route.AgentSlug
+		if caller := callerIdentityFromContext(ctx); caller != nil && caller.UserID != "" {
+			key += ":" + caller.UserID
+		}
+		return key, nil
 	}
 }
