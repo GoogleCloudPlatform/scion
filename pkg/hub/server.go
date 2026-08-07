@@ -3583,7 +3583,7 @@ func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Cont
 			slog.Error("a2a-bridge-sweep: request failed", "error", err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			slog.Warn("a2a-bridge-sweep: non-200 response",

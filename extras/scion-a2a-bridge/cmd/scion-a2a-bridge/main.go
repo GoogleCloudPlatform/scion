@@ -687,4 +687,3 @@ func accessSecret(ctx context.Context, resourceName string) (string, error) {
 	}
 	return cleanBase64(string(resp.Payload.Data))
 }
-

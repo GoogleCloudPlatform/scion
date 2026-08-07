@@ -554,8 +554,8 @@ func TestHandleBrokerMessage_WritesToEventLog(t *testing.T) {
 
 	// Simulate a message arriving from the broker.
 	msg := &state.TaskEvent{
-		TaskID:  taskID,
-		Kind:    "message",
+		TaskID: taskID,
+		Kind:   "message",
 		Payload: mustJSON(t, TaskStatusUpdate{
 			TaskID: taskID,
 			Status: TaskStatus{
