@@ -235,6 +235,8 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 	interval := 100 * time.Millisecond
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	pollTimer := time.NewTimer(interval)
+	defer pollTimer.Stop()
 
 	for {
 		events, err := b.store.ReadTaskEvents(ctx, taskID, cursor, 10)
@@ -254,12 +256,20 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		// Reset backoff when we got events (but none were response/final)
 		if len(events) > 0 {
 			interval = 100 * time.Millisecond
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
+			}
+			pollTimer.Reset(interval)
 			continue
 		}
 
 		select {
-		case <-time.After(interval):
+		case <-pollTimer.C:
 			interval = backoffInterval(interval)
+			pollTimer.Reset(interval)
 		case <-timer.C:
 			return nil, ErrTimeout
 		case <-ctx.Done():
@@ -956,10 +966,10 @@ func (b *Bridge) failFollowUpTask(taskID string) {
 	if err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 	}
-	if b.metrics != nil {
-		b.metrics.TasksCompleted.WithLabelValues(TaskStateFailed).Inc()
-	}
 	if changed {
+		if b.metrics != nil {
+			b.metrics.TasksCompleted.WithLabelValues(TaskStateFailed).Inc()
+		}
 		failPayload, _ := json.Marshal(TaskStatusUpdate{
 			TaskID: taskID,
 			Status: TaskStatus{State: TaskStateFailed},

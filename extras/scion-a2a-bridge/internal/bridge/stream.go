@@ -150,6 +150,8 @@ func streamTaskEvents(ctx context.Context, store state.Store, taskID string, cur
 		defer close(ch)
 		session := NewStreamSession(taskID, cursor, store)
 		interval := 100 * time.Millisecond
+		pollTimer := time.NewTimer(interval)
+		defer pollTimer.Stop()
 
 		for {
 			events, err := session.ReadNext(ctx, batchLimit)
@@ -177,12 +179,20 @@ func streamTaskEvents(ctx context.Context, store state.Store, taskID string, cur
 			// Reset backoff when we got events
 			if len(events) > 0 {
 				interval = 100 * time.Millisecond
+				if !pollTimer.Stop() {
+					select {
+					case <-pollTimer.C:
+					default:
+					}
+				}
+				pollTimer.Reset(interval)
 				continue // immediately check for more
 			}
 
 			select {
-			case <-time.After(interval):
+			case <-pollTimer.C:
 				interval = backoffInterval(interval)
+				pollTimer.Reset(interval)
 			case <-ctx.Done():
 				return
 			}
