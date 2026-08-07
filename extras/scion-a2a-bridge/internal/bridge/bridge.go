@@ -1033,6 +1033,7 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 		}
 	}
 
+	jsonrpcURL := agentURL + "/jsonrpc"
 	card := map[string]interface{}{
 		"name":        name,
 		"description": description,
@@ -1045,6 +1046,13 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 		"defaultInputModes":  []string{"text/plain", "application/json"},
 		"defaultOutputModes": []string{"text/plain", "application/json"},
 		"skills":             skills,
+		"supportedInterfaces": []map[string]interface{}{
+			{
+				"url":             jsonrpcURL,
+				"protocolBinding": "JSONRPC",
+				"protocolVersion": "1.0",
+			},
+		},
 	}
 
 	if cfg.Bridge.Provider.Organization != "" {
