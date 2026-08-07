@@ -281,7 +281,7 @@ func TestAgentListSecrets_ReturnsMetadataNoValues(t *testing.T) {
 	for _, s := range secrets {
 		sm, ok := s.(map[string]interface{})
 		if !ok {
-			continue
+			t.Fatalf("expected secret entry to be a JSON object, got %T", s)
 		}
 		if _, exists := sm["value"]; exists {
 			t.Errorf("list response should not contain a 'value' field, got: %v", sm)

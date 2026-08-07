@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -175,7 +176,10 @@ Examples:
 			os.Exit(1)
 		}
 
-		os.Stdout.Write(decoded)
+		if _, err := os.Stdout.Write(decoded); err != nil {
+			log.Error("Failed to write secret value: %v", err)
+			os.Exit(1)
+		}
 	},
 }
 
@@ -210,12 +214,14 @@ Examples:
 			return
 		}
 
-		// Print header and table.
-		fmt.Printf("%-30s %-15s %s\n", "KEY", "TYPE", "TARGET")
-		fmt.Printf("%-30s %-15s %s\n", strings.Repeat("-", 30), strings.Repeat("-", 15), strings.Repeat("-", 20))
+		// Print header and table using tabwriter for aligned columns.
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "KEY\tTYPE\tTARGET")
+		fmt.Fprintln(w, "---\t----\t------")
 		for _, s := range resp.Secrets {
-			fmt.Printf("%-30s %-15s %s\n", s.Key, s.Type, s.Target)
+			fmt.Fprintf(w, "%s\t%s\t%s\n", s.Key, s.Type, s.Target)
 		}
+		w.Flush()
 	},
 }
 
