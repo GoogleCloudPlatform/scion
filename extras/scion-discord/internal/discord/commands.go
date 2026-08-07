@@ -75,6 +75,19 @@ type HubClient interface {
 
 	// HubBaseURL returns the base URL of the hub (e.g. "https://hub.example.com").
 	HubBaseURL() string
+
+	// ListSecrets returns metadata for all secrets in the given scope.
+	ListSecrets(ctx context.Context, scope, scopeID string) ([]SecretInfo, error)
+
+	// GetSecret returns metadata for a single secret.
+	GetSecret(ctx context.Context, key, scope, scopeID string) (*SecretInfo, error)
+
+	// SetSecret creates or updates a secret value. onBehalfOf is a namespaced
+	// principal (e.g. "user:alice@example.com") sent as X-Scion-On-Behalf-Of.
+	SetSecret(ctx context.Context, key, value, scope, scopeID, onBehalfOf string) error
+
+	// DeleteSecret removes a secret. onBehalfOf is sent as X-Scion-On-Behalf-Of.
+	DeleteSecret(ctx context.Context, key, scope, scopeID, onBehalfOf string) error
 }
 
 // CommandHandler manages Discord slash command registration and dispatch.
@@ -308,6 +321,51 @@ func (h *CommandHandler) RegisterCommandsForGuild(guildID string) error {
 				},
 			},
 			{
+				Type:        discordgo.ApplicationCommandOptionSubCommandGroup,
+				Name:        "secret",
+				Description: "Manage project secrets",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        "list",
+						Description: "List secrets in the linked project",
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        "set",
+						Description: "Set a secret value (entered via secure dialog)",
+						Options: []*discordgo.ApplicationCommandOption{{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "key",
+							Description: "Secret key name",
+							Required:    true,
+						}},
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        "get",
+						Description: "Show secret metadata (value is never shown)",
+						Options: []*discordgo.ApplicationCommandOption{{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "key",
+							Description: "Secret key name",
+							Required:    true,
+						}},
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        "delete",
+						Description: "Delete a secret",
+						Options: []*discordgo.ApplicationCommandOption{{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "key",
+							Description: "Secret key name",
+							Required:    true,
+						}},
+					},
+				},
+			},
+			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
 				Name:        "help",
 				Description: "Show available commands",
@@ -340,6 +398,7 @@ var ephemeralCommands = map[string]bool{
 	"terminal": true,
 	"thread":   true,
 	"send":     true,
+	"secret":   true,
 }
 
 // ephemeralFlag returns MessageFlagsEphemeral if the subcommand should be
@@ -368,6 +427,43 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 	// Commands that don't need async Hub API calls respond immediately.
 	if subcommand == "help" {
 		h.respondImmediate(s, i, helpText())
+		return
+	}
+
+	// Secret subcommand group: "set" opens a modal (must be first response,
+	// no defer); all other sub-subcommands use the standard deferred path.
+	if subcommand == "secret" {
+		subSub := ""
+		if len(data.Options[0].Options) > 0 {
+			subSub = data.Options[0].Options[0].Name
+		}
+		if subSub == "set" {
+			h.HandleSecretSet(s, i)
+			return
+		}
+		// Defer for list/get/delete.
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Flags: discordgo.MessageFlagsEphemeral,
+			},
+		})
+		if err != nil {
+			h.log.Error("Failed to acknowledge secret command", "error", err)
+			return
+		}
+		go func() {
+			switch subSub {
+			case "list":
+				h.HandleSecretList(s, i)
+			case "get":
+				h.HandleSecretGet(s, i)
+			case "delete":
+				h.HandleSecretDelete(s, i)
+			default:
+				h.followup(s, i, fmt.Sprintf("Unknown secret operation: %s", subSub))
+			}
+		}()
 		return
 	}
 
@@ -548,6 +644,10 @@ func helpText() string {
 		"`/scion terminal <agent>` — Get the web terminal URL for an agent\n" +
 		"`/scion send <path>` — Send a file by path or search for files\n" +
 		"`/scion thread <title> [template]` — Create a thread with a new agent\n" +
+		"`/scion secret list` — List project secrets (metadata only)\n" +
+		"`/scion secret set <key>` — Set a secret (value entered via secure dialog)\n" +
+		"`/scion secret get <key>` — Show secret metadata\n" +
+		"`/scion secret delete <key>` — Delete a secret\n" +
 		"`/scion register` — Link your Discord account to Scion Hub\n" +
 		"`/scion unregister` — Unlink your Discord account\n" +
 		"`/scion settings` — Configure channel notification settings\n" +
