@@ -215,13 +215,16 @@ Examples:
 		}
 
 		// Print header and table using tabwriter for aligned columns.
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "KEY\tTYPE\tTARGET")
-		fmt.Fprintln(w, "---\t----\t------")
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "KEY\tTYPE\tTARGET") //nolint:errcheck
+		fmt.Fprintln(tw, "---\t----\t------") //nolint:errcheck
 		for _, s := range resp.Secrets {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", s.Key, s.Type, s.Target)
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", s.Key, s.Type, s.Target) //nolint:errcheck
 		}
-		w.Flush()
+		if err := tw.Flush(); err != nil {
+			log.Error("Failed to flush output: %v", err)
+			os.Exit(1)
+		}
 	},
 }
 
