@@ -78,8 +78,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 }
 
 // MetricsHandler returns an http.Handler for the /metrics endpoint.
-func MetricsHandler() http.Handler {
-	return promhttp.Handler()
+// The gatherer should match the registry used by NewMetrics so the
+// bridge's own metrics are served, not just Go runtime defaults.
+func MetricsHandler(gatherer prometheus.Gatherer) http.Handler {
+	return promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
 }
 
 type statusRecorder struct {

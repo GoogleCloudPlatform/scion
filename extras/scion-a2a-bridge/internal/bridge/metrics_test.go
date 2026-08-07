@@ -17,6 +17,7 @@ package bridge
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,7 +268,14 @@ func TestStatusRecorderUnwrapEnablesSetWriteDeadline(t *testing.T) {
 }
 
 func TestMetricsHandler(t *testing.T) {
-	handler := MetricsHandler()
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+
+	// Observe at least one value so counter vecs with labels appear in output.
+	m.RequestsTotal.WithLabelValues("GET /healthz", "200").Inc()
+	m.ActiveSSE.Set(0)
+
+	handler := MetricsHandler(reg)
 	if handler == nil {
 		t.Fatal("MetricsHandler returned nil")
 	}
@@ -278,5 +286,14 @@ func TestMetricsHandler(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("metrics endpoint status = %d, want 200", rec.Code)
+	}
+
+	// Verify bridge-specific metrics are served, not just Go defaults.
+	body := rec.Body.String()
+	if !strings.Contains(body, "a2a_bridge_requests_total") {
+		t.Error("MetricsHandler should serve bridge metrics (a2a_bridge_requests_total)")
+	}
+	if !strings.Contains(body, "a2a_bridge_active_sse_connections") {
+		t.Error("MetricsHandler should serve bridge metrics (a2a_bridge_active_sse_connections)")
 	}
 }

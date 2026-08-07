@@ -28,9 +28,22 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// BridgePathPatterns returns URL patterns for the A2A bridge API.
+// These patterns are used by RequestLogMiddleware to extract project and agent
+// IDs from the request path for structured log enrichment.
+func BridgePathPatterns() []logging.PathPattern {
+	return []logging.PathPattern{
+		{Prefix: "/projects/", ProjectIdx: 0, AgentIdx: 2},  // /projects/{slug}/agents/{slug}/...
+		{Prefix: "/groves/", ProjectIdx: 0, AgentIdx: 2},    // /groves/{slug}/agents/{slug}/...
+	}
+}
 
 // Server is the A2A HTTP server that routes requests to the SDK handler.
 type Server struct {
@@ -179,9 +192,9 @@ func (s *Server) Handler() http.Handler {
 	// Health, readiness, and metrics.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.Handle("GET /metrics", MetricsHandler())
+	mux.Handle("GET /metrics", MetricsHandler(prometheus.DefaultGatherer))
 
-	// Wrap with middleware chain: metrics -> rate limit -> auth.
+	// Wrap with middleware chain: request-log -> metrics -> rate limit -> auth.
 	handler := s.authMiddleware(mux)
 	if s.snapshot != nil {
 		handler = s.snapshotRateLimitMiddleware(handler)
@@ -189,6 +202,9 @@ func (s *Server) Handler() http.Handler {
 		handler = RateLimitMiddleware(handler, s.config.RateLimit)
 	}
 	handler = InstrumentHandler(handler, s.metrics)
+	handler = logging.RequestLogMiddleware(
+		s.log, "scion-a2a-bridge", BridgePathPatterns(), 0,
+	)(handler)
 	return handler
 }
 

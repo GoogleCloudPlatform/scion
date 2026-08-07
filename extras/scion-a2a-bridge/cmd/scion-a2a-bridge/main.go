@@ -42,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 func main() {
@@ -54,13 +55,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize structured logging before validation so config errors are logged.
+	useGCP := os.Getenv("SCION_LOG_GCP") == "true" || os.Getenv("K_SERVICE") != ""
+	debug := cfg.Logging.Level == "debug"
+	logging.Setup("scion-a2a-bridge", debug, useGCP)
+	log := slog.Default()
+
 	// Validate auth configuration at startup (fail closed).
 	if err := bridge.ValidateConfig(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid configuration: %v\n", err)
+		log.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
 
-	log := initLogger(cfg.Logging)
 	log.Info("scion-a2a-bridge starting")
 
 	// Initialize SQLite state database.
@@ -350,24 +356,3 @@ func accessSecret(ctx context.Context, resourceName string) (string, error) {
 	return cleanBase64(string(resp.Payload.Data))
 }
 
-func initLogger(cfg bridge.LoggingConfig) *slog.Logger {
-	level := slog.LevelInfo
-	switch cfg.Level {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-
-	var handler slog.Handler
-	if cfg.Format == "json" {
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	} else {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	}
-	logger := slog.New(handler)
-	slog.SetDefault(logger)
-	return logger
-}
