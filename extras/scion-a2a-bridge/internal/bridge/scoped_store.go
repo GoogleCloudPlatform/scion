@@ -17,6 +17,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -45,22 +46,37 @@ func NewScopedTaskStore(inner taskstore.Store) *ScopedTaskStore {
 	}
 }
 
-// ownerKey returns the ownership key derived from the request context.
+// buildOwnerKey constructs the ownership key from the request context.
 // When a CallerIdentity is present (per-user auth schemes like hubJWT/hubUAT),
 // the caller's UserID is incorporated into the key so that different users on
 // the same project/agent route get isolated task namespaces. For legacy auth
 // schemes (apiKey/bearer/none) where no CallerIdentity exists, the key is
 // based solely on the route (project + agent), preserving backward compatibility.
-func ownerKey(ctx context.Context) (string, bool) {
+//
+// Both ownerKey() and RouteKeyAuthenticator() delegate here to ensure the key
+// format stays consistent across Create/Get/Update and List operations.
+func buildOwnerKey(ctx context.Context) (string, bool) {
 	route, ok := RouteInfoFrom(ctx)
 	if !ok {
 		return "", false
 	}
 	key := route.ProjectSlug + ":" + route.AgentSlug
-	if caller := callerIdentityFromContext(ctx); caller != nil && caller.UserID != "" {
-		key += ":" + caller.UserID
+	if caller := callerIdentityFromContext(ctx); caller != nil {
+		if caller.UserID != "" {
+			key += ":" + caller.UserID
+		} else {
+			slog.Warn("CallerIdentity present but UserID is empty; falling back to route-only key",
+				"project", route.ProjectSlug,
+				"agent", route.AgentSlug,
+			)
+		}
 	}
 	return key, true
+}
+
+// ownerKey returns the ownership key derived from the request context.
+func ownerKey(ctx context.Context) (string, bool) {
+	return buildOwnerKey(ctx)
 }
 
 // Create stores the task and records its ownership based on the route info in context.
@@ -134,13 +150,9 @@ func (s *ScopedTaskStore) List(ctx context.Context, req *a2a.ListTasksRequest) (
 // the identity is based solely on the route (project + agent pair).
 func RouteKeyAuthenticator() taskstore.Authenticator {
 	return func(ctx context.Context) (string, error) {
-		route, ok := RouteInfoFrom(ctx)
+		key, ok := buildOwnerKey(ctx)
 		if !ok {
 			return "", fmt.Errorf("missing route info: %w", a2a.ErrUnauthenticated)
-		}
-		key := route.ProjectSlug + ":" + route.AgentSlug
-		if caller := callerIdentityFromContext(ctx); caller != nil && caller.UserID != "" {
-			key += ":" + caller.UserID
 		}
 		return key, nil
 	}

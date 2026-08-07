@@ -163,6 +163,57 @@ func TestScopedStoreGetRequiresRouteInfo(t *testing.T) {
 	}
 }
 
+// --- Empty UserID edge case (Optional-1) ---
+
+func TestScopedStoreEmptyUserIDFallback(t *testing.T) {
+	// When CallerIdentity is present but UserID is empty, the ownership key
+	// should fall back to route-only keying (project:agent). This documents
+	// current defense-in-depth behavior: a broken validator that produces an
+	// empty UserID does not silently create a separate namespace — instead it
+	// falls back to the shared route key (and a warning is logged).
+	store := newScopedStore(t)
+	ctxRouteOnly := ctxForRoute("proj-a", "agent-1")
+	ctxEmptyUser := ctxForRouteAndCaller("proj-a", "agent-1", "")
+
+	// Create a task with a route-only context (no CallerIdentity).
+	task := &a2a.Task{
+		ID:        "task-empty-uid",
+		ContextID: "ctx-1",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
+	}
+	if _, err := store.Create(ctxRouteOnly, task); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// A context with CallerIdentity{UserID: ""} should resolve to the same
+	// route-only key and therefore be able to access the task.
+	stored, err := store.Get(ctxEmptyUser, "task-empty-uid")
+	if err != nil {
+		t.Fatalf("Get (empty UserID, same route): %v", err)
+	}
+	if stored.Task.ID != "task-empty-uid" {
+		t.Errorf("task ID = %q, want %q", stored.Task.ID, "task-empty-uid")
+	}
+
+	// Verify the reverse: a task created with empty UserID should also be
+	// visible to a route-only context.
+	task2 := &a2a.Task{
+		ID:        "task-empty-uid-2",
+		ContextID: "ctx-1",
+		Status:    a2a.TaskStatus{State: a2a.TaskStateSubmitted},
+	}
+	if _, err := store.Create(ctxEmptyUser, task2); err != nil {
+		t.Fatalf("Create (empty UserID): %v", err)
+	}
+	stored2, err := store.Get(ctxRouteOnly, "task-empty-uid-2")
+	if err != nil {
+		t.Fatalf("Get (route-only for empty-UserID task): %v", err)
+	}
+	if stored2.Task.ID != "task-empty-uid-2" {
+		t.Errorf("task ID = %q, want %q", stored2.Task.ID, "task-empty-uid-2")
+	}
+}
+
 // --- Cross-user isolation tests (per-user auth: hubJWT/hubUAT) ---
 
 func TestScopedStoreCrossUserGetDenied(t *testing.T) {
