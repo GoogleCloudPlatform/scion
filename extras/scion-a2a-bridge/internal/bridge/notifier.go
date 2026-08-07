@@ -153,7 +153,9 @@ func (n *Notifier) Stop() {
 	if wasStarted && done != nil {
 		<-done
 	}
-	n.log.Info("notifier: LISTEN connection stopped")
+	if wasStarted {
+		n.log.Info("notifier: LISTEN connection stopped")
+	}
 }
 
 // listenLoop is the core loop that waits for PostgreSQL notifications and
