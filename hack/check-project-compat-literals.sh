@@ -60,6 +60,7 @@ allowed_paths=(
   "^extras/agent-viz/internal/logparser/parser_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/auth_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/metrics_test.go$"
+  "^extras/scion-a2a-bridge/internal/bridge/middleware_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/server_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/stream_test.go$"
   "^extras/scion-a2a-bridge/internal/state/state_test.go$"
