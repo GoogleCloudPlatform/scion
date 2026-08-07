@@ -22,10 +22,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -36,18 +38,30 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/integration/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	brokerv1 "github.com/GoogleCloudPlatform/scion/proto/broker/v1"
 )
 
 func main() {
+	standalone := flag.Bool("standalone", false, "Run in standalone mode with Postgres store and gRPC broker")
 	configPath := flag.String("config", "scion-a2a-bridge.yaml", "Path to configuration file")
 	flag.Parse()
+
+	// Check environment variable as alternative to --standalone flag.
+	if os.Getenv("A2A_STANDALONE") == "true" {
+		*standalone = true
+	}
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
@@ -60,6 +74,11 @@ func main() {
 	debug := cfg.Logging.Level == "debug"
 	logging.Setup("scion-a2a-bridge", debug, useGCP)
 	log := slog.Default()
+
+	if *standalone {
+		serveStandalone(cfg, log)
+		return
+	}
 
 	// Validate auth configuration at startup (fail closed).
 	if err := bridge.ValidateConfig(cfg); err != nil {
@@ -74,7 +93,7 @@ func main() {
 	if dbPath == "" {
 		dbPath = "scion-a2a-bridge.db"
 	}
-	store, err := state.New(dbPath)
+	store, err := state.NewSQLite(dbPath)
 	if err != nil {
 		log.Error("failed to initialize state database", "error", err)
 		os.Exit(1)
@@ -260,6 +279,312 @@ func main() {
 	b.Shutdown()
 
 	log.Info("scion-a2a-bridge stopped")
+}
+
+// serveStandalone runs the A2A bridge in standalone mode using a Postgres
+// store and the integration runtime for config management. This mode is fully
+// leaderless — no advisory locks, no lock loops, no leader election.
+func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
+	log.Info("scion-a2a-bridge starting in standalone mode")
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// 1. Require DATABASE_URL for Postgres store.
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Error("DATABASE_URL is required in standalone mode")
+		os.Exit(1)
+	}
+
+	store, err := state.NewPostgres(databaseURL)
+	if err != nil {
+		log.Error("failed to initialize Postgres store", "error", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+	log.Info("Postgres store initialized")
+
+	// 2. Set up gRPC broker server + health service early so health probes
+	// work during the runtime's DB-connect retry window.
+	grpcPort := 50051
+	if p := os.Getenv("GRPC_PORT"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil {
+			grpcPort = parsed
+		}
+	}
+
+	brokerServer := bridge.NewBrokerServer(nil, log.With("component", "broker"), ctx)
+	grpcBrokerServer := grpcbroker.NewServer(brokerServer)
+
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
+	if err != nil {
+		log.Error("failed to listen for gRPC", "error", err, "port", grpcPort)
+		os.Exit(1)
+	}
+
+	grpcServer := grpc.NewServer()
+	brokerv1.RegisterBrokerServiceServer(grpcServer, grpcBrokerServer)
+	healthServer := health.NewServer()
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+
+	go func() {
+		log.Info("gRPC server listening", "port", grpcPort)
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Error("gRPC server error", "error", err)
+		}
+	}()
+
+	// 3. Start the integration runtime for config management.
+	rt := runtime.New(runtime.Options{
+		Integration: "a2a-bridge",
+		DatabaseURL: databaseURL,
+		EnvPrefix:   "A2A",
+		EnvKeys: []string{
+			"external_url", "auth_scheme", "uat_cache_ttl",
+			"rate_limit_enabled", "rate_limit_rps", "rate_limit_burst",
+			"send_message_timeout", "sse_keepalive", "push_retry_max",
+			"provider_org", "provider_url",
+		},
+		UpdateHook: os.Getenv("UPDATE_HOOK"),
+		Log:        log,
+	})
+
+	rctx, err := rt.Start(ctx)
+	if err != nil {
+		log.Error("failed to start integration runtime", "error", err)
+		os.Exit(1)
+	}
+	defer rt.Stop()
+
+	// 4. Apply runtime config onto the base YAML config.
+	rtConfig := rt.Config()
+	applyRuntimeConfig(cfg, rtConfig)
+
+	// 5. Read A2A_API_KEY from environment (secret, never through runtime config path).
+	if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
+		cfg.Auth.APIKey = apiKey
+	}
+
+	// Validate configuration after applying runtime overrides.
+	if err := bridge.ValidateConfig(cfg); err != nil {
+		log.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+
+	// 6. Load hub signing key and create hub client.
+	signingKeyB64, err := loadSigningKey(cfg.Hub)
+	if err != nil {
+		log.Error("failed to load signing key", "error", err)
+		os.Exit(1)
+	}
+	signingKey, err := base64.StdEncoding.DecodeString(signingKeyB64)
+	if err != nil {
+		log.Error("failed to decode hub signing key (expected base64)", "error", err)
+		os.Exit(1)
+	}
+
+	keyHash := sha256.Sum256(signingKey)
+	log.Info("signing key loaded",
+		"key_len", len(signingKey),
+		"key_sha256", hex.EncodeToString(keyHash[:8]),
+	)
+
+	minter, err := identity.NewTokenMinter(signingKey)
+	if err != nil {
+		log.Error("failed to create token minter", "error", err)
+		os.Exit(1)
+	}
+
+	hubUserID := cfg.Hub.UserID
+	if hubUserID == "" {
+		hubUserID = cfg.Hub.User
+	}
+	adminAuth := identity.NewMintingAuth(minter, hubUserID, cfg.Hub.User, "admin", 15*time.Minute)
+
+	hubClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithAuthenticator(adminAuth))
+	if err != nil {
+		log.Error("failed to create hub client", "error", err)
+		os.Exit(1)
+	}
+	log.Info("hub client initialized", "endpoint", cfg.Hub.Endpoint, "admin_user", cfg.Hub.User)
+
+	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
+
+	// 7. Build config snapshot (base YAML + runtime overrides).
+	baseCfg := *cfg
+	snapshot := bridge.NewSnapshotHolder(bridge.BuildSnapshot(*cfg))
+
+	// 8. Create core bridge.
+	b := bridge.New(store, hubClient, minter, cfg, metrics, log.With("component", "bridge"))
+
+	// Wire broker handler and admin config into the broker server.
+	brokerServer.SetHandler(b.HandleBrokerMessage)
+	b.SetBroker(brokerServer)
+	b.SetSnapshot(snapshot)
+	brokerServer.SetAdminConfig(&baseCfg, snapshot, "")
+
+	// 9. Set up reconfigure callback for runtime config changes.
+	rt.SetReconfigure(func(newCfg map[string]string) error {
+		applyRuntimeConfig(cfg, newCfg)
+		// Re-read A2A_API_KEY on reconfigure (may have been rotated).
+		if apiKey := os.Getenv("A2A_API_KEY"); apiKey != "" {
+			cfg.Auth.APIKey = apiKey
+		}
+		snap := bridge.BuildSnapshot(*cfg)
+		snapshot.Store(snap)
+		return nil
+	})
+
+	// 10. Create SDK executor and request handler.
+	executor := bridge.NewScionExecutor(b, log.With("component", "executor"))
+	routeAuthenticator := bridge.RouteKeyAuthenticator()
+	innerTaskStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: routeAuthenticator,
+	})
+	scopedTaskStore := bridge.NewScopedTaskStore(innerTaskStore)
+	sdkRequestHandler := a2asrv.NewHandler(
+		executor,
+		a2asrv.WithLogger(log.With("component", "a2a-sdk")),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{
+			Streaming:         true,
+			PushNotifications: false,
+		}),
+		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
+		a2asrv.WithTaskStore(scopedTaskStore),
+	)
+	b.SetSDKRequestHandler(sdkRequestHandler)
+
+	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(
+		sdkRequestHandler,
+		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+	)
+
+	// 11. Start A2A HTTP server.
+	listenAddr := cfg.Bridge.ListenAddress
+	if listenAddr == "" {
+		listenAddr = ":8443"
+	}
+
+	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
+	srv.SetSnapshot(snapshot)
+	if signingKey != nil {
+		srv.SetJWTValidator(bridge.NewJWTValidator(signingKey))
+	}
+	srv.WarnOnOpenAuth()
+
+	httpServer := &http.Server{
+		Addr:           listenAddr,
+		Handler:        srv.Handler(),
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		log.Info("A2A protocol server starting", "address", listenAddr)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- fmt.Errorf("a2a server: %w", err)
+		}
+	}()
+
+	// Mark healthy now that all services are up.
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+
+	log.Info("scion-a2a-bridge ready (standalone)",
+		"transport", "JSON-RPC",
+		"sdk", "a2a-go/v2",
+		"grpc_port", grpcPort,
+		"http_addr", listenAddr,
+	)
+
+	// 12. Block until signal, server error, or update-triggered shutdown.
+	select {
+	case <-rctx.Done():
+	case updateID := <-rt.ShutdownRequested():
+		log.Info("update-triggered shutdown", "update_id", updateID)
+		stop()
+	case err := <-errCh:
+		log.Error("server error", "error", err)
+		stop()
+	}
+
+	// 13. Graceful shutdown.
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Error("failed to stop A2A server", "error", err)
+	}
+
+	grpcDone := make(chan struct{})
+	go func() {
+		grpcServer.GracefulStop()
+		close(grpcDone)
+	}()
+	select {
+	case <-grpcDone:
+	case <-time.After(5 * time.Second):
+		grpcServer.Stop()
+	}
+
+	b.Shutdown()
+	log.Info("scion-a2a-bridge stopped (standalone)")
+}
+
+// applyRuntimeConfig merges runtime config values into the bridge config.
+// Only non-empty values override existing config.
+func applyRuntimeConfig(cfg *bridge.Config, rtCfg map[string]string) {
+	if v := rtCfg["external_url"]; v != "" {
+		cfg.Bridge.ExternalURL = v
+	}
+	if v := rtCfg["auth_scheme"]; v != "" {
+		cfg.Auth.Scheme = v
+	}
+	if v := rtCfg["uat_cache_ttl"]; v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Auth.UATCacheTTL = d
+		}
+	}
+	if v := rtCfg["rate_limit_enabled"]; v != "" {
+		cfg.RateLimit.Enabled = v == "true" || v == "1"
+	}
+	if v := rtCfg["rate_limit_rps"]; v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.RateLimit.RequestsPerSec = f
+		}
+	}
+	if v := rtCfg["rate_limit_burst"]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.RateLimit.Burst = n
+		}
+	}
+	if v := rtCfg["send_message_timeout"]; v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Timeouts.SendMessage = d
+		}
+	}
+	if v := rtCfg["sse_keepalive"]; v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Timeouts.SSEKeepalive = d
+		}
+	}
+	if v := rtCfg["push_retry_max"]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Timeouts.PushRetryMax = n
+		}
+	}
+	if v := rtCfg["provider_org"]; v != "" {
+		cfg.Bridge.Provider.Organization = v
+	}
+	if v := rtCfg["provider_url"]; v != "" {
+		cfg.Bridge.Provider.URL = v
+	}
 }
 
 func loadConfig(path string) (*bridge.Config, error) {
