@@ -692,6 +692,9 @@ type Server struct {
 	// Plugin manager for broker integration admin API (nil = no integrations)
 	pluginManager IntegrationManager
 
+	// Secret intake service for secure secret submission via links (nil = disabled)
+	secretIntakeService *SecretIntakeService
+
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -947,6 +950,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize Discord link service
 	srv.discordLinkService = NewDiscordLinkService()
+
+	// Initialize secret intake service
+	srv.secretIntakeService = NewSecretIntakeService()
 
 	// Initialize OAuth service if configured
 	if cfg.OAuthConfig.IsConfigured() {
@@ -2876,6 +2882,9 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.discordLinkService != nil {
 			s.discordLinkService.Close()
 		}
+		if s.secretIntakeService != nil {
+			s.secretIntakeService.Close()
+		}
 		if s.events != nil {
 			s.events.Close()
 		}
@@ -3079,6 +3088,10 @@ func (s *Server) registerRoutes() {
 	// as an exact path so it takes precedence over the /api/v1/skills/ subtree
 	// handler above.
 	s.mux.HandleFunc("/api/v1/skills/discover-directory", s.handleSkillsDiscoverDirectory)
+
+	// Secret intake endpoints (secure secret submission via links)
+	s.mux.HandleFunc("/api/v1/secret-intake", s.handleSecretIntake)
+	s.mux.HandleFunc("/api/v1/secret-intake/", s.handleSecretIntakeByID)
 
 	// GitHub App webhook and setup callback (unauthenticated — uses webhook signature)
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook)

@@ -117,6 +117,9 @@ type Client interface {
 	// the list of skills found at the given GitHub directory URL.
 	DiscoverSkillsDirectory(ctx context.Context, req DiscoverSkillsDirectoryRequest) (*DiscoverSkillsDirectoryResponse, error)
 
+	// SecretIntake returns the secret intake link operations interface.
+	SecretIntake() SecretIntakeService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
@@ -145,6 +148,7 @@ type client struct {
 	messages              *messageService
 	allowList             *allowListService
 	invites               *inviteService
+	secretIntake          *secretIntakeService
 }
 
 // New creates a new Hub API client.
@@ -197,6 +201,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.messages = &messageService{c: c}
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
+	c.secretIntake = &secretIntakeService{c: c}
 
 	return c, nil
 }
@@ -314,6 +319,11 @@ func (c *client) AllowList() AllowListService {
 // Invites returns the invite code management operations interface.
 func (c *client) Invites() InviteService {
 	return c.invites
+}
+
+// SecretIntake returns the secret intake link operations interface.
+func (c *client) SecretIntake() SecretIntakeService {
+	return c.secretIntake
 }
 
 // get performs an HTTP GET request with fallback.

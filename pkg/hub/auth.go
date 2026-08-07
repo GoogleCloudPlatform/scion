@@ -381,6 +381,8 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/github-app/setup": // GitHub App post-installation callback (browser redirect)
 		return true
+	case "/api/v1/settings/public": // Public settings (telemetry default, etc.)
+		return true
 	}
 	return false
 }
