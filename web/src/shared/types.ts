@@ -43,10 +43,12 @@ export interface AdminUser {
   displayName: string;
   avatarUrl?: string;
   role: UserRole;
-  status: 'active' | 'suspended';
+  status: 'active' | 'suspended' | 'invited';
   created: string;
   lastLogin?: string;
   lastSeen?: string;
+  invitedBy?: string;
+  inviteNote?: string;
   _capabilities?: Capabilities;
 }
 
@@ -177,7 +179,9 @@ export function isSharedWorkspace(project: Project): boolean {
  * Check whether a project uses worktree-per-agent workspace mode.
  */
 export function isWorktreeWorkspace(project: Project): boolean {
-  return !!project.gitRemote && project.labels?.['scion.dev/workspace-mode'] === 'worktree-per-agent';
+  return (
+    !!project.gitRemote && project.labels?.['scion.dev/workspace-mode'] === 'worktree-per-agent'
+  );
 }
 
 /**
