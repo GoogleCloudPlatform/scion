@@ -239,12 +239,12 @@ func TestApplySettingsUpdates_AutoExposePortsNilRequest(t *testing.T) {
 func TestApplySettingsUpdates_ClearFieldsToBlank(t *testing.T) {
 	// Step 1: Start with existing settings containing the fields we'll clear.
 	raw := map[string]interface{}{
-		"schema_version":       "1",
-		"default_max_duration": "2h",
-		"default_max_turns":    200,
+		"schema_version":          "1",
+		"default_max_duration":    "2h",
+		"default_max_turns":       200,
 		"default_max_model_calls": 500,
-		"default_model":        "gemini-2.0-flash",
-		"default_thinking_level": 3,
+		"default_model":           "gemini-2.0-flash",
+		"default_thinking_level":  3,
 	}
 
 	// Verify they're present.
