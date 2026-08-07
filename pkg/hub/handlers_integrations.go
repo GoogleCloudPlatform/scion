@@ -186,8 +186,8 @@ func lookupKnownPlugin(name string) *KnownPlugin {
 	return nil
 }
 
-// settingsWriteMu guards concurrent writes to settings.yaml.
-var settingsWriteMu sync.Mutex
+// SettingsWriteMu guards concurrent writes to settings.yaml.
+var SettingsWriteMu sync.Mutex
 
 // pluginBuildMu guards concurrent build operations per plugin name.
 var pluginBuildMu sync.Map
@@ -603,12 +603,12 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	settingsWriteMu.Lock()
+	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
 		// Non-fatal — continue with the config update.
 	}
-	settingsWriteMu.Unlock()
+	SettingsWriteMu.Unlock()
 
 	// Reconfigure the running integration with updated config.
 	// For HA integrations the DB write + NOTIFY is the reconfigure path —
@@ -654,12 +654,12 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	settingsWriteMu.Lock()
+	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
 		// Non-fatal — continue with the restart.
 	}
-	settingsWriteMu.Unlock()
+	SettingsWriteMu.Unlock()
 
 	// reconfigureIntegration pushes new config to the running plugin process
 	// (via ReplaceBrokerConfig) without killing it, so the existing spoke's
@@ -774,12 +774,12 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	settingsWriteMu.Lock()
+	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", name, "error", err)
 		// Non-fatal — continue with the update.
 	}
-	settingsWriteMu.Unlock()
+	SettingsWriteMu.Unlock()
 
 	if err := mgr.UpdatePlugin(name, repoPath); err != nil {
 		slog.Error("Failed to update integration", "plugin", name, "error", err)
@@ -891,12 +891,12 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 		slog.Info("Plugin config file already exists, preserving", "plugin", name, "path", resolvedConfigPath)
 	}
 
-	settingsWriteMu.Lock()
+	SettingsWriteMu.Lock()
 	err = config.AddPluginToSettings(name, configFilePath)
 	if err == nil {
 		err = config.AddPluginToMessageBrokerTypes(name)
 	}
-	settingsWriteMu.Unlock()
+	SettingsWriteMu.Unlock()
 	if err != nil {
 		slog.Error("Failed to add plugin to settings.yaml", "plugin", name, "error", err)
 		InternalError(w)
@@ -1005,13 +1005,13 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 
 	// 3. Register in settings.yaml with self-managed fields and broker type
 	//    in a single read-modify-write cycle.
-	settingsWriteMu.Lock()
+	SettingsWriteMu.Lock()
 	err = config.AddSelfManagedPluginWithBrokerType(config.SelfManagedPluginEntry{
 		Name:       name,
 		Address:    "localhost:9090",
 		ConfigFile: adminConfigPath,
 	})
-	settingsWriteMu.Unlock()
+	SettingsWriteMu.Unlock()
 	if err != nil {
 		slog.Error("Failed to add self-managed plugin to settings.yaml", "plugin", name, "error", err)
 		InternalError(w)
@@ -1168,12 +1168,12 @@ func (s *Server) handleRebuildSelfManaged(w http.ResponseWriter, _ *http.Request
 
 	// Ensure the plugin is listed in message_broker.types on disk so it
 	// survives future restarts/rebuilds that re-read settings.yaml.
-	settingsWriteMu.Lock()
+	SettingsWriteMu.Lock()
 	if err := config.AddPluginToMessageBrokerTypes(kp.Name); err != nil {
 		slog.Warn("Failed to ensure plugin in message_broker.types", "plugin", kp.Name, "error", err)
 		// Non-fatal — continue with the rebuild response.
 	}
-	settingsWriteMu.Unlock()
+	SettingsWriteMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":      "rebuilt",

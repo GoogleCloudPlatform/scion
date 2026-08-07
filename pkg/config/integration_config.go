@@ -500,7 +500,7 @@ func AddPluginToSettings(pluginName, configFilePath string) error {
 // AddPluginToMessageBrokerTypes appends pluginName to
 // server.message_broker.types in the global settings.yaml if it is not already
 // present. It also ensures that message_broker.enabled is true. The caller is
-// responsible for serialising concurrent writes (settingsWriteMu).
+// responsible for serialising concurrent writes (hub.SettingsWriteMu).
 func AddPluginToMessageBrokerTypes(pluginName string) error {
 	globalDir, err := GetGlobalDir()
 	if err != nil {
