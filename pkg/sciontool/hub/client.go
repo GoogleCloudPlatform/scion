@@ -563,6 +563,105 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target s
 	}
 }
 
+// GetSecretResponse is the response from the agent secret GET endpoint.
+type GetSecretResponse struct {
+	Key    string `json:"key"`
+	Value  string `json:"value"` // base64-encoded
+	Type   string `json:"type"`
+	Target string `json:"target"`
+}
+
+// GetSecret retrieves a project-scoped secret via the Hub API.
+// Returns the secret key, value (base64-encoded), type and target.
+func (c *Client) GetSecret(ctx context.Context, key string) (*GetSecretResponse, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/secrets/%s",
+		strings.TrimSuffix(c.hubURL, "/"), c.agentID, key)
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Scion-Agent-Token", currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result GetSecretResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return &result, nil
+}
+
+// ListSecretsSecretMeta is secret metadata returned in list responses.
+type ListSecretsSecretMeta struct {
+	Key    string `json:"key"`
+	Type   string `json:"type"`
+	Target string `json:"target"`
+}
+
+// ListSecretsResponse is the response from the agent secret LIST endpoint.
+type ListSecretsResponse struct {
+	Secrets []ListSecretsSecretMeta `json:"secrets"`
+}
+
+// ListSecrets lists metadata for all project-scoped secrets via the Hub API.
+func (c *Client) ListSecrets(ctx context.Context) (*ListSecretsResponse, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/secrets",
+		strings.TrimSuffix(c.hubURL, "/"), c.agentID)
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Scion-Agent-Token", currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result ListSecretsResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return &result, nil
+}
+
 // RefreshTokenEntry represents a single token in the generalized refresh response.
 // Mirrors the hub's RefreshTokenEntry type.
 type RefreshTokenEntry struct {

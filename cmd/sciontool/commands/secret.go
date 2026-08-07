@@ -7,9 +7,11 @@ package commands
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -135,9 +137,102 @@ Examples:
 	},
 }
 
+var secretGetCmd = &cobra.Command{
+	Use:   "get KEY",
+	Short: "Retrieve a project-scoped secret via the Hub API",
+	Long: `Retrieve a project-scoped secret from the Hub from within an agent container.
+
+The decoded secret value is printed to stdout (suitable for piping).
+
+Examples:
+  # Retrieve a secret value
+  sciontool secret get MY_API_KEY
+
+  # Use in a script
+  export API_KEY=$(sciontool secret get MY_API_KEY)`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		key := args[0]
+
+		hubClient := hub.NewClient()
+		if hubClient == nil || !hubClient.IsConfigured() {
+			log.Error("Hub client not configured. Is SCION_HUB_ENDPOINT set?")
+			os.Exit(1)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		resp, err := hubClient.GetSecret(ctx, key)
+		if err != nil {
+			log.Error("%v", err)
+			os.Exit(1)
+		}
+
+		// Decode the base64 value and write raw bytes to stdout.
+		decoded, err := base64.StdEncoding.DecodeString(resp.Value)
+		if err != nil {
+			log.Error("Failed to decode secret value: %v", err)
+			os.Exit(1)
+		}
+
+		if _, err := os.Stdout.Write(decoded); err != nil {
+			log.Error("Failed to write secret value: %v", err)
+			os.Exit(1)
+		}
+	},
+}
+
+var secretListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List available project-scoped secrets via the Hub API",
+	Long: `List metadata for all project-scoped secrets from within an agent container.
+
+Only metadata (key, type, target) is returned — secret values are not included.
+
+Examples:
+  sciontool secret list`,
+	Args: cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		hubClient := hub.NewClient()
+		if hubClient == nil || !hubClient.IsConfigured() {
+			log.Error("Hub client not configured. Is SCION_HUB_ENDPOINT set?")
+			os.Exit(1)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		resp, err := hubClient.ListSecrets(ctx)
+		if err != nil {
+			log.Error("%v", err)
+			os.Exit(1)
+		}
+
+		if len(resp.Secrets) == 0 {
+			log.Info("No secrets found")
+			return
+		}
+
+		// Print header and table using tabwriter for aligned columns.
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "KEY\tTYPE\tTARGET") //nolint:errcheck
+		fmt.Fprintln(tw, "---\t----\t------") //nolint:errcheck
+		for _, s := range resp.Secrets {
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", s.Key, s.Type, s.Target) //nolint:errcheck
+		}
+		if err := tw.Flush(); err != nil {
+			log.Error("Failed to flush output: %v", err)
+			os.Exit(1)
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(secretCmd)
 	secretCmd.AddCommand(secretSetCmd)
+	secretCmd.AddCommand(secretGetCmd)
+	secretCmd.AddCommand(secretListCmd)
 
 	secretSetCmd.Flags().StringVar(&secretType, "type", "", "Secret type: environment (default), variable, file")
 	secretSetCmd.Flags().StringVar(&secretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")
