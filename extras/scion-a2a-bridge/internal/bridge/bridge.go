@@ -175,12 +175,14 @@ func (b *Bridge) reapStaleTasks(ctx context.Context, maxAge time.Duration) {
 				TaskID: task.ID,
 				Status: TaskStatus{State: TaskStateFailed},
 			})
-			b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+			if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
 				TaskID:  task.ID,
 				Kind:    "status",
 				Payload: failPayload,
 				Final:   true,
-			})
+			}); err != nil {
+				b.log.Error("failed to append task event", "task_id", task.ID, "kind", "status", "error", err)
+			}
 			failEvent := StreamEvent{
 				StatusUpdate: &TaskStatusUpdate{
 					TaskID: task.ID,
@@ -233,8 +235,10 @@ func (b *Bridge) maybeOpportunisticSweep(ctx context.Context) {
 	if !b.lastSweptAt.CompareAndSwap(last, now) {
 		return // another goroutine won the CAS
 	}
+	b.wg.Add(1)
 	go func() {
-		b.RunSweep(context.Background())
+		defer b.wg.Done()
+		b.RunSweep(b.shutdownCtx)
 	}()
 }
 
@@ -780,12 +784,14 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 			TaskID: taskID,
 			Status: TaskStatus{State: TaskStateCanceled},
 		})
-		b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+		if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
 			TaskID:  taskID,
 			Kind:    "status",
 			Payload: cancelPayload,
 			Final:   true,
-		})
+		}); err != nil {
+			b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+		}
 		cancelEvent := StreamEvent{
 			StatusUpdate: &TaskStatusUpdate{
 				TaskID: taskID,
@@ -913,13 +919,15 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 			Status: TaskStatus{State: taskState},
 		})
 
-		b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+		if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
 			TaskID:   taskID,
 			Kind:     "status",
 			Payload:  statusPayload,
 			Final:    isFinal,
 			DedupKey: dedupKey,
-		})
+		}); err != nil {
+			b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+		}
 
 		changed, err := b.store.UpdateTaskState(ctx, taskID, taskState)
 		if err != nil {
@@ -986,13 +994,15 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 			TaskID:   taskID,
 			Artifact: art,
 		})
-		b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+		if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
 			TaskID:   taskID,
 			Kind:     "artifact",
 			Payload:  artPayload,
 			Final:    false,
 			DedupKey: dedupKey + ":artifact:" + art.ArtifactID,
-		})
+		}); err != nil {
+			b.log.Error("failed to append task event", "task_id", taskID, "kind", "artifact", "error", err)
+		}
 		artEvent := StreamEvent{
 			ArtifactUpdate: &TaskArtifactUpdate{
 				TaskID:   taskID,
@@ -1010,13 +1020,15 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 			Message: &a2aMsg,
 		},
 	})
-	b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+	if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
 		TaskID:   taskID,
 		Kind:     "message",
 		Payload:  msgPayload,
 		Final:    false,
 		DedupKey: dedupKey + ":message",
-	})
+	}); err != nil {
+		b.log.Error("failed to append task event", "task_id", taskID, "kind", "message", "error", err)
+	}
 
 	statusEvent := StreamEvent{
 		StatusUpdate: &TaskStatusUpdate{
@@ -1047,12 +1059,14 @@ func (b *Bridge) failFollowUpTask(taskID string) {
 			TaskID: taskID,
 			Status: TaskStatus{State: TaskStateFailed},
 		})
-		b.store.AppendTaskEvent(b.shutdownCtx, &state.TaskEvent{
+		if _, err := b.store.AppendTaskEvent(b.shutdownCtx, &state.TaskEvent{
 			TaskID:  taskID,
 			Kind:    "status",
 			Payload: failPayload,
 			Final:   true,
-		})
+		}); err != nil {
+			b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+		}
 		failEvent := StreamEvent{
 			StatusUpdate: &TaskStatusUpdate{
 				TaskID: taskID,

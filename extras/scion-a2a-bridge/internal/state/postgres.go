@@ -175,7 +175,7 @@ func (s *PostgresStore) TouchTask(ctx context.Context, id string) error {
 // Returns changed=true if the row was actually updated (CAS semantics).
 func (s *PostgresStore) UpdateTaskState(ctx context.Context, id, state string) (bool, error) {
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE a2a_tasks SET state = $1, updated_at = NOW() WHERE id = $2 AND state NOT IN ('completed', 'failed', 'canceled')`,
+		`UPDATE a2a_tasks SET state = $1, updated_at = NOW() WHERE id = $2 AND state NOT IN ('completed', 'failed', 'canceled', 'rejected')`,
 		state, id,
 	)
 	if err != nil {
@@ -234,7 +234,7 @@ func (s *PostgresStore) FindActiveTaskForAgent(ctx context.Context, projectID, a
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM a2a_tasks
-		 WHERE project_id = $1 AND agent_slug = $2 AND state NOT IN ('completed','failed','canceled')
+		 WHERE project_id = $1 AND agent_slug = $2 AND state NOT IN ('completed','failed','canceled','rejected')
 		 ORDER BY updated_at DESC LIMIT 1`, projectID, agentSlug,
 	).Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata)
 	if err == sql.ErrNoRows {
@@ -252,7 +252,7 @@ func (s *PostgresStore) ListStaleActiveTasks(ctx context.Context, olderThan time
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM a2a_tasks
-		 WHERE state NOT IN ('completed','failed','canceled') AND updated_at < $1
+		 WHERE state NOT IN ('completed','failed','canceled','rejected') AND updated_at < $1
 		 ORDER BY updated_at ASC LIMIT $2`, olderThan, limit,
 	)
 	if err != nil {

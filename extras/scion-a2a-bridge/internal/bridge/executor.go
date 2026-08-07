@@ -170,9 +170,8 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 				failMsg = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Request cancelled"))
 			}
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
-			if e.bridge.metrics != nil {
-				e.bridge.metrics.TasksCompleted.WithLabelValues("failed").Inc()
-			}
+			// Metric increment is handled by the CAS winner in
+			// processAndAppendEvent — not duplicated here.
 			return
 		}
 
@@ -182,16 +181,10 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			e.log.Error("failed to convert event to SDK format", "error", sdkErr, "task_id", taskID)
 			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to process agent response"))
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
-			if e.bridge.metrics != nil {
-				e.bridge.metrics.TasksCompleted.WithLabelValues("failed").Inc()
-			}
 			return
 		}
 
 		yield(sdkEvent, nil)
-		if e.bridge.metrics != nil {
-			e.bridge.metrics.TasksCompleted.WithLabelValues("completed").Inc()
-		}
 	}
 }
 

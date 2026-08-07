@@ -3578,7 +3578,8 @@ func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Cont
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 
-		resp, err := http.DefaultClient.Do(req)
+		sweepClient := &http.Client{Timeout: 30 * time.Second}
+		resp, err := sweepClient.Do(req)
 		if err != nil {
 			slog.Error("a2a-bridge-sweep: request failed", "error", err)
 			return

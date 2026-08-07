@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -60,7 +59,7 @@ type StreamManager struct {
 	mu             sync.RWMutex
 	sessions       map[string]int // taskID -> count of active sessions
 	maxSubscribers int
-	totalActive    atomic.Int64
+	totalActive    int64 // guarded by mu — no atomic needed
 }
 
 // NewStreamManager creates a new stream manager with the given subscriber limit.
@@ -79,13 +78,12 @@ func NewStreamManager(maxSubscribers int) *StreamManager {
 // global subscriber cap.
 func (sm *StreamManager) AcquireSession(taskID string) (func(), error) {
 	sm.mu.Lock()
-	total := int(sm.totalActive.Load())
-	if total >= sm.maxSubscribers {
+	if int(sm.totalActive) >= sm.maxSubscribers {
 		sm.mu.Unlock()
 		return nil, ErrTooManySubscribers
 	}
 	sm.sessions[taskID]++
-	sm.totalActive.Add(1)
+	sm.totalActive++
 	sm.mu.Unlock()
 
 	cleanup := func() {
@@ -94,7 +92,7 @@ func (sm *StreamManager) AcquireSession(taskID string) (func(), error) {
 		if sm.sessions[taskID] <= 0 {
 			delete(sm.sessions, taskID)
 		}
-		sm.totalActive.Add(-1)
+		sm.totalActive--
 		sm.mu.Unlock()
 	}
 	return cleanup, nil
@@ -304,18 +302,27 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 		TaskID: taskID,
 		Status: TaskStatus{State: TaskStateSubmitted},
 	})
-	b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+	if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
 		TaskID:   taskID,
 		Kind:     "status",
 		Payload:  submittedPayload,
 		Final:    false,
 		DedupKey: taskID + ":submitted",
-	})
+	}); err != nil {
+		b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+	}
 
-	// Start polling the event log for this task.
-	pollCtx, pollCancel := context.WithCancel(b.shutdownCtx)
+	// Start polling the event log for this task. Derive from the request
+	// context so cancellation propagates when the client disconnects.
+	pollCtx, pollCancel := context.WithCancel(ctx)
 	events := streamTaskEvents(pollCtx, b.store, taskID, 0, 10, b.notifier)
 
+	// NOTE: SendStreamingMessage intentionally uses the bridge admin identity
+	// rather than propagating per-user CallerIdentity. Streaming is an admin-only
+	// transport; per-user routing is handled by the blocking SendMessage path and
+	// the SDK executor (ScionExecutor.Execute). If per-user streaming is needed
+	// in the future, CallerIdentity propagation should be added here (similar to
+	// Bridge.SendMessage).
 	scionMsg := TranslateA2AToScion(parts)
 	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
@@ -345,12 +352,14 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 					TaskID: taskID,
 					Status: TaskStatus{State: TaskStateFailed},
 				})
-				b.store.AppendTaskEvent(sendCtx, &state.TaskEvent{
+				if _, err := b.store.AppendTaskEvent(sendCtx, &state.TaskEvent{
 					TaskID:  taskID,
 					Kind:    "status",
 					Payload: failPayload,
 					Final:   true,
-				})
+				}); err != nil {
+					b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+				}
 			}
 			b.unregisterActiveTask(taskID, aKey)
 			return
@@ -365,13 +374,15 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 				TaskID: taskID,
 				Status: TaskStatus{State: TaskStateWorking},
 			})
-			b.store.AppendTaskEvent(sendCtx, &state.TaskEvent{
+			if _, err := b.store.AppendTaskEvent(sendCtx, &state.TaskEvent{
 				TaskID:   taskID,
 				Kind:     "status",
 				Payload:  workingPayload,
 				Final:    false,
 				DedupKey: taskID + ":working",
-			})
+			}); err != nil {
+				b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+			}
 		}
 	}()
 

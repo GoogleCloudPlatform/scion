@@ -234,7 +234,7 @@ func (s *SQLiteStore) TouchTask(ctx context.Context, id string) error {
 // Returns changed=true if the row was actually updated (CAS semantics).
 func (s *SQLiteStore) UpdateTaskState(ctx context.Context, id, state string) (bool, error) {
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET state = ?, updated_at = ? WHERE id = ? AND state NOT IN ('completed', 'failed', 'canceled')`,
+		`UPDATE tasks SET state = ?, updated_at = ? WHERE id = ? AND state NOT IN ('completed', 'failed', 'canceled', 'rejected')`,
 		state, time.Now().UTC(), id,
 	)
 	if err != nil {
@@ -320,7 +320,7 @@ func (s *SQLiteStore) FindActiveTaskForAgent(ctx context.Context, projectID, age
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM tasks
-		 WHERE project_id = ? AND agent_slug = ? AND state NOT IN ('completed','failed','canceled')
+		 WHERE project_id = ? AND agent_slug = ? AND state NOT IN ('completed','failed','canceled','rejected')
 		 ORDER BY updated_at DESC LIMIT 1`, projectID, agentSlug,
 	).Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata)
 	if err == sql.ErrNoRows {
@@ -338,7 +338,7 @@ func (s *SQLiteStore) ListStaleActiveTasks(ctx context.Context, olderThan time.T
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM tasks
-		 WHERE state NOT IN ('completed','failed','canceled') AND updated_at < ?
+		 WHERE state NOT IN ('completed','failed','canceled','rejected') AND updated_at < ?
 		 ORDER BY updated_at ASC LIMIT ?`, olderThan, limit,
 	)
 	if err != nil {
@@ -544,30 +544,4 @@ func nullableString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
-}
-
-// scanTask scans a task row from the given scanner (Row or Rows).
-func scanTask(scanner interface{ Scan(dest ...any) error }) (*Task, error) {
-	t := &Task{}
-	err := scanner.Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata)
-	if err != nil {
-		return nil, err
-	}
-	return t, nil
-}
-
-// scanTaskEvent scans an event row. Shared by SQLite and Postgres for DRY.
-func scanTaskEvent(scanner interface{ Scan(dest ...any) error }) (*TaskEvent, error) {
-	ev := &TaskEvent{}
-	var dedupKey sql.NullString
-	var payload string
-	err := scanner.Scan(&ev.ID, &ev.TaskID, &ev.Kind, &payload, &ev.Final, &dedupKey, &ev.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	ev.Payload = json.RawMessage(payload)
-	if dedupKey.Valid {
-		ev.DedupKey = dedupKey.String
-	}
-	return ev, nil
 }
