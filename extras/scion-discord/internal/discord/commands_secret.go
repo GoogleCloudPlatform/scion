@@ -90,9 +90,10 @@ func (h *CommandHandler) HandleSecretSet(s *discordgo.Session, i *discordgo.Inte
 	}
 
 	// Modal title is limited to 45 chars by Discord.
+	// Use runes to avoid splitting multi-byte UTF-8 characters.
 	title := "Set Secret: " + key
-	if len(title) > 45 {
-		title = title[:45]
+	if runes := []rune(title); len(runes) > 45 {
+		title = string(runes[:45])
 	}
 
 	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -254,7 +255,13 @@ func (h *CommandHandler) HandleSecretList(s *discordgo.Session, i *discordgo.Int
 		sb.WriteString(line + "\n")
 	}
 
-	h.followup(s, i, sb.String())
+	// Discord messages are limited to 2000 characters. Truncate defensively.
+	output := sb.String()
+	if len(output) > 1900 {
+		output = output[:1900] + "\n... (truncated)"
+	}
+
+	h.followup(s, i, output)
 }
 
 // HandleSecretGet shows metadata for a single secret (never the value).
