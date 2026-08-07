@@ -46,13 +46,17 @@ func newTestBridge(t *testing.T) *Bridge {
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
 
 	cfg := &Config{
 		Timeouts: TimeoutConfig{PushRetryMax: 3},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(store, nil, nil, cfg, nil, log)
+	b := New(store, nil, nil, cfg, nil, log)
+	t.Cleanup(func() {
+		b.Shutdown()
+		store.Close()
+	})
+	return b
 }
 
 func TestPushDispatcherSendsWebhook(t *testing.T) {
@@ -355,8 +359,10 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
+	ctx := context.Background()
+
 	// Set config.
-	cfg, err := b.SetPushNotificationConfig(nil, "task-1", "https://example.com/webhook", "tok123", "", "")
+	cfg, err := b.SetPushNotificationConfig(ctx, "task-1", "https://example.com/webhook", "tok123", "", "")
 	if err != nil {
 		t.Fatalf("SetPushNotificationConfig: %v", err)
 	}
@@ -368,7 +374,7 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 	}
 
 	// Get configs.
-	configs, err := b.GetPushNotificationConfig(nil, "task-1")
+	configs, err := b.GetPushNotificationConfig(ctx, "task-1")
 	if err != nil {
 		t.Fatalf("GetPushNotificationConfig: %v", err)
 	}
@@ -377,11 +383,11 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 	}
 
 	// Delete config.
-	if err := b.DeletePushNotificationConfig(nil, "task-1", cfg.ID); err != nil {
+	if err := b.DeletePushNotificationConfig(ctx, "task-1", cfg.ID); err != nil {
 		t.Fatalf("DeletePushNotificationConfig: %v", err)
 	}
 
-	configs, err = b.GetPushNotificationConfig(nil, "task-1")
+	configs, err = b.GetPushNotificationConfig(ctx, "task-1")
 	if err != nil {
 		t.Fatalf("GetPushNotificationConfig after delete: %v", err)
 	}
@@ -393,7 +399,7 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 func TestBridgeSetPushConfigTaskNotFound(t *testing.T) {
 	b := newTestBridge(t)
 
-	_, err := b.SetPushNotificationConfig(nil, "nonexistent-task", "https://example.com/webhook", "", "", "")
+	_, err := b.SetPushNotificationConfig(context.Background(), "nonexistent-task", "https://example.com/webhook", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for nonexistent task")
 	}
