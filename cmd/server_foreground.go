@@ -430,28 +430,30 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				}
 				if !vs.Server.MessageBroker.Enabled {
 					vs.Server.MessageBroker.Enabled = true
-					seen := make(map[string]bool, len(vs.Server.MessageBroker.Types))
-					for _, t := range vs.Server.MessageBroker.Types {
-						seen[t] = true
-					}
-					for name := range vs.Server.Plugins.Broker {
-						if !seen[name] {
-							vs.Server.MessageBroker.Types = append(vs.Server.MessageBroker.Types, name)
-							seen[name] = true
-						}
-					}
-					log.Printf("Auto-enabled message broker for configured broker plugin(s): %v", vs.Server.MessageBroker.Types)
+					log.Printf("Auto-enabled message broker for configured broker plugin(s)")
 				}
 			}
 
-			// Auto-populate: if message_broker.enabled but types is empty while
-			// broker plugins exist, populate types from the plugin list.
-			if vs.Server.Plugins != nil && vs.Server.MessageBroker != nil &&
-				vs.Server.MessageBroker.Enabled && len(vs.Server.MessageBroker.Types) == 0 && len(vs.Server.Plugins.Broker) > 0 {
-				for name := range vs.Server.Plugins.Broker {
-					vs.Server.MessageBroker.Types = append(vs.Server.MessageBroker.Types, name)
+			// Reconcile: ensure every configured broker plugin is listed in
+			// message_broker.types (in-memory AND on disk). Covers both empty
+			// and partially-populated type lists.
+			if vs.Server.Plugins != nil && vs.Server.MessageBroker != nil && len(vs.Server.Plugins.Broker) > 0 {
+				typesSet := make(map[string]bool, len(vs.Server.MessageBroker.Types))
+				for _, t := range vs.Server.MessageBroker.Types {
+					typesSet[t] = true
 				}
-				log.Printf("NOTICE: message_broker.types was empty — auto-populated from plugins: %v", vs.Server.MessageBroker.Types)
+				for name := range vs.Server.Plugins.Broker {
+					if !typesSet[name] {
+						vs.Server.MessageBroker.Types = append(vs.Server.MessageBroker.Types, name)
+						hub.SettingsWriteMu.Lock()
+						if err := config.AddPluginToMessageBrokerTypes(name); err != nil {
+							log.Printf("Warning: failed to persist %s to message_broker.types: %v", name, err)
+						} else {
+							log.Printf("NOTICE: auto-added %q to message_broker.types (was configured but missing)", name)
+						}
+						hub.SettingsWriteMu.Unlock()
+					}
+				}
 			}
 
 			// Warn on plugin-not-in-types
