@@ -55,11 +55,11 @@ type jsonRPCErr struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
-func newTestServer(t *testing.T) (*Server, *httptest.Server, *state.Store) {
+func newTestServer(t *testing.T) (*Server, *httptest.Server, state.Store) {
 	t.Helper()
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestPerAgentCardSupportedInterfaces(t *testing.T) {
 
 func TestGenerateAgentCardSupportedInterfaces(t *testing.T) {
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "card-test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "card-test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -592,7 +592,7 @@ func TestLegacyGrovePath(t *testing.T) {
 
 func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 	dir := t.TempDir()
-	s, err := state.New(filepath.Join(dir, "auth-test.db"))
+	s, err := state.NewSQLite(filepath.Join(dir, "auth-test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +605,7 @@ func TestAuthorizeTaskReturnsNilNil(t *testing.T) {
 	b := New(s, nil, nil, cfg, nil, log)
 
 	now := time.Now()
-	s.CreateTask(&state.Task{
+	s.CreateTask(context.Background(), &state.Task{
 		ID: "owned-task", ContextID: "ctx-1", ProjectID: "grove-a", AgentSlug: "agent-x",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
@@ -642,7 +642,7 @@ func TestSetJWTValidator_EnablesHubJWTAuth(t *testing.T) {
 	// Verify that calling SetJWTValidator on the server with a signing key
 	// initializes the JWTValidator so hubJWT auth works (and doesn't 500).
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "jwt-test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "jwt-test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}

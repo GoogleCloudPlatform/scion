@@ -36,7 +36,7 @@ import (
 
 // PushDispatcher delivers webhook notifications for task state changes.
 type PushDispatcher struct {
-	store       *state.Store
+	store       state.Store
 	config      *Config
 	log         *slog.Logger
 	client      *http.Client
@@ -158,7 +158,7 @@ func NewSSRFSafeClient() *http.Client {
 }
 
 // NewPushDispatcher creates a new push notification dispatcher.
-func NewPushDispatcher(store *state.Store, cfg *Config, log *slog.Logger, shutdownCtx context.Context) *PushDispatcher {
+func NewPushDispatcher(store state.Store, cfg *Config, log *slog.Logger, shutdownCtx context.Context) *PushDispatcher {
 	return &PushDispatcher{
 		store:       store,
 		config:      cfg,
@@ -179,7 +179,7 @@ func (pd *PushDispatcher) Dispatch(ctx context.Context, taskID string, event Str
 	default:
 	}
 
-	configs, err := pd.store.GetPushConfigsByTask(taskID)
+	configs, err := pd.store.GetPushConfigsByTask(ctx, taskID)
 	if err != nil {
 		pd.log.Error("failed to get push configs", "task_id", taskID, "error", err)
 		return
@@ -247,7 +247,7 @@ func (pd *PushDispatcher) sendWithRetry(cfg state.PushNotificationConfig, event 
 			if statusCode == 410 || (statusCode >= 400 && statusCode < 500 && statusCode != 408 && statusCode != 429) {
 				pd.log.Error("push notification returned permanent client error, removing config",
 					"id", cfg.ID, "url", cfg.URL, "status_code", statusCode)
-				if err := pd.store.DeletePushConfig(cfg.ID); err != nil {
+				if err := pd.store.DeletePushConfig(pd.shutdownCtx, cfg.ID); err != nil {
 					pd.log.Error("failed to delete push config after permanent error", "id", cfg.ID, "error", err)
 				}
 				return
@@ -308,7 +308,7 @@ func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, pushURL,
 		return nil, fmt.Errorf("invalid push URL: %w", err)
 	}
 
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
@@ -316,7 +316,7 @@ func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, pushURL,
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
 
-	existing, err := b.store.GetPushConfigsByTask(taskID)
+	existing, err := b.store.GetPushConfigsByTask(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("check existing configs: %w", err)
 	}
@@ -334,7 +334,7 @@ func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, pushURL,
 		CreatedAt:       time.Now(),
 	}
 
-	if err := b.store.SetPushConfig(cfg); err != nil {
+	if err := b.store.SetPushConfig(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("set push config: %w", err)
 	}
 
@@ -344,11 +344,11 @@ func (b *Bridge) SetPushNotificationConfig(ctx context.Context, taskID, pushURL,
 
 // GetPushNotificationConfig returns all push configs for a task.
 func (b *Bridge) GetPushNotificationConfig(ctx context.Context, taskID string) ([]state.PushNotificationConfig, error) {
-	return b.store.GetPushConfigsByTask(taskID)
+	return b.store.GetPushConfigsByTask(ctx, taskID)
 }
 
 // DeletePushNotificationConfig removes a push notification configuration,
 // verifying it belongs to the specified task.
 func (b *Bridge) DeletePushNotificationConfig(ctx context.Context, taskID, id string) error {
-	return b.store.DeletePushConfigForTask(taskID, id)
+	return b.store.DeletePushConfigForTask(ctx, taskID, id)
 }

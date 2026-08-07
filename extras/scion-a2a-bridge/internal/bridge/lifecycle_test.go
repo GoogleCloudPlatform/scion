@@ -33,7 +33,7 @@ import (
 // b.Shutdown() (or defer it) to avoid goroutine leaks.
 // An optional *Metrics can be passed to wire metrics from the start, avoiding
 // data races from assigning b.metrics after background goroutines are running.
-func newLifecycleTestBridge(t *testing.T, opts ...func(*lifecycleTestOpts)) (*Bridge, *state.Store) {
+func newLifecycleTestBridge(t *testing.T, opts ...func(*lifecycleTestOpts)) (*Bridge, state.Store) {
 	t.Helper()
 
 	o := &lifecycleTestOpts{}
@@ -42,7 +42,7 @@ func newLifecycleTestBridge(t *testing.T, opts ...func(*lifecycleTestOpts)) (*Br
 	}
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "lifecycle-test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "lifecycle-test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -68,10 +68,10 @@ func withMetrics(m *Metrics) func(*lifecycleTestOpts) {
 
 // seedTask creates and registers a task in both the store and the bridge's
 // activeTasks map, mimicking what SendMessage does for non-blocking sends.
-func seedLifecycleTask(t *testing.T, b *Bridge, store *state.Store, taskID, projectID, agentSlug string) {
+func seedLifecycleTask(t *testing.T, b *Bridge, store state.Store, taskID, projectID, agentSlug string) {
 	t.Helper()
 	now := time.Now()
-	if err := store.CreateTask(&state.Task{
+	if err := store.CreateTask(context.Background(), &state.Task{
 		ID:        taskID,
 		ContextID: "ctx-1",
 		ProjectID: projectID,
@@ -119,7 +119,7 @@ func TestContentMessageDoesNotCompleteTask(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Task should NOT be completed in the store.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestContentMessagePreservesInputRequiredState(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// State must still be input-required — content must not overwrite it.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestMultipleContentMessagesKeepTaskAlive(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Task should still be working.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Task should now be completed in the store.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestStateChangeInputRequiredKeepsTaskAlive(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Task should be in input-required state.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestStateChangeFailedClosesTask(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -539,7 +539,7 @@ func TestBlockingSendMessageReturnsWorking(t *testing.T) {
 	now := time.Now()
 
 	// Seed the task directly in the store.
-	if err := store.CreateTask(&state.Task{
+	if err := store.CreateTask(context.Background(), &state.Task{
 		ID: taskID, ContextID: "ctx-1", ProjectID: "proj1", AgentSlug: "agent-a",
 		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	}); err != nil {
@@ -709,7 +709,7 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 	sendStateChange("WAITING_FOR_INPUT")
 	time.Sleep(50 * time.Millisecond)
 
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask after input-required: %v", err)
 	}
@@ -729,7 +729,7 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 	sendStateChange("WORKING")
 	time.Sleep(50 * time.Millisecond)
 
-	task, err = store.GetTask(taskID)
+	task, err = store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask after working: %v", err)
 	}
@@ -745,7 +745,7 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 	sendStateChange("COMPLETED")
 	time.Sleep(100 * time.Millisecond)
 
-	task, err = store.GetTask(taskID)
+	task, err = store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask after completed: %v", err)
 	}
@@ -806,7 +806,7 @@ func TestSlugFallbackContentDoesNotCloseTask(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -904,7 +904,7 @@ func TestContentMessageDoesNotIncrementCompletedMetric(t *testing.T) {
 
 	// The completed metric should NOT have been incremented.
 	// We test indirectly by verifying the task is still active and not completed.
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateWorking {
 		t.Errorf("task state = %q, want %q", task.State, TaskStateWorking)
 	}
@@ -934,7 +934,7 @@ func TestContentAfterCompletedIsIgnored(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify task is completed and unregistered.
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateCompleted {
 		t.Fatalf("expected completed state, got %q", task.State)
 	}
@@ -961,7 +961,7 @@ func TestContentAfterCompletedIsIgnored(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// State should still be completed (store protects terminal states).
-	task, _ = store.GetTask(taskID)
+	task, _ = store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateCompleted {
 		t.Errorf("task state changed after late content: %q, want %q", task.State, TaskStateCompleted)
 	}
@@ -991,7 +991,7 @@ func TestDoubleCompletedIsIdempotent(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateCompleted {
 		t.Errorf("task state = %q, want %q", task.State, TaskStateCompleted)
 	}
@@ -1033,7 +1033,7 @@ func TestNonBlockingSendKeepsTaskAlive(t *testing.T) {
 		t.Error("non-blocking task should still be active after content message")
 	}
 
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateWorking {
 		t.Errorf("task state = %q, want %q", task.State, TaskStateWorking)
 	}
@@ -1067,7 +1067,7 @@ func TestStateChangeWorkingDoesNotCloseTask(t *testing.T) {
 		t.Error("WORKING state-change should not unregister the task (non-terminal)")
 	}
 
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateWorking {
 		t.Errorf("task state = %q, want %q", task.State, TaskStateWorking)
 	}
@@ -1103,7 +1103,7 @@ func TestMultipleAgentTasksContentDoesNotClose(t *testing.T) {
 		if !isActive {
 			t.Errorf("task %s should still be active after slug-fallback content", tid)
 		}
-		task, _ := store.GetTask(tid)
+		task, _ := store.GetTask(context.Background(), tid)
 		if task.State != TaskStateWorking {
 			t.Errorf("task %s state = %q, want %q", tid, task.State, TaskStateWorking)
 		}
@@ -1185,7 +1185,7 @@ func TestStateChangeTerminalityTableDriven(t *testing.T) {
 			}
 			time.Sleep(100 * time.Millisecond)
 
-			task, err := store.GetTask(taskID)
+			task, err := store.GetTask(context.Background(), taskID)
 			if err != nil {
 				t.Fatalf("GetTask: %v", err)
 			}
@@ -1352,7 +1352,7 @@ func TestDispatchToWaiterPersistsTerminalState(t *testing.T) {
 	}
 
 	// But the DB state must be updated to completed.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -1387,7 +1387,7 @@ func TestDispatchToWaiterDoesNotPersistNonTerminalState(t *testing.T) {
 	}
 
 	// DB state should remain working (seedTask sets it to working).
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -1402,7 +1402,7 @@ func TestContentMessageRefreshesTimestamp(t *testing.T) {
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	// Record the initial timestamp.
-	taskBefore, err := store.GetTask(taskID)
+	taskBefore, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask (before): %v", err)
 	}
@@ -1427,7 +1427,7 @@ func TestContentMessageRefreshesTimestamp(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// The task's UpdatedAt should have been refreshed.
-	taskAfter, err := store.GetTask(taskID)
+	taskAfter, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask (after): %v", err)
 	}

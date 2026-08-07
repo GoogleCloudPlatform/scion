@@ -49,7 +49,7 @@ type waiter struct {
 // Bridge is the core bridge logic that ties together state management,
 // hub client operations, and message translation.
 type Bridge struct {
-	store     *state.Store
+	store     state.Store
 	hubClient hubclient.Client
 	minter    *identity.TokenMinter
 	config    *Config
@@ -109,7 +109,7 @@ type brokerMessage struct {
 }
 
 // New creates a new Bridge instance.
-func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, metrics *Metrics, log *slog.Logger) *Bridge {
+func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, metrics *Metrics, log *slog.Logger) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &Bridge{
 		store:          store,
@@ -184,7 +184,7 @@ func (b *Bridge) reapStaleTasks(maxAge time.Duration) {
 	b.tasksMu.RUnlock()
 
 	for _, c := range candidates {
-		task, err := b.store.GetTask(c.taskID)
+		task, err := b.store.GetTask(b.shutdownCtx, c.taskID)
 		if err != nil {
 			b.log.Error("janitor: failed to get task", "task_id", c.taskID, "error", err)
 			continue
@@ -196,7 +196,7 @@ func (b *Bridge) reapStaleTasks(maxAge time.Duration) {
 		}
 		if task == nil || task.UpdatedAt.Before(cutoff) {
 			b.log.Warn("janitor: reaping stale task", "task_id", c.taskID, "age_cutoff", maxAge)
-			if err := b.store.UpdateTaskState(c.taskID, TaskStateFailed); err != nil {
+			if _, err := b.store.UpdateTaskState(b.shutdownCtx, c.taskID, TaskStateFailed); err != nil {
 				b.log.Error("janitor: failed to update task state", "task_id", c.taskID, "error", err)
 			}
 			if b.metrics != nil {
@@ -307,7 +307,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	if caller != nil {
 		task.CallerUserID = caller.UserID
 	}
-	if err := b.store.CreateTask(task); err != nil {
+	if err := b.store.CreateTask(ctx, task); err != nil {
 		return nil, fmt.Errorf("create task: %w", err)
 	}
 	if b.metrics != nil {
@@ -337,13 +337,13 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 			defer cancel()
 			if _, err := writeClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 				b.log.Error("non-blocking send failed", "error", err, "task_id", taskID)
-				if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+				if _, err := b.store.UpdateTaskState(sendCtx, taskID, TaskStateFailed); err != nil {
 					b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 				}
 				b.unregisterActiveTask(taskID, aKey)
 				return
 			}
-			if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+			if _, err := b.store.UpdateTaskState(sendCtx, taskID, TaskStateWorking); err != nil {
 				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 			}
 		}()
@@ -371,14 +371,14 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	// to completed/failed will close it via dispatchToActiveTask.
 
 	if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
-		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
 		b.unregisterActiveTask(taskID, aKey)
 		return nil, fmt.Errorf("send message to agent: %w", err)
 	}
 
-	if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+	if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateWorking); err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 	}
 
@@ -405,14 +405,14 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		}, nil
 
 	case <-timer.C:
-		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
 		b.unregisterActiveTask(taskID, aKey)
 		return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
 
 	case <-ctx.Done():
-		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
 		b.unregisterActiveTask(taskID, aKey)
@@ -423,7 +423,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 // sendFollowUp routes a user message to an existing task's agent, continuing
 // the conversation. Returns ErrTaskTerminal if the task has already completed.
 func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskID string, parts []Part, blocking bool) (*TaskResult, error) {
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
@@ -476,7 +476,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		}
 	}
 
-	if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+	if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateWorking); err != nil {
 		b.log.Error("failed to update task state for follow-up", "error", err, "task_id", taskID)
 	}
 
@@ -502,7 +502,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 
 		select {
 		case response := <-responseCh:
-			if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+			if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateWorking); err != nil {
 				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 			}
 			msg, artifacts := TranslateScionToA2A(response)
@@ -546,7 +546,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 // GetTask retrieves a task by ID. Per-user isolation: if CallerIdentity is
 // present and the task has a CallerUserID, only the task's owner can read it.
 func (b *Bridge) GetTask(ctx context.Context, taskID string) (*TaskResult, error) {
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
@@ -609,7 +609,7 @@ func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult,
 // if CallerIdentity is present and the task has a CallerUserID, only the
 // task's owner can cancel it.
 func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, error) {
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
@@ -667,7 +667,7 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		}
 	}
 
-	if err := b.store.UpdateTaskState(taskID, TaskStateCanceled); err != nil {
+	if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateCanceled); err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 	}
 	if b.metrics != nil {
@@ -746,7 +746,7 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 	// If the message carries a task correlation ID, dispatch only to that task
 	// after verifying the message's agent matches the task's owner.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
-		task, err := b.store.GetTask(taskID)
+		task, err := b.store.GetTask(ctx, taskID)
 		if err != nil || task == nil {
 			b.log.Debug("ignoring message for unknown task", "task_id", taskID)
 			return
@@ -815,7 +815,7 @@ func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage
 		// we skip the waiter — otherwise the task's stored state is never updated.
 		if msg.Type == messages.TypeStateChange {
 			if taskState := MapActivityToTaskState(msg.Msg); IsTerminalState(taskState) {
-				if err := b.store.UpdateTaskState(taskID, taskState); err != nil {
+				if _, err := b.store.UpdateTaskState(b.shutdownCtx, taskID, taskState); err != nil {
 					b.log.Error("failed to persist terminal state from waiter path",
 						"task_id", taskID, "state", taskState, "error", err)
 				}
@@ -835,7 +835,7 @@ func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage
 func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug string, msg *messages.StructuredMessage) {
 	if msg.Type == messages.TypeStateChange {
 		taskState := MapActivityToTaskState(msg.Msg)
-		if err := b.store.UpdateTaskState(taskID, taskState); err != nil {
+		if _, err := b.store.UpdateTaskState(ctx, taskID, taskState); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
 
@@ -877,14 +877,14 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 	a2aMsg, artifacts := TranslateScionToA2A(msg)
 
 	currentState := TaskStateWorking
-	if task, err := b.store.GetTask(taskID); err != nil {
+	if task, err := b.store.GetTask(ctx, taskID); err != nil {
 		b.log.Error("failed to get task for content message",
 			"task_id", taskID, "error", err)
 	} else if task != nil {
 		currentState = task.State
 	}
 
-	if err := b.store.TouchTask(taskID); err != nil {
+	if err := b.store.TouchTask(ctx, taskID); err != nil {
 		b.log.Error("failed to refresh task timestamp for content message",
 			"task_id", taskID, "error", err)
 	}
@@ -918,7 +918,7 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 // to SSE/push subscribers, and close streams.  The caller is responsible for
 // unregistering the active task and removing any waiter.
 func (b *Bridge) failFollowUpTask(taskID string) {
-	if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+	if _, err := b.store.UpdateTaskState(b.shutdownCtx, taskID, TaskStateFailed); err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 	}
 	if b.metrics != nil {
@@ -1133,7 +1133,7 @@ func (b *Bridge) GetProjectConfig(projectSlug string) *ProjectConfig {
 // resolveContext maps an A2A context to a Scion agent, creating a new context if needed.
 func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, contextID string) (*state.Context, error) {
 	if contextID != "" {
-		existing, err := b.store.GetContext(contextID)
+		existing, err := b.store.GetContext(ctx, contextID)
 		if err != nil {
 			return nil, fmt.Errorf("get context: %w", err)
 		}
@@ -1141,7 +1141,7 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 			if existing.ProjectID != projectSlug || existing.AgentSlug != agentSlug {
 				return nil, fmt.Errorf("%w: context does not belong to %s/%s", ErrContextUnknown, projectSlug, agentSlug)
 			}
-			if err := b.store.TouchContext(contextID); err != nil {
+			if err := b.store.TouchContext(ctx, contextID); err != nil {
 				b.log.Error("failed to touch context", "context_id", contextID, "error", err)
 			}
 			return existing, nil
@@ -1212,7 +1212,7 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 		CreatedAt:  now,
 		LastActive: now,
 	}
-	if err := b.store.CreateContext(agentCtx); err != nil {
+	if err := b.store.CreateContext(ctx, agentCtx); err != nil {
 		return nil, fmt.Errorf("create context: %w", err)
 	}
 
@@ -1299,7 +1299,7 @@ func (b *Bridge) AuthorizeExposed(projectSlug, agentSlug string) error {
 // Returns nil (not an error) if the task doesn't exist or doesn't match,
 // so callers can return "not found" without leaking existence.
 func (b *Bridge) AuthorizeTask(taskID, projectSlug, agentSlug string) (*state.Task, error) {
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(context.Background(), taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
@@ -1313,7 +1313,7 @@ func (b *Bridge) AuthorizeTask(taskID, projectSlug, agentSlug string) (*state.Ta
 // Returns (true, nil) on success, (false, nil) when the context doesn't exist
 // or doesn't match, and (false, err) on database errors.
 func (b *Bridge) AuthorizeContext(contextID, projectSlug, agentSlug string) (bool, error) {
-	ctx, err := b.store.GetContext(contextID)
+	ctx, err := b.store.GetContext(context.Background(), contextID)
 	if err != nil {
 		return false, fmt.Errorf("get context: %w", err)
 	}

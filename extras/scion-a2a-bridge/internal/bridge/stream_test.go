@@ -291,7 +291,7 @@ func TestActiveTaskTracking(t *testing.T) {
 // tasks (which are tracked as waiters, not activeTasks).
 func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "c3-test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "c3-test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
 
 	now := time.Now()
 	taskID := "blocking-task-1"
-	store.CreateTask(&state.Task{
+	store.CreateTask(context.Background(), &state.Task{
 		ID: taskID, ContextID: "ctx-1", ProjectID: "grove1", AgentSlug: "agent-a",
 		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
@@ -344,7 +344,7 @@ func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
 
 	// The task should NOT have been updated in the DB by dispatchToActiveTask
 	// because the task is not registered in activeTasks.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}

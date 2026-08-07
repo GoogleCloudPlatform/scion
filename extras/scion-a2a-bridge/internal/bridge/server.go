@@ -227,7 +227,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	checks := map[string]string{}
 	ready := true
 
-	if err := s.bridge.store.Ping(); err != nil {
+	if err := s.bridge.store.Ping(r.Context()); err != nil {
 		s.log.Error("readiness check: database ping failed", "error", err)
 		checks["database"] = "error"
 		ready = false

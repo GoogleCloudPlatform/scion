@@ -160,7 +160,7 @@ func TestAuthMiddleware_AllSchemes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			store, err := state.New(filepath.Join(dir, "test.db"))
+			store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -210,7 +210,7 @@ func TestAuthMiddleware_HubJWT(t *testing.T) {
 	signingKey := testSigningKey(t)
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestAuthMiddleware_HubJWT(t *testing.T) {
 
 func TestAuthMiddleware_PublicEndpoints(t *testing.T) {
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestAuthMiddleware_PublicEndpoints(t *testing.T) {
 
 func TestPerUserTaskIsolation(t *testing.T) {
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "iso-test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "iso-test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,18 +326,18 @@ func TestPerUserTaskIsolation(t *testing.T) {
 	now := time.Now()
 
 	// Create tasks for two different users.
-	store.CreateTask(&state.Task{
+	store.CreateTask(context.Background(), &state.Task{
 		ID: "task-alice", ContextID: "ctx-1", ProjectID: "proj-1",
 		AgentSlug: "agent-1", State: "working", CallerUserID: "user-alice",
 		CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
-	store.CreateTask(&state.Task{
+	store.CreateTask(context.Background(), &state.Task{
 		ID: "task-bob", ContextID: "ctx-1", ProjectID: "proj-1",
 		AgentSlug: "agent-1", State: "working", CallerUserID: "user-bob",
 		CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 	// Create a legacy task (no caller).
-	store.CreateTask(&state.Task{
+	store.CreateTask(context.Background(), &state.Task{
 		ID: "task-legacy", ContextID: "ctx-1", ProjectID: "proj-1",
 		AgentSlug: "agent-1", State: "working", CallerUserID: "",
 		CreatedAt: now, UpdatedAt: now, Metadata: "{}",

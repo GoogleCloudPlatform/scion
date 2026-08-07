@@ -177,10 +177,10 @@ func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclie
 // --- Test helpers ---
 
 // newFollowUpTestBridge creates a Bridge wired to a mock hub client and real SQLite store.
-func newFollowUpTestBridge(t *testing.T, agents *mockAgentService) (*Bridge, *state.Store) {
+func newFollowUpTestBridge(t *testing.T, agents *mockAgentService) (*Bridge, state.Store) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -206,10 +206,10 @@ func newFollowUpTestBridge(t *testing.T, agents *mockAgentService) (*Bridge, *st
 }
 
 // seedTask inserts a task into the store for testing.
-func seedTask(t *testing.T, store *state.Store, id, contextID, projectID, agentSlug, agentID, taskState string) {
+func seedTask(t *testing.T, store state.Store, id, contextID, projectID, agentSlug, agentID, taskState string) {
 	t.Helper()
 	now := time.Now()
-	if err := store.CreateTask(&state.Task{
+	if err := store.CreateTask(context.Background(), &state.Task{
 		ID:        id,
 		ContextID: contextID,
 		ProjectID: projectID,
@@ -376,7 +376,7 @@ func TestSendFollowUp_UpdatesTaskStateToWorking(t *testing.T) {
 	}
 
 	// The state should be updated to working immediately (before the send goroutine).
-	task, err := store.GetTask("task-1")
+	task, err := store.GetTask(context.Background(), "task-1")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestSendFollowUp_BlockingTimeout_CleansUpActiveTask(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestSendFollowUp_BlockingTimeout_CleansUpActiveTask(t *testing.T) {
 	}
 
 	// Verify the DB state was set to failed on timeout.
-	task, getErr := store.GetTask("task-1")
+	task, getErr := store.GetTask(context.Background(), "task-1")
 	if getErr != nil {
 		t.Fatalf("GetTask: %v", getErr)
 	}
@@ -474,7 +474,7 @@ func TestSendFollowUp_BlockingSendFailure_CleansUpActiveTask(t *testing.T) {
 	}
 
 	// Verify the DB state was set to failed on send failure.
-	task, getErr := store.GetTask("task-1")
+	task, getErr := store.GetTask(context.Background(), "task-1")
 	if getErr != nil {
 		t.Fatalf("GetTask: %v", getErr)
 	}
@@ -549,7 +549,7 @@ func TestSendFollowUp_NonBlocking_SendFailure_CleansUp(t *testing.T) {
 	// Wait for background goroutine to complete by polling for the task state change.
 	deadline := time.After(5 * time.Second)
 	for {
-		task, _ := store.GetTask("task-1")
+		task, _ := store.GetTask(context.Background(), "task-1")
 		if task != nil && task.State == TaskStateFailed {
 			break
 		}
@@ -570,7 +570,7 @@ func TestSendFollowUp_NonBlocking_SendFailure_CleansUp(t *testing.T) {
 	}
 
 	// Task state should be set to failed.
-	task, err := store.GetTask("task-1")
+	task, err := store.GetTask(context.Background(), "task-1")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestSendFollowUp_BlockingSuccess_CleansUpActiveTask(t *testing.T) {
 	}
 
 	// Verify the DB state was refreshed to working on success.
-	task, getErr := store.GetTask("task-1")
+	task, getErr := store.GetTask(context.Background(), "task-1")
 	if getErr != nil {
 		t.Fatalf("GetTask: %v", getErr)
 	}
@@ -718,7 +718,7 @@ func TestSendFollowUp_BlockingContextCancel_CleansUp(t *testing.T) {
 	}
 
 	// Verify the DB state was set to failed on context cancel.
-	task, getErr := store.GetTask("task-1")
+	task, getErr := store.GetTask(context.Background(), "task-1")
 	if getErr != nil {
 		t.Fatalf("GetTask: %v", getErr)
 	}
@@ -745,7 +745,7 @@ func TestSendFollowUp_InputRequiredToWorking(t *testing.T) {
 	}
 
 	// Verify the store was updated from input-required to working.
-	task, err := store.GetTask("task-1")
+	task, err := store.GetTask(context.Background(), "task-1")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -824,7 +824,7 @@ func TestSendFollowUp_ResolvesAgentIDViaLookup(t *testing.T) {
 
 func TestHandleSendMessage_PassesTaskIDToSendMessage(t *testing.T) {
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -902,7 +902,7 @@ func TestHandleSendMessage_PassesTaskIDToSendMessage(t *testing.T) {
 
 func TestHandleSendMessage_ErrTaskTerminal_ReturnsCorrectError(t *testing.T) {
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -949,7 +949,7 @@ func TestHandleSendMessage_ErrTaskTerminal_ReturnsCorrectError(t *testing.T) {
 
 func TestHandleSendMessage_UnknownTaskID_ReturnsAgentNotFound(t *testing.T) {
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -997,7 +997,7 @@ func TestHandleSendMessage_NoTaskID_RoutesToNewTask(t *testing.T) {
 	// because there's no real hub client to resolve the context). This verifies
 	// the router correctly falls through to the new-task path.
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}

@@ -191,7 +191,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 		UpdatedAt: now,
 		Metadata:  "{}",
 	}
-	if err := b.store.CreateTask(task); err != nil {
+	if err := b.store.CreateTask(ctx, task); err != nil {
 		return "", nil, nil, fmt.Errorf("create task: %w", err)
 	}
 	if b.metrics != nil {
@@ -235,7 +235,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 
 		if _, err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 			b.log.Error("streaming send failed", "error", err, "task_id", taskID)
-			if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+			if _, err := b.store.UpdateTaskState(sendCtx, taskID, TaskStateFailed); err != nil {
 				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 			}
 			b.streams.Broadcast(taskID, StreamEvent{
@@ -249,7 +249,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 			return
 		}
 
-		if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+		if _, err := b.store.UpdateTaskState(sendCtx, taskID, TaskStateWorking); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
 		b.streams.Broadcast(taskID, StreamEvent{
@@ -269,7 +269,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 
 // SubscribeToTask opens an SSE stream for an existing in-progress task.
 func (b *Bridge) SubscribeToTask(ctx context.Context, taskID string) (<-chan StreamEvent, func(), error) {
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get task: %w", err)
 	}
