@@ -207,7 +207,12 @@ func (h *CommandHandler) HandleSecretList(s *discordgo.Session, i *discordgo.Int
 		return
 	}
 	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil || mapping == nil {
+	if err != nil {
+		h.log.Error("Failed to look up user mapping", "error", err)
+		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
+		return
+	}
+	if mapping == nil {
 		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
 		return
 	}
@@ -264,7 +269,12 @@ func (h *CommandHandler) HandleSecretGet(s *discordgo.Session, i *discordgo.Inte
 		return
 	}
 	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil || mapping == nil {
+	if err != nil {
+		h.log.Error("Failed to look up user mapping", "error", err)
+		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
+		return
+	}
+	if mapping == nil {
 		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
 		return
 	}
@@ -324,7 +334,12 @@ func (h *CommandHandler) HandleSecretDelete(s *discordgo.Session, i *discordgo.I
 		return
 	}
 	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil || mapping == nil {
+	if err != nil {
+		h.log.Error("Failed to look up user mapping", "error", err)
+		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
+		return
+	}
+	if mapping == nil {
 		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
 		return
 	}

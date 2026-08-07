@@ -441,7 +441,8 @@ func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID string) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list secrets returned status %d", resp.StatusCode)
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("list secrets returned status %d: %s", resp.StatusCode, he.Message)
 	}
 
 	var result hubListSecretsResponse
@@ -473,7 +474,8 @@ func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID strin
 		return nil, fmt.Errorf("secret %q not found", key)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get secret returned status %d", resp.StatusCode)
+		he := parseHubError(resp)
+		return nil, fmt.Errorf("get secret returned status %d: %s", resp.StatusCode, he.Message)
 	}
 
 	var info SecretInfo

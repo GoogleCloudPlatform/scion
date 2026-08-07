@@ -1175,6 +1175,9 @@ func (b *DiscordBroker) handleInteractionCreate(s *discordgo.Session, i *discord
 				HandleModalSubmit(s, i, store, b.deliverInbound, b.log)
 			}()
 		} else if strings.HasPrefix(data.CustomID, "secret:") {
+			if commands == nil {
+				return
+			}
 			// Secret modal submission — defer then process async.
 			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
