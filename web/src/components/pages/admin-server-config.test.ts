@@ -606,4 +606,50 @@ describe('scion-page-admin-server-config', () => {
       expect(badgeTexts.some(t => t.includes('deployment configuration'))).toBe(true);
     });
   });
+
+  // ── Regression: clearing fields to blank (ptone/scion#860) ──
+
+  describe('Regression #860 — clearing agent limit fields to blank', () => {
+    it('file mode PUT includes zero/empty agent limit fields so backend can clear them', async () => {
+      // Start with agent limits set to non-zero values, then verify
+      // the PUT payload includes the zeroed values (not undefined).
+      const config = makeBaseConfig({
+        settings_tier: 'file',
+        default_max_turns: 100,
+        default_max_model_calls: 200,
+        default_max_duration: '2h',
+      });
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      element = await createComponent(createFetchHandler(config, {
+        putHandler: (body) => {
+          capturedPayload = body;
+          return { status: 200, body: { reload: { applied: [] } } };
+        },
+      }));
+
+      // Simulate clearing the fields: set the internal state to zero/empty.
+      // In the real UI, the user would clear the input fields.
+      (element as any).defaultMaxTurns = 0;
+      (element as any).defaultMaxModelCalls = 0;
+      (element as any).defaultMaxDuration = '';
+      await (element as any).updateComplete;
+
+      // Trigger save.
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      expect(saveBtn).not.toBeNull();
+      (saveBtn as HTMLElement).click();
+      await new Promise(resolve => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      expect(capturedPayload).not.toBeNull();
+
+      // The key assertion: zero/empty values MUST be present in the payload
+      // (not undefined), so the backend receives them and can delete the keys.
+      expect(capturedPayload!.default_max_turns).toBe(0);
+      expect(capturedPayload!.default_max_model_calls).toBe(0);
+      expect(capturedPayload!.default_max_duration).toBe('');
+    });
+  });
 });
