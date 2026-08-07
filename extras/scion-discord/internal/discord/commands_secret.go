@@ -31,8 +31,8 @@ func validateSecretKey(key string) error {
 	if key == "" {
 		return fmt.Errorf("secret key cannot be empty")
 	}
-	if strings.ContainsAny(key, " \t\n\r=") {
-		return fmt.Errorf("secret key must not contain spaces, tabs, newlines, or '='")
+	if strings.ContainsAny(key, " \t\n\r=:") {
+		return fmt.Errorf("secret key must not contain spaces, tabs, newlines, '=' or ':'")
 	}
 	return nil
 }
@@ -166,15 +166,21 @@ func (h *CommandHandler) HandleSecretModalSubmit(s *discordgo.Session, i *discor
 		return
 	}
 	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
-	if err != nil || mapping == nil {
+	if err != nil {
+		h.log.Error("Failed to look up user mapping", "error", err)
+		h.followup(s, i, "Something went wrong looking up your account. Please try again.")
+		return
+	}
+	if mapping == nil {
 		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
 		return
 	}
 
-	onBehalfOf := ""
-	if mapping.ScionEmail != "" {
-		onBehalfOf = "user:" + mapping.ScionEmail
+	if mapping.ScionEmail == "" {
+		h.followup(s, i, "Your account has no email associated. Please re-register with `/scion register`.")
+		return
 	}
+	onBehalfOf := "user:" + mapping.ScionEmail
 
 	// Call hub API to set the secret.
 	err = h.hubClient.SetSecret(ctx, key, value, "project", projectID, onBehalfOf)
@@ -341,10 +347,11 @@ func (h *CommandHandler) HandleSecretDelete(s *discordgo.Session, i *discordgo.I
 		return
 	}
 
-	onBehalfOf := ""
-	if mapping.ScionEmail != "" {
-		onBehalfOf = "user:" + mapping.ScionEmail
+	if mapping.ScionEmail == "" {
+		h.followup(s, i, "Your account has no email associated. Please re-register with `/scion register`.")
+		return
 	}
+	onBehalfOf := "user:" + mapping.ScionEmail
 
 	err = h.hubClient.DeleteSecret(ctx, key, "project", link.ProjectID, onBehalfOf)
 	if err != nil {

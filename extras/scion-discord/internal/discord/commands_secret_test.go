@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
@@ -38,6 +39,7 @@ func TestValidateSecretKey_Invalid(t *testing.T) {
 		{"newline", "has\nnewline"},
 		{"carriage_return", "has\rreturn"},
 		{"equals", "key=value"},
+		{"colon", "service:api_key"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -175,4 +177,27 @@ func TestHelpText_IncludesSecretCommands(t *testing.T) {
 	assert.Contains(t, text, "/scion secret set")
 	assert.Contains(t, text, "/scion secret get")
 	assert.Contains(t, text, "/scion secret delete")
+}
+
+// ---------------------------------------------------------------------------
+// Modal submit customID parsing
+// ---------------------------------------------------------------------------
+
+func TestSecretModalCustomID_ParsesCorrectly(t *testing.T) {
+	customID := "secret:set:mykey:proj-uuid-1234"
+	parts := strings.SplitN(customID, ":", 4)
+
+	assert.Len(t, parts, 4)
+	assert.Equal(t, "secret", parts[0])
+	assert.Equal(t, "set", parts[1])
+	assert.Equal(t, "mykey", parts[2])
+	assert.Equal(t, "proj-uuid-1234", parts[3])
+}
+
+func TestSecretModalCustomID_ColonInKeyRejected(t *testing.T) {
+	// After R1 fix, keys with colons are rejected before they
+	// reach the customID construction, preventing mis-parsing.
+	err := validateSecretKey("service:api_key")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "':'")
 }
