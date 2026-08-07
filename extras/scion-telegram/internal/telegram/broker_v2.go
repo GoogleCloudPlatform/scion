@@ -2594,38 +2594,6 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 	return agentSlugs(agents)
 }
 
-// --- Dynamic subscription management ---
-
-func (b *TelegramBrokerV2) subscribeForProject(projectID string) {
-	pattern := projectcompat.ProjectPattern(projectID)
-
-	b.mu.RLock()
-	hc := b.hostCallbacks
-	b.mu.RUnlock()
-
-	if hc != nil {
-		if err := hc.RequestSubscription(pattern); err != nil {
-			b.log.Warn("Failed to request subscription via host callbacks",
-				"pattern", pattern, "error", err)
-		}
-	}
-}
-
-func (b *TelegramBrokerV2) unsubscribeForProject(projectID string) {
-	pattern := projectcompat.ProjectPattern(projectID)
-
-	b.mu.RLock()
-	hc := b.hostCallbacks
-	b.mu.RUnlock()
-
-	if hc != nil {
-		if err := hc.CancelSubscription(pattern); err != nil {
-			b.log.Warn("Failed to cancel subscription via host callbacks",
-				"pattern", pattern, "error", err)
-		}
-	}
-}
-
 // --- Hub delivery (reuses the same pattern as v1) ---
 
 func (b *TelegramBrokerV2) deliverInbound(topic string, msg *messages.StructuredMessage) {
