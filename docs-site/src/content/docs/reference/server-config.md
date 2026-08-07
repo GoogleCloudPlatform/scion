@@ -253,7 +253,7 @@ When `server.hub.public_url` is not explicitly set, the Hub endpoint injected in
 2. Project-level `hub.endpoint` setting.
 3. `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
 4. **IAP Audience Derivation** (in Hosted HA mode with IAP authentication):
-   - For **Cloud Run** IAP audiences (`/projects/<number>/locations/<region>/services/<service>`), Scion can auto-derive the Hub's URL (e.g., `https://<service>-<number>.<region>.run.app`).
+   - For **Cloud Run** IAP audiences (`/projects/<number>/locations/<region>/services/<service>`), Scion can auto-derive the Hub's URL using the legacy Cloud Run URL format (`https://<service>-<number>.<region>.run.app`). Newer Cloud Run services use a different URL format (`https://<service>-<hash>-<region>.a.run.app`) where the hash cannot be derived from the project number — for those services, set `SCION_SERVER_BASE_URL` explicitly instead of relying on auto-derivation.
    - For **GKE/GCLB** backend-service IAP audiences (`/projects/<number>/global/backendServices/<id>`), a URL cannot be derived from the ID. If `SCION_SERVER_BASE_URL` (or other explicit URL settings) is not set, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents.
 5. Auto-computed `http://localhost:{port}` (last resort).
 

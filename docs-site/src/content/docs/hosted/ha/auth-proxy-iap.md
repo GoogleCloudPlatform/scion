@@ -53,10 +53,10 @@ server:
       provider: iap
       iap:
         # MANDATORY — the IAP audience for your backend.
-        # GCE/GKE backend service format:
+        # Cloud Run format:
+        #   /projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE_NAME>
+        # GCE/GKE backend service (GCLB) format:
         #   /projects/<PROJECT_NUMBER>/global/backendServices/<BACKEND_SERVICE_ID>
-        # App Engine format:
-        #   /projects/<PROJECT_NUMBER>/apps/<PROJECT_ID>
         audience: "/projects/123456789/global/backendServices/987654321"
 
         # Optional overrides (defaults are correct for production IAP):
@@ -82,8 +82,7 @@ server:
 The `audience` value must match the audience claim (`aud`) in the IAP-signed JWT. The format depends on the backend type:
 
 - **Cloud Run**: `/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE_NAME>`
-- **GCE/GKE backend service**: `/projects/<PROJECT_NUMBER>/global/backendServices/<BACKEND_SERVICE_ID>`
-- **App Engine**: `/projects/<PROJECT_NUMBER>/apps/<PROJECT_ID>`
+- **GCE/GKE backend service (GCLB)**: `/projects/<PROJECT_NUMBER>/global/backendServices/<BACKEND_SERVICE_ID>`
 
 You can find this value in the Google Cloud Console under **Security → Identity-Aware Proxy** → select your backend → **Signed Header JWT Audience**.
 
