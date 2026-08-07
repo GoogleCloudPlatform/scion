@@ -259,6 +259,106 @@ func TestPerAgentCard(t *testing.T) {
 	}
 }
 
+func TestPerAgentCardSupportedInterfaces(t *testing.T) {
+	_, ts, _ := newTestServer(t)
+
+	resp, err := http.Get(ts.URL + "/projects/test-grove/agents/test-agent/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatalf("GET agent card: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var card map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&card); err != nil {
+		t.Fatalf("decode agent card: %v", err)
+	}
+
+	ifaces, ok := card["supportedInterfaces"].([]interface{})
+	if !ok || len(ifaces) == 0 {
+		t.Fatal("expected non-empty supportedInterfaces array in agent card")
+	}
+
+	iface, ok := ifaces[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected supportedInterfaces[0] to be an object")
+	}
+
+	expectedURL := "https://a2a.test.example.com/projects/test-grove/agents/test-agent/jsonrpc"
+	if iface["url"] != expectedURL {
+		t.Errorf("supportedInterfaces[0].url = %q, want %q", iface["url"], expectedURL)
+	}
+	if iface["protocolBinding"] != "JSONRPC" {
+		t.Errorf("supportedInterfaces[0].protocolBinding = %q, want %q", iface["protocolBinding"], "JSONRPC")
+	}
+	if iface["protocolVersion"] != "1.0" {
+		t.Errorf("supportedInterfaces[0].protocolVersion = %q, want %q", iface["protocolVersion"], "1.0")
+	}
+}
+
+func TestGenerateAgentCardSupportedInterfaces(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.New(filepath.Join(dir, "card-test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	defer store.Close()
+
+	cfg := &Config{
+		Bridge: BridgeConfig{
+			ExternalURL: "https://bridge.example.com",
+		},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b := New(store, nil, nil, cfg, nil, log)
+
+	card := b.GenerateAgentCard(context.Background(), "my-project", "my-agent")
+
+	ifaces, ok := card["supportedInterfaces"].([]map[string]interface{})
+	if !ok || len(ifaces) == 0 {
+		t.Fatal("expected non-empty supportedInterfaces in generated card")
+	}
+
+	iface := ifaces[0]
+	wantURL := "https://bridge.example.com/projects/my-project/agents/my-agent/jsonrpc"
+	if iface["url"] != wantURL {
+		t.Errorf("supportedInterfaces[0].url = %q, want %q", iface["url"], wantURL)
+	}
+	if iface["protocolBinding"] != "JSONRPC" {
+		t.Errorf("supportedInterfaces[0].protocolBinding = %q, want %q", iface["protocolBinding"], "JSONRPC")
+	}
+	if iface["protocolVersion"] != "1.0" {
+		t.Errorf("supportedInterfaces[0].protocolVersion = %q, want %q", iface["protocolVersion"], "1.0")
+	}
+
+	// Verify the card round-trips through JSON with the expected shape.
+	data, err := json.Marshal(card)
+	if err != nil {
+		t.Fatalf("json.Marshal card: %v", err)
+	}
+
+	var roundTripped map[string]interface{}
+	if err := json.Unmarshal(data, &roundTripped); err != nil {
+		t.Fatalf("json.Unmarshal card: %v", err)
+	}
+
+	rtIfaces, ok := roundTripped["supportedInterfaces"].([]interface{})
+	if !ok || len(rtIfaces) == 0 {
+		t.Fatal("expected supportedInterfaces after JSON round-trip")
+	}
+
+	rtIface, ok := rtIfaces[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected supportedInterfaces[0] to be an object after JSON round-trip")
+	}
+	if rtIface["url"] != wantURL {
+		t.Errorf("round-tripped url = %q, want %q", rtIface["url"], wantURL)
+	}
+}
+
 func TestPerAgentCardNotExposed(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
