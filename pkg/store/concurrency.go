@@ -72,6 +72,11 @@ const (
 	// call so only one standalone instance registers the webhook URL at a time.
 	LockTelegramWebhook AdvisoryLockKey = 0x5C10000D
 
+	// LockA2ABridgeSweep guards the Hub scheduler's recurring A2A bridge
+	// sweep job. The Hub (not the bridge) holds this lock to POST
+	// /internal/sweep to the bridge's external URL at most once per tick.
+	LockA2ABridgeSweep AdvisoryLockKey = 0x5C10000E
+
 	// LockHubSettingsSeed guards first-boot seeding of operational settings
 	// from settings.yaml into the hub_settings table (settings-db §3.9).
 	// Only the replica that acquires this lock performs the seed; others skip.

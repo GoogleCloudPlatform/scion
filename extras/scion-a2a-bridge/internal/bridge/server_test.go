@@ -217,8 +217,10 @@ func TestWellKnownAgentCard(t *testing.T) {
 	if caps["streaming"] != true {
 		t.Errorf("capabilities.streaming = %v, want true", caps["streaming"])
 	}
-	if caps["pushNotifications"] != true {
-		t.Errorf("capabilities.pushNotifications = %v, want true", caps["pushNotifications"])
+	// The well-known registry card reports pushNotifications: false (the bridge
+	// does not support push at the registry level; per-agent cards report true).
+	if caps["pushNotifications"] != false {
+		t.Errorf("capabilities.pushNotifications = %v, want false", caps["pushNotifications"])
 	}
 }
 
@@ -765,5 +767,256 @@ func TestRouteInfoContextMissing(t *testing.T) {
 	_, ok := RouteInfoFrom(context.Background())
 	if ok {
 		t.Fatal("expected no route info in empty context")
+	}
+}
+
+// TestInternalSweepServiceClaimPin is the critical security test for Phase 3.
+// It verifies that /internal/sweep:
+//   - Accepts a valid service-role JWT (200)
+//   - Rejects a valid non-service JWT (403) — the service claim PIN
+//   - Rejects an unauthenticated request (401)
+//   - Rejects an invalid/malformed token (401)
+func TestInternalSweepServiceClaimPin(t *testing.T) {
+	signingKey := testSigningKey(t)
+
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "sweep-test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	cfg := &Config{
+		Bridge: BridgeConfig{
+			ExternalURL: "https://a2a.test.example.com",
+		},
+		Auth: AuthConfig{
+			Scheme: "none", // external auth is "none" — internal must still be protected
+		},
+		Projects: []ProjectConfig{
+			{Slug: "proj", ExposedAgents: []string{"agent-1"}},
+		},
+		Timeouts: TimeoutConfig{
+			SendMessage: 120 * time.Second,
+		},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b := New(store, nil, nil, cfg, nil, log)
+
+	executor := NewScionExecutor(b, log)
+	routeAuth := RouteKeyAuthenticator()
+	innerStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: routeAuth,
+	})
+	scopedStore := NewScopedTaskStore(innerStore)
+	sdkRequestHandler := a2asrv.NewHandler(
+		executor,
+		a2asrv.WithLogger(log),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{
+			Streaming:         true,
+			PushNotifications: false,
+		}),
+		a2asrv.WithTaskStore(scopedStore),
+	)
+	b.SetSDKRequestHandler(sdkRequestHandler)
+	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(sdkRequestHandler)
+
+	srv := NewServer(b, cfg, nil, log, sdkJSONRPCHandler)
+	srv.SetJWTValidator(NewJWTValidator(signingKey))
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	t.Run("service token accepted", func(t *testing.T) {
+		claims := validClaims()
+		claims.Role = "service"
+		claims.UserID = "hub-scheduler"
+		claims.Email = "hub-scheduler@system"
+		token := mintTestJWT(t, signingKey, claims)
+
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/internal/sweep", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("service token: status = %d, want 200", resp.StatusCode)
+		}
+	})
+
+	t.Run("admin token rejected (403)", func(t *testing.T) {
+		claims := validClaims()
+		claims.Role = "admin"
+		token := mintTestJWT(t, signingKey, claims)
+
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/internal/sweep", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("admin token: status = %d, want 403", resp.StatusCode)
+		}
+	})
+
+	t.Run("user token rejected (403)", func(t *testing.T) {
+		claims := validClaims()
+		claims.Role = "user"
+		token := mintTestJWT(t, signingKey, claims)
+
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/internal/sweep", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("user token: status = %d, want 403", resp.StatusCode)
+		}
+	})
+
+	t.Run("no token rejected (401)", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/internal/sweep", nil)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("no token: status = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("invalid token rejected (401)", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/internal/sweep", nil)
+		req.Header.Set("Authorization", "Bearer invalid-token-here")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("invalid token: status = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("wrong signing key rejected (401)", func(t *testing.T) {
+		wrongKey := testSigningKey(t)
+		claims := validClaims()
+		claims.Role = "service"
+		token := mintTestJWT(t, wrongKey, claims)
+
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/internal/sweep", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("wrong key: status = %d, want 401", resp.StatusCode)
+		}
+	})
+}
+
+// TestInternalSweepWithoutValidator verifies that /internal/sweep returns 503
+// when no JWT validator is configured (e.g., in development mode).
+func TestInternalSweepWithoutValidator(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "sweep-noval-test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	cfg := &Config{
+		Bridge: BridgeConfig{
+			ExternalURL: "https://a2a.test.example.com",
+		},
+		Auth: AuthConfig{
+			Scheme: "none",
+		},
+		Timeouts: TimeoutConfig{
+			SendMessage: 120 * time.Second,
+		},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b := New(store, nil, nil, cfg, nil, log)
+
+	executor := NewScionExecutor(b, log)
+	routeAuth := RouteKeyAuthenticator()
+	innerStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: routeAuth,
+	})
+	scopedStore := NewScopedTaskStore(innerStore)
+	sdkRequestHandler := a2asrv.NewHandler(
+		executor,
+		a2asrv.WithLogger(log),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{
+			Streaming:         true,
+			PushNotifications: false,
+		}),
+		a2asrv.WithTaskStore(scopedStore),
+	)
+	b.SetSDKRequestHandler(sdkRequestHandler)
+	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(sdkRequestHandler)
+
+	// Deliberately NOT calling SetJWTValidator — should return 503.
+	srv := NewServer(b, cfg, nil, log, sdkJSONRPCHandler)
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/internal/sweep", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("without validator: status = %d, want 503", resp.StatusCode)
+	}
+}
+
+// TestHealthEndpointsRemainUnauthenticated verifies that /healthz, /readyz,
+// and /metrics remain accessible without authentication even when auth is
+// configured.
+func TestHealthEndpointsRemainUnauthenticated(t *testing.T) {
+	_, ts, _ := newTestServer(t) // uses apiKey auth scheme
+
+	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
+		t.Run(path, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("GET %s without auth: status = %d, want 200", path, resp.StatusCode)
+			}
+		})
 	}
 }

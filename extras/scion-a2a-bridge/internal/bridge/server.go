@@ -205,7 +205,19 @@ func (s *Server) Handler() http.Handler {
 	handler = logging.RequestLogMiddleware(
 		s.log, "scion-a2a-bridge", BridgePathPatterns(), 0,
 	)(handler)
-	return handler
+
+	// Internal endpoints — behind Hub-JWT auth with service claim pin,
+	// NOT the external authMiddleware (which enforces the A2A auth_scheme
+	// and would leave the endpoint open when scheme is "none").
+	internalMux := http.NewServeMux()
+	internalMux.HandleFunc("POST /internal/sweep", s.handleInternalSweep)
+
+	// Combine: internal routes (with their own auth) + external routes.
+	combinedMux := http.NewServeMux()
+	combinedMux.Handle("/internal/", s.hubJWTAuthMiddleware(internalMux))
+	combinedMux.Handle("/", handler) // handler is the existing middleware chain
+
+	return combinedMux
 }
 
 // SDKRequestHandler returns the a2asrv.RequestHandler for use with other transports (gRPC, REST).
@@ -333,6 +345,9 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Opportunistic sweep: fire at most once per interval per instance.
+	s.bridge.maybeOpportunisticSweep(r.Context())
+
 	// Enforce request body size limit to prevent memory exhaustion.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 
@@ -373,8 +388,8 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 // consistency even if a config swap happens mid-flight.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Public endpoints skip auth.
-		if r.URL.Path == "/.well-known/agent-card.json" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+		// Public/operational endpoints skip auth.
+		if r.URL.Path == "/.well-known/agent-card.json" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -539,6 +554,50 @@ func (s *Server) effectiveConfig() *Config {
 		return &snap.Config
 	}
 	return s.config
+}
+
+// hubJWTAuthMiddleware validates Hub-issued JWTs and pins the service claim.
+// This protects internal endpoints (like /internal/sweep) that must only be
+// callable by the Hub scheduler, not by arbitrary Hub users.
+func (s *Server) hubJWTAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.jwtValidator == nil {
+			http.Error(w, "sweep endpoint not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		token := extractBearerToken(r)
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		identity, err := s.jwtValidator.Validate(token)
+		if err != nil {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// PIN THE SERVICE CLAIM — this is the security-critical detail.
+		// Without this check, any valid Hub user token can trigger sweeps.
+		if identity.Role != "service" {
+			http.Error(w, "forbidden: service role required", http.StatusForbidden)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleInternalSweep runs the bridge sweep: reap stale tasks + purge old events.
+func (s *Server) handleInternalSweep(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	s.bridge.RunSweep(ctx)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
 }
 
 // extractBearerToken extracts the token from an Authorization: Bearer header.

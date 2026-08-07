@@ -2694,6 +2694,14 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 5, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 
+	// A2A bridge sweep — conditional on the bridge being registered as a standalone plugin.
+	if a2aExternalURL := s.getA2ABridgeExternalURL(); a2aExternalURL != "" {
+		s.scheduler.RegisterRecurringSingleton(
+			"a2a-bridge-sweep", 5, store.LockA2ABridgeSweep,
+			s.a2aBridgeSweepHandler(a2aExternalURL),
+		)
+	}
+
 	// Register GitHub resolution cache TTL eviction (every 10 minutes)
 	if s.ghResolutionStore != nil {
 		s.scheduler.RegisterRecurringSingleton("github-resolution-cache-eviction", 10, store.LockGitHubResolutionCacheEviction, s.githubResolutionCacheEvictionHandler())
@@ -3525,4 +3533,61 @@ func (s *Server) seedGitHubResolutionCacheSettings(ctx context.Context) error {
 
 	slog.Info("Seeded github_resolution_cache settings into hub_settings")
 	return nil
+}
+
+// getA2ABridgeExternalURL returns the external URL of the A2A bridge if it is
+// registered as a standalone plugin, or "" if not configured. Used to
+// conditionally register the Hub-driven sweep scheduler job.
+func (s *Server) getA2ABridgeExternalURL() string {
+	if s.pluginManager == nil {
+		return ""
+	}
+	cfg := s.pluginManager.GetPluginConfig("broker", "a2a-bridge")
+	return cfg["external_url"]
+}
+
+// a2aBridgeSweepHandler returns a recurring handler that POSTs to the bridge's
+// /internal/sweep endpoint with a Hub-minted service JWT. The bridge validates
+// the token and runs the sweep (reap stale tasks + purge old events).
+func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Context) {
+	return func(ctx context.Context) {
+		if s.userTokenService == nil {
+			slog.Warn("a2a-bridge-sweep: user token service not available, skipping")
+			return
+		}
+
+		// Mint a short-lived JWT with a service claim. The bridge's
+		// hubJWTAuthMiddleware pins on role=="service" — without this
+		// claim, any valid user token could trigger sweeps.
+		token, _, err := s.userTokenService.GenerateAccessToken(
+			"hub-scheduler",        // userID — synthetic service identity
+			"hub-scheduler@system", // email
+			"Hub Scheduler",        // displayName
+			"service",              // role — the pinned service claim
+			ClientTypeAPI,          // clientType
+		)
+		if err != nil {
+			slog.Error("a2a-bridge-sweep: failed to mint sweep token", "error", err)
+			return
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", externalURL+"/internal/sweep", nil)
+		if err != nil {
+			slog.Error("a2a-bridge-sweep: failed to create request", "error", err)
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			slog.Error("a2a-bridge-sweep: request failed", "error", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			slog.Warn("a2a-bridge-sweep: non-200 response",
+				"status", resp.StatusCode, "url", externalURL)
+		}
+	}
 }

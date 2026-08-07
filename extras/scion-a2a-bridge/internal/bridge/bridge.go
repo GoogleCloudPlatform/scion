@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -67,6 +68,10 @@ type Bridge struct {
 	// agentTasks maps agentKey (projectID:agentSlug) to active task IDs,
 	// used as a local cache for reverse lookup when broker messages arrive.
 	agentTasks map[string][]string
+
+	// lastSweptAt is a unix timestamp used by maybeOpportunisticSweep to
+	// throttle opportunistic sweeps to at most once per interval per instance.
+	lastSweptAt atomic.Int64
 
 	// wg tracks background goroutines to drain on shutdown.
 	wg sync.WaitGroup
@@ -188,6 +193,45 @@ func (b *Bridge) reapStaleTasks(ctx context.Context, maxAge time.Duration) {
 		aKey := agentKey(task.ProjectID, task.AgentSlug)
 		b.unregisterActiveTask(task.ID, aKey)
 	}
+}
+
+// RunSweep performs a full sweep pass: reaps stale tasks and purges old events.
+// Safe to call from any goroutine; CAS in the store ensures exactly one
+// instance wins per task even under concurrent sweeps.
+func (b *Bridge) RunSweep(ctx context.Context) {
+	maxAge := 2 * b.effectiveConfig().Timeouts.SendMessage
+	if maxAge < 2*time.Minute {
+		maxAge = 4 * time.Minute
+	}
+	b.reapStaleTasks(ctx, maxAge)
+
+	// Purge events older than 1 hour (D8).
+	purged, err := b.store.PurgeTaskEvents(ctx, time.Now().Add(-1*time.Hour))
+	if err != nil {
+		b.log.Error("failed to purge task events", "error", err)
+	} else if purged > 0 {
+		b.log.Info("purged old task events", "count", purged)
+	}
+}
+
+// maybeOpportunisticSweep fires a best-effort sweep if the throttle interval
+// has elapsed. The CAS on lastSweptAt ensures at most one goroutine per
+// interval actually runs the sweep. The goroutine is fire-and-forget: if
+// Cloud Run throttles it after the request completes, the partial sweep
+// leaves the remainder for the next trigger.
+func (b *Bridge) maybeOpportunisticSweep(ctx context.Context) {
+	const interval int64 = 120 // 2 minutes
+	now := time.Now().Unix()
+	last := b.lastSweptAt.Load()
+	if now-last < interval {
+		return
+	}
+	if !b.lastSweptAt.CompareAndSwap(last, now) {
+		return // another goroutine won the CAS
+	}
+	go func() {
+		b.RunSweep(context.Background())
+	}()
 }
 
 // Shutdown gracefully drains background work.
@@ -698,11 +742,11 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 	if err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 	}
-	if b.metrics != nil {
-		b.metrics.TasksCompleted.WithLabelValues(TaskStateCanceled).Inc()
-	}
 
 	if changed {
+		if b.metrics != nil {
+			b.metrics.TasksCompleted.WithLabelValues(TaskStateCanceled).Inc()
+		}
 		cancelPayload, _ := json.Marshal(TaskStatusUpdate{
 			TaskID: taskID,
 			Status: TaskStatus{State: TaskStateCanceled},
