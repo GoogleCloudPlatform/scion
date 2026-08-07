@@ -70,7 +70,7 @@ const (
 
 	// LockTelegramWebhook serializes the Telegram setWebhook registration
 	// call so only one standalone instance registers the webhook URL at a time.
-	LockTelegramWebhook AdvisoryLockKey = 0x5C10000A
+	LockTelegramWebhook AdvisoryLockKey = 0x5C10000D
 
 	// LockHubSettingsSeed guards first-boot seeding of operational settings
 	// from settings.yaml into the hub_settings table (settings-db §3.9).
