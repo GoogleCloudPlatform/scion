@@ -38,6 +38,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -231,6 +232,10 @@ type ServerConfig struct {
 	Workstation bool
 	// DevUserConfig holds optional identity overrides for the development user.
 	DevUserConfig DevUserConfig
+
+	// OIDCConfig holds configuration for the OIDC Identity Provider feature.
+	// When Enabled, the hub initializes an OIDCKeyManager and exposes OIDC endpoints.
+	OIDCConfig config.OIDCProviderConfig
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -700,6 +705,12 @@ type Server struct {
 	transportAudience string
 	transportMode     string
 
+	// OIDC identity provider (nil = OIDC IdP disabled)
+	oidcKeyManager       *OIDCKeyManager
+	oidcIssuerURL        string
+	oidcTokenRateLimiter *GCPTokenRateLimiter // per-agent rate limiter for OIDC identity token requests
+	oidcTokenLifetime    time.Duration        // validity duration for OIDC identity tokens
+
 	// GCP token generator for agent identity (nil = GCP identity disabled)
 	gcpTokenGenerator GCPTokenGenerator
 
@@ -988,6 +999,47 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Info("Transport token minter configured",
 			"mode", cfg.TransportMode,
 			"audience", cfg.TransportAudience)
+	}
+
+	// Initialize OIDC Identity Provider key manager if enabled
+	if cfg.OIDCConfig.Enabled {
+		oidcIssuerURL := cfg.OIDCConfig.IssuerURL
+		if oidcIssuerURL == "" {
+			oidcIssuerURL = cfg.HubEndpoint
+		}
+		if oidcIssuerURL == "" {
+			return nil, fmt.Errorf("OIDC is enabled but no issuer URL configured (set oidc.issuer_url or hub.endpoint)")
+		}
+		oidcIssuerURL = strings.TrimRight(oidcIssuerURL, "/")
+
+		oidcMgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+			Store:                   s,
+			Backend:                 srv.secretBackend,
+			HubID:                   srv.hubID,
+			IssuerURL:               oidcIssuerURL,
+			RequireStableSigningKey: cfg.RequireStableSigningKey,
+			Log:                     logging.Subsystem("hub.oidc"),
+		})
+		if err != nil {
+			if isGCPBackend || cfg.RequireStableSigningKey {
+				return nil, fmt.Errorf("OIDC key manager: %w", err)
+			}
+			slog.Warn("Failed to initialize OIDC key manager", "error", err)
+		} else {
+			srv.oidcKeyManager = oidcMgr
+			srv.oidcIssuerURL = oidcIssuerURL
+
+			// OIDC identity token lifetime: use config if set, else default 15m
+			srv.oidcTokenLifetime = 15 * time.Minute
+			if cfg.OIDCConfig.TokenLifetime > 0 {
+				srv.oidcTokenLifetime = cfg.OIDCConfig.TokenLifetime
+			}
+
+			// Per-agent rate limiter for OIDC identity token requests (0.5 req/sec avg, burst 30)
+			srv.oidcTokenRateLimiter = NewGCPTokenRateLimiter(0.5, 30)
+
+			slog.Info("OIDC Identity Provider enabled", "issuer_url", oidcIssuerURL)
+		}
 	}
 
 	// Initialize control channel manager
@@ -2732,9 +2784,17 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		}
 	}
 
-	// Start rate limiter cleanup goroutine (exits when ctx is cancelled).
+	// Start rate limiter cleanup goroutines (exit when ctx is cancelled).
 	if s.gcpTokenRateLimiter != nil {
 		s.gcpTokenRateLimiter.StartCleanup(ctx)
+	}
+	if s.oidcTokenRateLimiter != nil {
+		s.oidcTokenRateLimiter.StartCleanup(ctx)
+	}
+
+	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.
+	if s.oidcKeyManager != nil {
+		s.oidcKeyManager.StartCleanupLoop(ctx)
 	}
 
 	// Start notification dispatcher (uses the current event publisher).
@@ -3103,6 +3163,13 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/system/apple-dns", s.requireWorkstation(http.HandlerFunc(s.handleAppleDNS)))
 	s.mux.Handle("/api/v1/system/registry", s.requireWorkstation(http.HandlerFunc(s.handleSystemRegistry)))
 	s.mux.Handle("/api/v1/system/workstation-settings", s.requireWorkstation(http.HandlerFunc(s.handleWorkstationSettings)))
+
+	// OIDC Identity Provider endpoints (unauthenticated — public metadata)
+	if s.oidcKeyManager != nil {
+		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCDiscovery)
+		s.mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
+		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.handleAgentIdentityToken)
+	}
 
 	// Workstation-only filesystem endpoints
 	s.mux.Handle("/api/v1/system/fs/list", s.requireWorkstation(http.HandlerFunc(s.handleFSList)))

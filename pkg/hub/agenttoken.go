@@ -57,6 +57,8 @@ const (
 	ScopeAgentTokenRefresh AgentTokenScope = "agent:token:refresh"
 	// ScopeAgentPortForward allows the agent to register ports and hold port-forward tunnels.
 	ScopeAgentPortForward AgentTokenScope = "agent:port:forward"
+	// ScopeIdentityToken grants the ability to request OIDC identity tokens.
+	ScopeIdentityToken AgentTokenScope = "agent:identity:token"
 	// ScopeGCPTokenPrefix is the prefix for GCP token scopes.
 	// Full scope format: "project:gcp:token:<sa-id>"
 	ScopeGCPTokenPrefix = "project:gcp:token:"
