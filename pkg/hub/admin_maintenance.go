@@ -703,11 +703,11 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	if err := cmd.Start(); err != nil {
 		log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"Failed to initiate restart: "+err.Error(), nil)
+			"Failed to initiate restart", nil)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "restarting",
 		"message": "Hub restart initiated",
 	})
