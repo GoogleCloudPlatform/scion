@@ -398,9 +398,12 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			} else {
 				// No matching projects - ask for confirmation
 				if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
-					return nil, fmt.Errorf("project must be linked to Hub to perform this operation\n\n" +
-						"Link this project: scion hub link\n" +
-						"Or use local-only mode: scion --no-hub <command>")
+					msg := "project must be linked to Hub to perform this operation\n\n" +
+						"Link this project: scion hub link"
+					if !config.IsHubManagedAgent() {
+						msg += "\nOr use local-only mode: scion --no-hub <command>"
+					}
+					return nil, errors.New(msg)
 				}
 			}
 		}
@@ -487,9 +490,12 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				return nil, wrapHubError(fmt.Errorf("failed to sync agents: %w", err))
 			}
 		} else {
-			return nil, fmt.Errorf("agents must be synchronized with Hub to perform this operation\n\n" +
-				"Sync agents: scion hub sync\n" +
-				"Or use local-only mode: scion --no-hub <command>")
+			msg := "agents must be synchronized with Hub to perform this operation\n\n" +
+				"Sync agents: scion hub sync"
+			if !config.IsHubManagedAgent() {
+				msg += "\nOr use local-only mode: scion --no-hub <command>"
+			}
+			return nil, errors.New(msg)
 		}
 	} else {
 		// Already in sync — update the watermark and synced agents to keep current
@@ -1391,9 +1397,14 @@ func isLocalhostEndpoint(endpoint string) bool {
 }
 
 // wrapHubError wraps a Hub error with guidance to disable Hub integration.
+// When running inside a hub-managed agent, the local-only mode hint is
+// suppressed because disabling the Hub would break orchestration connectivity.
 func wrapHubError(err error) error {
 	if apiclient.IsUnauthorizedError(err) {
 		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
+	}
+	if config.IsHubManagedAgent() {
+		return err
 	}
 	return fmt.Errorf("%w\n\nTo use local-only mode, use: scion --no-hub <command>", err)
 }
