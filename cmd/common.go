@@ -78,6 +78,7 @@ var (
 	labelFlags            []string
 	modelFlag             string
 	thinkingLevelFlag     int = -1
+	agentRoleFlag         string
 )
 
 func parseLabels(raw []string) (map[string]string, error) {
@@ -755,6 +756,16 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		return err
 	}
 
+	// Validate --role flag if provided
+	if agentRoleFlag != "" {
+		switch agentRoleFlag {
+		case "none", "readonly", "baseline", "full":
+			// valid
+		default:
+			return fmt.Errorf("invalid --role value %q: must be one of none, readonly, baseline, full", agentRoleFlag)
+		}
+	}
+
 	// Build create request (Hub creates and starts in one operation)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
@@ -773,6 +784,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		Attach:          attach,
 		GatherEnv:       true, // Enable env-gather flow
 		Notify:          !startNoNotify,
+		AgentRole:       agentRoleFlag,
 	}
 
 	// Thread inline config from --config flag into the Hub request.

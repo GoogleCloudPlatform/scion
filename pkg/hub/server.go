@@ -2118,9 +2118,11 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 
 // GenerateAgentToken generates a JWT for an agent.
 // This is a convenience method that delegates to the token service.
-// Base scopes are determined by the agent's role (baseline, or full in dev-auth mode).
+// Base scopes are determined by the passed role.
+// Dev-auth mode overrides to full if the role would be more restrictive,
+// preserving dev-mode behavior where all agents get full access.
 // Additional scopes are merged with the role-based defaults, deduplicated.
-func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string, additionalScopes ...AgentTokenScope) (string, error) {
+func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error) {
 	s.mu.RLock()
 	tokenService := s.agentTokenService
 	s.mu.RUnlock()
@@ -2129,12 +2131,14 @@ func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string
 		return "", fmt.Errorf("agent token service not initialized")
 	}
 
-	// Default role is baseline; dev-auth mode grants full to match current behavior.
-	role := AgentRoleBaseline
-	if s.config.DevAuthToken != "" {
-		role = AgentRoleFull
+	// Use the specified role for base scopes.
+	// Dev-auth mode overrides to full if the role would be more restrictive,
+	// preserving dev-mode behavior where all agents get full access.
+	effectiveRole := role
+	if s.config.DevAuthToken != "" && CompareRoles(role, AgentRoleFull) < 0 {
+		effectiveRole = AgentRoleFull
 	}
-	scopes := ScopesForRole(role)
+	scopes := ScopesForRole(effectiveRole)
 
 	// Merge additional scopes, deduplicating
 	seen := make(map[AgentTokenScope]bool, len(scopes))

@@ -63,4 +63,7 @@ func init() {
 
 	// Inline config flag
 	resumeCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+
+	// Agent role flag
+	resumeCmd.Flags().StringVar(&agentRoleFlag, "role", "", "Agent role for Hub API access: none, readonly, baseline, full (default: project ceiling)")
 }

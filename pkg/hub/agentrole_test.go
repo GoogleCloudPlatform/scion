@@ -181,3 +181,35 @@ func TestResolveEffectiveRole_InvalidRequestedRole(t *testing.T) {
 	// so readonly wins — project cap takes effect.
 	assert.Equal(t, AgentRoleReadOnly, ResolveEffectiveRole(AgentRole("superuser"), "admin", AgentRoleReadOnly))
 }
+
+func TestResolveEffectiveRole_ProjectMaxReadonly_AdminRequestsFull(t *testing.T) {
+	// When project max is "readonly" and an admin requests full, effective is readonly.
+	assert.Equal(t, AgentRoleReadOnly, ResolveEffectiveRole(AgentRoleFull, "admin", AgentRoleReadOnly))
+}
+
+func TestResolveEffectiveRole_ProjectMaxNone(t *testing.T) {
+	// When project max is "none", any request resolves to none.
+	assert.Equal(t, AgentRoleNone, ResolveEffectiveRole(AgentRoleFull, "admin", AgentRoleNone))
+	assert.Equal(t, AgentRoleNone, ResolveEffectiveRole(AgentRoleBaseline, "member", AgentRoleNone))
+	assert.Equal(t, AgentRoleNone, ResolveEffectiveRole(AgentRoleReadOnly, "admin", AgentRoleNone))
+}
+
+func TestResolveEffectiveRole_ProjectMaxFull_MemberCapped(t *testing.T) {
+	// When project max is full but user is member, member ceiling (baseline) applies.
+	assert.Equal(t, AgentRoleBaseline, ResolveEffectiveRole(AgentRoleFull, "member", AgentRoleFull))
+}
+
+func TestScopesForRole_RoleNoneMapToNoAuth(t *testing.T) {
+	// role=none produces nil scopes — caller should set NoAuth=true
+	scopes := ScopesForRole(AgentRoleNone)
+	assert.Nil(t, scopes)
+}
+
+func TestScopesForRole_RoleReadOnlyHasOnlyRead(t *testing.T) {
+	scopes := ScopesForRole(AgentRoleReadOnly)
+	require.Len(t, scopes, 1)
+	assert.Equal(t, ScopeProjectRead, scopes[0])
+	// Must NOT have elevated scopes
+	assert.NotContains(t, scopes, ScopeAgentCreate)
+	assert.NotContains(t, scopes, ScopeAgentStatusUpdate)
+}

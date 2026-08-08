@@ -79,7 +79,7 @@ func (s *Server) getHarnessConfigFromTemplate(template *store.Template, fallback
 // buildAppliedConfig constructs an AgentAppliedConfig from a CreateAgentRequest.
 // When req.Config is a ScionConfig, its fields are extracted into the applied config
 // and the full ScionConfig is preserved as InlineConfig for threading to the broker.
-func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string, creatorName string) *store.AgentAppliedConfig {
+func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string, creatorName string, effectiveRole AgentRole) *store.AgentAppliedConfig {
 	ac := &store.AgentAppliedConfig{
 		Profile:       req.Profile,
 		HarnessConfig: harnessConfig,
@@ -89,6 +89,7 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string
 		Branch:        req.Branch,
 		Workspace:     req.Workspace,
 		CreatorName:   creatorName,
+		AgentRole:     string(effectiveRole),
 	}
 
 	ac.NoAuth = req.NoAuth

@@ -119,7 +119,7 @@ func (d *HTTPAgentDispatcher) GetClient() RuntimeBrokerClient {
 
 // AgentTokenGenerator generates JWT tokens for agents.
 type AgentTokenGenerator interface {
-	GenerateAgentToken(agentID, projectID string, ancestry []string, additionalScopes ...AgentTokenScope) (string, error)
+	GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error)
 }
 
 // GitHubAppTokenMinter mints GitHub App installation tokens for projects.
@@ -419,18 +419,21 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 
 	// Generate agent token if token generator is available
 	if d.tokenGenerator != nil {
-		// Convert hub access scopes from AppliedConfig to AgentTokenScope
+		// Determine agent role (default to baseline for backward compat with pre-role agents)
+		agentRole := AgentRoleBaseline
+		if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
+			agentRole = AgentRole(agent.AppliedConfig.AgentRole)
+		}
+
+		// Compute additional scopes beyond the role (GCP token, etc.)
 		var additionalScopes []AgentTokenScope
 		if agent.AppliedConfig != nil {
-			for _, s := range agent.AppliedConfig.HubAccessScopes {
-				additionalScopes = append(additionalScopes, AgentTokenScope(s))
-			}
-			// Inject GCP token scope when the agent has an assigned service account
+			// GCP token scope is config-based, not role-based
 			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to generate agent token", "error", err)
@@ -1816,17 +1819,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	// Generate a fresh agent token for Hub authentication
 	if d.tokenGenerator != nil {
+		agentRole := AgentRoleBaseline
+		if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
+			agentRole = AgentRole(agent.AppliedConfig.AgentRole)
+		}
+
 		var additionalScopes []AgentTokenScope
 		if agent.AppliedConfig != nil {
-			for _, s := range agent.AppliedConfig.HubAccessScopes {
-				additionalScopes = append(additionalScopes, AgentTokenScope(s))
-			}
-			// Inject GCP token scope when the agent has an assigned service account
 			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentStart: failed to generate agent token", "error", err)
@@ -2071,16 +2075,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 
 	if d.tokenGenerator != nil {
+		agentRole := AgentRoleBaseline
+		if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
+			agentRole = AgentRole(agent.AppliedConfig.AgentRole)
+		}
+
 		var additionalScopes []AgentTokenScope
 		if agent.AppliedConfig != nil {
-			for _, s := range agent.AppliedConfig.HubAccessScopes {
-				additionalScopes = append(additionalScopes, AgentTokenScope(s))
-			}
 			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentRestart: failed to generate agent token", "error", err)
@@ -2165,16 +2171,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 
 	var token string
 	if d.tokenGenerator != nil {
+		agentRole := AgentRoleBaseline
+		if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
+			agentRole = AgentRole(agent.AppliedConfig.AgentRole)
+		}
+
 		var additionalScopes []AgentTokenScope
 		if agent.AppliedConfig != nil {
-			for _, s := range agent.AppliedConfig.HubAccessScopes {
-				additionalScopes = append(additionalScopes, AgentTokenScope(s))
-			}
 			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
 				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
 			}
 		}
-		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
 		}
