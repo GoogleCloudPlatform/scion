@@ -1689,6 +1689,58 @@ func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (st
 	return result.Token, nil
 }
 
+// IdentityTokenResponse is the Hub's response for an OIDC identity token request.
+type IdentityTokenResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// RequestIdentityToken requests an OIDC identity token for the given audience.
+// The token is a short-lived RS256-signed JWT that can be used to authenticate
+// to external systems supporting OIDC/JWT verification (Vault, GCP WIF, AWS
+// IRSA, A2A bridges, etc.).
+func (c *Client) RequestIdentityToken(ctx context.Context, audience string) (*IdentityTokenResponse, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agent/identity-token",
+		strings.TrimSuffix(c.hubURL, "/"))
+
+	body, _ := json.Marshal(map[string]string{
+		"audience": audience,
+	})
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Agent-Token", currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hub request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result IdentityTokenResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
 // AgentSelf is the subset of Hub agent fields returned by GetSelf.
 // It covers the Tier 2 fields needed by `scion whoami --full`.
 type AgentSelf struct {

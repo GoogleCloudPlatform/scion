@@ -1473,6 +1473,74 @@ func TestClient_SetSecret_NotConfigured(t *testing.T) {
 	assert.Contains(t, err.Error(), "not configured")
 }
 
+func TestClient_RequestIdentityToken(t *testing.T) {
+	t.Run("successful request", func(t *testing.T) {
+		wantToken := "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhZ2VudC0xMjMifQ.sig"
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, http.MethodPost, r.Method)
+			assert.Equal(t, "/api/v1/agent/identity-token", r.URL.Path)
+			assert.Equal(t, "test-token", r.Header.Get("X-Scion-Agent-Token"))
+			assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+			var body map[string]string
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			assert.Equal(t, "https://vault.example.com", body["audience"])
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"token":      wantToken,
+				"expires_at": "2030-01-01T00:15:00Z",
+			})
+		}))
+		defer server.Close()
+
+		client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+		resp, err := client.RequestIdentityToken(context.Background(), "https://vault.example.com")
+
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, wantToken, resp.Token)
+		assert.Equal(t, time.Date(2030, 1, 1, 0, 15, 0, 0, time.UTC), resp.ExpiresAt)
+	})
+
+	t.Run("not configured", func(t *testing.T) {
+		client := &Client{}
+		_, err := client.RequestIdentityToken(context.Background(), "test")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not configured")
+	})
+
+	t.Run("server returns 403", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"agent not authorized to request identity tokens"}`))
+		}))
+		defer server.Close()
+
+		client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+		_, err := client.RequestIdentityToken(context.Background(), "test")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "403")
+	})
+
+	t.Run("server returns 429", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+		}))
+		defer server.Close()
+
+		client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+		_, err := client.RequestIdentityToken(context.Background(), "test")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "429")
+	})
+}
+
 func TestClient_SetSecret_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
