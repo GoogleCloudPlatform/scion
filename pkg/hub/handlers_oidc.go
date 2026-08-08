@@ -28,13 +28,13 @@ import (
 // oidcDiscoveryDocument represents the OpenID Connect Provider Metadata
 // returned by the /.well-known/openid-configuration endpoint.
 type oidcDiscoveryDocument struct {
-	Issuer                            string   `json:"issuer"`
-	JWKSURI                           string   `json:"jwks_uri"`
-	ResponseTypesSupported            []string `json:"response_types_supported"`
-	SubjectTypesSupported             []string `json:"subject_types_supported"`
-	IDTokenSigningAlgValuesSupported  []string `json:"id_token_signing_alg_values_supported"`
-	ClaimsSupported                   []string `json:"claims_supported"`
-	ScopesSupported                   []string `json:"scopes_supported"`
+	Issuer                           string   `json:"issuer"`
+	JWKSURI                          string   `json:"jwks_uri"`
+	ResponseTypesSupported           []string `json:"response_types_supported"`
+	SubjectTypesSupported            []string `json:"subject_types_supported"`
+	IDTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported"`
+	ClaimsSupported                  []string `json:"claims_supported"`
+	ScopesSupported                  []string `json:"scopes_supported"`
 }
 
 // handleOIDCDiscovery serves the OIDC Provider Metadata at

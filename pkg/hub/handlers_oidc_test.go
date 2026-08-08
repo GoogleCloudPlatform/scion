@@ -397,13 +397,13 @@ func doIdentityTokenRequest(t *testing.T, srv *Server, claims *AgentTokenClaims,
 
 func TestHandleAgentIdentityToken(t *testing.T) {
 	tests := []struct {
-		name           string
-		claims         func(base *AgentTokenClaims) *AgentTokenClaims
-		body           interface{}
-		wantStatus     int
-		wantErrCode    string
-		checkToken     bool
-		checkAudience  string
+		name          string
+		claims        func(base *AgentTokenClaims) *AgentTokenClaims
+		body          interface{}
+		wantStatus    int
+		wantErrCode   string
+		checkToken    bool
+		checkAudience string
 	}{
 		{
 			name: "valid request returns RS256-signed JWT with correct claims",

@@ -116,8 +116,8 @@ func TestGenerateRSAKeyPair(t *testing.T) {
 			assert.Equal(t, 2048, key.N.BitLen(), "RSA key should be 2048 bits")
 
 			// Verify public key is extractable
-			assert.NotNil(t, key.PublicKey.N)
-			assert.NotNil(t, key.PublicKey.E)
+			assert.NotNil(t, key.N)
+			assert.NotNil(t, key.E)
 
 			// Verify the key validates
 			err = key.Validate()
@@ -170,9 +170,9 @@ func TestPEMEncodingRoundTrip(t *testing.T) {
 					"Modulus should be preserved")
 			} else {
 				// Public key should match
-				assert.Equal(t, key.PublicKey.N.Bytes(), decoded.PublicKey.N.Bytes(),
+				assert.Equal(t, key.N.Bytes(), decoded.N.Bytes(),
 					"Public key modulus should be preserved")
-				assert.Equal(t, key.PublicKey.E, decoded.PublicKey.E,
+				assert.Equal(t, key.E, decoded.E,
 					"Public key exponent should be preserved")
 			}
 		})

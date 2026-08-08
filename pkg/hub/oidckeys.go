@@ -80,12 +80,12 @@ type OIDCKeyManager struct {
 
 // OIDCKeyManagerConfig holds the configuration needed to initialize an OIDCKeyManager.
 type OIDCKeyManagerConfig struct {
-	Store                  store.Store
-	Backend                secret.SecretBackend
-	HubID                  string
-	IssuerURL              string
+	Store                   store.Store
+	Backend                 secret.SecretBackend
+	HubID                   string
+	IssuerURL               string
 	RequireStableSigningKey bool
-	Log                    *slog.Logger
+	Log                     *slog.Logger
 }
 
 // NewOIDCKeyManager creates a new OIDCKeyManager, loading or generating
@@ -373,7 +373,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 
 	// 3. No existing key found — generate or fail
 	if cfg.RequireStableSigningKey {
-		return nil, fmt.Errorf("refusing to generate a new OIDC signing key: RequireStableSigningKey is set and no existing key was found; "+
+		return nil, fmt.Errorf("refusing to generate a new OIDC signing key: RequireStableSigningKey is set and no existing key was found; " +
 			"pre-provision the key via the secret backend or store")
 	}
 

@@ -79,7 +79,7 @@ func runIdentityToken(cmd *cobra.Command, args []string) error {
 		}
 	default:
 		// Raw token output — no trailing newline for clean pipeline use.
-		fmt.Fprint(cmd.OutOrStdout(), resp.Token)
+		_, _ = fmt.Fprint(cmd.OutOrStdout(), resp.Token)
 	}
 
 	return nil
