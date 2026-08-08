@@ -23,7 +23,7 @@ docs-site/
 examples/
 extras/
 hack/
-internal/
+/internal/
 reviews/
 scratch/
 /scripts/
