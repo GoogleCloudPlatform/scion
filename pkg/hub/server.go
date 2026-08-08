@@ -2128,13 +2128,12 @@ func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string
 		return "", fmt.Errorf("agent token service not initialized")
 	}
 
-	scopes := []AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify, ScopeAgentPortForward}
-
-	// In dev-auth mode, auto-grant agent creation and lifecycle scopes
-	// so agents can create sub-agents without explicit template configuration.
+	// Default role is baseline; dev-auth mode grants full to match current behavior.
+	role := AgentRoleBaseline
 	if s.config.DevAuthToken != "" {
-		scopes = append(scopes, ScopeAgentCreate, ScopeAgentLifecycle)
+		role = AgentRoleFull
 	}
+	scopes := ScopesForRole(role)
 
 	// Merge additional scopes, deduplicating
 	seen := make(map[AgentTokenScope]bool, len(scopes))
