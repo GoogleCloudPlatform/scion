@@ -17,6 +17,7 @@ package hubsync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -2358,4 +2359,28 @@ func TestAddRemoveSyncedAgent(t *testing.T) {
 			t.Fatal("agent-b should have been removed")
 		}
 	}
+}
+
+func TestWrapHubError_SuppressesLocalHintForAgents(t *testing.T) {
+	baseErr := errors.New("hub connection refused")
+
+	t.Run("standalone CLI includes local-only hint", func(t *testing.T) {
+		t.Setenv("SCION_AGENT_ID", "") // Ensure agent context is cleared.
+		got := wrapHubError(baseErr)
+		if !strings.Contains(got.Error(), "local-only mode") {
+			t.Errorf("expected local-only mode hint for standalone CLI, got: %s", got)
+		}
+	})
+
+	t.Run("hub-managed agent omits local-only hint", func(t *testing.T) {
+		t.Setenv("SCION_AGENT_ID", "agent-uuid-123")
+		got := wrapHubError(baseErr)
+		if strings.Contains(got.Error(), "local-only mode") {
+			t.Errorf("expected no local-only mode hint for hub-managed agent, got: %s", got)
+		}
+		// The original error should still be present.
+		if !errors.Is(got, baseErr) {
+			t.Errorf("expected wrapped error to contain base error")
+		}
+	})
 }

@@ -323,9 +323,14 @@ func PrintUsingHub(endpoint string) {
 }
 
 // wrapHubError wraps a Hub error with guidance to disable Hub integration.
+// When running inside a hub-managed agent, the local-only mode hint is
+// suppressed because disabling the Hub would break orchestration connectivity.
 func wrapHubError(err error) error {
 	if apiclient.IsUnauthorizedError(err) {
 		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
+	}
+	if config.IsHubManagedAgent() {
+		return err
 	}
 	return fmt.Errorf("%w\n\nTo use local-only mode, run: scion hub disable", err)
 }
@@ -356,7 +361,11 @@ func GetProjectID(hubCtx *HubContext) (string, error) {
 	// Fall back to git remote lookup
 	gitRemote := util.GetGitRemote()
 	if gitRemote == "" {
-		return "", fmt.Errorf("no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub, or use --no-hub for local-only mode")
+		msg := "no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub"
+		if !config.IsHubManagedAgent() {
+			msg += ", or use --no-hub for local-only mode"
+		}
+		return "", fmt.Errorf("%s", msg)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
