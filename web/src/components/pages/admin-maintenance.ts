@@ -127,6 +127,14 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private viewingRun: MaintenanceRun | null = null;
 
+  /** Whether the restart hub confirmation dialog is open. */
+  @state()
+  private restartDialogOpen = false;
+
+  /** Whether a restart request is in-flight. */
+  @state()
+  private restartLoading = false;
+
   /** Whether the bulk reset-auth request is in-flight. */
   @state()
   private resetAuthAllLoading = false;
@@ -925,6 +933,7 @@ export class ScionPageAdminMaintenance extends LitElement {
 
       ${this.renderRunDialog()}
       ${this.renderRunDetailDialog()}
+      ${this.renderRestartDialog()}
     `;
   }
 
@@ -969,6 +978,29 @@ export class ScionPageAdminMaintenance extends LitElement {
           One-off administrative actions across all agents.
         </p>
         <div class="card-list">
+          <div class="card">
+            <div class="card-header">
+              <sl-icon name="arrow-clockwise" class="pending"></sl-icon>
+              <span class="card-title">Restart Hub</span>
+              ${this.restartLoading
+                ? html`<sl-button size="small" disabled loading>Restarting...</sl-button>`
+                : html`
+                    <sl-button
+                      variant="warning"
+                      size="small"
+                      @click=${() => this.openRestartDialog()}
+                    >
+                      <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                      Restart
+                    </sl-button>
+                  `}
+            </div>
+            <div class="card-description">
+              Restart the hub service via systemd. This will briefly drop all
+              active connections (including WebSockets) while the process restarts.
+              Use this after changing settings that require a restart to take effect.
+            </div>
+          </div>
           <div class="card">
             <div class="card-header">
               <sl-icon name="key" class="pending"></sl-icon>
@@ -1030,6 +1062,35 @@ export class ScionPageAdminMaintenance extends LitElement {
       showToast(err instanceof Error ? err.message : 'Failed to reset auth for all agents');
     } finally {
       this.resetAuthAllLoading = false;
+    }
+  }
+
+  private openRestartDialog(): void {
+    this.restartDialogOpen = true;
+  }
+
+  private closeRestartDialog(): void {
+    if (!this.restartLoading) {
+      this.restartDialogOpen = false;
+    }
+  }
+
+  private async handleRestartHub(): Promise<void> {
+    this.restartLoading = true;
+    try {
+      const response = await apiFetch('/api/v1/admin/maintenance/restart', {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        const errMsg = await extractApiError(response, `HTTP ${response.status}`);
+        throw new Error(errMsg);
+      }
+      this.restartDialogOpen = false;
+      showToast('Hub is restarting... The page will reconnect shortly.', 'primary', { icon: 'info-circle', duration: 10000 });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to restart hub');
+    } finally {
+      this.restartLoading = false;
     }
   }
 
@@ -1390,6 +1451,43 @@ export class ScionPageAdminMaintenance extends LitElement {
           variant="default"
           @click=${() => this.closeRunDetail()}
         >Close</sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private renderRestartDialog() {
+    if (!this.restartDialogOpen) return nothing;
+
+    return html`
+      <sl-dialog
+        label="Restart Hub"
+        open
+        @sl-request-close=${() => this.closeRestartDialog()}
+      >
+        <div class="dialog-body">
+          <p>
+            Are you sure you want to restart the hub service?
+          </p>
+          <p style="color: var(--sl-color-warning-700, #a16207); font-weight: 500;">
+            This will briefly disconnect all users and drop active WebSocket
+            connections. The hub will be back online within a few seconds.
+          </p>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => this.closeRestartDialog()}
+          ?disabled=${this.restartLoading}
+        >Cancel</sl-button>
+        <sl-button
+          slot="footer"
+          variant="warning"
+          ?loading=${this.restartLoading}
+          @click=${() => this.handleRestartHub()}
+        >
+          <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+          Restart Hub
+        </sl-button>
       </sl-dialog>
     `;
   }

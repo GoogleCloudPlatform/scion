@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -669,4 +670,45 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleAdminRestart handles POST /api/v1/admin/maintenance/restart.
+// It initiates a graceful systemd restart of the hub service using the same
+// fire-and-forget pattern as the rebuild-server executor. The response is
+// sent before the restart takes effect so the client receives a 200.
+func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil || user.Role() != "admin" {
+		Forbidden(w)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	serviceName := s.config.MaintenanceConfig.ServiceName
+	if serviceName == "" {
+		serviceName = "scion-hub"
+	}
+
+	log := s.maintenanceLog
+	log.Info("Hub restart requested via admin API", "user", user.Email(), "service", serviceName)
+
+	// Fire-and-forget: start the restart but don't wait for it.
+	// "systemctl restart" sends SIGTERM to this process, so cmd.Run()
+	// would never return. Using cmd.Start() lets us return success first.
+	cmd := exec.Command("sudo", "systemctl", "restart", serviceName)
+	if err := cmd.Start(); err != nil {
+		log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to initiate restart: "+err.Error(), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "restarting",
+		"message": "Hub restart initiated",
+	})
 }
