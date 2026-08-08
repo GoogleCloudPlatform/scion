@@ -38,6 +38,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -287,6 +289,9 @@ func main() {
 func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	log.Info("scion-a2a-bridge starting in standalone mode")
 
+	// Detect Cloud Run or explicit port-muxing mode (single-port h2c).
+	muxPorts := os.Getenv("MUX_PORTS") == "true" || os.Getenv("K_SERVICE") != ""
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -307,21 +312,8 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 
 	// 2. Set up gRPC broker server + health service early so health probes
 	// work during the runtime's DB-connect retry window.
-	grpcPort := 50051
-	if p := os.Getenv("GRPC_PORT"); p != "" {
-		if parsed, err := strconv.Atoi(p); err == nil {
-			grpcPort = parsed
-		}
-	}
-
 	brokerServer := bridge.NewBrokerServer(nil, log.With("component", "broker"), ctx)
 	grpcBrokerServer := grpcbroker.NewServer(brokerServer)
-
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
-	if err != nil {
-		log.Error("failed to listen for gRPC", "error", err, "port", grpcPort)
-		os.Exit(1)
-	}
 
 	grpcServer := grpc.NewServer()
 	brokerv1.RegisterBrokerServiceServer(grpcServer, grpcBrokerServer)
@@ -329,12 +321,30 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 
-	go func() {
-		log.Info("gRPC server listening", "port", grpcPort)
-		if err := grpcServer.Serve(lis); err != nil {
-			log.Error("gRPC server error", "error", err)
+	// When port-muxing is active, gRPC is served through the HTTP handler via
+	// h2c — no dedicated gRPC listener is needed.
+	var grpcPort int
+	if !muxPorts {
+		grpcPort = 50051
+		if p := os.Getenv("GRPC_PORT"); p != "" {
+			if parsed, err := strconv.Atoi(p); err == nil {
+				grpcPort = parsed
+			}
 		}
-	}()
+
+		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
+		if err != nil {
+			log.Error("failed to listen for gRPC", "error", err, "port", grpcPort)
+			os.Exit(1)
+		}
+
+		go func() {
+			log.Info("gRPC server listening", "port", grpcPort)
+			if err := grpcServer.Serve(lis); err != nil {
+				log.Error("gRPC server error", "error", err)
+			}
+		}()
+	}
 
 	// 3. Start the integration runtime for config management.
 	rt := runtime.New(runtime.Options{
@@ -480,9 +490,26 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	}
 	srv.WarnOnOpenAuth()
 
+	httpHandler := srv.Handler()
+	if muxPorts {
+		// Override listen address with PORT env var (Cloud Run convention).
+		if port := os.Getenv("PORT"); port != "" {
+			listenAddr = ":" + port
+		}
+		// Wrap with h2c to multiplex HTTP/1.1 and gRPC (HTTP/2) on the same port.
+		a2aHandler := httpHandler
+		httpHandler = h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+				grpcServer.ServeHTTP(w, r)
+			} else {
+				a2aHandler.ServeHTTP(w, r)
+			}
+		}), &http2.Server{})
+	}
+
 	httpServer := &http.Server{
 		Addr:           listenAddr,
-		Handler:        srv.Handler(),
+		Handler:        httpHandler,
 		ReadTimeout:    30 * time.Second,
 		WriteTimeout:   30 * time.Second,
 		IdleTimeout:    120 * time.Second,
@@ -505,6 +532,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		"sdk", "a2a-go/v2",
 		"grpc_port", grpcPort,
 		"http_addr", listenAddr,
+		"mux_ports", muxPorts,
 	)
 
 	// 12. Block until signal, server error, or update-triggered shutdown.
@@ -528,15 +556,17 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		log.Error("failed to stop A2A server", "error", err)
 	}
 
-	grpcDone := make(chan struct{})
-	go func() {
-		grpcServer.GracefulStop()
-		close(grpcDone)
-	}()
-	select {
-	case <-grpcDone:
-	case <-time.After(5 * time.Second):
-		grpcServer.Stop()
+	if !muxPorts {
+		grpcDone := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(grpcDone)
+		}()
+		select {
+		case <-grpcDone:
+		case <-time.After(5 * time.Second):
+			grpcServer.Stop()
+		}
 	}
 
 	notifier.Stop()
