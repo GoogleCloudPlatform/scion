@@ -228,11 +228,11 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 			"pre-provision the key via the secret backend or store")
 	}
 
-	m.log.Warn("Generated new OIDC signing key; all previously issued identity tokens are invalid", "key", keyName)
 	privKey, err := generateRSAKeyPair()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate OIDC RSA key pair: %w", err)
 	}
+	m.log.Warn("Generated new OIDC signing key; all previously issued identity tokens are invalid", "key", keyName)
 
 	pemData, err := encodePEMPrivateKey(privKey)
 	if err != nil {
