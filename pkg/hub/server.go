@@ -38,6 +38,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -231,6 +232,10 @@ type ServerConfig struct {
 	Workstation bool
 	// DevUserConfig holds optional identity overrides for the development user.
 	DevUserConfig DevUserConfig
+
+	// OIDCConfig holds configuration for the OIDC Identity Provider feature.
+	// When Enabled, the hub initializes an OIDCKeyManager and exposes OIDC endpoints.
+	OIDCConfig config.OIDCProviderConfig
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -700,6 +705,10 @@ type Server struct {
 	transportAudience string
 	transportMode     string
 
+	// OIDC identity provider (nil = OIDC IdP disabled)
+	oidcKeyManager *OIDCKeyManager
+	oidcIssuerURL  string
+
 	// GCP token generator for agent identity (nil = GCP identity disabled)
 	gcpTokenGenerator GCPTokenGenerator
 
@@ -988,6 +997,37 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Info("Transport token minter configured",
 			"mode", cfg.TransportMode,
 			"audience", cfg.TransportAudience)
+	}
+
+	// Initialize OIDC Identity Provider key manager if enabled
+	if cfg.OIDCConfig.Enabled {
+		oidcIssuerURL := cfg.OIDCConfig.IssuerURL
+		if oidcIssuerURL == "" {
+			oidcIssuerURL = cfg.HubEndpoint
+		}
+		if oidcIssuerURL == "" {
+			return nil, fmt.Errorf("OIDC is enabled but no issuer URL configured (set oidc.issuer_url or hub.endpoint)")
+		}
+
+		oidcMgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+			Store:                   s,
+			Backend:                 srv.secretBackend,
+			HubID:                   srv.hubID,
+			IssuerURL:               oidcIssuerURL,
+			OIDCConfig:              cfg.OIDCConfig,
+			RequireStableSigningKey: cfg.RequireStableSigningKey,
+			Log:                     logging.Subsystem("hub.oidc"),
+		})
+		if err != nil {
+			if isGCPBackend || cfg.RequireStableSigningKey {
+				return nil, fmt.Errorf("OIDC key manager: %w", err)
+			}
+			slog.Warn("Failed to initialize OIDC key manager", "error", err)
+		} else {
+			srv.oidcKeyManager = oidcMgr
+			srv.oidcIssuerURL = oidcIssuerURL
+			slog.Info("OIDC Identity Provider enabled", "issuer_url", oidcIssuerURL)
+		}
 	}
 
 	// Initialize control channel manager

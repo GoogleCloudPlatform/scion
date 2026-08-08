@@ -312,6 +312,24 @@ type OAuthConfig struct {
 	Device OAuthClientConfig `json:"device" yaml:"device" koanf:"device"`
 }
 
+// OIDCProviderConfig holds configuration for the OIDC Identity Provider feature.
+// When enabled, the Hub acts as a minimal OIDC IdP, issuing RS256-signed identity
+// tokens that agents can use to authenticate to external systems (Vault, GCP WIF, etc.).
+type OIDCProviderConfig struct {
+	// IssuerURL is the OIDC issuer URL (the "iss" claim in identity tokens).
+	// Must be a valid HTTPS URL in hosted mode (HTTP allowed in workstation mode).
+	// Defaults to the Hub endpoint if empty.
+	IssuerURL string `json:"issuer_url,omitempty" yaml:"issuer_url,omitempty" koanf:"issuer_url"`
+	// Enabled controls whether the OIDC IdP feature is active. Default: false.
+	Enabled bool `json:"enabled" yaml:"enabled" koanf:"enabled"`
+	// TokenLifetime is the validity duration of issued identity tokens. Default: 15m.
+	TokenLifetime time.Duration `json:"token_lifetime,omitempty" yaml:"token_lifetime,omitempty" koanf:"token_lifetime"`
+	// SigningKeySecret is an optional pre-provisioned PEM-encoded RSA private key
+	// for signing identity tokens. When empty, a key is generated and stored
+	// via the secret backend / store on first boot.
+	SigningKeySecret string `json:"signing_key_secret,omitempty" yaml:"signing_key_secret,omitempty" koanf:"signing_key_secret"`
+}
+
 // GlobalConfig holds the complete server configuration.
 // This is distinct from hub.ServerConfig which only holds HTTP server settings.
 type GlobalConfig struct {
@@ -362,6 +380,9 @@ type GlobalConfig struct {
 
 	// Scheduler settings
 	Scheduler SchedulerConfig `json:"scheduler" yaml:"scheduler" koanf:"scheduler"`
+
+	// OIDC Identity Provider settings
+	OIDC OIDCProviderConfig `json:"oidc,omitempty" yaml:"oidc,omitempty" koanf:"oidc"`
 
 	// SlowRequestThreshold is the duration after which an HTTP request is
 	// logged as slow. Default: 10s when unset/zero.
