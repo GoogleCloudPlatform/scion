@@ -706,8 +706,10 @@ type Server struct {
 	transportMode     string
 
 	// OIDC identity provider (nil = OIDC IdP disabled)
-	oidcKeyManager *OIDCKeyManager
-	oidcIssuerURL  string
+	oidcKeyManager       *OIDCKeyManager
+	oidcIssuerURL        string
+	oidcTokenRateLimiter *GCPTokenRateLimiter // per-agent rate limiter for OIDC identity token requests
+	oidcTokenLifetime    time.Duration        // validity duration for OIDC identity tokens
 
 	// GCP token generator for agent identity (nil = GCP identity disabled)
 	gcpTokenGenerator GCPTokenGenerator
@@ -1008,6 +1010,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		if oidcIssuerURL == "" {
 			return nil, fmt.Errorf("OIDC is enabled but no issuer URL configured (set oidc.issuer_url or hub.endpoint)")
 		}
+		oidcIssuerURL = strings.TrimRight(oidcIssuerURL, "/")
 
 		oidcMgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
 			Store:                   s,
@@ -1025,6 +1028,16 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		} else {
 			srv.oidcKeyManager = oidcMgr
 			srv.oidcIssuerURL = oidcIssuerURL
+
+			// OIDC identity token lifetime: use config if set, else default 15m
+			srv.oidcTokenLifetime = 15 * time.Minute
+			if cfg.OIDCConfig.TokenLifetime > 0 {
+				srv.oidcTokenLifetime = cfg.OIDCConfig.TokenLifetime
+			}
+
+			// Per-agent rate limiter for OIDC identity token requests (0.5 req/sec avg, burst 30)
+			srv.oidcTokenRateLimiter = NewGCPTokenRateLimiter(0.5, 30)
+
 			slog.Info("OIDC Identity Provider enabled", "issuer_url", oidcIssuerURL)
 		}
 	}
@@ -2771,9 +2784,12 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		}
 	}
 
-	// Start rate limiter cleanup goroutine (exits when ctx is cancelled).
+	// Start rate limiter cleanup goroutines (exit when ctx is cancelled).
 	if s.gcpTokenRateLimiter != nil {
 		s.gcpTokenRateLimiter.StartCleanup(ctx)
+	}
+	if s.oidcTokenRateLimiter != nil {
+		s.oidcTokenRateLimiter.StartCleanup(ctx)
 	}
 
 	// Start notification dispatcher (uses the current event publisher).
@@ -3147,6 +3163,7 @@ func (s *Server) registerRoutes() {
 	if s.oidcKeyManager != nil {
 		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCDiscovery)
 		s.mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
+		s.mux.HandleFunc("POST /api/v1/agent/identity-token", s.handleAgentIdentityToken)
 	}
 
 	// Workstation-only filesystem endpoints
