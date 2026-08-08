@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -29,11 +30,11 @@ import (
 )
 
 // newLifecycleTestBridge creates a Bridge with a real SQLite store for lifecycle tests.
-// The broker worker and janitor goroutines are started; callers must call
-// b.Shutdown() (or defer it) to avoid goroutine leaks.
+// The janitor goroutine is started; callers must call b.Shutdown() (or defer it)
+// to avoid goroutine leaks.
 // An optional *Metrics can be passed to wire metrics from the start, avoiding
 // data races from assigning b.metrics after background goroutines are running.
-func newLifecycleTestBridge(t *testing.T, opts ...func(*lifecycleTestOpts)) (*Bridge, *state.Store) {
+func newLifecycleTestBridge(t *testing.T, opts ...func(*lifecycleTestOpts)) (*Bridge, state.Store) {
 	t.Helper()
 
 	o := &lifecycleTestOpts{}
@@ -42,7 +43,7 @@ func newLifecycleTestBridge(t *testing.T, opts ...func(*lifecycleTestOpts)) (*Br
 	}
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "lifecycle-test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "lifecycle-test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -66,12 +67,12 @@ func withMetrics(m *Metrics) func(*lifecycleTestOpts) {
 	return func(o *lifecycleTestOpts) { o.metrics = m }
 }
 
-// seedTask creates and registers a task in both the store and the bridge's
+// seedLifecycleTask creates and registers a task in both the store and the bridge's
 // activeTasks map, mimicking what SendMessage does for non-blocking sends.
-func seedLifecycleTask(t *testing.T, b *Bridge, store *state.Store, taskID, projectID, agentSlug string) {
+func seedLifecycleTask(t *testing.T, b *Bridge, store state.Store, taskID, projectID, agentSlug string) {
 	t.Helper()
 	now := time.Now()
-	if err := store.CreateTask(&state.Task{
+	if err := store.CreateTask(context.Background(), &state.Task{
 		ID:        taskID,
 		ContextID: "ctx-1",
 		ProjectID: projectID,
@@ -87,19 +88,32 @@ func seedLifecycleTask(t *testing.T, b *Bridge, store *state.Store, taskID, proj
 	b.registerActiveTask(taskID, aKey)
 }
 
-// --- Tests for dispatchToActiveTask with content messages ---
+// readStreamEvents reads events from the store's event log and converts them
+// to StreamEvents, replacing the old Subscribe+drainLoop pattern.
+func readStreamEvents(t *testing.T, store state.Store, taskID string) []StreamEvent {
+	t.Helper()
+	rawEvents, err := store.ReadTaskEvents(context.Background(), taskID, 0, 100)
+	if err != nil {
+		t.Fatalf("ReadTaskEvents: %v", err)
+	}
+	var events []StreamEvent
+	for _, raw := range rawEvents {
+		se, err := taskEventToStreamEvent(raw)
+		if err != nil {
+			t.Logf("skipping event %d: %v", raw.ID, err)
+			continue
+		}
+		events = append(events, se)
+	}
+	return events
+}
+
+// --- Tests for HandleBrokerMessage with content messages ---
 
 func TestContentMessageDoesNotCompleteTask(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "content-no-complete-1"
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
-
-	// Subscribe to the task's stream.
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer cleanup()
 
 	// Dispatch a content (non-state-change) message to the active task.
 	contentMsg := &messages.StructuredMessage{
@@ -115,11 +129,10 @@ func TestContentMessageDoesNotCompleteTask(t *testing.T) {
 		t.Fatalf("HandleBrokerMessage: %v", err)
 	}
 
-	// Wait for the broker worker to process.
 	time.Sleep(100 * time.Millisecond)
 
 	// Task should NOT be completed in the store.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -135,12 +148,10 @@ func TestContentMessageDoesNotCompleteTask(t *testing.T) {
 		t.Error("task should still be in activeTasks after content message")
 	}
 
-	// The stream should have received events (artifact + status with state=working).
-	var events []StreamEvent
-	drainLoop(ch, &events)
-
+	// Verify events were written to the event log.
+	events := readStreamEvents(t, store, taskID)
 	if len(events) == 0 {
-		t.Fatal("expected at least one stream event from content message")
+		t.Fatal("expected at least one event in the event log from content message")
 	}
 
 	// Find the status update event.
@@ -157,7 +168,7 @@ func TestContentMessageDoesNotCompleteTask(t *testing.T) {
 		}
 	}
 	if !foundWorkingStatus {
-		t.Error("no StatusUpdate with state=working found in stream events")
+		t.Error("no StatusUpdate with state=working found in event log")
 	}
 }
 
@@ -165,12 +176,6 @@ func TestContentMessagePreservesInputRequiredState(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "content-preserves-ir-1"
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
-
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer cleanup()
 
 	topic := "scion.project.proj1.user.test-user.messages"
 
@@ -205,7 +210,7 @@ func TestContentMessagePreservesInputRequiredState(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// State must still be input-required — content must not overwrite it.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -214,10 +219,8 @@ func TestContentMessagePreservesInputRequiredState(t *testing.T) {
 			task.State, TaskStateInputRequired)
 	}
 
-	// The streamed status update for the content message must also carry input-required.
-	var events []StreamEvent
-	drainLoop(ch, &events)
-
+	// Verify event log has events with content.
+	events := readStreamEvents(t, store, taskID)
 	var foundContentStatus bool
 	for _, ev := range events {
 		if ev.StatusUpdate != nil && ev.StatusUpdate.Status.Message != nil {
@@ -229,7 +232,7 @@ func TestContentMessagePreservesInputRequiredState(t *testing.T) {
 		}
 	}
 	if !foundContentStatus {
-		t.Error("no StatusUpdate with message content found in stream events")
+		t.Error("no StatusUpdate with message content found in event log")
 	}
 }
 
@@ -237,12 +240,6 @@ func TestContentMessageBroadcastsWorkingNonFinal(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "broadcast-working-1"
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
-
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer cleanup()
 
 	contentMsg := &messages.StructuredMessage{
 		Version:   1,
@@ -259,8 +256,7 @@ func TestContentMessageBroadcastsWorkingNonFinal(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	var events []StreamEvent
-	drainLoop(ch, &events)
+	events := readStreamEvents(t, store, taskID)
 
 	// Should have an artifact update and a status update.
 	var hasArtifact, hasStatus bool
@@ -285,10 +281,10 @@ func TestContentMessageBroadcastsWorkingNonFinal(t *testing.T) {
 		}
 	}
 	if !hasArtifact {
-		t.Error("expected ArtifactUpdate event")
+		t.Error("expected ArtifactUpdate event in event log")
 	}
 	if !hasStatus {
-		t.Error("expected StatusUpdate event")
+		t.Error("expected StatusUpdate event in event log")
 	}
 }
 
@@ -297,20 +293,14 @@ func TestMultipleContentMessagesKeepTaskAlive(t *testing.T) {
 	taskID := "multi-content-1"
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer cleanup()
-
-	// Send 3 content messages.
+	// Send 3 content messages with distinct text to avoid dedup.
 	for i := 0; i < 3; i++ {
 		msg := &messages.StructuredMessage{
 			Version:   1,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 			Sender:    "agent:agent-a",
 			Recipient: "user:test-user",
-			Msg:       "progress update",
+			Msg:       fmt.Sprintf("progress update %d", i),
 			Type:      messages.TypeAssistantReply,
 			Metadata:  map[string]string{"a2aTaskId": taskID},
 		}
@@ -322,7 +312,7 @@ func TestMultipleContentMessagesKeepTaskAlive(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Task should still be working.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -339,8 +329,7 @@ func TestMultipleContentMessagesKeepTaskAlive(t *testing.T) {
 	}
 
 	// Should have received multiple events (each content message produces artifact + status).
-	var events []StreamEvent
-	drainLoop(ch, &events)
+	events := readStreamEvents(t, store, taskID)
 
 	statusCount := 0
 	for _, ev := range events {
@@ -364,11 +353,7 @@ func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 	taskID := "complete-after-content-1"
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer cleanup()
+	topic := "scion.project.proj1.user.test-user.messages"
 
 	// First: send a content message.
 	contentMsg := &messages.StructuredMessage{
@@ -380,7 +365,7 @@ func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 		Type:      messages.TypeAssistantReply,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
-	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
+	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
 		t.Fatalf("HandleBrokerMessage(content): %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -395,13 +380,13 @@ func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 		Type:      messages.TypeStateChange,
 		Metadata:  map[string]string{"a2aTaskId": taskID},
 	}
-	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", completedMsg); err != nil {
+	if err := b.HandleBrokerMessage(context.Background(), topic, completedMsg); err != nil {
 		t.Fatalf("HandleBrokerMessage(completed): %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
 
 	// Task should now be completed in the store.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -417,10 +402,8 @@ func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 		t.Error("task should be removed from activeTasks after state-change to completed")
 	}
 
-	// Stream should have received the final event with Final=true.
-	var events []StreamEvent
-	drainLoop(ch, &events)
-
+	// Event log should have the final event with Final=true.
+	events := readStreamEvents(t, store, taskID)
 	var foundFinal bool
 	for _, ev := range events {
 		if ev.StatusUpdate != nil && ev.StatusUpdate.Final {
@@ -431,7 +414,7 @@ func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 		}
 	}
 	if !foundFinal {
-		t.Error("expected a final StatusUpdate with state=completed")
+		t.Error("expected a final StatusUpdate with state=completed in event log")
 	}
 }
 
@@ -439,12 +422,6 @@ func TestStateChangeInputRequiredKeepsTaskAlive(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "input-required-1"
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
-
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer cleanup()
 
 	// Send state-change to WAITING_FOR_INPUT (maps to input-required).
 	inputMsg := &messages.StructuredMessage{
@@ -462,7 +439,7 @@ func TestStateChangeInputRequiredKeepsTaskAlive(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Task should be in input-required state.
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -478,10 +455,8 @@ func TestStateChangeInputRequiredKeepsTaskAlive(t *testing.T) {
 		t.Error("task should remain in activeTasks for input-required (non-terminal) state")
 	}
 
-	// Stream event should have Final=false.
-	var events []StreamEvent
-	drainLoop(ch, &events)
-
+	// Event log should have Final=false.
+	events := readStreamEvents(t, store, taskID)
 	var foundInputRequired bool
 	for _, ev := range events {
 		if ev.StatusUpdate != nil && ev.StatusUpdate.Status.State == TaskStateInputRequired {
@@ -492,7 +467,7 @@ func TestStateChangeInputRequiredKeepsTaskAlive(t *testing.T) {
 		}
 	}
 	if !foundInputRequired {
-		t.Error("expected StatusUpdate with state=input-required")
+		t.Error("expected StatusUpdate with state=input-required in event log")
 	}
 }
 
@@ -515,7 +490,7 @@ func TestStateChangeFailedClosesTask(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -531,125 +506,116 @@ func TestStateChangeFailedClosesTask(t *testing.T) {
 	}
 }
 
-// --- Tests for blocking SendMessage path ---
+// --- Tests for blocking wait via event log ---
 
-func TestBlockingSendMessageReturnsWorking(t *testing.T) {
+func TestBlockingWaitForTaskEvent_ReturnsOnEvent(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
-	taskID := "blocking-working-1"
+	taskID := "blocking-event-1"
 	now := time.Now()
 
 	// Seed the task directly in the store.
-	if err := store.CreateTask(&state.Task{
+	if err := store.CreateTask(context.Background(), &state.Task{
 		ID: taskID, ContextID: "ctx-1", ProjectID: "proj1", AgentSlug: "agent-a",
 		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	}); err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
 
-	// Set up a blocking waiter as SendMessage would.
 	aKey := agentKey("proj1", "agent-a")
 	b.registerActiveTask(taskID, aKey)
-	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
-		ch:        responseCh,
-		agentSlug: "agent-a",
-		projectID: "proj1",
-	})
 
-	// Simulate agent sending a content response.
-	responseCh <- &messages.StructuredMessage{
-		Version:   1,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Sender:    "agent:agent-a",
-		Recipient: "user:test-user",
-		Msg:       "Here is the answer",
-		Type:      messages.TypeAssistantReply,
+	// Inject a response event into the event log in a goroutine.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		injectResponseEvent(t, store, taskID, "Here is the answer")
+	}()
+
+	// Wait for the event (as the blocking SendMessage path would).
+	ev, err := b.waitForTaskEvent(context.Background(), taskID, 2*time.Second)
+	if err != nil {
+		t.Fatalf("waitForTaskEvent: %v", err)
 	}
 
-	// Read the response as the blocking path would.
-	timeout := time.NewTimer(2 * time.Second)
-	defer timeout.Stop()
+	if ev.Kind != "message" {
+		t.Errorf("event kind = %q, want %q", ev.Kind, "message")
+	}
+}
 
-	select {
-	case response := <-responseCh:
-		msg, artifacts := TranslateScionToA2A(response)
-		result := &TaskResult{
-			ID:        taskID,
-			ContextID: "ctx-1",
-			Status: TaskStatus{
-				State:   TaskStateWorking,
-				Message: &msg,
-			},
-			Artifacts: artifacts,
-		}
+func TestBlockingWaitForTaskEvent_TimeoutCleansUp(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "timeout-cleanup-1"
+	now := time.Now()
 
-		// The key assertion: status is working, not completed.
-		if result.Status.State != TaskStateWorking {
-			t.Errorf("result.Status.State = %q, want %q", result.Status.State, TaskStateWorking)
-		}
-	case <-timeout.C:
-		t.Fatal("timed out waiting for response")
+	if err := store.CreateTask(context.Background(), &state.Task{
+		ID: taskID, ContextID: "ctx-1", ProjectID: "proj1", AgentSlug: "agent-a",
+		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	// Task should still be active (not unregistered by blocking path on success).
+	aKey := agentKey("proj1", "agent-a")
+	b.registerActiveTask(taskID, aKey)
+
+	// Wait with a very short timeout — no events will arrive.
+	_, err := b.waitForTaskEvent(context.Background(), taskID, 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if err != ErrTimeout {
+		t.Errorf("error = %v, want ErrTimeout", err)
+	}
+}
+
+func TestBlockingWaitForTaskEvent_ContextCancel(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "cancel-cleanup-1"
+	now := time.Now()
+
+	if err := store.CreateTask(context.Background(), &state.Task{
+		ID: taskID, ContextID: "ctx-1", ProjectID: "proj1", AgentSlug: "agent-a",
+		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
+	}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	aKey := agentKey("proj1", "agent-a")
+	b.registerActiveTask(taskID, aKey)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel after a short delay.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second)
+	if err == nil {
+		t.Fatal("expected context canceled error")
+	}
+}
+
+func TestActiveTaskCleanup(t *testing.T) {
+	b, _ := newLifecycleTestBridge(t)
+	taskID := "cleanup-1"
+	aKey := agentKey("proj1", "agent-a")
+
+	b.registerActiveTask(taskID, aKey)
+
 	b.tasksMu.RLock()
 	_, isActive := b.activeTasks[taskID]
 	b.tasksMu.RUnlock()
 	if !isActive {
-		t.Error("task should remain in activeTasks after blocking response (lifecycle driven by state-change)")
+		t.Fatal("task should be active after register")
 	}
 
-	b.removeWaiter(taskID)
-}
-
-func TestBlockingSendMessageTimeoutCleansUpActiveTask(t *testing.T) {
-	b, _ := newLifecycleTestBridge(t)
-	taskID := "timeout-cleanup-1"
-	aKey := agentKey("proj1", "agent-a")
-
-	b.registerActiveTask(taskID, aKey)
-	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
-		ch:        responseCh,
-		agentSlug: "agent-a",
-		projectID: "proj1",
-	})
-
-	// Simulate timeout path: the timer fires, and we clean up.
-	// (This mimics the select case <-timer.C in SendMessage.)
-	b.unregisterActiveTask(taskID, aKey)
-	b.removeWaiter(taskID)
-
-	b.tasksMu.RLock()
-	_, isActive := b.activeTasks[taskID]
-	b.tasksMu.RUnlock()
-	if isActive {
-		t.Error("task should be removed from activeTasks after timeout")
-	}
-
-	b.mu.RLock()
-	_, hasWaiter := b.waiters[taskID]
-	b.mu.RUnlock()
-	if hasWaiter {
-		t.Error("waiter should be removed after timeout")
-	}
-}
-
-func TestBlockingSendMessageErrorCleansUpActiveTask(t *testing.T) {
-	b, _ := newLifecycleTestBridge(t)
-	taskID := "error-cleanup-1"
-	aKey := agentKey("proj1", "agent-a")
-
-	b.registerActiveTask(taskID, aKey)
-
-	// Simulate the send failure path: the error branch unregisters the task.
 	b.unregisterActiveTask(taskID, aKey)
 
 	b.tasksMu.RLock()
-	_, isActive := b.activeTasks[taskID]
+	_, isActive = b.activeTasks[taskID]
 	b.tasksMu.RUnlock()
 	if isActive {
-		t.Error("task should be removed from activeTasks after send failure")
+		t.Error("task should be removed from activeTasks after unregister")
 	}
 }
 
@@ -659,12 +625,6 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "multi-turn-full-1"
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
-
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer cleanup()
 
 	topic := "scion.project.proj1.user.test-user.messages"
 
@@ -709,7 +669,7 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 	sendStateChange("WAITING_FOR_INPUT")
 	time.Sleep(50 * time.Millisecond)
 
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask after input-required: %v", err)
 	}
@@ -729,7 +689,7 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 	sendStateChange("WORKING")
 	time.Sleep(50 * time.Millisecond)
 
-	task, err = store.GetTask(taskID)
+	task, err = store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask after working: %v", err)
 	}
@@ -745,7 +705,7 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 	sendStateChange("COMPLETED")
 	time.Sleep(100 * time.Millisecond)
 
-	task, err = store.GetTask(taskID)
+	task, err = store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask after completed: %v", err)
 	}
@@ -760,9 +720,8 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 		t.Error("task should be removed from activeTasks after completed")
 	}
 
-	// Verify we got all the events.
-	var events []StreamEvent
-	drainLoop(ch, &events)
+	// Verify we got all the events from the event log.
+	events := readStreamEvents(t, store, taskID)
 
 	// Count status updates by state.
 	stateCounts := make(map[string]int)
@@ -806,7 +765,7 @@ func TestSlugFallbackContentDoesNotCloseTask(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 
-	task, err := store.GetTask(taskID)
+	task, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -819,62 +778,6 @@ func TestSlugFallbackContentDoesNotCloseTask(t *testing.T) {
 	b.tasksMu.RUnlock()
 	if isActive == false {
 		t.Error("task should still be active after slug-fallback content message")
-	}
-}
-
-// --- Test dispatchToWaiter skips state-changes ---
-
-func TestDispatchToWaiterSkipsStateChange(t *testing.T) {
-	b, _ := newLifecycleTestBridge(t)
-	taskID := "waiter-skip-1"
-
-	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
-		ch:        responseCh,
-		agentSlug: "agent-a",
-		projectID: "proj1",
-	})
-	defer b.removeWaiter(taskID)
-
-	stateMsg := &messages.StructuredMessage{
-		Version: 1,
-		Sender:  "agent:agent-a",
-		Msg:     "COMPLETED",
-		Type:    messages.TypeStateChange,
-	}
-
-	handled := b.dispatchToWaiter(taskID, stateMsg)
-	if !handled {
-		t.Error("dispatchToWaiter should return true for state-change (to suppress further dispatch)")
-	}
-
-	// The channel should NOT have received the message.
-	select {
-	case <-responseCh:
-		t.Error("waiter should NOT receive state-change messages")
-	default:
-		// Good.
-	}
-
-	// Content message SHOULD be dispatched to the waiter.
-	contentMsg := &messages.StructuredMessage{
-		Version: 1,
-		Sender:  "agent:agent-a",
-		Msg:     "Hello",
-		Type:    messages.TypeAssistantReply,
-	}
-	handled = b.dispatchToWaiter(taskID, contentMsg)
-	if !handled {
-		t.Error("dispatchToWaiter should return true for content message when waiter exists")
-	}
-
-	select {
-	case got := <-responseCh:
-		if got.Msg != "Hello" {
-			t.Errorf("waiter received Msg = %q, want %q", got.Msg, "Hello")
-		}
-	default:
-		t.Error("waiter should have received content message")
 	}
 }
 
@@ -904,7 +807,7 @@ func TestContentMessageDoesNotIncrementCompletedMetric(t *testing.T) {
 
 	// The completed metric should NOT have been incremented.
 	// We test indirectly by verifying the task is still active and not completed.
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateWorking {
 		t.Errorf("task state = %q, want %q", task.State, TaskStateWorking)
 	}
@@ -934,7 +837,7 @@ func TestContentAfterCompletedIsIgnored(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify task is completed and unregistered.
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateCompleted {
 		t.Fatalf("expected completed state, got %q", task.State)
 	}
@@ -961,7 +864,7 @@ func TestContentAfterCompletedIsIgnored(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// State should still be completed (store protects terminal states).
-	task, _ = store.GetTask(taskID)
+	task, _ = store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateCompleted {
 		t.Errorf("task state changed after late content: %q, want %q", task.State, TaskStateCompleted)
 	}
@@ -991,7 +894,7 @@ func TestDoubleCompletedIsIdempotent(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateCompleted {
 		t.Errorf("task state = %q, want %q", task.State, TaskStateCompleted)
 	}
@@ -1033,7 +936,7 @@ func TestNonBlockingSendKeepsTaskAlive(t *testing.T) {
 		t.Error("non-blocking task should still be active after content message")
 	}
 
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateWorking {
 		t.Errorf("task state = %q, want %q", task.State, TaskStateWorking)
 	}
@@ -1067,7 +970,7 @@ func TestStateChangeWorkingDoesNotCloseTask(t *testing.T) {
 		t.Error("WORKING state-change should not unregister the task (non-terminal)")
 	}
 
-	task, _ := store.GetTask(taskID)
+	task, _ := store.GetTask(context.Background(), taskID)
 	if task.State != TaskStateWorking {
 		t.Errorf("task state = %q, want %q", task.State, TaskStateWorking)
 	}
@@ -1103,42 +1006,10 @@ func TestMultipleAgentTasksContentDoesNotClose(t *testing.T) {
 		if !isActive {
 			t.Errorf("task %s should still be active after slug-fallback content", tid)
 		}
-		task, _ := store.GetTask(tid)
+		task, _ := store.GetTask(context.Background(), tid)
 		if task.State != TaskStateWorking {
 			t.Errorf("task %s state = %q, want %q", tid, task.State, TaskStateWorking)
 		}
-	}
-}
-
-func TestBlockingSendMessageCancelCleansUpActiveTask(t *testing.T) {
-	b, _ := newLifecycleTestBridge(t)
-	taskID := "cancel-cleanup-1"
-	aKey := agentKey("proj1", "agent-a")
-
-	b.registerActiveTask(taskID, aKey)
-	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
-		ch:        responseCh,
-		agentSlug: "agent-a",
-		projectID: "proj1",
-	})
-
-	// Simulate the ctx.Done() path in SendMessage.
-	b.unregisterActiveTask(taskID, aKey)
-	b.removeWaiter(taskID)
-
-	b.tasksMu.RLock()
-	_, isActive := b.activeTasks[taskID]
-	b.tasksMu.RUnlock()
-	if isActive {
-		t.Error("task should be removed from activeTasks after context cancellation")
-	}
-
-	b.mu.RLock()
-	_, hasWaiter := b.waiters[taskID]
-	b.mu.RUnlock()
-	if hasWaiter {
-		t.Error("waiter should be removed after context cancellation")
 	}
 }
 
@@ -1165,12 +1036,6 @@ func TestStateChangeTerminalityTableDriven(t *testing.T) {
 			taskID := "term-" + tc.activity
 			seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
-			ch, cleanup, err := b.streams.Subscribe(taskID)
-			if err != nil {
-				t.Fatalf("Subscribe: %v", err)
-			}
-			defer cleanup()
-
 			msg := &messages.StructuredMessage{
 				Version:   1,
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -1185,7 +1050,7 @@ func TestStateChangeTerminalityTableDriven(t *testing.T) {
 			}
 			time.Sleep(100 * time.Millisecond)
 
-			task, err := store.GetTask(taskID)
+			task, err := store.GetTask(context.Background(), taskID)
 			if err != nil {
 				t.Fatalf("GetTask: %v", err)
 			}
@@ -1204,10 +1069,8 @@ func TestStateChangeTerminalityTableDriven(t *testing.T) {
 				t.Errorf("task should remain active for non-terminal state %q", tc.activity)
 			}
 
-			// Check stream event Final flag.
-			var events []StreamEvent
-			drainLoop(ch, &events)
-
+			// Check event log Final flag.
+			events := readStreamEvents(t, store, taskID)
 			for _, ev := range events {
 				if ev.StatusUpdate != nil {
 					if ev.StatusUpdate.Final != tc.wantTerminal {
@@ -1220,18 +1083,17 @@ func TestStateChangeTerminalityTableDriven(t *testing.T) {
 	}
 }
 
-// --- Stream close regression tests ---
+// --- Stream close via event log ---
 
-func TestTerminalStateClosesStreamChannel(t *testing.T) {
+func TestTerminalStateWritesFinalEvent(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "stream-close-1"
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer cleanup()
+	// Start polling the event log.
+	pollCtx, pollCancel := context.WithCancel(context.Background())
+	defer pollCancel()
+	ch := streamTaskEvents(pollCtx, store, taskID, 0, 10, nil)
 
 	// Send a terminal state-change.
 	completedMsg := &messages.StructuredMessage{
@@ -1247,8 +1109,7 @@ func TestTerminalStateClosesStreamChannel(t *testing.T) {
 		t.Fatalf("HandleBrokerMessage: %v", err)
 	}
 
-	// The channel should be closed after the broker worker processes the message.
-	// Read all events; the channel must close (range exits).
+	// The channel should close after the final event is read.
 	done := make(chan struct{})
 	var events []StreamEvent
 	go func() {
@@ -1261,8 +1122,8 @@ func TestTerminalStateClosesStreamChannel(t *testing.T) {
 	select {
 	case <-done:
 		// Good — channel was closed.
-	case <-time.After(2 * time.Second):
-		t.Fatal("stream channel was not closed after terminal state-change (CloseAll missing?)")
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream channel was not closed after terminal state-change")
 	}
 
 	// Verify we received the final event.
@@ -1277,16 +1138,14 @@ func TestTerminalStateClosesStreamChannel(t *testing.T) {
 	}
 }
 
-func TestTerminalStateFailedClosesStreamChannel(t *testing.T) {
+func TestTerminalStateFailedWritesFinalEvent(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "stream-close-fail-1"
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer cleanup()
+	pollCtx, pollCancel := context.WithCancel(context.Background())
+	defer pollCancel()
+	ch := streamTaskEvents(pollCtx, store, taskID, 0, 10, nil)
 
 	failMsg := &messages.StructuredMessage{
 		Version:   1,
@@ -1311,90 +1170,12 @@ func TestTerminalStateFailedClosesStreamChannel(t *testing.T) {
 	select {
 	case <-done:
 		// Good.
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("stream channel was not closed after ERROR state-change")
 	}
 }
 
-// --- Fix regression tests ---
-
-func TestDispatchToWaiterPersistsTerminalState(t *testing.T) {
-	b, store := newLifecycleTestBridge(t)
-	taskID := "waiter-persist-terminal-1"
-	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
-
-	// Set up a blocking waiter as SendMessage would.
-	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
-		ch:        responseCh,
-		agentSlug: "agent-a",
-		projectID: "proj1",
-	})
-	defer b.removeWaiter(taskID)
-
-	// Dispatch a COMPLETED state-change via dispatchToWaiter.
-	completedMsg := &messages.StructuredMessage{
-		Version: 1,
-		Sender:  "agent:agent-a",
-		Msg:     "COMPLETED",
-		Type:    messages.TypeStateChange,
-	}
-	handled := b.dispatchToWaiter(taskID, completedMsg)
-	if !handled {
-		t.Fatal("dispatchToWaiter should return true for state-change")
-	}
-
-	// The waiter channel should NOT have received the message (state-changes are skipped).
-	select {
-	case <-responseCh:
-		t.Error("waiter should NOT receive state-change messages")
-	default:
-	}
-
-	// But the DB state must be updated to completed.
-	task, err := store.GetTask(taskID)
-	if err != nil {
-		t.Fatalf("GetTask: %v", err)
-	}
-	if task.State != TaskStateCompleted {
-		t.Errorf("task state = %q, want %q — terminal state-change must persist even when waiter exists", task.State, TaskStateCompleted)
-	}
-}
-
-func TestDispatchToWaiterDoesNotPersistNonTerminalState(t *testing.T) {
-	b, store := newLifecycleTestBridge(t)
-	taskID := "waiter-no-persist-nonterminal-1"
-	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
-
-	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
-		ch:        responseCh,
-		agentSlug: "agent-a",
-		projectID: "proj1",
-	})
-	defer b.removeWaiter(taskID)
-
-	// Dispatch a WORKING state-change (non-terminal).
-	workingMsg := &messages.StructuredMessage{
-		Version: 1,
-		Sender:  "agent:agent-a",
-		Msg:     "WORKING",
-		Type:    messages.TypeStateChange,
-	}
-	handled := b.dispatchToWaiter(taskID, workingMsg)
-	if !handled {
-		t.Fatal("dispatchToWaiter should return true for state-change")
-	}
-
-	// DB state should remain working (seedTask sets it to working).
-	task, err := store.GetTask(taskID)
-	if err != nil {
-		t.Fatalf("GetTask: %v", err)
-	}
-	if task.State != TaskStateWorking {
-		t.Errorf("task state = %q, want %q — non-terminal state-change should not alter DB from waiter path", task.State, TaskStateWorking)
-	}
-}
+// --- Timestamp refresh test ---
 
 func TestContentMessageRefreshesTimestamp(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
@@ -1402,7 +1183,7 @@ func TestContentMessageRefreshesTimestamp(t *testing.T) {
 	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	// Record the initial timestamp.
-	taskBefore, err := store.GetTask(taskID)
+	taskBefore, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask (before): %v", err)
 	}
@@ -1427,7 +1208,7 @@ func TestContentMessageRefreshesTimestamp(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// The task's UpdatedAt should have been refreshed.
-	taskAfter, err := store.GetTask(taskID)
+	taskAfter, err := store.GetTask(context.Background(), taskID)
 	if err != nil {
 		t.Fatalf("GetTask (after): %v", err)
 	}

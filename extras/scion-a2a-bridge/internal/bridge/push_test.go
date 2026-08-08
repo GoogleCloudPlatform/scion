@@ -42,17 +42,21 @@ func testPushClient() *http.Client {
 func newTestBridge(t *testing.T) *Bridge {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
 
 	cfg := &Config{
 		Timeouts: TimeoutConfig{PushRetryMax: 3},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(store, nil, nil, cfg, nil, log)
+	b := New(store, nil, nil, cfg, nil, log)
+	t.Cleanup(func() {
+		b.Shutdown()
+		store.Close()
+	})
+	return b
 }
 
 func TestPushDispatcherSendsWebhook(t *testing.T) {
@@ -68,18 +72,18 @@ func TestPushDispatcherSendsWebhook(t *testing.T) {
 	defer ts.Close()
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 
 	now := time.Now()
-	store.CreateTask(&state.Task{
+	store.CreateTask(context.Background(), &state.Task{
 		ID: "task-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
-	store.SetPushConfig(&state.PushNotificationConfig{
+	store.SetPushConfig(context.Background(), &state.PushNotificationConfig{
 		ID:              "push-1",
 		TaskID:          "task-1",
 		URL:             ts.URL,
@@ -129,7 +133,7 @@ func TestPushDispatcherAuthScheme(t *testing.T) {
 	defer ts.Close()
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +178,7 @@ func TestPushDispatcherRetriesOnFailure(t *testing.T) {
 	defer ts.Close()
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,22 +214,22 @@ func TestPushDispatcherDeletesOnPermanentError(t *testing.T) {
 	defer ts.Close()
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 
 	now := time.Now()
-	store.CreateTask(&state.Task{
+	store.CreateTask(context.Background(), &state.Task{
 		ID: "task-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
-	store.SetPushConfig(&state.PushNotificationConfig{
+	store.SetPushConfig(context.Background(), &state.PushNotificationConfig{
 		ID: "push-del", TaskID: "task-1", URL: ts.URL, CreatedAt: now,
 	})
 
-	configs, _ := store.GetPushConfigsByTask("task-1")
+	configs, _ := store.GetPushConfigsByTask(context.Background(), "task-1")
 	if len(configs) != 1 {
 		t.Fatalf("expected 1 config before, got %d", len(configs))
 	}
@@ -246,7 +250,7 @@ func TestPushDispatcherDeletesOnPermanentError(t *testing.T) {
 		},
 	})
 
-	configs, _ = store.GetPushConfigsByTask("task-1")
+	configs, _ = store.GetPushConfigsByTask(context.Background(), "task-1")
 	if len(configs) != 0 {
 		t.Errorf("expected 0 configs after permanent 410 error, got %d", len(configs))
 	}
@@ -260,18 +264,18 @@ func TestPushDispatcherKeepsConfigOnServerError(t *testing.T) {
 	defer ts.Close()
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 
 	now := time.Now()
-	store.CreateTask(&state.Task{
+	store.CreateTask(context.Background(), &state.Task{
 		ID: "task-2", ContextID: "ctx-2", ProjectID: "g1", AgentSlug: "a1",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
-	store.SetPushConfig(&state.PushNotificationConfig{
+	store.SetPushConfig(context.Background(), &state.PushNotificationConfig{
 		ID: "push-keep", TaskID: "task-2", URL: ts.URL, CreatedAt: now,
 	})
 
@@ -291,7 +295,7 @@ func TestPushDispatcherKeepsConfigOnServerError(t *testing.T) {
 		},
 	})
 
-	configs, _ := store.GetPushConfigsByTask("task-2")
+	configs, _ := store.GetPushConfigsByTask(context.Background(), "task-2")
 	if len(configs) != 1 {
 		t.Errorf("expected 1 config to be preserved after transient 500 errors, got %d", len(configs))
 	}
@@ -306,7 +310,7 @@ func TestPushDispatcherWebhookPayload(t *testing.T) {
 	defer ts.Close()
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,13 +354,15 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 	b := newTestBridge(t)
 
 	now := time.Now()
-	b.store.CreateTask(&state.Task{
+	b.store.CreateTask(context.Background(), &state.Task{
 		ID: "task-1", ContextID: "ctx-1", ProjectID: "g1", AgentSlug: "a1",
 		State: "working", CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
+	ctx := context.Background()
+
 	// Set config.
-	cfg, err := b.SetPushNotificationConfig(nil, "task-1", "https://example.com/webhook", "tok123", "", "")
+	cfg, err := b.SetPushNotificationConfig(ctx, "task-1", "https://example.com/webhook", "tok123", "", "")
 	if err != nil {
 		t.Fatalf("SetPushNotificationConfig: %v", err)
 	}
@@ -368,7 +374,7 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 	}
 
 	// Get configs.
-	configs, err := b.GetPushNotificationConfig(nil, "task-1")
+	configs, err := b.GetPushNotificationConfig(ctx, "task-1")
 	if err != nil {
 		t.Fatalf("GetPushNotificationConfig: %v", err)
 	}
@@ -377,11 +383,11 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 	}
 
 	// Delete config.
-	if err := b.DeletePushNotificationConfig(nil, "task-1", cfg.ID); err != nil {
+	if err := b.DeletePushNotificationConfig(ctx, "task-1", cfg.ID); err != nil {
 		t.Fatalf("DeletePushNotificationConfig: %v", err)
 	}
 
-	configs, err = b.GetPushNotificationConfig(nil, "task-1")
+	configs, err = b.GetPushNotificationConfig(ctx, "task-1")
 	if err != nil {
 		t.Fatalf("GetPushNotificationConfig after delete: %v", err)
 	}
@@ -393,7 +399,7 @@ func TestBridgePushConfigCRUD(t *testing.T) {
 func TestBridgeSetPushConfigTaskNotFound(t *testing.T) {
 	b := newTestBridge(t)
 
-	_, err := b.SetPushNotificationConfig(nil, "nonexistent-task", "https://example.com/webhook", "", "", "")
+	_, err := b.SetPushNotificationConfig(context.Background(), "nonexistent-task", "https://example.com/webhook", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for nonexistent task")
 	}

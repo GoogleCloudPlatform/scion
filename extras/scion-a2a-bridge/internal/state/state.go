@@ -17,6 +17,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -58,13 +59,16 @@ type PushNotificationConfig struct {
 	CreatedAt       time.Time
 }
 
-// Store provides SQLite-backed state management for the A2A bridge.
-type Store struct {
+// SQLiteStore provides SQLite-backed state management for the A2A bridge.
+type SQLiteStore struct {
 	db *sql.DB
 }
 
-// New opens (or creates) the SQLite database at dbPath and runs schema migrations.
-func New(dbPath string) (*Store, error) {
+// Compile-time check that SQLiteStore implements Store.
+var _ Store = (*SQLiteStore)(nil)
+
+// NewSQLite opens (or creates) the SQLite database at dbPath and runs schema migrations.
+func NewSQLite(dbPath string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on&_synchronous=NORMAL")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -76,7 +80,7 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	s := &Store{db: db}
+	s := &SQLiteStore{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
@@ -86,16 +90,16 @@ func New(dbPath string) (*Store, error) {
 }
 
 // Close closes the underlying database connection.
-func (s *Store) Close() error {
+func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
 // Ping checks database connectivity.
-func (s *Store) Ping() error {
-	return s.db.Ping()
+func (s *SQLiteStore) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
 }
 
-func (s *Store) migrate() error {
+func (s *SQLiteStore) migrate() error {
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS tasks (
 			id TEXT PRIMARY KEY,
@@ -135,6 +139,20 @@ func (s *Store) migrate() error {
 			FOREIGN KEY (task_id) REFERENCES tasks(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_push_task ON push_notification_configs(task_id)`,
+
+		// Task event log for durable streaming (Phase 2).
+		`CREATE TABLE IF NOT EXISTS a2a_task_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			final BOOLEAN NOT NULL DEFAULT 0,
+			dedup_key TEXT,
+			created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_a2a_task_events_task ON a2a_task_events (task_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_a2a_task_events_created ON a2a_task_events (created_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_a2a_task_events_dedup ON a2a_task_events (task_id, dedup_key) WHERE dedup_key IS NOT NULL`,
 	}
 
 	for _, m := range migrations {
@@ -168,8 +186,8 @@ func (s *Store) migrate() error {
 // --- Tasks ---
 
 // CreateTask inserts a new task record.
-func (s *Store) CreateTask(t *Task) error {
-	_, err := s.db.Exec(
+func (s *SQLiteStore) CreateTask(ctx context.Context, t *Task) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO tasks (id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.ContextID, t.ProjectID, t.AgentSlug, t.AgentID, t.State, t.CallerUserID, t.CreatedAt, t.UpdatedAt, t.Metadata,
@@ -181,9 +199,9 @@ func (s *Store) CreateTask(t *Task) error {
 }
 
 // GetTask returns a task by ID, or nil if not found.
-func (s *Store) GetTask(id string) (*Task, error) {
+func (s *SQLiteStore) GetTask(ctx context.Context, id string) (*Task, error) {
 	t := &Task{}
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM tasks WHERE id = ?`, id,
 	).Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata)
@@ -199,10 +217,10 @@ func (s *Store) GetTask(id string) (*Task, error) {
 // TouchTask updates only the updated_at timestamp without changing state.
 // Use this for content messages that should keep the task alive for the
 // janitor without overwriting the current state (e.g. input-required).
-func (s *Store) TouchTask(id string) error {
-	_, err := s.db.Exec(
+func (s *SQLiteStore) TouchTask(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE tasks SET updated_at = ? WHERE id = ?`,
-		time.Now(), id,
+		time.Now().UTC(), id,
 	)
 	if err != nil {
 		return fmt.Errorf("touch task: %w", err)
@@ -211,21 +229,26 @@ func (s *Store) TouchTask(id string) error {
 }
 
 // UpdateTaskState updates a task's state and updated_at timestamp.
-// Terminal states (completed, failed, canceled, rejected) are protected:
+// Terminal states (completed, failed, canceled) are protected:
 // once a task reaches a terminal state, further updates are silently ignored.
-func (s *Store) UpdateTaskState(id, state string) error {
-	_, err := s.db.Exec(
+// Returns changed=true if the row was actually updated (CAS semantics).
+func (s *SQLiteStore) UpdateTaskState(ctx context.Context, id, state string) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE tasks SET state = ?, updated_at = ? WHERE id = ? AND state NOT IN ('completed', 'failed', 'canceled', 'rejected')`,
-		state, time.Now(), id,
+		state, time.Now().UTC(), id,
 	)
 	if err != nil {
-		return fmt.Errorf("update task state: %w", err)
+		return false, fmt.Errorf("update task state: %w", err)
 	}
-	return nil
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("update task state rows affected: %w", err)
+	}
+	return rows > 0, nil
 }
 
 // ListTasksByContext returns all tasks for the given context.
-func (s *Store) ListTasksByContext(ctx context.Context, contextID string) ([]Task, error) {
+func (s *SQLiteStore) ListTasksByContext(ctx context.Context, contextID string) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM tasks WHERE context_id = ? ORDER BY created_at DESC`, contextID,
@@ -247,8 +270,8 @@ func (s *Store) ListTasksByContext(ctx context.Context, contextID string) ([]Tas
 }
 
 // ListTasksByAgent returns all tasks for a given project and agent.
-func (s *Store) ListTasksByAgent(projectID, agentSlug string) ([]Task, error) {
-	rows, err := s.db.Query(
+func (s *SQLiteStore) ListTasksByAgent(ctx context.Context, projectID, agentSlug string) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM tasks WHERE project_id = ? AND agent_slug = ? ORDER BY created_at DESC`, projectID, agentSlug,
 	)
@@ -269,7 +292,7 @@ func (s *Store) ListTasksByAgent(projectID, agentSlug string) ([]Task, error) {
 }
 
 // ListTasksByContextAndCaller returns tasks for the given context filtered by caller user ID.
-func (s *Store) ListTasksByContextAndCaller(ctx context.Context, contextID, callerUserID string) ([]Task, error) {
+func (s *SQLiteStore) ListTasksByContextAndCaller(ctx context.Context, contextID, callerUserID string) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM tasks WHERE context_id = ? AND caller_user_id = ? ORDER BY created_at DESC`, contextID, callerUserID,
@@ -290,11 +313,55 @@ func (s *Store) ListTasksByContextAndCaller(ctx context.Context, contextID, call
 	return tasks, rows.Err()
 }
 
+// FindActiveTaskForAgent returns the most recently updated non-terminal task
+// for the given project and agent, or nil if none exists.
+func (s *SQLiteStore) FindActiveTaskForAgent(ctx context.Context, projectID, agentSlug string) (*Task, error) {
+	t := &Task{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
+		 FROM tasks
+		 WHERE project_id = ? AND agent_slug = ? AND state NOT IN ('completed','failed','canceled','rejected')
+		 ORDER BY updated_at DESC LIMIT 1`, projectID, agentSlug,
+	).Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find active task for agent: %w", err)
+	}
+	return t, nil
+}
+
+// ListStaleActiveTasks returns non-terminal tasks whose updated_at is older
+// than olderThan, ordered by updated_at ascending, up to limit rows.
+func (s *SQLiteStore) ListStaleActiveTasks(ctx context.Context, olderThan time.Time, limit int) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
+		 FROM tasks
+		 WHERE state NOT IN ('completed','failed','canceled','rejected') AND updated_at < ?
+		 ORDER BY updated_at ASC LIMIT ?`, olderThan, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list stale active tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 // --- Contexts ---
 
 // CreateContext inserts a new context mapping.
-func (s *Store) CreateContext(c *Context) error {
-	_, err := s.db.Exec(
+func (s *SQLiteStore) CreateContext(ctx context.Context, c *Context) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO contexts (context_id, project_id, agent_slug, agent_id, created_at, last_active)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		c.ContextID, c.ProjectID, c.AgentSlug, c.AgentID, c.CreatedAt, c.LastActive,
@@ -306,9 +373,9 @@ func (s *Store) CreateContext(c *Context) error {
 }
 
 // GetContext returns a context by ID, or nil if not found.
-func (s *Store) GetContext(contextID string) (*Context, error) {
+func (s *SQLiteStore) GetContext(ctx context.Context, contextID string) (*Context, error) {
 	c := &Context{}
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT context_id, project_id, agent_slug, agent_id, created_at, last_active
 		 FROM contexts WHERE context_id = ?`, contextID,
 	).Scan(&c.ContextID, &c.ProjectID, &c.AgentSlug, &c.AgentID, &c.CreatedAt, &c.LastActive)
@@ -322,10 +389,10 @@ func (s *Store) GetContext(contextID string) (*Context, error) {
 }
 
 // TouchContext updates a context's last_active timestamp.
-func (s *Store) TouchContext(contextID string) error {
-	_, err := s.db.Exec(
+func (s *SQLiteStore) TouchContext(ctx context.Context, contextID string) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE contexts SET last_active = ? WHERE context_id = ?`,
-		time.Now(), contextID,
+		time.Now().UTC(), contextID,
 	)
 	if err != nil {
 		return fmt.Errorf("touch context: %w", err)
@@ -336,8 +403,8 @@ func (s *Store) TouchContext(contextID string) error {
 // --- Push Notification Configs ---
 
 // SetPushConfig inserts or replaces a push notification configuration.
-func (s *Store) SetPushConfig(cfg *PushNotificationConfig) error {
-	_, err := s.db.Exec(
+func (s *SQLiteStore) SetPushConfig(ctx context.Context, cfg *PushNotificationConfig) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO push_notification_configs (id, task_id, url, token, auth_scheme, auth_credentials, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		cfg.ID, cfg.TaskID, cfg.URL, cfg.Token, cfg.AuthScheme, cfg.AuthCredentials, cfg.CreatedAt,
@@ -349,8 +416,8 @@ func (s *Store) SetPushConfig(cfg *PushNotificationConfig) error {
 }
 
 // GetPushConfigsByTask returns all push configs for the given task.
-func (s *Store) GetPushConfigsByTask(taskID string) ([]PushNotificationConfig, error) {
-	rows, err := s.db.Query(
+func (s *SQLiteStore) GetPushConfigsByTask(ctx context.Context, taskID string) ([]PushNotificationConfig, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, task_id, url, token, auth_scheme, auth_credentials, created_at
 		 FROM push_notification_configs WHERE task_id = ?`, taskID,
 	)
@@ -371,8 +438,8 @@ func (s *Store) GetPushConfigsByTask(taskID string) ([]PushNotificationConfig, e
 }
 
 // DeletePushConfig removes a push notification configuration.
-func (s *Store) DeletePushConfig(id string) error {
-	_, err := s.db.Exec(`DELETE FROM push_notification_configs WHERE id = ?`, id)
+func (s *SQLiteStore) DeletePushConfig(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM push_notification_configs WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete push config: %w", err)
 	}
@@ -380,8 +447,8 @@ func (s *Store) DeletePushConfig(id string) error {
 }
 
 // DeletePushConfigForTask removes a push config only if it belongs to the given task.
-func (s *Store) DeletePushConfigForTask(taskID, id string) error {
-	result, err := s.db.Exec(`DELETE FROM push_notification_configs WHERE id = ? AND task_id = ?`, id, taskID)
+func (s *SQLiteStore) DeletePushConfigForTask(ctx context.Context, taskID, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM push_notification_configs WHERE id = ? AND task_id = ?`, id, taskID)
 	if err != nil {
 		return fmt.Errorf("delete push config: %w", err)
 	}
@@ -393,4 +460,88 @@ func (s *Store) DeletePushConfigForTask(taskID, id string) error {
 		return fmt.Errorf("push config not found for task")
 	}
 	return nil
+}
+
+// --- Task Event Log ---
+
+// AppendTaskEvent inserts a new event into the task event log.
+// If ev.DedupKey is non-empty and a matching row already exists,
+// the insert is silently skipped and id=0 is returned.
+func (s *SQLiteStore) AppendTaskEvent(ctx context.Context, ev *TaskEvent) (int64, error) {
+	result, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO a2a_task_events (task_id, kind, payload, final, dedup_key, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		ev.TaskID, ev.Kind, string(ev.Payload), ev.Final, nullableString(ev.DedupKey), time.Now().UTC(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("append task event: %w", err)
+	}
+	// Check RowsAffected to detect dedup: INSERT OR IGNORE sets rows=0
+	// when the unique constraint fires, but LastInsertId still returns
+	// the previous rowid.
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("append task event rows affected: %w", err)
+	}
+	if rows == 0 {
+		return 0, nil // dedup — row was not inserted
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("append task event last insert id: %w", err)
+	}
+	return id, nil
+}
+
+// ReadTaskEvents returns events for a task with id > afterID, up to limit rows.
+func (s *SQLiteStore) ReadTaskEvents(ctx context.Context, taskID string, afterID int64, limit int) ([]TaskEvent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, task_id, kind, payload, final, dedup_key, created_at
+		 FROM a2a_task_events
+		 WHERE task_id = ? AND id > ?
+		 ORDER BY id ASC LIMIT ?`, taskID, afterID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read task events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []TaskEvent
+	for rows.Next() {
+		var ev TaskEvent
+		var dedupKey sql.NullString
+		var payload string
+		if err := rows.Scan(&ev.ID, &ev.TaskID, &ev.Kind, &payload, &ev.Final, &dedupKey, &ev.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan task event: %w", err)
+		}
+		ev.Payload = json.RawMessage(payload)
+		if dedupKey.Valid {
+			ev.DedupKey = dedupKey.String
+		}
+		events = append(events, ev)
+	}
+	return events, rows.Err()
+}
+
+// PurgeTaskEvents deletes events older than olderThan and returns the count deleted.
+func (s *SQLiteStore) PurgeTaskEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM a2a_task_events WHERE created_at < ?`, olderThan,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("purge task events: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("purge task events rows affected: %w", err)
+	}
+	return n, nil
+}
+
+// nullableString returns a sql.NullString: valid if s is non-empty.
+func nullableString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
 }

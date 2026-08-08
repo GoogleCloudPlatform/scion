@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -24,15 +25,14 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-func TestStreamManagerSubscribeAndBroadcast(t *testing.T) {
+func TestStreamManagerAcquireAndHasSubscribers(t *testing.T) {
 	sm := NewStreamManager(0)
 
-	ch, cleanup, err := sm.Subscribe("task-1")
+	cleanup, err := sm.AcquireSession("task-1")
 	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+		t.Fatalf("AcquireSession: %v", err)
 	}
 	defer cleanup()
 
@@ -42,75 +42,46 @@ func TestStreamManagerSubscribeAndBroadcast(t *testing.T) {
 	if sm.HasSubscribers("task-2") {
 		t.Error("expected no subscribers for task-2")
 	}
-
-	event := StreamEvent{
-		StatusUpdate: &TaskStatusUpdate{
-			TaskID: "task-1",
-			Status: TaskStatus{State: TaskStateWorking},
-		},
-	}
-	sm.Broadcast("task-1", event)
-
-	select {
-	case got := <-ch:
-		if got.StatusUpdate == nil {
-			t.Fatal("expected status update event")
-		}
-		if got.StatusUpdate.TaskID != "task-1" {
-			t.Errorf("TaskID = %q, want %q", got.StatusUpdate.TaskID, "task-1")
-		}
-		if got.StatusUpdate.Status.State != TaskStateWorking {
-			t.Errorf("State = %q, want %q", got.StatusUpdate.Status.State, TaskStateWorking)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for event")
-	}
 }
 
-func TestStreamManagerMultipleSubscribers(t *testing.T) {
+func TestStreamManagerMultipleSessions(t *testing.T) {
 	sm := NewStreamManager(0)
 
-	ch1, cleanup1, err := sm.Subscribe("task-1")
+	cleanup1, err := sm.AcquireSession("task-1")
 	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+		t.Fatalf("AcquireSession 1: %v", err)
 	}
-	defer cleanup1()
-	ch2, cleanup2, err := sm.Subscribe("task-1")
+	cleanup2, err := sm.AcquireSession("task-1")
 	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+		t.Fatalf("AcquireSession 2: %v", err)
 	}
-	defer cleanup2()
 
-	event := StreamEvent{
-		StatusUpdate: &TaskStatusUpdate{
-			TaskID: "task-1",
-			Status: TaskStatus{State: TaskStateCompleted},
-			Final:  true,
-		},
+	if !sm.HasSubscribers("task-1") {
+		t.Error("expected subscribers for task-1")
 	}
-	sm.Broadcast("task-1", event)
 
-	for i, ch := range []<-chan StreamEvent{ch1, ch2} {
-		select {
-		case got := <-ch:
-			if got.StatusUpdate == nil || got.StatusUpdate.Status.State != TaskStateCompleted {
-				t.Errorf("subscriber %d: expected completed status", i)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("subscriber %d: timed out", i)
-		}
+	// Releasing one session should keep the subscriber count > 0.
+	cleanup1()
+	if !sm.HasSubscribers("task-1") {
+		t.Error("expected subscribers after releasing one of two")
+	}
+
+	// Releasing the second should drop to zero.
+	cleanup2()
+	if sm.HasSubscribers("task-1") {
+		t.Error("expected no subscribers after releasing all")
 	}
 }
 
 func TestStreamManagerCleanup(t *testing.T) {
 	sm := NewStreamManager(0)
 
-	_, cleanup, err := sm.Subscribe("task-1")
+	cleanup, err := sm.AcquireSession("task-1")
 	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+		t.Fatalf("AcquireSession: %v", err)
 	}
 	if !sm.HasSubscribers("task-1") {
-		t.Fatal("expected subscribers after subscribe")
+		t.Fatal("expected subscribers after acquire")
 	}
 
 	cleanup()
@@ -119,43 +90,32 @@ func TestStreamManagerCleanup(t *testing.T) {
 	}
 }
 
-func TestStreamManagerCloseAll(t *testing.T) {
-	sm := NewStreamManager(0)
+func TestStreamManagerMaxSubscribers(t *testing.T) {
+	sm := NewStreamManager(2) // max 2
 
-	ch1, _, err := sm.Subscribe("task-1")
+	c1, err := sm.AcquireSession("task-1")
 	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+		t.Fatalf("AcquireSession 1: %v", err)
 	}
-	ch2, _, err := sm.Subscribe("task-1")
+	c2, err := sm.AcquireSession("task-2")
 	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+		t.Fatalf("AcquireSession 2: %v", err)
 	}
 
-	sm.CloseAll("task-1")
-
-	// Channels should be closed.
-	if _, ok := <-ch1; ok {
-		t.Error("expected ch1 to be closed")
-	}
-	if _, ok := <-ch2; ok {
-		t.Error("expected ch2 to be closed")
+	// Third should fail.
+	_, err = sm.AcquireSession("task-3")
+	if err != ErrTooManySubscribers {
+		t.Errorf("expected ErrTooManySubscribers, got %v", err)
 	}
 
-	if sm.HasSubscribers("task-1") {
-		t.Error("expected no subscribers after CloseAll")
+	// Release one, then acquire should succeed.
+	c1()
+	c3, err := sm.AcquireSession("task-3")
+	if err != nil {
+		t.Fatalf("AcquireSession 3 after release: %v", err)
 	}
-}
-
-func TestStreamManagerBroadcastNoSubscribers(t *testing.T) {
-	sm := NewStreamManager(0)
-
-	// Should not panic.
-	sm.Broadcast("nonexistent-task", StreamEvent{
-		StatusUpdate: &TaskStatusUpdate{
-			TaskID: "nonexistent-task",
-			Status: TaskStatus{State: TaskStateWorking},
-		},
-	})
+	c2()
+	c3()
 }
 
 func TestStreamManagerConcurrentAccess(t *testing.T) {
@@ -166,26 +126,20 @@ func TestStreamManagerConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ch, cleanup, err := sm.Subscribe("task-1")
+			cleanup, err := sm.AcquireSession("task-1")
 			if err != nil {
 				return
 			}
 			defer cleanup()
-
-			sm.Broadcast("task-1", StreamEvent{
-				StatusUpdate: &TaskStatusUpdate{
-					TaskID: "task-1",
-					Status: TaskStatus{State: TaskStateWorking},
-				},
-			})
-
-			select {
-			case <-ch:
-			case <-time.After(time.Second):
-			}
+			// Hold the session briefly.
+			time.Sleep(5 * time.Millisecond)
 		}()
 	}
 	wg.Wait()
+
+	if sm.HasSubscribers("task-1") {
+		t.Error("expected no subscribers after all goroutines completed")
+	}
 }
 
 func TestStreamEventTypes(t *testing.T) {
@@ -241,9 +195,6 @@ func TestStreamEventTypes(t *testing.T) {
 }
 
 func TestActiveTaskTracking(t *testing.T) {
-	sm := NewStreamManager(0)
-	_ = sm // StreamManager tested above; this tests Bridge active task methods.
-
 	b := &Bridge{
 		activeTasks: make(map[string]activeTaskEntry),
 		agentTasks:  make(map[string][]string),
@@ -286,12 +237,298 @@ func TestActiveTaskTracking(t *testing.T) {
 	}
 }
 
-// TestBlockingTaskIgnoresActiveDispatch is a regression test for C3: ensures
-// HandleBrokerMessage does not dispatch to dispatchToActiveTask for blocking
-// tasks (which are tracked as waiters, not activeTasks).
-func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
+func TestBackoffInterval(t *testing.T) {
+	tests := []struct {
+		input time.Duration
+		want  time.Duration
+	}{
+		{100 * time.Millisecond, 200 * time.Millisecond},
+		{250 * time.Millisecond, 500 * time.Millisecond},
+		{500 * time.Millisecond, 1 * time.Second},
+		{1 * time.Second, 2 * time.Second},
+		{2 * time.Second, 2 * time.Second}, // cap
+		{3 * time.Second, 2 * time.Second}, // above cap
+	}
+	for _, tt := range tests {
+		got := backoffInterval(tt.input)
+		if got != tt.want {
+			t.Errorf("backoffInterval(%v) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestStreamSession_ReadNext(t *testing.T) {
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "c3-test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Write some events.
+	for i := 0; i < 3; i++ {
+		payload, _ := json.Marshal(TaskStatusUpdate{
+			TaskID: "task-1",
+			Status: TaskStatus{State: TaskStateWorking},
+		})
+		_, err := store.AppendTaskEvent(ctx, &state.TaskEvent{
+			TaskID:  "task-1",
+			Kind:    "status",
+			Payload: payload,
+			Final:   i == 2,
+		})
+		if err != nil {
+			t.Fatalf("append event %d: %v", i, err)
+		}
+	}
+
+	session := NewStreamSession("task-1", 0, store)
+
+	// Read first batch.
+	events, err := session.ReadNext(ctx, 2)
+	if err != nil {
+		t.Fatalf("ReadNext: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+
+	// Cursor should advance.
+	if session.Cursor() != events[1].ID {
+		t.Errorf("cursor = %d, want %d", session.Cursor(), events[1].ID)
+	}
+
+	// Read remaining events.
+	events, err = session.ReadNext(ctx, 10)
+	if err != nil {
+		t.Fatalf("ReadNext: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if !events[0].Final {
+		t.Error("expected final event")
+	}
+
+	// No more events.
+	events, err = session.ReadNext(ctx, 10)
+	if err != nil {
+		t.Fatalf("ReadNext: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events, got %d", len(events))
+	}
+}
+
+func TestStreamTaskEvents(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Write a status event and a final message event.
+	statusPayload, _ := json.Marshal(TaskStatusUpdate{
+		TaskID: "task-1",
+		Status: TaskStatus{State: TaskStateWorking},
+	})
+	store.AppendTaskEvent(ctx, &state.TaskEvent{
+		TaskID:  "task-1",
+		Kind:    "status",
+		Payload: statusPayload,
+		Final:   false,
+	})
+
+	msgPayload, _ := json.Marshal(TaskStatusUpdate{
+		TaskID: "task-1",
+		Status: TaskStatus{
+			State: TaskStateCompleted,
+			Message: &Message{
+				MessageID: "msg-1",
+				Role:      RoleAgent,
+				Parts:     []Part{{Text: "Done!"}},
+			},
+		},
+	})
+	store.AppendTaskEvent(ctx, &state.TaskEvent{
+		TaskID:  "task-1",
+		Kind:    "message",
+		Payload: msgPayload,
+		Final:   true,
+	})
+
+	ch := streamTaskEvents(ctx, store, "task-1", 0, 10, nil)
+
+	// Should receive the status event.
+	select {
+	case ev := <-ch:
+		if ev.StatusUpdate == nil {
+			t.Fatal("expected status update event")
+		}
+		if ev.StatusUpdate.Status.State != TaskStateWorking {
+			t.Errorf("state = %q, want %q", ev.StatusUpdate.Status.State, TaskStateWorking)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for status event")
+	}
+
+	// Should receive the final message event.
+	select {
+	case ev := <-ch:
+		if ev.StatusUpdate == nil {
+			t.Fatal("expected status update (message) event")
+		}
+		if !ev.StatusUpdate.Final {
+			t.Error("expected final flag set")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for final event")
+	}
+
+	// Channel should be closed after final event.
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Error("expected channel to be closed after final event")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for channel close")
+	}
+}
+
+func TestStreamTaskEvents_ContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start streaming with no events — will poll indefinitely.
+	ch := streamTaskEvents(ctx, store, "task-no-events", 0, 10, nil)
+
+	// Cancel should cause the channel to close.
+	cancel()
+
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Error("expected channel to be closed on cancel")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for channel close on cancel")
+	}
+}
+
+func TestTaskEventToStreamEvent(t *testing.T) {
+	t.Run("status event", func(t *testing.T) {
+		payload, _ := json.Marshal(TaskStatusUpdate{
+			Status: TaskStatus{State: TaskStateWorking},
+		})
+		ev := state.TaskEvent{
+			TaskID:  "task-1",
+			Kind:    "status",
+			Payload: payload,
+			Final:   false,
+		}
+		se, err := taskEventToStreamEvent(ev)
+		if err != nil {
+			t.Fatalf("taskEventToStreamEvent: %v", err)
+		}
+		if se.StatusUpdate == nil {
+			t.Fatal("expected status update")
+		}
+		if se.StatusUpdate.TaskID != "task-1" {
+			t.Errorf("TaskID = %q, want %q", se.StatusUpdate.TaskID, "task-1")
+		}
+		if se.StatusUpdate.Status.State != TaskStateWorking {
+			t.Errorf("State = %q, want %q", se.StatusUpdate.Status.State, TaskStateWorking)
+		}
+	})
+
+	t.Run("artifact event", func(t *testing.T) {
+		payload, _ := json.Marshal(TaskArtifactUpdate{
+			Artifact: Artifact{ArtifactID: "art-1", Parts: []Part{{Text: "data"}}},
+		})
+		ev := state.TaskEvent{
+			TaskID:  "task-1",
+			Kind:    "artifact",
+			Payload: payload,
+			Final:   false,
+		}
+		se, err := taskEventToStreamEvent(ev)
+		if err != nil {
+			t.Fatalf("taskEventToStreamEvent: %v", err)
+		}
+		if se.ArtifactUpdate == nil {
+			t.Fatal("expected artifact update")
+		}
+		if se.ArtifactUpdate.TaskID != "task-1" {
+			t.Errorf("TaskID = %q, want %q", se.ArtifactUpdate.TaskID, "task-1")
+		}
+	})
+
+	t.Run("message event", func(t *testing.T) {
+		payload, _ := json.Marshal(TaskStatusUpdate{
+			Status: TaskStatus{
+				State: TaskStateCompleted,
+				Message: &Message{
+					MessageID: "msg-1",
+					Role:      RoleAgent,
+					Parts:     []Part{{Text: "result"}},
+				},
+			},
+		})
+		ev := state.TaskEvent{
+			TaskID:  "task-1",
+			Kind:    "message",
+			Payload: payload,
+			Final:   true,
+		}
+		se, err := taskEventToStreamEvent(ev)
+		if err != nil {
+			t.Fatalf("taskEventToStreamEvent: %v", err)
+		}
+		if se.StatusUpdate == nil {
+			t.Fatal("expected status update (from message event)")
+		}
+		if !se.StatusUpdate.Final {
+			t.Error("expected final flag")
+		}
+		if se.StatusUpdate.Status.Message == nil {
+			t.Fatal("expected message in status update")
+		}
+		if se.StatusUpdate.Status.Message.Parts[0].Text != "result" {
+			t.Errorf("message text = %q, want %q", se.StatusUpdate.Status.Message.Parts[0].Text, "result")
+		}
+	})
+
+	t.Run("unknown event kind", func(t *testing.T) {
+		ev := state.TaskEvent{
+			TaskID:  "task-1",
+			Kind:    "unknown",
+			Payload: []byte("{}"),
+		}
+		_, err := taskEventToStreamEvent(ev)
+		if err == nil {
+			t.Fatal("expected error for unknown kind")
+		}
+	})
+}
+
+// TestHandleBrokerMessage_WritesToEventLog verifies that HandleBrokerMessage
+// writes events to the event log (replacing the old in-memory dispatch).
+func TestHandleBrokerMessage_WritesToEventLog(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.NewSQLite(filepath.Join(dir, "broker-test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -302,53 +539,59 @@ func TestBlockingTaskIgnoresActiveDispatch(t *testing.T) {
 		Hub: HubConfig{User: "test-user"},
 	}
 	b := New(store, nil, nil, cfg, nil, log)
+	defer b.Shutdown()
 
+	ctx := context.Background()
 	now := time.Now()
-	taskID := "blocking-task-1"
-	store.CreateTask(&state.Task{
+	taskID := "task-broker-1"
+	store.CreateTask(ctx, &state.Task{
 		ID: taskID, ContextID: "ctx-1", ProjectID: "grove1", AgentSlug: "agent-a",
 		State: TaskStateWorking, CreatedAt: now, UpdatedAt: now, Metadata: "{}",
 	})
 
-	// Register a blocking waiter (as SendMessage would in blocking mode).
-	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
-		ch:        responseCh,
-		agentSlug: "agent-a",
-		projectID: "grove1",
-	})
-	defer b.removeWaiter(taskID)
+	// Register the active task so correlation works via local cache.
+	b.registerActiveTask(taskID, "grove1:agent-a")
 
-	// Simulate a state-change arriving for the blocking task.
-	stateChangeMsg := &messages.StructuredMessage{
-		Version:   1,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Sender:    "agent:agent-a",
-		Recipient: "user:test-user",
-		Msg:       "WORKING",
-		Type:      messages.TypeStateChange,
-		Metadata:  map[string]string{"a2aTaskId": taskID},
+	// Simulate a message arriving from the broker.
+	msg := &state.TaskEvent{
+		TaskID: taskID,
+		Kind:   "message",
+		Payload: mustJSON(t, TaskStatusUpdate{
+			TaskID: taskID,
+			Status: TaskStatus{
+				State: TaskStateWorking,
+				Message: &Message{
+					MessageID: "resp-1",
+					Role:      RoleAgent,
+					Parts:     []Part{{Text: "response text"}},
+				},
+			},
+		}),
+		Final: false,
 	}
-
-	err = b.HandleBrokerMessage(context.Background(), "scion.grove.grove1.agent.agent-a.messages", stateChangeMsg)
+	_, err = store.AppendTaskEvent(ctx, msg)
 	if err != nil {
-		t.Fatalf("HandleBrokerMessage: %v", err)
+		t.Fatalf("AppendTaskEvent: %v", err)
 	}
 
-	// The waiter should NOT receive a state-change (dispatchToWaiter skips TypeStateChange).
-	select {
-	case <-responseCh:
-		t.Fatal("blocking waiter should not receive state-change messages")
-	default:
-	}
-
-	// The task should NOT have been updated in the DB by dispatchToActiveTask
-	// because the task is not registered in activeTasks.
-	task, err := store.GetTask(taskID)
+	// Verify the event is readable from the log.
+	events, err := store.ReadTaskEvents(ctx, taskID, 0, 10)
 	if err != nil {
-		t.Fatalf("GetTask: %v", err)
+		t.Fatalf("ReadTaskEvents: %v", err)
 	}
-	if task.State != TaskStateWorking {
-		t.Errorf("task state = %q, want %q (state-change should not have been dispatched to active task path)", task.State, TaskStateWorking)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
 	}
+	if events[0].Kind != "message" {
+		t.Errorf("event kind = %q, want %q", events[0].Kind, "message")
+	}
+}
+
+func mustJSON(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return b
 }

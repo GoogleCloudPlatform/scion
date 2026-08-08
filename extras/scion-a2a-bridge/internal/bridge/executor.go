@@ -16,6 +16,8 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -24,6 +26,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
+	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -53,7 +56,7 @@ func RouteInfoFrom(ctx context.Context) (RouteInfo, bool) {
 // to the Scion Hub message routing. Each Execute call:
 //  1. Translates the SDK message to a Scion StructuredMessage
 //  2. Sends it to the target agent via Hub
-//  3. Waits for the agent response via the broker
+//  3. Polls the event log for the agent's response events
 //  4. Translates the response back to SDK events
 type ScionExecutor struct {
 	bridge *Bridge
@@ -68,7 +71,7 @@ func NewScionExecutor(bridge *Bridge, log *slog.Logger) *ScionExecutor {
 }
 
 // Execute implements a2asrv.AgentExecutor. It routes the incoming A2A message
-// to a Scion agent and yields events as the agent responds.
+// to a Scion agent and yields events as the agent responds via the event log.
 func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		route, ok := RouteInfoFrom(ctx)
@@ -130,19 +133,10 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 		}
 
-		// Register active task for broker correlation.
+		// Register active task for broker correlation (local cache).
 		aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 		e.bridge.registerActiveTask(string(taskID), aKey)
 		defer e.bridge.unregisterActiveTask(string(taskID), aKey)
-
-		// Set up response channel.
-		responseCh := make(chan *messages.StructuredMessage, 1)
-		e.bridge.addWaiter(string(taskID), &waiter{
-			ch:        responseCh,
-			agentSlug: agentCtx.AgentSlug,
-			projectID: agentCtx.ProjectID,
-		})
-		defer e.bridge.removeWaiter(string(taskID))
 
 		// Send to Hub using the per-user or admin client.
 		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
@@ -161,55 +155,98 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			e.bridge.metrics.TasksCreated.WithLabelValues(agentCtx.ProjectID).Inc()
 		}
 
-		// Wait for agent response.
+		// Poll the event log for agent response events.
 		timeout := e.bridge.config.Timeouts.SendMessage
 		if timeout == 0 {
 			timeout = 120 * time.Second
 		}
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
 
-		select {
-		case response, ok := <-responseCh:
-			if !ok || response == nil {
-				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Agent response channel closed unexpectedly"))
-				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+		ev, err := e.bridge.waitForTaskEvent(ctx, string(taskID), timeout)
+		if err != nil {
+			var failMsg *a2a.Message
+			if errors.Is(err, ErrTimeout) {
+				failMsg = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(fmt.Sprintf("Timeout waiting for agent response after %v", timeout)))
+			} else {
+				failMsg = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Request cancelled"))
+			}
+			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+			// Metric increment is handled by the CAS winner in
+			// processAndAppendEvent — not duplicated here.
+			return
+		}
 
-				if e.bridge.metrics != nil {
-					e.bridge.metrics.TasksCompleted.WithLabelValues("failed").Inc()
+		// Convert the event to SDK format.
+		sdkEvent, sdkErr := taskEventToSDKEvent(execCtx, ev)
+		if sdkErr != nil {
+			e.log.Error("failed to convert event to SDK format", "error", sdkErr, "task_id", taskID)
+			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to process agent response"))
+			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+			return
+		}
+
+		yield(sdkEvent, nil)
+	}
+}
+
+// taskEventToSDKEvent converts a stored TaskEvent to an SDK a2a.Event.
+func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (a2a.Event, error) {
+	switch ev.Kind {
+	case "message":
+		var su TaskStatusUpdate
+		if err := json.Unmarshal(ev.Payload, &su); err != nil {
+			return nil, fmt.Errorf("unmarshal message event: %w", err)
+		}
+		// Build SDK parts from the message.
+		var sdkParts []*a2a.Part
+		if su.Status.Message != nil {
+			for _, p := range su.Status.Message.Parts {
+				if p.Text != "" {
+					sdkParts = append(sdkParts, a2a.NewTextPart(p.Text))
 				}
-				return
-			}
-
-			agentMsg, _ := TranslateScionToA2AParts(response)
-
-			// Emit completed status with agent message. Content is delivered
-			// in the status message only — emitting it again as an artifact
-			// would duplicate it and confuse A2A clients that aggregate
-			// artifacts separately from status messages.
-			statusMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, agentMsg.Parts...)
-			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, statusMsg), nil)
-
-			if e.bridge.metrics != nil {
-				e.bridge.metrics.TasksCompleted.WithLabelValues("completed").Inc()
-			}
-
-		case <-timer.C:
-			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(fmt.Sprintf("Timeout waiting for agent response after %v", timeout)))
-			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
-
-			if e.bridge.metrics != nil {
-				e.bridge.metrics.TasksCompleted.WithLabelValues("failed").Inc()
-			}
-
-		case <-ctx.Done():
-			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Request cancelled"))
-			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
-
-			if e.bridge.metrics != nil {
-				e.bridge.metrics.TasksCompleted.WithLabelValues("failed").Inc()
+				if p.URL != "" {
+					sdkParts = append(sdkParts, &a2a.Part{Content: a2a.URL(p.URL)})
+				}
 			}
 		}
+		if len(sdkParts) == 0 {
+			sdkParts = append(sdkParts, a2a.NewTextPart("[empty response]"))
+		}
+		statusMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, sdkParts...)
+		return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, statusMsg), nil
+	case "status":
+		var su TaskStatusUpdate
+		if err := json.Unmarshal(ev.Payload, &su); err != nil {
+			return nil, fmt.Errorf("unmarshal status event: %w", err)
+		}
+		sdkState := mapBridgeStateToSDK(su.Status.State)
+		return a2a.NewStatusUpdateEvent(execCtx, sdkState, nil), nil
+	case "artifact":
+		// Return as completed with a text message about the artifact.
+		return a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil), nil
+	default:
+		return nil, fmt.Errorf("unknown event kind: %s", ev.Kind)
+	}
+}
+
+// mapBridgeStateToSDK maps bridge task states to SDK task states.
+func mapBridgeStateToSDK(state string) a2a.TaskState {
+	switch state {
+	case TaskStateSubmitted:
+		return a2a.TaskStateSubmitted
+	case TaskStateWorking:
+		return a2a.TaskStateWorking
+	case TaskStateCompleted:
+		return a2a.TaskStateCompleted
+	case TaskStateFailed:
+		return a2a.TaskStateFailed
+	case TaskStateCanceled:
+		return a2a.TaskStateCanceled
+	case TaskStateInputRequired:
+		return a2a.TaskStateInputRequired
+	case TaskStateRejected:
+		return a2a.TaskStateRejected
+	default:
+		return a2a.TaskStateWorking
 	}
 }
 

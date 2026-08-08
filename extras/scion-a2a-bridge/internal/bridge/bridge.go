@@ -16,11 +16,14 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -37,19 +40,13 @@ var (
 	ErrAgentNotFound  = errors.New("agent not found")
 	ErrContextUnknown = errors.New("unknown context ID")
 	ErrTaskTerminal   = errors.New("task is in a terminal state")
+	ErrTimeout        = errors.New("timeout waiting for agent response")
 )
-
-// waiter tracks a blocking response channel with agent routing info.
-type waiter struct {
-	ch        chan *messages.StructuredMessage
-	agentSlug string
-	projectID string
-}
 
 // Bridge is the core bridge logic that ties together state management,
 // hub client operations, and message translation.
 type Bridge struct {
-	store     *state.Store
+	store     state.Store
 	hubClient hubclient.Client
 	minter    *identity.TokenMinter
 	config    *Config
@@ -63,24 +60,25 @@ type Bridge struct {
 	// sdkRequestHandler holds the SDK RequestHandler for multi-transport use (gRPC, REST).
 	sdkRequestHandler a2asrv.RequestHandler
 
-	// waiters tracks channels waiting for agent responses, keyed by taskID.
-	mu      sync.RWMutex
-	waiters map[string]*waiter
-
-	// activeTasks maps taskID to routing/lifecycle metadata for broker messages.
+	// activeTasks is a best-effort local cache mapping taskID to routing/lifecycle
+	// metadata. On cache miss, the DB is queried via FindActiveTaskForAgent.
 	tasksMu     sync.RWMutex
 	activeTasks map[string]activeTaskEntry
 
 	// agentTasks maps agentKey (projectID:agentSlug) to active task IDs,
-	// used for reverse lookup when broker messages arrive.
+	// used as a local cache for reverse lookup when broker messages arrive.
 	agentTasks map[string][]string
+
+	// lastSweptAt is a unix timestamp used by maybeOpportunisticSweep to
+	// throttle opportunistic sweeps to at most once per interval per instance.
+	lastSweptAt atomic.Int64
 
 	// wg tracks background goroutines to drain on shutdown.
 	wg sync.WaitGroup
 
-	// brokerMsgs decouples HandleBrokerMessage (called synchronously by the
-	// broker RPC) from dispatch work. Publish enqueues; a worker drains.
-	brokerMsgs chan brokerMessage
+	// notifier accelerates event delivery via PostgreSQL NOTIFY/LISTEN.
+	// nil in plugin/SQLite mode; polling remains the correctness floor.
+	notifier *Notifier
 
 	// agentCache caches lookupAgent results to avoid listing all agents per call.
 	agentCacheMu sync.RWMutex
@@ -103,13 +101,8 @@ type activeTaskEntry struct {
 	createdAt time.Time
 }
 
-type brokerMessage struct {
-	topic string
-	msg   *messages.StructuredMessage
-}
-
 // New creates a new Bridge instance.
-func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, metrics *Metrics, log *slog.Logger) *Bridge {
+func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, metrics *Metrics, log *slog.Logger) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &Bridge{
 		store:          store,
@@ -120,23 +113,19 @@ func New(store *state.Store, hubClient hubclient.Client, minter *identity.TokenM
 		log:            log,
 		streams:        NewStreamManager(cfg.Bridge.MaxSubscribers),
 		push:           NewPushDispatcher(store, cfg, log, ctx),
-		waiters:        make(map[string]*waiter),
 		activeTasks:    make(map[string]activeTaskEntry),
 		agentTasks:     make(map[string][]string),
-		brokerMsgs:     make(chan brokerMessage, 256),
 		agentCache:     make(map[string]*agentCacheEntry),
 		shutdownCtx:    ctx,
 		shutdownCancel: cancel,
 	}
-	b.wg.Add(2)
+	b.wg.Add(1)
 	go b.janitor()
-	go b.brokerWorker()
 	return b
 }
 
-// janitor periodically reaps active tasks that have exceeded the maximum age,
-// preventing unbounded growth of activeTasks/agentTasks/waiters maps when
-// agents crash or broker connections are lost.
+// janitor periodically reaps stale active tasks from the database and
+// evicts stale agent cache entries.
 func (b *Bridge) janitor() {
 	defer b.wg.Done()
 
@@ -157,73 +146,104 @@ func (b *Bridge) janitor() {
 		case <-b.shutdownCtx.Done():
 			return
 		case <-ticker.C:
-			b.reapStaleTasks(maxAge)
+			b.reapStaleTasks(b.shutdownCtx, maxAge)
 			b.evictStaleAgentCache()
 		}
 	}
 }
 
-func (b *Bridge) reapStaleTasks(maxAge time.Duration) {
+// reapStaleTasks queries the DB for stale active tasks and CAS-transitions
+// them to failed. Each instance runs this independently; CAS ensures exactly
+// one instance wins per task.
+func (b *Bridge) reapStaleTasks(ctx context.Context, maxAge time.Duration) {
 	cutoff := time.Now().Add(-maxAge)
-
-	b.tasksMu.RLock()
-	var candidates []struct {
-		taskID string
-		entry  activeTaskEntry
+	tasks, err := b.store.ListStaleActiveTasks(ctx, cutoff, 100)
+	if err != nil {
+		b.log.Error("janitor: listing stale tasks", "error", err)
+		return
 	}
-	for taskID, entry := range b.activeTasks {
-		// Skip tasks that were created recently — they can't be stale yet.
-		if entry.createdAt.After(cutoff) {
-			continue
-		}
-		candidates = append(candidates, struct {
-			taskID string
-			entry  activeTaskEntry
-		}{taskID, entry})
-	}
-	b.tasksMu.RUnlock()
-
-	for _, c := range candidates {
-		task, err := b.store.GetTask(c.taskID)
+	for _, task := range tasks {
+		changed, err := b.store.UpdateTaskState(ctx, task.ID, TaskStateFailed)
 		if err != nil {
-			b.log.Error("janitor: failed to get task", "task_id", c.taskID, "error", err)
+			b.log.Error("janitor: failing stale task", "taskID", task.ID, "error", err)
 			continue
 		}
-		if task != nil && IsTerminalState(task.State) {
-			b.unregisterActiveTask(c.taskID, c.entry.aKey)
-			b.streams.CloseAll(c.taskID)
-			continue
-		}
-		if task == nil || task.UpdatedAt.Before(cutoff) {
-			b.log.Warn("janitor: reaping stale task", "task_id", c.taskID, "age_cutoff", maxAge)
-			if err := b.store.UpdateTaskState(c.taskID, TaskStateFailed); err != nil {
-				b.log.Error("janitor: failed to update task state", "task_id", c.taskID, "error", err)
-			}
-			if b.metrics != nil {
-				b.metrics.TasksCompleted.WithLabelValues(TaskStateFailed).Inc()
+		if changed {
+			// We won the CAS — emit the failure event and push.
+			b.log.Warn("janitor: reaping stale task", "task_id", task.ID, "age_cutoff", maxAge)
+			failPayload, _ := json.Marshal(TaskStatusUpdate{
+				TaskID: task.ID,
+				Status: TaskStatus{State: TaskStateFailed},
+			})
+			if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+				TaskID:  task.ID,
+				Kind:    "status",
+				Payload: failPayload,
+				Final:   true,
+			}); err != nil {
+				b.log.Error("failed to append task event", "task_id", task.ID, "kind", "status", "error", err)
 			}
 			failEvent := StreamEvent{
 				StatusUpdate: &TaskStatusUpdate{
-					TaskID: c.taskID,
+					TaskID: task.ID,
 					Status: TaskStatus{State: TaskStateFailed},
 					Final:  true,
 				},
 			}
-			b.streams.Broadcast(c.taskID, failEvent)
-			b.push.Dispatch(b.shutdownCtx, c.taskID, failEvent)
-			b.unregisterActiveTask(c.taskID, c.entry.aKey)
-			b.streams.CloseAll(c.taskID)
+			b.push.Dispatch(ctx, task.ID, failEvent)
+			if b.metrics != nil {
+				b.metrics.TasksCompleted.WithLabelValues(TaskStateFailed).Inc()
+			}
 		}
+		// Unregister from local cache regardless of who won the CAS.
+		aKey := agentKey(task.ProjectID, task.AgentSlug)
+		b.unregisterActiveTask(task.ID, aKey)
 	}
 }
 
+// RunSweep performs a full sweep pass: reaps stale tasks and purges old events.
+// Safe to call from any goroutine; CAS in the store ensures exactly one
+// instance wins per task even under concurrent sweeps.
+func (b *Bridge) RunSweep(ctx context.Context) {
+	maxAge := 2 * b.effectiveConfig().Timeouts.SendMessage
+	if maxAge < 2*time.Minute {
+		maxAge = 4 * time.Minute
+	}
+	b.reapStaleTasks(ctx, maxAge)
+
+	// Purge events older than 1 hour (D8).
+	purged, err := b.store.PurgeTaskEvents(ctx, time.Now().Add(-1*time.Hour))
+	if err != nil {
+		b.log.Error("failed to purge task events", "error", err)
+	} else if purged > 0 {
+		b.log.Info("purged old task events", "count", purged)
+	}
+}
+
+// maybeOpportunisticSweep fires a best-effort sweep if the throttle interval
+// has elapsed. The CAS on lastSweptAt ensures at most one goroutine per
+// interval actually runs the sweep. The goroutine is fire-and-forget: if
+// Cloud Run throttles it after the request completes, the partial sweep
+// leaves the remainder for the next trigger.
+func (b *Bridge) maybeOpportunisticSweep(ctx context.Context) {
+	const interval int64 = 120 // 2 minutes
+	now := time.Now().Unix()
+	last := b.lastSweptAt.Load()
+	if now-last < interval {
+		return
+	}
+	if !b.lastSweptAt.CompareAndSwap(last, now) {
+		return // another goroutine won the CAS
+	}
+	b.wg.Add(1)
+	go func() {
+		defer b.wg.Done()
+		b.RunSweep(b.shutdownCtx)
+	}()
+}
+
 // Shutdown gracefully drains background work.
-// Order: (1) close broker channel so brokerWorker drains buffered messages,
-// (2) cancel shutdownCtx to stop the janitor,
-// (3) wait for both goroutines to exit,
-// (4) wait for push goroutines spawned during drain to finish.
 func (b *Bridge) Shutdown() {
-	close(b.brokerMsgs)
 	b.shutdownCancel()
 	b.wg.Wait()
 	b.push.Wait()
@@ -232,6 +252,13 @@ func (b *Bridge) Shutdown() {
 // SetBroker wires the broker server for subscription management.
 func (b *Bridge) SetBroker(broker *BrokerServer) {
 	b.broker = broker
+}
+
+// SetNotifier wires the NOTIFY accelerator. When set, waitForTaskEvent
+// and streamTaskEvents wake immediately on notification instead of waiting
+// for the next poll timer. Pass nil to disable (SQLite / plugin mode).
+func (b *Bridge) SetNotifier(n *Notifier) {
+	b.notifier = n
 }
 
 // SetSnapshot wires the atomic config snapshot for hot-apply support.
@@ -257,6 +284,118 @@ func (b *Bridge) SetSDKRequestHandler(h a2asrv.RequestHandler) {
 // agentKey returns a composite key for project-scoped agent isolation.
 func agentKey(projectID, agentSlug string) string {
 	return projectID + ":" + agentSlug
+}
+
+// waitForTaskEvent polls the event log for a response event on the given task,
+// with adaptive backoff. Returns the first response (content/message) event or
+// a final event, whichever comes first.
+func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout time.Duration) (*state.TaskEvent, error) {
+	var cursor int64
+	interval := 100 * time.Millisecond
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	pollTimer := time.NewTimer(interval)
+	defer pollTimer.Stop()
+
+	// Register for NOTIFY acceleration (no-op if notifier is nil).
+	var notifyCh <-chan struct{}
+	if b.notifier != nil {
+		var cleanup func()
+		notifyCh, cleanup = b.notifier.Register(taskID)
+		defer cleanup()
+	}
+
+	for {
+		events, err := b.store.ReadTaskEvents(ctx, taskID, cursor, 10)
+		if err != nil {
+			return nil, fmt.Errorf("reading task events: %w", err)
+		}
+		for _, ev := range events {
+			cursor = ev.ID
+			if isResponseEvent(ev) {
+				return &ev, nil
+			}
+			if ev.Final {
+				return &ev, nil
+			}
+		}
+
+		// Reset backoff when we got events (but none were response/final)
+		if len(events) > 0 {
+			interval = 100 * time.Millisecond
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
+			}
+			pollTimer.Reset(interval)
+			continue
+		}
+
+		select {
+		case <-notifyCh:
+			// NOTIFY woke us — immediately re-read (reset backoff).
+			interval = 100 * time.Millisecond
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
+			}
+			pollTimer.Reset(interval)
+		case <-pollTimer.C:
+			interval = backoffInterval(interval)
+			pollTimer.Reset(interval)
+		case <-timer.C:
+			return nil, ErrTimeout
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// isResponseEvent returns true if the event is a content/message event
+// (as opposed to a status-only event). These are the events that carry
+// the agent's response content back to the blocking caller.
+func isResponseEvent(ev state.TaskEvent) bool {
+	return ev.Kind == "message" || ev.Kind == "artifact"
+}
+
+// taskEventToTaskResult converts a stored TaskEvent to a TaskResult for
+// blocking SendMessage callers.
+func (b *Bridge) taskEventToTaskResult(taskID, contextID string, ev *state.TaskEvent) (*TaskResult, error) {
+	result := &TaskResult{
+		ID:        taskID,
+		ContextID: contextID,
+	}
+
+	switch ev.Kind {
+	case "message":
+		var su TaskStatusUpdate
+		if err := json.Unmarshal(ev.Payload, &su); err != nil {
+			return nil, fmt.Errorf("unmarshal message event: %w", err)
+		}
+		result.Status = su.Status
+		return result, nil
+	case "status":
+		var su TaskStatusUpdate
+		if err := json.Unmarshal(ev.Payload, &su); err != nil {
+			return nil, fmt.Errorf("unmarshal status event: %w", err)
+		}
+		result.Status = su.Status
+		return result, nil
+	case "artifact":
+		var au TaskArtifactUpdate
+		if err := json.Unmarshal(ev.Payload, &au); err != nil {
+			return nil, fmt.Errorf("unmarshal artifact event: %w", err)
+		}
+		result.Status = TaskStatus{State: TaskStateWorking}
+		result.Artifacts = []Artifact{au.Artifact}
+		return result, nil
+	default:
+		return nil, fmt.Errorf("unknown event kind: %s", ev.Kind)
+	}
 }
 
 // SendMessage handles an A2A SendMessage. When taskID is non-empty, the message
@@ -307,7 +446,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	if caller != nil {
 		task.CallerUserID = caller.UserID
 	}
-	if err := b.store.CreateTask(task); err != nil {
+	if err := b.store.CreateTask(ctx, task); err != nil {
 		return nil, fmt.Errorf("create task: %w", err)
 	}
 	if b.metrics != nil {
@@ -337,13 +476,13 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 			defer cancel()
 			if _, err := writeClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 				b.log.Error("non-blocking send failed", "error", err, "task_id", taskID)
-				if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+				if _, err := b.store.UpdateTaskState(sendCtx, taskID, TaskStateFailed); err != nil {
 					b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 				}
 				b.unregisterActiveTask(taskID, aKey)
 				return
 			}
-			if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+			if _, err := b.store.UpdateTaskState(sendCtx, taskID, TaskStateWorking); err != nil {
 				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 			}
 		}()
@@ -355,30 +494,20 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		}, nil
 	}
 
-	// Blocking mode: set up per-task waiter.
-	// Also register in agentTasks so the slug-based fallback correlation works
-	// when broker messages arrive without a2aTaskId metadata.
+	// Blocking mode: register in activeTasks cache for correlation, then poll
+	// the event log for the agent's response.
 	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 	b.registerActiveTask(taskID, aKey)
-	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
-		ch:        responseCh,
-		agentSlug: agentCtx.AgentSlug,
-		projectID: agentCtx.ProjectID,
-	})
-	defer b.removeWaiter(taskID)
-	// Keep task registered in activeTasks — the agent's eventual state-change
-	// to completed/failed will close it via dispatchToActiveTask.
 
 	if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
-		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
 		b.unregisterActiveTask(taskID, aKey)
 		return nil, fmt.Errorf("send message to agent: %w", err)
 	}
 
-	if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+	if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateWorking); err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 	}
 
@@ -387,43 +516,27 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		timeout = 120 * time.Second
 	}
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case response := <-responseCh:
-		msg, artifacts := TranslateScionToA2A(response)
-
-		return &TaskResult{
-			ID:        taskID,
-			ContextID: agentCtx.ContextID,
-			Status: TaskStatus{
-				State:   TaskStateWorking,
-				Message: &msg,
-			},
-			Artifacts: artifacts,
-		}, nil
-
-	case <-timer.C:
-		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
-			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+	ev, err := b.waitForTaskEvent(ctx, taskID, timeout)
+	if err != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		if _, updateErr := b.store.UpdateTaskState(cleanupCtx, taskID, TaskStateFailed); updateErr != nil {
+			b.log.Error("failed to update task state", "error", updateErr, "task_id", taskID)
 		}
 		b.unregisterActiveTask(taskID, aKey)
-		return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
-
-	case <-ctx.Done():
-		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
-			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		if errors.Is(err, ErrTimeout) {
+			return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
 		}
-		b.unregisterActiveTask(taskID, aKey)
-		return nil, ctx.Err()
+		return nil, err
 	}
+
+	return b.taskEventToTaskResult(taskID, agentCtx.ContextID, ev)
 }
 
 // sendFollowUp routes a user message to an existing task's agent, continuing
 // the conversation. Returns ErrTaskTerminal if the task has already completed.
 func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskID string, parts []Part, blocking bool) (*TaskResult, error) {
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
@@ -476,20 +589,17 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		}
 	}
 
-	if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+	if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateWorking); err != nil {
 		b.log.Error("failed to update task state for follow-up", "error", err, "task_id", taskID)
 	}
 
 	if blocking {
 		aKey := agentKey(task.ProjectID, task.AgentSlug)
 		b.registerActiveTask(taskID, aKey)
-		responseCh := make(chan *messages.StructuredMessage, 1)
-		b.addWaiter(taskID, &waiter{ch: responseCh, agentSlug: task.AgentSlug, projectID: task.ProjectID})
-		defer b.removeWaiter(taskID)
-		defer b.unregisterActiveTask(taskID, aKey)
 
 		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
 			b.failFollowUpTask(taskID)
+			b.unregisterActiveTask(taskID, aKey)
 			return nil, fmt.Errorf("send follow-up to agent: %w", err)
 		}
 
@@ -497,28 +607,20 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		if timeout == 0 {
 			timeout = 120 * time.Second
 		}
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
 
-		select {
-		case response := <-responseCh:
-			if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
-				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		ev, err := b.waitForTaskEvent(ctx, taskID, timeout)
+		if err != nil {
+			if errors.Is(err, ErrTimeout) {
+				b.failFollowUpTask(taskID)
+				b.unregisterActiveTask(taskID, aKey)
+				return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
 			}
-			msg, artifacts := TranslateScionToA2A(response)
-			return &TaskResult{
-				ID:        taskID,
-				ContextID: task.ContextID,
-				Status:    TaskStatus{State: TaskStateWorking, Message: &msg},
-				Artifacts: artifacts,
-			}, nil
-		case <-timer.C:
 			b.failFollowUpTask(taskID)
-			return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
-		case <-ctx.Done():
-			b.failFollowUpTask(taskID)
-			return nil, ctx.Err()
+			b.unregisterActiveTask(taskID, aKey)
+			return nil, err
 		}
+
+		return b.taskEventToTaskResult(taskID, task.ContextID, ev)
 	}
 
 	// Non-blocking follow-up
@@ -546,7 +648,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 // GetTask retrieves a task by ID. Per-user isolation: if CallerIdentity is
 // present and the task has a CallerUserID, only the task's owner can read it.
 func (b *Bridge) GetTask(ctx context.Context, taskID string) (*TaskResult, error) {
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
@@ -609,7 +711,7 @@ func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult,
 // if CallerIdentity is present and the task has a CallerUserID, only the
 // task's owner can cancel it.
 func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, error) {
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
@@ -630,8 +732,8 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		return nil, fmt.Errorf("task %s is already in terminal state: %s", taskID, task.State)
 	}
 
-	// Unregister before updating state so concurrent broker messages cannot
-	// overwrite the canceled state via dispatchToActiveTask.
+	// Unregister from local cache before CAS so concurrent broker messages
+	// cannot overwrite the canceled state.
 	aKey := agentKey(task.ProjectID, task.AgentSlug)
 	b.unregisterActiveTask(taskID, aKey)
 
@@ -667,24 +769,36 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		}
 	}
 
-	if err := b.store.UpdateTaskState(taskID, TaskStateCanceled); err != nil {
+	changed, err := b.store.UpdateTaskState(ctx, taskID, TaskStateCanceled)
+	if err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 	}
-	if b.metrics != nil {
-		b.metrics.TasksCompleted.WithLabelValues(TaskStateCanceled).Inc()
-	}
 
-	cancelEvent := StreamEvent{
-		StatusUpdate: &TaskStatusUpdate{
+	if changed {
+		if b.metrics != nil {
+			b.metrics.TasksCompleted.WithLabelValues(TaskStateCanceled).Inc()
+		}
+		cancelPayload, _ := json.Marshal(TaskStatusUpdate{
 			TaskID: taskID,
 			Status: TaskStatus{State: TaskStateCanceled},
-			Final:  true,
-		},
+		})
+		if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+			TaskID:  taskID,
+			Kind:    "status",
+			Payload: cancelPayload,
+			Final:   true,
+		}); err != nil {
+			b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+		}
+		cancelEvent := StreamEvent{
+			StatusUpdate: &TaskStatusUpdate{
+				TaskID: taskID,
+				Status: TaskStatus{State: TaskStateCanceled},
+				Final:  true,
+			},
+		}
+		b.push.Dispatch(ctx, taskID, cancelEvent)
 	}
-	b.streams.Broadcast(taskID, cancelEvent)
-	b.push.Dispatch(ctx, taskID, cancelEvent)
-
-	b.streams.CloseAll(taskID)
 
 	return &TaskResult{
 		ID:        task.ID,
@@ -693,35 +807,11 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 	}, nil
 }
 
-// HandleBrokerMessage enqueues a broker message for async dispatch, keeping
-// the broker's Publish RPC non-blocking. Returns an error only if the queue
-// is full or shutdown has begun, signalling backpressure to the Hub.
-func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("broker shutting down")
-		}
-	}()
-	select {
-	case b.brokerMsgs <- brokerMessage{topic: topic, msg: msg}:
-		return nil
-	default:
-		b.log.Error("broker message queue full, dropping message", "topic", topic)
-		return fmt.Errorf("broker message queue full")
-	}
-}
-
-// brokerWorker drains the brokerMsgs channel, dispatching each message.
-// Shutdown closes the channel; the range loop drains buffered messages
-// with shutdownCtx still live so push.Dispatch works during drain.
-func (b *Bridge) brokerWorker() {
-	defer b.wg.Done()
-	for bm := range b.brokerMsgs {
-		b.dispatchBrokerMessage(bm.topic, bm.msg)
-	}
-}
-
-func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMessage) {
+// HandleBrokerMessage processes a broker message inline: correlates to a taskID,
+// writes events to the durable event log, CAS-updates task state, and
+// conditionally dispatches push notifications. No in-memory fan-out is used;
+// all consumers read from the event log.
+func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.log.Debug("handling broker message",
 		"topic", topic,
 		"sender", msg.Sender,
@@ -732,171 +822,210 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 	agentSlug := extractAgentIDFromSender(msg.Sender)
 	if agentSlug == "" {
 		b.log.Warn("ignoring message: sender does not use agent:<slug> format, dropping", "topic", topic, "sender", msg.Sender)
-		return
+		return nil
 	}
 
 	projectID := extractProjectIDFromTopic(topic)
 	if projectID == "" {
 		b.log.Warn("dropping message with unparseable project ID", "topic", topic)
-		return
+		return nil
 	}
 
-	ctx := b.shutdownCtx
+	// Correlate to taskID.
+	taskID, err := b.correlateToTask(ctx, projectID, agentSlug, msg)
+	if err != nil {
+		b.log.Debug("could not correlate broker message to task", "error", err, "topic", topic, "sender", msg.Sender)
+		return nil
+	}
 
-	// If the message carries a task correlation ID, dispatch only to that task
-	// after verifying the message's agent matches the task's owner.
+	// Skip system messages — they don't produce events.
+	if msg.Type == messages.TypeSystem {
+		b.log.Debug("skipping system message in A2A bridge", "task_id", taskID, "sender", msg.Sender)
+		return nil
+	}
+
+	// Process the message and write to the event log.
+	b.processAndAppendEvent(ctx, taskID, agentSlug, msg)
+	return nil
+}
+
+// correlateToTask determines the taskID for a broker message, using metadata
+// or falling back to DB lookup.
+func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) (string, error) {
+	// If the message carries a task correlation ID, verify ownership.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
-		task, err := b.store.GetTask(taskID)
+		task, err := b.store.GetTask(ctx, taskID)
 		if err != nil || task == nil {
-			b.log.Debug("ignoring message for unknown task", "task_id", taskID)
-			return
+			return "", fmt.Errorf("unknown task: %s", taskID)
 		}
 		if task.AgentSlug != agentSlug {
 			b.log.Warn("dropping cross-agent a2aTaskId injection",
 				"task_agent", task.AgentSlug, "msg_agent", agentSlug, "task_id", taskID)
-			return
+			return "", fmt.Errorf("cross-agent injection for task %s", taskID)
 		}
-
-		if b.dispatchToWaiter(taskID, msg) {
-			return
-		}
-		b.tasksMu.RLock()
-		_, isActive := b.activeTasks[taskID]
-		b.tasksMu.RUnlock()
-		if isActive {
-			b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
-		}
-		return
+		return taskID, nil
 	}
 
-	// No a2aTaskId — the outbound message path (sciontool stop hook →
-	// SendOutboundMessage) does not carry metadata from the original inbound
-	// message, so a2aTaskId is lost in the round-trip. Fall back to agent-slug
-	// correlation using the agentTasks reverse map.
+	// No a2aTaskId — fall back to local cache, then DB.
 	aKey := agentKey(projectID, agentSlug)
+
+	// Fast path: check local cache.
 	b.tasksMu.RLock()
 	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
 	b.tasksMu.RUnlock()
 
-	if len(taskIDs) == 0 {
-		b.log.Warn("dropping broker message: no a2aTaskId and no active tasks for agent",
-			"topic", topic, "sender", msg.Sender, "project", projectID, "agent", agentSlug)
-		return
+	if len(taskIDs) > 0 {
+		b.log.Debug("correlating broker message by agent slug from local cache",
+			"agent", agentSlug, "project", projectID, "active_tasks", len(taskIDs))
+		// Use the most recently registered task.
+		return taskIDs[len(taskIDs)-1], nil
 	}
 
-	b.log.Debug("correlating broker message by agent slug (no a2aTaskId)",
-		"agent", agentSlug, "project", projectID, "active_tasks", len(taskIDs))
-	for _, taskID := range taskIDs {
-		if b.dispatchToWaiter(taskID, msg) {
-			continue
-		}
-		b.tasksMu.RLock()
-		_, isActive := b.activeTasks[taskID]
-		b.tasksMu.RUnlock()
-		if isActive {
-			b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
-		}
+	// Slow path: query DB.
+	task, err := b.store.FindActiveTaskForAgent(ctx, projectID, agentSlug)
+	if err != nil {
+		return "", fmt.Errorf("DB lookup failed: %w", err)
 	}
+	if task == nil {
+		return "", fmt.Errorf("no active tasks for agent %s in project %s", agentSlug, projectID)
+	}
+
+	b.log.Debug("correlating broker message by agent slug from DB fallback",
+		"agent", agentSlug, "project", projectID, "task_id", task.ID)
+	return task.ID, nil
 }
 
-// dispatchToWaiter sends a message to a blocking waiter for the given taskID.
-// Returns true if a waiter exists and handled the message (callers should skip
-// further dispatch). State-change messages are skipped so the actual reply
-// lands in the buffer.
-func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage) bool {
-	b.mu.RLock()
-	w, ok := b.waiters[taskID]
-	b.mu.RUnlock()
-	if !ok {
-		return false
+// processAndAppendEvent translates a broker message to an event, appends it to
+// the event log, CAS-updates task state, and conditionally fires push notifications.
+func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug string, msg *messages.StructuredMessage) {
+	// Determine the dedup key.
+	dedupKey := ""
+	if msgID, ok := msg.Metadata["msgId"]; ok && msgID != "" {
+		dedupKey = msgID
+	} else {
+		// Generate a deterministic key from taskID + content hash.
+		h := sha256.Sum256([]byte(taskID + msg.Msg + msg.Timestamp))
+		dedupKey = fmt.Sprintf("%x", h[:16])
 	}
-	if msg.Type == messages.TypeStateChange || msg.Type == messages.TypeSystem {
-		// Terminal state-changes must still be persisted to the DB even though
-		// we skip the waiter — otherwise the task's stored state is never updated.
-		if msg.Type == messages.TypeStateChange {
-			if taskState := MapActivityToTaskState(msg.Msg); IsTerminalState(taskState) {
-				if err := b.store.UpdateTaskState(taskID, taskState); err != nil {
-					b.log.Error("failed to persist terminal state from waiter path",
-						"task_id", taskID, "state", taskState, "error", err)
-				}
-			}
-		}
-		return true
-	}
-	select {
-	case w.ch <- msg:
-	default:
-		b.log.Debug("dropping duplicate response for blocking waiter", "task_id", taskID)
-	}
-	return true
-}
 
-// dispatchToActiveTask routes a broker message to streaming/push subscribers for a task.
-func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug string, msg *messages.StructuredMessage) {
 	if msg.Type == messages.TypeStateChange {
 		taskState := MapActivityToTaskState(msg.Msg)
-		if err := b.store.UpdateTaskState(taskID, taskState); err != nil {
+		isFinal := IsTerminalState(taskState)
+
+		statusPayload, _ := json.Marshal(TaskStatusUpdate{
+			TaskID: taskID,
+			Status: TaskStatus{State: taskState},
+		})
+
+		if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+			TaskID:   taskID,
+			Kind:     "status",
+			Payload:  statusPayload,
+			Final:    isFinal,
+			DedupKey: dedupKey,
+		}); err != nil {
+			b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+		}
+
+		changed, err := b.store.UpdateTaskState(ctx, taskID, taskState)
+		if err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
 
-		event := StreamEvent{
-			StatusUpdate: &TaskStatusUpdate{
-				TaskID: taskID,
-				Status: TaskStatus{State: taskState},
-				Final:  IsTerminalState(taskState),
-			},
-		}
-		b.streams.Broadcast(taskID, event)
-		b.push.Dispatch(ctx, taskID, event)
-
-		if IsTerminalState(taskState) {
+		if changed && isFinal {
 			if b.metrics != nil {
 				b.metrics.TasksCompleted.WithLabelValues(taskState).Inc()
 			}
+			// This instance won the CAS — dispatch push notifications.
+			event := StreamEvent{
+				StatusUpdate: &TaskStatusUpdate{
+					TaskID: taskID,
+					Status: TaskStatus{State: taskState},
+					Final:  true,
+				},
+			}
+			b.push.Dispatch(ctx, taskID, event)
+
+			// Unregister from local cache.
 			b.tasksMu.RLock()
 			aKey := b.activeTasks[taskID].aKey
 			b.tasksMu.RUnlock()
+			if aKey == "" {
+				aKey = agentKey("", agentSlug)
+			}
 			b.unregisterActiveTask(taskID, aKey)
-			b.streams.CloseAll(taskID)
+		} else if changed {
+			// Non-terminal state change — still dispatch push for subscribers.
+			event := StreamEvent{
+				StatusUpdate: &TaskStatusUpdate{
+					TaskID: taskID,
+					Status: TaskStatus{State: taskState},
+					Final:  false,
+				},
+			}
+			b.push.Dispatch(ctx, taskID, event)
 		}
 		return
 	}
 
-	// System messages are non-conversational — log and skip content dispatch.
-	if msg.Type == messages.TypeSystem {
-		b.log.Debug("skipping system message in A2A bridge", "task_id", taskID, "sender", msg.Sender)
-		return
-	}
-
-	// Content message — broadcast to subscribers but keep task alive.
-	// Task lifecycle is driven by state-change messages, not content.
+	// Content message — write to event log.
 	// Touch the DB timestamp so the janitor doesn't reap active tasks
 	// whose only recent activity is content messages.
-	// Use TouchTask (not UpdateTaskState) to preserve the current state —
-	// content messages must not overwrite input-required.
+	if err := b.store.TouchTask(ctx, taskID); err != nil {
+		b.log.Error("failed to refresh task timestamp for content message",
+			"task_id", taskID, "error", err)
+	}
+
 	a2aMsg, artifacts := TranslateScionToA2A(msg)
 
 	currentState := TaskStateWorking
-	if task, err := b.store.GetTask(taskID); err != nil {
+	if task, err := b.store.GetTask(ctx, taskID); err != nil {
 		b.log.Error("failed to get task for content message",
 			"task_id", taskID, "error", err)
 	} else if task != nil {
 		currentState = task.State
 	}
 
-	if err := b.store.TouchTask(taskID); err != nil {
-		b.log.Error("failed to refresh task timestamp for content message",
-			"task_id", taskID, "error", err)
-	}
+	// Write artifact events.
 	for _, art := range artifacts {
+		artPayload, _ := json.Marshal(TaskArtifactUpdate{
+			TaskID:   taskID,
+			Artifact: art,
+		})
+		if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+			TaskID:   taskID,
+			Kind:     "artifact",
+			Payload:  artPayload,
+			Final:    false,
+			DedupKey: dedupKey + ":artifact:" + art.ArtifactID,
+		}); err != nil {
+			b.log.Error("failed to append task event", "task_id", taskID, "kind", "artifact", "error", err)
+		}
 		artEvent := StreamEvent{
 			ArtifactUpdate: &TaskArtifactUpdate{
 				TaskID:   taskID,
 				Artifact: art,
 			},
 		}
-		b.streams.Broadcast(taskID, artEvent)
 		b.push.Dispatch(ctx, taskID, artEvent)
+	}
+
+	// Write message event.
+	msgPayload, _ := json.Marshal(TaskStatusUpdate{
+		TaskID: taskID,
+		Status: TaskStatus{
+			State:   currentState,
+			Message: &a2aMsg,
+		},
+	})
+	if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
+		TaskID:   taskID,
+		Kind:     "message",
+		Payload:  msgPayload,
+		Final:    false,
+		DedupKey: dedupKey + ":message",
+	}); err != nil {
+		b.log.Error("failed to append task event", "task_id", taskID, "kind", "message", "error", err)
 	}
 
 	statusEvent := StreamEvent{
@@ -909,31 +1038,42 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 			Final: false,
 		},
 	}
-	b.streams.Broadcast(taskID, statusEvent)
 	b.push.Dispatch(ctx, taskID, statusEvent)
 }
 
 // failFollowUpTask centralises the failure-notification pattern for follow-up
-// messages: update DB state, increment metrics, broadcast a final failure event
-// to SSE/push subscribers, and close streams.  The caller is responsible for
-// unregistering the active task and removing any waiter.
+// messages: update DB state via CAS, increment metrics, write failure event
+// to the log, and dispatch push notifications.
 func (b *Bridge) failFollowUpTask(taskID string) {
-	if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+	changed, err := b.store.UpdateTaskState(b.shutdownCtx, taskID, TaskStateFailed)
+	if err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 	}
-	if b.metrics != nil {
-		b.metrics.TasksCompleted.WithLabelValues(TaskStateFailed).Inc()
-	}
-	failEvent := StreamEvent{
-		StatusUpdate: &TaskStatusUpdate{
+	if changed {
+		if b.metrics != nil {
+			b.metrics.TasksCompleted.WithLabelValues(TaskStateFailed).Inc()
+		}
+		failPayload, _ := json.Marshal(TaskStatusUpdate{
 			TaskID: taskID,
 			Status: TaskStatus{State: TaskStateFailed},
-			Final:  true,
-		},
+		})
+		if _, err := b.store.AppendTaskEvent(b.shutdownCtx, &state.TaskEvent{
+			TaskID:  taskID,
+			Kind:    "status",
+			Payload: failPayload,
+			Final:   true,
+		}); err != nil {
+			b.log.Error("failed to append task event", "task_id", taskID, "kind", "status", "error", err)
+		}
+		failEvent := StreamEvent{
+			StatusUpdate: &TaskStatusUpdate{
+				TaskID: taskID,
+				Status: TaskStatus{State: TaskStateFailed},
+				Final:  true,
+			},
+		}
+		b.push.Dispatch(b.shutdownCtx, taskID, failEvent)
 	}
-	b.streams.Broadcast(taskID, failEvent)
-	b.push.Dispatch(b.shutdownCtx, taskID, failEvent)
-	b.streams.CloseAll(taskID)
 }
 
 func truncate(s string, n int) string {
@@ -973,9 +1113,6 @@ func (b *Bridge) subscribeAllUserTopics(projectID string) {
 	if err := b.broker.RequestSubscription(pattern); err != nil {
 		b.log.Warn("failed to request wildcard subscription", "pattern", pattern, "error", err)
 	}
-	// Note: no LegacyAllUserTopic exists in projectcompat, so legacy wildcard
-	// subscription is not available. Legacy user topics use the scion.grove.*
-	// prefix which will be phased out.
 }
 
 // subscribeAdminUserTopics subscribes to the bridge admin's user topic (legacy mode).
@@ -1133,7 +1270,7 @@ func (b *Bridge) GetProjectConfig(projectSlug string) *ProjectConfig {
 // resolveContext maps an A2A context to a Scion agent, creating a new context if needed.
 func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, contextID string) (*state.Context, error) {
 	if contextID != "" {
-		existing, err := b.store.GetContext(contextID)
+		existing, err := b.store.GetContext(ctx, contextID)
 		if err != nil {
 			return nil, fmt.Errorf("get context: %w", err)
 		}
@@ -1141,7 +1278,7 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 			if existing.ProjectID != projectSlug || existing.AgentSlug != agentSlug {
 				return nil, fmt.Errorf("%w: context does not belong to %s/%s", ErrContextUnknown, projectSlug, agentSlug)
 			}
-			if err := b.store.TouchContext(contextID); err != nil {
+			if err := b.store.TouchContext(ctx, contextID); err != nil {
 				b.log.Error("failed to touch context", "context_id", contextID, "error", err)
 			}
 			return existing, nil
@@ -1212,7 +1349,7 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 		CreatedAt:  now,
 		LastActive: now,
 	}
-	if err := b.store.CreateContext(agentCtx); err != nil {
+	if err := b.store.CreateContext(ctx, agentCtx); err != nil {
 		return nil, fmt.Errorf("create context: %w", err)
 	}
 
@@ -1244,18 +1381,6 @@ func (b *Bridge) unregisterActiveTask(taskID, aKey string) {
 	if len(b.agentTasks[aKey]) == 0 {
 		delete(b.agentTasks, aKey)
 	}
-}
-
-func (b *Bridge) addWaiter(taskID string, w *waiter) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.waiters[taskID] = w
-}
-
-func (b *Bridge) removeWaiter(taskID string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.waiters, taskID)
 }
 
 // parseTopic extracts project and agent identifiers from a broker topic string.
@@ -1299,7 +1424,7 @@ func (b *Bridge) AuthorizeExposed(projectSlug, agentSlug string) error {
 // Returns nil (not an error) if the task doesn't exist or doesn't match,
 // so callers can return "not found" without leaking existence.
 func (b *Bridge) AuthorizeTask(taskID, projectSlug, agentSlug string) (*state.Task, error) {
-	task, err := b.store.GetTask(taskID)
+	task, err := b.store.GetTask(context.Background(), taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
@@ -1313,7 +1438,7 @@ func (b *Bridge) AuthorizeTask(taskID, projectSlug, agentSlug string) (*state.Ta
 // Returns (true, nil) on success, (false, nil) when the context doesn't exist
 // or doesn't match, and (false, err) on database errors.
 func (b *Bridge) AuthorizeContext(contextID, projectSlug, agentSlug string) (bool, error) {
-	ctx, err := b.store.GetContext(contextID)
+	ctx, err := b.store.GetContext(context.Background(), contextID)
 	if err != nil {
 		return false, fmt.Errorf("get context: %w", err)
 	}

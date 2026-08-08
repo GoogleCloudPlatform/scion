@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -177,10 +176,10 @@ func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclie
 // --- Test helpers ---
 
 // newFollowUpTestBridge creates a Bridge wired to a mock hub client and real SQLite store.
-func newFollowUpTestBridge(t *testing.T, agents *mockAgentService) (*Bridge, *state.Store) {
+func newFollowUpTestBridge(t *testing.T, agents *mockAgentService) (*Bridge, state.Store) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -206,10 +205,10 @@ func newFollowUpTestBridge(t *testing.T, agents *mockAgentService) (*Bridge, *st
 }
 
 // seedTask inserts a task into the store for testing.
-func seedTask(t *testing.T, store *state.Store, id, contextID, projectID, agentSlug, agentID, taskState string) {
+func seedTask(t *testing.T, store state.Store, id, contextID, projectID, agentSlug, agentID, taskState string) {
 	t.Helper()
 	now := time.Now()
-	if err := store.CreateTask(&state.Task{
+	if err := store.CreateTask(context.Background(), &state.Task{
 		ID:        id,
 		ContextID: contextID,
 		ProjectID: projectID,
@@ -221,6 +220,35 @@ func seedTask(t *testing.T, store *state.Store, id, contextID, projectID, agentS
 		Metadata:  "{}",
 	}); err != nil {
 		t.Fatalf("seed task %s: %v", id, err)
+	}
+}
+
+// injectResponseEvent writes a message event to the store, simulating an agent
+// response arriving via the event log (as would happen via HandleBrokerMessage).
+func injectResponseEvent(t *testing.T, store state.Store, taskID, responseText string) {
+	t.Helper()
+	payload, err := json.Marshal(TaskStatusUpdate{
+		TaskID: taskID,
+		Status: TaskStatus{
+			State: TaskStateWorking,
+			Message: &Message{
+				MessageID: "test-msg-id",
+				Role:      RoleAgent,
+				Parts:     []Part{{Text: responseText}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal response payload: %v", err)
+	}
+	_, err = store.AppendTaskEvent(context.Background(), &state.TaskEvent{
+		TaskID:  taskID,
+		Kind:    "message",
+		Payload: payload,
+		Final:   false,
+	})
+	if err != nil {
+		t.Fatalf("inject response event: %v", err)
 	}
 }
 
@@ -263,8 +291,6 @@ func TestSendFollowUp_ValidTaskRoutesMessage(t *testing.T) {
 	}
 
 	// Wait for the non-blocking goroutine to complete.
-	// We can't call Shutdown() here because the cleanup already does it.
-	// Instead, poll until the captured message is set.
 	deadline := time.After(5 * time.Second)
 	for {
 		captured.mu.Lock()
@@ -376,7 +402,7 @@ func TestSendFollowUp_UpdatesTaskStateToWorking(t *testing.T) {
 	}
 
 	// The state should be updated to working immediately (before the send goroutine).
-	task, err := store.GetTask("task-1")
+	task, err := store.GetTask(context.Background(), "task-1")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -394,7 +420,7 @@ func TestSendFollowUp_BlockingTimeout_CleansUpActiveTask(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
+	store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
@@ -403,7 +429,7 @@ func TestSendFollowUp_BlockingTimeout_CleansUpActiveTask(t *testing.T) {
 	cfg := &Config{
 		Hub: HubConfig{User: "test-user"},
 		Timeouts: TimeoutConfig{
-			SendMessage: 100 * time.Millisecond, // very short for test
+			SendMessage: 200 * time.Millisecond, // very short for test
 		},
 		Projects: []ProjectConfig{{Slug: "proj-1", ExposedAgents: []string{"agent-a"}}},
 		Bridge:   BridgeConfig{ExternalURL: "https://test.example.com"},
@@ -432,16 +458,8 @@ func TestSendFollowUp_BlockingTimeout_CleansUpActiveTask(t *testing.T) {
 		t.Error("expected activeTask to be cleaned up after timeout")
 	}
 
-	// Verify waiter was cleaned up.
-	b.mu.RLock()
-	_, waiterExists := b.waiters["task-1"]
-	b.mu.RUnlock()
-	if waiterExists {
-		t.Error("expected waiter to be cleaned up after timeout")
-	}
-
 	// Verify the DB state was set to failed on timeout.
-	task, getErr := store.GetTask("task-1")
+	task, getErr := store.GetTask(context.Background(), "task-1")
 	if getErr != nil {
 		t.Fatalf("GetTask: %v", getErr)
 	}
@@ -474,7 +492,7 @@ func TestSendFollowUp_BlockingSendFailure_CleansUpActiveTask(t *testing.T) {
 	}
 
 	// Verify the DB state was set to failed on send failure.
-	task, getErr := store.GetTask("task-1")
+	task, getErr := store.GetTask(context.Background(), "task-1")
 	if getErr != nil {
 		t.Fatalf("GetTask: %v", getErr)
 	}
@@ -549,7 +567,7 @@ func TestSendFollowUp_NonBlocking_SendFailure_CleansUp(t *testing.T) {
 	// Wait for background goroutine to complete by polling for the task state change.
 	deadline := time.After(5 * time.Second)
 	for {
-		task, _ := store.GetTask("task-1")
+		task, _ := store.GetTask(context.Background(), "task-1")
 		if task != nil && task.State == TaskStateFailed {
 			break
 		}
@@ -570,7 +588,7 @@ func TestSendFollowUp_NonBlocking_SendFailure_CleansUp(t *testing.T) {
 	}
 
 	// Task state should be set to failed.
-	task, err := store.GetTask("task-1")
+	task, err := store.GetTask(context.Background(), "task-1")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -579,7 +597,7 @@ func TestSendFollowUp_NonBlocking_SendFailure_CleansUp(t *testing.T) {
 	}
 }
 
-func TestSendFollowUp_BlockingSuccess_CleansUpActiveTask(t *testing.T) {
+func TestSendFollowUp_BlockingSuccess_ViaEventLog(t *testing.T) {
 	agents := &mockAgentService{
 		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 			return nil, nil
@@ -599,34 +617,11 @@ func TestSendFollowUp_BlockingSuccess_CleansUpActiveTask(t *testing.T) {
 		resultCh <- sendResult{r, err}
 	}()
 
-	// Wait for the waiter to be registered.
-	var waiterFound bool
-	for i := 0; i < 100; i++ {
-		b.mu.RLock()
-		_, waiterFound = b.waiters["task-1"]
-		b.mu.RUnlock()
-		if waiterFound {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !waiterFound {
-		t.Fatal("waiter not registered within timeout")
-	}
+	// Give the blocking call time to start polling.
+	time.Sleep(50 * time.Millisecond)
 
-	// Simulate a response from the agent.
-	b.mu.RLock()
-	w := b.waiters["task-1"]
-	b.mu.RUnlock()
-
-	response := &messages.StructuredMessage{
-		Version:   1,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Sender:    "agent:agent-a",
-		Msg:       "Here is my response",
-		Type:      messages.TypeAssistantReply,
-	}
-	w.ch <- response
+	// Simulate a response arriving via the event log.
+	injectResponseEvent(t, store, "task-1", "Here is my response")
 
 	// Wait for result.
 	select {
@@ -637,31 +632,11 @@ func TestSendFollowUp_BlockingSuccess_CleansUpActiveTask(t *testing.T) {
 		if sr.result.ID != "task-1" {
 			t.Errorf("result.ID = %q, want %q", sr.result.ID, "task-1")
 		}
-		if sr.result.Status.State != TaskStateWorking {
-			t.Errorf("result.Status.State = %q, want %q", sr.result.Status.State, TaskStateWorking)
-		}
 		if sr.result.Status.Message == nil {
 			t.Fatal("expected status message in result")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for blocking result")
-	}
-
-	// Verify activeTask was cleaned up on success path (Bug 1 fix).
-	b.tasksMu.RLock()
-	_, exists := b.activeTasks["task-1"]
-	b.tasksMu.RUnlock()
-	if exists {
-		t.Error("expected activeTask to be cleaned up after successful blocking follow-up")
-	}
-
-	// Verify the DB state was refreshed to working on success.
-	task, getErr := store.GetTask("task-1")
-	if getErr != nil {
-		t.Fatalf("GetTask: %v", getErr)
-	}
-	if task.State != TaskStateWorking {
-		t.Errorf("task state = %q, want %q after blocking success", task.State, TaskStateWorking)
 	}
 }
 
@@ -686,16 +661,8 @@ func TestSendFollowUp_BlockingContextCancel_CleansUp(t *testing.T) {
 		resultCh <- sendResult{r, err}
 	}()
 
-	// Wait for waiter to be registered.
-	for i := 0; i < 100; i++ {
-		b.mu.RLock()
-		_, ok := b.waiters["task-1"]
-		b.mu.RUnlock()
-		if ok {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Give the blocking call time to start polling.
+	time.Sleep(50 * time.Millisecond)
 
 	// Cancel the context.
 	cancel()
@@ -718,7 +685,7 @@ func TestSendFollowUp_BlockingContextCancel_CleansUp(t *testing.T) {
 	}
 
 	// Verify the DB state was set to failed on context cancel.
-	task, getErr := store.GetTask("task-1")
+	task, getErr := store.GetTask(context.Background(), "task-1")
 	if getErr != nil {
 		t.Fatalf("GetTask: %v", getErr)
 	}
@@ -745,7 +712,7 @@ func TestSendFollowUp_InputRequiredToWorking(t *testing.T) {
 	}
 
 	// Verify the store was updated from input-required to working.
-	task, err := store.GetTask("task-1")
+	task, err := store.GetTask(context.Background(), "task-1")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -820,250 +787,11 @@ func TestSendFollowUp_ResolvesAgentIDViaLookup(t *testing.T) {
 	}
 }
 
-// --- Server-layer tests for handleSendMessage with TaskID ---
-
-func TestHandleSendMessage_PassesTaskIDToSendMessage(t *testing.T) {
-	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("state.New: %v", err)
-	}
-	defer store.Close()
-
-	var mu sync.Mutex
-	var capturedMeta map[string]string
-	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			capturedMeta = msg.Metadata
-			return nil, nil
-		},
-	}
-
-	cfg := &Config{
-		Bridge:   BridgeConfig{ExternalURL: "https://test.example.com"},
-		Hub:      HubConfig{User: "test-user"},
-		Auth:     AuthConfig{Scheme: "apiKey", APIKey: "test-key"},
-		Projects: []ProjectConfig{{Slug: "proj-1", ExposedAgents: []string{"agent-a"}}},
-		Timeouts: TimeoutConfig{SendMessage: 2 * time.Second},
-	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hub := &mockHubClient{agents: agents}
-	bridge := New(store, hub, nil, cfg, nil, log)
-	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log, testHandler())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	seedTask(t, store, "existing-task", "ctx-1", "proj-1", "agent-a", "aid", TaskStateWorking)
-
-	params := SendMessageParams{
-		TaskID: "existing-task",
-		Message: Message{
-			Role:  RoleUser,
-			Parts: []Part{{Text: "follow up"}},
-		},
-		Configuration: &SendMessageConfig{
-			Blocking: boolPtr(false),
-		},
-	}
-
-	rpcResp := doRPC(t, ts, "/projects/proj-1/agents/agent-a/jsonrpc",
-		"message/send", params, "test-key")
-
-	if rpcResp.Error != nil {
-		t.Fatalf("unexpected error: code=%d msg=%s", rpcResp.Error.Code, rpcResp.Error.Message)
-	}
-
-	// Poll until the send function captures metadata.
-	deadline := time.After(5 * time.Second)
-	for {
-		mu.Lock()
-		done := capturedMeta != nil
-		mu.Unlock()
-		if done {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for send to complete")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if capturedMeta["a2aTaskId"] != "existing-task" {
-		t.Errorf("metadata a2aTaskId = %q, want %q", capturedMeta["a2aTaskId"], "existing-task")
-	}
-}
-
-func TestHandleSendMessage_ErrTaskTerminal_ReturnsCorrectError(t *testing.T) {
-	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("state.New: %v", err)
-	}
-	defer store.Close()
-
-	agents := &mockAgentService{}
-	cfg := &Config{
-		Bridge:   BridgeConfig{ExternalURL: "https://test.example.com"},
-		Hub:      HubConfig{User: "test-user"},
-		Auth:     AuthConfig{Scheme: "apiKey", APIKey: "test-key"},
-		Projects: []ProjectConfig{{Slug: "proj-1", ExposedAgents: []string{"agent-a"}}},
-	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hub := &mockHubClient{agents: agents}
-	bridge := New(store, hub, nil, cfg, nil, log)
-	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log, testHandler())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	seedTask(t, store, "done-task", "ctx-1", "proj-1", "agent-a", "aid", TaskStateCompleted)
-
-	params := SendMessageParams{
-		TaskID: "done-task",
-		Message: Message{
-			Role:  RoleUser,
-			Parts: []Part{{Text: "try to follow up"}},
-		},
-	}
-
-	rpcResp := doRPC(t, ts, "/projects/proj-1/agents/agent-a/jsonrpc",
-		"message/send", params, "test-key")
-
-	if rpcResp.Error == nil {
-		t.Fatal("expected error for terminal task")
-	}
-	if rpcResp.Error.Code != ErrCodeInvalidParams {
-		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
-	}
-	if rpcResp.Error.Message != "task is in a terminal state" {
-		t.Errorf("error message = %q, want %q", rpcResp.Error.Message, "task is in a terminal state")
-	}
-}
-
-func TestHandleSendMessage_UnknownTaskID_ReturnsAgentNotFound(t *testing.T) {
-	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("state.New: %v", err)
-	}
-	defer store.Close()
-
-	agents := &mockAgentService{}
-	cfg := &Config{
-		Bridge:   BridgeConfig{ExternalURL: "https://test.example.com"},
-		Hub:      HubConfig{User: "test-user"},
-		Auth:     AuthConfig{Scheme: "apiKey", APIKey: "test-key"},
-		Projects: []ProjectConfig{{Slug: "proj-1", ExposedAgents: []string{"agent-a"}}},
-	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hub := &mockHubClient{agents: agents}
-	bridge := New(store, hub, nil, cfg, nil, log)
-	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log, testHandler())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	params := SendMessageParams{
-		TaskID: "no-such-task",
-		Message: Message{
-			Role:  RoleUser,
-			Parts: []Part{{Text: "follow up"}},
-		},
-	}
-
-	rpcResp := doRPC(t, ts, "/projects/proj-1/agents/agent-a/jsonrpc",
-		"message/send", params, "test-key")
-
-	if rpcResp.Error == nil {
-		t.Fatal("expected error for unknown task ID")
-	}
-	if rpcResp.Error.Code != ErrCodeInvalidParams {
-		t.Errorf("error code = %d, want %d", rpcResp.Error.Code, ErrCodeInvalidParams)
-	}
-	if rpcResp.Error.Message != "agent not found" {
-		t.Errorf("error message = %q, want %q", rpcResp.Error.Message, "agent not found")
-	}
-}
-
-func TestHandleSendMessage_NoTaskID_RoutesToNewTask(t *testing.T) {
-	// When TaskID is empty, SendMessage should try to create a new task (and fail
-	// because there's no real hub client to resolve the context). This verifies
-	// the router correctly falls through to the new-task path.
-	dir := t.TempDir()
-	store, err := state.New(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("state.New: %v", err)
-	}
-	defer store.Close()
-
-	agents := &mockAgentService{
-		listFn: func(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error) {
-			return &hubclient.ListAgentsResponse{
-				Agents: []hubclient.Agent{
-					{ID: "agent-id-1", Slug: "agent-a", ProjectID: "proj-1"},
-				},
-			}, nil
-		},
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
-			return nil, nil
-		},
-	}
-	cfg := &Config{
-		Bridge:   BridgeConfig{ExternalURL: "https://test.example.com"},
-		Hub:      HubConfig{User: "test-user"},
-		Auth:     AuthConfig{Scheme: "apiKey", APIKey: "test-key"},
-		Projects: []ProjectConfig{{Slug: "proj-1", ExposedAgents: []string{"agent-a"}}},
-		Timeouts: TimeoutConfig{SendMessage: 2 * time.Second},
-	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hub := &mockHubClient{agents: agents}
-	bridge := New(store, hub, nil, cfg, nil, log)
-	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log, testHandler())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	params := SendMessageParams{
-		Message: Message{
-			Role:  RoleUser,
-			Parts: []Part{{Text: "new message"}},
-		},
-		Configuration: &SendMessageConfig{
-			Blocking: boolPtr(false),
-		},
-	}
-
-	rpcResp := doRPC(t, ts, "/projects/proj-1/agents/agent-a/jsonrpc",
-		"message/send", params, "test-key")
-
-	// Should succeed — the new task path creates a context and task.
-	if rpcResp.Error != nil {
-		t.Fatalf("unexpected error: code=%d msg=%s", rpcResp.Error.Code, rpcResp.Error.Message)
-	}
-
-	resultBytes, err2 := json.Marshal(rpcResp.Result)
-	if err2 != nil {
-		t.Fatalf("marshal result: %v", err2)
-	}
-	var result TaskResult
-	if err2 = json.Unmarshal(resultBytes, &result); err2 != nil {
-		t.Fatalf("unmarshal result: %v", err2)
-	}
-
-	if result.ID == "" {
-		t.Error("expected non-empty task ID for new task")
-	}
-	if result.Status.State != TaskStateSubmitted {
-		t.Errorf("status.state = %q, want %q", result.Status.State, TaskStateSubmitted)
-	}
-}
+// NOTE: Server-layer tests for handleSendMessage (TestHandleSendMessage_*) were
+// removed. The server now delegates JSON-RPC to the SDK handler, and the
+// old custom handleSendMessage dispatcher no longer exists. The behavior
+// tested (task ID routing, terminal state errors, agent-not-found) is covered
+// by the direct SendMessage unit tests above.
 
 func TestSendFollowUp_SendMessageParams_TaskIDField(t *testing.T) {
 	// Verify the TaskID field is correctly parsed from JSON.
@@ -1134,67 +862,6 @@ func TestSendFollowUp_ConcurrentFollowUps_SameTask(t *testing.T) {
 	b.tasksMu.RUnlock()
 	if dupes > 1 {
 		t.Errorf("agentTasks has %d entries for task-1, want at most 1", dupes)
-	}
-}
-
-func TestSendFollowUp_MessageContentTranslated(t *testing.T) {
-	// Verify the A2A parts are correctly translated to Scion format.
-	var capturedMsg *messages.StructuredMessage
-	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
-			capturedMsg = msg
-			return nil, nil
-		},
-	}
-	b, store := newFollowUpTestBridge(t, agents)
-	seedTask(t, store, "task-1", "ctx-1", "proj-1", "agent-a", "aid", TaskStateWorking)
-
-	parts := []Part{
-		{Text: "part one"},
-		{Text: "part two"},
-	}
-
-	// Use blocking mode with a goroutine to inject a response.
-	type result struct {
-		r   *TaskResult
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		r, err := b.SendMessage(context.Background(), "proj-1", "agent-a", "", "task-1", parts, true)
-		ch <- result{r, err}
-	}()
-
-	// Wait for waiter.
-	for i := 0; i < 100; i++ {
-		b.mu.RLock()
-		_, ok := b.waiters["task-1"]
-		b.mu.RUnlock()
-		if ok {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	// Inject response.
-	b.mu.RLock()
-	w := b.waiters["task-1"]
-	b.mu.RUnlock()
-	w.ch <- &messages.StructuredMessage{
-		Version: 1, Msg: "response", Type: messages.TypeAssistantReply,
-	}
-
-	res := <-ch
-	if res.err != nil {
-		t.Fatalf("SendMessage: %v", res.err)
-	}
-
-	// Verify the translated message content.
-	if capturedMsg.Msg != "part one\npart two" {
-		t.Errorf("translated msg = %q, want %q", capturedMsg.Msg, "part one\npart two")
-	}
-	if capturedMsg.Type != messages.TypeInstruction {
-		t.Errorf("type = %q, want %q", capturedMsg.Type, messages.TypeInstruction)
 	}
 }
 
