@@ -66,7 +66,7 @@ scion hub env set --broker=my-gpu-node CUDA_VISIBLE_DEVICES=0
 
 ## Managing Secrets
 
-Secrets are write-only. Once set, their values cannot be retrieved via the CLI or API; they are only decrypted and injected into the agent container at runtime.
+Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `sciontool` utility.
 
 ### Setting Secrets
 Secrets can be set manually via the CLI or Web Dashboard, or gathered interactively during agent creation.
@@ -121,6 +121,55 @@ scion hub secret set \
 ```
 
 Once set, every agent that starts will have the credential file mounted at `~/.scion/telemetry-gcp-credentials.json` and GCP-native telemetry will be enabled automatically — no additional environment variable configuration required. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for the full setup guide.
+
+---
+
+### Agent Runtime Secret Retrieval
+
+While environment and file-based injection deliver secrets at agent startup, Scion also supports **dynamic runtime secret retrieval** from inside the agent container. This enables harnesses or scripts to request project-scoped secrets programmatically as-needed, reducing initial environment exposure.
+
+This runtime retrieval is accessible either via the `sciontool` helper utility or directly through the Hub API.
+
+#### Using `sciontool`
+From inside an agent container, use the `sciontool secret` command suite:
+
+*   **List Available Secrets**: Lists metadata (keys, types, and injection targets) for all secrets in the agent's project. Sensitive values are omitted.
+    ```bash
+    sciontool secret list
+    ```
+    *Output:*
+    ```text
+    KEY              TYPE         TARGET
+    ---              ----         ------
+    MY_API_KEY       environment  MY_API_KEY
+    CLAUDE_AUTH      file         ~/.claude/.credentials.json
+    ```
+
+*   **Retrieve a Secret Value**: Decodes and outputs the raw bytes of a specific secret to stdout (ideal for piping or scripting).
+    ```bash
+    sciontool secret get MY_API_KEY
+    ```
+    *Example script usage:*
+    ```bash
+    export API_KEY=$(sciontool secret get MY_API_KEY)
+    ```
+
+*   **Set a Project Secret**: You can also write/update secrets from inside the container to persist credentials discovered or generated at runtime:
+    ```bash
+    sciontool secret set NEW_TOKEN "secret-value"
+    ```
+
+#### Using the Hub API Directly
+Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
+
+*   **`GET /api/v1/agents/{agentID}/secrets`**: Lists available secret metadata in the agent's project.
+*   **`GET /api/v1/agents/{agentID}/secrets/{key}`**: Retrieves a single secret's metadata and its base64-encoded value.
+*   **`PUT /api/v1/agents/{agentID}/secrets/{key}`**: Stores or updates a secret.
+
+#### Security & Audit Logging
+*   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.
+*   **Authorization**: Agents are strictly bounded to their own project's secrets. They cannot access secrets in other projects, user-scoped secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
+*   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Successful and failed retrieval attempts log an audit event (`agent_secret_read`) identifying the calling agent, requested key, and status.
 
 ---
 

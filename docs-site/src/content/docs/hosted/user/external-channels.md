@@ -83,6 +83,7 @@ All bot interactions are handled via `/scion` slash commands:
 | `/scion logs <agent>` | Stream/view recent logs for an agent. |
 | `/scion default [agent]` | Set or clear the default agent for the channel or thread (so unaddressed text routes automatically). |
 | `/scion send <path>` | Send a file from your workspace by path or search for files. Supports container-to-host path translation. |
+| `/scion secret` | Subcommand group for managing project secrets (list, get, set, delete) directly from Discord (see below). |
 | `/scion thread <title> [template]` | Create a Discord thread and a Scion agent in one atomic step (see below). |
 | `/scion register` | Link your Discord account to your Scion Hub identity. |
 | `/scion unregister` | Unlink your Discord account from Scion Hub. |
@@ -106,6 +107,21 @@ The `/scion thread <title> [template]` command allows you to spin up a new conve
 
 - **Multi-Server (Multi-Guild) Support:** A single bot instance can serve multiple servers simultaneously. Admins can configure `guild_ids` for instant command registration on listed servers.
 - **Outage Protection:** Automatically deactivates channel links when the bot is removed from a server, while protecting active links against temporary Discord API outages.
+
+#### Managing Project Secrets via Discord (`/scion secret`)
+
+You can view and modify project-scoped secrets directly from a linked Discord channel or thread using the `/scion secret` subcommand group. To protect sensitive credentials, secret values are never typed or printed in public chat rooms; they are input securely via Discord pop-up modals, and all responses are ephemeral (visible only to you).
+
+##### Requirements
+*   **Channel Link**: The Discord channel or thread must be linked to a project (via `/scion setup`).
+*   **Account Association**: Your Discord account must be registered with your Scion Hub identity (via `/scion register`). Write operations use secure `X-Scion-On-Behalf-Of` delegation.
+
+##### Subcommands
+*   **`/scion secret list`**: Lists the keys, types, and injection targets of all secrets in the linked project. Secret values themselves are never shown.
+*   **`/scion secret set <key>`**: Initiates setting a secret. After specifying the key name, Discord displays an interactive pop-up modal. Enter your sensitive secret value securely inside this modal and submit. The value is securely sent to the Hub over an HMAC-signed API call and stored in your project scope.
+    *   *Key Restriction*: Secret keys must not contain spaces, tabs, newlines, or colons (`:`).
+*   **`/scion secret get <key>`**: Displays the metadata (key, type, target) of a specific secret to verify its existence. The secret value itself is never shown.
+*   **`/scion secret delete <key>`**: Permanently deletes a secret from the linked project.
 
 #### File Transfers & Attachments
 
