@@ -119,7 +119,7 @@ You can view and modify project-scoped secrets directly from a linked Discord ch
 ##### Subcommands
 *   **`/scion secret list`**: Lists the keys, types, and injection targets of all secrets in the linked project. Secret values themselves are never shown.
 *   **`/scion secret set <key>`**: Initiates setting a secret. After specifying the key name, Discord displays an interactive pop-up modal. Enter your sensitive secret value securely inside this modal and submit. The value is securely sent to the Hub over an HMAC-signed API call and stored in your project scope.
-    *   *Key Restriction*: Secret keys must not contain spaces, tabs, newlines, or colons (`:`).
+    *   *Key Restriction*: Secret keys must not contain spaces, tabs, newlines, carriage returns, equals signs (=), or colons (:).
 *   **`/scion secret get <key>`**: Displays the metadata (key, type, target) of a specific secret to verify its existence. The secret value itself is never shown.
 *   **`/scion secret delete <key>`**: Permanently deletes a secret from the linked project.
 
