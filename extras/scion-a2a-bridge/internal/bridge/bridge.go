@@ -518,17 +518,15 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 
 	ev, err := b.waitForTaskEvent(ctx, taskID, timeout)
 	if err != nil {
-		if errors.Is(err, ErrTimeout) {
-			if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
-				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
-			}
-			b.unregisterActiveTask(taskID, aKey)
-			return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
-		}
-		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
-			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		if _, updateErr := b.store.UpdateTaskState(cleanupCtx, taskID, TaskStateFailed); updateErr != nil {
+			b.log.Error("failed to update task state", "error", updateErr, "task_id", taskID)
 		}
 		b.unregisterActiveTask(taskID, aKey)
+		if errors.Is(err, ErrTimeout) {
+			return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
+		}
 		return nil, err
 	}
 
