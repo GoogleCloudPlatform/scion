@@ -380,6 +380,9 @@ type GlobalConfig struct {
 	// OIDC Identity Provider settings
 	OIDC OIDCProviderConfig `json:"oidc,omitempty" yaml:"oidc,omitempty" koanf:"oidc"`
 
+	// Federation settings for hub-hub authentication
+	Federation FederationConfig `json:"federation,omitempty" yaml:"federation,omitempty" koanf:"federation"`
+
 	// SlowRequestThreshold is the duration after which an HTTP request is
 	// logged as slow. Default: 10s when unset/zero.
 	SlowRequestThreshold time.Duration `json:"slowRequestThreshold,omitempty" yaml:"slowRequestThreshold,omitempty" koanf:"slowRequestThreshold"`
