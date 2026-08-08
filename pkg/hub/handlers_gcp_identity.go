@@ -947,14 +947,18 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 
 	// 2. Grant Hub SA tokenCreator on the minted SA.
 	hubMember := "serviceAccount:" + hubEmail
-	if err := s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, hubMember, "roles/iam.serviceAccountTokenCreator"); err != nil {
+	if err := retryIAMGrant(r.Context(), func() error {
+		return s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, hubMember, "roles/iam.serviceAccountTokenCreator")
+	}); err != nil {
 		cleanupAndFail("tokenCreator grant on minted SA", err)
 		return
 	}
 
 	// 3. Grant the minted SA roles/aiplatform.user at the project level.
 	saMember := "serviceAccount:" + saEmail
-	if err := s.gcpIAMAdmin.AddProjectIAMBinding(r.Context(), hubGCPProjectID, saMember, RoleAIPlatformUser); err != nil {
+	if err := retryIAMGrant(r.Context(), func() error {
+		return s.gcpIAMAdmin.AddProjectIAMBinding(r.Context(), hubGCPProjectID, saMember, RoleAIPlatformUser)
+	}); err != nil {
 		cleanupAndFail("project-level aiplatform.user grant for minted SA", err)
 		return
 	}
@@ -962,7 +966,9 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 	// 4. Grant requester roles/iam.serviceAccountUser on the minted SA.
 	// This lets the requester assign the minted SA under enforce mode.
 	requesterMember := "user:" + user.Email()
-	if err := s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, requesterMember, RoleSAUser); err != nil {
+	if err := retryIAMGrant(r.Context(), func() error {
+		return s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, requesterMember, RoleSAUser)
+	}); err != nil {
 		cleanupAndFail("serviceAccountUser grant for requester on minted SA", err)
 		return
 	}

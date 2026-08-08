@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -206,6 +207,50 @@ func (c *IAMAdminClient) addProjectIAMBindingOnce(ctx context.Context, projectID
 		return fmt.Errorf("setting project IAM policy for %s: %w", projectID, err)
 	}
 	return nil
+}
+
+// retryIAMGrant retries an IAM operation with exponential backoff to handle
+// GCP eventual consistency after SA creation. Retries only on "does not exist"
+// errors (400 badRequest), which indicate the SA has not propagated yet.
+func retryIAMGrant(ctx context.Context, op func() error) error {
+	delays := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+	var lastErr error
+	// Try once without delay first.
+	if err := op(); err == nil {
+		return nil
+	} else {
+		lastErr = err
+	}
+	for _, delay := range delays {
+		// Only retry on "does not exist" / badRequest errors.
+		if !isEventualConsistencyError(lastErr) {
+			return lastErr
+		}
+		slog.Warn("IAM grant hit eventual consistency delay, retrying",
+			"delay", delay, "error", lastErr)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if err := op(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// isEventualConsistencyError checks if the error is a GCP eventual consistency
+// error (400 badRequest with "does not exist" message).
+func isEventualConsistencyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "does not exist") &&
+		strings.Contains(errStr, "400")
 }
 
 // ResolveGCPProjectID returns the project ID from config or auto-detects it

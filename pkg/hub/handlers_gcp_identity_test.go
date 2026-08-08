@@ -796,6 +796,48 @@ func TestMintGCPServiceAccount_IAMGrantFailure_DoesNotCountAgainstQuota(t *testi
 	require.Equal(t, http.StatusCreated, rec.Code, "retry should succeed: %s", rec.Body.String())
 }
 
+func TestMintGCPServiceAccount_RetryOnEventualConsistency(t *testing.T) {
+	srv, _, mock, _ := testServerWithMintingAndPT(t)
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	// SetIAMPolicy fails on the first call with a "does not exist" error
+	// (simulating GCP eventual consistency after SA creation) and succeeds
+	// on the retry.
+	mock.policyErr = fmt.Errorf("googleapi: Error 400: Service account does not exist., badRequest")
+	mock.policyErrOnCall = 1
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, "mint should succeed after retry: %s", rec.Body.String())
+
+	// The first SetIAMPolicy call failed, the retry (call #2) succeeded,
+	// then the requester grant (call #3) succeeded.
+	assert.GreaterOrEqual(t, len(mock.iamPolicies), 3,
+		"expected at least 3 SetIAMPolicy calls (1 failed + 1 retry + 1 requester grant)")
+}
+
+func TestMintGCPServiceAccount_NoRetryOnNonConsistencyError(t *testing.T) {
+	srv, _, mock, _ := testServerWithMintingAndPT(t)
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	// SetIAMPolicy fails with a non-retryable error (no "does not exist").
+	mock.policyErr = fmt.Errorf("googleapi: Error 403: permission denied")
+	mock.policyErrOnCall = 1
+
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+	require.Equal(t, http.StatusBadGateway, rec.Code, "mint should fail immediately for non-retryable error")
+
+	// Only one SetIAMPolicy call should have been made — no retry.
+	assert.Equal(t, 1, len(mock.iamPolicies),
+		"expected exactly 1 SetIAMPolicy call (no retry for non-consistency error)")
+
+	// SA should have been cleaned up.
+	assert.Len(t, mock.deletedSAs, 1, "orphaned SA should be cleaned up")
+}
+
 // ============================================================================
 // GCP Service Account Authorization Tests
 // ============================================================================
