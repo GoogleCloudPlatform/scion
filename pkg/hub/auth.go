@@ -381,6 +381,10 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/github-app/setup": // GitHub App post-installation callback (browser redirect)
 		return true
+	case "/.well-known/openid-configuration": // OIDC discovery document (public metadata)
+		return true
+	case "/.well-known/jwks.json": // OIDC JSON Web Key Set (public keys)
+		return true
 	}
 	return false
 }

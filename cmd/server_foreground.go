@@ -1466,6 +1466,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		// new host that changed the HubID). Operators enabling this must supply a
 		// session secret or pre-provision the signing keys.
 		RequireStableSigningKey: os.Getenv("SCION_REQUIRE_STABLE_SIGNING_KEY") == "true",
+		OIDCConfig:              cfg.OIDC,
 	}
 
 	// In hosted mode every replica must share the same session secret for

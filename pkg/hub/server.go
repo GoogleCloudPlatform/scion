@@ -3143,6 +3143,12 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/system/registry", s.requireWorkstation(http.HandlerFunc(s.handleSystemRegistry)))
 	s.mux.Handle("/api/v1/system/workstation-settings", s.requireWorkstation(http.HandlerFunc(s.handleWorkstationSettings)))
 
+	// OIDC Identity Provider endpoints (unauthenticated — public metadata)
+	if s.oidcKeyManager != nil {
+		s.mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCDiscovery)
+		s.mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
+	}
+
 	// Workstation-only filesystem endpoints
 	s.mux.Handle("/api/v1/system/fs/list", s.requireWorkstation(http.HandlerFunc(s.handleFSList)))
 	s.mux.Handle("/api/v1/system/fs/mkdir", s.requireWorkstation(http.HandlerFunc(s.handleFSMkdir)))
