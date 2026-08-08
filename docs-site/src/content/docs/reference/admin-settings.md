@@ -164,7 +164,7 @@ To streamline management of complex environments, the **General** settings tab i
 
 1. **General Card**: Houses central Hub identity, registration endpoints, and core server configurations.
 2. **Agent Defaults Card** (with dedicated sub-tabs):
-   - Configures default resource constraints (`max_turns`, `max_duration`, limits).
+   - Configures default resource constraints (`max_turns`, `max_duration`, limits). These fields can be cleared to blank in the UI, which persists them as `null` in the Hub settings database instead of preserving their previous values, allowing administrators to remove default constraints entirely.
    - Introduces **Default Model** (`default_model`) and **Default Thinking Level** (`default_thinking_level`) fields directly into the agent default pipeline.
    - Houses the **Telemetry Toggle**, which has been moved to this card to keep telemetry configuration closely aligned with operational defaults.
 3. **Project Default Settings Card**: Configures platform-level default annotations and behaviors for newly created projects.
