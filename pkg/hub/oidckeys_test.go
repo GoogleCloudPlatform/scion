@@ -23,7 +23,6 @@ import (
 	"encoding/pem"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4"
@@ -337,9 +336,6 @@ func TestOIDCKeyManager_JWKS(t *testing.T) {
 		Store:     s,
 		HubID:     "test-hub",
 		IssuerURL: "https://hub.example.com",
-		OIDCConfig: config.OIDCProviderConfig{
-			Enabled: true,
-		},
 	})
 	require.NoError(t, err)
 
@@ -423,9 +419,6 @@ func TestOIDCKeyManager_LoadFromStore(t *testing.T) {
 		Store:     s,
 		HubID:     hubID,
 		IssuerURL: "https://hub.example.com",
-		OIDCConfig: config.OIDCProviderConfig{
-			Enabled: true,
-		},
 	})
 	require.NoError(t, err)
 	kid1 := mgr1.JWKS().Keys[0].KeyID
@@ -435,9 +428,6 @@ func TestOIDCKeyManager_LoadFromStore(t *testing.T) {
 		Store:     s,
 		HubID:     hubID,
 		IssuerURL: "https://hub.example.com",
-		OIDCConfig: config.OIDCProviderConfig{
-			Enabled: true,
-		},
 	})
 	require.NoError(t, err)
 	kid2 := mgr2.JWKS().Keys[0].KeyID
@@ -470,9 +460,6 @@ func TestOIDCKeyManager_LoadFromBackend(t *testing.T) {
 		Backend:   backend,
 		HubID:     hubID,
 		IssuerURL: "https://hub.example.com",
-		OIDCConfig: config.OIDCProviderConfig{
-			Enabled: true,
-		},
 	})
 	require.NoError(t, err)
 	kid1 := mgr1.JWKS().Keys[0].KeyID
@@ -489,9 +476,6 @@ func TestOIDCKeyManager_LoadFromBackend(t *testing.T) {
 		Backend:   backend,
 		HubID:     hubID,
 		IssuerURL: "https://hub.example.com",
-		OIDCConfig: config.OIDCProviderConfig{
-			Enabled: true,
-		},
 	})
 	require.NoError(t, err)
 	kid2 := mgr2.JWKS().Keys[0].KeyID
@@ -525,9 +509,6 @@ func TestOIDCKeyManager_GenerateWhenNoKey(t *testing.T) {
 				Backend:   tc.backend,
 				HubID:     "test-hub-gen-" + tc.name,
 				IssuerURL: "https://hub.example.com",
-				OIDCConfig: config.OIDCProviderConfig{
-					Enabled: true,
-				},
 			})
 			require.NoError(t, err)
 			require.NotNil(t, mgr)
@@ -576,9 +557,6 @@ func TestOIDCKeyManager_RequireStableSigningKey(t *testing.T) {
 				HubID:                   "test-hub-require-stable-" + tc.name,
 				IssuerURL:               "https://hub.example.com",
 				RequireStableSigningKey: true,
-				OIDCConfig: config.OIDCProviderConfig{
-					Enabled: true,
-				},
 			})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
@@ -596,9 +574,6 @@ func TestOIDCKeyManager_RequireStableSigningKey(t *testing.T) {
 			Backend:   be,
 			HubID:     hubID,
 			IssuerURL: "https://hub.example.com",
-			OIDCConfig: config.OIDCProviderConfig{
-				Enabled: true,
-			},
 		})
 		require.NoError(t, err)
 		kid1 := mgr1.JWKS().Keys[0].KeyID
@@ -610,9 +585,6 @@ func TestOIDCKeyManager_RequireStableSigningKey(t *testing.T) {
 			HubID:                   hubID,
 			IssuerURL:               "https://hub.example.com",
 			RequireStableSigningKey: true,
-			OIDCConfig: config.OIDCProviderConfig{
-				Enabled: true,
-			},
 		})
 		require.NoError(t, err)
 		kid2 := mgr2.JWKS().Keys[0].KeyID
@@ -638,9 +610,6 @@ func TestOIDCKeyManager_IssuerURL(t *testing.T) {
 				Store:     s,
 				HubID:     "test-hub-issuer-" + tc.name,
 				IssuerURL: tc.issuerURL,
-				OIDCConfig: config.OIDCProviderConfig{
-					Enabled: true,
-				},
 			})
 			require.NoError(t, err)
 			assert.Equal(t, tc.issuerURL, mgr.IssuerURL())

@@ -324,10 +324,6 @@ type OIDCProviderConfig struct {
 	Enabled bool `json:"enabled" yaml:"enabled" koanf:"enabled"`
 	// TokenLifetime is the validity duration of issued identity tokens. Default: 15m.
 	TokenLifetime time.Duration `json:"token_lifetime,omitempty" yaml:"token_lifetime,omitempty" koanf:"token_lifetime"`
-	// SigningKeySecret is an optional pre-provisioned PEM-encoded RSA private key
-	// for signing identity tokens. When empty, a key is generated and stored
-	// via the secret backend / store on first boot.
-	SigningKeySecret string `json:"signing_key_secret,omitempty" yaml:"signing_key_secret,omitempty" koanf:"signing_key_secret"`
 }
 
 // GlobalConfig holds the complete server configuration.

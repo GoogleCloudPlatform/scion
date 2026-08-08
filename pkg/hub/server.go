@@ -1014,7 +1014,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			Backend:                 srv.secretBackend,
 			HubID:                   srv.hubID,
 			IssuerURL:               oidcIssuerURL,
-			OIDCConfig:              cfg.OIDCConfig,
 			RequireStableSigningKey: cfg.RequireStableSigningKey,
 			Log:                     logging.Subsystem("hub.oidc"),
 		})

@@ -27,7 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4"
@@ -75,7 +74,6 @@ type OIDCKeyManagerConfig struct {
 	Backend                secret.SecretBackend
 	HubID                  string
 	IssuerURL              string
-	OIDCConfig             config.OIDCProviderConfig
 	RequireStableSigningKey bool
 	Log                    *slog.Logger
 }
@@ -148,7 +146,8 @@ func (m *OIDCKeyManager) Signer() jose.Signer {
 }
 
 // JWKS returns the public key set as a jose.JSONWebKeySet for the
-// /.well-known/jwks.json endpoint. Only active keys are included.
+// /.well-known/jwks.json endpoint. All keys (active and rotated) are
+// included to support key rotation overlap.
 // Thread-safe for concurrent reads.
 func (m *OIDCKeyManager) JWKS() jose.JSONWebKeySet {
 	m.mu.RLock()
@@ -226,10 +225,10 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 	// 3. No existing key found — generate or fail
 	if cfg.RequireStableSigningKey {
 		return nil, fmt.Errorf("refusing to generate a new OIDC signing key: RequireStableSigningKey is set and no existing key was found; "+
-			"pre-provision the key via signing_key_secret config or the secret backend")
+			"pre-provision the key via the secret backend or store")
 	}
 
-	m.log.Info("No existing OIDC signing key found, generating new RSA-2048 key pair", "key", keyName)
+	m.log.Warn("Generated new OIDC signing key; all previously issued identity tokens are invalid", "key", keyName)
 	privKey, err := generateRSAKeyPair()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate OIDC RSA key pair: %w", err)
