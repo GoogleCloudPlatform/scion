@@ -403,7 +403,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 					if !config.IsHubManagedAgent() {
 						msg += "\nOr use local-only mode: scion --no-hub <command>"
 					}
-					return nil, fmt.Errorf("%s", msg)
+					return nil, errors.New(msg)
 				}
 			}
 		}
@@ -495,7 +495,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			if !config.IsHubManagedAgent() {
 				msg += "\nOr use local-only mode: scion --no-hub <command>"
 			}
-			return nil, fmt.Errorf("%s", msg)
+			return nil, errors.New(msg)
 		}
 	} else {
 		// Already in sync — update the watermark and synced agents to keep current

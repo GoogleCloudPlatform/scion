@@ -365,7 +365,7 @@ func GetProjectID(hubCtx *HubContext) (string, error) {
 		if !config.IsHubManagedAgent() {
 			msg += ", or use --no-hub for local-only mode"
 		}
-		return "", fmt.Errorf("%s", msg)
+		return "", errors.New(msg)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
