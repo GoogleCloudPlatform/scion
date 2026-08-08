@@ -159,3 +159,25 @@ func TestResolveEffectiveRole_LatticeMin(t *testing.T) {
 	// Three-way min: member + full request + none project = none
 	assert.Equal(t, AgentRoleNone, ResolveEffectiveRole(AgentRoleFull, "member", AgentRoleNone))
 }
+
+func TestResolveEffectiveRole_InvalidRequestedRole(t *testing.T) {
+	// An unknown/invalid requested role gets baseline-level ordinal (2) via the
+	// default case in roleOrdinal. minRole preserves the original role value, so
+	// the returned AgentRole string is the invalid one — but ScopesForRole will
+	// map it to baseline scopes via its own default case.
+
+	// Admin + invalid request + full project: invalid ordinal (2) < full (3),
+	// so the invalid role is returned. Its scopes resolve to baseline.
+	resolved := ResolveEffectiveRole(AgentRole("superuser"), "admin", AgentRoleFull)
+	assert.Equal(t, AgentRole("superuser"), resolved)
+	assert.Equal(t, ScopesForRole(AgentRoleBaseline), ScopesForRole(resolved))
+
+	// Member + invalid request + full project: member ceiling is baseline (2),
+	// invalid is also ordinal 2; the first encountered (invalid) wins the tie.
+	resolved = ResolveEffectiveRole(AgentRole("superuser"), "member", AgentRoleFull)
+	assert.Equal(t, ScopesForRole(AgentRoleBaseline), ScopesForRole(resolved))
+
+	// Admin + invalid request + readonly project: readonly (1) < invalid (2),
+	// so readonly wins — project cap takes effect.
+	assert.Equal(t, AgentRoleReadOnly, ResolveEffectiveRole(AgentRole("superuser"), "admin", AgentRoleReadOnly))
+}
