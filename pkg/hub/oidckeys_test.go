@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -662,6 +663,307 @@ func TestEncodePEMPrivateKey_PKCS8Format(t *testing.T) {
 	rsaKey, ok := parsed.(*rsa.PrivateKey)
 	require.True(t, ok, "Parsed key should be RSA")
 	assert.Equal(t, key.D.Bytes(), rsaKey.D.Bytes())
+}
+
+// --- Key Rotation and Cleanup Tests ---
+
+func TestOIDCKeyManager_RotateKey(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     "test-hub-rotate",
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	originalKID := mgr.JWKS().Keys[0].KeyID
+	originalSigner := mgr.Signer()
+
+	// Sign a token with the original key before rotation.
+	preRotationClaims := map[string]interface{}{
+		"sub": "agent-pre-rotate",
+		"iss": "https://hub.example.com",
+	}
+	preRotationToken, err := jwt.Signed(originalSigner).Claims(preRotationClaims).Serialize()
+	require.NoError(t, err)
+
+	// Rotate.
+	err = mgr.RotateKey(ctx)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name  string
+		check func(t *testing.T)
+	}{
+		{
+			name: "rotation produces new kid",
+			check: func(t *testing.T) {
+				jwks := mgr.JWKS()
+				require.NotEmpty(t, jwks.Keys)
+				// Active key (first in JWKS) should have a different kid.
+				newKID := jwks.Keys[0].KeyID
+				assert.NotEqual(t, originalKID, newKID,
+					"After rotation, active key should have a different kid")
+			},
+		},
+		{
+			name: "old key remains in JWKS",
+			check: func(t *testing.T) {
+				jwks := mgr.JWKS()
+				require.Len(t, jwks.Keys, 2, "JWKS should contain both old and new keys")
+				kids := []string{jwks.Keys[0].KeyID, jwks.Keys[1].KeyID}
+				assert.Contains(t, kids, originalKID, "Old key should still be in JWKS")
+			},
+		},
+		{
+			name: "signing uses new key",
+			check: func(t *testing.T) {
+				newClaims := map[string]interface{}{
+					"sub": "agent-post-rotate",
+					"iss": "https://hub.example.com",
+				}
+				token, signErr := jwt.Signed(mgr.Signer()).Claims(newClaims).Serialize()
+				require.NoError(t, signErr)
+
+				parsed, parseErr := jwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.RS256})
+				require.NoError(t, parseErr)
+
+				// The token's kid header should match the new active key.
+				jwks := mgr.JWKS()
+				newKID := jwks.Keys[0].KeyID
+				assert.NotEqual(t, originalKID, newKID)
+
+				// Token should verify with the new key.
+				var result map[string]interface{}
+				verifyErr := parsed.Claims(jwks.Keys[0].Key, &result)
+				require.NoError(t, verifyErr)
+				assert.Equal(t, "agent-post-rotate", result["sub"])
+			},
+		},
+		{
+			name: "old tokens still verifiable via JWKS",
+			check: func(t *testing.T) {
+				parsed, parseErr := jwt.ParseSigned(preRotationToken, []jose.SignatureAlgorithm{jose.RS256})
+				require.NoError(t, parseErr)
+
+				// Find the old key in JWKS.
+				jwks := mgr.JWKS()
+				var oldKey interface{}
+				for _, k := range jwks.Keys {
+					if k.KeyID == originalKID {
+						oldKey = k.Key
+						break
+					}
+				}
+				require.NotNil(t, oldKey, "Old key must still be in JWKS")
+
+				var result map[string]interface{}
+				verifyErr := parsed.Claims(oldKey, &result)
+				require.NoError(t, verifyErr, "Token signed before rotation should still verify with old key from JWKS")
+				assert.Equal(t, "agent-pre-rotate", result["sub"])
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.check(t)
+		})
+	}
+}
+
+func TestOIDCKeyManager_CleanupExpiredKeys(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     "test-hub-cleanup",
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	// Rotate to get a second key.
+	err = mgr.RotateKey(ctx)
+	require.NoError(t, err)
+	require.Len(t, mgr.JWKS().Keys, 2, "Should have 2 keys after rotation")
+
+	tests := []struct {
+		name  string
+		setup func()
+		check func(t *testing.T)
+	}{
+		{
+			name: "keeps recent inactive keys",
+			setup: func() {
+				// Inactive key is recent (created moments ago) — should be kept.
+			},
+			check: func(t *testing.T) {
+				mgr.CleanupExpiredKeys()
+				jwks := mgr.JWKS()
+				assert.Len(t, jwks.Keys, 2, "Recent inactive key should not be removed")
+			},
+		},
+		{
+			name: "removes old inactive keys",
+			setup: func() {
+				// Artificially age the inactive key past the overlap window.
+				mgr.mu.Lock()
+				for _, k := range mgr.allKeys {
+					if !k.Active {
+						k.CreatedAt = time.Now().Add(-25 * time.Hour) // 25h ago
+					}
+				}
+				mgr.mu.Unlock()
+			},
+			check: func(t *testing.T) {
+				mgr.CleanupExpiredKeys()
+				jwks := mgr.JWKS()
+				assert.Len(t, jwks.Keys, 1, "Old inactive key should be removed")
+				assert.True(t, jwks.Keys[0].KeyID != "", "Remaining key should have a kid")
+			},
+		},
+		{
+			name: "never removes active key regardless of age",
+			setup: func() {
+				// Age the active key past the overlap window.
+				mgr.mu.Lock()
+				for _, k := range mgr.allKeys {
+					if k.Active {
+						k.CreatedAt = time.Now().Add(-48 * time.Hour) // 48h ago
+					}
+				}
+				mgr.mu.Unlock()
+			},
+			check: func(t *testing.T) {
+				mgr.CleanupExpiredKeys()
+				jwks := mgr.JWKS()
+				assert.Len(t, jwks.Keys, 1, "Active key should never be removed")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			tc.check(t)
+		})
+	}
+}
+
+func TestOIDCKeyManager_RotateKey_MultipleRotations(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     "test-hub-multi-rotate",
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	// Rotate three times.
+	kids := make([]string, 0, 4)
+	kids = append(kids, mgr.JWKS().Keys[0].KeyID)
+
+	for i := 0; i < 3; i++ {
+		err = mgr.RotateKey(ctx)
+		require.NoError(t, err)
+		jwks := mgr.JWKS()
+		kids = append(kids, jwks.Keys[0].KeyID)
+	}
+
+	t.Run("all kids are unique", func(t *testing.T) {
+		seen := make(map[string]bool)
+		for _, kid := range kids {
+			assert.False(t, seen[kid], "kid %s should be unique", kid)
+			seen[kid] = true
+		}
+	})
+
+	t.Run("JWKS contains all keys", func(t *testing.T) {
+		jwks := mgr.JWKS()
+		assert.Len(t, jwks.Keys, 4, "JWKS should contain original + 3 rotated keys")
+	})
+
+	t.Run("only one key is active", func(t *testing.T) {
+		mgr.mu.RLock()
+		defer mgr.mu.RUnlock()
+		activeCount := 0
+		for _, k := range mgr.allKeys {
+			if k.Active {
+				activeCount++
+			}
+		}
+		assert.Equal(t, 1, activeCount, "Exactly one key should be active")
+	})
+}
+
+func TestOIDCKeyManager_RotateKey_WithBackend(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	backend := newOIDCMockSecretBackend()
+
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		Backend:   backend,
+		HubID:     "test-hub-rotate-backend",
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	err = mgr.RotateKey(ctx)
+	require.NoError(t, err)
+
+	// Verify the rotated key was persisted to the backend.
+	sv, err := backend.Get(ctx, SecretKeyOIDCSigningKey, store.ScopeHub, "test-hub-rotate-backend")
+	require.NoError(t, err)
+	assert.NotEmpty(t, sv.Value, "Rotated key should be persisted to backend")
+
+	// The persisted key should be the new active key.
+	privKey, err := decodePEMPrivateKey([]byte(sv.Value))
+	require.NoError(t, err)
+	newKID := computeKeyID(&privKey.PublicKey)
+	assert.Equal(t, mgr.JWKS().Keys[0].KeyID, newKID,
+		"Persisted key should match the new active key")
+}
+
+func TestOIDCKeyManager_StartCleanupLoop(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     "test-hub-cleanup-loop",
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	// Rotate and age the old key past the overlap window.
+	err = mgr.RotateKey(ctx)
+	require.NoError(t, err)
+	require.Len(t, mgr.JWKS().Keys, 2)
+
+	mgr.mu.Lock()
+	for _, k := range mgr.allKeys {
+		if !k.Active {
+			k.CreatedAt = time.Now().Add(-25 * time.Hour)
+		}
+	}
+	mgr.mu.Unlock()
+
+	// Manually call CleanupExpiredKeys to verify (we don't wait for the ticker
+	// since the 1-hour interval is too long for a unit test).
+	mgr.CleanupExpiredKeys()
+	assert.Len(t, mgr.JWKS().Keys, 1, "Expired key should be cleaned up")
+
+	// Verify the cleanup loop can be started and stopped via context cancellation
+	// without panicking.
+	mgr.StartCleanupLoop(ctx)
+	cancel()
 }
 
 // createOIDCTestStore creates an in-memory SQLite store for OIDC tests.

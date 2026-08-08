@@ -2792,6 +2792,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		s.oidcTokenRateLimiter.StartCleanup(ctx)
 	}
 
+	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.
+	if s.oidcKeyManager != nil {
+		s.oidcKeyManager.StartCleanupLoop(ctx)
+	}
+
 	// Start notification dispatcher (uses the current event publisher).
 	// The dispatcher is resolved lazily so it works even if SetDispatcher
 	// is called after Start().

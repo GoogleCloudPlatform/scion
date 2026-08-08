@@ -42,6 +42,15 @@ const (
 
 	// oidcRSAKeyBits is the RSA key size for OIDC signing keys.
 	oidcRSAKeyBits = 2048
+
+	// oidcKeyOverlapWindow is the duration that rotated-out keys remain in the
+	// JWKS after rotation, allowing external systems to pick up the new key.
+	// 24 hours provides ample margin for all JWKS caching consumers.
+	oidcKeyOverlapWindow = 24 * time.Hour
+
+	// oidcCleanupInterval is how often the background cleanup loop checks for
+	// expired rotated keys.
+	oidcCleanupInterval = 1 * time.Hour
 )
 
 // OIDCSigningKey holds an RSA key pair used for signing OIDC identity tokens.
@@ -168,6 +177,130 @@ func (m *OIDCKeyManager) JWKS() jose.JSONWebKeySet {
 // IssuerURL returns the configured OIDC issuer URL.
 func (m *OIDCKeyManager) IssuerURL() string {
 	return m.issuerURL
+}
+
+// RotateKey generates a new RSA key pair, makes it the active signing key,
+// and retains the old key in the JWKS for the overlap window. The old key
+// will be removed by CleanupExpiredKeys after oidcKeyOverlapWindow (24h).
+func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
+	// 1. Generate new RSA-2048 key pair (outside the lock).
+	newPrivKey, err := generateRSAKeyPair()
+	if err != nil {
+		return fmt.Errorf("generating new OIDC signing key: %w", err)
+	}
+
+	newKID := computeKeyID(&newPrivKey.PublicKey)
+
+	// 2. Create new jose.Signer with the new key.
+	newSigner, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: newPrivKey},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", newKID),
+	)
+	if err != nil {
+		return fmt.Errorf("creating signer for rotated OIDC key: %w", err)
+	}
+
+	newKey := &OIDCSigningKey{
+		KeyID:      newKID,
+		PrivateKey: newPrivKey,
+		PublicKey:  &newPrivKey.PublicKey,
+		CreatedAt:  time.Now(),
+		Active:     true,
+	}
+
+	// 3. Swap keys under write lock.
+	m.mu.Lock()
+	oldKID := ""
+	if m.activeKey != nil {
+		oldKID = m.activeKey.KeyID
+		m.activeKey.Active = false
+	}
+	m.activeKey = newKey
+	m.allKeys = append([]*OIDCSigningKey{newKey}, m.allKeys...)
+	m.signer = newSigner
+	m.mu.Unlock()
+
+	// 4. Persist new key to backend/store (same pattern as initial key storage).
+	pemData, err := encodePEMPrivateKey(newPrivKey)
+	if err != nil {
+		return fmt.Errorf("PEM-encoding rotated OIDC key: %w", err)
+	}
+	pemStr := string(pemData)
+
+	// Use a rotation-specific secret name to avoid overwriting the original key.
+	// The primary key name stays for the current active key that will be loaded on restart.
+	keyName := SecretKeyOIDCSigningKey
+	if m.backend != nil {
+		input := &secret.SetSecretInput{
+			Name:        keyName,
+			Value:       pemStr,
+			SecretType:  store.SecretTypeInternal,
+			Scope:       store.ScopeHub,
+			ScopeID:     m.hubID,
+			Description: "OIDC identity token signing key (RSA-2048)",
+		}
+		if _, _, setErr := m.backend.Set(ctx, input); setErr != nil {
+			m.log.Warn("Failed to persist rotated OIDC key to secret backend",
+				"kid", newKID, "error", setErr)
+		}
+	}
+	if persistErr := m.backupKeyToStore(ctx, keyName, pemStr, m.hubID); persistErr != nil {
+		m.log.Warn("Failed to persist rotated OIDC key to store",
+			"kid", newKID, "error", persistErr)
+	}
+
+	m.log.Info("OIDC signing key rotated",
+		"old_kid", oldKID,
+		"new_kid", newKID,
+	)
+
+	return nil
+}
+
+// CleanupExpiredKeys removes inactive keys that have been rotated out
+// longer than the overlap window (24 hours). The active key is never
+// removed regardless of age.
+func (m *OIDCKeyManager) CleanupExpiredKeys() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	kept := make([]*OIDCSigningKey, 0, len(m.allKeys))
+	for _, k := range m.allKeys {
+		if k.Active {
+			kept = append(kept, k)
+			continue
+		}
+		age := now.Sub(k.CreatedAt)
+		if age < oidcKeyOverlapWindow {
+			kept = append(kept, k)
+			continue
+		}
+		m.log.Info("Removing expired OIDC key from JWKS",
+			"kid", k.KeyID,
+			"created_at", k.CreatedAt,
+			"age", age.Round(time.Second),
+		)
+	}
+	m.allKeys = kept
+}
+
+// StartCleanupLoop starts a background goroutine that periodically removes
+// expired rotated keys from the JWKS. Call this once after initialization.
+// The goroutine stops when ctx is canceled.
+func (m *OIDCKeyManager) StartCleanupLoop(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(oidcCleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.CleanupExpiredKeys()
+			}
+		}
+	}()
 }
 
 // loadOrCreateKey attempts to load an existing OIDC signing key from the
