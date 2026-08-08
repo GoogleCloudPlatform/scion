@@ -55,11 +55,12 @@ const (
 
 // OIDCSigningKey holds an RSA key pair used for signing OIDC identity tokens.
 type OIDCSigningKey struct {
-	KeyID      string
-	PrivateKey *rsa.PrivateKey
-	PublicKey  *rsa.PublicKey
-	CreatedAt  time.Time
-	Active     bool
+	KeyID         string
+	PrivateKey    *rsa.PrivateKey
+	PublicKey     *rsa.PublicKey
+	CreatedAt     time.Time
+	DeactivatedAt time.Time // zero until rotated out
+	Active        bool
 }
 
 // OIDCKeyManager manages RSA key pairs for OIDC identity token signing.
@@ -135,6 +136,9 @@ func NewOIDCKeyManager(ctx context.Context, cfg OIDCKeyManagerConfig) (*OIDCKeyM
 	}
 
 	mgr.activeKey = signingKey
+	// Note: only the active key is loaded on startup. Previously rotated keys
+	// (serving JWKS overlap) are not restored. The overlap window does not
+	// survive hub restarts.
 	mgr.allKeys = []*OIDCSigningKey{signingKey}
 	mgr.signer = signer
 
@@ -200,36 +204,16 @@ func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
 		return fmt.Errorf("creating signer for rotated OIDC key: %w", err)
 	}
 
-	newKey := &OIDCSigningKey{
-		KeyID:      newKID,
-		PrivateKey: newPrivKey,
-		PublicKey:  &newPrivKey.PublicKey,
-		CreatedAt:  time.Now(),
-		Active:     true,
-	}
-
-	// 3. Swap keys under write lock.
-	m.mu.Lock()
-	oldKID := ""
-	if m.activeKey != nil {
-		oldKID = m.activeKey.KeyID
-		m.activeKey.Active = false
-	}
-	m.activeKey = newKey
-	m.allKeys = append([]*OIDCSigningKey{newKey}, m.allKeys...)
-	m.signer = newSigner
-	m.mu.Unlock()
-
-	// 4. Persist new key to backend/store (same pattern as initial key storage).
+	// 3. Persist new key to backend/store BEFORE in-memory swap.
 	pemData, err := encodePEMPrivateKey(newPrivKey)
 	if err != nil {
 		return fmt.Errorf("PEM-encoding rotated OIDC key: %w", err)
 	}
 	pemStr := string(pemData)
 
-	// Use a rotation-specific secret name to avoid overwriting the original key.
-	// The primary key name stays for the current active key that will be loaded on restart.
+	// Overwrite the stored key with the new active key so it is loaded on restart.
 	keyName := SecretKeyOIDCSigningKey
+	persisted := false
 	if m.backend != nil {
 		input := &secret.SetSecretInput{
 			Name:        keyName,
@@ -242,12 +226,44 @@ func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
 		if _, _, setErr := m.backend.Set(ctx, input); setErr != nil {
 			m.log.Warn("Failed to persist rotated OIDC key to secret backend",
 				"kid", newKID, "error", setErr)
+		} else {
+			persisted = true
 		}
 	}
-	if persistErr := m.backupKeyToStore(ctx, keyName, pemStr, m.hubID); persistErr != nil {
-		m.log.Warn("Failed to persist rotated OIDC key to store",
-			"kid", newKID, "error", persistErr)
+	if m.store != nil {
+		if persistErr := m.backupKeyToStore(ctx, keyName, pemStr, m.hubID); persistErr != nil {
+			m.log.Warn("Failed to persist rotated OIDC key to store",
+				"kid", newKID, "error", persistErr)
+		} else {
+			persisted = true
+		}
 	}
+
+	// If ALL persistence paths failed, do NOT swap in-memory — return an error.
+	if !persisted {
+		return fmt.Errorf("persisting rotated OIDC key: all persistence paths failed for kid %s", newKID)
+	}
+
+	// 4. Swap keys under write lock (only after successful persistence).
+	newKey := &OIDCSigningKey{
+		KeyID:      newKID,
+		PrivateKey: newPrivKey,
+		PublicKey:  &newPrivKey.PublicKey,
+		CreatedAt:  time.Now(),
+		Active:     true,
+	}
+
+	m.mu.Lock()
+	oldKID := ""
+	if m.activeKey != nil {
+		oldKID = m.activeKey.KeyID
+		m.activeKey.Active = false
+		m.activeKey.DeactivatedAt = time.Now()
+	}
+	m.activeKey = newKey
+	m.allKeys = append([]*OIDCSigningKey{newKey}, m.allKeys...)
+	m.signer = newSigner
+	m.mu.Unlock()
 
 	m.log.Info("OIDC signing key rotated",
 		"old_kid", oldKID,
@@ -271,14 +287,14 @@ func (m *OIDCKeyManager) CleanupExpiredKeys() {
 			kept = append(kept, k)
 			continue
 		}
-		age := now.Sub(k.CreatedAt)
+		age := now.Sub(k.DeactivatedAt)
 		if age < oidcKeyOverlapWindow {
 			kept = append(kept, k)
 			continue
 		}
 		m.log.Info("Removing expired OIDC key from JWKS",
 			"kid", k.KeyID,
-			"created_at", k.CreatedAt,
+			"deactivated_at", k.DeactivatedAt,
 			"age", age.Round(time.Second),
 		)
 	}

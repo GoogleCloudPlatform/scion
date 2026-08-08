@@ -21,6 +21,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"testing"
 	"time"
 
@@ -809,11 +810,11 @@ func TestOIDCKeyManager_CleanupExpiredKeys(t *testing.T) {
 		{
 			name: "removes old inactive keys",
 			setup: func() {
-				// Artificially age the inactive key past the overlap window.
+				// Artificially age the inactive key's deactivation time past the overlap window.
 				mgr.mu.Lock()
 				for _, k := range mgr.allKeys {
 					if !k.Active {
-						k.CreatedAt = time.Now().Add(-25 * time.Hour) // 25h ago
+						k.DeactivatedAt = time.Now().Add(-25 * time.Hour) // 25h ago
 					}
 				}
 				mgr.mu.Unlock()
@@ -950,7 +951,7 @@ func TestOIDCKeyManager_StartCleanupLoop(t *testing.T) {
 	mgr.mu.Lock()
 	for _, k := range mgr.allKeys {
 		if !k.Active {
-			k.CreatedAt = time.Now().Add(-25 * time.Hour)
+			k.DeactivatedAt = time.Now().Add(-25 * time.Hour)
 		}
 	}
 	mgr.mu.Unlock()
@@ -964,6 +965,77 @@ func TestOIDCKeyManager_StartCleanupLoop(t *testing.T) {
 	// without panicking.
 	mgr.StartCleanupLoop(ctx)
 	cancel()
+}
+
+func TestOIDCKeyManager_CleanupUsesDeactivationTime(t *testing.T) {
+	// Regression test for R1: CleanupExpiredKeys must use DeactivatedAt, not CreatedAt.
+	// A key created 48h ago but deactivated just now should NOT be cleaned up.
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     "test-hub-deactivation-time",
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	// Artificially age the initial key's CreatedAt to 48 hours ago.
+	mgr.mu.Lock()
+	mgr.activeKey.CreatedAt = time.Now().Add(-48 * time.Hour)
+	mgr.mu.Unlock()
+
+	// Rotate — the old key is now inactive with DeactivatedAt = now.
+	err = mgr.RotateKey(ctx)
+	require.NoError(t, err)
+	require.Len(t, mgr.JWKS().Keys, 2, "Should have 2 keys after rotation")
+
+	// Run cleanup — old key should NOT be removed because DeactivatedAt is recent.
+	mgr.CleanupExpiredKeys()
+	jwks := mgr.JWKS()
+	assert.Len(t, jwks.Keys, 2,
+		"Old key created 48h ago but deactivated just now should still be in JWKS")
+}
+
+func TestOIDCKeyManager_RotateKey_PersistFailure(t *testing.T) {
+	// Regression test for R2: RotateKey should return an error and leave
+	// in-memory state unchanged when all persistence paths fail.
+	ctx := context.Background()
+	backend := newOIDCMockSecretBackend()
+
+	// Initialize with a backend (no store) so there is only one persistence path.
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Backend:   backend,
+		HubID:     "test-hub-persist-fail",
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	originalKID := mgr.JWKS().Keys[0].KeyID
+	originalSigner := mgr.Signer()
+
+	// Inject error on the backend — the only persistence path.
+	backend.setErr = fmt.Errorf("backend unavailable")
+
+	// Attempt rotation — should fail because all persistence paths fail.
+	err = mgr.RotateKey(ctx)
+	require.Error(t, err, "RotateKey should return an error when all persistence fails")
+	assert.Contains(t, err.Error(), "all persistence paths failed")
+
+	// Verify in-memory state is unchanged.
+	assert.Equal(t, originalKID, mgr.JWKS().Keys[0].KeyID,
+		"Active key should be unchanged after persist failure")
+	assert.Len(t, mgr.JWKS().Keys, 1,
+		"No new key should be added after persist failure")
+
+	currentSigner := mgr.Signer()
+	assert.Equal(t, originalSigner, currentSigner,
+		"Signer should be unchanged after persist failure")
+
+	// Verify the old key is still active.
+	mgr.mu.RLock()
+	assert.True(t, mgr.activeKey.Active, "Active key should still be marked active")
+	mgr.mu.RUnlock()
 }
 
 // createOIDCTestStore creates an in-memory SQLite store for OIDC tests.
