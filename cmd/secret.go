@@ -33,7 +33,6 @@ import (
 var (
 	agentSecretType   string
 	agentSecretTarget string
-	agentSecretForce  bool
 )
 
 // agentSecretCmd is the top-level `scion secret` command group.
@@ -85,8 +84,8 @@ Examples:
   # Store a file secret with explicit target path
   scion secret set MY_CERT @/tmp/cert.pem --type file --target ~/certs/cert.pem
 
-  # Overwrite an existing secret
-  scion secret set MY_KEY "new-value" --force`,
+  # Update an existing secret (overwrites automatically)
+  scion secret set MY_KEY "new-value"`,
 	Args: cobra.ExactArgs(2),
 	RunE: runAgentSecretSet,
 }
@@ -114,7 +113,6 @@ func init() {
 
 	agentSecretSetCmd.Flags().StringVar(&agentSecretType, "type", "", "Secret type: environment (default), variable, file")
 	agentSecretSetCmd.Flags().StringVar(&agentSecretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")
-	agentSecretSetCmd.Flags().BoolVar(&agentSecretForce, "force", false, "Overwrite existing secret")
 }
 
 func runAgentSecretGet(cmd *cobra.Command, args []string) error {
