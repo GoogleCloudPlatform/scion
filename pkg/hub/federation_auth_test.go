@@ -819,4 +819,3 @@ func TestFederationAuth_ProjectAllowed(t *testing.T) {
 		t.Errorf("expected project 'project-alpha', got %q", identity.RemoteProjectID())
 	}
 }
-

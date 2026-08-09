@@ -23,7 +23,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 	tests := []struct {
 		name      string
 		config    FederationConfig
-		wantErrs  int  // expected number of errors (0 = valid)
+		wantErrs  int      // expected number of errors (0 = valid)
 		wantSubst []string // substrings expected in error messages
 	}{
 		{
@@ -38,7 +38,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 			config: FederationConfig{
 				Enabled: true,
 			},
-			wantErrs: 1,
+			wantErrs:  1,
 			wantSubst: []string{"no trusted_issuers"},
 		},
 		{
@@ -70,7 +70,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 					{IssuerURL: "https://hub-a.example.com"},
 				},
 			},
-			wantErrs: 1,
+			wantErrs:  1,
 			wantSubst: []string{"duplicate issuer_url"},
 		},
 		{
@@ -82,7 +82,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 					{IssuerURL: "https://hub.example.com"},
 				},
 			},
-			wantErrs: 1,
+			wantErrs:  1,
 			wantSubst: []string{"unsupported algorithm", "HS256"},
 		},
 		{
@@ -94,7 +94,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 					{IssuerURL: "https://hub.example.com"},
 				},
 			},
-			wantErrs: 1,
+			wantErrs:  1,
 			wantSubst: []string{"unsupported algorithm", "none"},
 		},
 		{
@@ -137,7 +137,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 					{IssuerURL: "hub.example.com"},
 				},
 			},
-			wantErrs: 1,
+			wantErrs:  1,
 			wantSubst: []string{"must use https or http scheme"},
 		},
 		{
@@ -148,7 +148,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 					{IssuerURL: "ftp://hub.example.com"},
 				},
 			},
-			wantErrs: 1,
+			wantErrs:  1,
 			wantSubst: []string{"must use https or http scheme"},
 		},
 		{
@@ -170,7 +170,7 @@ func TestFederationConfig_Validate(t *testing.T) {
 					{IssuerURL: ""},
 				},
 			},
-			wantErrs: 1,
+			wantErrs:  1,
 			wantSubst: []string{"issuer_url is required"},
 		},
 		{
