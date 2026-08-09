@@ -1388,6 +1388,22 @@ func TestMatchesAllowedEmails_EmptyListAcceptsAll(t *testing.T) {
 	}
 }
 
+// Email Test 15: Case-insensitive exact match
+func TestMatchesAllowedEmails_CaseInsensitiveExact(t *testing.T) {
+	patterns := []string{"User@Example.COM"}
+	if !matchesAllowedEmails(patterns, "user@example.com") {
+		t.Error("expected case-insensitive match for user@example.com against User@Example.COM")
+	}
+}
+
+// Email Test 16: Case-insensitive wildcard match
+func TestMatchesAllowedEmails_CaseInsensitiveWildcard(t *testing.T) {
+	patterns := []string{"*@Example.COM"}
+	if !matchesAllowedEmails(patterns, "user@example.com") {
+		t.Error("expected case-insensitive wildcard match for user@example.com against *@Example.COM")
+	}
+}
+
 // --- Hub backward compatibility ---
 
 // Hub Test 15: Existing hub issuer with no issuer_type field -> works as before (defaults to "hub")

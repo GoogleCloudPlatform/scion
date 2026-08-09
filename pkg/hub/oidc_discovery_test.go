@@ -36,7 +36,7 @@ func TestDiscoverJWKSURL_ValidDiscovery(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	jwksURL, err := discoverJWKSURL(srv.URL, client)
+	jwksURL, err := discoverJWKSURL(srv.URL, client, false)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestDiscoverJWKSURL_MissingJWKSURI(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverJWKSURL(srv.URL, client)
+	_, err := discoverJWKSURL(srv.URL, client, false)
 	if err == nil {
 		t.Fatal("expected error for missing jwks_uri, got nil")
 	}
@@ -71,7 +71,7 @@ func TestDiscoverJWKSURL_Non200Status(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverJWKSURL(srv.URL, client)
+	_, err := discoverJWKSURL(srv.URL, client, false)
 	if err == nil {
 		t.Fatal("expected error for non-200 status, got nil")
 	}
@@ -89,7 +89,7 @@ func TestDiscoverJWKSURL_InvalidJSON(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := discoverJWKSURL(srv.URL, client)
+	_, err := discoverJWKSURL(srv.URL, client, false)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
@@ -101,7 +101,7 @@ func TestDiscoverJWKSURL_InvalidJSON(t *testing.T) {
 // Test 5: Network error — use an unreachable URL, function returns error
 func TestDiscoverJWKSURL_NetworkError(t *testing.T) {
 	client := &http.Client{Timeout: 1 * time.Second}
-	_, err := discoverJWKSURL("http://127.0.0.1:1", client)
+	_, err := discoverJWKSURL("http://127.0.0.1:1", client, false)
 	if err == nil {
 		t.Fatal("expected error for network error, got nil")
 	}
@@ -127,9 +127,46 @@ func TestDiscoverJWKSURL_TrailingSlashNormalization(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	// Issuer URL with trailing slash
-	jwksURL, err := discoverJWKSURL(srv.URL+"/", client)
+	jwksURL, err := discoverJWKSURL(srv.URL+"/", client, false)
 	if err != nil {
 		t.Fatalf("expected success with trailing slash, got error: %v", err)
+	}
+	if jwksURL != expectedJWKSURL {
+		t.Errorf("expected jwks_uri %q, got %q", expectedJWKSURL, jwksURL)
+	}
+}
+
+// Test 7: requireHTTPS=true rejects HTTP jwks_uri
+func TestDiscoverJWKSURL_RequireHTTPS_RejectsHTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jwks_uri": "http://example.com/keys"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	_, err := discoverJWKSURL(srv.URL, client, true)
+	if err == nil {
+		t.Fatal("expected error for HTTP jwks_uri with requireHTTPS=true, got nil")
+	}
+	if !strings.Contains(err.Error(), "must use HTTPS") {
+		t.Errorf("expected 'must use HTTPS' in error, got: %v", err)
+	}
+}
+
+// Test 8: requireHTTPS=true accepts HTTPS jwks_uri
+func TestDiscoverJWKSURL_RequireHTTPS_AcceptsHTTPS(t *testing.T) {
+	expectedJWKSURL := "https://example.com/keys"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jwks_uri": "` + expectedJWKSURL + `"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	jwksURL, err := discoverJWKSURL(srv.URL, client, true)
+	if err != nil {
+		t.Fatalf("expected success for HTTPS jwks_uri with requireHTTPS=true, got error: %v", err)
 	}
 	if jwksURL != expectedJWKSURL {
 		t.Errorf("expected jwks_uri %q, got %q", expectedJWKSURL, jwksURL)

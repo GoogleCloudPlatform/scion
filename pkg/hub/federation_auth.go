@@ -104,7 +104,8 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 				issuerType = IssuerTypeHub
 			}
 			if issuerType != IssuerTypeHub {
-				discovered, err := discoverJWKSURL(issuer.IssuerURL, httpClient)
+				requireHTTPS := mode != "dev" && mode != "workstation"
+				discovered, err := discoverJWKSURL(issuer.IssuerURL, httpClient, requireHTTPS)
 				if err != nil {
 					return nil, fmt.Errorf("federation: issuer %q: jwks_url not configured and OIDC discovery failed: %w", issuer.IssuerURL, err)
 				}
@@ -341,8 +342,13 @@ func extractUserClaims(verified *jwt.Claims, raw map[string]interface{},
 
 // matchesAllowedEmails checks if an email matches any pattern in the allowed list.
 // Supports exact match and leading-wildcard suffix match (e.g. "*@example.com").
+// Note: a bare "*" pattern matches all emails (the suffix after "*" is empty,
+// and strings.HasSuffix always returns true for an empty suffix). Use an empty
+// AllowedEmails slice instead to express "accept all emails" in configuration.
 func matchesAllowedEmails(patterns []string, email string) bool {
+	email = strings.ToLower(email)
 	for _, pattern := range patterns {
+		pattern = strings.ToLower(pattern)
 		if strings.HasPrefix(pattern, "*") {
 			// Leading-wildcard: match suffix.
 			suffix := pattern[1:] // strip the *

@@ -18,13 +18,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
 // discoverJWKSURL fetches the OIDC discovery document from the issuer and
 // extracts the jwks_uri field. Returns an error if the discovery document
 // cannot be fetched or does not contain a jwks_uri.
-func discoverJWKSURL(issuerURL string, client *http.Client) (string, error) {
+// When requireHTTPS is true, the discovered jwks_uri must use the HTTPS scheme.
+func discoverJWKSURL(issuerURL string, client *http.Client, requireHTTPS bool) (string, error) {
 	discoveryURL := strings.TrimRight(issuerURL, "/") + "/.well-known/openid-configuration"
 	resp, err := client.Get(discoveryURL)
 	if err != nil {
@@ -44,6 +46,16 @@ func discoverJWKSURL(issuerURL string, client *http.Client) (string, error) {
 	}
 	if doc.JWKSURI == "" {
 		return "", fmt.Errorf("oidc discovery: no jwks_uri in response from %s", discoveryURL)
+	}
+
+	if requireHTTPS {
+		parsed, err := url.Parse(doc.JWKSURI)
+		if err != nil {
+			return "", fmt.Errorf("oidc discovery: invalid jwks_uri %q: %w", doc.JWKSURI, err)
+		}
+		if parsed.Scheme != "https" {
+			return "", fmt.Errorf("oidc discovery: jwks_uri %q must use HTTPS", doc.JWKSURI)
+		}
 	}
 
 	return doc.JWKSURI, nil
