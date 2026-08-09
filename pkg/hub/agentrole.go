@@ -63,8 +63,10 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentLifecycle,
 			ScopeProjectSecretRead,
 		}
+	case "":
+		return ScopesForRole(AgentRoleFull)
 	default:
-		return ScopesForRole(AgentRoleBaseline)
+		return ScopesForRole(AgentRoleNone)
 	}
 }
 
@@ -80,8 +82,10 @@ func roleOrdinal(r AgentRole) int {
 		return 2
 	case AgentRoleFull:
 		return 3
+	case "":
+		return 3 // default to full for legacy/unspecified roles
 	default:
-		return 2 // default to baseline
+		return 0 // fail-closed for unknown/invalid roles
 	}
 }
 
@@ -93,7 +97,7 @@ func CompareRoles(a, b AgentRole) int {
 // minRole returns the least-privileged role from the given set.
 func minRole(roles ...AgentRole) AgentRole {
 	if len(roles) == 0 {
-		return AgentRoleBaseline
+		return AgentRoleFull
 	}
 	min := roles[0]
 	for _, r := range roles[1:] {
@@ -107,12 +111,12 @@ func minRole(roles ...AgentRole) AgentRole {
 // ResolveEffectiveRole computes the effective agent role using the two-gate
 // authority lattice: min(requested, userCeiling, projectMax).
 //
+// The user-ceiling gate is currently a pass-through: all hub roles (admin and
+// member alike) receive a ceiling of Full. The projectMax gate is the effective
+// limiter for role resolution.
+//
 // userHubRole is the hub-level user role string ("admin" or "member").
-// If empty, defaults to "member" ceiling (baseline).
 func ResolveEffectiveRole(requested AgentRole, userHubRole string, projectMax AgentRole) AgentRole {
-	userCeiling := AgentRoleBaseline
-	if userHubRole == "admin" {
-		userCeiling = AgentRoleFull
-	}
+	userCeiling := AgentRoleFull
 	return minRole(requested, userCeiling, projectMax)
 }

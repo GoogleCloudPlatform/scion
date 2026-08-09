@@ -66,6 +66,7 @@ type AgentDefaultsSettings struct {
 	DefaultModel         string            `json:"default_model,omitempty"`
 	DefaultThinkingLevel *int              `json:"default_thinking_level,omitempty"`
 	DefaultMaxAgentRole  string            `json:"default_max_agent_role,omitempty"`
+	DefaultAgentRole     string            `json:"default_agent_role,omitempty"`
 }
 
 // EndpointsSettings holds Layer-1 endpoint configuration.

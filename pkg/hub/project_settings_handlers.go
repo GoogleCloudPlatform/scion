@@ -54,7 +54,8 @@ const (
 	projectSettingDefaultResourcesDisk   = "scion.io/default-resources-disk"
 
 	// Agent authorization
-	projectSettingMaxAgentRole = "scion.io/max-agent-role"
+	projectSettingMaxAgentRole     = "scion.io/max-agent-role"
+	projectSettingDefaultAgentRole = "scion.io/default-agent-role"
 )
 
 // projectSettingKeys is the authoritative list of scion.io/* annotation keys
@@ -143,6 +144,7 @@ var projectSettingKeys = []string{
 
 	// Agent authorization
 	projectSettingMaxAgentRole,
+	projectSettingDefaultAgentRole,
 }
 
 // handleProjectSettings handles GET/PUT on /api/v1/projects/{projectId}/settings.
@@ -215,6 +217,11 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
+		if req.DefaultAgentRole != "" && !ValidAgentRole(AgentRole(req.DefaultAgentRole)) {
+			BadRequest(w, "defaultAgentRole must be one of none, readonly, baseline, full")
+			return
+		}
+
 		applyProjectSettingsToAnnotations(project, &req)
 
 		if err := s.store.UpdateProject(ctx, project); err != nil {
@@ -284,6 +291,7 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 
 	// Agent authorization
 	settings.MaxAgentRole = project.Annotations[projectSettingMaxAgentRole]
+	settings.DefaultAgentRole = project.Annotations[projectSettingDefaultAgentRole]
 
 	return settings
 }
@@ -350,6 +358,7 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 
 	// Agent authorization
 	setOrDelete(project.Annotations, projectSettingMaxAgentRole, settings.MaxAgentRole)
+	setOrDelete(project.Annotations, projectSettingDefaultAgentRole, settings.DefaultAgentRole)
 
 	// Default resources (flat keys)
 	if settings.DefaultResources != nil {

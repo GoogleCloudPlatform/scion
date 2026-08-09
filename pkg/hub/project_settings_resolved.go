@@ -316,6 +316,11 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 		path:              []string{"default_max_agent_role"},
 		absentWhenMissing: false, // string, "" dropped by omitempty
 	},
+	projectSettingDefaultAgentRole: {
+		source:            hubSourceAgentDefaults,
+		path:              []string{"default_agent_role"},
+		absentWhenMissing: false,
+	},
 }
 
 // handleProjectSettingsResolved serves GET

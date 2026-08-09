@@ -208,6 +208,8 @@ interface ServerConfigResponse {
   default_resources?: ResourceSpec;
   default_model?: string;
   default_thinking_level?: number | null;
+  default_max_agent_role?: string;
+  default_agent_role?: string;
 
   auto_expose_ports?: { enabled?: boolean };
 
@@ -349,6 +351,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_resources: 'Default Resources',
   default_model: 'Default Model',
   default_thinking_level: 'Default Thinking Level',
+  default_max_agent_role: 'Default Maximum Agent Role',
+  default_agent_role: 'Default Agent Role',
   // endpoints section
   'server.hub.public_url': 'Public URL',
   image_registry: 'Image Registry',
@@ -413,6 +417,10 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultModelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
   @state() private defaultCustomModelId = '';
   @state() private defaultThinkingLevel: number | null = null;
+
+  // Agent authorization
+  @state() private defaultMaxAgentRole = '';
+  @state() private defaultAgentRole = '';
 
   // Agent defaults sub-tab
   @state() private agentDefaultsTab = 'general';
@@ -1357,6 +1365,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.defaultCustomModelId = '';
     }
     this.defaultThinkingLevel = data.default_thinking_level ?? null;
+    this.defaultMaxAgentRole = data.default_max_agent_role || '';
+    this.defaultAgentRole = data.default_agent_role || '';
 
     // Server
     const srv = data.server;
@@ -1584,6 +1594,12 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_thinking_level')) {
       payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
     }
+    if (ok('default_max_agent_role')) {
+      payload.default_max_agent_role = this.defaultMaxAgentRole || '';
+    }
+    if (ok('default_agent_role')) {
+      payload.default_agent_role = this.defaultAgentRole || '';
+    }
 
     const server: Record<string, unknown> = {};
 
@@ -1737,6 +1753,12 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (ok('default_thinking_level')) {
       payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+    }
+    if (ok('default_max_agent_role')) {
+      payload.default_max_agent_role = this.defaultMaxAgentRole || undefined;
+    }
+    if (ok('default_agent_role')) {
+      payload.default_agent_role = this.defaultAgentRole || undefined;
     }
 
     // Server
@@ -2821,6 +2843,48 @@ export class ScionPageAdminServerConfig extends LitElement {
                       <span>${this.defaultThinkingLevel === null ? 'Using harness default' : ''}</span>
                       <span>100 = maximum reasoning</span>
                     </span>`
+                  )}
+                </div>
+                <div class="form-field">
+                  <label>Default Agent Role</label>
+                  <span class="hint">Role assigned to new agents when not explicitly specified. Can be overridden per-project.</span>
+                  ${this.renderFieldValue(
+                    'default_agent_role',
+                    this.defaultAgentRole || 'Full (default)',
+                    html`${this.renderEnvBadge('default_agent_role')}<sl-select
+                      placeholder="Full (default)"
+                      clearable
+                      value=${this.defaultAgentRole}
+                      @sl-change=${(e: Event) => {
+                        this.defaultAgentRole = (e.target as HTMLSelectElement).value;
+                      }}
+                    >
+                      <sl-option value="none">None — No hub access</sl-option>
+                      <sl-option value="readonly">Read-only — Read-only access</sl-option>
+                      <sl-option value="baseline">Baseline — Standard access</sl-option>
+                      <sl-option value="full">Full — Full access</sl-option>
+                    </sl-select>`
+                  )}
+                </div>
+                <div class="form-field">
+                  <label>Default Maximum Agent Role</label>
+                  <span class="hint">Default maximum role for agents in new projects. Can be overridden per-project.</span>
+                  ${this.renderFieldValue(
+                    'default_max_agent_role',
+                    this.defaultMaxAgentRole || 'Full (default)',
+                    html`${this.renderEnvBadge('default_max_agent_role')}<sl-select
+                      placeholder="Full (default)"
+                      clearable
+                      value=${this.defaultMaxAgentRole}
+                      @sl-change=${(e: Event) => {
+                        this.defaultMaxAgentRole = (e.target as HTMLSelectElement).value;
+                      }}
+                    >
+                      <sl-option value="none">None — No hub access</sl-option>
+                      <sl-option value="readonly">Read-only — Read-only access</sl-option>
+                      <sl-option value="baseline">Baseline — Standard access</sl-option>
+                      <sl-option value="full">Full — Full access</sl-option>
+                    </sl-select>`
                   )}
                 </div>
               </div>
