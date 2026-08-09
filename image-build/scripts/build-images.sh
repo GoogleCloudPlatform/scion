@@ -66,6 +66,10 @@ Options:
                           hub         - just scion-hub (uses existing scion-base:<tag>)
                           common      - scion-base + harnesses + hub (skip core-base)
                           all         - full rebuild including core-base
+                          thick-prep  - just the thick base prep layer (amd64 only)
+                          thick       - full thick rebuild: thick-prep + scion-base +
+                                        harnesses + hub (amd64 only, uses Cloud
+                                        Workstations base instead of core-base)
   --tag <tag>           Mutable image tag (default: latest). The :<short-sha> tag
                         is always added when run inside a git repo.
   --platform <plat>     Target platform(s) (default: builder's native arch)
@@ -99,6 +103,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 REGISTRY="${REGISTRY%/}"
+
+# Set THICK_BUILD flag when building the thick target, so step descriptors
+# in targets.sh route scion-base to thick-prep instead of core-base.
+THICK_BUILD="false"
+if [[ "${TARGET}" == "thick" || "${TARGET}" == "thick-prep" ]]; then
+  THICK_BUILD="true"
+fi
+export THICK_BUILD
 
 # Validate builder against allow-list.
 builder_ok="false"
