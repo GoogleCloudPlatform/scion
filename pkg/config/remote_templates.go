@@ -75,6 +75,9 @@ func remoteCacheDir() (string, error) {
 func NormalizeTemplateSourceURL(raw string) string {
 	s := strings.TrimSpace(raw)
 
+	// Handle git+https:// and git+http:// scheme prefixes.
+	s = strings.TrimPrefix(s, "git+")
+
 	// Add https:// scheme if missing (not rclone and not already http/https)
 	if !strings.HasPrefix(s, ":") && !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
 		s = "https://" + s

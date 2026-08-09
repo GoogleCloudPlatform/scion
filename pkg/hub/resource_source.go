@@ -80,9 +80,12 @@ type BootstrapResult struct {
 }
 
 // IsBuiltinManaged returns true if sourceURL identifies a resource managed by
-// the built-in bundled catalog.
+// the built-in bundled catalog.  It recognises both the current https:// prefix
+// and the legacy git+https:// prefix for backward compatibility with existing
+// hub databases.
 func IsBuiltinManaged(sourceURL string) bool {
 	return strings.HasPrefix(sourceURL, "builtin://scion/") ||
+		strings.HasPrefix(sourceURL, "https://github.com/GoogleCloudPlatform/scion/harnesses/") ||
 		strings.HasPrefix(sourceURL, "git+https://github.com/GoogleCloudPlatform/scion/harnesses/")
 }
 
