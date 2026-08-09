@@ -37,6 +37,7 @@ REGISTRY=""
 TARGET="common"
 TAG="latest"
 PLATFORM=""
+PLATFORM_EXPLICIT="false"
 PUSH="false"
 DRY_RUN="false"
 
@@ -94,7 +95,7 @@ while [[ $# -gt 0 ]]; do
     --registry) REGISTRY="$2"; shift 2 ;;
     --target)   TARGET="$2"; shift 2 ;;
     --tag)      TAG="$2"; shift 2 ;;
-    --platform) PLATFORM="$2"; shift 2 ;;
+    --platform) PLATFORM="$2"; PLATFORM_EXPLICIT="true"; shift 2 ;;
     --push)     PUSH="true"; shift ;;
     --dry-run)  DRY_RUN="true"; shift ;;
     -h|--help)  usage 0 ;;
@@ -106,7 +107,7 @@ REGISTRY="${REGISTRY%/}"
 
 # Set THICK_BUILD flag when building the thick target, so step descriptors
 # in targets.sh route scion-base to thick-prep instead of core-base.
-THICK_BUILD="false"
+THICK_BUILD="${THICK_BUILD:-false}"
 if [[ "${TARGET}" == "thick" || "${TARGET}" == "thick-prep" ]]; then
   THICK_BUILD="true"
 fi
@@ -143,11 +144,17 @@ if [[ -n "${PLATFORM}" ]]; then
   fi
 fi
 
-# Thick targets are amd64-only; reject early if arm64 is requested.
-if [[ "${THICK_BUILD}" == "true" && "${PLATFORMS}" == *"arm64"* ]]; then
-  echo "Error: --target ${TARGET} is amd64-only (Cloud Workstations base has no arm64 variant)." >&2
-  echo "Remove --platform or use --platform linux/amd64." >&2
-  exit 1
+# Thick targets are amd64-only. When the user explicitly requested arm64,
+# error out. When no --platform was given, default to linux/amd64 so that
+# builds on arm64 hosts (e.g. Apple Silicon) don't silently fail.
+if [[ "${THICK_BUILD}" == "true" ]]; then
+  if [[ "${PLATFORM_EXPLICIT}" == "true" && "${PLATFORMS}" == *"arm64"* ]]; then
+    echo "Error: --target ${TARGET} is amd64-only (Cloud Workstations base has no arm64 variant)." >&2
+    echo "Remove --platform or use --platform linux/amd64." >&2
+    exit 1
+  elif [[ "${PLATFORM_EXPLICIT}" != "true" ]]; then
+    PLATFORMS="linux/amd64"
+  fi
 fi
 
 # Multi-arch builds require --push (buildx can't load multi-arch images
