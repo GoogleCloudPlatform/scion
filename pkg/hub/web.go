@@ -587,6 +587,10 @@ func (ws *WebServer) MountHubAPI(hubHandler http.Handler, hubShutdown func(conte
 	// longest-prefix matching, so /api/v1/ takes priority over /
 	// (the SPA catch-all).
 	ws.mux.Handle("/api/v1/", ws.sessionToBearerMiddleware(hubHandler))
+	// Forward OIDC discovery endpoints so they are reachable in combo mode
+	// (hub + web on the same port). Without this, the SPA catch-all "/"
+	// intercepts /.well-known/ requests and returns HTML instead of JSON.
+	ws.mux.Handle("/.well-known/", hubHandler)
 }
 
 // sessionToBearerMiddleware bridges cookie-based web sessions to the
@@ -1192,6 +1196,9 @@ func isPublicRoute(path string) bool {
 	case strings.HasPrefix(path, "/api/v1/"):
 		// Hub API routes have their own auth (UnifiedAuth middleware).
 		// Let them pass through the Web session auth layer untouched.
+		return true
+	case strings.HasPrefix(path, "/.well-known/"):
+		// OIDC discovery endpoints must be publicly accessible (unauthenticated).
 		return true
 	case path == "/login":
 		return true
