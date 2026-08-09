@@ -170,6 +170,10 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -1703,6 +1707,10 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {

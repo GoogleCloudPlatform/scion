@@ -220,12 +220,16 @@ func (s *Server) authorizeSessionMetricsAccess(w http.ResponseWriter, r *http.Re
 //
 // GET /api/v1/agents/{id}/metrics/summary
 func (s *Server) handleAgentMetricsSummary(w http.ResponseWriter, r *http.Request, agentID string) {
-	ctx := r.Context()
-
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
+
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
+	ctx := r.Context()
 
 	// Verify the agent exists and the caller can view it.
 	agent, err := s.store.GetAgent(ctx, agentID)

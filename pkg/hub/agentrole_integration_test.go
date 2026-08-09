@@ -891,3 +891,182 @@ func TestCreateAgent_ProjectMaxReadonly_MemberGetsReadonly(t *testing.T) {
 			"member in readonly-max project should get readonly")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7 — Read endpoint enforcement (ScopeProjectRead)
+// ---------------------------------------------------------------------------
+
+// doAgentReadRequest makes a GET request to the given path using an agent token
+// with the specified scopes.
+func doAgentReadRequest(t *testing.T, srv *Server, agentID, projectID, path string, scopes []AgentTokenScope) *httptest.ResponseRecorder {
+	t.Helper()
+	tokenSvc := srv.GetAgentTokenService()
+	require.NotNil(t, tokenSvc)
+
+	token, err := tokenSvc.GenerateAgentToken(agentID, projectID, scopes, nil)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("X-Scion-Agent-Token", token)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// setupReadScopeTest creates a server, user, project, and agent for read scope tests.
+func setupReadScopeTest(t *testing.T) (*Server, store.Store, *store.Agent, *store.Project) {
+	t.Helper()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("user-read-scope"),
+		Email:       "readscope@test.com",
+		DisplayName: "Read Scope Tester",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("project-read-scope"),
+		Name:      "read-scope-project",
+		Slug:      "read-scope-project",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+
+	agent := &store.Agent{
+		ID:        tid("agent-read-scope"),
+		Slug:      "read-scope-agent",
+		Name:      "Read Scope Agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	return srv, s, agent, project
+}
+
+func TestReadEndpoint_BaselineAgent_Allowed(t *testing.T) {
+	srv, _, agent, project := setupReadScopeTest(t)
+
+	// Baseline scopes include ScopeProjectRead.
+	scopes := ScopesForRole(AgentRoleBaseline)
+
+	endpoints := []string{
+		"/api/v1/agents?projectId=" + project.ID,
+		"/api/v1/agents/" + agent.ID,
+		"/api/v1/templates",
+		"/api/v1/skills",
+		"/api/v1/harness-configs",
+		"/api/v1/projects",
+		"/api/v1/projects/" + project.ID,
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			rec := doAgentReadRequest(t, srv, agent.ID, project.ID, ep, scopes)
+			assert.NotEqual(t, http.StatusForbidden, rec.Code,
+				"baseline agent should not be forbidden on %s; got %d: %s",
+				ep, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+func TestReadEndpoint_ReadonlyAgent_Allowed(t *testing.T) {
+	srv, _, agent, project := setupReadScopeTest(t)
+
+	// Readonly scopes include ScopeProjectRead.
+	scopes := ScopesForRole(AgentRoleReadOnly)
+
+	endpoints := []string{
+		"/api/v1/agents?projectId=" + project.ID,
+		"/api/v1/agents/" + agent.ID,
+		"/api/v1/templates",
+		"/api/v1/skills",
+		"/api/v1/harness-configs",
+		"/api/v1/projects",
+		"/api/v1/projects/" + project.ID,
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			rec := doAgentReadRequest(t, srv, agent.ID, project.ID, ep, scopes)
+			assert.NotEqual(t, http.StatusForbidden, rec.Code,
+				"readonly agent should not be forbidden on %s; got %d: %s",
+				ep, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+func TestReadEndpoint_NoReadScope_Blocked(t *testing.T) {
+	srv, _, agent, project := setupReadScopeTest(t)
+
+	// Simulate a legacy agent or misconfigured token: valid JWT but no ScopeProjectRead.
+	scopes := []AgentTokenScope{ScopeAgentStatusUpdate}
+
+	endpoints := []string{
+		"/api/v1/agents?projectId=" + project.ID,
+		"/api/v1/agents/" + agent.ID,
+		"/api/v1/templates",
+		"/api/v1/skills",
+		"/api/v1/harness-configs",
+		"/api/v1/projects",
+		"/api/v1/projects/" + project.ID,
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			rec := doAgentReadRequest(t, srv, agent.ID, project.ID, ep, scopes)
+			assert.Equal(t, http.StatusForbidden, rec.Code,
+				"agent without ScopeProjectRead should be forbidden on %s; got %d: %s",
+				ep, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "project:read",
+				"error should mention the missing scope")
+		})
+	}
+}
+
+func TestReadEndpoint_UserCaller_NotAffected(t *testing.T) {
+	srv, _, _, project := setupReadScopeTest(t)
+
+	// User callers should not be affected by the agent scope check.
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		tid("user-read-scope"), "readscope@test.com", "Read Scope Tester",
+		store.UserRoleMember, ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	endpoints := []string{
+		"/api/v1/agents?projectId=" + project.ID,
+		"/api/v1/templates",
+		"/api/v1/skills",
+		"/api/v1/harness-configs",
+		"/api/v1/projects",
+		"/api/v1/projects/" + project.ID,
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, ep, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			assert.NotEqual(t, http.StatusForbidden, rec.Code,
+				"user caller should not be forbidden on %s; got %d: %s",
+				ep, rec.Code, rec.Body.String())
+		})
+	}
+}

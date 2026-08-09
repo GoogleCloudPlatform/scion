@@ -36,6 +36,10 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -88,6 +92,10 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
+		return
+	}
+
+	if !checkAgentReadScope(w, r) {
 		return
 	}
 
@@ -269,6 +277,10 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
+		return
+	}
+
+	if !checkAgentReadScope(w, r) {
 		return
 	}
 
