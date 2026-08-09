@@ -644,8 +644,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		}
 		// TrustedIssuers: unmarshal from the koanf slice
 		if raw := k.Get("server.federation.trusted_issuers"); raw != nil {
-			data, _ := json.Marshal(raw)
-			json.Unmarshal(data, &fedCfg.TrustedIssuers)
+			data, err := json.Marshal(raw)
+			if err != nil {
+				slog.Warn("federation: failed to marshal trusted_issuers from koanf", "error", err)
+			} else if err := json.Unmarshal(data, &fedCfg.TrustedIssuers); err != nil {
+				slog.Warn("federation: failed to unmarshal trusted_issuers", "error", err)
+			}
 		}
 		if algs := k.Strings("server.federation.algorithms"); len(algs) > 0 {
 			fedCfg.Algorithms = algs

@@ -135,7 +135,7 @@ func init() {
 				"server.federation.refresh_interval",
 				"server.federation.debounce_interval",
 			},
-			New: func() interface{} { return &FederationSettings{} },
+			New: func() any { return &FederationSettings{} },
 		},
 	}
 
@@ -369,6 +369,7 @@ func compileSchemas() {
 				"refresh_interval":  map[string]interface{}{"type": "string"},
 				"debounce_interval": map[string]interface{}{"type": "string"},
 			},
+			"additionalProperties": false,
 		},
 	}
 
