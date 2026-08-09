@@ -900,6 +900,164 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision_PassesTaskThrough(t *testing
 	}
 }
 
+// setupProvisionEnvTest creates a broker, project, project provider, and
+// as_needed env vars in the test store, then returns an agent wired to them.
+// This mirrors setupFinalizeEnvTest but uses unique IDs for the provision path.
+func setupProvisionEnvTest(t *testing.T, ctx context.Context, memStore store.Store, asNeededVars []store.EnvVar) *store.Agent {
+	t.Helper()
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-provision"),
+		Name:     "provision-broker",
+		Slug:     "provision-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	project := &store.Project{
+		ID:   tid("project-provision"),
+		Name: "provision-project",
+		Slug: "provision-project",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	provider := &store.ProjectProvider{
+		ProjectID:  tid("project-provision"),
+		BrokerID:   tid("broker-provision"),
+		BrokerName: "provision-broker",
+		LocalPath:  "/home/user/project/.scion",
+		Status:     store.BrokerStatusOnline,
+	}
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	for i, v := range asNeededVars {
+		v.Scope = "project"
+		v.ScopeID = tid("project-provision")
+		v.InjectionMode = store.InjectionModeAsNeeded
+		if v.ID == "" {
+			v.ID = tid("ev-provision-" + string(rune('0'+i)))
+		}
+		asNeededVars[i] = v
+		if err := memStore.CreateEnvVar(ctx, &asNeededVars[i]); err != nil {
+			t.Fatalf("failed to create env var %q: %v", v.Key, err)
+		}
+	}
+
+	return &store.Agent{
+		ID:              tid("agent-provision-env"),
+		Name:            "provision-env-agent",
+		Slug:            "provision-env-agent",
+		ProjectID:       tid("project-provision"),
+		OwnerID:         "owner-1",
+		RuntimeBrokerID: tid("broker-provision"),
+		AppliedConfig:   &store.AgentAppliedConfig{},
+	}
+}
+
+func TestHTTPAgentDispatcher_DispatchAgentProvision_TwoPassSuccess(t *testing.T) {
+	// Scenario: first pass returns envReqs with needs (API_KEY), the
+	// as_needed store has the key, second pass fires with merged env and succeeds.
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	agent := setupProvisionEnvTest(t, ctx, memStore, []store.EnvVar{
+		{Key: "API_KEY", Value: "resolved-api-key"},
+	})
+
+	callCount := 0
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			callCount++
+			if callCount == 1 {
+				// First pass: broker says API_KEY is still needed.
+				// Verify ProvisionOnly and GatherEnv are set.
+				if !req.ProvisionOnly {
+					t.Error("first pass: expected ProvisionOnly to be true")
+				}
+				if !req.GatherEnv {
+					t.Error("first pass: expected GatherEnv to be true")
+				}
+				return nil, &RemoteEnvRequirementsResponse{
+					AgentID: req.ID,
+					Needs:   []string{"API_KEY"},
+				}, nil
+			}
+			// Second pass: verify API_KEY was merged into ResolvedEnv.
+			if v, ok := req.ResolvedEnv["API_KEY"]; !ok || v != "resolved-api-key" {
+				t.Errorf("second pass: expected API_KEY='resolved-api-key', got %q (ok=%v)", v, ok)
+			}
+			// Verify ProvisionOnly and GatherEnv are still set on second pass.
+			if !req.ProvisionOnly {
+				t.Error("second pass: expected ProvisionOnly to be true")
+			}
+			if !req.GatherEnv {
+				t.Error("second pass: expected GatherEnv to be true")
+			}
+			return &RemoteAgentResponse{
+				Agent: &RemoteAgentInfo{
+					ID:    req.ID,
+					Slug:  req.Slug,
+					Name:  req.Name,
+					Phase: string(state.PhaseRunning),
+				},
+				Created: true,
+			}, nil, nil
+		},
+	}
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchAgentProvision(ctx, agent)
+	if err != nil {
+		t.Fatalf("DispatchAgentProvision returned unexpected error: %v", err)
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected 2 CreateAgentWithGather calls, got %d", callCount)
+	}
+}
+
+func TestHTTPAgentDispatcher_DispatchAgentProvision_TwoPassNoResolution(t *testing.T) {
+	// Scenario: first pass returns envReqs with needs, but no as_needed vars
+	// match. No second pass should occur and no error should be returned.
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	// No as_needed vars in the store.
+	agent := setupProvisionEnvTest(t, ctx, memStore, nil)
+
+	callCount := 0
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			callCount++
+			// First pass: broker says MISSING_VAR is needed but no store entry exists.
+			return nil, &RemoteEnvRequirementsResponse{
+				AgentID: req.ID,
+				Needs:   []string{"MISSING_VAR"},
+			}, nil
+		},
+	}
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchAgentProvision(ctx, agent)
+	if err != nil {
+		t.Fatalf("DispatchAgentProvision returned unexpected error: %v", err)
+	}
+
+	// Only one call — no second pass because resolution returned nothing.
+	if callCount != 1 {
+		t.Errorf("expected 1 CreateAgentWithGather call, got %d", callCount)
+	}
+}
+
 func TestHTTPAgentDispatcher_DispatchAgentCreate_WithWorkspace(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
