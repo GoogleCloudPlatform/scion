@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Build stage
-FROM golang:1.26.1 AS builder
+FROM golang:1.26.1@sha256:cd78d88e00afadbedd272f977d375a6247455f3a4b1178f8ae8bbcb201743a8a AS builder
 
 WORKDIR /src
 
@@ -35,7 +35,7 @@ RUN go mod download
 RUN CGO_ENABLED=1 go build -tags no_embed_web -o /scion-a2a-bridge ./cmd/scion-a2a-bridge/
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
