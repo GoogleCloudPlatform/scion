@@ -108,6 +108,10 @@ type CreateAgentRequest struct {
 	// NoAuth indicates the agent should start with zero injected credentials.
 	// When true, the Hub skips secret resolution and the broker skips credential injection.
 	NoAuth bool `json:"noAuth,omitempty"`
+	// AgentRole specifies the requested authorization role for the agent.
+	// Valid values: "none", "readonly", "baseline", "full".
+	// When omitted, defaults to the effective ceiling (project max intersected with caller ceiling).
+	AgentRole string `json:"agentRole,omitempty"`
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
@@ -166,6 +170,10 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -321,6 +329,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.AgentRole != "" && !ValidAgentRole(AgentRole(req.AgentRole)) {
+		ValidationError(w, fmt.Sprintf("invalid agentRole %q: must be one of none, readonly, baseline, full", req.AgentRole), nil)
+		return
+	}
+
 	if err := labels.Validate(req.Labels); err != nil {
 		ValidationError(w, "Invalid labels: "+err.Error(), nil)
 		return
@@ -412,6 +425,107 @@ func (s *Server) createAgentInProject(
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"cannot create agents in a template project", nil)
 		return
+	}
+
+	// Resolve effective agent role using the authority lattice.
+	// Computed early (before broker resolution) so that fail-loud 403 on
+	// role over-requests fires before resource-intensive operations.
+	var effectiveRole AgentRole
+	var parentRole AgentRole // empty for user-created agents; set in agent-caller branch
+	requestedRole := AgentRole(req.AgentRole)
+
+	// Read project max agent role from annotations (default: baseline)
+	projectMax := AgentRoleBaseline
+	if project != nil && project.Annotations != nil {
+		if maxStr, ok := project.Annotations[projectSettingMaxAgentRole]; ok && maxStr != "" {
+			if ValidAgentRole(AgentRole(maxStr)) {
+				projectMax = AgentRole(maxStr)
+			}
+		}
+	}
+
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		// Agent caller: read parent agent's stored role for no-escalation ceiling.
+		parentRole = AgentRoleBaseline
+		creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
+		if err != nil {
+			slog.Warn("Failed to read parent agent for role ceiling",
+				"parent_agent_id", agentIdent.ID(), "error", err)
+			// Fall through with baseline default — safe because it is the most restrictive
+			// non-zero role, so the ceiling is conservative.
+		} else if creatorAgent.AppliedConfig != nil && creatorAgent.AppliedConfig.AgentRole != "" {
+			parentRole = AgentRole(creatorAgent.AppliedConfig.AgentRole)
+		}
+
+		// Validate stored parentRole to guard against corrupted data.
+		if !ValidAgentRole(parentRole) {
+			slog.Warn("Parent agent has invalid stored role, defaulting to baseline",
+				"parent_agent_id", agentIdent.ID(), "stored_role", parentRole)
+			parentRole = AgentRoleBaseline
+		}
+
+		// Log the parent role for audit trail
+		slog.Info("Agent creating sub-agent",
+			"parent_agent_id", agentIdent.ID(),
+			"parent_role", parentRole,
+			"requested_role", requestedRole,
+			"project_max", projectMax,
+		)
+
+		if requestedRole == "" {
+			requestedRole = parentRole // default: inherit parent's role
+		}
+
+		// Enforce no-escalation: sub-agent role cannot exceed parent's role.
+		// Fail-loud so template misconfiguration is visible (a template requesting
+		// "full" for a sub-agent under a "baseline" parent is almost certainly wrong).
+		if req.AgentRole != "" && CompareRoles(AgentRole(req.AgentRole), parentRole) > 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				fmt.Sprintf("Cannot grant sub-agent role %q: parent agent role is %q",
+					req.AgentRole, parentRole), nil)
+			return
+		}
+
+		effectiveRole = minRole(requestedRole, parentRole, projectMax)
+	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		// User caller: ceiling based on hub role
+		userHubRole := userIdent.Role()
+		userCeiling := AgentRoleBaseline
+		if userHubRole == "admin" {
+			userCeiling = AgentRoleFull
+		}
+
+		if requestedRole == "" {
+			requestedRole = projectMax
+		}
+
+		// Fail-loud: reject explicit over-request against user ceiling or project max.
+		if req.AgentRole != "" && CompareRoles(AgentRole(req.AgentRole), userCeiling) > 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				fmt.Sprintf("Cannot grant agent role %q: user ceiling is %q",
+					req.AgentRole, userCeiling), nil)
+			return
+		}
+		if req.AgentRole != "" && CompareRoles(AgentRole(req.AgentRole), projectMax) > 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				fmt.Sprintf("Cannot grant agent role %q: project maximum is %q",
+					req.AgentRole, projectMax), nil)
+			return
+		}
+
+		// Use minRole directly instead of ResolveEffectiveRole to avoid recomputing ceiling.
+		effectiveRole = minRole(requestedRole, userCeiling, projectMax)
+	} else {
+		// No identity (should not happen in practice) - default to baseline
+		if requestedRole == "" {
+			requestedRole = AgentRoleBaseline
+		}
+		effectiveRole = requestedRole
+	}
+
+	// Map role=none to NoAuth behavior
+	if effectiveRole == AgentRoleNone {
+		req.NoAuth = true
 	}
 
 	// Resolve the runtime broker
@@ -678,7 +792,7 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	agent.AppliedConfig = s.buildAppliedConfig(req, harnessConfig, creatorName)
+	agent.AppliedConfig = s.buildAppliedConfig(req, harnessConfig, creatorName, effectiveRole)
 
 	// Populate GCP identity in applied config.
 	// Default to "block" mode when no GCP identity is specified, so agents
@@ -866,8 +980,12 @@ func (s *Server) createAgentInProject(
 
 	// Managed agent path: bypass broker dispatch entirely and handle directly.
 	if req.Profile == ManagedAgentsProfile {
+		logAttrs := []any{"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String()}
+		if parentRole != "" {
+			logAttrs = append(logAttrs, "parent_agent_role", string(parentRole))
+		}
 		s.agentLifecycleLog.Info("Hub: managed agent create (hub-direct)",
-			"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String())
+			logAttrs...)
 
 		task := ""
 		if agent.AppliedConfig != nil {
@@ -902,8 +1020,12 @@ func (s *Server) createAgentInProject(
 	// Dispatch to runtime broker if available.
 	// Unless provision-only is requested, do a full create+start via DispatchAgentCreate.
 	// Otherwise provision only — set up dirs, worktree, templates without launching the container.
+	preDispatchAttrs := []any{"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String()}
+	if parentRole != "" {
+		preDispatchAttrs = append(preDispatchAttrs, "parent_agent_role", string(parentRole))
+	}
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
-		"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String())
+		preDispatchAttrs...)
 	var warnings []string
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
 		if !req.ProvisionOnly {
@@ -997,8 +1119,12 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
+	dispatchAttrs := []any{"agent_id", agent.ID, "agent", agent.Name, "totalElapsed", time.Since(hubCreateStart).String()}
+	if parentRole != "" {
+		dispatchAttrs = append(dispatchAttrs, "parent_agent_role", string(parentRole))
+	}
 	s.agentLifecycleLog.Info("Hub: dispatch complete",
-		"agent_id", agent.ID, "agent", agent.Name, "totalElapsed", time.Since(hubCreateStart).String())
+		dispatchAttrs...)
 
 	// Re-read the agent from the database before publishing the "created" event.
 	// A concurrent status update (e.g. sciontool reporting a clone error) may have
@@ -1581,6 +1707,10 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {

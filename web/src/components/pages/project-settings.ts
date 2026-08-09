@@ -65,6 +65,7 @@ interface ProjectSettings {
   defaultGCPIdentityServiceAccountID?: string | undefined;
   defaultModel?: string | undefined;
   defaultThinkingLevel?: number | null | undefined;
+  maxAgentRole?: string | undefined;
 }
 
 interface ResolvedHubSetting {
@@ -203,6 +204,10 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private configDefaultGCPIdentitySAID = '';
+
+  // Agent authorization
+  @state()
+  private configMaxAgentRole = '';
 
   @state()
   private defaultModelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
@@ -1018,6 +1023,7 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultResDisk = res?.disk || '';
       this.configDefaultGCPIdentityMode = this.settings.defaultGCPIdentityMode || '';
       this.configDefaultGCPIdentitySAID = this.settings.defaultGCPIdentityServiceAccountID || '';
+      this.configMaxAgentRole = this.settings.maxAgentRole || '';
       if (this.settings.defaultModel) {
         const dm = normalizeModelAlias(this.settings.defaultModel);
         if (['small', 'medium', 'large', 'extra-large'].includes(dm)) {
@@ -1192,6 +1198,7 @@ export class ScionPageProjectSettings extends LitElement {
           this.configDefaultGCPIdentityMode === 'assign'
             ? this.configDefaultGCPIdentitySAID || undefined
             : undefined,
+        maxAgentRole: this.configMaxAgentRole || undefined,
       };
 
       const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`, {
@@ -1786,6 +1793,27 @@ export class ScionPageProjectSettings extends LitElement {
                 </sl-select>
                 <span class="field-help"
                   >Automatically detect and expose listening TCP ports in agent containers. "Use hub default" inherits the server-level setting.</span
+                >
+              </div>
+
+              <div class="config-field ${this.isHubDefault('scion.io/max-agent-role') ? 'hub-inherited' : ''}">
+                <label>Maximum Agent Role ${this.renderHubIndicator('scion.io/max-agent-role')}</label>
+                <sl-select
+                  placeholder=${this.hubSelectLabel('scion.io/max-agent-role', 'Baseline (default)')}
+                  clearable
+                  value=${this.configMaxAgentRole}
+                  ?disabled=${!canEdit}
+                  @sl-change=${(e: Event) => {
+                    this.configMaxAgentRole = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="none">None — No hub access</sl-option>
+                  <sl-option value="readonly">Read-only — Read-only access</sl-option>
+                  <sl-option value="baseline">Baseline — Standard access</sl-option>
+                  <sl-option value="full">Full — Full access (admin only)</sl-option>
+                </sl-select>
+                <span class="field-help"
+                  >Caps the maximum role agents in this project can receive.</span
                 >
               </div>
 

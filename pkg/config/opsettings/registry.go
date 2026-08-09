@@ -291,6 +291,7 @@ func compileSchemas() {
 				"default_resources":       getSchemaProperty(root, "default_resources"),
 				"default_model":           map[string]interface{}{"type": "string"},
 				"default_thinking_level":  map[string]interface{}{"type": "integer"},
+				"default_max_agent_role":  getSchemaProperty(root, "default_max_agent_role"),
 			},
 			"additionalProperties": false,
 		},

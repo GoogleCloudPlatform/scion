@@ -440,3 +440,113 @@ func TestRunTemplateStatus_NoHub(t *testing.T) {
 	err := runTemplateStatus(nil, nil)
 	require.Error(t, err)
 }
+
+func TestWarnDeprecatedHubAccessScopes_JSON_WithScopes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "scion-agent.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{
+		"harness": "claude",
+		"hubAccess": {
+			"scopes": ["project:read", "agent:create"]
+		}
+	}`), 0644))
+
+	// Capture stderr
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	warnDeprecatedHubAccessScopes("test-template", dir)
+
+	_ = w.Close()
+	os.Stderr = oldStderr
+	buf := make([]byte, 4096)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	assert.Contains(t, output, "deprecated hubAccess.scopes",
+		"should warn about deprecated hubAccess.scopes")
+	assert.Contains(t, output, "test-template",
+		"warning should include template name")
+}
+
+func TestWarnDeprecatedHubAccessScopes_JSON_WithoutScopes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "scion-agent.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{
+		"harness": "claude"
+	}`), 0644))
+
+	// Capture stderr
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	warnDeprecatedHubAccessScopes("test-template", dir)
+
+	_ = w.Close()
+	os.Stderr = oldStderr
+	buf := make([]byte, 4096)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	assert.Empty(t, output,
+		"should not warn when hubAccess.scopes is absent")
+}
+
+func TestWarnDeprecatedHubAccessScopes_YAML_WithScopes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "scion-agent.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+harness: claude
+hubAccess:
+  scopes:
+    - project:read
+    - agent:create
+`), 0644))
+
+	// Capture stderr
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	warnDeprecatedHubAccessScopes("yaml-template", dir)
+
+	_ = w.Close()
+	os.Stderr = oldStderr
+	buf := make([]byte, 4096)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	assert.Contains(t, output, "deprecated hubAccess.scopes",
+		"should warn about deprecated hubAccess.scopes in YAML")
+	assert.Contains(t, output, "yaml-template",
+		"warning should include template name")
+}
+
+func TestWarnDeprecatedHubAccessScopes_EmptyScopes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "scion-agent.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{
+		"harness": "claude",
+		"hubAccess": {
+			"scopes": []
+		}
+	}`), 0644))
+
+	// Capture stderr
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	warnDeprecatedHubAccessScopes("empty-scopes", dir)
+
+	_ = w.Close()
+	os.Stderr = oldStderr
+	buf := make([]byte, 4096)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	assert.Empty(t, output,
+		"should not warn when hubAccess.scopes is empty array")
+}

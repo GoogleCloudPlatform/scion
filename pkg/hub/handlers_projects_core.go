@@ -129,6 +129,10 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -354,6 +358,16 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	// API evolution.
 	if len(project.SharedDirs) == 0 {
 		project.SharedDirs = s.defaultProjectSharedDirs()
+	}
+
+	// Apply hub-level default max agent role to new projects.
+	if defaults := s.hubAgentDefaults(); defaults.DefaultMaxAgentRole != "" {
+		if project.Annotations == nil {
+			project.Annotations = make(map[string]string)
+		}
+		if _, exists := project.Annotations[projectSettingMaxAgentRole]; !exists {
+			project.Annotations[projectSettingMaxAgentRole] = defaults.DefaultMaxAgentRole
+		}
 	}
 
 	if err := s.store.CreateProject(ctx, project); err != nil {
@@ -1065,6 +1079,16 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			project.SharedDirs = s.defaultProjectSharedDirs()
 		}
 
+		// Apply hub-level default max agent role to new projects.
+		if defaults := s.hubAgentDefaults(); defaults.DefaultMaxAgentRole != "" {
+			if project.Annotations == nil {
+				project.Annotations = make(map[string]string)
+			}
+			if _, exists := project.Annotations[projectSettingMaxAgentRole]; !exists {
+				project.Annotations[projectSettingMaxAgentRole] = defaults.DefaultMaxAgentRole
+			}
+		}
+
 		if err := s.store.CreateProject(ctx, project); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -1700,6 +1724,10 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 
 // listProjectAgents lists agents within a specific project
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -1822,6 +1850,10 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 
 // getProjectAgent gets an agent by ID within a specific project
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 
 	// Try to get by slug first (more common case)
@@ -2109,6 +2141,10 @@ func (s *Server) handleProjectByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	project, err := s.store.GetProject(ctx, id)
 	if err != nil {

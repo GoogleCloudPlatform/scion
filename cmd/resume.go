@@ -63,4 +63,5 @@ func init() {
 
 	// Inline config flag
 	resumeCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+
 }

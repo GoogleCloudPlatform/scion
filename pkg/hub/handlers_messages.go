@@ -159,6 +159,10 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	ctx, span := tracer.Start(ctx, "hub.message.list")
 	defer span.End()

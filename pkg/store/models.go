@@ -169,6 +169,10 @@ type AgentAppliedConfig struct {
 	// Hub access scopes granted to the agent (from template HubAccess config)
 	HubAccessScopes []string `json:"hubAccessScopes,omitempty"`
 
+	// AgentRole is the effective authorization role resolved at creation time.
+	// Determines which JWT scopes the agent receives. Immutable after creation.
+	AgentRole string `json:"agentRole,omitempty"`
+
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// Set during workspace bootstrap for non-git projects.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`

@@ -520,6 +520,62 @@ func TestProjectSettings_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestProjectSettings_MaxAgentRole_PutAndGet(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	putBody := hubclient.ProjectSettings{
+		MaxAgentRole: "readonly",
+	}
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var putResp hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&putResp))
+	assert.Equal(t, "readonly", putResp.MaxAgentRole)
+
+	// GET should return persisted value
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var getResp hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
+	assert.Equal(t, "readonly", getResp.MaxAgentRole)
+}
+
+func TestProjectSettings_MaxAgentRole_InvalidReturns400(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	putBody := hubclient.ProjectSettings{
+		MaxAgentRole: "superadmin",
+	}
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "maxAgentRole")
+}
+
+func TestProjectSettings_MaxAgentRole_ClearValue(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	// Set it first
+	putBody := hubclient.ProjectSettings{MaxAgentRole: "readonly"}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Clear it
+	putBody = hubclient.ProjectSettings{MaxAgentRole: ""}
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var getResp hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
+	assert.Empty(t, getResp.MaxAgentRole)
+}
+
 func createTestProjectForSettings(t *testing.T, s store.Store) *store.Project {
 	t.Helper()
 	project := &store.Project{

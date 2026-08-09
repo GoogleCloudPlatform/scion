@@ -678,8 +678,8 @@ func TestServer_GenerateAgentToken_DevAuthAutoGrantsScopes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
-	// Generate token without any additional scopes
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil)
+	// Generate token without any additional scopes — role=baseline, dev-auth upgrades to full
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -727,8 +727,8 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Generate token with explicit scopes that overlap with auto-granted ones
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil,
-		ScopeAgentCreate, ScopeAgentLifecycle, ScopeProjectSecretRead)
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline,
+		[]AgentTokenScope{ScopeAgentCreate, ScopeAgentLifecycle, ScopeProjectSecretRead})
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -777,7 +777,7 @@ func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
-	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil)
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
 	if err != nil {
 		t.Fatalf("GenerateAgentToken failed: %v", err)
 	}
@@ -798,6 +798,185 @@ func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
 	}
 	if claims.HasScope(ScopeAgentLifecycle) {
 		t.Error("expected ScopeAgentLifecycle NOT to be auto-granted without dev-auth")
+	}
+}
+
+func TestServer_GenerateAgentToken_RoleBaseline(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.AgentTokenConfig = AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	}
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
+	if err != nil {
+		t.Fatalf("GenerateAgentToken failed: %v", err)
+	}
+
+	claims, err := srv.agentTokenService.ValidateAgentToken(token)
+	if err != nil {
+		t.Fatalf("ValidateAgentToken failed: %v", err)
+	}
+
+	if !claims.HasScope(ScopeProjectRead) {
+		t.Error("expected ScopeProjectRead for baseline role")
+	}
+	if !claims.HasScope(ScopeAgentStatusUpdate) {
+		t.Error("expected ScopeAgentStatusUpdate for baseline role")
+	}
+	if !claims.HasScope(ScopeAgentTokenRefresh) {
+		t.Error("expected ScopeAgentTokenRefresh for baseline role")
+	}
+	if claims.HasScope(ScopeAgentCreate) {
+		t.Error("expected ScopeAgentCreate NOT to be present for baseline role")
+	}
+	if claims.HasScope(ScopeAgentLifecycle) {
+		t.Error("expected ScopeAgentLifecycle NOT to be present for baseline role")
+	}
+}
+
+func TestServer_GenerateAgentToken_RoleFull(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.AgentTokenConfig = AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	}
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleFull, nil)
+	if err != nil {
+		t.Fatalf("GenerateAgentToken failed: %v", err)
+	}
+
+	claims, err := srv.agentTokenService.ValidateAgentToken(token)
+	if err != nil {
+		t.Fatalf("ValidateAgentToken failed: %v", err)
+	}
+
+	if !claims.HasScope(ScopeProjectRead) {
+		t.Error("expected ScopeProjectRead for full role")
+	}
+	if !claims.HasScope(ScopeAgentCreate) {
+		t.Error("expected ScopeAgentCreate for full role")
+	}
+	if !claims.HasScope(ScopeAgentLifecycle) {
+		t.Error("expected ScopeAgentLifecycle for full role")
+	}
+	if !claims.HasScope(ScopeProjectSecretRead) {
+		t.Error("expected ScopeProjectSecretRead for full role")
+	}
+}
+
+func TestServer_GenerateAgentToken_RoleReadOnly(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.AgentTokenConfig = AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	}
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleReadOnly, nil)
+	if err != nil {
+		t.Fatalf("GenerateAgentToken failed: %v", err)
+	}
+
+	claims, err := srv.agentTokenService.ValidateAgentToken(token)
+	if err != nil {
+		t.Fatalf("ValidateAgentToken failed: %v", err)
+	}
+
+	if !claims.HasScope(ScopeProjectRead) {
+		t.Error("expected ScopeProjectRead for readonly role")
+	}
+	if claims.HasScope(ScopeAgentStatusUpdate) {
+		t.Error("expected ScopeAgentStatusUpdate NOT to be present for readonly role")
+	}
+	if claims.HasScope(ScopeAgentCreate) {
+		t.Error("expected ScopeAgentCreate NOT to be present for readonly role")
+	}
+}
+
+func TestServer_GenerateAgentToken_DevAuthUpgradesRole(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := s.Migrate(context.Background()); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = "test-dev-token"
+	cfg.AgentTokenConfig = AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	}
+
+	srv, err := New(cfg, s)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	// Even with readonly role, dev-auth mode should upgrade to full
+	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleReadOnly, nil)
+	if err != nil {
+		t.Fatalf("GenerateAgentToken failed: %v", err)
+	}
+
+	claims, err := srv.agentTokenService.ValidateAgentToken(token)
+	if err != nil {
+		t.Fatalf("ValidateAgentToken failed: %v", err)
+	}
+
+	if !claims.HasScope(ScopeAgentCreate) {
+		t.Error("expected ScopeAgentCreate to be present — dev-auth should upgrade to full")
+	}
+	if !claims.HasScope(ScopeAgentLifecycle) {
+		t.Error("expected ScopeAgentLifecycle to be present — dev-auth should upgrade to full")
+	}
+	if !claims.HasScope(ScopeProjectSecretRead) {
+		t.Error("expected ScopeProjectSecretRead to be present — dev-auth should upgrade to full")
 	}
 }
 

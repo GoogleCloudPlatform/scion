@@ -702,7 +702,9 @@ func TestAgentGetAgent_ProjectIsolation(t *testing.T) {
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
 
-	token, err := tokenSvc.GenerateAgentToken(agent1.ID, project1.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	// Token includes ScopeProjectRead (required for read endpoints) and
+	// ScopeAgentStatusUpdate (standard baseline scope).
+	token, err := tokenSvc.GenerateAgentToken(agent1.ID, project1.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 	require.NoError(t, err)
 
 	t.Run("Agent can GET details of agents in same project", func(t *testing.T) {

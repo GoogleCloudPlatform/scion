@@ -59,6 +59,9 @@ const (
 	ScopeAgentPortForward AgentTokenScope = "agent:port:forward"
 	// ScopeIdentityToken grants the ability to request OIDC identity tokens.
 	ScopeIdentityToken AgentTokenScope = "agent:identity:token"
+	// ScopeProjectRead grants read access to project resources (agents, templates,
+	// skills, harness configs, projects). Enforced by checkAgentReadScope().
+	ScopeProjectRead AgentTokenScope = "project:read"
 	// ScopeGCPTokenPrefix is the prefix for GCP token scopes.
 	// Full scope format: "project:gcp:token:<sa-id>"
 	ScopeGCPTokenPrefix = "project:gcp:token:"
@@ -366,4 +369,25 @@ func RequireAgentSelfAccess(pathPrefix string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// checkAgentReadScope verifies that agent callers have ScopeProjectRead.
+// Returns true if the request should proceed, false if a 403 was written.
+// User callers are not affected — the check only applies when the caller
+// is an agent (i.e., GetAgentIdentityFromContext returns non-nil).
+//
+// Backward compatibility note: legacy agents created before the role system
+// may not have ScopeProjectRead in their JWT. They must refresh their token,
+// which will mint scopes based on their effective role (defaulting to baseline,
+// which includes ScopeProjectRead). Token refresh is automatic and frequent,
+// so active legacy agents will have already refreshed.
+func checkAgentReadScope(w http.ResponseWriter, r *http.Request) bool {
+	if agentIdent := GetAgentIdentityFromContext(r.Context()); agentIdent != nil {
+		if !agentIdent.HasScope(ScopeProjectRead) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Missing required scope: project:read", nil)
+			return false
+		}
+	}
+	return true
 }

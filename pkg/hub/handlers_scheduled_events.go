@@ -67,6 +67,10 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	// For agent identities, enforce project isolation
 	if agentIdentity := GetAgentIdentityFromContext(r.Context()); agentIdentity != nil {
 		if agentIdentity.ProjectID() != projectID {

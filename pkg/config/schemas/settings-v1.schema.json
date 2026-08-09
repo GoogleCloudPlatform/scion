@@ -232,6 +232,13 @@
       "description": "Default thinking/reasoning level for new agents (1-100). 0 is reserved as the clear sentinel.",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "default_max_agent_role": {
+      "type": "string",
+      "enum": ["none", "readonly", "baseline", "full"],
+      "description": "Default maximum agent role for new projects. Caps the role agents can receive.",
+      "x-scope": "any",
+      "x-since": "1"
     }
   },
   "additionalProperties": false,

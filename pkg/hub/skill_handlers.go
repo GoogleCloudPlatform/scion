@@ -215,6 +215,10 @@ func (s *Server) handleSkillCRUD(w http.ResponseWriter, r *http.Request, id stri
 
 // listSkills lists skills with filtering.
 func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -414,6 +418,10 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 
 // getSkill retrieves a skill with capabilities.
 func (s *Server) getSkill(w http.ResponseWriter, r *http.Request, id string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	skill, err := s.store.GetSkill(ctx, id)
 	if err != nil {

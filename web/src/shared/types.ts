@@ -402,6 +402,7 @@ export interface AgentAppliedConfig {
   templateHash?: string;
   inlineConfig?: AgentInlineConfig;
   gcpIdentity?: GCPIdentityConfig;
+  agentRole?: string;
 }
 
 /**

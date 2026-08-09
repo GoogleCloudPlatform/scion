@@ -63,7 +63,8 @@ func agentDefaultsEqual(a, b opsettings.AgentDefaultsSettings) bool {
 		a.DefaultMaxTurns != b.DefaultMaxTurns ||
 		a.DefaultMaxModelCalls != b.DefaultMaxModelCalls ||
 		a.DefaultMaxDuration != b.DefaultMaxDuration ||
-		a.DefaultModel != b.DefaultModel {
+		a.DefaultModel != b.DefaultModel ||
+		a.DefaultMaxAgentRole != b.DefaultMaxAgentRole {
 		return false
 	}
 	if !intPtrEqual(a.DefaultThinkingLevel, b.DefaultThinkingLevel) {

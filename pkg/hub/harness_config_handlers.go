@@ -148,6 +148,10 @@ func (s *Server) handleHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 
 // listHarnessConfigs lists harness configs with filtering.
 func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -362,6 +366,10 @@ func (s *Server) handleHarnessConfigCRUD(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	hc, err := s.store.GetHarnessConfig(ctx, id)
 	if err != nil {

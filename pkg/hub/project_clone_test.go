@@ -755,3 +755,30 @@ func TestProjectClone_StorageFilesCopied(t *testing.T) {
 	}
 	assert.True(t, found, "storage files should exist under clone's project ID")
 }
+
+func TestProjectClone_CopiesMaxAgentRole(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	src := &store.Project{
+		ID:        api.NewUUID(),
+		Name:      "Source With MaxRole",
+		Slug:      "source-maxrole",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+		Annotations: map[string]string{
+			projectSettingMaxAgentRole: "readonly",
+		},
+	}
+	require.NoError(t, s.CreateProject(ctx, src))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]string{"name": "Cloned MaxRole"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+	assert.Equal(t, "readonly", clone.Annotations[projectSettingMaxAgentRole],
+		"clone should copy max_agent_role annotation from source")
+}

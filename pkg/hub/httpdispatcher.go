@@ -119,7 +119,7 @@ func (d *HTTPAgentDispatcher) GetClient() RuntimeBrokerClient {
 
 // AgentTokenGenerator generates JWT tokens for agents.
 type AgentTokenGenerator interface {
-	GenerateAgentToken(agentID, projectID string, ancestry []string, additionalScopes ...AgentTokenScope) (string, error)
+	GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error)
 }
 
 // GitHubAppTokenMinter mints GitHub App installation tokens for projects.
@@ -199,6 +199,26 @@ func NewHTTPAgentDispatcherWithClient(s store.Store, client RuntimeBrokerClient,
 // SetTokenGenerator sets the token generator for agent authentication.
 func (d *HTTPAgentDispatcher) SetTokenGenerator(gen AgentTokenGenerator) {
 	d.tokenGenerator = gen
+}
+
+// agentRoleAndScopes extracts the effective role and config-based additional
+// scopes (e.g. GCP token) from the agent record. Used by all dispatch call
+// sites to keep role/scope computation in a single place.
+func agentRoleAndScopes(agent *store.Agent) (AgentRole, []AgentTokenScope) {
+	// Default to baseline for backward compat with pre-role agents.
+	role := AgentRoleBaseline
+	if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
+		role = AgentRole(agent.AppliedConfig.AgentRole)
+	}
+
+	var additionalScopes []AgentTokenScope
+	if agent.AppliedConfig != nil {
+		// GCP token scope is config-based, not role-based.
+		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
+			additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
+		}
+	}
+	return role, additionalScopes
 }
 
 // SetHubEndpoint sets the Hub endpoint URL that agents will use to call back.
@@ -419,18 +439,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 
 	// Generate agent token if token generator is available
 	if d.tokenGenerator != nil {
-		// Convert hub access scopes from AppliedConfig to AgentTokenScope
-		var additionalScopes []AgentTokenScope
-		if agent.AppliedConfig != nil {
-			for _, s := range agent.AppliedConfig.HubAccessScopes {
-				additionalScopes = append(additionalScopes, AgentTokenScope(s))
-			}
-			// Inject GCP token scope when the agent has an assigned service account
-			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
-				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
-			}
-		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		agentRole, additionalScopes := agentRoleAndScopes(agent)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("Failed to generate agent token", "error", err)
@@ -1816,17 +1826,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	// Generate a fresh agent token for Hub authentication
 	if d.tokenGenerator != nil {
-		var additionalScopes []AgentTokenScope
-		if agent.AppliedConfig != nil {
-			for _, s := range agent.AppliedConfig.HubAccessScopes {
-				additionalScopes = append(additionalScopes, AgentTokenScope(s))
-			}
-			// Inject GCP token scope when the agent has an assigned service account
-			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
-				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
-			}
-		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		agentRole, additionalScopes := agentRoleAndScopes(agent)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentStart: failed to generate agent token", "error", err)
@@ -2071,16 +2072,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 
 	if d.tokenGenerator != nil {
-		var additionalScopes []AgentTokenScope
-		if agent.AppliedConfig != nil {
-			for _, s := range agent.AppliedConfig.HubAccessScopes {
-				additionalScopes = append(additionalScopes, AgentTokenScope(s))
-			}
-			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
-				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
-			}
-		}
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		agentRole, additionalScopes := agentRoleAndScopes(agent)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			if d.debug {
 				d.log.Warn("DispatchAgentRestart: failed to generate agent token", "error", err)
@@ -2165,16 +2158,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 
 	var token string
 	if d.tokenGenerator != nil {
-		var additionalScopes []AgentTokenScope
-		if agent.AppliedConfig != nil {
-			for _, s := range agent.AppliedConfig.HubAccessScopes {
-				additionalScopes = append(additionalScopes, AgentTokenScope(s))
-			}
-			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
-				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
-			}
-		}
-		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		agentRole, additionalScopes := agentRoleAndScopes(agent)
+		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
 		if err != nil {
 			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
 		}

@@ -36,6 +36,10 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -88,6 +92,10 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
+		return
+	}
+
+	if !checkAgentReadScope(w, r) {
 		return
 	}
 
@@ -167,6 +175,10 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
+		return
+	}
+
+	if !checkAgentReadScope(w, r) {
 		return
 	}
 
@@ -272,6 +284,10 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	if s.logQueryService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
 			"Cloud Logging is not configured", nil)
@@ -341,6 +357,10 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
+		return
+	}
+
+	if !checkAgentReadScope(w, r) {
 		return
 	}
 
@@ -434,6 +454,10 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	if s.logQueryService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
 			"Cloud Logging is not configured", nil)
@@ -501,6 +525,10 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
+		return
+	}
+
+	if !checkAgentReadScope(w, r) {
 		return
 	}
 

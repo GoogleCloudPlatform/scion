@@ -186,6 +186,9 @@ type CreateAgentRequest struct {
 	// Notify subscribes the creating agent/user to status notifications
 	// (COMPLETED, WAITING_FOR_INPUT, LIMITS_EXCEEDED) for the new agent.
 	Notify bool `json:"notify,omitempty"`
+
+	// AgentRole specifies the requested authorization role.
+	AgentRole string `json:"agentRole,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.
