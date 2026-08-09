@@ -54,6 +54,9 @@ type AuthConfig struct {
 	ProxyUserProvisioner func(ctx context.Context, info *ProxyUserInfo) (UserIdentity, error)
 	// AuthMode is the exclusive human auth mode: "oauth", "proxy", "dev".
 	AuthMode string
+	// FederationAuthenticator validates OIDC tokens from trusted external hubs.
+	// nil when federation is disabled.
+	FederationAuthenticator *FederationAuthenticator
 	// Debug enables verbose logging
 	Debug bool
 	// Logger is the subsystem logger for auth middleware (defaults to slog.Default())
@@ -138,6 +141,35 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					}
 				}
 				// Bearer token wasn't an agent token, continue to user auth
+			}
+
+			// Step 1.5: Federation OIDC token (X-Scion-Federation-Token header)
+			if federationToken := r.Header.Get(FederationTokenHeader); federationToken != "" {
+				if cfg.FederationAuthenticator == nil {
+					// Header present but federation not enabled — reject, don't silently ignore
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"federation authentication is not configured", nil)
+					return
+				}
+				identity, err := cfg.FederationAuthenticator.Authenticate(federationToken)
+				if err != nil {
+					if cfg.Debug {
+						log.Debug("Federation token validation failed", "error", err)
+					}
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid federation token", nil)
+					return
+				}
+				ctx = contextWithIdentity(ctx, identity)
+				ctx = contextWithAuthType(ctx, AuthTypeFederation)
+				if cfg.Debug {
+					log.Debug("Federated agent authenticated",
+						"issuer", identity.IssuerURL(),
+						"agent_id", identity.RemoteAgentID(),
+						"agent_name", identity.AgentName())
+				}
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
 			}
 
 			// Step 2: Check for broker HMAC authentication (X-Scion-Broker-ID header)
