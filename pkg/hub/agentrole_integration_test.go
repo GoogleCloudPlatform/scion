@@ -183,20 +183,19 @@ func TestCreateAgent_RoleNone_SetsNoAuth(t *testing.T) {
 	}
 }
 
-func TestCreateAgent_RoleFull_CappedByMemberCeiling(t *testing.T) {
-	srv, s, user, project := setupAgentRoleTest(t)
+func TestCreateAgent_RoleFull_RejectedByMemberCeiling(t *testing.T) {
+	srv, _, user, project := setupAgentRoleTest(t)
 
-	_ = doAgentRoleRequest(t, srv, user, CreateAgentRequest{
+	rec := doAgentRoleRequest(t, srv, user, CreateAgentRequest{
 		Name:      "test-full-capped",
 		ProjectID: project.ID,
 		AgentRole: "full",
 	})
 
-	if role, ok := getStoredAgentRole(t, s, project.ID, "test-full-capped"); ok {
-		// Member user ceiling is baseline, so full should be capped.
-		assert.Equal(t, "baseline", role,
-			"member user requesting full should be capped to baseline")
-	}
+	// Member user ceiling is baseline; explicitly requesting full is fail-loud 403.
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"member user requesting full should be forbidden; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "user ceiling")
 }
 
 func TestCreateAgent_AdminGetsFull(t *testing.T) {
@@ -315,7 +314,7 @@ func TestCreateSubAgent_LegacyParent(t *testing.T) {
 	}
 }
 
-func TestCreateSubAgent_NoEscalationNotEnforced(t *testing.T) {
+func TestCreateSubAgent_NoEscalationEnforced(t *testing.T) {
 	srv, s, _, project := setupAgentRoleTest(t)
 	ctx := context.Background()
 
@@ -332,29 +331,25 @@ func TestCreateSubAgent_NoEscalationNotEnforced(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, baselineParent))
 
-	// Baseline parent requests role=full for child. In F2P1, this should
-	// still be allowed (no-escalation enforcement is F2P2).
+	// Baseline parent requests role=full for child — should be rejected with 403 (F2P2).
 	rec := doAgentCallerRequest(t, srv, baselineParent.ID, project.ID, CreateAgentRequest{
 		Name:      "child-escalated",
 		ProjectID: project.ID,
 		AgentRole: "full",
 	})
 
-	// Should NOT get a 403 — enforcement is not in place yet.
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"baseline parent requesting full child should NOT be forbidden in F2P1")
+	// Should get a 403 — no-escalation enforcement is in place.
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"baseline parent requesting full child should be forbidden")
+	assert.Contains(t, rec.Body.String(), "parent agent role")
 
-	// The child should get full (capped only by projectMax=baseline, so baseline).
-	// NOTE: projectMax defaults to baseline, so the effective role is baseline
-	// even though full was requested. This is projectMax capping, not parentRole capping.
-	if role, ok := getStoredAgentRole(t, s, project.ID, "child-escalated"); ok {
-		assert.Equal(t, "baseline", role,
-			"role should be capped by projectMax (baseline), not by parentRole in F2P1")
-	}
+	// Agent should NOT have been created.
+	_, err := s.GetAgentBySlug(ctx, project.ID, "child-escalated")
+	assert.Error(t, err, "escalated sub-agent should not be persisted")
 }
 
 func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
-	srv, s, _, _ := setupAgentRoleTest(t)
+	srv, st, _, _ := setupAgentRoleTest(t)
 	ctx := context.Background()
 
 	// Create a project with max-agent-role=readonly.
@@ -368,7 +363,7 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
-	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, st.CreateProject(ctx, project))
 	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
 	admin := &store.User{
@@ -379,17 +374,256 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 		Status:      "active",
 		Created:     time.Now(),
 	}
-	require.NoError(t, s.CreateUser(ctx, admin))
-	ensureHubMembership(ctx, s, admin.ID)
+	require.NoError(t, st.CreateUser(ctx, admin))
+	ensureHubMembership(ctx, st, admin.ID)
 
-	_ = doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
+	rec := doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
 		Name:      "test-admin-capped",
 		ProjectID: project.ID,
 		AgentRole: "full",
 	})
 
-	if role, ok := getStoredAgentRole(t, s, project.ID, "test-admin-capped"); ok {
-		assert.Equal(t, "readonly", role,
-			"admin requesting full in readonly-max project should get readonly")
+	// Admin requesting full in a readonly-max project should be fail-loud 403.
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"admin requesting full in readonly-max project should be forbidden; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "project maximum")
+}
+
+// ---------- F2P2 No-Escalation Integration Tests ----------
+
+// setupFullMaxProject creates a project with max-agent-role=full so that
+// projectMax does not interfere with parent-ceiling tests.
+func setupFullMaxProject(t *testing.T) (*Server, store.Store, *store.Project) {
+	t.Helper()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("user-f2p2-setup"),
+		Email:       "f2p2setup@test.com",
+		DisplayName: "F2P2 Setup",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
 	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("project-f2p2"),
+		Name:      "f2p2-project",
+		Slug:      "f2p2-project",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Annotations: map[string]string{
+			"scion.dev/max-agent-role": "full",
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+
+	return srv, s, project
+}
+
+func TestCreateSubAgent_BaselineParent_RequestsFull_403(t *testing.T) {
+	srv, s, project := setupFullMaxProject(t)
+	ctx := context.Background()
+
+	parent := &store.Agent{
+		ID:        tid("f2p2-parent-baseline"),
+		Slug:      "f2p2-parent-baseline",
+		Name:      "f2p2-parent-baseline",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "baseline",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, parent))
+
+	rec := doAgentCallerRequest(t, srv, parent.ID, project.ID, CreateAgentRequest{
+		Name:      "child-over-request",
+		ProjectID: project.ID,
+		AgentRole: "full",
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"baseline parent requesting full sub-agent should get 403; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "parent agent role")
+}
+
+func TestCreateSubAgent_FullParent_RequestsBaseline_OK(t *testing.T) {
+	srv, s, project := setupFullMaxProject(t)
+	ctx := context.Background()
+
+	parent := &store.Agent{
+		ID:        tid("f2p2-parent-full-bl"),
+		Slug:      "f2p2-parent-full-bl",
+		Name:      "f2p2-parent-full-bl",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "full",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, parent))
+
+	rec := doAgentCallerRequest(t, srv, parent.ID, project.ID, CreateAgentRequest{
+		Name:      "child-baseline-ok",
+		ProjectID: project.ID,
+		AgentRole: "baseline",
+	})
+
+	// Should succeed (not 403)
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"full parent requesting baseline sub-agent should not be forbidden")
+
+	if role, ok := getStoredAgentRole(t, s, project.ID, "child-baseline-ok"); ok {
+		assert.Equal(t, "baseline", role,
+			"child should get the explicitly requested baseline role")
+	}
+}
+
+func TestCreateSubAgent_FullParent_RequestsFull_OK(t *testing.T) {
+	srv, s, project := setupFullMaxProject(t)
+	ctx := context.Background()
+
+	parent := &store.Agent{
+		ID:        tid("f2p2-parent-full-f"),
+		Slug:      "f2p2-parent-full-f",
+		Name:      "f2p2-parent-full-f",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "full",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, parent))
+
+	rec := doAgentCallerRequest(t, srv, parent.ID, project.ID, CreateAgentRequest{
+		Name:      "child-full-ok",
+		ProjectID: project.ID,
+		AgentRole: "full",
+	})
+
+	// Should succeed (not 403)
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"full parent requesting full sub-agent should not be forbidden")
+
+	if role, ok := getStoredAgentRole(t, s, project.ID, "child-full-ok"); ok {
+		assert.Equal(t, "full", role,
+			"child of full parent in full-max project should get full")
+	}
+}
+
+func TestCreateSubAgent_BaselineParent_DefaultsToBaseline(t *testing.T) {
+	srv, s, project := setupFullMaxProject(t)
+	ctx := context.Background()
+
+	parent := &store.Agent{
+		ID:        tid("f2p2-parent-bl-def"),
+		Slug:      "f2p2-parent-bl-def",
+		Name:      "f2p2-parent-bl-def",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "baseline",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, parent))
+
+	// No explicit agentRole — should inherit parent's baseline.
+	rec := doAgentCallerRequest(t, srv, parent.ID, project.ID, CreateAgentRequest{
+		Name:      "child-default-bl",
+		ProjectID: project.ID,
+	})
+
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"baseline parent with no explicit role should not be forbidden")
+
+	if role, ok := getStoredAgentRole(t, s, project.ID, "child-default-bl"); ok {
+		assert.Equal(t, "baseline", role,
+			"child with no explicit role should inherit parent's baseline")
+	}
+}
+
+func TestCreateSubAgent_MultiHop(t *testing.T) {
+	srv, s, project := setupFullMaxProject(t)
+	ctx := context.Background()
+
+	// Full grandparent creates a baseline child.
+	// We verify the grandparent→child request is allowed (not 403), then
+	// create the child directly in the store to test the child→grandchild hop
+	// (the HTTP path cannot persist agents without a broker).
+	grandparent := &store.Agent{
+		ID:        tid("f2p2-grandparent"),
+		Slug:      "f2p2-grandparent",
+		Name:      "f2p2-grandparent",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "full",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, grandparent))
+
+	rec := doAgentCallerRequest(t, srv, grandparent.ID, project.ID, CreateAgentRequest{
+		Name:      "mh-child-baseline",
+		ProjectID: project.ID,
+		AgentRole: "baseline",
+	})
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"full grandparent creating baseline child should not be forbidden")
+
+	// Create the baseline child directly in store for the second hop test.
+	child := &store.Agent{
+		ID:        tid("f2p2-mh-child"),
+		Slug:      "mh-child-baseline",
+		Name:      "mh-child-baseline",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "baseline",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, child))
+
+	// Baseline child tries to create a full grandchild — should be 403.
+	rec2 := doAgentCallerRequest(t, srv, child.ID, project.ID, CreateAgentRequest{
+		Name:      "mh-grandchild-full",
+		ProjectID: project.ID,
+		AgentRole: "full",
+	})
+	assert.Equal(t, http.StatusForbidden, rec2.Code,
+		"baseline child should not be able to create full grandchild; got: %s", rec2.Body.String())
+	assert.Contains(t, rec2.Body.String(), "parent agent role")
+}
+
+func TestCreateSubAgent_LegacyParent_CapsAtBaseline(t *testing.T) {
+	srv, s, project := setupFullMaxProject(t)
+	ctx := context.Background()
+
+	// Legacy agent: AppliedConfig exists but has no AgentRole set.
+	legacy := &store.Agent{
+		ID:            tid("f2p2-legacy-parent"),
+		Slug:          "f2p2-legacy-parent",
+		Name:          "f2p2-legacy-parent",
+		ProjectID:     project.ID,
+		Phase:         "running",
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, legacy))
+
+	// Legacy parent requesting full should be rejected — defaults to baseline ceiling.
+	rec := doAgentCallerRequest(t, srv, legacy.ID, project.ID, CreateAgentRequest{
+		Name:      "child-legacy-full",
+		ProjectID: project.ID,
+		AgentRole: "full",
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"legacy parent (no stored role → baseline) should not create full sub-agent; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "parent agent role")
 }
