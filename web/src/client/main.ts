@@ -153,6 +153,7 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/admin\/integrations$/, tag: 'scion-page-admin-integrations', load: () => import('../components/pages/admin-integrations.js') },
   { pattern: /^\/admin\/integrations\/[^/]+$/, tag: 'scion-page-admin-integrations', load: () => import('../components/pages/admin-integrations.js') },
   { pattern: /^\/admin\/server-config$/, tag: 'scion-page-admin-server-config', load: () => import('../components/pages/admin-server-config.js') },
+  { pattern: /^\/admin\/federation$/, tag: 'scion-page-admin-federation', load: () => import('../components/pages/admin-federation.js') },
   { pattern: /^\/settings$/, tag: 'scion-page-settings', load: () => import('../components/pages/settings.js') },
   { pattern: /^\/settings\/templates\/[^/]+$/, tag: 'scion-page-template-detail', load: () => import('../components/pages/template-detail.js') },
   { pattern: /^\/settings\/harness-configs\/[^/]+$/, tag: 'scion-page-harness-config-detail', load: () => import('../components/pages/harness-config-detail.js') },
@@ -192,7 +193,7 @@ const PROFILE_ROUTES = new Set(['scion-page-profile-env-vars', 'scion-page-profi
 /**
  * Routes that require admin role. Non-admin users are redirected to dashboard.
  */
-const ADMIN_ROUTES = new Set(['scion-page-settings', 'scion-page-admin-scheduler', 'scion-page-admin-maintenance', 'scion-page-admin-users', 'scion-page-admin-groups', 'scion-page-admin-group-detail', 'scion-page-admin-server-config', 'scion-page-admin-integrations', 'scion-page-admin-skill-registries', 'scion-page-admin-skill-registry-detail', 'scion-page-diagnostics', 'scion-page-health-dashboard']);
+const ADMIN_ROUTES = new Set(['scion-page-settings', 'scion-page-admin-scheduler', 'scion-page-admin-maintenance', 'scion-page-admin-users', 'scion-page-admin-groups', 'scion-page-admin-group-detail', 'scion-page-admin-server-config', 'scion-page-admin-federation', 'scion-page-admin-integrations', 'scion-page-admin-skill-registries', 'scion-page-admin-skill-registry-detail', 'scion-page-diagnostics', 'scion-page-health-dashboard']);
 
 /**
  * Initialize the client-side application
