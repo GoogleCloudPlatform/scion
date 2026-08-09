@@ -92,11 +92,11 @@ type NotificationsSettings struct {
 
 // FederationSettings is the opsettings section struct for federation config.
 type FederationSettings struct {
-	Enabled          *bool                              `json:"enabled,omitempty"`
-	TrustedIssuers   []config.V1TrustedIssuerConfig     `json:"trusted_issuers,omitempty"`
-	Algorithms       []string                           `json:"algorithms,omitempty"`
-	RefreshInterval  string                             `json:"refresh_interval,omitempty"`
-	DebounceInterval string                             `json:"debounce_interval,omitempty"`
+	Enabled          *bool                          `json:"enabled,omitempty"`
+	TrustedIssuers   []config.V1TrustedIssuerConfig `json:"trusted_issuers,omitempty"`
+	Algorithms       []string                       `json:"algorithms,omitempty"`
+	RefreshInterval  string                         `json:"refresh_interval,omitempty"`
+	DebounceInterval string                         `json:"debounce_interval,omitempty"`
 }
 
 // ProjectDefaultsSettings holds Layer-1 project creation defaults.

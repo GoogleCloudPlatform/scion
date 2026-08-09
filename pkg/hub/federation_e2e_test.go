@@ -117,10 +117,10 @@ func setupE2EServer(t *testing.T, requiredScope AgentTokenScope) (
 	}
 
 	authCfg := AuthConfig{
-		Mode:                    "production",
+		Mode:           "production",
 		FederationAuth: newFedAuthPointer(authenticator),
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Debug:          true,
+		Logger:         slog.Default(),
 	}
 
 	// Build the handler chain: auth middleware -> access control -> handler
@@ -339,10 +339,10 @@ func setupNonHubE2EServer(t *testing.T, fedCfg config.FederationConfig, audience
 	}
 
 	authCfg := AuthConfig{
-		Mode:                    "production",
+		Mode:           "production",
 		FederationAuth: newFedAuthPointer(authenticator),
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Debug:          true,
+		Logger:         slog.Default(),
 	}
 
 	identityHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

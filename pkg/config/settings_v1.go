@@ -1592,18 +1592,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Federation.Enabled = *v1.Federation.Enabled
 		}
 		for _, vi := range v1.Federation.TrustedIssuers {
-			ti := TrustedIssuerConfig{
-				IssuerURL:        vi.IssuerURL,
-				JWKSURL:          vi.JWKSURL,
-				ExpectedAudience: vi.ExpectedAudience,
-				AllowedProjects:  vi.AllowedProjects,
-				AllowedRootUsers: vi.AllowedRootUsers,
-				DefaultScopes:    vi.DefaultScopes,
-				IssuerType:       vi.IssuerType,
-				DefaultRole:      vi.DefaultRole,
-				AllowedEmails:    vi.AllowedEmails,
-			}
-			gc.Federation.TrustedIssuers = append(gc.Federation.TrustedIssuers, ti)
+			gc.Federation.TrustedIssuers = append(gc.Federation.TrustedIssuers, TrustedIssuerConfig(vi))
 		}
 		gc.Federation.Algorithms = v1.Federation.Algorithms
 		if v1.Federation.RefreshInterval != "" {
@@ -1796,18 +1785,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			v1.Federation.DebounceInterval = gc.Federation.Cache.DebounceInterval.String()
 		}
 		for _, ti := range gc.Federation.TrustedIssuers {
-			vi := V1TrustedIssuerConfig{
-				IssuerURL:        ti.IssuerURL,
-				JWKSURL:          ti.JWKSURL,
-				ExpectedAudience: ti.ExpectedAudience,
-				AllowedProjects:  ti.AllowedProjects,
-				AllowedRootUsers: ti.AllowedRootUsers,
-				DefaultScopes:    ti.DefaultScopes,
-				IssuerType:       ti.IssuerType,
-				DefaultRole:      ti.DefaultRole,
-				AllowedEmails:    ti.AllowedEmails,
-			}
-			v1.Federation.TrustedIssuers = append(v1.Federation.TrustedIssuers, vi)
+			v1.Federation.TrustedIssuers = append(v1.Federation.TrustedIssuers, V1TrustedIssuerConfig(ti))
 		}
 	}
 

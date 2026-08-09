@@ -101,10 +101,14 @@ func TestFederationMiddleware_ValidToken(t *testing.T) {
 	privKey, auth, issuer, audience, kid := setupFederationIntegration(t)
 
 	cfg := AuthConfig{
-		Mode:                    "production",
-		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Mode: "production",
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] {
+			p := &atomic.Pointer[FederationAuthenticator]{}
+			p.Store(auth)
+			return p
+		}(),
+		Debug:  true,
+		Logger: slog.Default(),
 	}
 
 	middleware := UnifiedAuthMiddleware(cfg)
@@ -200,10 +204,14 @@ func TestFederationMiddleware_InvalidToken(t *testing.T) {
 	_, auth, _, _, _ := setupFederationIntegration(t)
 
 	cfg := AuthConfig{
-		Mode:                    "production",
-		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Mode: "production",
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] {
+			p := &atomic.Pointer[FederationAuthenticator]{}
+			p.Store(auth)
+			return p
+		}(),
+		Debug:  true,
+		Logger: slog.Default(),
 	}
 
 	middleware := UnifiedAuthMiddleware(cfg)
@@ -234,10 +242,10 @@ func TestFederationMiddleware_InvalidToken(t *testing.T) {
 // "federation authentication is not configured".
 func TestFederationMiddleware_NotConfigured(t *testing.T) {
 	cfg := AuthConfig{
-		Mode:                    "production",
+		Mode:           "production",
 		FederationAuth: nil, // federation not enabled
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Debug:          true,
+		Logger:         slog.Default(),
 	}
 
 	middleware := UnifiedAuthMiddleware(cfg)
@@ -271,10 +279,14 @@ func TestFederationMiddleware_NoHeader(t *testing.T) {
 	_, auth, _, _, _ := setupFederationIntegration(t)
 
 	cfg := AuthConfig{
-		Mode:                    "production",
-		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Mode: "production",
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] {
+			p := &atomic.Pointer[FederationAuthenticator]{}
+			p.Store(auth)
+			return p
+		}(),
+		Debug:  true,
+		Logger: slog.Default(),
 	}
 
 	middleware := UnifiedAuthMiddleware(cfg)
@@ -320,11 +332,15 @@ func TestFederationMiddleware_AgentTokenTakesPriority(t *testing.T) {
 	}
 
 	cfg := AuthConfig{
-		Mode:                    "production",
-		AgentTokenSvc:           agentTokenSvc,
-		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Mode:          "production",
+		AgentTokenSvc: agentTokenSvc,
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] {
+			p := &atomic.Pointer[FederationAuthenticator]{}
+			p.Store(auth)
+			return p
+		}(),
+		Debug:  true,
+		Logger: slog.Default(),
 	}
 
 	middleware := UnifiedAuthMiddleware(cfg)
@@ -380,10 +396,14 @@ func TestFederationMiddleware_ExpiredToken(t *testing.T) {
 	privKey, auth, issuer, audience, kid := setupFederationIntegration(t)
 
 	cfg := AuthConfig{
-		Mode:                    "production",
-		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Mode: "production",
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] {
+			p := &atomic.Pointer[FederationAuthenticator]{}
+			p.Store(auth)
+			return p
+		}(),
+		Debug:  true,
+		Logger: slog.Default(),
 	}
 
 	middleware := UnifiedAuthMiddleware(cfg)

@@ -42,7 +42,7 @@ func TestApplySnapshot_FederationHotReload(t *testing.T) {
 	// Create a JWKS test server for the trusted issuer.
 	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"keys":[]}`))
+		_, _ = w.Write([]byte(`{"keys":[]}`))
 	}))
 	defer jwksServer.Close()
 
@@ -426,7 +426,7 @@ func TestMiddleware_LoadsFromAtomicPointer(t *testing.T) {
 	}
 
 	var body map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &body)
+	_ = json.Unmarshal(rr.Body.Bytes(), &body)
 	errData, _ := body["error"].(map[string]interface{})
 	if msg, ok := errData["message"].(string); ok {
 		if msg != "federation authentication is not configured" {

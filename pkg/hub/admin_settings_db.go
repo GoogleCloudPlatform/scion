@@ -1123,18 +1123,7 @@ func convertFederationSettingsToConfig(fs opsettings.FederationSettings) config.
 		fc.Enabled = *fs.Enabled
 	}
 	for _, vi := range fs.TrustedIssuers {
-		ti := config.TrustedIssuerConfig{
-			IssuerURL:        vi.IssuerURL,
-			JWKSURL:          vi.JWKSURL,
-			ExpectedAudience: vi.ExpectedAudience,
-			AllowedProjects:  vi.AllowedProjects,
-			AllowedRootUsers: vi.AllowedRootUsers,
-			DefaultScopes:    vi.DefaultScopes,
-			IssuerType:       vi.IssuerType,
-			DefaultRole:      vi.DefaultRole,
-			AllowedEmails:    vi.AllowedEmails,
-		}
-		fc.TrustedIssuers = append(fc.TrustedIssuers, ti)
+		fc.TrustedIssuers = append(fc.TrustedIssuers, config.TrustedIssuerConfig(vi))
 	}
 	if fs.RefreshInterval != "" {
 		if d, err := time.ParseDuration(fs.RefreshInterval); err == nil {

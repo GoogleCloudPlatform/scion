@@ -1185,19 +1185,19 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Build unified auth configuration
 	srv.authConfig = AuthConfig{
-		Mode:                    "production",
-		DevAuthEnabled:          cfg.DevAuthToken != "",
-		DevAuthToken:            cfg.DevAuthToken,
-		DevUserCfg:              cfg.DevUserConfig,
-		AgentTokenSvc:           srv.agentTokenService,
-		UserTokenSvc:            srv.userTokenService,
-		UATSvc:                  srv.uatService,
-		TrustedProxies:          cfg.TrustedProxies,
-		ProxyAuthenticator:      cfg.ProxyAuth,
-		FederationAuth: &srv.federationAuth,
-		AuthMode:                cfg.AuthMode,
-		Debug:                   cfg.Debug,
-		Logger:                  srv.authLog,
+		Mode:               "production",
+		DevAuthEnabled:     cfg.DevAuthToken != "",
+		DevAuthToken:       cfg.DevAuthToken,
+		DevUserCfg:         cfg.DevUserConfig,
+		AgentTokenSvc:      srv.agentTokenService,
+		UserTokenSvc:       srv.userTokenService,
+		UATSvc:             srv.uatService,
+		TrustedProxies:     cfg.TrustedProxies,
+		ProxyAuthenticator: cfg.ProxyAuth,
+		FederationAuth:     &srv.federationAuth,
+		AuthMode:           cfg.AuthMode,
+		Debug:              cfg.Debug,
+		Logger:             srv.authLog,
 	}
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
