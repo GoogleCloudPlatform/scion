@@ -64,6 +64,10 @@ type ServerConfigResponse struct {
 	DefaultModel         string `json:"default_model,omitempty"`
 	DefaultThinkingLevel *int   `json:"default_thinking_level,omitempty"`
 
+	// Default agent authorization
+	DefaultMaxAgentRole string `json:"default_max_agent_role,omitempty"`
+	DefaultAgentRole    string `json:"default_agent_role,omitempty"`
+
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty"`
 
@@ -99,6 +103,10 @@ type ServerConfigUpdateRequest struct {
 	// Default agent model settings
 	DefaultModel         *string `json:"default_model,omitempty"`
 	DefaultThinkingLevel *int    `json:"default_thinking_level,omitempty"`
+
+	// Default agent authorization
+	DefaultMaxAgentRole *string `json:"default_max_agent_role,omitempty"`
+	DefaultAgentRole    *string `json:"default_agent_role,omitempty"`
 
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC *bool `json:"auto_inject_gcloud_adc,omitempty"`
@@ -258,6 +266,8 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultResources:     vs.DefaultResources,
 		DefaultModel:         vs.DefaultModel,
 		DefaultThinkingLevel: vs.DefaultThinkingLevel,
+		DefaultMaxAgentRole:  vs.DefaultMaxAgentRole,
+		DefaultAgentRole:     vs.DefaultAgentRole,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
 	}
@@ -470,6 +480,20 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			raw["default_thinking_level"] = *req.DefaultThinkingLevel
 		} else {
 			delete(raw, "default_thinking_level")
+		}
+	}
+	if req.DefaultMaxAgentRole != nil {
+		if *req.DefaultMaxAgentRole != "" {
+			raw["default_max_agent_role"] = *req.DefaultMaxAgentRole
+		} else {
+			delete(raw, "default_max_agent_role")
+		}
+	}
+	if req.DefaultAgentRole != nil {
+		if *req.DefaultAgentRole != "" {
+			raw["default_agent_role"] = *req.DefaultAgentRole
+		} else {
+			delete(raw, "default_agent_role")
 		}
 	}
 	if req.AutoInjectGcloudADC != nil {

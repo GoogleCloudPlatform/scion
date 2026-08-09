@@ -64,7 +64,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeProjectSecretRead,
 		}
 	default:
-		return ScopesForRole(AgentRoleBaseline)
+		return ScopesForRole(AgentRoleFull)
 	}
 }
 
@@ -81,7 +81,7 @@ func roleOrdinal(r AgentRole) int {
 	case AgentRoleFull:
 		return 3
 	default:
-		return 2 // default to baseline
+		return 3 // default to full
 	}
 }
 
@@ -93,7 +93,7 @@ func CompareRoles(a, b AgentRole) int {
 // minRole returns the least-privileged role from the given set.
 func minRole(roles ...AgentRole) AgentRole {
 	if len(roles) == 0 {
-		return AgentRoleBaseline
+		return AgentRoleFull
 	}
 	min := roles[0]
 	for _, r := range roles[1:] {
@@ -110,7 +110,7 @@ func minRole(roles ...AgentRole) AgentRole {
 // userHubRole is the hub-level user role string ("admin" or "member").
 // If empty, defaults to "member" ceiling (baseline).
 func ResolveEffectiveRole(requested AgentRole, userHubRole string, projectMax AgentRole) AgentRole {
-	userCeiling := AgentRoleBaseline
+	userCeiling := AgentRoleFull
 	if userHubRole == "admin" {
 		userCeiling = AgentRoleFull
 	}

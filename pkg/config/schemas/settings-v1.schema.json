@@ -239,6 +239,13 @@
       "description": "Default maximum agent role for new projects. Caps the role agents can receive.",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "default_agent_role": {
+      "type": "string",
+      "enum": ["none", "readonly", "baseline", "full"],
+      "description": "Default role assigned to new agents when not explicitly specified.",
+      "x-scope": "any",
+      "x-since": "1"
     }
   },
   "additionalProperties": false,

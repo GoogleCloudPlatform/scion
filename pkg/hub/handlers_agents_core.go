@@ -434,8 +434,8 @@ func (s *Server) createAgentInProject(
 	var parentRole AgentRole // empty for user-created agents; set in agent-caller branch
 	requestedRole := AgentRole(req.AgentRole)
 
-	// Read project max agent role from annotations (default: baseline)
-	projectMax := AgentRoleBaseline
+	// Read project max agent role from annotations (default: full)
+	projectMax := AgentRoleFull
 	if project != nil && project.Annotations != nil {
 		if maxStr, ok := project.Annotations[projectSettingMaxAgentRole]; ok && maxStr != "" {
 			if ValidAgentRole(AgentRole(maxStr)) {
@@ -444,9 +444,28 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
+	// Read default agent role: project annotation → hub default → full.
+	// Applied only when no explicit role is requested.
+	defaultAgentRole := AgentRoleFull
+	if project != nil && project.Annotations != nil {
+		if defStr, ok := project.Annotations[projectSettingDefaultAgentRole]; ok && defStr != "" {
+			if ValidAgentRole(AgentRole(defStr)) {
+				defaultAgentRole = AgentRole(defStr)
+			}
+		}
+	}
+	if defaultAgentRole == AgentRoleFull {
+		// No project-level default set; fall back to hub-level default
+		if hubDefault := s.hubAgentDefaults().DefaultAgentRole; hubDefault != "" {
+			if ValidAgentRole(AgentRole(hubDefault)) {
+				defaultAgentRole = AgentRole(hubDefault)
+			}
+		}
+	}
+
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		// Agent caller: read parent agent's stored role for no-escalation ceiling.
-		parentRole = AgentRoleBaseline
+		parentRole = AgentRoleFull
 		creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
 		if err != nil {
 			slog.Warn("Failed to read parent agent for role ceiling",
@@ -459,9 +478,9 @@ func (s *Server) createAgentInProject(
 
 		// Validate stored parentRole to guard against corrupted data.
 		if !ValidAgentRole(parentRole) {
-			slog.Warn("Parent agent has invalid stored role, defaulting to baseline",
+			slog.Warn("Parent agent has invalid stored role, defaulting to full",
 				"parent_agent_id", agentIdent.ID(), "stored_role", parentRole)
-			parentRole = AgentRoleBaseline
+			parentRole = AgentRoleFull
 		}
 
 		// Log the parent role for audit trail
@@ -490,13 +509,13 @@ func (s *Server) createAgentInProject(
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		// User caller: ceiling based on hub role
 		userHubRole := userIdent.Role()
-		userCeiling := AgentRoleBaseline
+		userCeiling := AgentRoleFull
 		if userHubRole == "admin" {
 			userCeiling = AgentRoleFull
 		}
 
 		if requestedRole == "" {
-			requestedRole = projectMax
+			requestedRole = defaultAgentRole
 		}
 
 		// Fail-loud: reject explicit over-request against user ceiling or project max.
@@ -516,9 +535,9 @@ func (s *Server) createAgentInProject(
 		// Use minRole directly instead of ResolveEffectiveRole to avoid recomputing ceiling.
 		effectiveRole = minRole(requestedRole, userCeiling, projectMax)
 	} else {
-		// No identity (should not happen in practice) - default to baseline
+		// No identity (should not happen in practice) - default to configured default
 		if requestedRole == "" {
-			requestedRole = AgentRoleBaseline
+			requestedRole = defaultAgentRole
 		}
 		effectiveRole = requestedRole
 	}

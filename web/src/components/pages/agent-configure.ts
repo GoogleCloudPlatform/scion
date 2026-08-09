@@ -947,7 +947,12 @@ export class ScionPageAgentConfigure extends LitElement {
         ? html`
             <div class="form-field">
               <label>Agent Role</label>
-              <sl-input .value=${this.agent.appliedConfig.agentRole} readonly></sl-input>
+              <sl-select value=${this.agent.appliedConfig.agentRole} disabled>
+                <sl-option value="none">None — No hub access</sl-option>
+                <sl-option value="readonly">Read-only — Read-only access</sl-option>
+                <sl-option value="baseline">Baseline — Standard access</sl-option>
+                <sl-option value="full">Full — Full access</sl-option>
+              </sl-select>
               <div class="hint">Authorization role set at creation time. Determines hub API access level.</div>
             </div>
           `

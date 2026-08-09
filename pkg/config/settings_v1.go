@@ -289,6 +289,10 @@ type VersionedSettings struct {
 	DefaultModel         string `json:"default_model,omitempty" yaml:"default_model,omitempty" koanf:"default_model"`
 	DefaultThinkingLevel *int   `json:"default_thinking_level,omitempty" yaml:"default_thinking_level,omitempty" koanf:"default_thinking_level"`
 
+	// Default agent authorization
+	DefaultMaxAgentRole string `json:"default_max_agent_role,omitempty" yaml:"default_max_agent_role,omitempty" koanf:"default_max_agent_role"`
+	DefaultAgentRole    string `json:"default_agent_role,omitempty" yaml:"default_agent_role,omitempty" koanf:"default_agent_role"`
+
 	// AutoInjectGcloudADC controls whether the host's gcloud Application Default
 	// Credentials file is automatically injected into agent containers in
 	// co-located (workstation) mode.

@@ -360,13 +360,20 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		project.SharedDirs = s.defaultProjectSharedDirs()
 	}
 
-	// Apply hub-level default max agent role to new projects.
-	if defaults := s.hubAgentDefaults(); defaults.DefaultMaxAgentRole != "" {
+	// Apply hub-level default agent roles to new projects.
+	if defaults := s.hubAgentDefaults(); defaults.DefaultMaxAgentRole != "" || defaults.DefaultAgentRole != "" {
 		if project.Annotations == nil {
 			project.Annotations = make(map[string]string)
 		}
-		if _, exists := project.Annotations[projectSettingMaxAgentRole]; !exists {
-			project.Annotations[projectSettingMaxAgentRole] = defaults.DefaultMaxAgentRole
+		if defaults.DefaultMaxAgentRole != "" {
+			if _, exists := project.Annotations[projectSettingMaxAgentRole]; !exists {
+				project.Annotations[projectSettingMaxAgentRole] = defaults.DefaultMaxAgentRole
+			}
+		}
+		if defaults.DefaultAgentRole != "" {
+			if _, exists := project.Annotations[projectSettingDefaultAgentRole]; !exists {
+				project.Annotations[projectSettingDefaultAgentRole] = defaults.DefaultAgentRole
+			}
 		}
 	}
 
@@ -1079,13 +1086,20 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			project.SharedDirs = s.defaultProjectSharedDirs()
 		}
 
-		// Apply hub-level default max agent role to new projects.
-		if defaults := s.hubAgentDefaults(); defaults.DefaultMaxAgentRole != "" {
+		// Apply hub-level default agent roles to new projects.
+		if defaults := s.hubAgentDefaults(); defaults.DefaultMaxAgentRole != "" || defaults.DefaultAgentRole != "" {
 			if project.Annotations == nil {
 				project.Annotations = make(map[string]string)
 			}
-			if _, exists := project.Annotations[projectSettingMaxAgentRole]; !exists {
-				project.Annotations[projectSettingMaxAgentRole] = defaults.DefaultMaxAgentRole
+			if defaults.DefaultMaxAgentRole != "" {
+				if _, exists := project.Annotations[projectSettingMaxAgentRole]; !exists {
+					project.Annotations[projectSettingMaxAgentRole] = defaults.DefaultMaxAgentRole
+				}
+			}
+			if defaults.DefaultAgentRole != "" {
+				if _, exists := project.Annotations[projectSettingDefaultAgentRole]; !exists {
+					project.Annotations[projectSettingDefaultAgentRole] = defaults.DefaultAgentRole
+				}
 			}
 		}
 
