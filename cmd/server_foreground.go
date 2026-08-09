@@ -1467,6 +1467,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		// session secret or pre-provision the signing keys.
 		RequireStableSigningKey: os.Getenv("SCION_REQUIRE_STABLE_SIGNING_KEY") == "true",
 		OIDCConfig:              cfg.OIDC,
+		Federation:              cfg.Federation,
 	}
 
 	// In hosted mode every replica must share the same session secret for

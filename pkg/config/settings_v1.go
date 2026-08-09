@@ -346,6 +346,9 @@ type V1ServerConfig struct {
 	// Scheduler configures the Hub background task scheduler.
 	Scheduler *V1SchedulerConfig `json:"scheduler,omitempty" yaml:"scheduler,omitempty" koanf:"scheduler"`
 
+	// OIDC configures the OIDC Identity Provider feature.
+	OIDC *OIDCProviderConfig `json:"oidc,omitempty" yaml:"oidc,omitempty" koanf:"oidc"`
+
 	// Federation configures hub-hub federation authentication.
 	Federation *V1FederationConfig `json:"federation,omitempty" yaml:"federation,omitempty" koanf:"federation"`
 }
@@ -1590,6 +1593,11 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.Scheduler.MaxConcurrency = v1.Scheduler.MaxConcurrency // both are *int; nil propagates
 	}
 
+	// OIDC Identity Provider
+	if v1.OIDC != nil {
+		gc.OIDC = *v1.OIDC
+	}
+
 	// Federation
 	if v1.Federation != nil {
 		if v1.Federation.Enabled != nil {
@@ -1774,6 +1782,12 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			IntervalSeconds: gc.Scheduler.IntervalSeconds,
 			MaxConcurrency:  gc.Scheduler.MaxConcurrency,
 		}
+	}
+
+	// OIDC Identity Provider config
+	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" {
+		oidc := gc.OIDC
+		v1.OIDC = &oidc
 	}
 
 	// Federation
