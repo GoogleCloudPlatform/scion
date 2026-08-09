@@ -31,28 +31,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Mint-time permission constants. These are checked via Policy Troubleshooter
-// before any GCP SA is created. They are independent of gcpIamCheckMode because
-// minting creates new GCP authority (D6, design §4.6).
-const (
-	// PermissionSACreate is the IAM permission required to create service
-	// accounts in the Hub GCP project.
-	PermissionSACreate = "iam.serviceAccounts.create"
-
-	// PermissionAgentPlatform is the representative Agent Platform User
-	// permission (D6, design §4.6). Defined as a named constant so it can be
-	// changed deliberately if the product chooses a different operation.
-	PermissionAgentPlatform = "aiplatform.endpoints.predict"
-
-	// RoleAIPlatformUser is the project-level role granted to minted SAs for
-	// inference access.
-	RoleAIPlatformUser = "roles/aiplatform.user"
-
-	// RoleSAUser is the SA-level role granted to the requester on the minted
-	// SA so that mint-then-assign works under enforce mode.
-	RoleSAUser = "roles/iam.serviceAccountUser"
-)
-
 // handleProjectGCPServiceAccounts handles /api/v1/projects/{projectId}/gcp-service-accounts
 func (s *Server) handleProjectGCPServiceAccounts(w http.ResponseWriter, r *http.Request, projectID string) {
 	switch r.Method {
@@ -731,59 +709,6 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	// ----------------------------------------------------------------
-	// PT permission checks — ALWAYS run, independent of gcpIamCheckMode.
-	// Minting creates new GCP authority; it is not merely assignment (D6).
-	// ----------------------------------------------------------------
-	s.mu.RLock()
-	ptChecker := s.mintPTChecker
-	s.mu.RUnlock()
-
-	if ptChecker == nil {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-			"service account minting requires permission verification (Policy Troubleshooter); "+
-				"PT is not configured on this Hub", nil)
-		return
-	}
-
-	userEmail := user.Email()
-	projectResource := fmt.Sprintf(
-		"//cloudresourcemanager.googleapis.com/projects/%s", hubGCPProjectID)
-
-	// 1. Requester must have iam.serviceAccounts.create on the Hub project.
-	result, err := ptChecker.CheckPermission(r.Context(), userEmail, projectResource, PermissionSACreate)
-	if err != nil {
-		slog.Error("GCP SA mint: PT check failed for serviceAccounts.create",
-			"user", userEmail, "project", hubGCPProjectID, "error", err)
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-			"unable to verify permission to create service accounts; the permission check could not be performed", nil)
-		return
-	}
-	if !result.Allowed {
-		slog.Warn("GCP SA mint: requester lacks iam.serviceAccounts.create",
-			"user", userEmail, "project", hubGCPProjectID, "reason", result.Reason)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"you do not have permission to create service accounts in the Hub GCP project: "+result.Reason, nil)
-		return
-	}
-
-	// 2. Requester must have aiplatform.endpoints.predict on the Hub project.
-	result, err = ptChecker.CheckPermission(r.Context(), userEmail, projectResource, PermissionAgentPlatform)
-	if err != nil {
-		slog.Error("GCP SA mint: PT check failed for aiplatform.endpoints.predict",
-			"user", userEmail, "project", hubGCPProjectID, "error", err)
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-			"unable to verify agent platform permission; the permission check could not be performed", nil)
-		return
-	}
-	if !result.Allowed {
-		slog.Warn("GCP SA mint: requester lacks aiplatform.endpoints.predict",
-			"user", userEmail, "project", hubGCPProjectID, "reason", result.Reason)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"you do not have agent platform permission on the Hub GCP project: "+result.Reason, nil)
-		return
-	}
-
 	var req mintGCPServiceAccountRequest
 	if r.Body != nil {
 		if err := readJSON(r, &req); err != nil {
@@ -945,7 +870,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	// 2. Grant Hub SA tokenCreator on the minted SA.
+	// Grant Hub SA tokenCreator on the minted SA.
 	hubMember := "serviceAccount:" + hubEmail
 	if err := retryIAMGrant(r.Context(), func() error {
 		return s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, hubMember, "roles/iam.serviceAccountTokenCreator")
@@ -954,33 +879,8 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	// 3. Grant the minted SA roles/aiplatform.user at the project level.
-	saMember := "serviceAccount:" + saEmail
-	if err := retryIAMGrant(r.Context(), func() error {
-		return s.gcpIAMAdmin.AddProjectIAMBinding(r.Context(), hubGCPProjectID, saMember, RoleAIPlatformUser)
-	}); err != nil {
-		cleanupAndFail("project-level aiplatform.user grant for minted SA", err)
-		return
-	}
-
-	// 4. Grant requester roles/iam.serviceAccountUser on the minted SA.
-	// This lets the requester assign the minted SA under enforce mode.
-	requesterMember := "user:" + user.Email()
-	if err := retryIAMGrant(r.Context(), func() error {
-		return s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, requesterMember, RoleSAUser)
-	}); err != nil {
-		cleanupAndFail("serviceAccountUser grant for requester on minted SA", err)
-		return
-	}
-
-	slog.Info("GCP SA mint: SA created and all IAM grants succeeded",
-		"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail,
-		"requester", user.Email())
-
-	// Invalidate cached actAs decisions for the minted SA. The IAM mutations
-	// above changed who can act as this SA, so any prior cached denial (or
-	// allow against a stale policy) must be cleared.
-	s.invalidateActAsCache(saEmail)
+	slog.Info("GCP SA mint: SA created and tokenCreator grant succeeded",
+		"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail)
 
 	// Store the SA record — only reached when ALL required IAM mutations succeeded.
 	sa := &store.GCPServiceAccount{

@@ -168,35 +168,22 @@ func TestCreateGCPServiceAccount_Duplicate(t *testing.T) {
 
 // mockGCPServiceAccountAdmin is a test implementation of GCPServiceAccountAdmin.
 type mockGCPServiceAccountAdmin struct {
-	createErr         error
-	policyErr         error
-	deleteErr         error
-	projectBindingErr error
-	createdSAs        []string // track created account IDs
-	deletedSAs        []string // track deleted SA emails (cleanup calls)
-	lastEmail         string
-	lastProject       string
-
-	// policyErrOnCall, when > 0, causes SetIAMPolicy to return policyErr only
-	// on the Nth call (1-indexed) and succeed on all others. When 0 (default),
-	// policyErr applies to every call.
-	policyErrOnCall int
+	createErr   error
+	policyErr   error
+	deleteErr   error
+	createdSAs  []string // track created account IDs
+	deletedSAs  []string // track deleted SA emails (cleanup calls)
+	lastEmail   string
+	lastProject string
 
 	// Track IAM mutations for assertions.
-	iamPolicies     []mockIAMPolicyCall      // SA-level SetIAMPolicy calls
-	projectBindings []mockProjectBindingCall // project-level AddProjectIAMBinding calls
+	iamPolicies []mockIAMPolicyCall // SA-level SetIAMPolicy calls
 }
 
 type mockIAMPolicyCall struct {
 	SAEmail string
 	Member  string
 	Role    string
-}
-
-type mockProjectBindingCall struct {
-	ProjectID string
-	Member    string
-	Role      string
 }
 
 func (m *mockGCPServiceAccountAdmin) CreateServiceAccount(_ context.Context, projectID, accountID, _, _ string) (string, string, error) {
@@ -221,23 +208,7 @@ func (m *mockGCPServiceAccountAdmin) SetIAMPolicy(_ context.Context, saEmail, me
 		Member:  member,
 		Role:    role,
 	})
-	if m.policyErr != nil && m.policyErrOnCall > 0 {
-		// Fail only on the Nth call (1-indexed).
-		if len(m.iamPolicies) == m.policyErrOnCall {
-			return m.policyErr
-		}
-		return nil
-	}
 	return m.policyErr
-}
-
-func (m *mockGCPServiceAccountAdmin) AddProjectIAMBinding(_ context.Context, projectID, member, role string) error {
-	m.projectBindings = append(m.projectBindings, mockProjectBindingCall{
-		ProjectID: projectID,
-		Member:    member,
-		Role:      role,
-	})
-	return m.projectBindingErr
 }
 
 func testServerWithMinting(t *testing.T) (*Server, store.Store, *mockGCPServiceAccountAdmin) {
@@ -272,6 +243,35 @@ func (m *mockGCPTokenGenerator) VerifyImpersonation(_ context.Context, _ string)
 
 func (m *mockGCPTokenGenerator) ServiceAccountEmail() string {
 	return m.email
+}
+
+// countingMockAdmin is a mock that fails SetIAMPolicy on the first N calls
+// to simulate GCP eventual consistency, then succeeds on subsequent calls.
+type countingMockAdmin struct {
+	failUntilCall   int // fail SetIAMPolicy until this call count (1-indexed)
+	failErr         error
+	policyCallCount int
+	createdSAs      []string
+	deletedSAs      []string
+}
+
+func (m *countingMockAdmin) CreateServiceAccount(_ context.Context, projectID, accountID, _, _ string) (string, string, error) {
+	email := fmt.Sprintf("%s@%s.iam.gserviceaccount.com", accountID, projectID)
+	m.createdSAs = append(m.createdSAs, accountID)
+	return email, "unique-id-123", nil
+}
+
+func (m *countingMockAdmin) DeleteServiceAccount(_ context.Context, saEmail string) error {
+	m.deletedSAs = append(m.deletedSAs, saEmail)
+	return nil
+}
+
+func (m *countingMockAdmin) SetIAMPolicy(_ context.Context, _, _, _ string) error {
+	m.policyCallCount++
+	if m.policyCallCount <= m.failUntilCall {
+		return m.failErr
+	}
+	return nil
 }
 
 func TestMintGCPServiceAccount_Success(t *testing.T) {
@@ -797,33 +797,34 @@ func TestMintGCPServiceAccount_IAMGrantFailure_DoesNotCountAgainstQuota(t *testi
 }
 
 func TestMintGCPServiceAccount_RetryOnEventualConsistency(t *testing.T) {
-	srv, _, mock, _ := testServerWithMintingAndPT(t)
+	srv, _, _ := testServerWithMinting(t)
 	projectID := createTestProjectForSA(t, srv, nil)
 
-	// SetIAMPolicy fails on the first call with a "does not exist" error
-	// (simulating GCP eventual consistency after SA creation) and succeeds
-	// on the retry.
-	mock.policyErr = fmt.Errorf("googleapi: Error 400: Service account does not exist., badRequest")
-	mock.policyErrOnCall = 1
+	// Use a counter-based mock that fails on the first SetIAMPolicy call with
+	// a "does not exist" error (simulating GCP eventual consistency after SA
+	// creation) and succeeds on the retry.
+	retryMock := &countingMockAdmin{
+		failUntilCall: 1,
+		failErr:       fmt.Errorf("googleapi: Error 400: Service account does not exist., badRequest"),
+	}
+	srv.SetGCPServiceAccountAdmin(retryMock)
 
 	rec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
 		map[string]string{})
 	require.Equal(t, http.StatusCreated, rec.Code, "mint should succeed after retry: %s", rec.Body.String())
 
-	// The first SetIAMPolicy call failed, the retry (call #2) succeeded,
-	// then the requester grant (call #3) succeeded.
-	assert.GreaterOrEqual(t, len(mock.iamPolicies), 3,
-		"expected at least 3 SetIAMPolicy calls (1 failed + 1 retry + 1 requester grant)")
+	// The first SetIAMPolicy call failed, the retry (call #2) succeeded.
+	assert.GreaterOrEqual(t, retryMock.policyCallCount, 2,
+		"expected at least 2 SetIAMPolicy calls (1 failed + 1 retry)")
 }
 
 func TestMintGCPServiceAccount_NoRetryOnNonConsistencyError(t *testing.T) {
-	srv, _, mock, _ := testServerWithMintingAndPT(t)
+	srv, _, mock := testServerWithMinting(t)
 	projectID := createTestProjectForSA(t, srv, nil)
 
 	// SetIAMPolicy fails with a non-retryable error (no "does not exist").
 	mock.policyErr = fmt.Errorf("googleapi: Error 403: permission denied")
-	mock.policyErrOnCall = 1
 
 	rec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
