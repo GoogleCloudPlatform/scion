@@ -865,3 +865,90 @@ func TestSnapshot_MixedSource_DBAndFile(t *testing.T) {
 		t.Errorf("SoftDeleteRetention: want '30d' (from file), got %q", snap.SoftDeleteRetention)
 	}
 }
+
+func TestSnapshot_FederationFromDB(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("federation", json.RawMessage(`{
+		"enabled": true,
+		"trusted_issuers": [
+			{
+				"issuer_url": "https://hub-a.example.com",
+				"jwks_url": "https://hub-a.example.com/.well-known/jwks.json",
+				"expected_audience": "https://hub-b.example.com",
+				"allowed_projects": ["proj1"],
+				"issuer_type": "hub",
+				"default_scopes": ["agent:status:update"]
+			}
+		],
+		"algorithms": ["RS256"],
+		"refresh_interval": "1h",
+		"debounce_interval": "5s"
+	}`))
+
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	_, _ = ops.Refresh(context.Background())
+
+	snap := ops.Snapshot()
+	if snap.FederationConfig == nil {
+		t.Fatal("want non-nil FederationConfig")
+	}
+	if !snap.FederationConfig.Enabled {
+		t.Error("want Enabled true")
+	}
+	if len(snap.FederationConfig.TrustedIssuers) != 1 {
+		t.Fatalf("want 1 issuer, got %d", len(snap.FederationConfig.TrustedIssuers))
+	}
+	iss := snap.FederationConfig.TrustedIssuers[0]
+	if iss.IssuerURL != "https://hub-a.example.com" {
+		t.Errorf("IssuerURL: want https://hub-a.example.com, got %s", iss.IssuerURL)
+	}
+	if iss.IssuerType != "hub" {
+		t.Errorf("IssuerType: want hub, got %s", iss.IssuerType)
+	}
+	if len(iss.AllowedProjects) != 1 || iss.AllowedProjects[0] != "proj1" {
+		t.Errorf("AllowedProjects: want [proj1], got %v", iss.AllowedProjects)
+	}
+	if len(snap.FederationConfig.Algorithms) != 1 || snap.FederationConfig.Algorithms[0] != "RS256" {
+		t.Errorf("Algorithms: want [RS256], got %v", snap.FederationConfig.Algorithms)
+	}
+	if snap.FederationConfig.Cache.RefreshInterval.String() != "1h0m0s" {
+		t.Errorf("RefreshInterval: want 1h0m0s, got %s", snap.FederationConfig.Cache.RefreshInterval)
+	}
+	if snap.FederationConfig.Cache.DebounceInterval.String() != "5s" {
+		t.Errorf("DebounceInterval: want 5s, got %s", snap.FederationConfig.Cache.DebounceInterval)
+	}
+}
+
+func TestBuildLayer1SnapshotFromFile_Federation(t *testing.T) {
+	gc := &config.GlobalConfig{
+		Federation: config.FederationConfig{
+			Enabled: true,
+			TrustedIssuers: []config.TrustedIssuerConfig{
+				{
+					IssuerURL:  "https://hub-a.example.com",
+					IssuerType: "hub",
+				},
+			},
+			Algorithms: []string{"RS256"},
+		},
+	}
+
+	snap := BuildLayer1SnapshotFromFile(gc)
+	if snap.FederationConfig == nil {
+		t.Fatal("want non-nil FederationConfig")
+	}
+	if !snap.FederationConfig.Enabled {
+		t.Error("want Enabled true")
+	}
+	if len(snap.FederationConfig.TrustedIssuers) != 1 {
+		t.Fatalf("want 1 issuer, got %d", len(snap.FederationConfig.TrustedIssuers))
+	}
+}
+
+func TestBuildLayer1SnapshotFromFile_NoFederation(t *testing.T) {
+	gc := &config.GlobalConfig{}
+	snap := BuildLayer1SnapshotFromFile(gc)
+	if snap.FederationConfig != nil {
+		t.Error("want nil FederationConfig when federation is disabled and no issuers")
+	}
+}

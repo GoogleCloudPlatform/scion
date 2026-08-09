@@ -108,6 +108,13 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"auto_expose_ports": {
 		"auto_expose_ports.enabled": "enabled",
 	},
+	"federation": {
+		"server.federation.enabled":           "enabled",
+		"server.federation.trusted_issuers":   "trusted_issuers",
+		"server.federation.algorithms":        "algorithms",
+		"server.federation.refresh_interval":  "refresh_interval",
+		"server.federation.debounce_interval": "debounce_interval",
+	},
 }
 
 // jsonFieldToKoanfPaths maps section name → json field → koanf path for the
@@ -137,6 +144,13 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"auto_expose_ports": {
 		"enabled": "auto_expose_ports.enabled",
+	},
+	"federation": {
+		"enabled":           "server.federation.enabled",
+		"trusted_issuers":   "server.federation.trusted_issuers",
+		"algorithms":        "server.federation.algorithms",
+		"refresh_interval":  "server.federation.refresh_interval",
+		"debounce_interval": "server.federation.debounce_interval",
 	},
 }
 

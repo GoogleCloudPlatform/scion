@@ -114,6 +114,9 @@ type Layer1Snapshot struct {
 	// Notifications
 	NotificationChannels []config.V1NotificationChannelConfig
 
+	// Federation
+	FederationConfig *config.FederationConfig // nil when federation section not present
+
 	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
 	// on this node — used for drift warnings.
 	EnvOverrides []string
@@ -634,6 +637,28 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		}
 	}
 
+	// Federation
+	if k.Exists("server.federation.enabled") || k.Exists("server.federation.trusted_issuers") {
+		fedCfg := config.FederationConfig{
+			Enabled: k.Bool("server.federation.enabled"),
+		}
+		// TrustedIssuers: unmarshal from the koanf slice
+		if raw := k.Get("server.federation.trusted_issuers"); raw != nil {
+			data, _ := json.Marshal(raw)
+			json.Unmarshal(data, &fedCfg.TrustedIssuers)
+		}
+		if algs := k.Strings("server.federation.algorithms"); len(algs) > 0 {
+			fedCfg.Algorithms = algs
+		}
+		if ri := k.String("server.federation.refresh_interval"); ri != "" {
+			fedCfg.Cache.RefreshInterval, _ = time.ParseDuration(ri)
+		}
+		if di := k.String("server.federation.debounce_interval"); di != "" {
+			fedCfg.Cache.DebounceInterval, _ = time.ParseDuration(di)
+		}
+		snap.FederationConfig = &fedCfg
+	}
+
 	return snap
 }
 
@@ -668,6 +693,11 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap.GitHubWebhooksEnabled = gc.GitHubApp.WebhooksEnabled
 	snap.GitHubInstallationURL = gc.GitHubApp.InstallationURL
 	snap.GitHubPrivateKeyPath = gc.GitHubApp.PrivateKeyPath
+
+	// Federation — read from GlobalConfig
+	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
+		snap.FederationConfig = &gc.Federation
+	}
 
 	return snap
 }
