@@ -358,7 +358,7 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 		Name: "readonly-max-project",
 		Slug: "readonly-max-project",
 		Annotations: map[string]string{
-			"scion.dev/max-agent-role": "readonly",
+			projectSettingMaxAgentRole: "readonly",
 		},
 		Created: time.Now(),
 		Updated: time.Now(),
@@ -688,4 +688,73 @@ func TestCreateSubAgent_LegacyParent_CapsAtBaseline(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"legacy parent (no stored role → baseline) should not create full sub-agent; got: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "parent agent role")
+}
+
+func TestCreateAgent_ProjectMaxBaseline_CapsFullToBaseline(t *testing.T) {
+	srv, s, _, _ := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("project-baseline-max"),
+		Name: "baseline-max-project",
+		Slug: "baseline-max-project",
+		Annotations: map[string]string{
+			projectSettingMaxAgentRole: "baseline",
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+
+	admin := &store.User{
+		ID:          tid("user-admin-base-cap"),
+		Email:       "admin-base-cap@test.com",
+		DisplayName: "Admin Baseline Cap",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	ensureHubMembership(ctx, s, admin.ID)
+
+	_ = doAgentRoleRequest(t, srv, admin, CreateAgentRequest{
+		Name:      "test-full-in-baseline-max",
+		ProjectID: project.ID,
+		AgentRole: "full",
+	})
+
+	if role, ok := getStoredAgentRole(t, s, project.ID, "test-full-in-baseline-max"); ok {
+		assert.Equal(t, "baseline", role,
+			"admin requesting full in baseline-max project should be capped to baseline")
+	}
+}
+
+func TestCreateAgent_ProjectMaxReadonly_MemberGetsReadonly(t *testing.T) {
+	srv, s, user, _ := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("project-readonly-member"),
+		Name: "readonly-member-project",
+		Slug: "readonly-member-project",
+		Annotations: map[string]string{
+			projectSettingMaxAgentRole: "readonly",
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+
+	// Member user requesting no specific role — should default to project max (readonly)
+	_ = doAgentRoleRequest(t, srv, user, CreateAgentRequest{
+		Name:      "test-member-readonly-proj",
+		ProjectID: project.ID,
+	})
+
+	if role, ok := getStoredAgentRole(t, s, project.ID, "test-member-readonly-proj"); ok {
+		assert.Equal(t, "readonly", role,
+			"member in readonly-max project should get readonly")
+	}
 }

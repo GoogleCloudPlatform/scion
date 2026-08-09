@@ -433,7 +433,7 @@ func (s *Server) createAgentInProject(
 	// Read project max agent role from annotations (default: baseline)
 	projectMax := AgentRoleBaseline
 	if project != nil && project.Annotations != nil {
-		if maxStr := project.Annotations["scion.dev/max-agent-role"]; maxStr != "" {
+		if maxStr, ok := project.Annotations[projectSettingMaxAgentRole]; ok && maxStr != "" {
 			if ValidAgentRole(AgentRole(maxStr)) {
 				projectMax = AgentRole(maxStr)
 			}

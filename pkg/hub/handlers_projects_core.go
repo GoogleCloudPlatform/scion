@@ -356,6 +356,16 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		project.SharedDirs = s.defaultProjectSharedDirs()
 	}
 
+	// Apply hub-level default max agent role to new projects.
+	if defaults := s.hubAgentDefaults(); defaults.DefaultMaxAgentRole != "" {
+		if project.Annotations == nil {
+			project.Annotations = make(map[string]string)
+		}
+		if _, exists := project.Annotations[projectSettingMaxAgentRole]; !exists {
+			project.Annotations[projectSettingMaxAgentRole] = defaults.DefaultMaxAgentRole
+		}
+	}
+
 	if err := s.store.CreateProject(ctx, project); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1063,6 +1073,16 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// Apply default shared dirs from hub settings (new projects only).
 		if len(project.SharedDirs) == 0 {
 			project.SharedDirs = s.defaultProjectSharedDirs()
+		}
+
+		// Apply hub-level default max agent role to new projects.
+		if defaults := s.hubAgentDefaults(); defaults.DefaultMaxAgentRole != "" {
+			if project.Annotations == nil {
+				project.Annotations = make(map[string]string)
+			}
+			if _, exists := project.Annotations[projectSettingMaxAgentRole]; !exists {
+				project.Annotations[projectSettingMaxAgentRole] = defaults.DefaultMaxAgentRole
+			}
 		}
 
 		if err := s.store.CreateProject(ctx, project); err != nil {

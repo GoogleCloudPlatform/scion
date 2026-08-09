@@ -52,6 +52,9 @@ const (
 	projectSettingDefaultResourcesCPULim = "scion.io/default-resources-cpu-limit"
 	projectSettingDefaultResourcesMemLim = "scion.io/default-resources-memory-limit"
 	projectSettingDefaultResourcesDisk   = "scion.io/default-resources-disk"
+
+	// Agent authorization
+	projectSettingMaxAgentRole = "scion.io/max-agent-role"
 )
 
 // projectSettingKeys is the authoritative list of scion.io/* annotation keys
@@ -137,6 +140,9 @@ var projectSettingKeys = []string{
 	projectSettingDefaultResourcesCPULim,
 	projectSettingDefaultResourcesMemLim,
 	projectSettingDefaultResourcesDisk,
+
+	// Agent authorization
+	projectSettingMaxAgentRole,
 }
 
 // handleProjectSettings handles GET/PUT on /api/v1/projects/{projectId}/settings.
@@ -202,6 +208,11 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 				BadRequest(w, "thinking_level must be between 0 and 100")
 				return
 			}
+		}
+
+		if req.MaxAgentRole != "" && !ValidAgentRole(AgentRole(req.MaxAgentRole)) {
+			BadRequest(w, "maxAgentRole must be one of none, readonly, baseline, full")
+			return
 		}
 
 		applyProjectSettingsToAnnotations(project, &req)
@@ -271,6 +282,9 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 		settings.DefaultResources = res
 	}
 
+	// Agent authorization
+	settings.MaxAgentRole = project.Annotations[projectSettingMaxAgentRole]
+
 	return settings
 }
 
@@ -333,6 +347,9 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	setOrDeleteInt(project.Annotations, projectSettingDefaultMaxTurns, settings.DefaultMaxTurns)
 	setOrDeleteInt(project.Annotations, projectSettingDefaultMaxModelCalls, settings.DefaultMaxModelCalls)
 	setOrDelete(project.Annotations, projectSettingDefaultMaxDuration, settings.DefaultMaxDuration)
+
+	// Agent authorization
+	setOrDelete(project.Annotations, projectSettingMaxAgentRole, settings.MaxAgentRole)
 
 	// Default resources (flat keys)
 	if settings.DefaultResources != nil {
