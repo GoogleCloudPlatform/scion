@@ -67,8 +67,14 @@ func TestScopesForRole_Full(t *testing.T) {
 }
 
 func TestScopesForRole_InvalidDefault(t *testing.T) {
-	// Unknown role strings should fall back to full scopes
+	// Unknown role strings should fail closed to none scopes
 	scopes := ScopesForRole(AgentRole("unknown-role"))
+	assert.Nil(t, scopes)
+}
+
+func TestScopesForRole_EmptyStringDefaultsToFull(t *testing.T) {
+	// Empty string (legacy agents with no stored role) defaults to full scopes
+	scopes := ScopesForRole(AgentRole(""))
 	fullScopes := ScopesForRole(AgentRoleFull)
 	assert.Equal(t, fullScopes, scopes)
 }
@@ -161,25 +167,26 @@ func TestResolveEffectiveRole_LatticeMin(t *testing.T) {
 }
 
 func TestResolveEffectiveRole_InvalidRequestedRole(t *testing.T) {
-	// An unknown/invalid requested role gets full-level ordinal (3) via the
-	// default case in roleOrdinal. minRole preserves the original role value, so
-	// the returned AgentRole string is the invalid one — but ScopesForRole will
-	// map it to full scopes via its own default case.
+	// An unknown/invalid requested role gets ordinal 0 (none) via the default
+	// case in roleOrdinal. This is the fail-closed behavior: invalid roles
+	// resolve to the lowest privilege level.
 
-	// Admin + invalid request + full project: invalid ordinal (3) = full (3),
-	// so the invalid role is returned. Its scopes resolve to full.
+	// Admin + invalid request + full project: invalid ordinal (0) is the min,
+	// so the invalid role string is returned. Its scopes resolve to none (nil).
 	resolved := ResolveEffectiveRole(AgentRole("superuser"), "admin", AgentRoleFull)
 	assert.Equal(t, AgentRole("superuser"), resolved)
-	assert.Equal(t, ScopesForRole(AgentRoleFull), ScopesForRole(resolved))
+	assert.Nil(t, ScopesForRole(resolved))
 
-	// Member + invalid request + full project: member ceiling is full (3),
-	// invalid is also ordinal 3; the first encountered (invalid) wins the tie.
+	// Member + invalid request + full project: invalid ordinal (0) is still
+	// the min — fail-closed.
 	resolved = ResolveEffectiveRole(AgentRole("superuser"), "member", AgentRoleFull)
-	assert.Equal(t, ScopesForRole(AgentRoleFull), ScopesForRole(resolved))
+	assert.Nil(t, ScopesForRole(resolved))
 
-	// Admin + invalid request + readonly project: readonly (1) < invalid (3),
-	// so readonly wins — project cap takes effect.
-	assert.Equal(t, AgentRoleReadOnly, ResolveEffectiveRole(AgentRole("superuser"), "admin", AgentRoleReadOnly))
+	// Admin + invalid request + readonly project: invalid (0) < readonly (1),
+	// so invalid wins — even the project cap can't elevate an invalid role.
+	resolved = ResolveEffectiveRole(AgentRole("superuser"), "admin", AgentRoleReadOnly)
+	assert.Equal(t, AgentRole("superuser"), resolved)
+	assert.Nil(t, ScopesForRole(resolved))
 }
 
 func TestResolveEffectiveRole_ProjectMaxReadonly_AdminRequestsFull(t *testing.T) {
