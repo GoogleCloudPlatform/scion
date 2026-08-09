@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -669,4 +670,48 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleAdminRestart handles POST /api/v1/admin/maintenance/restart.
+// It initiates a graceful systemd restart of the hub service. The
+// --no-block flag lets systemd schedule the restart asynchronously,
+// so the response is sent before the restart takes effect.
+func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil || user.Role() != "admin" {
+		Forbidden(w)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	serviceName := s.config.MaintenanceConfig.ServiceName
+	if serviceName == "" {
+		serviceName = "scion-hub"
+	}
+
+	log := s.maintenanceLog
+	log.Info("Hub restart requested via admin API", "user", user.Email(), "service", serviceName)
+
+	// Use --no-block so systemd schedules the restart asynchronously.
+	// Without it, "systemctl restart" waits for the service to fully
+	// stop and restart — but this process IS the service, creating a
+	// deadlock.  With --no-block, systemd returns immediately, cmd.Run()
+	// completes, and we can send the response before the process is
+	// killed.
+	cmd := exec.Command("sudo", "systemctl", "restart", "--no-block", serviceName)
+	if err := cmd.Run(); err != nil {
+		log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to initiate restart", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":  "restarting",
+		"message": "Hub restart initiated",
+	})
 }

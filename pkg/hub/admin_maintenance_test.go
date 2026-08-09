@@ -607,6 +607,79 @@ func TestCheckForUpdates_NonAdmin(t *testing.T) {
 	}
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// handleAdminRestart tests
+// ────────────────────────────────────────────────────────────────────────────
+
+func TestHandleAdminRestart_Forbidden(t *testing.T) {
+	srv, _ := newTestServerWithStore(t)
+
+	// Non-admin user should receive 403.
+	member := NewAuthenticatedUser("u1", "member@example.com", "Member", "member", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/restart", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), member))
+	rr := httptest.NewRecorder()
+	srv.handleAdminRestart(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Nil user (unauthenticated) should also receive 403.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/restart", nil)
+	rr2 := httptest.NewRecorder()
+	srv.handleAdminRestart(rr2, req2)
+
+	if rr2.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for nil user, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+}
+
+func TestHandleAdminRestart_MethodNotAllowed(t *testing.T) {
+	srv, _ := newTestServerWithStore(t)
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/maintenance/restart", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminRestart(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleAdminRestart_ExecFailure(t *testing.T) {
+	srv, _ := newTestServerWithStore(t)
+
+	// Clear PATH so that exec.Command("sudo", ...) fails at Start()
+	// because the binary cannot be found.
+	t.Setenv("PATH", t.TempDir())
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/restart", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminRestart(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify the error message is generic and does not leak exec details (N1 fix).
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp.Error.Message != "Failed to initiate restart" {
+		t.Errorf("expected generic error message, got %q", resp.Error.Message)
+	}
+}
+
 func TestListMaintenanceOperations_HidesContainerBinariesByDefault(t *testing.T) {
 	srv, _ := newTestServerWithStore(t)
 	t.Setenv("SCION_DEV_BINARIES", "")

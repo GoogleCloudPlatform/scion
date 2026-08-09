@@ -3079,6 +3079,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/operations/", s.handleAdminMaintenanceOps)
 	s.mux.HandleFunc("/api/v1/admin/maintenance/migrations/", s.handleAdminMaintenanceMigrations)
 	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.handleCheckForUpdates)
+	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.handleAdminRestart)
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.handleAdminScheduler)
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.handleAdminAllowList)
 	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail)
