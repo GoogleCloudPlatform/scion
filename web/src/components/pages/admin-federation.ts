@@ -68,6 +68,12 @@ export class ScionPageAdminFederation extends LitElement {
   @state() private deleteDialogOpen = false;
   @state() private deletingIndex = -1;
 
+  // URL validation state
+  @state() private issuerUrlError: string | null = null;
+
+  // Timer cleanup
+  private successMessageTimer: ReturnType<typeof setTimeout> | null = null;
+
   static override styles = css`
     :host {
       display: block;
@@ -312,6 +318,22 @@ export class ScionPageAdminFederation extends LitElement {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
+    .form-field.mb-1 {
+      margin-bottom: 1rem;
+    }
+
+    .cache-section {
+      margin-top: 1rem;
+    }
+
+    .cache-section-label {
+      font-size: 0.8125rem;
+      font-weight: 500;
+      color: var(--scion-text, #1e293b);
+      display: block;
+      margin-bottom: 0.5rem;
+    }
   `;
 
   // --- Lifecycle ---
@@ -319,6 +341,14 @@ export class ScionPageAdminFederation extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.loadData();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.successMessageTimer !== null) {
+      clearTimeout(this.successMessageTimer);
+      this.successMessageTimer = null;
+    }
   }
 
   // --- Data ---
@@ -367,14 +397,19 @@ export class ScionPageAdminFederation extends LitElement {
       });
       if (!res.ok) {
         this.error = await extractApiError(res, 'Failed to save federation config');
+        // Reload server state so local data matches after failed save
+        await this.loadData();
         return;
       }
       this.successMessage = 'Federation config saved successfully';
-      setTimeout(() => {
+      this.successMessageTimer = setTimeout(() => {
         this.successMessage = null;
+        this.successMessageTimer = null;
       }, 3000);
     } catch {
       this.error = 'Failed to connect to server';
+      // Reload server state so local data matches after failed save
+      await this.loadData();
     } finally {
       this.saving = false;
     }
@@ -413,12 +448,20 @@ export class ScionPageAdminFederation extends LitElement {
     this.dialogOpen = false;
     this.editingIssuer = null;
     this.editingIndex = -1;
+    this.issuerUrlError = null;
   }
 
   private handleSaveIssuer(): void {
     if (!this.editingIssuer || !this.editingIssuer.issuer_url.trim()) {
       return;
     }
+
+    const url = this.editingIssuer.issuer_url.trim();
+    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+      this.issuerUrlError = 'Issuer URL must start with https:// or http://';
+      return;
+    }
+    this.issuerUrlError = null;
 
     // Build clean issuer config — strip empty optional fields
     const issuer: TrustedIssuerConfig = {
@@ -536,11 +579,11 @@ export class ScionPageAdminFederation extends LitElement {
   private renderGlobalSettings() {
     return html`
       <div class="section">
-        <h3 class="section-title" style="margin: 0 0 1rem 0; padding-bottom: 0.75rem; border-bottom: 1px solid var(--scion-border, #e2e8f0);">
-          Global Settings
-        </h3>
+        <div class="section-header">
+          <h3 class="section-title">Global Settings</h3>
+        </div>
 
-        <div class="form-field" style="margin-bottom: 1rem;">
+        <div class="form-field mb-1">
           <sl-switch
             ?checked=${this.enabled}
             @sl-change=${(e: Event) => {
@@ -572,8 +615,8 @@ export class ScionPageAdminFederation extends LitElement {
           </div>
         </div>
 
-        <div style="margin-top: 1rem;">
-          <label style="font-size: 0.8125rem; font-weight: 500; color: var(--scion-text, #1e293b); display: block; margin-bottom: 0.5rem;">
+        <div class="cache-section">
+          <label class="cache-section-label">
             JWKS Cache
           </label>
           <div class="cache-row">
@@ -694,14 +737,20 @@ export class ScionPageAdminFederation extends LitElement {
                     required
                     placeholder="https://hub-a.example.com"
                     .value=${this.editingIssuer.issuer_url}
+                    @sl-input=${() => {
+                      this.issuerUrlError = null;
+                    }}
                     @sl-change=${(e: Event) => {
                       this.editingIssuer = {
                         ...this.editingIssuer!,
                         issuer_url: (e.target as HTMLInputElement).value,
                       };
+                      this.issuerUrlError = null;
                     }}
                   ></sl-input>
-                  <span class="hint">The OIDC issuer URL of the trusted external hub or service.</span>
+                  ${this.issuerUrlError
+                    ? html`<span class="hint" style="color: var(--scion-error-text, #991b1b);">${this.issuerUrlError}</span>`
+                    : html`<span class="hint">The OIDC issuer URL of the trusted external hub or service.</span>`}
                 </div>
 
                 <div class="form-field">
