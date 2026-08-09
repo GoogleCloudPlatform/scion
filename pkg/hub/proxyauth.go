@@ -233,11 +233,32 @@ type jwksCache struct {
 	url    string
 	client *http.Client
 
+	refreshInterval  time.Duration // proactive refresh period; 0 = use jwksRefreshInterval
+	debounceInterval time.Duration // min time between fetches; 0 = use jwksDebounceInterval
+
 	mu            sync.RWMutex
 	keys          map[string]jose.JSONWebKey // kid -> key
 	lastFetched   time.Time                  // last successful fetch
 	lastAttempted time.Time                  // last fetch attempt (success or failure), for stampede prevention
 	refreshing    bool                       // true while a refresh is in-flight
+}
+
+// getRefreshInterval returns the configured refresh interval,
+// falling back to the package-level default.
+func (c *jwksCache) getRefreshInterval() time.Duration {
+	if c.refreshInterval > 0 {
+		return c.refreshInterval
+	}
+	return jwksRefreshInterval
+}
+
+// getDebounceInterval returns the configured debounce interval,
+// falling back to the package-level default.
+func (c *jwksCache) getDebounceInterval() time.Duration {
+	if c.debounceInterval > 0 {
+		return c.debounceInterval
+	}
+	return jwksDebounceInterval
 }
 
 // GetKey returns the public key for the given kid. If the kid is not found
@@ -248,7 +269,7 @@ func (c *jwksCache) GetKey(kid string) (interface{}, error) {
 	c.mu.RLock()
 	if c.keys != nil {
 		if k, ok := c.keys[kid]; ok {
-			needsRefresh := time.Since(c.lastFetched) > jwksRefreshInterval
+			needsRefresh := time.Since(c.lastFetched) > c.getRefreshInterval()
 			c.mu.RUnlock()
 			// Proactive background refresh (non-blocking)
 			if needsRefresh {
@@ -293,7 +314,7 @@ func (c *jwksCache) refresh() error {
 	c.mu.Lock()
 
 	// Debounce: skip if a refresh was attempted (success OR failure) very recently.
-	if time.Since(c.lastAttempted) < jwksDebounceInterval {
+	if time.Since(c.lastAttempted) < c.getDebounceInterval() {
 		c.mu.Unlock()
 		return nil
 	}

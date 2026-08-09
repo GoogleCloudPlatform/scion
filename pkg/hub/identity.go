@@ -194,12 +194,13 @@ func contextWithIdentity(ctx context.Context, identity Identity) context.Context
 
 // AuthType constants for request logging.
 const (
-	AuthTypeJWT      = "jwt"
-	AuthTypeUAT      = "uat"
-	AuthTypeDevToken = "dev-token"
-	AuthTypeAgent    = "agent"
-	AuthTypeBroker   = "broker"
-	AuthTypeProxy    = "proxy"
+	AuthTypeJWT        = "jwt"
+	AuthTypeUAT        = "uat"
+	AuthTypeDevToken   = "dev-token"
+	AuthTypeAgent      = "agent"
+	AuthTypeBroker     = "broker"
+	AuthTypeProxy      = "proxy"
+	AuthTypeFederation = "federation"
 )
 
 // contextWithAuthType returns a new context with the auth type set.

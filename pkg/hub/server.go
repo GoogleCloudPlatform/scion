@@ -236,6 +236,16 @@ type ServerConfig struct {
 	// OIDCConfig holds configuration for the OIDC Identity Provider feature.
 	// When Enabled, the hub initializes an OIDCKeyManager and exposes OIDC endpoints.
 	OIDCConfig config.OIDCProviderConfig
+
+	// Federation holds configuration for hub-hub federation authentication.
+	// When Federation.Enabled is true, the server initializes a FederationAuthenticator
+	// and injects it into the auth middleware.
+	Federation config.FederationConfig
+
+	// Mode is the server mode (e.g. "workstation", "dev", "hosted").
+	// Used by the federation authenticator to enforce HTTPS on issuer URLs
+	// in non-dev/non-workstation modes.
+	Mode string
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -1137,20 +1147,54 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			"runs", runs, "migrations", migrations)
 	}
 
+	// Initialize federation authenticator if enabled.
+	var federationAuth *FederationAuthenticator
+	if cfg.Federation.Enabled {
+		// Derive mode for HTTPS enforcement.
+		federationMode := cfg.Mode
+		if federationMode == "" {
+			if cfg.Workstation {
+				federationMode = "workstation"
+			} else {
+				federationMode = "hosted"
+			}
+		}
+		// Use the OIDC issuer URL as the default expected audience.
+		federationAudience := srv.oidcIssuerURL
+		if federationAudience == "" {
+			federationAudience = cfg.OIDCConfig.IssuerURL
+		}
+
+		var err error
+		federationAuth, err = NewFederationAuthenticator(
+			cfg.Federation,
+			federationAudience,
+			srv.federationClient,
+			federationMode,
+			logging.Subsystem("hub.federation"),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("federation authenticator init: %w", err)
+		}
+		slog.Info("Federation authenticator enabled",
+			"trusted_issuers", len(cfg.Federation.TrustedIssuers))
+	}
+
 	// Build unified auth configuration
 	srv.authConfig = AuthConfig{
-		Mode:               "production",
-		DevAuthEnabled:     cfg.DevAuthToken != "",
-		DevAuthToken:       cfg.DevAuthToken,
-		DevUserCfg:         cfg.DevUserConfig,
-		AgentTokenSvc:      srv.agentTokenService,
-		UserTokenSvc:       srv.userTokenService,
-		UATSvc:             srv.uatService,
-		TrustedProxies:     cfg.TrustedProxies,
-		ProxyAuthenticator: cfg.ProxyAuth,
-		AuthMode:           cfg.AuthMode,
-		Debug:              cfg.Debug,
-		Logger:             srv.authLog,
+		Mode:                    "production",
+		DevAuthEnabled:          cfg.DevAuthToken != "",
+		DevAuthToken:            cfg.DevAuthToken,
+		DevUserCfg:              cfg.DevUserConfig,
+		AgentTokenSvc:           srv.agentTokenService,
+		UserTokenSvc:            srv.userTokenService,
+		UATSvc:                  srv.uatService,
+		TrustedProxies:          cfg.TrustedProxies,
+		ProxyAuthenticator:      cfg.ProxyAuth,
+		FederationAuthenticator: federationAuth,
+		AuthMode:                cfg.AuthMode,
+		Debug:                   cfg.Debug,
+		Logger:                  srv.authLog,
 	}
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
