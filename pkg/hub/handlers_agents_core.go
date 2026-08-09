@@ -702,7 +702,10 @@ func (s *Server) createAgentInProject(
 	}
 
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		// Agent caller: ceiling is parent's role (Phase F2P1 will read this; for now use full)
+		// Agent caller: ceiling is the parent agent's own role.
+		// TODO(F2P1): read the parent's effective role from its stored AgentRole
+		// and pass it as an additional ceiling to minRole, so a baseline parent
+		// cannot escalate a child to full. Until then, only projectMax caps.
 		// Default requested role to project max if not specified
 		if requestedRole == "" {
 			requestedRole = projectMax
