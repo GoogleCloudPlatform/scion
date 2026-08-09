@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Build stage
-FROM golang:1.25.4@sha256:8a7adc288b77e9b787cd2695029eb54d10ae80571b21d44fed68d067ad0a9c96 AS builder
+FROM golang:1.26.1@sha256:cd78d88e00afadbedd272f977d375a6247455f3a4b1178f8ae8bbcb201743a8a AS builder
 
 WORKDIR /src
 
@@ -22,6 +22,9 @@ COPY go.mod go.sum ./
 COPY pkg/ pkg/
 COPY cmd/ cmd/
 COPY web/ web/
+COPY harnesses/ harnesses/
+COPY proto/ proto/
+COPY resources/ resources/
 
 # Copy the extras module
 COPY extras/scion-a2a-bridge/ extras/scion-a2a-bridge/
@@ -29,10 +32,10 @@ COPY extras/scion-a2a-bridge/ extras/scion-a2a-bridge/
 WORKDIR /src/extras/scion-a2a-bridge
 
 RUN go mod download
-RUN CGO_ENABLED=1 go build -o /scion-a2a-bridge ./cmd/scion-a2a-bridge/
+RUN CGO_ENABLED=1 go build -tags no_embed_web -o /scion-a2a-bridge ./cmd/scion-a2a-bridge/
 
 # Runtime stage
-FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -47,7 +50,7 @@ RUN mkdir -p /var/lib/scion-a2a-bridge && chown bridge:bridge /var/lib/scion-a2a
 
 ENV SCION_A2A_STATE_DB=/var/lib/scion-a2a-bridge/state.db
 
-EXPOSE 8443 9090
+EXPOSE 8080 8443 50051
 
 USER bridge
 
