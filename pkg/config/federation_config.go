@@ -88,6 +88,8 @@ func (c *FederationConfig) Validate() []error {
 				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: invalid issuer_url %q: %v", i, issuer.IssuerURL, err))
 			} else if u.Scheme != "https" && u.Scheme != "http" {
 				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: issuer_url %q must use https or http scheme", i, issuer.IssuerURL))
+			} else if u.Host == "" {
+				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: issuer_url %q has no host", i, issuer.IssuerURL))
 			}
 
 			if seen[issuer.IssuerURL] {

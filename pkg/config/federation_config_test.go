@@ -152,6 +152,17 @@ func TestFederationConfig_Validate(t *testing.T) {
 			wantSubst: []string{"must use https or http scheme"},
 		},
 		{
+			name: "issuer URL with empty host is rejected",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://"},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"has no host"},
+		},
+		{
 			name: "empty issuer URL is rejected",
 			config: FederationConfig{
 				Enabled: true,
