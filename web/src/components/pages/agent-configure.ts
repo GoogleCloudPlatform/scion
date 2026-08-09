@@ -65,6 +65,7 @@ interface AppliedConfig {
   inlineConfig?: ScionConfigPayload & {
     harness_config?: string;
   };
+  agentRole?: string;
 }
 
 interface AgentWithConfig extends Omit<Agent, 'appliedConfig'> {
