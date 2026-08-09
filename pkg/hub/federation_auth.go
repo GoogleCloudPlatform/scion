@@ -55,10 +55,13 @@ type issuerEntry struct {
 // Separate from OIDCIdentityTokenClaims (outbound) to maintain trust boundary separation.
 type federationClaims struct {
 	jwt.Claims
-	ProjectID string   `json:"project_id,omitempty"`
-	AgentName string   `json:"agent_name,omitempty"`
-	Ancestry  []string `json:"ancestry,omitempty"`
-	RootUser  string   `json:"root_user,omitempty"`
+	ProjectID     string   `json:"project_id,omitempty"`
+	AgentName     string   `json:"agent_name,omitempty"`
+	Ancestry      []string `json:"ancestry,omitempty"`
+	RootUser      string   `json:"root_user,omitempty"`
+	Email         string   `json:"email,omitempty"`
+	EmailVerified bool     `json:"email_verified,omitempty"`
+	Name          string   `json:"name,omitempty"`
 }
 
 // NewFederationAuthenticator creates a FederationAuthenticator from the given config.
@@ -82,9 +85,12 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 	issuers := make(map[string]*issuerEntry, len(cfg.TrustedIssuers))
 
 	for _, issuer := range cfg.TrustedIssuers {
+		// Normalize issuer URL by trimming trailing slashes for consistent map lookup.
+		normalizedIssuer := strings.TrimRight(issuer.IssuerURL, "/")
+
 		// Fix 2: In hosted mode (not workstation, not dev), reject HTTP issuer URLs.
 		if mode != "workstation" && mode != "dev" {
-			u, err := url.Parse(issuer.IssuerURL)
+			u, err := url.Parse(normalizedIssuer)
 			if err != nil {
 				return nil, fmt.Errorf("invalid issuer_url %q: %v", issuer.IssuerURL, err)
 			}
@@ -137,7 +143,7 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 			debounceInterval: cfg.Cache.DebounceInterval,
 		}
 
-		issuers[issuer.IssuerURL] = &issuerEntry{
+		issuers[normalizedIssuer] = &issuerEntry{
 			config: resolvedCfg,
 			cache:  cache,
 		}
@@ -185,8 +191,9 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIde
 		return nil, fmt.Errorf("federation: failed to peek at claims: %w", err)
 	}
 
-	// 4. Look up issuer.
-	entry, ok := a.issuers[unverified.Issuer]
+	// 4. Look up issuer (normalize trailing slashes for consistent matching).
+	normalizedIssuer := strings.TrimRight(unverified.Issuer, "/")
+	entry, ok := a.issuers[normalizedIssuer]
 	if !ok {
 		return nil, fmt.Errorf("federation: untrusted issuer %q", unverified.Issuer)
 	}
@@ -207,8 +214,11 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIde
 	expectedAud := entry.config.ExpectedAudience
 	now := time.Now()
 
+	// Normalize issuer for comparison (handles trailing slash differences).
+	claims.Issuer = strings.TrimRight(claims.Issuer, "/")
+
 	expected := jwt.Expected{
-		Issuer:      unverified.Issuer,
+		Issuer:      strings.TrimRight(entry.config.IssuerURL, "/"),
 		AnyAudience: jwt.Audience{expectedAud},
 		Time:        now,
 	}
@@ -240,18 +250,9 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIde
 	case IssuerTypeHub:
 		identity, err = extractHubClaims(&claims, entry.config, scopes)
 	case IssuerTypeServiceAccount:
-		// For SA/user types, get raw claims map for email/name extraction.
-		var rawClaims map[string]interface{}
-		if err := tok.UnsafeClaimsWithoutVerification(&rawClaims); err != nil {
-			return nil, fmt.Errorf("federation: failed to extract raw claims: %w", err)
-		}
-		identity, err = extractServiceAccountClaims(&claims.Claims, rawClaims, entry.config, scopes)
+		identity, err = extractServiceAccountClaims(&claims, entry.config, scopes)
 	case IssuerTypeUser:
-		var rawClaims map[string]interface{}
-		if err := tok.UnsafeClaimsWithoutVerification(&rawClaims); err != nil {
-			return nil, fmt.Errorf("federation: failed to extract raw claims: %w", err)
-		}
-		identity, err = extractUserClaims(&claims.Claims, rawClaims, entry.config, scopes)
+		identity, err = extractUserClaims(&claims, entry.config, scopes)
 	default:
 		return nil, fmt.Errorf("federation: unknown issuer type %q", issuerType)
 	}
@@ -309,34 +310,31 @@ func extractHubClaims(claims *federationClaims, issuerCfg config.TrustedIssuerCo
 }
 
 // extractServiceAccountClaims extracts GCP service account claims.
-func extractServiceAccountClaims(verified *jwt.Claims, raw map[string]interface{},
+func extractServiceAccountClaims(claims *federationClaims,
 	issuerCfg config.TrustedIssuerConfig, scopes []AgentTokenScope) (FederatedIdentity, error) {
-	if verified.Subject == "" {
+	if claims.Subject == "" {
 		return nil, fmt.Errorf("federation: service account token missing sub claim")
 	}
-	email, _ := raw["email"].(string)
-	if email == "" {
+	if claims.Email == "" {
 		return nil, fmt.Errorf("federation: service account token missing email claim")
 	}
 	return NewFederatedServiceIdentity(
-		verified.Issuer, verified.Subject, email, scopes,
+		claims.Issuer, claims.Subject, claims.Email, scopes,
 	), nil
 }
 
 // extractUserClaims extracts Firebase/Google user claims.
-func extractUserClaims(verified *jwt.Claims, raw map[string]interface{},
+func extractUserClaims(claims *federationClaims,
 	issuerCfg config.TrustedIssuerConfig, scopes []AgentTokenScope) (FederatedIdentity, error) {
-	if verified.Subject == "" {
+	if claims.Subject == "" {
 		return nil, fmt.Errorf("federation: user token missing sub claim")
 	}
-	email, _ := raw["email"].(string)
-	name, _ := raw["name"].(string)
 	role := issuerCfg.DefaultRole
 	if role == "" {
 		role = "viewer"
 	}
 	return NewFederatedUserIdentity(
-		verified.Issuer, verified.Subject, email, name, role, scopes,
+		claims.Issuer, claims.Subject, claims.Email, claims.Name, role, scopes,
 	), nil
 }
 

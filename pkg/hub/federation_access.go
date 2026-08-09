@@ -19,19 +19,33 @@ import (
 	"net/http"
 )
 
+// scopeChecker is implemented by identity types that support scope-based access control.
+type scopeChecker interface {
+	HasScope(scope AgentTokenScope) bool
+}
+
 // RequireFederationAccess returns a middleware that requires the caller to be
-// either a local agent or a federated agent with the specified scope.
-// This works for both local and federated agents because both implement AgentIdentity.
+// any identity with scope-based access (local agent, federated agent,
+// federated service account, or federated user) and to have the specified scope.
 func RequireFederationAccess(scope AgentTokenScope) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			identity := GetAgentIdentityFromContext(r.Context())
+			identity := GetIdentityFromContext(r.Context())
 			if identity == nil {
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-					"agent authentication required", nil)
+					"authentication required", nil)
 				return
 			}
-			if !identity.HasScope(scope) {
+
+			sc, ok := identity.(scopeChecker)
+			if !ok {
+				// Identity type does not support scope checking (e.g. UserIdentity from IAP).
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					fmt.Sprintf("identity type %q does not support scope-based access", identity.Type()), nil)
+				return
+			}
+
+			if !sc.HasScope(scope) {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden,
 					fmt.Sprintf("missing required scope: %s", scope), nil)
 				return

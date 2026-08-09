@@ -1340,6 +1340,61 @@ func TestFederationAuth_User_DefaultScopesEmpty(t *testing.T) {
 	}
 }
 
+// --- Trailing slash normalization tests ---
+
+// Test: Issuer URL trailing slash normalization — config has no slash, token has slash
+func TestFederationAuth_IssuerTrailingSlashNormalization(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	// Config issuer has no trailing slash
+	configIssuer := "https://hub-a.example.com"
+	// Token issuer has trailing slash
+	tokenIssuer := "https://hub-a.example.com/"
+	audience := "https://hub-b.example.com"
+
+	auth := newTestAuthenticator(t, configIssuer, jwksSrv.URL, audience)
+
+	claims := validFederationClaims(tokenIssuer, audience)
+	token := signFederationToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success despite trailing slash difference, got error: %v", err)
+	}
+	if identity == nil {
+		t.Fatal("expected identity, got nil")
+	}
+	agentID, ok := identity.(*FederatedAgentIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedAgentIdentity, got %T", identity)
+	}
+	if agentID.RemoteAgentID() != "agent-123" {
+		t.Errorf("expected agent ID 'agent-123', got %q", agentID.RemoteAgentID())
+	}
+}
+
+// Test: Issuer URL trailing slash normalization — config has slash, token has no slash
+func TestFederationAuth_IssuerTrailingSlashNormalization_Reverse(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	// Config issuer has trailing slash
+	configIssuer := "https://hub-a.example.com/"
+	// Token issuer has no trailing slash
+	tokenIssuer := "https://hub-a.example.com"
+	audience := "https://hub-b.example.com"
+
+	auth := newTestAuthenticator(t, configIssuer, jwksSrv.URL, audience)
+
+	claims := validFederationClaims(tokenIssuer, audience)
+	token := signFederationToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success despite trailing slash difference, got error: %v", err)
+	}
+	if identity == nil {
+		t.Fatal("expected identity, got nil")
+	}
+}
+
 // --- Email matching tests ---
 
 // Email Test 11: Exact match works

@@ -160,14 +160,14 @@ func TestRequireFederationAccess_NoIdentity(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status 401, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "agent authentication required") {
-		t.Errorf("expected 'agent authentication required' in body, got: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "authentication required") {
+		t.Errorf("expected 'authentication required' in body, got: %s", rec.Body.String())
 	}
 }
 
 // TestRequireFederationAccess_UserIdentity verifies that a user identity
-// (not an agent) on the context is rejected with 401, since
-// GetAgentIdentityFromContext returns nil for users.
+// (not an agent) on the context is rejected with 403, since
+// UserIdentity does not implement scopeChecker.
 func TestRequireFederationAccess_UserIdentity(t *testing.T) {
 	middleware := RequireFederationAccess(ScopeAgentStatusUpdate)
 
@@ -181,11 +181,91 @@ func TestRequireFederationAccess_UserIdentity(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected status 401, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "agent authentication required") {
-		t.Errorf("expected 'agent authentication required' in body, got: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "does not support scope-based access") {
+		t.Errorf("expected 'does not support scope-based access' in body, got: %s", rec.Body.String())
+	}
+}
+
+// TestRequireFederationAccess_FederatedServiceWithScope verifies that a federated
+// service identity with the required scope passes through the middleware.
+func TestRequireFederationAccess_FederatedServiceWithScope(t *testing.T) {
+	middleware := RequireFederationAccess(ScopeAgentStatusUpdate)
+
+	identity := NewFederatedServiceIdentity(
+		"https://accounts.google.com",
+		"123456789",
+		"my-sa@my-project.iam.gserviceaccount.com",
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentLogAppend},
+	)
+
+	handler := middleware(okHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), identity))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRequireFederationAccess_FederatedServiceWithoutScope verifies that a federated
+// service identity without the required scope is rejected with 403.
+func TestRequireFederationAccess_FederatedServiceWithoutScope(t *testing.T) {
+	middleware := RequireFederationAccess(ScopeProjectSecretRead)
+
+	identity := NewFederatedServiceIdentity(
+		"https://accounts.google.com",
+		"123456789",
+		"my-sa@my-project.iam.gserviceaccount.com",
+		[]AgentTokenScope{ScopeAgentStatusUpdate},
+	)
+
+	handler := middleware(okHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), identity))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "missing required scope") {
+		t.Errorf("expected 'missing required scope' in body, got: %s", rec.Body.String())
+	}
+}
+
+// TestRequireFederationAccess_FederatedUserWithScope verifies that a federated
+// user identity with the required scope passes through the middleware.
+func TestRequireFederationAccess_FederatedUserWithScope(t *testing.T) {
+	middleware := RequireFederationAccess(ScopeAgentStatusUpdate)
+
+	identity := NewFederatedUserIdentity(
+		"https://securetoken.google.com/my-project",
+		"abcdef123456",
+		"user@example.com",
+		"Test User",
+		"viewer",
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentLogAppend},
+	)
+
+	handler := middleware(okHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), identity))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

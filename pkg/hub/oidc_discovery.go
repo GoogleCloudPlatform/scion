@@ -17,10 +17,15 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 )
+
+// maxDiscoveryResponseSize limits the OIDC discovery response body to 1 MB
+// to prevent DoS from oversized responses.
+const maxDiscoveryResponseSize = 1 << 20 // 1 MB
 
 // discoverJWKSURL fetches the OIDC discovery document from the issuer and
 // extracts the jwks_uri field. Returns an error if the discovery document
@@ -41,7 +46,8 @@ func discoverJWKSURL(issuerURL string, client *http.Client, requireHTTPS bool) (
 	var doc struct {
 		JWKSURI string `json:"jwks_uri"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+	limitedBody := io.LimitReader(resp.Body, maxDiscoveryResponseSize)
+	if err := json.NewDecoder(limitedBody).Decode(&doc); err != nil {
 		return "", fmt.Errorf("oidc discovery: failed to parse response from %s: %w", discoveryURL, err)
 	}
 	if doc.JWKSURI == "" {
