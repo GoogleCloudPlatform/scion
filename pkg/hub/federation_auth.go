@@ -63,6 +63,8 @@ type federationClaims struct {
 
 // NewFederationAuthenticator creates a FederationAuthenticator from the given config.
 // oidcIssuerURL is this hub's own OIDC issuer URL, used as the default expected audience.
+// httpClient is used for JWKS endpoint fetches. The caller should configure
+// CheckRedirect to return http.ErrUseLastResponse to prevent open-redirect attacks.
 // mode is the server mode (e.g. "workstation", "dev", "hosted"); non-dev/workstation
 // modes reject HTTP issuer URLs for security.
 func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL string,
@@ -238,7 +240,7 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (*FederatedAg
 		scopes,
 	)
 
-	a.log.Info("federation token validated",
+	a.log.Debug("federation token validated",
 		"issuer", claims.Issuer,
 		"subject", claims.Subject,
 		"project_id", claims.ProjectID,

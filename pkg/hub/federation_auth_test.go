@@ -458,6 +458,36 @@ func TestFederationAuth_JWKSDownCachedKeys(t *testing.T) {
 	}
 }
 
+// Test 9b: JWKS endpoint down with no cached keys -> reject with clear error
+func TestFederationAuth_JWKSDownNoCachedKeys(t *testing.T) {
+	kid := "no-cache-key"
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+
+	// JWKS server that always returns HTTP 500
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	issuer := "https://hub-a.example.com"
+	audience := "https://hub-b.example.com"
+	auth := newTestAuthenticator(t, issuer, srv.URL, audience)
+
+	claims := validFederationClaims(issuer, audience)
+	token := signFederationToken(t, privKey, kid, claims)
+
+	_, err = auth.Authenticate(token)
+	if err == nil {
+		t.Fatal("expected error when JWKS is down with no cached keys, got nil")
+	}
+	if !containsStr(err.Error(), "JWKS key lookup failed") {
+		t.Errorf("expected 'JWKS key lookup failed' in error, got: %v", err)
+	}
+}
+
 // Test 10: Empty sub claim -> reject
 func TestFederationAuth_EmptySubject(t *testing.T) {
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
@@ -694,8 +724,12 @@ func TestFederationAuth_DerivedJWKSURL(t *testing.T) {
 	}
 	jwksData, _ := json.Marshal(jwks)
 
-	// Start server that serves JWKS at /.well-known/jwks.json
+	// Start server that serves JWKS only at the derived path /.well-known/jwks.json
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/jwks.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(jwksData)
 	}))
@@ -706,8 +740,7 @@ func TestFederationAuth_DerivedJWKSURL(t *testing.T) {
 		Enabled: true,
 		TrustedIssuers: []config.TrustedIssuerConfig{
 			{
-				IssuerURL:        srv.URL,        // JWKS will be derived as srv.URL + /.well-known/jwks.json
-				JWKSURL:          srv.URL,         // for test simplicity, point directly at server
+				IssuerURL:        srv.URL, // JWKSURL left empty — derivation adds /.well-known/jwks.json
 				ExpectedAudience: audience,
 			},
 		},
