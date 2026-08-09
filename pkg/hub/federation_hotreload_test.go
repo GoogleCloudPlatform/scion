@@ -1,0 +1,493 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+)
+
+// --- Deliverable 10a: Hot-reload via ApplySnapshot ---
+
+func TestApplySnapshot_FederationHotReload(t *testing.T) {
+	// Create a minimal Server with the fields ApplySnapshot needs.
+	srv := &Server{}
+	srv.config.Mode = "dev"
+	srv.config.Workstation = true
+	srv.config.OIDCConfig.IssuerURL = "https://hub.example.com"
+	srv.federationClient = &http.Client{Timeout: 5 * time.Second}
+
+	// Create a JWKS test server for the trusted issuer.
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"keys":[]}`))
+	}))
+	defer jwksServer.Close()
+
+	// Build a snapshot with federation config.
+	fedCfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        jwksServer.URL,
+				JWKSURL:          jwksServer.URL,
+				ExpectedAudience: "https://hub.example.com",
+			},
+		},
+	}
+	snap := Layer1Snapshot{
+		FederationConfig: &fedCfg,
+	}
+
+	// Initially, no authenticator is loaded.
+	if srv.federationAuth.Load() != nil {
+		t.Fatal("expected nil federationAuth before ApplySnapshot")
+	}
+
+	// Apply the snapshot — should hot-reload the authenticator.
+	result := ApplySnapshot(srv, snap)
+
+	// Verify the authenticator was stored.
+	newAuth := srv.federationAuth.Load()
+	if newAuth == nil {
+		t.Fatal("expected non-nil federationAuth after ApplySnapshot")
+	}
+
+	// Check that "federation" is in the applied list.
+	applied, ok := result["applied"].([]string)
+	if !ok {
+		t.Fatalf("expected applied to be []string, got %T", result["applied"])
+	}
+	found := false
+	for _, a := range applied {
+		if a == "federation" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'federation' in applied list, got %v", applied)
+	}
+}
+
+func TestApplySnapshot_FederationValidationFailure(t *testing.T) {
+	// Create a minimal Server.
+	srv := &Server{}
+	srv.config.Mode = "dev"
+	srv.config.Workstation = true
+
+	// Store an initial authenticator to verify it's kept on failure.
+	initialAuth := &FederationAuthenticator{}
+	srv.federationAuth.Store(initialAuth)
+
+	// Build a snapshot with invalid federation config (enabled but no issuers).
+	fedCfg := config.FederationConfig{
+		Enabled:        true,
+		TrustedIssuers: nil, // validation requires at least one issuer when enabled
+	}
+	snap := Layer1Snapshot{
+		FederationConfig: &fedCfg,
+	}
+
+	// Apply — should fail validation, keep old authenticator.
+	ApplySnapshot(srv, snap)
+
+	// Verify old authenticator is preserved.
+	currentAuth := srv.federationAuth.Load()
+	if currentAuth != initialAuth {
+		t.Error("expected old authenticator to be preserved after validation failure")
+	}
+}
+
+func TestApplySnapshot_FederationNilKeepsExisting(t *testing.T) {
+	// Create a minimal Server with an existing authenticator.
+	srv := &Server{}
+	initialAuth := &FederationAuthenticator{}
+	srv.federationAuth.Store(initialAuth)
+
+	// Apply snapshot without federation config.
+	snap := Layer1Snapshot{
+		FederationConfig: nil,
+	}
+	ApplySnapshot(srv, snap)
+
+	// Verify the existing authenticator is preserved (no-op on nil).
+	currentAuth := srv.federationAuth.Load()
+	if currentAuth != initialAuth {
+		t.Error("expected existing authenticator to be preserved when FederationConfig is nil")
+	}
+}
+
+// --- Deliverable 10b: Concurrent access ---
+
+func TestFederationAuth_ConcurrentAccess(t *testing.T) {
+	var fedAuth atomic.Pointer[FederationAuthenticator]
+
+	// Initial value.
+	auth1 := &FederationAuthenticator{}
+	fedAuth.Store(auth1)
+
+	const numReaders = 10
+	const numIterations = 1000
+
+	var wg sync.WaitGroup
+
+	// Readers: load from the atomic pointer concurrently.
+	for i := 0; i < numReaders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < numIterations; j++ {
+				loaded := fedAuth.Load()
+				if loaded == nil {
+					// nil is acceptable if a store of nil happened;
+					// in this test we only store non-nil, so this would be a bug.
+					t.Error("loaded nil from atomic pointer")
+					return
+				}
+			}
+		}()
+	}
+
+	// Writer: swap the authenticator concurrently.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < numIterations; j++ {
+			newAuth := &FederationAuthenticator{}
+			fedAuth.Store(newAuth)
+		}
+	}()
+
+	wg.Wait()
+}
+
+// --- Deliverable 10c: buildSingleSectionDoc federation case ---
+
+func TestBuildSingleSectionDoc_Federation(t *testing.T) {
+	enabled := true
+	req := &ServerConfigUpdateRequest{
+		Federation: &config.V1FederationConfig{
+			Enabled: &enabled,
+			TrustedIssuers: []config.V1TrustedIssuerConfig{
+				{
+					IssuerURL:        "https://hub-a.example.com",
+					ExpectedAudience: "https://hub-b.example.com",
+					IssuerType:       "hub",
+				},
+			},
+			Algorithms:      []string{"RS256"},
+			RefreshInterval: "1h",
+		},
+	}
+
+	fp := newFieldPresenceFromJSON(t, `{
+		"federation": {
+			"enabled": true,
+			"trusted_issuers": [{"issuer_url": "https://hub-a.example.com"}],
+			"algorithms": ["RS256"],
+			"refresh_interval": "1h"
+		}
+	}`)
+
+	doc, err := buildSingleSectionDoc(req, "federation", fp)
+	if err != nil {
+		t.Fatalf("buildSingleSectionDoc failed: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("expected non-nil doc for federation section")
+	}
+
+	// Unmarshal and verify fields.
+	var fedSettings opsettings.FederationSettings
+	if err := json.Unmarshal(doc, &fedSettings); err != nil {
+		t.Fatalf("failed to unmarshal federation doc: %v", err)
+	}
+
+	if fedSettings.Enabled == nil || !*fedSettings.Enabled {
+		t.Error("expected enabled to be true")
+	}
+	if len(fedSettings.TrustedIssuers) != 1 {
+		t.Errorf("expected 1 trusted issuer, got %d", len(fedSettings.TrustedIssuers))
+	}
+	if fedSettings.TrustedIssuers[0].IssuerURL != "https://hub-a.example.com" {
+		t.Errorf("expected issuer_url 'https://hub-a.example.com', got %q", fedSettings.TrustedIssuers[0].IssuerURL)
+	}
+	if len(fedSettings.Algorithms) != 1 || fedSettings.Algorithms[0] != "RS256" {
+		t.Errorf("expected algorithms [RS256], got %v", fedSettings.Algorithms)
+	}
+	if fedSettings.RefreshInterval != "1h" {
+		t.Errorf("expected refresh_interval '1h', got %q", fedSettings.RefreshInterval)
+	}
+}
+
+func TestBuildSingleSectionDoc_Federation_Nil(t *testing.T) {
+	req := &ServerConfigUpdateRequest{
+		Federation: nil,
+	}
+	fp := newFieldPresenceFromJSON(t, `{}`)
+
+	doc, err := buildSingleSectionDoc(req, "federation", fp)
+	if err != nil {
+		t.Fatalf("buildSingleSectionDoc failed: %v", err)
+	}
+
+	// When Federation is nil, we still get a doc (empty FederationSettings).
+	if doc == nil {
+		t.Fatal("expected non-nil doc for federation section even with nil federation field")
+	}
+	var fedSettings opsettings.FederationSettings
+	if err := json.Unmarshal(doc, &fedSettings); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if fedSettings.Enabled != nil {
+		t.Error("expected nil enabled when federation request field is nil")
+	}
+}
+
+// --- Deliverable 10d: Validation rejection ---
+
+func TestConvertFederationSettingsToConfig(t *testing.T) {
+	enabled := true
+	fs := opsettings.FederationSettings{
+		Enabled: &enabled,
+		TrustedIssuers: []config.V1TrustedIssuerConfig{
+			{
+				IssuerURL:        "https://hub-a.example.com",
+				ExpectedAudience: "https://hub-b.example.com",
+				IssuerType:       "hub",
+				AllowedProjects:  []string{"proj1"},
+				AllowedRootUsers: []string{"user@example.com"},
+				DefaultScopes:    []string{"agent:status:update"},
+			},
+		},
+		Algorithms:       []string{"RS256", "ES256"},
+		RefreshInterval:  "1h",
+		DebounceInterval: "5s",
+	}
+
+	fc := convertFederationSettingsToConfig(fs)
+
+	if !fc.Enabled {
+		t.Error("expected Enabled true")
+	}
+	if len(fc.TrustedIssuers) != 1 {
+		t.Fatalf("expected 1 issuer, got %d", len(fc.TrustedIssuers))
+	}
+	ti := fc.TrustedIssuers[0]
+	if ti.IssuerURL != "https://hub-a.example.com" {
+		t.Errorf("expected IssuerURL 'https://hub-a.example.com', got %q", ti.IssuerURL)
+	}
+	if ti.IssuerType != "hub" {
+		t.Errorf("expected IssuerType 'hub', got %q", ti.IssuerType)
+	}
+	if len(ti.AllowedProjects) != 1 || ti.AllowedProjects[0] != "proj1" {
+		t.Errorf("unexpected AllowedProjects: %v", ti.AllowedProjects)
+	}
+	if len(fc.Algorithms) != 2 {
+		t.Errorf("expected 2 algorithms, got %d", len(fc.Algorithms))
+	}
+	if fc.Cache.RefreshInterval != 1*time.Hour {
+		t.Errorf("expected RefreshInterval 1h, got %v", fc.Cache.RefreshInterval)
+	}
+	if fc.Cache.DebounceInterval != 5*time.Second {
+		t.Errorf("expected DebounceInterval 5s, got %v", fc.Cache.DebounceInterval)
+	}
+}
+
+func TestConvertFederationSettingsToConfig_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		fs   opsettings.FederationSettings
+		want string // substring expected in one of the validation errors
+	}{
+		{
+			name: "enabled with no issuers",
+			fs: opsettings.FederationSettings{
+				Enabled: boolPtr(true),
+			},
+			want: "no trusted_issuers",
+		},
+		{
+			name: "missing issuer_url",
+			fs: opsettings.FederationSettings{
+				Enabled: boolPtr(true),
+				TrustedIssuers: []config.V1TrustedIssuerConfig{
+					{IssuerURL: ""},
+				},
+			},
+			want: "issuer_url is required",
+		},
+		{
+			name: "invalid algorithm",
+			fs: opsettings.FederationSettings{
+				Enabled: boolPtr(true),
+				TrustedIssuers: []config.V1TrustedIssuerConfig{
+					{IssuerURL: "https://hub.example.com"},
+				},
+				Algorithms: []string{"HS256"},
+			},
+			want: "unsupported algorithm",
+		},
+		{
+			name: "duplicate issuers",
+			fs: opsettings.FederationSettings{
+				Enabled: boolPtr(true),
+				TrustedIssuers: []config.V1TrustedIssuerConfig{
+					{IssuerURL: "https://hub.example.com"},
+					{IssuerURL: "https://hub.example.com"},
+				},
+			},
+			want: "duplicate issuer_url",
+		},
+		{
+			name: "hub-only fields on service_account issuer",
+			fs: opsettings.FederationSettings{
+				Enabled: boolPtr(true),
+				TrustedIssuers: []config.V1TrustedIssuerConfig{
+					{
+						IssuerURL:       "https://accounts.google.com",
+						IssuerType:      "service_account",
+						AllowedProjects: []string{"proj1"},
+					},
+				},
+			},
+			want: "allowed_projects is not applicable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := convertFederationSettingsToConfig(tt.fs)
+			errs := fc.Validate()
+			if len(errs) == 0 {
+				t.Fatal("expected validation errors, got none")
+			}
+			found := false
+			for _, e := range errs {
+				if contains([]string{e.Error()}, "") || len(e.Error()) > 0 {
+					if containsSubstring(e.Error(), tt.want) {
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				t.Errorf("expected error containing %q, got %v", tt.want, errs)
+			}
+		})
+	}
+}
+
+// --- Deliverable 10e: Middleware loads from atomic pointer ---
+
+func TestMiddleware_LoadsFromAtomicPointer(t *testing.T) {
+	// Start with no authenticator (nil pointer value).
+	var fedAuth atomic.Pointer[FederationAuthenticator]
+
+	cfg := AuthConfig{
+		Mode:           "production",
+		FederationAuth: &fedAuth,
+		Debug:          true,
+		Logger:         slog.Default(),
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// With nil authenticator, sending a federation token should get 401.
+	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req.Header.Set("X-Scion-Federation-Token", "some-token")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 when authenticator is nil, got %d", rr.Code)
+	}
+
+	var body map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &body)
+	errData, _ := body["error"].(map[string]interface{})
+	if msg, ok := errData["message"].(string); ok {
+		if msg != "federation authentication is not configured" {
+			t.Errorf("unexpected error message: %s", msg)
+		}
+	}
+}
+
+func TestMiddleware_NilFederationAuthField(t *testing.T) {
+	// When FederationAuth field itself is nil (not just the pointer value).
+	cfg := AuthConfig{
+		Mode:           "production",
+		FederationAuth: nil,
+		Debug:          true,
+		Logger:         slog.Default(),
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Sending a federation token should get 401.
+	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
+	req.Header.Set("X-Scion-Federation-Token", "some-token")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 when FederationAuth is nil, got %d", rr.Code)
+	}
+}
+
+// --- Helpers ---
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+func containsSubstring(s, substr string) bool {
+	return len(s) >= len(substr) && (substr == "" || findSubstring(s, substr))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// newFieldPresenceFromJSON creates a fieldPresence from raw JSON for testing.
+func newFieldPresenceFromJSON(t *testing.T, rawJSON string) *fieldPresence {
+	t.Helper()
+	fp, err := parseFieldPresence([]byte(rawJSON))
+	if err != nil {
+		t.Fatalf("failed to parse field presence JSON: %v", err)
+	}
+	return fp
+}

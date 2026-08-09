@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/knadh/koanf/v2"
 )
@@ -853,6 +854,47 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// must never touch MaintenanceState (restoring pre-refactor behavior).
 	// In postgres mode, the caller uses ApplyMaintenanceFromSnapshot
 	// separately, which respects env > DB precedence (§3.4/§3.8).
+
+	// Federation (outside mutex — atomic.Pointer swap is lock-free,
+	// and NewFederationAuthenticator may do network I/O)
+	if snap.FederationConfig != nil {
+		if errs := snap.FederationConfig.Validate(); len(errs) > 0 {
+			slog.Error("Federation config validation failed during apply, keeping old config",
+				"errors", fmt.Sprintf("%v", errs))
+		} else {
+			// Derive federation mode using the same pattern as New().
+			federationMode := s.config.Mode
+			if federationMode == "" {
+				if s.config.Workstation {
+					federationMode = "workstation"
+				} else {
+					federationMode = "hosted"
+				}
+			}
+			// Use the OIDC issuer URL as the default expected audience.
+			federationAudience := s.oidcIssuerURL
+			if federationAudience == "" {
+				federationAudience = s.config.OIDCConfig.IssuerURL
+			}
+			newAuth, err := NewFederationAuthenticator(
+				*snap.FederationConfig,
+				federationAudience,
+				s.federationClient,
+				federationMode,
+				logging.Subsystem("hub.federation"),
+			)
+			if err != nil {
+				slog.Error("Federation authenticator rebuild failed, keeping old config",
+					"error", err)
+			} else {
+				s.federationAuth.Store(newAuth)
+				slog.Info("Federation authenticator hot-reloaded",
+					"trusted_issuers", len(snap.FederationConfig.TrustedIssuers),
+					"enabled", snap.FederationConfig.Enabled)
+				applied = append(applied, "federation")
+			}
+		}
+	}
 
 	// Settings that require restart
 	needsRestart := []string{

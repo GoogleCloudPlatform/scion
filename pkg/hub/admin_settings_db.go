@@ -248,6 +248,13 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 			Enabled: snap.AutoExposePortsEnabled,
 		}
 	}
+
+	// Federation — populate from snapshot's FederationConfig.
+	if snap.FederationConfig != nil {
+		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
+		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
+		resp.Federation = v1Server.Federation
+	}
 }
 
 // buildSectionMetadata reads the OperationalSettings cache to determine
@@ -493,6 +500,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		slog.Error("PUT server-config: failed to build section documents", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
 		return
+	}
+
+	// Validate federation semantics (beyond JSON schema).
+	if doc, ok := sectionDocs["federation"]; ok {
+		var fedSettings opsettings.FederationSettings
+		if err := json.Unmarshal(doc, &fedSettings); err == nil {
+			fedCfg := convertFederationSettingsToConfig(fedSettings)
+			if errs := fedCfg.Validate(); len(errs) > 0 {
+				var errMsgs []string
+				for _, e := range errs {
+					errMsgs = append(errMsgs, e.Error())
+				}
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+					"federation config validation failed", map[string]interface{}{
+						"errors": errMsgs,
+					})
+				return
+			}
+		}
 	}
 
 	// Validate ALL sections before writing ANY (atomic: all-or-nothing).
@@ -1051,11 +1077,58 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		}
 		doc = d
 
+	case "federation":
+		fedSettings := opsettings.FederationSettings{}
+		if req.Federation != nil {
+			fedSettings.Enabled = req.Federation.Enabled
+			fedSettings.TrustedIssuers = req.Federation.TrustedIssuers
+			fedSettings.Algorithms = req.Federation.Algorithms
+			fedSettings.RefreshInterval = req.Federation.RefreshInterval
+			fedSettings.DebounceInterval = req.Federation.DebounceInterval
+		}
+		doc = &fedSettings
+
 	default:
 		return nil, nil
 	}
 
 	return json.Marshal(doc)
+}
+
+// convertFederationSettingsToConfig maps FederationSettings to config.FederationConfig
+// for semantic validation.
+func convertFederationSettingsToConfig(fs opsettings.FederationSettings) config.FederationConfig {
+	fc := config.FederationConfig{
+		Algorithms: fs.Algorithms,
+	}
+	if fs.Enabled != nil {
+		fc.Enabled = *fs.Enabled
+	}
+	for _, vi := range fs.TrustedIssuers {
+		ti := config.TrustedIssuerConfig{
+			IssuerURL:        vi.IssuerURL,
+			JWKSURL:          vi.JWKSURL,
+			ExpectedAudience: vi.ExpectedAudience,
+			AllowedProjects:  vi.AllowedProjects,
+			AllowedRootUsers: vi.AllowedRootUsers,
+			DefaultScopes:    vi.DefaultScopes,
+			IssuerType:       vi.IssuerType,
+			DefaultRole:      vi.DefaultRole,
+			AllowedEmails:    vi.AllowedEmails,
+		}
+		fc.TrustedIssuers = append(fc.TrustedIssuers, ti)
+	}
+	if fs.RefreshInterval != "" {
+		if d, err := time.ParseDuration(fs.RefreshInterval); err == nil {
+			fc.Cache.RefreshInterval = d
+		}
+	}
+	if fs.DebounceInterval != "" {
+		if d, err := time.ParseDuration(fs.DebounceInterval); err == nil {
+			fc.Cache.DebounceInterval = d
+		}
+	}
+	return fc
 }
 
 // mapKeys returns the keys of a map as a sorted slice.

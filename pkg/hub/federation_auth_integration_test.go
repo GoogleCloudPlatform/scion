@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -101,7 +102,7 @@ func TestFederationMiddleware_ValidToken(t *testing.T) {
 
 	cfg := AuthConfig{
 		Mode:                    "production",
-		FederationAuthenticator: auth,
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
 		Debug:                   true,
 		Logger:                  slog.Default(),
 	}
@@ -200,7 +201,7 @@ func TestFederationMiddleware_InvalidToken(t *testing.T) {
 
 	cfg := AuthConfig{
 		Mode:                    "production",
-		FederationAuthenticator: auth,
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
 		Debug:                   true,
 		Logger:                  slog.Default(),
 	}
@@ -234,7 +235,7 @@ func TestFederationMiddleware_InvalidToken(t *testing.T) {
 func TestFederationMiddleware_NotConfigured(t *testing.T) {
 	cfg := AuthConfig{
 		Mode:                    "production",
-		FederationAuthenticator: nil, // federation not enabled
+		FederationAuth: nil, // federation not enabled
 		Debug:                   true,
 		Logger:                  slog.Default(),
 	}
@@ -271,7 +272,7 @@ func TestFederationMiddleware_NoHeader(t *testing.T) {
 
 	cfg := AuthConfig{
 		Mode:                    "production",
-		FederationAuthenticator: auth,
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
 		Debug:                   true,
 		Logger:                  slog.Default(),
 	}
@@ -321,7 +322,7 @@ func TestFederationMiddleware_AgentTokenTakesPriority(t *testing.T) {
 	cfg := AuthConfig{
 		Mode:                    "production",
 		AgentTokenSvc:           agentTokenSvc,
-		FederationAuthenticator: auth,
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
 		Debug:                   true,
 		Logger:                  slog.Default(),
 	}
@@ -380,7 +381,7 @@ func TestFederationMiddleware_ExpiredToken(t *testing.T) {
 
 	cfg := AuthConfig{
 		Mode:                    "production",
-		FederationAuthenticator: auth,
+		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] { p := &atomic.Pointer[FederationAuthenticator]{}; p.Store(auth); return p }(),
 		Debug:                   true,
 		Logger:                  slog.Default(),
 	}
