@@ -360,6 +360,7 @@ func compileSchemas() {
 							"default_role":       map[string]interface{}{"type": "string"},
 							"allowed_emails":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 						},
+						"additionalProperties": false,
 					},
 				},
 				"algorithms": map[string]interface{}{

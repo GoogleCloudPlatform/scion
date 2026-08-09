@@ -1607,10 +1607,14 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		gc.Federation.Algorithms = v1.Federation.Algorithms
 		if v1.Federation.RefreshInterval != "" {
-			gc.Federation.Cache.RefreshInterval, _ = time.ParseDuration(v1.Federation.RefreshInterval)
+			if d, err := time.ParseDuration(v1.Federation.RefreshInterval); err == nil {
+				gc.Federation.Cache.RefreshInterval = d
+			}
 		}
 		if v1.Federation.DebounceInterval != "" {
-			gc.Federation.Cache.DebounceInterval, _ = time.ParseDuration(v1.Federation.DebounceInterval)
+			if d, err := time.ParseDuration(v1.Federation.DebounceInterval); err == nil {
+				gc.Federation.Cache.DebounceInterval = d
+			}
 		}
 	}
 

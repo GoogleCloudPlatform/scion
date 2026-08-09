@@ -655,10 +655,14 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 			fedCfg.Algorithms = algs
 		}
 		if ri := k.String("server.federation.refresh_interval"); ri != "" {
-			fedCfg.Cache.RefreshInterval, _ = time.ParseDuration(ri)
+			if d, err := time.ParseDuration(ri); err == nil {
+				fedCfg.Cache.RefreshInterval = d
+			}
 		}
 		if di := k.String("server.federation.debounce_interval"); di != "" {
-			fedCfg.Cache.DebounceInterval, _ = time.ParseDuration(di)
+			if d, err := time.ParseDuration(di); err == nil {
+				fedCfg.Cache.DebounceInterval = d
+			}
 		}
 		snap.FederationConfig = &fedCfg
 	}
