@@ -298,12 +298,59 @@ func TestNormalizeTemplateSourceURL(t *testing.T) {
 			input:    "github.com/org/repo/.scion/templates/mytmpl",
 			expected: "https://github.com/org/repo/.scion/templates/mytmpl",
 		},
+		{
+			name:     "git+https:// prefix is stripped",
+			input:    "git+https://github.com/org/repo/tree/main/path",
+			expected: "https://github.com/org/repo/tree/main/path",
+		},
+		{
+			name:     "git+http:// prefix is stripped and kept as http",
+			input:    "git+http://example.com/template.tgz",
+			expected: "http://example.com/template.tgz",
+		},
+		{
+			name:     "git+https:// harness config URL normalizes correctly",
+			input:    "git+https://github.com/GoogleCloudPlatform/scion/harnesses/claude",
+			expected: "https://github.com/GoogleCloudPlatform/scion/harnesses/claude",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := NormalizeTemplateSourceURL(tt.input)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestNormalizeAndDetect_GitPlusHTTPS(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantType RemoteTemplateType
+	}{
+		{
+			name:     "git+https github harness URL detected as GitHub",
+			input:    "git+https://github.com/GoogleCloudPlatform/scion/harnesses/claude",
+			wantType: RemoteTypeGitHub,
+		},
+		{
+			name:     "git+https github repo URL detected as GitHub",
+			input:    "git+https://github.com/org/repo/tree/main/templates",
+			wantType: RemoteTypeGitHub,
+		},
+		{
+			name:     "git+http github URL detected as GitHub after normalize",
+			input:    "git+http://github.com/org/repo/tree/main/templates",
+			wantType: RemoteTypeGitHub,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized := NormalizeTemplateSourceURL(tt.input)
+			got := DetectRemoteType(normalized)
+			assert.Equal(t, tt.wantType, got, "normalized URL: %s", normalized)
 		})
 	}
 }

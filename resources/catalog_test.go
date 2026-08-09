@@ -107,7 +107,7 @@ func TestBuiltinResources(t *testing.T) {
 }
 
 func TestSourceURLFormat(t *testing.T) {
-	const harnessPrefix = "git+https://github.com/GoogleCloudPlatform/scion/harnesses/"
+	const harnessPrefix = "https://github.com/GoogleCloudPlatform/scion/harnesses/"
 	const builtinPrefix = "builtin://scion/"
 
 	for _, r := range BuiltinResources() {
@@ -160,8 +160,8 @@ func TestMandatoryBoilerplateFS(t *testing.T) {
 func assertSourceURL(t *testing.T, r BundledResource) {
 	t.Helper()
 	if r.Kind == storage.ResourceKindHarnessConfig {
-		if !strings.HasPrefix(r.SourceURL, "git+https://github.com/GoogleCloudPlatform/scion/harnesses/") {
-			t.Errorf("%s %q SourceURL = %q, want git+https://... prefix", r.Kind, r.Name, r.SourceURL)
+		if !strings.HasPrefix(r.SourceURL, "https://github.com/GoogleCloudPlatform/scion/harnesses/") {
+			t.Errorf("%s %q SourceURL = %q, want https://... prefix", r.Kind, r.Name, r.SourceURL)
 		}
 	} else if !strings.HasPrefix(r.SourceURL, "builtin://scion/") {
 		t.Errorf("%s %q SourceURL = %q, want builtin://scion/... prefix", r.Kind, r.Name, r.SourceURL)

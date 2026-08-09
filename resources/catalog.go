@@ -47,7 +47,7 @@ func sourceURL(kind storage.ResourceKind, name string) string {
 }
 
 func harnessConfigSourceURL(name string) string {
-	return fmt.Sprintf("git+https://github.com/GoogleCloudPlatform/scion/harnesses/%s", name)
+	return fmt.Sprintf("https://github.com/GoogleCloudPlatform/scion/harnesses/%s", name)
 }
 
 // BuiltinTemplates returns the bundled template resources.
