@@ -163,10 +163,10 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				ctx = contextWithIdentity(ctx, identity)
 				ctx = contextWithAuthType(ctx, AuthTypeFederation)
 				if cfg.Debug {
-					log.Debug("Federated agent authenticated",
+					log.Debug("Federated identity authenticated",
 						"issuer", identity.IssuerURL(),
-						"agent_id", identity.RemoteAgentID(),
-						"agent_name", identity.AgentName())
+						"type", identity.Type(),
+						"id", identity.ID())
 				}
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return

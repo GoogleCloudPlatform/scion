@@ -145,8 +145,8 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 }
 
 // Authenticate validates a federation OIDC identity token and returns the
-// authenticated FederatedAgentIdentity on success.
-func (a *FederationAuthenticator) Authenticate(tokenString string) (*FederatedAgentIdentity, error) {
+// authenticated FederatedIdentity on success.
+func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIdentity, error) {
 	// 1. Parse JWT with algorithm pinning — rejects wrong algorithms at parse time.
 	tok, err := jwt.ParseSigned(tokenString, a.algorithms)
 	if err != nil {
@@ -200,54 +200,147 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (*FederatedAg
 		return nil, fmt.Errorf("federation: claims validation failed: %w", err)
 	}
 
-	// 8. Validate federation-specific constraints.
-	// Sub (agent ID) must be non-empty.
-	if claims.Subject == "" {
-		return nil, fmt.Errorf("federation: empty sub claim")
+	// 8. Extract identity based on issuer type.
+	issuerType := IssuerType(entry.config.IssuerType)
+	if issuerType == "" {
+		issuerType = IssuerTypeHub
 	}
 
-	// If allowed_projects is non-empty, project_id must be in the list.
-	if len(entry.config.AllowedProjects) > 0 {
-		if !contains(entry.config.AllowedProjects, claims.ProjectID) {
-			return nil, fmt.Errorf("federation: project %q not in allowed_projects", claims.ProjectID)
-		}
-	}
-
-	// If allowed_root_users is non-empty, root_user must be in the list.
-	if len(entry.config.AllowedRootUsers) > 0 {
-		if !contains(entry.config.AllowedRootUsers, claims.RootUser) {
-			return nil, fmt.Errorf("federation: root_user %q not in allowed_root_users", claims.RootUser)
-		}
-	}
-
-	// 9. Build scopes.
+	// Build scopes.
 	scopes := DefaultFederationScopes
 	if len(entry.config.DefaultScopes) > 0 {
 		scopes = make([]AgentTokenScope, len(entry.config.DefaultScopes))
 		for i, s := range entry.config.DefaultScopes {
 			scopes[i] = AgentTokenScope(s)
 		}
+	} else if issuerType != IssuerTypeHub {
+		// Non-hub issuers default to empty scopes (zero-trust).
+		scopes = nil
 	}
 
-	// 10. Construct and return FederatedAgentIdentity.
-	identity := NewFederatedAgentIdentity(
-		claims.Issuer,
-		claims.Subject,
-		claims.ProjectID,
-		claims.AgentName,
-		claims.RootUser,
-		claims.Ancestry,
-		scopes,
-	)
+	var identity FederatedIdentity
+	switch issuerType {
+	case IssuerTypeHub:
+		identity, err = extractHubClaims(&claims, entry.config, scopes)
+	case IssuerTypeServiceAccount:
+		// For SA/user types, get raw claims map for email/name extraction.
+		var rawClaims map[string]interface{}
+		if err := tok.UnsafeClaimsWithoutVerification(&rawClaims); err != nil {
+			return nil, fmt.Errorf("federation: failed to extract raw claims: %w", err)
+		}
+		identity, err = extractServiceAccountClaims(&claims.Claims, rawClaims, entry.config, scopes)
+	case IssuerTypeUser:
+		var rawClaims map[string]interface{}
+		if err := tok.UnsafeClaimsWithoutVerification(&rawClaims); err != nil {
+			return nil, fmt.Errorf("federation: failed to extract raw claims: %w", err)
+		}
+		identity, err = extractUserClaims(&claims.Claims, rawClaims, entry.config, scopes)
+	default:
+		return nil, fmt.Errorf("federation: unknown issuer type %q", issuerType)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// 9. Apply issuer constraints based on type.
+	switch issuerType {
+	case IssuerTypeHub:
+		if len(entry.config.AllowedProjects) > 0 {
+			if !contains(entry.config.AllowedProjects, claims.ProjectID) {
+				return nil, fmt.Errorf("federation: project %q not in allowed_projects", claims.ProjectID)
+			}
+		}
+		if len(entry.config.AllowedRootUsers) > 0 {
+			if !contains(entry.config.AllowedRootUsers, claims.RootUser) {
+				return nil, fmt.Errorf("federation: root_user %q not in allowed_root_users", claims.RootUser)
+			}
+		}
+	case IssuerTypeServiceAccount, IssuerTypeUser:
+		if len(entry.config.AllowedEmails) > 0 {
+			var email string
+			if sid, ok := identity.(*FederatedServiceIdentity); ok {
+				email = sid.Email()
+			} else if uid, ok := identity.(*FederatedUserIdentity); ok {
+				email = uid.Email()
+			}
+			if !matchesAllowedEmails(entry.config.AllowedEmails, email) {
+				return nil, fmt.Errorf("federation: email %q not in allowed_emails", email)
+			}
+		}
+	}
 
 	a.log.Debug("federation token validated",
-		"issuer", claims.Issuer,
-		"subject", claims.Subject,
-		"project_id", claims.ProjectID,
-		"agent_name", claims.AgentName,
+		"issuer", identity.IssuerURL(),
+		"type", identity.Type(),
+		"id", identity.ID(),
 	)
 
 	return identity, nil
+}
+
+// extractHubClaims extracts Scion hub agent claims. This is the existing
+// extraction logic moved into a function.
+func extractHubClaims(claims *federationClaims, issuerCfg config.TrustedIssuerConfig,
+	scopes []AgentTokenScope) (FederatedIdentity, error) {
+	if claims.Subject == "" {
+		return nil, fmt.Errorf("federation: empty sub claim")
+	}
+	return NewFederatedAgentIdentity(
+		claims.Issuer, claims.Subject, claims.ProjectID,
+		claims.AgentName, claims.RootUser, claims.Ancestry, scopes,
+	), nil
+}
+
+// extractServiceAccountClaims extracts GCP service account claims.
+func extractServiceAccountClaims(verified *jwt.Claims, raw map[string]interface{},
+	issuerCfg config.TrustedIssuerConfig, scopes []AgentTokenScope) (FederatedIdentity, error) {
+	if verified.Subject == "" {
+		return nil, fmt.Errorf("federation: service account token missing sub claim")
+	}
+	email, _ := raw["email"].(string)
+	if email == "" {
+		return nil, fmt.Errorf("federation: service account token missing email claim")
+	}
+	return NewFederatedServiceIdentity(
+		verified.Issuer, verified.Subject, email, scopes,
+	), nil
+}
+
+// extractUserClaims extracts Firebase/Google user claims.
+func extractUserClaims(verified *jwt.Claims, raw map[string]interface{},
+	issuerCfg config.TrustedIssuerConfig, scopes []AgentTokenScope) (FederatedIdentity, error) {
+	if verified.Subject == "" {
+		return nil, fmt.Errorf("federation: user token missing sub claim")
+	}
+	email, _ := raw["email"].(string)
+	name, _ := raw["name"].(string)
+	role := issuerCfg.DefaultRole
+	if role == "" {
+		role = "viewer"
+	}
+	return NewFederatedUserIdentity(
+		verified.Issuer, verified.Subject, email, name, role, scopes,
+	), nil
+}
+
+// matchesAllowedEmails checks if an email matches any pattern in the allowed list.
+// Supports exact match and leading-wildcard suffix match (e.g. "*@example.com").
+func matchesAllowedEmails(patterns []string, email string) bool {
+	for _, pattern := range patterns {
+		if strings.HasPrefix(pattern, "*") {
+			// Leading-wildcard: match suffix.
+			suffix := pattern[1:] // strip the *
+			if strings.HasSuffix(email, suffix) {
+				return true
+			}
+		} else {
+			// Exact match.
+			if pattern == email {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // contains checks if a string is present in a slice.

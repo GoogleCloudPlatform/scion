@@ -124,6 +124,32 @@ func newTestAuthenticator(t *testing.T, issuerURL, jwksURL, expectedAudience str
 	return auth
 }
 
+// signGenericToken creates a signed RS256 JWT with arbitrary claims for non-hub token testing.
+func signGenericToken(t *testing.T, key *rsa.PrivateKey, kid string, claims interface{}) string {
+	t.Helper()
+	signerKey := jose.SigningKey{Algorithm: jose.RS256, Key: key}
+	opts := (&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid)
+	signer, err := jose.NewSigner(signerKey, opts)
+	if err != nil {
+		t.Fatalf("failed to create signer: %v", err)
+	}
+	raw, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		t.Fatalf("failed to sign JWT: %v", err)
+	}
+	return raw
+}
+
+// newTestAuthenticatorWithConfig creates a FederationAuthenticator from a full config.
+func newTestAuthenticatorWithConfig(t *testing.T, cfg config.FederationConfig, expectedAudience string) *FederationAuthenticator {
+	t.Helper()
+	auth, err := NewFederationAuthenticator(cfg, expectedAudience, &http.Client{Timeout: 5 * time.Second}, "dev", slog.Default())
+	if err != nil {
+		t.Fatalf("NewFederationAuthenticator failed: %v", err)
+	}
+	return auth
+}
+
 // --- Test cases ---
 
 // Test 1: Valid RS256 token from trusted issuer -> success
@@ -144,20 +170,24 @@ func TestFederationAuth_ValidToken(t *testing.T) {
 	if identity == nil {
 		t.Fatal("expected identity, got nil")
 	}
-	if identity.RemoteAgentID() != "agent-123" {
-		t.Errorf("expected agent ID 'agent-123', got %q", identity.RemoteAgentID())
+	agentID, ok := identity.(*FederatedAgentIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedAgentIdentity, got %T", identity)
+	}
+	if agentID.RemoteAgentID() != "agent-123" {
+		t.Errorf("expected agent ID 'agent-123', got %q", agentID.RemoteAgentID())
 	}
 	if identity.IssuerURL() != issuer {
 		t.Errorf("expected issuer %q, got %q", issuer, identity.IssuerURL())
 	}
-	if identity.RemoteProjectID() != "project-alpha" {
-		t.Errorf("expected project 'project-alpha', got %q", identity.RemoteProjectID())
+	if agentID.RemoteProjectID() != "project-alpha" {
+		t.Errorf("expected project 'project-alpha', got %q", agentID.RemoteProjectID())
 	}
-	if identity.AgentName() != "worker-1" {
-		t.Errorf("expected agent name 'worker-1', got %q", identity.AgentName())
+	if agentID.AgentName() != "worker-1" {
+		t.Errorf("expected agent name 'worker-1', got %q", agentID.AgentName())
 	}
-	if identity.OriginUserID() != "user:alice" {
-		t.Errorf("expected root user 'user:alice', got %q", identity.OriginUserID())
+	if agentID.OriginUserID() != "user:alice" {
+		t.Errorf("expected root user 'user:alice', got %q", agentID.OriginUserID())
 	}
 	if identity.Type() != "federated_agent" {
 		t.Errorf("expected type 'federated_agent', got %q", identity.Type())
@@ -397,8 +427,12 @@ func TestFederationAuth_UnknownKidTriggersRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second auth (new kid) failed: %v", err)
 	}
-	if identity.RemoteAgentID() != "agent-456" {
-		t.Errorf("expected agent ID 'agent-456', got %q", identity.RemoteAgentID())
+	agentID, ok := identity.(*FederatedAgentIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedAgentIdentity, got %T", identity)
+	}
+	if agentID.RemoteAgentID() != "agent-456" {
+		t.Errorf("expected agent ID 'agent-456', got %q", agentID.RemoteAgentID())
 	}
 }
 
@@ -454,8 +488,12 @@ func TestFederationAuth_JWKSDownCachedKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auth with cached key during outage failed: %v", err)
 	}
-	if identity.RemoteAgentID() != "agent-789" {
-		t.Errorf("expected agent ID 'agent-789', got %q", identity.RemoteAgentID())
+	agentID, ok := identity.(*FederatedAgentIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedAgentIdentity, got %T", identity)
+	}
+	if agentID.RemoteAgentID() != "agent-789" {
+		t.Errorf("expected agent ID 'agent-789', got %q", agentID.RemoteAgentID())
 	}
 }
 
@@ -526,7 +564,11 @@ func TestFederationAuth_DefaultScopes(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", err)
 	}
 
-	scopes := identity.Scopes()
+	agentID, ok := identity.(*FederatedAgentIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedAgentIdentity, got %T", identity)
+	}
+	scopes := agentID.Scopes()
 	if len(scopes) != len(DefaultFederationScopes) {
 		t.Fatalf("expected %d default scopes, got %d", len(DefaultFederationScopes), len(scopes))
 	}
@@ -567,11 +609,15 @@ func TestFederationAuth_PerIssuerScopes(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", err)
 	}
 
-	scopes := identity.Scopes()
+	agentID, ok := identity.(*FederatedAgentIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedAgentIdentity, got %T", identity)
+	}
+	scopes := agentID.Scopes()
 	if len(scopes) != 3 {
 		t.Fatalf("expected 3 scopes, got %d: %v", len(scopes), scopes)
 	}
-	if !identity.HasScope(ScopeProjectSecretRead) {
+	if !agentID.HasScope(ScopeProjectSecretRead) {
 		t.Error("expected ScopeProjectSecretRead to be granted")
 	}
 }
@@ -815,7 +861,568 @@ func TestFederationAuth_ProjectAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
-	if identity.RemoteProjectID() != "project-alpha" {
-		t.Errorf("expected project 'project-alpha', got %q", identity.RemoteProjectID())
+	agentID, ok := identity.(*FederatedAgentIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedAgentIdentity, got %T", identity)
+	}
+	if agentID.RemoteProjectID() != "project-alpha" {
+		t.Errorf("expected project 'project-alpha', got %q", agentID.RemoteProjectID())
+	}
+}
+
+// --- Service Account tests ---
+
+// SA Test 1: Valid SA token (iss=accounts.google.com, has email+sub) -> FederatedServiceIdentity
+func TestFederationAuth_ServiceAccount_ValidToken(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://accounts.google.com"
+	audience := "https://hub-b.example.com"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "service_account",
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":            issuer,
+		"sub":            "123456789",
+		"aud":            audience,
+		"iat":            now.Add(-1 * time.Minute).Unix(),
+		"exp":            now.Add(5 * time.Minute).Unix(),
+		"nbf":            now.Add(-1 * time.Minute).Unix(),
+		"email":          "my-sa@my-project.iam.gserviceaccount.com",
+		"email_verified": true,
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	sid, ok := identity.(*FederatedServiceIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedServiceIdentity, got %T", identity)
+	}
+	if sid.Email() != "my-sa@my-project.iam.gserviceaccount.com" {
+		t.Errorf("expected email 'my-sa@my-project.iam.gserviceaccount.com', got %q", sid.Email())
+	}
+	if sid.Subject() != "123456789" {
+		t.Errorf("expected subject '123456789', got %q", sid.Subject())
+	}
+	if sid.IssuerURL() != issuer {
+		t.Errorf("expected issuer %q, got %q", issuer, sid.IssuerURL())
+	}
+	if sid.Type() != "federated_service" {
+		t.Errorf("expected type 'federated_service', got %q", sid.Type())
+	}
+}
+
+// SA Test 2: SA token missing email -> reject
+func TestFederationAuth_ServiceAccount_MissingEmail(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://accounts.google.com"
+	audience := "https://hub-b.example.com"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "service_account",
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss": issuer,
+		"sub": "123456789",
+		"aud": audience,
+		"iat": now.Add(-1 * time.Minute).Unix(),
+		"exp": now.Add(5 * time.Minute).Unix(),
+		"nbf": now.Add(-1 * time.Minute).Unix(),
+		// no email claim
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	_, err := auth.Authenticate(token)
+	if err == nil {
+		t.Fatal("expected error for missing email, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing email claim") {
+		t.Errorf("expected 'missing email claim' in error, got: %v", err)
+	}
+}
+
+// SA Test 3: SA token with email not in allowed_emails -> reject
+func TestFederationAuth_ServiceAccount_EmailNotAllowed(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://accounts.google.com"
+	audience := "https://hub-b.example.com"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "service_account",
+				AllowedEmails:    []string{"allowed-sa@my-project.iam.gserviceaccount.com"},
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":   issuer,
+		"sub":   "123456789",
+		"aud":   audience,
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+		"nbf":   now.Add(-1 * time.Minute).Unix(),
+		"email": "disallowed-sa@other-project.iam.gserviceaccount.com",
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	_, err := auth.Authenticate(token)
+	if err == nil {
+		t.Fatal("expected error for disallowed email, got nil")
+	}
+	if !strings.Contains(err.Error(), "not in allowed_emails") {
+		t.Errorf("expected 'not in allowed_emails' in error, got: %v", err)
+	}
+}
+
+// SA Test 4: SA token with email matching wildcard pattern -> success
+func TestFederationAuth_ServiceAccount_WildcardEmailMatch(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://accounts.google.com"
+	audience := "https://hub-b.example.com"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "service_account",
+				AllowedEmails:    []string{"*@my-project.iam.gserviceaccount.com"},
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":   issuer,
+		"sub":   "123456789",
+		"aud":   audience,
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+		"nbf":   now.Add(-1 * time.Minute).Unix(),
+		"email": "deploy-bot@my-project.iam.gserviceaccount.com",
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	sid, ok := identity.(*FederatedServiceIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedServiceIdentity, got %T", identity)
+	}
+	if sid.Email() != "deploy-bot@my-project.iam.gserviceaccount.com" {
+		t.Errorf("expected email 'deploy-bot@my-project.iam.gserviceaccount.com', got %q", sid.Email())
+	}
+}
+
+// SA Test 5: SA token default scopes are empty (zero-trust)
+func TestFederationAuth_ServiceAccount_DefaultScopesEmpty(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://accounts.google.com"
+	audience := "https://hub-b.example.com"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "service_account",
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":   issuer,
+		"sub":   "123456789",
+		"aud":   audience,
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+		"nbf":   now.Add(-1 * time.Minute).Unix(),
+		"email": "my-sa@my-project.iam.gserviceaccount.com",
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	sid, ok := identity.(*FederatedServiceIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedServiceIdentity, got %T", identity)
+	}
+	scopes := sid.Scopes()
+	if len(scopes) != 0 {
+		t.Errorf("expected empty scopes for SA (zero-trust), got %v", scopes)
+	}
+}
+
+// --- User tests ---
+
+// User Test 6: Valid user token (Firebase-shaped, has email+sub+name) -> FederatedUserIdentity
+func TestFederationAuth_User_ValidToken(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://securetoken.google.com/my-firebase-project"
+	audience := "my-firebase-project"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "user",
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":            issuer,
+		"sub":            "abcdef123456",
+		"aud":            audience,
+		"iat":            now.Add(-1 * time.Minute).Unix(),
+		"exp":            now.Add(5 * time.Minute).Unix(),
+		"nbf":            now.Add(-1 * time.Minute).Unix(),
+		"email":          "user@example.com",
+		"email_verified": true,
+		"name":           "Test User",
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	uid, ok := identity.(*FederatedUserIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedUserIdentity, got %T", identity)
+	}
+	if uid.Email() != "user@example.com" {
+		t.Errorf("expected email 'user@example.com', got %q", uid.Email())
+	}
+	if uid.DisplayName() != "Test User" {
+		t.Errorf("expected display name 'Test User', got %q", uid.DisplayName())
+	}
+	if uid.Subject() != "abcdef123456" {
+		t.Errorf("expected subject 'abcdef123456', got %q", uid.Subject())
+	}
+	if uid.IssuerURL() != issuer {
+		t.Errorf("expected issuer %q, got %q", issuer, uid.IssuerURL())
+	}
+	if uid.Type() != "federated_user" {
+		t.Errorf("expected type 'federated_user', got %q", uid.Type())
+	}
+}
+
+// User Test 7: User token with default role -> role is "viewer"
+func TestFederationAuth_User_DefaultRole(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://securetoken.google.com/my-firebase-project"
+	audience := "my-firebase-project"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "user",
+				// DefaultRole not set — should default to "viewer"
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":   issuer,
+		"sub":   "abcdef123456",
+		"aud":   audience,
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+		"nbf":   now.Add(-1 * time.Minute).Unix(),
+		"email": "user@example.com",
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	uid, ok := identity.(*FederatedUserIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedUserIdentity, got %T", identity)
+	}
+	if uid.Role() != "viewer" {
+		t.Errorf("expected default role 'viewer', got %q", uid.Role())
+	}
+}
+
+// User Test 8: User token with configured default_role -> role matches config
+func TestFederationAuth_User_ConfiguredRole(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://securetoken.google.com/my-firebase-project"
+	audience := "my-firebase-project"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "user",
+				DefaultRole:      "member",
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":   issuer,
+		"sub":   "abcdef123456",
+		"aud":   audience,
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+		"nbf":   now.Add(-1 * time.Minute).Unix(),
+		"email": "user@example.com",
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	uid, ok := identity.(*FederatedUserIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedUserIdentity, got %T", identity)
+	}
+	if uid.Role() != "member" {
+		t.Errorf("expected configured role 'member', got %q", uid.Role())
+	}
+}
+
+// User Test 9: User token with email not in allowed_emails -> reject
+func TestFederationAuth_User_EmailNotAllowed(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://securetoken.google.com/my-firebase-project"
+	audience := "my-firebase-project"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "user",
+				AllowedEmails:    []string{"allowed@example.com"},
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":   issuer,
+		"sub":   "abcdef123456",
+		"aud":   audience,
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+		"nbf":   now.Add(-1 * time.Minute).Unix(),
+		"email": "disallowed@example.com",
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	_, err := auth.Authenticate(token)
+	if err == nil {
+		t.Fatal("expected error for disallowed email, got nil")
+	}
+	if !strings.Contains(err.Error(), "not in allowed_emails") {
+		t.Errorf("expected 'not in allowed_emails' in error, got: %v", err)
+	}
+}
+
+// User Test 10: User token default scopes are empty (zero-trust)
+func TestFederationAuth_User_DefaultScopesEmpty(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://securetoken.google.com/my-firebase-project"
+	audience := "my-firebase-project"
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuer,
+				JWKSURL:          jwksSrv.URL,
+				ExpectedAudience: audience,
+				IssuerType:       "user",
+			},
+		},
+	}
+	auth := newTestAuthenticatorWithConfig(t, cfg, audience)
+
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":   issuer,
+		"sub":   "abcdef123456",
+		"aud":   audience,
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+		"nbf":   now.Add(-1 * time.Minute).Unix(),
+		"email": "user@example.com",
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	uid, ok := identity.(*FederatedUserIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedUserIdentity, got %T", identity)
+	}
+	scopes := uid.Scopes()
+	if len(scopes) != 0 {
+		t.Errorf("expected empty scopes for user (zero-trust), got %v", scopes)
+	}
+}
+
+// --- Email matching tests ---
+
+// Email Test 11: Exact match works
+func TestMatchesAllowedEmails_ExactMatch(t *testing.T) {
+	patterns := []string{"user@example.com", "admin@corp.com"}
+	if !matchesAllowedEmails(patterns, "user@example.com") {
+		t.Error("expected exact match for user@example.com")
+	}
+	if !matchesAllowedEmails(patterns, "admin@corp.com") {
+		t.Error("expected exact match for admin@corp.com")
+	}
+	if matchesAllowedEmails(patterns, "other@example.com") {
+		t.Error("expected no match for other@example.com")
+	}
+}
+
+// Email Test 12: Wildcard *@example.com matches user@example.com
+func TestMatchesAllowedEmails_WildcardMatch(t *testing.T) {
+	patterns := []string{"*@example.com"}
+	if !matchesAllowedEmails(patterns, "user@example.com") {
+		t.Error("expected wildcard match for user@example.com")
+	}
+	if !matchesAllowedEmails(patterns, "admin@example.com") {
+		t.Error("expected wildcard match for admin@example.com")
+	}
+}
+
+// Email Test 13: Wildcard *@example.com does NOT match user@other.com
+func TestMatchesAllowedEmails_WildcardNoMatch(t *testing.T) {
+	patterns := []string{"*@example.com"}
+	if matchesAllowedEmails(patterns, "user@other.com") {
+		t.Error("expected no match for user@other.com with pattern *@example.com")
+	}
+	if matchesAllowedEmails(patterns, "user@example.com.evil.com") {
+		t.Error("expected no match for user@example.com.evil.com with pattern *@example.com")
+	}
+}
+
+// Email Test 14: Empty allowed_emails list -> all accepted
+func TestMatchesAllowedEmails_EmptyListAcceptsAll(t *testing.T) {
+	// When AllowedEmails is empty, the caller (Authenticate) skips the check entirely.
+	// But matchesAllowedEmails with empty list should return false (defense-in-depth).
+	patterns := []string{}
+	if matchesAllowedEmails(patterns, "anyone@example.com") {
+		t.Error("expected empty pattern list to not match anything (caller should skip)")
+	}
+}
+
+// --- Hub backward compatibility ---
+
+// Hub Test 15: Existing hub issuer with no issuer_type field -> works as before (defaults to "hub")
+func TestFederationAuth_HubBackwardCompat_NoIssuerType(t *testing.T) {
+	privKey, jwksSrv, kid := setupFederationTestServer(t)
+	issuer := "https://hub-a.example.com"
+	audience := "https://hub-b.example.com"
+
+	// No IssuerType set — should default to hub behavior
+	auth := newTestAuthenticator(t, issuer, jwksSrv.URL, audience)
+
+	claims := validFederationClaims(issuer, audience)
+	token := signFederationToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	agentID, ok := identity.(*FederatedAgentIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedAgentIdentity (hub default), got %T", identity)
+	}
+	if agentID.RemoteAgentID() != "agent-123" {
+		t.Errorf("expected agent ID 'agent-123', got %q", agentID.RemoteAgentID())
+	}
+	if agentID.RemoteProjectID() != "project-alpha" {
+		t.Errorf("expected project 'project-alpha', got %q", agentID.RemoteProjectID())
+	}
+	if agentID.AgentName() != "worker-1" {
+		t.Errorf("expected agent name 'worker-1', got %q", agentID.AgentName())
+	}
+	// Verify default scopes are applied (hub defaults)
+	scopes := agentID.Scopes()
+	if len(scopes) != len(DefaultFederationScopes) {
+		t.Errorf("expected %d default scopes, got %d", len(DefaultFederationScopes), len(scopes))
 	}
 }

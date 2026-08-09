@@ -199,6 +199,127 @@ func TestFederationConfig_Validate(t *testing.T) {
 			},
 			wantErrs: 4, // 2 bad algorithms + 1 bad scheme + 1 duplicate
 		},
+		// --- issuer_type validation ---
+		{
+			name: "issuer_type hub is valid",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://hub.example.com", IssuerType: "hub"},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "issuer_type service_account is valid with jwks_url",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:  "https://accounts.google.com",
+						IssuerType: "service_account",
+						JWKSURL:    "https://www.googleapis.com/oauth2/v3/certs",
+					},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "issuer_type user is valid with jwks_url",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:  "https://securetoken.google.com/my-project",
+						IssuerType: "user",
+						JWKSURL:    "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com",
+					},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "unknown issuer_type is rejected",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://hub.example.com", IssuerType: "unknown", JWKSURL: "https://example.com/jwks"},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"unknown issuer_type"},
+		},
+		{
+			name: "empty issuer_type defaults to hub (valid)",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://hub.example.com", IssuerType: ""},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "non-hub issuer without jwks_url is rejected",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:  "https://accounts.google.com",
+						IssuerType: "service_account",
+						// JWKSURL omitted
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"jwks_url is required"},
+		},
+		{
+			name: "allowed_projects on non-hub issuer produces warning error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:       "https://accounts.google.com",
+						IssuerType:      "service_account",
+						JWKSURL:         "https://www.googleapis.com/oauth2/v3/certs",
+						AllowedProjects: []string{"project-1"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_projects is not applicable"},
+		},
+		{
+			name: "allowed_root_users on non-hub issuer produces warning error",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:        "https://securetoken.google.com/proj",
+						IssuerType:       "user",
+						JWKSURL:          "https://www.googleapis.com/keys",
+						AllowedRootUsers: []string{"user:alice"},
+					},
+				},
+			},
+			wantErrs:  1,
+			wantSubst: []string{"allowed_root_users is not applicable"},
+		},
+		{
+			name: "hub issuer with allowed_projects is still valid",
+			config: FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{
+						IssuerURL:       "https://hub.example.com",
+						IssuerType:      "hub",
+						AllowedProjects: []string{"project-1"},
+					},
+				},
+			},
+			wantErrs: 0,
+		},
 	}
 
 	for _, tt := range tests {

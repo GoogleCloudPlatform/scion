@@ -41,12 +41,34 @@ type TrustedIssuerConfig struct {
 	// These are string representations of AgentTokenScope (defined in pkg/hub/agenttoken.go);
 	// string is used here to avoid a circular import between pkg/config and pkg/hub.
 	DefaultScopes []string `json:"default_scopes,omitempty" yaml:"default_scopes,omitempty" koanf:"default_scopes"`
+
+	// IssuerType controls claims extraction and identity construction.
+	// Default: "hub". Options: "hub", "service_account", "user".
+	// Uses string (not the hub IssuerType type) to avoid circular imports.
+	IssuerType string `json:"issuer_type,omitempty" yaml:"issuer_type,omitempty" koanf:"issuer_type"`
+
+	// DefaultRole sets the role for federated user identities (issuer_type: user).
+	// Ignored for other issuer types. Default: "viewer".
+	DefaultRole string `json:"default_role,omitempty" yaml:"default_role,omitempty" koanf:"default_role"`
+
+	// AllowedEmails restricts accepted tokens to specific email claims.
+	// Supports leading-wildcard suffix matching (e.g. "*@example.com").
+	// If empty, all emails accepted.
+	AllowedEmails []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
 }
 
 // FederationCacheConfig holds cache tuning parameters for federation JWKS fetching.
 type FederationCacheConfig struct {
 	RefreshInterval  time.Duration `json:"refresh_interval,omitempty" yaml:"refresh_interval,omitempty" koanf:"refresh_interval"`
 	DebounceInterval time.Duration `json:"debounce_interval,omitempty" yaml:"debounce_interval,omitempty" koanf:"debounce_interval"`
+}
+
+// allowedIssuerTypes is the set of valid issuer_type values for TrustedIssuerConfig.
+var allowedIssuerTypes = map[string]bool{
+	"":                true, // empty defaults to "hub"
+	"hub":             true,
+	"service_account": true,
+	"user":            true,
 }
 
 // allowedAlgorithms is the set of algorithms permitted for federation token validation.
@@ -99,6 +121,25 @@ func (c *FederationConfig) Validate() []error {
 		}
 
 		// Rule 4: Empty ExpectedAudience is allowed (resolved later).
+
+		// Rule 6: Validate issuer_type is a known value.
+		if !allowedIssuerTypes[issuer.IssuerType] {
+			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: unknown issuer_type %q (must be \"hub\", \"service_account\", or \"user\")", i, issuer.IssuerType))
+		}
+
+		// Rule 7: Non-hub issuers require jwks_url (OIDC discovery not yet implemented).
+		isNonHub := issuer.IssuerType != "" && issuer.IssuerType != "hub"
+		if isNonHub && issuer.JWKSURL == "" {
+			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: jwks_url is required for issuer_type %q (OIDC discovery not yet implemented)", i, issuer.IssuerType))
+		}
+
+		// Rule 8: Warn if hub-specific fields are set on non-hub issuers.
+		if isNonHub && len(issuer.AllowedProjects) > 0 {
+			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_projects is not applicable for issuer_type %q", i, issuer.IssuerType))
+		}
+		if isNonHub && len(issuer.AllowedRootUsers) > 0 {
+			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_root_users is not applicable for issuer_type %q", i, issuer.IssuerType))
+		}
 	}
 
 	return errs
