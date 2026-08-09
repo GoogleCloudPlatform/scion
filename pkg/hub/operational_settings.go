@@ -857,7 +857,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	// Federation (outside mutex — atomic.Pointer swap is lock-free,
 	// and NewFederationAuthenticator may do network I/O)
-	if snap.FederationConfig != nil {
+	//
+	// When federation is disabled (nil config or Enabled=false), clear the
+	// authenticator so the middleware returns 401. This ensures disabling
+	// federation at runtime actually takes effect.
+	if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
+		s.federationAuth.Store(nil)
+		if snap.FederationConfig != nil {
+			slog.Info("Federation disabled via config, authenticator cleared")
+		}
+		applied = append(applied, "federation")
+	} else {
 		if errs := snap.FederationConfig.Validate(); len(errs) > 0 {
 			slog.Error("Federation config validation failed during apply, keeping old config",
 				"errors", fmt.Sprintf("%v", errs))

@@ -506,6 +506,24 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if doc, ok := sectionDocs["federation"]; ok {
 		var fedSettings opsettings.FederationSettings
 		if err := json.Unmarshal(doc, &fedSettings); err == nil {
+			// Validate duration strings before conversion (which silently
+			// falls back to zero for invalid values). Invalid durations like
+			// "1hour" would fail at time.ParseDuration during ApplySnapshot.
+			if fedSettings.RefreshInterval != "" {
+				if _, err := time.ParseDuration(fedSettings.RefreshInterval); err != nil {
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err), nil)
+					return
+				}
+			}
+			if fedSettings.DebounceInterval != "" {
+				if _, err := time.ParseDuration(fedSettings.DebounceInterval); err != nil {
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err), nil)
+					return
+				}
+			}
+
 			fedCfg := convertFederationSettingsToConfig(fedSettings)
 			if errs := fedCfg.Validate(); len(errs) > 0 {
 				var errMsgs []string

@@ -121,22 +121,84 @@ func TestApplySnapshot_FederationValidationFailure(t *testing.T) {
 	}
 }
 
-func TestApplySnapshot_FederationNilKeepsExisting(t *testing.T) {
+func TestApplySnapshot_FederationNilClearsAuthenticator(t *testing.T) {
 	// Create a minimal Server with an existing authenticator.
 	srv := &Server{}
 	initialAuth := &FederationAuthenticator{}
 	srv.federationAuth.Store(initialAuth)
 
-	// Apply snapshot without federation config.
+	// Apply snapshot without federation config — should clear the authenticator.
 	snap := Layer1Snapshot{
 		FederationConfig: nil,
 	}
 	ApplySnapshot(srv, snap)
 
-	// Verify the existing authenticator is preserved (no-op on nil).
+	// Verify the authenticator is cleared (nil) so the middleware returns 401.
 	currentAuth := srv.federationAuth.Load()
-	if currentAuth != initialAuth {
-		t.Error("expected existing authenticator to be preserved when FederationConfig is nil")
+	if currentAuth != nil {
+		t.Error("expected authenticator to be cleared (nil) when FederationConfig is nil")
+	}
+}
+
+func TestApplySnapshot_FederationDisabledClearsAuthenticator(t *testing.T) {
+	// Create a minimal Server with an existing authenticator.
+	srv := &Server{}
+	srv.config.Mode = "dev"
+	srv.config.Workstation = true
+	srv.config.OIDCConfig.IssuerURL = "https://hub.example.com"
+	srv.federationClient = &http.Client{Timeout: 5 * time.Second}
+
+	// Start with federation enabled.
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"keys":[]}`))
+	}))
+	defer jwksServer.Close()
+
+	enabledCfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        jwksServer.URL,
+				JWKSURL:          jwksServer.URL,
+				ExpectedAudience: "https://hub.example.com",
+			},
+		},
+	}
+	enableSnap := Layer1Snapshot{FederationConfig: &enabledCfg}
+	ApplySnapshot(srv, enableSnap)
+
+	// Verify federation is active.
+	if srv.federationAuth.Load() == nil {
+		t.Fatal("expected non-nil authenticator after enabling federation")
+	}
+
+	// Now disable federation via Enabled=false.
+	disabledCfg := config.FederationConfig{
+		Enabled: false,
+	}
+	disableSnap := Layer1Snapshot{FederationConfig: &disabledCfg}
+	result := ApplySnapshot(srv, disableSnap)
+
+	// Verify the authenticator is cleared.
+	if srv.federationAuth.Load() != nil {
+		t.Error("expected authenticator to be cleared (nil) when federation is disabled")
+	}
+
+	// Check "federation" is in the applied list.
+	applied, ok := result["applied"].([]string)
+	if !ok {
+		t.Fatalf("expected applied to be []string, got %T", result["applied"])
+	}
+	found := false
+	for _, a := range applied {
+		if a == "federation" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'federation' in applied list when disabling, got %v", applied)
 	}
 }
 
@@ -579,6 +641,50 @@ func mapKeys2(m map[string]json.RawMessage) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// --- Deliverable: Duration string validation ---
+
+func TestConvertFederationSettingsToConfig_InvalidDurations(t *testing.T) {
+	// convertFederationSettingsToConfig silently falls back to zero for invalid
+	// durations. The admin API must reject these before they reach ApplySnapshot.
+	tests := []struct {
+		name  string
+		ri    string // RefreshInterval
+		di    string // DebounceInterval
+		valid bool
+	}{
+		{"valid durations", "1h", "5s", true},
+		{"valid duration with minutes", "30m", "500ms", true},
+		{"empty durations (optional)", "", "", true},
+		{"invalid refresh_interval", "1hour", "5s", false},
+		{"invalid debounce_interval", "5s", "five_seconds", false},
+		{"both invalid", "1hour", "five_seconds", false},
+		{"number without unit", "30", "5", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var validationErrors []string
+			if tt.ri != "" {
+				if _, err := time.ParseDuration(tt.ri); err != nil {
+					validationErrors = append(validationErrors, err.Error())
+				}
+			}
+			if tt.di != "" {
+				if _, err := time.ParseDuration(tt.di); err != nil {
+					validationErrors = append(validationErrors, err.Error())
+				}
+			}
+
+			if tt.valid && len(validationErrors) > 0 {
+				t.Errorf("expected valid, got errors: %v", validationErrors)
+			}
+			if !tt.valid && len(validationErrors) == 0 {
+				t.Error("expected validation errors for invalid durations, got none")
+			}
+		})
+	}
 }
 
 // --- Helpers ---
