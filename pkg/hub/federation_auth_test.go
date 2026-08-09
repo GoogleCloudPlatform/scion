@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -179,7 +180,7 @@ func TestFederationAuth_UntrustedIssuer(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for untrusted issuer, got nil")
 	}
-	if !containsStr(err.Error(), "untrusted issuer") {
+	if !strings.Contains(err.Error(), "untrusted issuer") {
 		t.Errorf("expected 'untrusted issuer' in error, got: %v", err)
 	}
 }
@@ -203,7 +204,7 @@ func TestFederationAuth_ExpiredToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for expired token, got nil")
 	}
-	if !containsStr(err.Error(), "claims validation failed") {
+	if !strings.Contains(err.Error(), "claims validation failed") {
 		t.Errorf("expected 'claims validation failed' in error, got: %v", err)
 	}
 }
@@ -223,7 +224,7 @@ func TestFederationAuth_WrongAudience(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for wrong audience, got nil")
 	}
-	if !containsStr(err.Error(), "claims validation failed") {
+	if !strings.Contains(err.Error(), "claims validation failed") {
 		t.Errorf("expected 'claims validation failed' in error, got: %v", err)
 	}
 }
@@ -258,7 +259,7 @@ func TestFederationAuth_ProjectNotAllowed(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for disallowed project, got nil")
 	}
-	if !containsStr(err.Error(), "not in allowed_projects") {
+	if !strings.Contains(err.Error(), "not in allowed_projects") {
 		t.Errorf("expected 'not in allowed_projects' in error, got: %v", err)
 	}
 }
@@ -293,7 +294,7 @@ func TestFederationAuth_RootUserNotAllowed(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for disallowed root_user, got nil")
 	}
-	if !containsStr(err.Error(), "not in allowed_root_users") {
+	if !strings.Contains(err.Error(), "not in allowed_root_users") {
 		t.Errorf("expected 'not in allowed_root_users' in error, got: %v", err)
 	}
 }
@@ -325,7 +326,7 @@ func TestFederationAuth_HS256Rejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for HS256 token, got nil")
 	}
-	if !containsStr(err.Error(), "failed to parse JWT") {
+	if !strings.Contains(err.Error(), "failed to parse JWT") {
 		t.Errorf("expected 'failed to parse JWT' in error, got: %v", err)
 	}
 }
@@ -483,7 +484,7 @@ func TestFederationAuth_JWKSDownNoCachedKeys(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when JWKS is down with no cached keys, got nil")
 	}
-	if !containsStr(err.Error(), "JWKS key lookup failed") {
+	if !strings.Contains(err.Error(), "JWKS key lookup failed") {
 		t.Errorf("expected 'JWKS key lookup failed' in error, got: %v", err)
 	}
 }
@@ -504,7 +505,7 @@ func TestFederationAuth_EmptySubject(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty sub claim, got nil")
 	}
-	if !containsStr(err.Error(), "empty sub claim") {
+	if !strings.Contains(err.Error(), "empty sub claim") {
 		t.Errorf("expected 'empty sub claim' in error, got: %v", err)
 	}
 }
@@ -688,7 +689,7 @@ func TestFederationAuth_HTTPIssuerHostedMode(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for HTTP issuer in hosted mode, got nil")
 	}
-	if !containsStr(err.Error(), "not allowed") {
+	if !strings.Contains(err.Error(), "not allowed") {
 		t.Errorf("expected 'not allowed' in error, got: %v", err)
 	}
 
@@ -779,7 +780,7 @@ func TestFederationAuth_NoAudienceError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when audience cannot be resolved, got nil")
 	}
-	if !containsStr(err.Error(), "expected_audience is empty") {
+	if !strings.Contains(err.Error(), "expected_audience is empty") {
 		t.Errorf("expected 'expected_audience is empty' in error, got: %v", err)
 	}
 }
@@ -819,16 +820,3 @@ func TestFederationAuth_ProjectAllowed(t *testing.T) {
 	}
 }
 
-// containsStr checks if a string contains a substring.
-func containsStr(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 || findSubstring(s, sub))
-}
-
-func findSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}

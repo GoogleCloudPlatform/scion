@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,12 +94,6 @@ func setupFederationIntegration(t *testing.T) (
 	return privKey, auth, issuer, audience, kid
 }
 
-// signIntegrationToken creates a signed JWT for integration testing.
-func signIntegrationToken(t *testing.T, key *rsa.PrivateKey, kid string, claims federationClaims) string {
-	t.Helper()
-	return signFederationToken(t, key, kid, claims)
-}
-
 // TestFederationMiddleware_ValidToken verifies that a valid federation token
 // in X-Scion-Federation-Token results in 200 with correct identity on the context.
 func TestFederationMiddleware_ValidToken(t *testing.T) {
@@ -119,7 +114,7 @@ func TestFederationMiddleware_ValidToken(t *testing.T) {
 	claims.AgentName = "test-worker"
 	claims.RootUser = "user:integrator"
 	claims.Ancestry = []string{"user:integrator", "agent:root"}
-	token := signIntegrationToken(t, privKey, kid, claims)
+	token := signFederationToken(t, privKey, kid, claims)
 
 	var gotIdentity Identity
 	var gotAgentIdentity AgentIdentity
@@ -228,7 +223,7 @@ func TestFederationMiddleware_InvalidToken(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !containsStr(body, "invalid federation token") {
+	if !strings.Contains(body, "invalid federation token") {
 		t.Errorf("expected 'invalid federation token' in body, got: %s", body)
 	}
 }
@@ -262,7 +257,7 @@ func TestFederationMiddleware_NotConfigured(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !containsStr(body, "federation authentication is not configured") {
+	if !strings.Contains(body, "federation authentication is not configured") {
 		t.Errorf("expected 'federation authentication is not configured' in body, got: %s", body)
 	}
 }
@@ -300,7 +295,7 @@ func TestFederationMiddleware_NoHeader(t *testing.T) {
 
 	body := rec.Body.String()
 	// Should fall through to "missing authorization header" — not a federation error
-	if !containsStr(body, "missing authorization header") {
+	if !strings.Contains(body, "missing authorization header") {
 		t.Errorf("expected 'missing authorization header' in body (fall-through), got: %s", body)
 	}
 }
@@ -336,7 +331,7 @@ func TestFederationMiddleware_AgentTokenTakesPriority(t *testing.T) {
 	// Create a valid federation token too
 	claims := validFederationClaims(issuer, audience)
 	claims.Subject = "federated-agent-1"
-	fedToken := signIntegrationToken(t, privKey, kid, claims)
+	fedToken := signFederationToken(t, privKey, kid, claims)
 
 	var gotIdentity Identity
 	var gotAuthType string
@@ -396,7 +391,7 @@ func TestFederationMiddleware_ExpiredToken(t *testing.T) {
 	claims.Expiry = jwt.NewNumericDate(time.Now().Add(-10 * time.Minute))
 	claims.IssuedAt = jwt.NewNumericDate(time.Now().Add(-15 * time.Minute))
 	claims.NotBefore = jwt.NewNumericDate(time.Now().Add(-15 * time.Minute))
-	token := signIntegrationToken(t, privKey, kid, claims)
+	token := signFederationToken(t, privKey, kid, claims)
 
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called for expired token")
@@ -414,7 +409,7 @@ func TestFederationMiddleware_ExpiredToken(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !containsStr(body, "invalid federation token") {
+	if !strings.Contains(body, "invalid federation token") {
 		t.Errorf("expected 'invalid federation token' in body, got: %s", body)
 	}
 }
