@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 // templatesCmd represents the templates command
@@ -763,6 +764,9 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read template config: %w", err)
 	}
 
+	// Warn if template uses deprecated hubAccess.scopes
+	warnDeprecatedHubAccessScopes(tpl.Name, tpl.Path)
+
 	return syncTemplateToHub(hubCtx, hubName, tpl.Path, destScope, harnessType)
 }
 
@@ -796,6 +800,9 @@ func syncAllTemplatesToHub(hubCtx *HubContext, scope string) error {
 			failed++
 			continue
 		}
+
+		// Warn if template uses deprecated hubAccess.scopes
+		warnDeprecatedHubAccessScopes(tpl.Name, tpl.Path)
 
 		err = syncTemplateToHub(hubCtx, tpl.Name, tpl.Path, scope, harnessType)
 		if err != nil {
@@ -1384,6 +1391,44 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 	_ = w.Flush()
 
 	return nil
+}
+
+// warnDeprecatedHubAccessScopes checks a local template's config file for
+// deprecated hubAccess.scopes and emits a warning to stderr. Agent authorization
+// is now controlled by the --role flag; hubAccess.scopes are ignored at dispatch.
+func warnDeprecatedHubAccessScopes(name, templatePath string) {
+	configPath := config.GetScionAgentConfigPath(templatePath)
+	if configPath == "" {
+		return
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return
+	}
+
+	// Parse into a struct that only captures hubAccess.scopes, ignoring all
+	// other fields. This works regardless of the Go ScionConfig struct shape.
+	var raw struct {
+		HubAccess *struct {
+			Scopes []string `json:"scopes" yaml:"scopes"`
+		} `json:"hubAccess" yaml:"hubAccess"`
+	}
+	ext := filepath.Ext(configPath)
+	if ext == ".yaml" || ext == ".yml" {
+		if yamlErr := yaml.Unmarshal(data, &raw); yamlErr != nil {
+			return
+		}
+	} else {
+		if jsonErr := json.Unmarshal(data, &raw); jsonErr != nil {
+			return
+		}
+	}
+	if raw.HubAccess != nil && len(raw.HubAccess.Scopes) > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: template %q uses deprecated hubAccess.scopes; "+
+			"agent authorization is now controlled by the --role flag. "+
+			"hubAccess.scopes will be ignored at dispatch.\n", name)
+	}
 }
 
 func init() {

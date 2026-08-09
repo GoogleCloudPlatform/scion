@@ -174,7 +174,16 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
 		agent.AppliedConfig.TemplateHash = resolvedTemplate.ContentHash
 		if resolvedTemplate.Config != nil && resolvedTemplate.Config.HubAccess != nil {
+			// Still store the scopes on AppliedConfig for backward-compat visibility,
+			// but they are no longer used for token generation (replaced by AgentRole).
 			agent.AppliedConfig.HubAccessScopes = resolvedTemplate.Config.HubAccess.Scopes
+			if len(resolvedTemplate.Config.HubAccess.Scopes) > 0 {
+				slog.Warn("Template uses deprecated hubAccess.scopes; agent role determines scopes instead",
+					"template", resolvedTemplate.Slug,
+					"scopes", resolvedTemplate.Config.HubAccess.Scopes,
+					"agent_role", agent.AppliedConfig.AgentRole,
+				)
+			}
 		}
 
 		// Merge template-level config values as defaults into AppliedConfig.

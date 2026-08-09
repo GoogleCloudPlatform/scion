@@ -348,6 +348,139 @@ func TestCreateSubAgent_NoEscalationEnforced(t *testing.T) {
 	assert.Error(t, err, "escalated sub-agent should not be persisted")
 }
 
+// TestTemplateHubAccessScopes_StoredButIgnoredForToken verifies that
+// hubAccess.scopes from a template are stored on the agent's AppliedConfig for
+// backward-compatibility visibility, but are NOT used for JWT token generation.
+// Token scopes are derived solely from the agent role (Phase 2 change).
+func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
+	// Use a non-dev-auth server so the role is not auto-upgraded to full.
+	s, err := newTestStore(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, s.Migrate(context.Background()))
+
+	cfg := DefaultServerConfig()
+	cfg.AgentTokenConfig = AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	}
+	// Deliberately NOT setting DevAuthToken so role-based scopes are enforced.
+
+	srv, err := New(cfg, s)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	ctx := context.Background()
+
+	// Create a project
+	project := &store.Project{
+		ID:      tid("project-tmpl-scopes"),
+		Name:    "tmpl-scopes-project",
+		Slug:    "tmpl-scopes-project",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create a template with legacy hubAccess.scopes that include elevated permissions
+	tmpl := &store.Template{
+		ID:      tid("tmpl-hub-scopes"),
+		Name:    "hub-scopes-template",
+		Slug:    "hub-scopes-template",
+		Scope:   "project",
+		ScopeID: project.ID,
+		Status:  store.TemplateStatusActive,
+		Config: &store.TemplateConfig{
+			HubAccess: &store.HubAccessConfig{
+				Scopes: []string{"project:read", "agent:create", "agent:lifecycle", "secret:read"},
+			},
+		},
+	}
+	require.NoError(t, s.CreateTemplate(ctx, tmpl))
+
+	// Simulate what populateAgentConfig does: build an agent with a baseline role
+	// and populate it from the template.
+	agent := &store.Agent{
+		ID:        tid("agent-scopes-test"),
+		Name:      "scopes-test-agent",
+		Slug:      "scopes-test-agent",
+		ProjectID: project.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: string(AgentRoleBaseline),
+		},
+	}
+
+	// Call populateAgentConfig to simulate the real code path
+	srv.populateAgentConfig(ctx, agent, project, tmpl)
+
+	// Verify the template scopes are stored on AppliedConfig for visibility
+	require.NotNil(t, agent.AppliedConfig, "AppliedConfig should be set")
+	assert.Equal(t, []string{"project:read", "agent:create", "agent:lifecycle", "secret:read"},
+		agent.AppliedConfig.HubAccessScopes,
+		"template hubAccess.scopes should be preserved on AppliedConfig for visibility")
+	assert.Equal(t, tmpl.ID, agent.AppliedConfig.TemplateID,
+		"template ID should be set on AppliedConfig")
+
+	// Verify agentRoleAndScopes does NOT read HubAccessScopes
+	role, additionalScopes := agentRoleAndScopes(agent)
+	assert.Equal(t, AgentRoleBaseline, role,
+		"role should come from AgentRole field, not template scopes")
+	assert.Empty(t, additionalScopes,
+		"agentRoleAndScopes should not produce additional scopes from HubAccessScopes")
+
+	// Generate a token and verify scopes match the baseline role, not template scopes
+	token, err := srv.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, role, additionalScopes)
+	require.NoError(t, err)
+
+	claims, err := srv.agentTokenService.ValidateAgentToken(token)
+	require.NoError(t, err)
+
+	// Baseline role grants: project:read, agent:status-update, agent:token-refresh,
+	// agent:notify, agent:port-forward
+	assert.True(t, claims.HasScope(ScopeProjectRead), "baseline should have project:read")
+	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate), "baseline should have agent:status-update")
+	assert.True(t, claims.HasScope(ScopeAgentTokenRefresh), "baseline should have agent:token-refresh")
+
+	// These scopes were in the template's hubAccess but must NOT leak into the token
+	assert.False(t, claims.HasScope(ScopeAgentCreate),
+		"agent:create from template scopes should NOT appear in baseline token")
+	assert.False(t, claims.HasScope(ScopeAgentLifecycle),
+		"agent:lifecycle from template scopes should NOT appear in baseline token")
+	assert.False(t, claims.HasScope(ScopeProjectSecretRead),
+		"secret:read from template scopes should NOT appear in baseline token")
+}
+
+// TestTemplateHubAccessScopes_EmptyDoesNotWarn verifies that a template with
+// an empty hubAccess.scopes array does not trigger the deprecation warning.
+func TestTemplateHubAccessScopes_EmptyDoesNotWarn(t *testing.T) {
+	// An agent whose template config has hubAccess with empty scopes should
+	// not modify HubAccessScopes and should behave identically to a template
+	// without any hubAccess block.
+	agent := &store.Agent{
+		ID:   tid("agent-empty-scopes"),
+		Name: "empty-scopes-agent",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: string(AgentRoleBaseline),
+		},
+	}
+
+	tmpl := &store.Template{
+		ID:   tid("tmpl-empty-scopes"),
+		Name: "empty-scopes-template",
+		Slug: "empty-scopes-template",
+		Config: &store.TemplateConfig{
+			HubAccess: &store.HubAccessConfig{
+				Scopes: []string{},
+			},
+		},
+	}
+
+	srv, _ := testServer(t)
+	srv.populateAgentConfig(context.Background(), agent, nil, tmpl)
+
+	assert.Empty(t, agent.AppliedConfig.HubAccessScopes,
+		"empty scopes array should not populate HubAccessScopes")
+}
+
 func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 	srv, st, _, _ := setupAgentRoleTest(t)
 	ctx := context.Background()
