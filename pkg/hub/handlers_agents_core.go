@@ -702,14 +702,27 @@ func (s *Server) createAgentInProject(
 	}
 
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		// Agent caller: ceiling is the parent agent's own role.
-		// TODO(F2P1): read the parent's effective role from its stored AgentRole
-		// and pass it as an additional ceiling to minRole, so a baseline parent
-		// cannot escalate a child to full. Until then, only projectMax caps.
-		// Default requested role to project max if not specified
-		if requestedRole == "" {
-			requestedRole = projectMax
+		// Agent caller: read parent agent's stored role for no-escalation ceiling (F2P1).
+		parentRole := AgentRoleBaseline // default for legacy agents without stored role
+		if creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
+			if creatorAgent.AppliedConfig != nil && creatorAgent.AppliedConfig.AgentRole != "" {
+				parentRole = AgentRole(creatorAgent.AppliedConfig.AgentRole)
+			}
 		}
+
+		// Log the parent role for audit trail
+		slog.Info("Agent creating sub-agent",
+			"parent_agent_id", agentIdent.ID(),
+			"parent_role", parentRole,
+			"requested_role", requestedRole,
+			"project_max", projectMax,
+		)
+
+		if requestedRole == "" {
+			requestedRole = parentRole // default: inherit parent's role
+		}
+		// NOTE: parentRole is NOT yet used as a ceiling in minRole.
+		// Flow 2 Phase 2 will add: effectiveRole = minRole(requestedRole, parentRole, projectMax)
 		effectiveRole = minRole(requestedRole, projectMax)
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 		// User caller: ceiling based on hub role

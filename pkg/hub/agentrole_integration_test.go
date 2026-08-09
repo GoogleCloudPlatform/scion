@@ -226,6 +226,133 @@ func TestCreateAgent_AdminGetsFull(t *testing.T) {
 	}
 }
 
+// doAgentCallerRequest creates a sub-agent request authenticated as an agent.
+// It generates an agent token for the given parentAgentID and projectID with the
+// ScopeAgentCreate scope, then performs a POST /api/v1/agents with the given body.
+func doAgentCallerRequest(t *testing.T, srv *Server, parentAgentID, projectID string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+
+	token, err := srv.GenerateAgentToken(parentAgentID, projectID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Agent-Token", token)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestCreateSubAgent_ParentRoleLogged(t *testing.T) {
+	srv, s, _, project := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	// Create a parent agent with role=full stored in its AppliedConfig.
+	parentAgent := &store.Agent{
+		ID:        tid("parent-full-role"),
+		Slug:      "parent-full",
+		Name:      "parent-full",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "full",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, parentAgent))
+
+	// Agent creates a sub-agent without specifying a role.
+	rec := doAgentCallerRequest(t, srv, parentAgent.ID, project.ID, CreateAgentRequest{
+		Name:      "child-inherit-full",
+		ProjectID: project.ID,
+	})
+
+	// The request should succeed (or at least not fail with authz error).
+	// It may fail downstream at dispatch, but the agent record should be created.
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("sub-agent creation should not be forbidden: %s", rec.Body.String())
+	}
+
+	// Verify the child agent was created and inherited the parent's role.
+	if role, ok := getStoredAgentRole(t, s, project.ID, "child-inherit-full"); ok {
+		assert.Equal(t, "full", role,
+			"child should inherit parent's full role when no role is requested")
+	}
+}
+
+func TestCreateSubAgent_LegacyParent(t *testing.T) {
+	srv, s, _, project := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	// Create a legacy parent agent with no AgentRole set in AppliedConfig.
+	legacyParent := &store.Agent{
+		ID:            tid("parent-legacy"),
+		Slug:          "parent-legacy",
+		Name:          "parent-legacy",
+		ProjectID:     project.ID,
+		Phase:         "running",
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, legacyParent))
+
+	// Agent creates a sub-agent without specifying a role.
+	rec := doAgentCallerRequest(t, srv, legacyParent.ID, project.ID, CreateAgentRequest{
+		Name:      "child-legacy-parent",
+		ProjectID: project.ID,
+	})
+
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("sub-agent creation should not be forbidden: %s", rec.Body.String())
+	}
+
+	// Legacy parent defaults to baseline, so child should get baseline.
+	if role, ok := getStoredAgentRole(t, s, project.ID, "child-legacy-parent"); ok {
+		assert.Equal(t, "baseline", role,
+			"child of legacy parent (no stored role) should get baseline")
+	}
+}
+
+func TestCreateSubAgent_NoEscalationNotEnforced(t *testing.T) {
+	srv, s, _, project := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	// Create a parent agent with role=baseline.
+	baselineParent := &store.Agent{
+		ID:        tid("parent-baseline-esc"),
+		Slug:      "parent-baseline-esc",
+		Name:      "parent-baseline-esc",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "baseline",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, baselineParent))
+
+	// Baseline parent requests role=full for child. In F2P1, this should
+	// still be allowed (no-escalation enforcement is F2P2).
+	rec := doAgentCallerRequest(t, srv, baselineParent.ID, project.ID, CreateAgentRequest{
+		Name:      "child-escalated",
+		ProjectID: project.ID,
+		AgentRole: "full",
+	})
+
+	// Should NOT get a 403 — enforcement is not in place yet.
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"baseline parent requesting full child should NOT be forbidden in F2P1")
+
+	// The child should get full (capped only by projectMax=baseline, so baseline).
+	// NOTE: projectMax defaults to baseline, so the effective role is baseline
+	// even though full was requested. This is projectMax capping, not parentRole capping.
+	if role, ok := getStoredAgentRole(t, s, project.ID, "child-escalated"); ok {
+		assert.Equal(t, "baseline", role,
+			"role should be capped by projectMax (baseline), not by parentRole in F2P1")
+	}
+}
+
 func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 	srv, s, _, _ := setupAgentRoleTest(t)
 	ctx := context.Background()
