@@ -71,7 +71,11 @@ A policy defines the rules for access:
 
 ## Roles
 
-To simplify management, Scion provides built-in roles that bundle common permissions:
+To simplify management, Scion separates roles into **User Roles** (for human operators) and **Agent Roles** (for running agents).
+
+### User Roles
+
+These built-in roles bundle common permissions for human users:
 
 | Role | Description |
 |------|-------------|
@@ -80,6 +84,37 @@ To simplify management, Scion provides built-in roles that bundle common permiss
 | `project:admin` | Full control over a specific project and its agents. |
 | `project:developer` | Can create and manage agents within a project. |
 | `project:viewer` | Read-only access to project status and logs. |
+
+### Tiered Agent Authorization Roles
+
+Scion implements a dedicated, tiered authorization model for **agents**. This ensures that running agents only possess the specific permissions they need to interact with the Hub API.
+
+Agents are assigned one of four named roles, each mapping to a fixed set of JWT scopes:
+
+| Agent Role | Granted Scopes | Description |
+| :--- | :--- | :--- |
+| `none` | *None* | No access to the Hub API (runs with no authorization claims). |
+| `readonly` | `project:read` | Can view and query project state, but cannot report status, register port forwards, or manage other agents. |
+| `baseline` | `project:read`<br>`agent:status:update`<br>`agent:token:refresh`<br>`project:agent:notify`<br>`agent:port:forward` | Standard execution permissions. Allows the agent to report progress, refresh its token, register reverse-proxied port forwards, and send notifications. |
+| `full` | *All baseline scopes* +<br>`project:agent:create`<br>`project:agent:lifecycle`<br>`project:secret:read` | Complete agent control. Allows spawning child (sub) agents, managing their lifecycles, and reading project-scoped secrets from the secret backend. |
+
+#### Two-Gate Authority Lattice
+The effective role granted to an agent at creation is resolved by a **two-gate authority lattice**:
+
+$$\text{effectiveRole} = \min(\text{requestedRole}, \text{userCeiling}, \text{projectMax})$$
+
+1. **Requested Role**: The role requested during agent dispatch (e.g., using the `--role` flag in the CLI). If not specified, defaults to `baseline`.
+2. **User Ceiling**: Capped by the user's own system permissions. A standard `hub:member` has an agent role ceiling of `baseline`. Only a `hub:admin` has a ceiling of `full`.
+3. **Project Max**: Set by the project's `max_agent_role` setting, which defaults to the global Hub configuration (`default_max_agent_role` under `agent_defaults`).
+
+#### Sub-Agent No-Escalation Enforcement
+To prevent security bypasses via sub-agent creation, Scion enforces strict no-escalation rules:
+- When a parent agent spawns a child (sub-agent), the parent agent acts as the requester.
+- A parent agent **cannot** grant a child agent a higher role than its own.
+- Any attempt by an agent to spawn a child with elevated permissions will result in a loud, immediate `403 Forbidden` API rejection.
+
+#### Deprecation of Raw Template Scopes
+With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` has been **deprecated**. Agent permissions must be configured via the named roles.
 
 ## Implementation Status
 
