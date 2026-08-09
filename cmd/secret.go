@@ -263,8 +263,15 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 	// so agents must use /api/v1/agents/{id}/secrets/{key} instead.
 	agentID := os.Getenv("SCION_AGENT_ID")
 	if agentID != "" {
+		// Base64-encode non-file values before sending. The hub expects
+		// base64-encoded values by default; file values are already
+		// base64-encoded by the @file handling above.
+		agentValue := value
+		if !strings.HasPrefix(args[1], "@") {
+			agentValue = base64.StdEncoding.EncodeToString([]byte(value))
+		}
 		req := &hubclient.AgentSetSecretRequest{
-			Value:  value,
+			Value:  agentValue,
 			Type:   localType,
 			Target: localTarget,
 			Force:  true, // scion secret set always overwrites
@@ -284,8 +291,13 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 	}
 
 	// Fall back to the user-scoped endpoint for non-agent contexts.
+	// Base64-encode non-file values; file values are already encoded above.
+	userValue := value
+	if !strings.HasPrefix(args[1], "@") {
+		userValue = base64.StdEncoding.EncodeToString([]byte(value))
+	}
 	req := &hubclient.SetSecretRequest{
-		Value:   value,
+		Value:   userValue,
 		Scope:   "project",
 		ScopeID: projectID,
 		Type:    localType,
@@ -295,13 +307,6 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 	resp, err := hubCtx.Client.Secrets().Set(ctx, key, req)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to set secret: %w", err))
-	}
-
-	if typeLabel == "" && resp.Secret != nil {
-		typeLabel = resp.Secret.SecretType
-	}
-	if typeLabel == "" {
-		typeLabel = "environment"
 	}
 
 	if resp.Created {
