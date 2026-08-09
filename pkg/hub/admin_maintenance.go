@@ -673,9 +673,9 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminRestart handles POST /api/v1/admin/maintenance/restart.
-// It initiates a graceful systemd restart of the hub service using the same
-// fire-and-forget pattern as the rebuild-server executor. The response is
-// sent before the restart takes effect so the client receives a 200.
+// It initiates a graceful systemd restart of the hub service. The
+// --no-block flag lets systemd schedule the restart asynchronously,
+// so the response is sent before the restart takes effect.
 func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil || user.Role() != "admin" {
