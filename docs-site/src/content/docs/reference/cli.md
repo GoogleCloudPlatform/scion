@@ -226,6 +226,20 @@ Manages per-user Hub settings.
         - Flags: `--as <alias>` (alias under which to mount the skill), `--optional` (continue provisioning if resolution fails), `--from-directory <url>` (discover and batch-add all skills from a GitHub repository directory).
     - `remove <id|uri>` (aliases `rm`, `delete`): Remove an auto-injected skill entry from your personal list by its ID or full URI.
 
+### `scion secret`
+
+Manages project-scoped secrets from the host or within an agent container. This command mirrors the `sciontool secret` commands used in agent containers, using the `hubclient` Secrets service to operate on the active project.
+
+Unlike `scion hub secret` (which supports managing secrets at any scope: user, hub, project, or broker), `scion secret` is streamlined for project-level secrets within your current project context.
+
+- `scion secret set KEY VALUE`: Store a project-scoped secret in the Hub.
+    - If `VALUE` starts with `@`, the remainder is treated as a file path. The file contents are read and base64-encoded, and `--type` defaults to `file`.
+    - Flags:
+        - `--type <string>`: Secret type: `environment` (default), `variable`, or `file`.
+        - `--target <string>`: Injection target path (defaults to key for env, required for file-type secrets).
+- `scion secret get KEY`: Retrieve the metadata of a project-scoped secret. Secret values are never returned to protect security.
+- `scion secret list`: List metadata (key, type, version, updated time) for all project-scoped secrets. Secret values are never returned.
+
 ### `scion clean`
 
 Removes the scion project configuration from the current project or global location.
