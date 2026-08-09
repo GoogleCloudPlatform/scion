@@ -690,6 +690,11 @@ func TestProjectSettings_HubScopedDefaultIsAcceptedAndConsumed(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
 
+	// The D4 mode coupling gate (sa_assign_gate.go) requires
+	// gcpIamCheckMode=enforce for hub-scoped SA assignment. Wire it up
+	// so that half B's agent creation passes the gate.
+	enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget("hub-default@hub.iam.gserviceaccount.com"))
+
 	hubSA := &store.GCPServiceAccount{
 		ID:                 tid("sa-hub-default-" + t.Name()),
 		Scope:              store.ScopeHub,

@@ -201,11 +201,15 @@ func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 }
 
 // token mints an agent JWT for the calling agent with the given scopes.
+// ScopeProjectRead is always included because the baseline role grants it to
+// every agent; without it, checkAgentReadScope rejects read requests before
+// the handler-level authorization these tests are designed to exercise.
 func (f *bypassAgentsFixture) token(t *testing.T, scopes ...AgentTokenScope) string {
 	t.Helper()
 	svc := f.srv.GetAgentTokenService()
 	require.NotNil(t, svc)
-	tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, scopes, nil)
+	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
+	tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, allScopes, nil)
 	require.NoError(t, err)
 	return tok
 }

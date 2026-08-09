@@ -693,7 +693,7 @@ func TestDemoPolicy_ProjectDeleteCleansUpGroupsAndPolicies(t *testing.T) {
 // TestCreatePolicy_DuplicateNameConflict verifies that creating two policies
 // with the same name in the same scope returns HTTP 409 Conflict.
 func TestCreatePolicy_DuplicateNameConflict(t *testing.T) {
-	srv, _, alice, _, _ := setupDemoPolicyTest(t)
+	srv, _, _, _, _ := setupDemoPolicyTest(t)
 
 	policyReq := CreatePolicyRequest{
 		Name:         "unique-test-policy",
@@ -703,13 +703,13 @@ func TestCreatePolicy_DuplicateNameConflict(t *testing.T) {
 		Effect:       "allow",
 	}
 
-	// First creation should succeed.
-	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/policies", policyReq)
+	// First creation should succeed (policy CRUD requires admin; use dev-auth).
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies", policyReq)
 	require.Equal(t, http.StatusCreated, rec.Code,
 		"first policy creation should succeed; got: %s", rec.Body.String())
 
 	// Second creation with the same name and scope should return 409.
-	rec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/policies", policyReq)
+	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/policies", policyReq)
 	assert.Equal(t, http.StatusConflict, rec2.Code,
 		"duplicate policy name in same scope should return 409; got: %s", rec2.Body.String())
 }
@@ -717,7 +717,7 @@ func TestCreatePolicy_DuplicateNameConflict(t *testing.T) {
 // TestCreatePolicy_SameNameDifferentScope verifies that policies with the same
 // name but different scopes are allowed (no conflict).
 func TestCreatePolicy_SameNameDifferentScope(t *testing.T) {
-	srv, _, alice, _, project := setupDemoPolicyTest(t)
+	srv, _, _, _, project := setupDemoPolicyTest(t)
 
 	hubPolicy := CreatePolicyRequest{
 		Name:         "shared-policy-name",
@@ -736,13 +736,13 @@ func TestCreatePolicy_SameNameDifferentScope(t *testing.T) {
 		Effect:       "allow",
 	}
 
-	// Hub-scoped policy.
-	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/policies", hubPolicy)
+	// Hub-scoped policy (policy CRUD requires admin; use dev-auth).
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies", hubPolicy)
 	require.Equal(t, http.StatusCreated, rec.Code,
 		"hub-scoped policy creation should succeed; got: %s", rec.Body.String())
 
 	// Project-scoped policy with the same name should also succeed.
-	rec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/policies", projectPolicy)
+	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/policies", projectPolicy)
 	assert.Equal(t, http.StatusCreated, rec2.Code,
 		"same name in different scope should succeed; got: %s", rec2.Body.String())
 }

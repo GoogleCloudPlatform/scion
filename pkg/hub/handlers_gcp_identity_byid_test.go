@@ -38,8 +38,8 @@ import (
 // accounts that already have a project, or a first-ever way to reach accounts
 // that were never meant to be addressable at all.
 //
-// Nothing here touches live GCP. Verification runs with a nil token generator,
-// which is the same path every existing verify test uses.
+// Nothing here touches live GCP. Verification uses a mock token generator
+// whose VerifyImpersonation always succeeds.
 
 const flatSAPath = "/api/v1/gcp-service-accounts/"
 
@@ -328,6 +328,11 @@ func TestGCPSA_FlatByID_Delete_HubScoped_CreatorCan(t *testing.T) {
 // stored verification state and not what an HTTP response once said.
 func TestGCPSA_FlatByID_Verify_HubScoped(t *testing.T) {
 	srv, s, _, member, _, _ := setupGCPAuthzTest(t)
+
+	// The verify handler fails closed when no token generator is configured
+	// (503 "GCP token generation is not configured on this Hub"). Supply a
+	// mock so the handler reaches the verification path and succeeds.
+	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub-sa@test.iam.gserviceaccount.com"})
 
 	sa := mkSA(t, s, "sa-flat-verify", "verify@p.iam.gserviceaccount.com",
 		store.ScopeHub, "hub-instance-1", member.ID)
