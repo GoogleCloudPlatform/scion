@@ -35,6 +35,11 @@ type SecretService interface {
 	// Set creates or updates a secret.
 	Set(ctx context.Context, key string, req *SetSecretRequest) (*SetSecretResponse, error)
 
+	// AgentSet creates or updates a secret using the agent-scoped endpoint.
+	// This endpoint requires agent JWT auth and derives the project from the
+	// agent's token. Use this instead of Set when running as an agent.
+	AgentSet(ctx context.Context, agentID, key string, req *AgentSetSecretRequest) (*AgentSetSecretResponse, error)
+
 	// Delete removes a secret.
 	Delete(ctx context.Context, key string, opts *SecretScopeOptions) error
 }
@@ -80,6 +85,23 @@ type SetSecretRequest struct {
 type SetSecretResponse struct {
 	Secret  *Secret `json:"secret"`  // Metadata only, no value
 	Created bool    `json:"created"` // Whether this was a new secret
+}
+
+// AgentSetSecretRequest is the request for setting a secret via the agent-scoped endpoint.
+// Unlike SetSecretRequest, scope is derived from the agent's JWT — no scope/scopeID needed.
+type AgentSetSecretRequest struct {
+	Value  string `json:"value"`            // Required: base64-encoded secret value
+	Type   string `json:"type,omitempty"`   // Secret type: environment (default), variable, file
+	Target string `json:"target,omitempty"` // Projection target (defaults to key)
+	Force  bool   `json:"force,omitempty"`  // Overwrite existing secret
+}
+
+// AgentSetSecretResponse is the response from the agent-scoped set endpoint.
+type AgentSetSecretResponse struct {
+	Key     string `json:"key"`
+	Scope   string `json:"scope"`
+	ScopeID string `json:"scopeId,omitempty"`
+	Created bool   // Derived from HTTP status code (201 = created, 204 = updated)
 }
 
 // List returns secret metadata for the specified scope.
@@ -130,6 +152,30 @@ func (s *secretService) Set(ctx context.Context, key string, req *SetSecretReque
 		return nil, err
 	}
 	return apiclient.DecodeResponse[SetSecretResponse](resp)
+}
+
+// AgentSet creates or updates a secret using the agent-scoped endpoint.
+func (s *secretService) AgentSet(ctx context.Context, agentID, key string, req *AgentSetSecretRequest) (*AgentSetSecretResponse, error) {
+	path := "/api/v1/agents/" + url.PathEscape(agentID) + "/secrets/" + url.PathEscape(key)
+	resp, err := s.c.put(ctx, path, req, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// The agent endpoint returns 201 Created with a JSON body for new secrets,
+	// or 204 No Content (no body) for updates. DecodeResponse handles body
+	// closing, error status codes, and 204 (returns nil, nil).
+	if resp.StatusCode == 204 {
+		_ = resp.Body.Close()
+		return &AgentSetSecretResponse{Key: key, Created: false}, nil
+	}
+
+	result, err := apiclient.DecodeResponse[AgentSetSecretResponse](resp)
+	if err != nil {
+		return nil, err
+	}
+	result.Created = true
+	return result, nil
 }
 
 // Delete removes a secret.

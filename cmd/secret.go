@@ -131,7 +131,7 @@ func runAgentSecretGet(cmd *cobra.Command, args []string) error {
 		return wrapHubError(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	opts := &hubclient.SecretScopeOptions{
@@ -191,6 +191,9 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 	// Handle @file syntax: read file and base64-encode contents.
 	if strings.HasPrefix(value, "@") {
 		filePath := value[1:]
+		if filePath == "" {
+			return fmt.Errorf("empty file path: VALUE starting with @ must be followed by a file path (e.g., @/path/to/file)")
+		}
 		// Expand ~ in source file path for reading.
 		if filePath == "~" || strings.HasPrefix(filePath, "~/") {
 			home, err := os.UserHomeDir()
@@ -202,6 +205,9 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 		info, err := os.Stat(filePath)
 		if err != nil {
 			return fmt.Errorf("failed to stat file %s: %w", filePath, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("cannot read secret from directory: %s (expected a file)", filePath)
 		}
 		if info.Size() > 64*1024 {
 			return fmt.Errorf("file exceeds 64KB limit (%d bytes)", info.Size())
@@ -244,9 +250,40 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 		return wrapHubError(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
+	typeLabel := localType
+	if typeLabel == "" {
+		typeLabel = "environment"
+	}
+
+	// Use the agent-scoped endpoint when running as an agent. The generic
+	// /api/v1/secrets endpoint forbids project-scope writes from agent JWTs,
+	// so agents must use /api/v1/agents/{id}/secrets/{key} instead.
+	agentID := os.Getenv("SCION_AGENT_ID")
+	if agentID != "" {
+		req := &hubclient.AgentSetSecretRequest{
+			Value:  value,
+			Type:   localType,
+			Target: localTarget,
+			Force:  true, // scion secret set always overwrites
+		}
+
+		resp, err := hubCtx.Client.Secrets().AgentSet(ctx, agentID, key, req)
+		if err != nil {
+			return wrapHubError(fmt.Errorf("failed to set secret: %w", err))
+		}
+
+		if resp.Created {
+			fmt.Printf("Created secret %s (scope: project, type: %s)\n", key, typeLabel)
+		} else {
+			fmt.Printf("Updated secret %s (scope: project, type: %s)\n", key, typeLabel)
+		}
+		return nil
+	}
+
+	// Fall back to the user-scoped endpoint for non-agent contexts.
 	req := &hubclient.SetSecretRequest{
 		Value:   value,
 		Scope:   "project",
@@ -260,7 +297,6 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 		return wrapHubError(fmt.Errorf("failed to set secret: %w", err))
 	}
 
-	typeLabel := localType
 	if typeLabel == "" && resp.Secret != nil {
 		typeLabel = resp.Secret.SecretType
 	}
@@ -295,7 +331,7 @@ func runAgentSecretList(cmd *cobra.Command, _ []string) error {
 		return wrapHubError(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	opts := &hubclient.ListSecretOptions{
