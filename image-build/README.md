@@ -14,6 +14,11 @@ core-base          System dependencies (Go, Node, Python)
   └── scion-base   Adds sciontool binary and scion user
         ├── harness images  Optional recipes from harnesses/<name>/
         └── hub             Scion hub server
+
+thick-prep         Patches Cloud Workstations base for scion compatibility (amd64 only)
+  └── scion-base   Same Dockerfile, different foundation
+        ├── harness images
+        └── hub
 ```
 
 `core-base/`, `scion-base/`, and `hub/` live under `image-build/`. Harness images
@@ -57,6 +62,8 @@ The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threadi
 | `hub` | `scion-hub` | Hub server image. Uses existing `scion-base:<tag>`. |
 | `common` (default) | `scion-base` + catalog harnesses + hub | Skips `core-base`. Most common rebuild. |
 | `all` | Full DAG | Rebuilds everything from `core-base`. |
+| `thick-prep` | `thick-prep` | Prep layer for thick base. amd64 only. |
+| `thick` | `thick-prep` + `scion-base` + catalog harnesses + hub | Full thick rebuild using Cloud Workstations base instead of `core-base`. amd64 only. |
 
 ### Tagging
 
@@ -125,6 +132,13 @@ The `cloud-build` builder maps each `--target` to a static YAML file:
 | `scion-base` | `cloudbuild-scion-base.yaml` |
 | `harnesses` | `cloudbuild-harnesses.yaml` |
 | `hub` | `cloudbuild-hub.yaml` |
+| `thick-prep` | `cloudbuild-thick.yaml` (builds the full thick chain — see note below) |
+| `thick` | `cloudbuild-thick.yaml` |
+
+**Note:** `--target thick-prep` with `--builder cloud-build` builds the full thick
+chain (thick-prep + scion-base + harnesses + hub), since both `thick-prep` and
+`thick` map to the same `cloudbuild-thick.yaml`. With per-image builders
+(`local-docker`, `local-podman`), `--target thick-prep` builds only thick-prep.
 
 These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator.
 

@@ -37,6 +37,7 @@ REGISTRY=""
 TARGET="common"
 TAG="latest"
 PLATFORM=""
+PLATFORM_EXPLICIT="false"
 PUSH="false"
 DRY_RUN="false"
 
@@ -66,6 +67,10 @@ Options:
                           hub         - just scion-hub (uses existing scion-base:<tag>)
                           common      - scion-base + harnesses + hub (skip core-base)
                           all         - full rebuild including core-base
+                          thick-prep  - just the thick base prep layer (amd64 only)
+                          thick       - full thick rebuild: thick-prep + scion-base +
+                                        harnesses + hub (amd64 only, uses Cloud
+                                        Workstations base instead of core-base)
   --tag <tag>           Mutable image tag (default: latest). The :<short-sha> tag
                         is always added when run inside a git repo.
   --platform <plat>     Target platform(s) (default: builder's native arch)
@@ -90,7 +95,7 @@ while [[ $# -gt 0 ]]; do
     --registry) REGISTRY="$2"; shift 2 ;;
     --target)   TARGET="$2"; shift 2 ;;
     --tag)      TAG="$2"; shift 2 ;;
-    --platform) PLATFORM="$2"; shift 2 ;;
+    --platform) PLATFORM="$2"; PLATFORM_EXPLICIT="true"; shift 2 ;;
     --push)     PUSH="true"; shift ;;
     --dry-run)  DRY_RUN="true"; shift ;;
     -h|--help)  usage 0 ;;
@@ -99,6 +104,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 REGISTRY="${REGISTRY%/}"
+
+# Set THICK_BUILD flag when building the thick target, so step descriptors
+# in targets.sh route scion-base to thick-prep instead of core-base.
+THICK_BUILD="${THICK_BUILD:-false}"
+if [[ "${TARGET}" == "thick" || "${TARGET}" == "thick-prep" ]]; then
+  THICK_BUILD="true"
+fi
+export THICK_BUILD
 
 # Validate builder against allow-list.
 builder_ok="false"
@@ -128,6 +141,19 @@ if [[ -n "${PLATFORM}" ]]; then
     PLATFORMS="linux/amd64,linux/arm64"
   else
     PLATFORMS="${PLATFORM}"
+  fi
+fi
+
+# Thick targets are amd64-only. When the user explicitly requested arm64,
+# error out. When no --platform was given, default to linux/amd64 so that
+# builds on arm64 hosts (e.g. Apple Silicon) don't silently fail.
+if [[ "${THICK_BUILD}" == "true" ]]; then
+  if [[ "${PLATFORM_EXPLICIT}" == "true" && "${PLATFORMS}" == *"arm64"* ]]; then
+    echo "Error: --target ${TARGET} is amd64-only (Cloud Workstations base has no arm64 variant)." >&2
+    echo "Remove --platform or use --platform linux/amd64." >&2
+    exit 1
+  elif [[ "${PLATFORM_EXPLICIT}" != "true" ]]; then
+    PLATFORMS="linux/amd64"
   fi
 fi
 

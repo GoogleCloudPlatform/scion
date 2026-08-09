@@ -52,6 +52,7 @@ emit_harness_steps() {
 # harnesses catalog.
 ALL_STEP_IDS=(
   core-base
+  thick-prep
   scion-base
 )
 while IFS= read -r harness_step; do
@@ -65,11 +66,13 @@ ALL_STEP_IDS+=(
 # validation.
 ALL_TARGETS=(
   core-base
+  thick-prep
   scion-base
   harnesses
   hub
   common
   all
+  thick
 )
 
 # resolve_targets <target>
@@ -100,6 +103,14 @@ resolve_targets() {
       emit_harness_steps
       printf '%s\n' scion-hub
       ;;
+    thick-prep)
+      echo thick-prep
+      ;;
+    thick)
+      printf '%s\n' thick-prep scion-base
+      emit_harness_steps
+      printf '%s\n' scion-hub
+      ;;
     *)
       return 1
       ;;
@@ -118,6 +129,7 @@ step_image_name() {
 step_dockerfile() {
   case "$1" in
     core-base)     echo "${IMAGE_BUILD_DIR}/core-base/Dockerfile" ;;
+    thick-prep)    echo "${IMAGE_BUILD_DIR}/thick-prep/Dockerfile" ;;
     scion-base)    echo "${IMAGE_BUILD_DIR}/scion-base/Dockerfile" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub/Dockerfile" ;;
     *)
@@ -138,6 +150,7 @@ step_dockerfile() {
 step_context_dir() {
   case "$1" in
     core-base)     echo "${IMAGE_BUILD_DIR}/core-base" ;;
+    thick-prep)    echo "${IMAGE_BUILD_DIR}/thick-prep" ;;
     scion-base)    echo "${REPO_ROOT}" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub" ;;
     *)
@@ -167,8 +180,15 @@ step_build_args() {
     core-base)
       # No build-args.
       ;;
+    thick-prep)
+      # No build-args — BASE_IMAGE default is in the Dockerfile ARG.
+      ;;
     scion-base)
-      echo "BASE_IMAGE=${prefix}core-base:${BASE_TAG}"
+      if [[ "${THICK_BUILD:-}" == "true" ]]; then
+        echo "BASE_IMAGE=${prefix}thick-prep:${BASE_TAG}"
+      else
+        echo "BASE_IMAGE=${prefix}core-base:${BASE_TAG}"
+      fi
       if [[ -n "${COMMIT_SHA:-}" ]]; then
         echo "GIT_COMMIT=${COMMIT_SHA}"
       fi
@@ -194,7 +214,14 @@ step_build_args() {
 step_parent() {
   case "$1" in
     core-base)     echo "" ;;
-    scion-base)    echo "core-base" ;;
+    thick-prep)    echo "" ;;
+    scion-base)
+      if [[ "${THICK_BUILD:-}" == "true" ]]; then
+        echo "thick-prep"
+      else
+        echo "core-base"
+      fi
+      ;;
     scion-hub)     echo "scion-base" ;;
     *)
       if is_harness_step "$1"; then
