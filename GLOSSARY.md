@@ -224,6 +224,11 @@ _See also_: A2A Protocol, Hub
 
 ## Users & Access
 
+**Agent Authorization Role**:
+A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. Resolves via a two-gate authority lattice matching requested role, user ceiling, and project maximums.
+_Avoid_: raw template scopes, agent scopes
+_See also_: User Access Token (UAT)
+
 **Group**:
 A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
 _Avoid_: team, org, role
