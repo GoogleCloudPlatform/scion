@@ -1724,6 +1724,10 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 
 // listProjectAgents lists agents within a specific project
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	query := r.URL.Query()
 
@@ -1846,6 +1850,10 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 
 // getProjectAgent gets an agent by ID within a specific project
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 
 	// Try to get by slug first (more common case)

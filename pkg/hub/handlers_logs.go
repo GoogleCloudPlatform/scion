@@ -178,6 +178,10 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	if s.logQueryService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
 			"Cloud Logging is not configured", nil)
@@ -356,6 +360,10 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	if s.logQueryService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
 			"Cloud Logging is not configured", nil)
@@ -446,6 +454,10 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	if s.logQueryService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
 			"Cloud Logging is not configured", nil)
@@ -513,6 +525,10 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
+		return
+	}
+
+	if !checkAgentReadScope(w, r) {
 		return
 	}
 

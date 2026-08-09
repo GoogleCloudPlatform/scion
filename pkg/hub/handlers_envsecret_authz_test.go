@@ -346,7 +346,8 @@ func TestEnvVar_ProjectScope_AgentReadOwnProject(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID,
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
@@ -386,12 +387,13 @@ func TestEnvVar_ProjectScope_AgentOtherProjectDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project1.ID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project1.ID,
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
-	// Agent should NOT be able to read other project env vars
+	// Agent should NOT be able to read other project env vars (project isolation)
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project2.ID+"/env", nil, agentToken)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for agent reading other project, got %d: %s", rec.Code, rec.Body.String())
@@ -419,12 +421,13 @@ func TestEnvVar_ProjectScope_AgentWriteDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID,
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
-	// Agent should NOT be able to write project env vars
+	// Agent should NOT be able to write project env vars (write is always denied for agents)
 	body := SetEnvVarRequest{Value: "agent-val"}
 	rec := doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/AGENT_VAR", body, agentToken)
 	if rec.Code != http.StatusForbidden {

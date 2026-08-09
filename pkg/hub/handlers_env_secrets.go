@@ -1183,6 +1183,10 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 }
 
 func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 
 	// Verify project exists
@@ -1277,6 +1281,10 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 }
 
 func (s *Server) handleProjectEnvVarByKey(w http.ResponseWriter, r *http.Request, projectID, key string) {
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 
 	// Verify project exists

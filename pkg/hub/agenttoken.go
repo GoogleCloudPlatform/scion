@@ -59,8 +59,8 @@ const (
 	ScopeAgentPortForward AgentTokenScope = "agent:port:forward"
 	// ScopeIdentityToken grants the ability to request OIDC identity tokens.
 	ScopeIdentityToken AgentTokenScope = "agent:identity:token"
-	// ScopeProjectRead grants read access to project resources (agents, templates, project info).
-	// Enforcement is deferred to a later phase; defining the scope now allows role bundles to include it.
+	// ScopeProjectRead grants read access to project resources (agents, templates,
+	// skills, harness configs, projects). Enforced by checkAgentReadScope().
 	ScopeProjectRead AgentTokenScope = "project:read"
 	// ScopeGCPTokenPrefix is the prefix for GCP token scopes.
 	// Full scope format: "project:gcp:token:<sa-id>"

@@ -1037,6 +1037,50 @@ func TestReadEndpoint_NoReadScope_Blocked(t *testing.T) {
 	}
 }
 
+func TestReadEndpoint_ProjectScopedAgents_NoReadScope_Blocked(t *testing.T) {
+	srv, _, agent, project := setupReadScopeTest(t)
+
+	// Agent with valid JWT but no ScopeProjectRead should be blocked on project-scoped routes.
+	scopes := []AgentTokenScope{ScopeAgentStatusUpdate}
+
+	endpoints := []string{
+		"/api/v1/projects/" + project.ID + "/agents",
+		"/api/v1/projects/" + project.ID + "/agents/" + agent.ID,
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			rec := doAgentReadRequest(t, srv, agent.ID, project.ID, ep, scopes)
+			assert.Equal(t, http.StatusForbidden, rec.Code,
+				"agent without ScopeProjectRead should be forbidden on %s; got %d: %s",
+				ep, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "project:read",
+				"error should mention the missing scope")
+		})
+	}
+}
+
+func TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed(t *testing.T) {
+	srv, _, agent, project := setupReadScopeTest(t)
+
+	// Baseline scopes include ScopeProjectRead — should be allowed.
+	scopes := ScopesForRole(AgentRoleBaseline)
+
+	endpoints := []string{
+		"/api/v1/projects/" + project.ID + "/agents",
+		"/api/v1/projects/" + project.ID + "/agents/" + agent.ID,
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			rec := doAgentReadRequest(t, srv, agent.ID, project.ID, ep, scopes)
+			assert.NotEqual(t, http.StatusForbidden, rec.Code,
+				"baseline agent should not be forbidden on %s; got %d: %s",
+				ep, rec.Code, rec.Body.String())
+		})
+	}
+}
+
 func TestReadEndpoint_UserCaller_NotAffected(t *testing.T) {
 	srv, _, _, project := setupReadScopeTest(t)
 
