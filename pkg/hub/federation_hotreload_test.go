@@ -22,7 +22,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -144,11 +143,9 @@ func TestApplySnapshot_FederationNilKeepsExisting(t *testing.T) {
 // --- Deliverable 10b: Concurrent access ---
 
 func TestFederationAuth_ConcurrentAccess(t *testing.T) {
-	var fedAuth atomic.Pointer[FederationAuthenticator]
-
 	// Initial value.
 	auth1 := &FederationAuthenticator{}
-	fedAuth.Store(auth1)
+	fedAuth := newFedAuthPointer(auth1)
 
 	const numReaders = 10
 	const numIterations = 1000
@@ -404,11 +401,11 @@ func TestConvertFederationSettingsToConfig_ValidationErrors(t *testing.T) {
 
 func TestMiddleware_LoadsFromAtomicPointer(t *testing.T) {
 	// Start with no authenticator (nil pointer value).
-	var fedAuth atomic.Pointer[FederationAuthenticator]
+	fedAuth := newFedAuthPointer(nil)
 
 	cfg := AuthConfig{
 		Mode:           "production",
-		FederationAuth: &fedAuth,
+		FederationAuth: fedAuth,
 		Debug:          true,
 		Logger:         slog.Default(),
 	}

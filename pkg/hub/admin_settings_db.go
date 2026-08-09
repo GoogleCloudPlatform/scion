@@ -518,6 +518,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 					})
 				return
 			}
+		} else {
+			slog.Warn("PUT server-config: failed to deserialize federation section for validation",
+				"error", err,
+				"user", updatedBy,
+			)
 		}
 	}
 
