@@ -601,6 +601,68 @@ func TestCreateSubAgent_MultiHop(t *testing.T) {
 	assert.Contains(t, rec2.Body.String(), "parent agent role")
 }
 
+func TestGetAgent_IncludesAgentRole(t *testing.T) {
+	srv, s, user, project := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	// Create an agent with role=baseline stored in AppliedConfig.
+	agent := &store.Agent{
+		ID:        tid("agent-get-role"),
+		Slug:      "agent-get-role",
+		Name:      "agent-get-role",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "baseline",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// GET the agent via the API.
+	rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code,
+		"GET agent should succeed; got: %s", rec.Body.String())
+
+	// Parse the response and verify agentRole is present in appliedConfig.
+	var resp AgentWithCapabilities
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.AppliedConfig,
+		"response should include appliedConfig")
+	assert.Equal(t, "baseline", resp.AppliedConfig.AgentRole,
+		"GET response should include agentRole in appliedConfig")
+}
+
+func TestGetAgent_IncludesAgentRoleFull(t *testing.T) {
+	srv, s, user, project := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	// Create an agent with role=full stored in AppliedConfig.
+	agent := &store.Agent{
+		ID:        tid("agent-get-role-full"),
+		Slug:      "agent-get-role-full",
+		Name:      "agent-get-role-full",
+		ProjectID: project.ID,
+		Phase:     "running",
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: "full",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// GET the agent via the API.
+	rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code,
+		"GET agent should succeed; got: %s", rec.Body.String())
+
+	// Parse the response and verify agentRole=full is present.
+	var resp AgentWithCapabilities
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.AppliedConfig,
+		"response should include appliedConfig")
+	assert.Equal(t, "full", resp.AppliedConfig.AgentRole,
+		"GET response should include agentRole=full in appliedConfig")
+}
+
 func TestCreateSubAgent_LegacyParent_CapsAtBaseline(t *testing.T) {
 	srv, s, project := setupFullMaxProject(t)
 	ctx := context.Background()

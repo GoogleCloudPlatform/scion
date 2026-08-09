@@ -427,6 +427,7 @@ func (s *Server) createAgentInProject(
 	// Computed early (before broker resolution) so that fail-loud 403 on
 	// role over-requests fires before resource-intensive operations.
 	var effectiveRole AgentRole
+	var parentRole AgentRole // empty for user-created agents; set in agent-caller branch
 	requestedRole := AgentRole(req.AgentRole)
 
 	// Read project max agent role from annotations (default: baseline)
@@ -441,7 +442,7 @@ func (s *Server) createAgentInProject(
 
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		// Agent caller: read parent agent's stored role for no-escalation ceiling.
-		parentRole := AgentRoleBaseline
+		parentRole = AgentRoleBaseline
 		creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
 		if err != nil {
 			slog.Warn("Failed to read parent agent for role ceiling",
@@ -975,8 +976,12 @@ func (s *Server) createAgentInProject(
 
 	// Managed agent path: bypass broker dispatch entirely and handle directly.
 	if req.Profile == ManagedAgentsProfile {
+		logAttrs := []any{"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String()}
+		if parentRole != "" {
+			logAttrs = append(logAttrs, "parent_agent_role", string(parentRole))
+		}
 		s.agentLifecycleLog.Info("Hub: managed agent create (hub-direct)",
-			"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String())
+			logAttrs...)
 
 		task := ""
 		if agent.AppliedConfig != nil {
@@ -1011,8 +1016,12 @@ func (s *Server) createAgentInProject(
 	// Dispatch to runtime broker if available.
 	// Unless provision-only is requested, do a full create+start via DispatchAgentCreate.
 	// Otherwise provision only — set up dirs, worktree, templates without launching the container.
+	preDispatchAttrs := []any{"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String()}
+	if parentRole != "" {
+		preDispatchAttrs = append(preDispatchAttrs, "parent_agent_role", string(parentRole))
+	}
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
-		"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String())
+		preDispatchAttrs...)
 	var warnings []string
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
 		if !req.ProvisionOnly {
@@ -1106,8 +1115,12 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
+	dispatchAttrs := []any{"agent_id", agent.ID, "agent", agent.Name, "totalElapsed", time.Since(hubCreateStart).String()}
+	if parentRole != "" {
+		dispatchAttrs = append(dispatchAttrs, "parent_agent_role", string(parentRole))
+	}
 	s.agentLifecycleLog.Info("Hub: dispatch complete",
-		"agent_id", agent.ID, "agent", agent.Name, "totalElapsed", time.Since(hubCreateStart).String())
+		dispatchAttrs...)
 
 	// Re-read the agent from the database before publishing the "created" event.
 	// A concurrent status update (e.g. sciontool reporting a clone error) may have
