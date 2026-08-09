@@ -1946,24 +1946,22 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	// Authorize by caller kind: users by delete policy, agents by lifecycle
 	// scope + same-project isolation (as in handleAgentAction). Fail closed
 	// for a caller that is neither — a user-only check would silently skip
-	// agent callers, since GetUserIdentityFromContext returns nil for them.
-	userIdent := GetUserIdentityFromContext(ctx)
-	agentIdent := GetAgentIdentityFromContext(ctx)
-	switch {
-	case userIdent != nil:
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionDelete)
+	// agent callers, which do not satisfy the UserIdentity interface.
+	switch ident := GetIdentityFromContext(ctx).(type) {
+	case UserIdentity:
+		decision := s.authzService.CheckAccess(ctx, ident, agentResource(agent), ActionDelete)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Only the agent's creator can delete it", nil)
 			return
 		}
-	case agentIdent != nil:
-		if !agentIdent.HasScope(ScopeAgentLifecycle) {
+	case AgentIdentity:
+		if !ident.HasScope(ScopeAgentLifecycle) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Missing required scope: project:agent:lifecycle", nil)
 			return
 		}
-		if agent.ProjectID != agentIdent.ProjectID() {
+		if agent.ProjectID != ident.ProjectID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Agents can only manage agents within their own project", nil)
 			return
