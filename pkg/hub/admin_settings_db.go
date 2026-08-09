@@ -843,6 +843,19 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		}
 	}
 
+	// Federation keys — emit all 5 koanf paths when the federation field
+	// is present. The section doc builder handles per-field presence;
+	// ClassifyKeys only needs at least one key to activate the section.
+	if req.Federation != nil {
+		keys = append(keys,
+			"server.federation.enabled",
+			"server.federation.trusted_issuers",
+			"server.federation.algorithms",
+			"server.federation.refresh_interval",
+			"server.federation.debounce_interval",
+		)
+	}
+
 	return keys
 }
 
@@ -1121,11 +1134,17 @@ func convertFederationSettingsToConfig(fs opsettings.FederationSettings) config.
 	if fs.RefreshInterval != "" {
 		if d, err := time.ParseDuration(fs.RefreshInterval); err == nil {
 			fc.Cache.RefreshInterval = d
+		} else {
+			slog.Warn("convertFederationSettingsToConfig: invalid refresh_interval duration, using zero",
+				"value", fs.RefreshInterval, "error", err)
 		}
 	}
 	if fs.DebounceInterval != "" {
 		if d, err := time.ParseDuration(fs.DebounceInterval); err == nil {
 			fc.Cache.DebounceInterval = d
+		} else {
+			slog.Warn("convertFederationSettingsToConfig: invalid debounce_interval duration, using zero",
+				"value", fs.DebounceInterval, "error", err)
 		}
 	}
 	return fc

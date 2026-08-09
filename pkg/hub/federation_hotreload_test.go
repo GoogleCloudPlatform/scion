@@ -19,6 +19,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -386,11 +388,9 @@ func TestConvertFederationSettingsToConfig_ValidationErrors(t *testing.T) {
 			}
 			found := false
 			for _, e := range errs {
-				if contains([]string{e.Error()}, "") || len(e.Error()) > 0 {
-					if containsSubstring(e.Error(), tt.want) {
-						found = true
-						break
-					}
+				if strings.Contains(e.Error(), tt.want) {
+					found = true
+					break
 				}
 			}
 			if !found {
@@ -463,23 +463,131 @@ func TestMiddleware_NilFederationAuthField(t *testing.T) {
 	}
 }
 
+// --- Deliverable R1-fix: DB-mode PUT round-trip integration test ---
+
+// TestExtractKoanfKeys_FederationRoundTrip verifies the full DB-mode path:
+// PUT request with federation config → extractKoanfKeysFromRequest →
+// ClassifyKeys → buildSectionDocsFromRequest → federation section doc produced.
+// This is the gap that masked R1: federation config was silently dropped
+// because extractKoanfKeysFromRequest emitted no federation koanf keys.
+func TestExtractKoanfKeys_FederationRoundTrip(t *testing.T) {
+	enabled := true
+	req := &ServerConfigUpdateRequest{
+		Federation: &config.V1FederationConfig{
+			Enabled: &enabled,
+			TrustedIssuers: []config.V1TrustedIssuerConfig{
+				{
+					IssuerURL:        "https://hub-a.example.com",
+					ExpectedAudience: "https://hub-b.example.com",
+					IssuerType:       "hub",
+				},
+			},
+			Algorithms:      []string{"RS256"},
+			RefreshInterval: "1h",
+		},
+	}
+
+	// Step 1: Extract koanf keys — this was the bug (no federation keys emitted).
+	keys := extractKoanfKeysFromRequest(req)
+
+	// Verify at least one server.federation.* key is present.
+	hasFedKey := false
+	for _, k := range keys {
+		if strings.HasPrefix(k, "server.federation.") {
+			hasFedKey = true
+			break
+		}
+	}
+	if !hasFedKey {
+		t.Fatalf("extractKoanfKeysFromRequest emitted no server.federation.* keys; got %v", keys)
+	}
+
+	// Step 2: Classify keys — federation keys should land in layer1BySec["federation"].
+	layer1BySec, layer0Keys, _ := opsettings.ClassifyKeys(keys)
+
+	if len(layer0Keys) > 0 {
+		t.Errorf("unexpected Layer-0 keys: %v", layer0Keys)
+	}
+
+	fedKeys, ok := layer1BySec["federation"]
+	if !ok || len(fedKeys) == 0 {
+		t.Fatalf("ClassifyKeys did not produce a 'federation' entry; layer1BySec = %v", layer1BySec)
+	}
+
+	// Step 3: Build section docs — the federation section doc should be produced.
+	rawBody := []byte(`{
+		"federation": {
+			"enabled": true,
+			"trusted_issuers": [{"issuer_url": "https://hub-a.example.com", "expected_audience": "https://hub-b.example.com", "issuer_type": "hub"}],
+			"algorithms": ["RS256"],
+			"refresh_interval": "1h"
+		}
+	}`)
+	sectionDocs, err := buildSectionDocsFromRequest(req, layer1BySec, rawBody)
+	if err != nil {
+		t.Fatalf("buildSectionDocsFromRequest failed: %v", err)
+	}
+
+	fedDoc, ok := sectionDocs["federation"]
+	if !ok {
+		t.Fatalf("federation section doc not produced; sectionDocs keys = %v", mapKeys2(sectionDocs))
+	}
+
+	// Step 4: Verify the section doc contents — federation config is NOT silently dropped.
+	var fedSettings opsettings.FederationSettings
+	if err := json.Unmarshal(fedDoc, &fedSettings); err != nil {
+		t.Fatalf("failed to unmarshal federation section doc: %v", err)
+	}
+
+	if fedSettings.Enabled == nil || !*fedSettings.Enabled {
+		t.Error("expected federation enabled=true in section doc")
+	}
+	if len(fedSettings.TrustedIssuers) != 1 {
+		t.Errorf("expected 1 trusted issuer in section doc, got %d", len(fedSettings.TrustedIssuers))
+	}
+	if len(fedSettings.Algorithms) != 1 || fedSettings.Algorithms[0] != "RS256" {
+		t.Errorf("expected algorithms [RS256] in section doc, got %v", fedSettings.Algorithms)
+	}
+	if fedSettings.RefreshInterval != "1h" {
+		t.Errorf("expected refresh_interval '1h' in section doc, got %q", fedSettings.RefreshInterval)
+	}
+
+	// Step 5: Validate the section doc via convertFederationSettingsToConfig → Validate().
+	fedCfg := convertFederationSettingsToConfig(fedSettings)
+	if errs := fedCfg.Validate(); len(errs) > 0 {
+		t.Errorf("unexpected validation errors for federation section doc: %v", errs)
+	}
+}
+
+// TestExtractKoanfKeys_FederationNil verifies that when Federation is nil,
+// no server.federation.* keys are emitted and no federation section doc is produced.
+func TestExtractKoanfKeys_FederationNil(t *testing.T) {
+	req := &ServerConfigUpdateRequest{
+		Federation: nil,
+	}
+
+	keys := extractKoanfKeysFromRequest(req)
+	for _, k := range keys {
+		if strings.HasPrefix(k, "server.federation.") {
+			t.Errorf("unexpected federation key %q when Federation is nil", k)
+		}
+	}
+}
+
+// mapKeys2 is a test helper that returns sorted keys from a map[string]json.RawMessage.
+func mapKeys2(m map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // --- Helpers ---
 
 func boolPtr(b bool) *bool {
 	return &b
-}
-
-func containsSubstring(s, substr string) bool {
-	return len(s) >= len(substr) && (substr == "" || findSubstring(s, substr))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // newFieldPresenceFromJSON creates a fieldPresence from raw JSON for testing.
