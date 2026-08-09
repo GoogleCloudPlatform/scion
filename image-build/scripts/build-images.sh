@@ -143,6 +143,13 @@ if [[ -n "${PLATFORM}" ]]; then
   fi
 fi
 
+# Thick targets are amd64-only; reject early if arm64 is requested.
+if [[ "${THICK_BUILD}" == "true" && "${PLATFORMS}" == *"arm64"* ]]; then
+  echo "Error: --target ${TARGET} is amd64-only (Cloud Workstations base has no arm64 variant)." >&2
+  echo "Remove --platform or use --platform linux/amd64." >&2
+  exit 1
+fi
+
 # Multi-arch builds require --push (buildx can't load multi-arch images
 # into the local docker daemon). Auto-promote and warn, matching the prior
 # build-images.sh behavior.

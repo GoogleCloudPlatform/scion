@@ -48,7 +48,7 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # Stage 3: Build all harnesses and hub in parallel on top of thick scion-base
+  # Stage 3: Build all harnesses and hub on top of thick scion-base
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-antigravity'
     dir: 'harnesses/antigravity'

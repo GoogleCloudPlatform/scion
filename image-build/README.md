@@ -132,8 +132,13 @@ The `cloud-build` builder maps each `--target` to a static YAML file:
 | `scion-base` | `cloudbuild-scion-base.yaml` |
 | `harnesses` | `cloudbuild-harnesses.yaml` |
 | `hub` | `cloudbuild-hub.yaml` |
-| `thick-prep` | `cloudbuild-thick.yaml` |
+| `thick-prep` | `cloudbuild-thick.yaml` (builds the full thick chain — see note below) |
 | `thick` | `cloudbuild-thick.yaml` |
+
+**Note:** `--target thick-prep` with `--builder cloud-build` builds the full thick
+chain (thick-prep + scion-base + harnesses + hub), since both `thick-prep` and
+`thick` map to the same `cloudbuild-thick.yaml`. With per-image builders
+(`local-docker`, `local-podman`), `--target thick-prep` builds only thick-prep.
 
 These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator.
 

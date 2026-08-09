@@ -33,7 +33,8 @@ USER root
 
 # Remove the ubuntu user (UID 1000) to avoid conflict with the scion user
 # that scion-base creates at the same UID.
-RUN userdel -r ubuntu 2>/dev/null || true
+RUN userdel -r ubuntu 2>/dev/null || true && \
+    groupdel ubuntu 2>/dev/null || true
 
 # Install packages that scion-base and harnesses expect but the thick base lacks.
 RUN apt-get update && apt-get install -y --no-install-recommends \
