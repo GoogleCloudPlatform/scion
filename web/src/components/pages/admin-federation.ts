@@ -353,8 +353,10 @@ export class ScionPageAdminFederation extends LitElement {
 
   // --- Data ---
 
-  private async loadData(): Promise<void> {
-    this.loading = true;
+  private async loadData(showSpinner = true): Promise<void> {
+    if (showSpinner) {
+      this.loading = true;
+    }
     this.error = null;
     try {
       const res = await apiFetch('/api/v1/admin/server-config');
@@ -405,21 +407,20 @@ export class ScionPageAdminFederation extends LitElement {
       });
       if (!res.ok) {
         this.error = await extractApiError(res, 'Failed to save federation config');
-        // Reload server state so local data matches after failed save
-        await this.loadData();
         return;
       }
       // Reload server state so server-side normalization is reflected
-      await this.loadData();
+      await this.loadData(false);
       this.successMessage = 'Federation config saved successfully';
+      if (this.successMessageTimer !== null) {
+        clearTimeout(this.successMessageTimer);
+      }
       this.successMessageTimer = setTimeout(() => {
         this.successMessage = null;
         this.successMessageTimer = null;
       }, 3000);
     } catch {
       this.error = 'Failed to connect to server';
-      // Reload server state so local data matches after failed save
-      await this.loadData();
     } finally {
       this.saving = false;
     }
