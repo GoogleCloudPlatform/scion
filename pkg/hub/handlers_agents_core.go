@@ -481,9 +481,9 @@ func (s *Server) createAgentInProject(
 
 		// Validate stored parentRole to guard against corrupted data.
 		if !ValidAgentRole(parentRole) {
-			slog.Warn("Parent agent has invalid stored role, defaulting to full",
+			slog.Warn("Parent agent has invalid stored role, defaulting to baseline",
 				"parent_agent_id", agentIdent.ID(), "stored_role", parentRole)
-			parentRole = AgentRoleFull
+			parentRole = AgentRoleBaseline
 		}
 
 		// Log the parent role for audit trail
