@@ -41,11 +41,25 @@ The `scion-a2a-bridge` process runs two concurrent RPC servers:
 1. **A2A HTTP Server (Default: Port 8443)**: Serves external A2A clients. Handles agent discovery requests (`/.well-known/agent-card.json`), JSON-RPC message exchanges, operational health checks (`/healthz`, `/readyz`), and Prometheus metrics (`/metrics`).
 2. **Broker Plugin RPC Server (Default: Port 9090)**: A `go-plugin` RPC interface. The Scion Hub connects to this port to push real-time agent-emitted messages, events, and status changes back to the bridge.
 
+### High Availability (HA) & Cloud Run Deployment
+
+To support robust, load-balanced hosted environments, the A2A Bridge includes advanced production capabilities:
+
+#### Leaderless HA Architecture
+The A2A Bridge supports High Availability (HA) natively through a **leaderless architecture**. Every replica is identical and interchangeable — there is no leader election, coordination overhead, or instance-identity requirement. Behind a load balancer, any replica can handle any incoming A2A request or receive broker plugin events, enabling seamless horizontal scaling.
+
+HA mode requires **standalone mode** (`--standalone` flag or `A2A_STANDALONE=true`) with a shared **PostgreSQL** backend (`DATABASE_URL`). This replaces the default local SQLite store so that all replicas share webhook subscriptions, task state, and admin configuration. Without a shared database, per-replica local state (SQLite) would drift across replicas and be lost on restart — making SQLite unsuitable for multi-replica or ephemeral deployments like Cloud Run.
+
+#### Single-Port h2c Multiplexing (Cloud Run)
+Google Cloud Run enforces a strict single-port limitation for incoming traffic. To run both the A2A HTTP server and the Broker Plugin RPC gRPC server on a single container port, the bridge implements **h2c port multiplexing**:
+- **Auto-Detection**: The bridge automatically detects when it is running on Cloud Run by checking for the presence of the `K_SERVICE` environment variable.
+- **Traffic Routing**: When detected, the bridge binds to the designated `$PORT` and multiplexes incoming HTTP/1.1 (standard A2A protocol JSON-RPC, health checks, and metrics) and HTTP/2 (gRPC broker traffic) over that single port. This eliminates the need for separate external ports or complex sidecar routing proxies.
+
 ### Interaction Modes
 The bridge supports three distinct A2A communication mechanics:
 * **Synchronous Blocking (SendMessage)**: The client POSTs a message and holds the HTTP connection open (up to `timeouts.send_message`, default 120s) until the agent produces its final response.
 * **Server-Sent Events (SSE) Streaming (SendStreamingMessage)**: The client opens an SSE connection (`message/stream`) to receive real-time, token-by-token streaming updates as the agent executes.
-* **Asynchronous Webhooks (Push Notifications)**: Clients register a callback URL (`tasks/pushNotification/set`). The bridge stores this subscription in its SQLite database and POSTs state-change alerts (running, completed, input-required, error) to the webhook as they occur.
+* **Asynchronous Webhooks (Push Notifications)**: Clients register a callback URL (`tasks/pushNotification/set`). The bridge stores this subscription in its state database (SQLite in default mode, PostgreSQL in standalone/HA mode) and POSTs state-change alerts (running, completed, input-required, error) to the webhook as they occur.
 
 ---
 

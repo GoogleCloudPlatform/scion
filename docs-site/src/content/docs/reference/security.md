@@ -32,11 +32,11 @@ For both Web and CLI access, Scion relies on standard OAuth 2.0 providers (Googl
 Agents running inside containers must report status back to the Hub without possessing user-level credentials.
 
 - **Hub-Issued JWT**: During provisioning, the Hub generates a short-lived JWT scoped specifically to that agent instance.
-- **Claims**: The token includes the `agent_id` (sub) and `project_id`.
-- **Scopes**: Standardized scopes include:
-    - `agent:status:update`: Allows reporting progress and heartbeats.
-    - `agent:log:append`: Allows streaming logs back to the Hub.
-    - `project:secret:read`: Allows the agent to retrieve project-scoped secrets.
+- **Claims**: The token includes the `agent_id` (sub), `project_id`, and `scopes`.
+- **Role-Based Scopes**: Instead of raw template scopes (which are deprecated), an agent's scopes are governed by its assigned **Tiered Agent Role** (`none`, `readonly`, `baseline`, or `full`):
+    - `project:read` (Readonly): Allows reading project state (agents, templates, etc.).
+    - `agent:status:update`, `agent:token:refresh`, `project:agent:notify`, `agent:port:forward` (Baseline): Standard operational scopes allowing the agent to report progress, refresh its token, and hold port tunnels.
+    - `project:agent:create`, `project:agent:lifecycle`, `project:secret:read` (Full): Complete programmatic control allowing the agent to spawn sub-agents, manage their phases, and retrieve project secrets dynamically.
 - **Transmission**: The token is injected into the container via the `SCION_HUB_TOKEN` environment variable and is used by `sciontool` for all API calls.
 
 ### 1.4 Runtime Broker Authentication (HMAC)
@@ -69,15 +69,16 @@ In production mode, Scion mandates the use of TLS for all network traffic.
 
 Scion supports restricting authentication to specific email domains via the `SCION_AUTHORIZED_DOMAINS` configuration. This provides a first-line defense, ensuring only authorized organization members can access the Hub.
 
-### 3.2 Permissions System (Future Plans)
+### 3.2 Permissions and Policy Model
 
-A comprehensive, hierarchical RBAC (Role-Based Access Control) system is currently in the design phase. For a detailed technical specification of the policy language and agent identity claims, see the [Policy & Permissions Reference](/scion/reference/permissions-policy/).
+Scion implements a robust, hierarchical RBAC (Role-Based Access Control) and policy system. For a detailed technical specification of the policy language and agent identity claims, see the [Policy & Permissions Reference](/scion/reference/permissions-policy/) and [Permissions & Policy Guide](/scion/hosted/ha/permissions/).
 
 - **Principal-Based**: Permissions are granted to **Users** and **Groups**.
 - **Hierarchical Groups**: Groups can contain other groups, allowing for complex team structures.
 - **Resource Scopes**: Policies are attached to scopes (Hub, Project, or specific Resource) and follow a containment hierarchy.
 - **Override Model**: Lower-level policies (e.g., at the Agent level) override higher-level ones (e.g., at the Project level), allowing for granular delegation of authority.
 - **Actions**: Standardized CRUD actions (`create`, `read`, `update`, `delete`, `list`) plus resource-specific actions (`start`, `stop`, `attach`, `message`).
+- **Lattice-Based Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes via a two-gate authority lattice.
 
 ## 4. Secret Management
 

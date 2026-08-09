@@ -254,3 +254,14 @@ The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry
 
 ### Session metrics
 Database-backed summaries and aggregations computed on agent session-end (aggregated by `sciontool` and delivered as a `MetricsPayload` in the StatusUpdate protocol) and stored in the Hub's `agent_session_metrics` SQL table. They provide an IDOR-safe structural view of token usage (input, output, cached, reasoning), tool execution counts, session duration, and model usage, queried via dedicated summary API endpoints and displayed in the Web Dashboard. Contrast with raw OpenTelemetry time-series metrics.
+
+## Users & Access
+
+### Agent Authorization Role
+A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. Resolves via a two-gate authority lattice matching requested role, user ceiling, and project maximums.
+
+### Group
+A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
+
+### User Access Token (UAT)
+A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT is scoped to a single project and carries a specific list of action permissions (scopes).

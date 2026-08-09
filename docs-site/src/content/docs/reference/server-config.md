@@ -208,6 +208,42 @@ Controls the background task scheduler in the Hub. This regulates the tick inter
 Configuring a modest concurrency limit (such as the default `2`) is highly recommended for small or single-node database instances to prevent sudden spikes in database connection usage.
 :::
 
+### OIDC Identity Provider (`server.oidc`)
+
+Configuration for the Hub's built-in OIDC Identity Provider feature.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | bool | `false` | Enable the OIDC Identity Provider endpoints. |
+| `issuer_url` | string | | The public issuer URL of this Hub. If empty, the hub public URL is used. |
+| `token_lifetime` | duration | `"15m"` | Validity duration for minted OIDC identity tokens (e.g. `"15m"`, `"1h"`). |
+
+### OIDC Federation (`server.federation`)
+
+Configuration for inbound OIDC-based federation authentication.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | bool | `false` | Enable OIDC federation authentication. |
+| `trusted_issuers` | list of objects | `[]` | List of trusted OIDC issuers (see below). |
+| `algorithms` | list of strings | `["RS256"]` | Supported cryptographic signing algorithms. |
+| `cache.refresh_interval` | duration | `"1h"` | How often to refresh cached issuer public keys (JWKS). |
+| `cache.debounce_interval` | duration | `"1s"` | Min interval between JWKS reload attempts to prevent DDOS. |
+
+#### Trusted Issuer Settings (`server.federation.trusted_issuers[]`)
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `issuer_url` | string | | **MANDATORY.** The exact OIDC issuer URL (matching token `iss` claim). |
+| `jwks_url` | string | | The URL to fetch signing public keys. Discovered via OIDC discovery if empty. |
+| `expected_audience` | string | | The expected audience `aud` claim in tokens. |
+| `allowed_projects` | list of strings | | If set, restricts tokens to specific project UUIDs. |
+| `allowed_root_users` | list of strings | | If set, restricts tokens to specific root user emails. |
+| `default_scopes` | list of strings | | Default JWT scopes granted to federated agents. |
+| `issuer_type` | string | `"hub"` | Type of issuer: `"hub"`, `"service_account"`, or `"user"`. |
+| `default_role` | string | `"viewer"` | Default role for federated users (`issuer_type: user`). |
+| `allowed_emails` | list of strings | | Restrict user tokens to specific email claims (supports wildcards e.g. `*@example.com`). |
+
 ## Environment Variables
 
 :::tip[Database Mode]
@@ -445,7 +481,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `lifecycle` | `auto_suspend_stalled`, `soft_delete_retention`, `soft_delete_retain_files` |
 | `maintenance` | `admin_mode`, `maintenance_message` (durable + cluster-wide) |
 | `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
-| `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level` |
+| `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role` |
 | `endpoints` | `hub.public_url`, `image_registry` |
 | `github_app` | `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `private_key_path` |
 | `notifications` | `notification_channels[]` |

@@ -145,6 +145,7 @@ Administrators can trigger critical infrastructure operations directly from the 
 - **Rebuild Server (`rebuild-server`)**: Initiates a fire-and-forget server rebuild and restart sequence. It uses staging paths and sudoers implementation to ensure reliable updates even while the server is running.
 - **Rebuild Web (`rebuild-web`)**: Recompiles the web frontend assets.
 - **Pull Images (`pull-images`)**: Triggers the Docker/Podman executor to pull the latest agent container images.
+- **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts.
 
 ### Operation Execution & History
 
