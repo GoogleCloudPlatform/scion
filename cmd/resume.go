@@ -65,5 +65,8 @@ func init() {
 	resumeCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
 
 	// Agent role flag
-	resumeCmd.Flags().StringVar(&agentRoleFlag, "role", "", "Agent role for Hub API access: none, readonly, baseline, full (default: project ceiling)")
+	resumeCmd.Flags().StringVar(&agentRoleFlag, "role", "",
+		"Agent role for Hub API access: none, readonly, baseline, full\n"+
+			"Members can grant up to baseline; admins up to full.\n"+
+			"Capped by project max_agent_role setting. Default: project ceiling.")
 }
