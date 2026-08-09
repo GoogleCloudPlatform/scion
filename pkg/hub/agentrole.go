@@ -107,12 +107,12 @@ func minRole(roles ...AgentRole) AgentRole {
 // ResolveEffectiveRole computes the effective agent role using the two-gate
 // authority lattice: min(requested, userCeiling, projectMax).
 //
+// The user-ceiling gate is currently a pass-through: all hub roles (admin and
+// member alike) receive a ceiling of Full. The projectMax gate is the effective
+// limiter for role resolution.
+//
 // userHubRole is the hub-level user role string ("admin" or "member").
-// If empty, defaults to "member" ceiling (baseline).
 func ResolveEffectiveRole(requested AgentRole, userHubRole string, projectMax AgentRole) AgentRole {
 	userCeiling := AgentRoleFull
-	if userHubRole == "admin" {
-		userCeiling = AgentRoleFull
-	}
 	return minRole(requested, userCeiling, projectMax)
 }

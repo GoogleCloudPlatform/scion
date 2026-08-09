@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1122,4 +1123,78 @@ func TestReadEndpoint_UserCaller_NotAffected(t *testing.T) {
 				ep, rec.Code, rec.Body.String())
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// R1 — Project default_agent_role is NOT overridden by hub-level default
+// ---------------------------------------------------------------------------
+
+func TestCreateAgent_ProjectDefaultFull_NotOverriddenByHubBaseline(t *testing.T) {
+	srv, s, user, _ := setupAgentRoleTest(t)
+	ctx := context.Background()
+
+	// Create a project that explicitly sets default_agent_role=full.
+	project := &store.Project{
+		ID:   tid("project-def-full"),
+		Name: "def-full-project",
+		Slug: "def-full-project",
+		Annotations: map[string]string{
+			projectSettingDefaultAgentRole: "full",
+		},
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+
+	// Set the hub-level default to baseline — this should NOT override the
+	// project-level explicit "full".
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{
+		DefaultAgentRole: "baseline",
+	})
+
+	rec := doAgentRoleRequest(t, srv, user, CreateAgentRequest{
+		Name:      "test-proj-full-hub-baseline",
+		ProjectID: project.ID,
+		// No explicit agentRole — should pick up project default (full).
+	})
+
+	// The request should succeed.
+	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		"should not be forbidden; got: %s", rec.Body.String())
+
+	// Verify the agent got the project-level default (full), not the hub default (baseline).
+	if role, ok := getStoredAgentRole(t, s, project.ID, "test-proj-full-hub-baseline"); ok {
+		assert.Equal(t, "full", role,
+			"project default_agent_role=full should win over hub default_agent_role=baseline")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R2 — GetAgent failure for parent agent defaults ceiling to baseline
+// ---------------------------------------------------------------------------
+
+func TestCreateSubAgent_ParentLookupFails_CeilingIsBaseline(t *testing.T) {
+	srv, _, project := setupFullMaxProject(t)
+
+	// Use a non-existent parent agent ID so GetAgent returns an error.
+	// The ceiling should fall back to baseline (fail-closed).
+	nonExistentParentID := tid("parent-does-not-exist")
+
+	// Request a full sub-agent; the baseline ceiling should cap it to baseline.
+	rec := doAgentCallerRequest(t, srv, nonExistentParentID, project.ID, CreateAgentRequest{
+		Name:      "child-parent-missing",
+		ProjectID: project.ID,
+		AgentRole: "full",
+	})
+
+	// Requesting full when the ceiling is baseline should trigger the
+	// no-escalation check and return 403.
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"requesting full with a missing parent should be forbidden (baseline ceiling); got: %s",
+		rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "parent agent role",
+		"error should mention the parent agent role constraint")
 }

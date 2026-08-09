@@ -447,14 +447,16 @@ func (s *Server) createAgentInProject(
 	// Read default agent role: project annotation → hub default → full.
 	// Applied only when no explicit role is requested.
 	defaultAgentRole := AgentRoleFull
+	foundProjectDefault := false
 	if project != nil && project.Annotations != nil {
 		if defStr, ok := project.Annotations[projectSettingDefaultAgentRole]; ok && defStr != "" {
 			if ValidAgentRole(AgentRole(defStr)) {
 				defaultAgentRole = AgentRole(defStr)
+				foundProjectDefault = true
 			}
 		}
 	}
-	if defaultAgentRole == AgentRoleFull {
+	if !foundProjectDefault {
 		// No project-level default set; fall back to hub-level default
 		if hubDefault := s.hubAgentDefaults().DefaultAgentRole; hubDefault != "" {
 			if ValidAgentRole(AgentRole(hubDefault)) {
@@ -468,10 +470,11 @@ func (s *Server) createAgentInProject(
 		parentRole = AgentRoleFull
 		creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
 		if err != nil {
+			// Fail-closed: default to baseline on lookup failure so that
+			// transient errors do not grant maximum privileges.
+			parentRole = AgentRoleBaseline
 			slog.Warn("Failed to read parent agent for role ceiling",
 				"parent_agent_id", agentIdent.ID(), "error", err)
-			// Fall through with baseline default — safe because it is the most restrictive
-			// non-zero role, so the ceiling is conservative.
 		} else if creatorAgent.AppliedConfig != nil && creatorAgent.AppliedConfig.AgentRole != "" {
 			parentRole = AgentRole(creatorAgent.AppliedConfig.AgentRole)
 		}
@@ -507,12 +510,10 @@ func (s *Server) createAgentInProject(
 
 		effectiveRole = minRole(requestedRole, parentRole, projectMax)
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		// User caller: ceiling based on hub role
-		userHubRole := userIdent.Role()
+		// User caller: ceiling based on hub role.
+		// The user-ceiling gate is currently a pass-through (all hub roles get
+		// Full); the projectMax gate is the effective limiter.
 		userCeiling := AgentRoleFull
-		if userHubRole == "admin" {
-			userCeiling = AgentRoleFull
-		}
 
 		if requestedRole == "" {
 			requestedRole = defaultAgentRole

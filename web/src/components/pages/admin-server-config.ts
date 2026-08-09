@@ -2883,7 +2883,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                       <sl-option value="none">None — No hub access</sl-option>
                       <sl-option value="readonly">Read-only — Read-only access</sl-option>
                       <sl-option value="baseline">Baseline — Standard access</sl-option>
-                      <sl-option value="full">Full — Full access (admin only)</sl-option>
+                      <sl-option value="full">Full — Full access</sl-option>
                     </sl-select>`
                   )}
                 </div>
