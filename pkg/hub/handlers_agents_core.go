@@ -1961,7 +1961,10 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 				"Missing required scope: project:agent:lifecycle", nil)
 			return
 		}
-		if agent.ProjectID != ident.ProjectID() {
+		// An empty project ID on either side must never authorize: two empty
+		// strings compare equal, so a malformed token or corrupted record would
+		// otherwise slip past the isolation gate.
+		if agent.ProjectID == "" || ident.ProjectID() == "" || agent.ProjectID != ident.ProjectID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Agents can only manage agents within their own project", nil)
 			return

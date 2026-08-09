@@ -68,6 +68,23 @@ func TestPerformAgentDelete_AgentCallerScopeAndProjectGate(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 
+	t.Run("empty project id on either side never authorizes", func(t *testing.T) {
+		// Two empty strings compare equal, so an empty project id must be
+		// rejected outright rather than allowed to match.
+		lifecycleAgent := func(pid string) Identity {
+			return &agentIdentityWrapper{&AgentTokenClaims{ProjectID: pid, Scopes: []AgentTokenScope{ScopeAgentLifecycle}}}
+		}
+		// Empty token project id against an empty-project target.
+		rec := httptest.NewRecorder()
+		srv.performAgentDelete(rec, deleteReqWithAgent(lifecycleAgent("")), &store.Agent{ID: tid("victim"), ProjectID: ""})
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Contains(t, rec.Body.String(), "within their own project")
+		// Empty token project id against a real-project target.
+		rec = httptest.NewRecorder()
+		srv.performAgentDelete(rec, deleteReqWithAgent(lifecycleAgent("")), victim)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
 	t.Run("lifecycle scope in the same project passes the gate", func(t *testing.T) {
 		// Already-soft-deleted: 204 right after the gate (idempotency), so an
 		// authorized agent clears the gate without a live broker.
