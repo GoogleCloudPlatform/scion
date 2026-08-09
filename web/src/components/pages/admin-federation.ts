@@ -362,7 +362,15 @@ export class ScionPageAdminFederation extends LitElement {
         this.error = await extractApiError(res, 'Failed to load federation config');
         return;
       }
-      const data = await res.json();
+      const data = (await res.json()) as {
+        federation?: {
+          enabled?: boolean;
+          algorithms?: string[];
+          refresh_interval?: string;
+          debounce_interval?: string;
+          trusted_issuers?: TrustedIssuerConfig[];
+        };
+      };
       if (data.federation) {
         this.enabled = data.federation.enabled ?? false;
         this.algorithms = data.federation.algorithms ?? ['RS256'];
@@ -401,6 +409,8 @@ export class ScionPageAdminFederation extends LitElement {
         await this.loadData();
         return;
       }
+      // Reload server state so server-side normalization is reflected
+      await this.loadData();
       this.successMessage = 'Federation config saved successfully';
       this.successMessageTimer = setTimeout(() => {
         this.successMessage = null;
@@ -605,7 +615,7 @@ export class ScionPageAdminFederation extends LitElement {
                 const value = (e.target as HTMLSelectElement).value;
                 this.algorithms = Array.isArray(value)
                   ? value as string[]
-                  : (value as string).split(' ').filter(Boolean);
+                  : value.split(' ').filter(Boolean);
               }}
             >
               <sl-option value="RS256">RS256</sl-option>
@@ -760,7 +770,7 @@ export class ScionPageAdminFederation extends LitElement {
                     @sl-change=${(e: Event) => {
                       this.editingIssuer = {
                         ...this.editingIssuer!,
-                        issuer_type: (e.target as HTMLSelectElement).value as string,
+                        issuer_type: (e.target as HTMLSelectElement).value,
                       };
                     }}
                   >
@@ -927,7 +937,7 @@ export class ScionPageAdminFederation extends LitElement {
           @sl-change=${(e: Event) => {
             this.editingIssuer = {
               ...this.editingIssuer!,
-              default_role: (e.target as HTMLSelectElement).value as string,
+              default_role: (e.target as HTMLSelectElement).value,
             };
           }}
         >
