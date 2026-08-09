@@ -1426,3 +1426,118 @@ func TestFederationAuth_HubBackwardCompat_NoIssuerType(t *testing.T) {
 		t.Errorf("expected %d default scopes, got %d", len(DefaultFederationScopes), len(scopes))
 	}
 }
+
+// --- OIDC Discovery integration tests ---
+
+// Discovery Test 1: OIDC discovery resolves JWKS URL for non-hub issuer
+func TestFederationAuth_OIDCDiscovery_ResolvesJWKSURL(t *testing.T) {
+	kid := "discovery-key"
+	audience := "https://hub-b.example.com"
+
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+
+	// JWKS server
+	jwks := jose.JSONWebKeySet{
+		Keys: []jose.JSONWebKey{
+			{Key: &privKey.PublicKey, KeyID: kid, Algorithm: string(jose.RS256), Use: "sig"},
+		},
+	}
+	jwksData, _ := json.Marshal(jwks)
+	jwksSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(jwksData)
+	}))
+	t.Cleanup(jwksSrv.Close)
+
+	// Issuer server with OIDC discovery that points to the JWKS server
+	issuerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/openid-configuration" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jwks_uri": "` + jwksSrv.URL + `"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(issuerSrv.Close)
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuerSrv.URL,
+				JWKSURL:          "", // empty — discovery should resolve
+				ExpectedAudience: audience,
+				IssuerType:       "service_account",
+			},
+		},
+	}
+
+	// NewFederationAuthenticator should succeed (discovery resolves JWKS URL)
+	auth, err := NewFederationAuthenticator(cfg, audience,
+		&http.Client{Timeout: 5 * time.Second}, "dev", slog.Default())
+	if err != nil {
+		t.Fatalf("NewFederationAuthenticator should succeed with discovery, got error: %v", err)
+	}
+
+	// Authenticate a valid token to prove the discovered URL was used
+	now := time.Now()
+	claims := map[string]interface{}{
+		"iss":   issuerSrv.URL,
+		"sub":   "discovery-test-subject",
+		"aud":   audience,
+		"iat":   now.Add(-1 * time.Minute).Unix(),
+		"exp":   now.Add(5 * time.Minute).Unix(),
+		"nbf":   now.Add(-1 * time.Minute).Unix(),
+		"email": "test-sa@project.iam.gserviceaccount.com",
+	}
+	token := signGenericToken(t, privKey, kid, claims)
+
+	identity, err := auth.Authenticate(token)
+	if err != nil {
+		t.Fatalf("expected authentication success, got error: %v", err)
+	}
+
+	sid, ok := identity.(*FederatedServiceIdentity)
+	if !ok {
+		t.Fatalf("expected *FederatedServiceIdentity, got %T", identity)
+	}
+	if sid.Email() != "test-sa@project.iam.gserviceaccount.com" {
+		t.Errorf("expected email 'test-sa@project.iam.gserviceaccount.com', got %q", sid.Email())
+	}
+}
+
+// Discovery Test 2: OIDC discovery failure when no jwks_url configured and no discovery endpoint
+func TestFederationAuth_OIDCDiscovery_FailureNoEndpoint(t *testing.T) {
+	audience := "https://hub-b.example.com"
+
+	// Issuer server with NO discovery endpoint
+	issuerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(issuerSrv.Close)
+
+	cfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:        issuerSrv.URL,
+				JWKSURL:          "", // empty — discovery will fail
+				ExpectedAudience: audience,
+				IssuerType:       "service_account",
+			},
+		},
+	}
+
+	// NewFederationAuthenticator should fail — no JWKS URL and discovery fails
+	_, err := NewFederationAuthenticator(cfg, audience,
+		&http.Client{Timeout: 5 * time.Second}, "dev", slog.Default())
+	if err == nil {
+		t.Fatal("expected error when JWKS URL not configured and discovery fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "OIDC discovery failed") {
+		t.Errorf("expected 'OIDC discovery failed' in error, got: %v", err)
+	}
+}

@@ -260,19 +260,18 @@ func TestFederationConfig_Validate(t *testing.T) {
 			wantErrs: 0,
 		},
 		{
-			name: "non-hub issuer without jwks_url is rejected",
+			name: "non-hub issuer without jwks_url is valid (OIDC discovery available)",
 			config: FederationConfig{
 				Enabled: true,
 				TrustedIssuers: []TrustedIssuerConfig{
 					{
 						IssuerURL:  "https://accounts.google.com",
 						IssuerType: "service_account",
-						// JWKSURL omitted
+						// JWKSURL omitted — OIDC discovery can resolve it at runtime
 					},
 				},
 			},
-			wantErrs:  1,
-			wantSubst: []string{"jwks_url is required"},
+			wantErrs: 0,
 		},
 		{
 			name: "allowed_projects on non-hub issuer produces warning error",

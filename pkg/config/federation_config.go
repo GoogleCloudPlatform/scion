@@ -127,11 +127,9 @@ func (c *FederationConfig) Validate() []error {
 			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: unknown issuer_type %q (must be \"hub\", \"service_account\", or \"user\")", i, issuer.IssuerType))
 		}
 
-		// Rule 7: Non-hub issuers require jwks_url (OIDC discovery not yet implemented).
+		// Rule 7: Non-hub issuers may omit jwks_url if OIDC discovery is available.
+		// The authenticator will attempt discovery at startup and fail if neither works.
 		isNonHub := issuer.IssuerType != "" && issuer.IssuerType != "hub"
-		if isNonHub && issuer.JWKSURL == "" {
-			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: jwks_url is required for issuer_type %q (OIDC discovery not yet implemented)", i, issuer.IssuerType))
-		}
 
 		// Rule 8: Warn if hub-specific fields are set on non-hub issuers.
 		if isNonHub && len(issuer.AllowedProjects) > 0 {

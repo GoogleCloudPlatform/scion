@@ -93,10 +93,26 @@ func NewFederationAuthenticator(cfg config.FederationConfig, oidcIssuerURL strin
 			}
 		}
 
-		// Resolve JWKS URL: derive from issuer URL if not explicitly set.
+		// Resolve JWKS URL with 3-tier resolution:
+		// 1. Explicit jwks_url config (always wins)
+		// 2. Non-hub: OIDC discovery ({iss}/.well-known/openid-configuration -> jwks_uri)
+		// 3. Hub: derive {iss}/.well-known/jwks.json (existing convention)
 		jwksURL := issuer.JWKSURL
 		if jwksURL == "" {
-			jwksURL = strings.TrimRight(issuer.IssuerURL, "/") + "/.well-known/jwks.json"
+			issuerType := IssuerType(issuer.IssuerType)
+			if issuerType == "" {
+				issuerType = IssuerTypeHub
+			}
+			if issuerType != IssuerTypeHub {
+				discovered, err := discoverJWKSURL(issuer.IssuerURL, httpClient)
+				if err != nil {
+					return nil, fmt.Errorf("federation: issuer %q: jwks_url not configured and OIDC discovery failed: %w", issuer.IssuerURL, err)
+				}
+				jwksURL = discovered
+			} else {
+				// Hub convention: derive from issuer URL
+				jwksURL = strings.TrimRight(issuer.IssuerURL, "/") + "/.well-known/jwks.json"
+			}
 		}
 
 		// Resolve expected audience: fall back to this hub's OIDC issuer URL.
