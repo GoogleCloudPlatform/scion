@@ -4215,6 +4215,124 @@ func TestConvertV1ServerToGlobalConfig_StalledThresholdInvalidIgnored(t *testing
 	assert.Equal(t, time.Duration(0), gc.Hub.StalledThreshold)
 }
 
+// --- Federation conversion tests ---
+
+func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
+	enabled := true
+	v1 := &V1ServerConfig{
+		Federation: &V1FederationConfig{
+			Enabled: &enabled,
+			TrustedIssuers: []V1TrustedIssuerConfig{
+				{
+					IssuerURL:        "https://hub-a.example.com",
+					JWKSURL:          "https://hub-a.example.com/.well-known/jwks.json",
+					ExpectedAudience: "https://hub-b.example.com",
+					AllowedProjects:  []string{"proj1", "proj2"},
+					AllowedRootUsers: []string{"user@example.com"},
+					DefaultScopes:    []string{"agent:status:update", "agent:message:send"},
+					IssuerType:       "hub",
+					DefaultRole:      "",
+					AllowedEmails:    nil,
+				},
+				{
+					IssuerURL:        "https://accounts.google.com",
+					JWKSURL:          "",
+					ExpectedAudience: "https://hub-b.example.com",
+					AllowedProjects:  nil,
+					AllowedRootUsers: nil,
+					DefaultScopes:    []string{"agent:status:update"},
+					IssuerType:       "service_account",
+					DefaultRole:      "",
+					AllowedEmails:    []string{"sa@proj.iam.gserviceaccount.com"},
+				},
+			},
+			Algorithms:       []string{"RS256", "ES256"},
+			RefreshInterval:  "1h",
+			DebounceInterval: "5s",
+		},
+	}
+
+	// V1 -> GlobalConfig
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.True(t, gc.Federation.Enabled)
+	require.Len(t, gc.Federation.TrustedIssuers, 2)
+
+	ti0 := gc.Federation.TrustedIssuers[0]
+	assert.Equal(t, "https://hub-a.example.com", ti0.IssuerURL)
+	assert.Equal(t, "https://hub-a.example.com/.well-known/jwks.json", ti0.JWKSURL)
+	assert.Equal(t, "https://hub-b.example.com", ti0.ExpectedAudience)
+	assert.Equal(t, []string{"proj1", "proj2"}, ti0.AllowedProjects)
+	assert.Equal(t, []string{"user@example.com"}, ti0.AllowedRootUsers)
+	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, ti0.DefaultScopes)
+	assert.Equal(t, "hub", ti0.IssuerType)
+
+	ti1 := gc.Federation.TrustedIssuers[1]
+	assert.Equal(t, "https://accounts.google.com", ti1.IssuerURL)
+	assert.Equal(t, "service_account", ti1.IssuerType)
+	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, ti1.AllowedEmails)
+
+	assert.Equal(t, []string{"RS256", "ES256"}, gc.Federation.Algorithms)
+	assert.Equal(t, time.Hour, gc.Federation.Cache.RefreshInterval)
+	assert.Equal(t, 5*time.Second, gc.Federation.Cache.DebounceInterval)
+
+	// GlobalConfig -> V1 (round-trip back)
+	v1Back := ConvertGlobalToV1ServerConfig(gc)
+	require.NotNil(t, v1Back.Federation)
+	assert.Equal(t, &enabled, v1Back.Federation.Enabled)
+	assert.Equal(t, []string{"RS256", "ES256"}, v1Back.Federation.Algorithms)
+	assert.Equal(t, "1h0m0s", v1Back.Federation.RefreshInterval)
+	assert.Equal(t, "5s", v1Back.Federation.DebounceInterval)
+
+	require.Len(t, v1Back.Federation.TrustedIssuers, 2)
+	vi0 := v1Back.Federation.TrustedIssuers[0]
+	assert.Equal(t, "https://hub-a.example.com", vi0.IssuerURL)
+	assert.Equal(t, "https://hub-a.example.com/.well-known/jwks.json", vi0.JWKSURL)
+	assert.Equal(t, "https://hub-b.example.com", vi0.ExpectedAudience)
+	assert.Equal(t, []string{"proj1", "proj2"}, vi0.AllowedProjects)
+	assert.Equal(t, []string{"user@example.com"}, vi0.AllowedRootUsers)
+	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, vi0.DefaultScopes)
+	assert.Equal(t, "hub", vi0.IssuerType)
+
+	vi1 := v1Back.Federation.TrustedIssuers[1]
+	assert.Equal(t, "https://accounts.google.com", vi1.IssuerURL)
+	assert.Equal(t, "service_account", vi1.IssuerType)
+	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, vi1.AllowedEmails)
+}
+
+func TestConvertV1FederationConfig_NilFederation(t *testing.T) {
+	v1 := &V1ServerConfig{}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.False(t, gc.Federation.Enabled)
+	assert.Empty(t, gc.Federation.TrustedIssuers)
+}
+
+func TestConvertGlobalToV1_FederationDisabledNoIssuers(t *testing.T) {
+	gc := DefaultGlobalConfig()
+	gc.Federation.Enabled = false
+	gc.Federation.TrustedIssuers = nil
+	v1 := ConvertGlobalToV1ServerConfig(&gc)
+	// When federation is disabled with no issuers, Federation should be nil in V1
+	assert.Nil(t, v1.Federation)
+}
+
+func TestConvertV1FederationConfig_EnabledNilDereference(t *testing.T) {
+	// Test that nil Enabled is handled safely (defaults to false)
+	v1 := &V1ServerConfig{
+		Federation: &V1FederationConfig{
+			Enabled: nil,
+			TrustedIssuers: []V1TrustedIssuerConfig{
+				{
+					IssuerURL: "https://hub-a.example.com",
+				},
+			},
+		},
+	}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.False(t, gc.Federation.Enabled)
+	require.Len(t, gc.Federation.TrustedIssuers, 1)
+	assert.Equal(t, "https://hub-a.example.com", gc.Federation.TrustedIssuers[0].IssuerURL)
+}
+
 // --- Helper ---
 
 func boolPtr(b bool) *bool {

@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/knadh/koanf/v2"
 )
 
@@ -113,6 +114,9 @@ type Layer1Snapshot struct {
 
 	// Notifications
 	NotificationChannels []config.V1NotificationChannelConfig
+
+	// Federation
+	FederationConfig *config.FederationConfig // nil when federation section not present
 
 	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
 	// on this node — used for drift warnings.
@@ -634,6 +638,36 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		}
 	}
 
+	// Federation
+	if k.Exists("server.federation.enabled") || k.Exists("server.federation.trusted_issuers") {
+		fedCfg := config.FederationConfig{
+			Enabled: k.Bool("server.federation.enabled"),
+		}
+		// TrustedIssuers: unmarshal from the koanf slice
+		if raw := k.Get("server.federation.trusted_issuers"); raw != nil {
+			data, err := json.Marshal(raw)
+			if err != nil {
+				slog.Warn("federation: failed to marshal trusted_issuers from koanf", "error", err)
+			} else if err := json.Unmarshal(data, &fedCfg.TrustedIssuers); err != nil {
+				slog.Warn("federation: failed to unmarshal trusted_issuers", "error", err)
+			}
+		}
+		if algs := k.Strings("server.federation.algorithms"); len(algs) > 0 {
+			fedCfg.Algorithms = algs
+		}
+		if ri := k.String("server.federation.refresh_interval"); ri != "" {
+			if d, err := time.ParseDuration(ri); err == nil {
+				fedCfg.Cache.RefreshInterval = d
+			}
+		}
+		if di := k.String("server.federation.debounce_interval"); di != "" {
+			if d, err := time.ParseDuration(di); err == nil {
+				fedCfg.Cache.DebounceInterval = d
+			}
+		}
+		snap.FederationConfig = &fedCfg
+	}
+
 	return snap
 }
 
@@ -668,6 +702,11 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap.GitHubWebhooksEnabled = gc.GitHubApp.WebhooksEnabled
 	snap.GitHubInstallationURL = gc.GitHubApp.InstallationURL
 	snap.GitHubPrivateKeyPath = gc.GitHubApp.PrivateKeyPath
+
+	// Federation — read from GlobalConfig
+	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
+		snap.FederationConfig = &gc.Federation
+	}
 
 	return snap
 }
@@ -815,6 +854,57 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// must never touch MaintenanceState (restoring pre-refactor behavior).
 	// In postgres mode, the caller uses ApplyMaintenanceFromSnapshot
 	// separately, which respects env > DB precedence (§3.4/§3.8).
+
+	// Federation (outside mutex — atomic.Pointer swap is lock-free,
+	// and NewFederationAuthenticator may do network I/O)
+	//
+	// When federation is disabled (nil config or Enabled=false), clear the
+	// authenticator so the middleware returns 401. This ensures disabling
+	// federation at runtime actually takes effect.
+	if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
+		s.federationAuth.Store(nil)
+		if snap.FederationConfig != nil {
+			slog.Info("Federation disabled via config, authenticator cleared")
+		}
+		applied = append(applied, "federation")
+	} else {
+		if errs := snap.FederationConfig.Validate(); len(errs) > 0 {
+			slog.Error("Federation config validation failed during apply, keeping old config",
+				"errors", fmt.Sprintf("%v", errs))
+		} else {
+			// Derive federation mode using the same pattern as New().
+			federationMode := s.config.Mode
+			if federationMode == "" {
+				if s.config.Workstation {
+					federationMode = "workstation"
+				} else {
+					federationMode = "hosted"
+				}
+			}
+			// Use the OIDC issuer URL as the default expected audience.
+			federationAudience := s.oidcIssuerURL
+			if federationAudience == "" {
+				federationAudience = s.config.OIDCConfig.IssuerURL
+			}
+			newAuth, err := NewFederationAuthenticator(
+				*snap.FederationConfig,
+				federationAudience,
+				s.federationClient,
+				federationMode,
+				logging.Subsystem("hub.federation"),
+			)
+			if err != nil {
+				slog.Error("Federation authenticator rebuild failed, keeping old config",
+					"error", err)
+			} else {
+				s.federationAuth.Store(newAuth)
+				slog.Info("Federation authenticator hot-reloaded",
+					"trusted_issuers", len(snap.FederationConfig.TrustedIssuers),
+					"enabled", snap.FederationConfig.Enabled)
+				applied = append(applied, "federation")
+			}
+		}
+	}
 
 	// Settings that require restart
 	needsRestart := []string{

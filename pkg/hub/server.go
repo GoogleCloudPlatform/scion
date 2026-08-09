@@ -782,6 +782,10 @@ type Server struct {
 	// Shared HTTP client for federation proxy calls (no redirect following).
 	federationClient *http.Client
 
+	// federationAuth holds the current FederationAuthenticator.
+	// Swapped atomically by ApplySnapshot; read by the auth middleware.
+	federationAuth atomic.Pointer[FederationAuthenticator]
+
 	imageBuildActive atomic.Bool
 	imagePullActive  atomic.Bool
 
@@ -1148,7 +1152,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	}
 
 	// Initialize federation authenticator if enabled.
-	var federationAuth *FederationAuthenticator
 	if cfg.Federation.Enabled {
 		// Derive mode for HTTPS enforcement.
 		federationMode := cfg.Mode
@@ -1165,8 +1168,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			federationAudience = cfg.OIDCConfig.IssuerURL
 		}
 
-		var err error
-		federationAuth, err = NewFederationAuthenticator(
+		fa, err := NewFederationAuthenticator(
 			cfg.Federation,
 			federationAudience,
 			srv.federationClient,
@@ -1176,25 +1178,26 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("federation authenticator init: %w", err)
 		}
+		srv.federationAuth.Store(fa)
 		slog.Info("Federation authenticator enabled",
 			"trusted_issuers", len(cfg.Federation.TrustedIssuers))
 	}
 
 	// Build unified auth configuration
 	srv.authConfig = AuthConfig{
-		Mode:                    "production",
-		DevAuthEnabled:          cfg.DevAuthToken != "",
-		DevAuthToken:            cfg.DevAuthToken,
-		DevUserCfg:              cfg.DevUserConfig,
-		AgentTokenSvc:           srv.agentTokenService,
-		UserTokenSvc:            srv.userTokenService,
-		UATSvc:                  srv.uatService,
-		TrustedProxies:          cfg.TrustedProxies,
-		ProxyAuthenticator:      cfg.ProxyAuth,
-		FederationAuthenticator: federationAuth,
-		AuthMode:                cfg.AuthMode,
-		Debug:                   cfg.Debug,
-		Logger:                  srv.authLog,
+		Mode:               "production",
+		DevAuthEnabled:     cfg.DevAuthToken != "",
+		DevAuthToken:       cfg.DevAuthToken,
+		DevUserCfg:         cfg.DevUserConfig,
+		AgentTokenSvc:      srv.agentTokenService,
+		UserTokenSvc:       srv.userTokenService,
+		UATSvc:             srv.uatService,
+		TrustedProxies:     cfg.TrustedProxies,
+		ProxyAuthenticator: cfg.ProxyAuth,
+		FederationAuth:     &srv.federationAuth,
+		AuthMode:           cfg.AuthMode,
+		Debug:              cfg.Debug,
+		Logger:             srv.authLog,
 	}
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {

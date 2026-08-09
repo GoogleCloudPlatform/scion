@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,15 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
+
+// newFedAuthPointer creates an atomic.Pointer pre-loaded with the given authenticator.
+func newFedAuthPointer(auth *FederationAuthenticator) *atomic.Pointer[FederationAuthenticator] {
+	p := &atomic.Pointer[FederationAuthenticator]{}
+	if auth != nil {
+		p.Store(auth)
+	}
+	return p
+}
 
 // e2eResponse is the JSON response returned by the E2E test endpoint handler
 // to verify identity details from the full authentication flow.
@@ -107,10 +117,10 @@ func setupE2EServer(t *testing.T, requiredScope AgentTokenScope) (
 	}
 
 	authCfg := AuthConfig{
-		Mode:                    "production",
-		FederationAuthenticator: authenticator,
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Mode:           "production",
+		FederationAuth: newFedAuthPointer(authenticator),
+		Debug:          true,
+		Logger:         slog.Default(),
 	}
 
 	// Build the handler chain: auth middleware -> access control -> handler
@@ -329,10 +339,10 @@ func setupNonHubE2EServer(t *testing.T, fedCfg config.FederationConfig, audience
 	}
 
 	authCfg := AuthConfig{
-		Mode:                    "production",
-		FederationAuthenticator: authenticator,
-		Debug:                   true,
-		Logger:                  slog.Default(),
+		Mode:           "production",
+		FederationAuth: newFedAuthPointer(authenticator),
+		Debug:          true,
+		Logger:         slog.Default(),
 	}
 
 	identityHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

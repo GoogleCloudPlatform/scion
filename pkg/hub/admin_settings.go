@@ -74,6 +74,9 @@ type ServerConfigResponse struct {
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
 
+	// Federation holds the federation authentication config for the admin API.
+	Federation *config.V1FederationConfig `json:"federation,omitempty"`
+
 	// EnvOverrides lists koanf keys overridden by SCION_SERVER_* env vars
 	// on this node. Present in both file-mode and DB-mode responses so the
 	// admin UI can show env-pinned fields regardless of settings tier.
@@ -113,6 +116,9 @@ type ServerConfigUpdateRequest struct {
 
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
+
+	// Federation holds the federation authentication config update.
+	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 }
 
 // handleAdminServerConfig handles GET/PUT /api/v1/admin/server-config.
@@ -270,6 +276,11 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultAgentRole:     vs.DefaultAgentRole,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
+	}
+
+	// Populate top-level federation field from the server config.
+	if vs.Server != nil && vs.Server.Federation != nil {
+		resp.Federation = vs.Server.Federation
 	}
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
@@ -509,6 +520,14 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		} else {
 			delete(raw, "auto_expose_ports")
 		}
+	}
+	if req.Federation != nil {
+		serverMap, ok := raw["server"].(map[string]interface{})
+		if !ok {
+			serverMap = make(map[string]interface{})
+			raw["server"] = serverMap
+		}
+		serverMap["federation"] = marshalToMap(req.Federation)
 	}
 }
 

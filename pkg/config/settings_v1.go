@@ -345,6 +345,9 @@ type V1ServerConfig struct {
 
 	// Scheduler configures the Hub background task scheduler.
 	Scheduler *V1SchedulerConfig `json:"scheduler,omitempty" yaml:"scheduler,omitempty" koanf:"scheduler"`
+
+	// Federation configures hub-hub federation authentication.
+	Federation *V1FederationConfig `json:"federation,omitempty" yaml:"federation,omitempty" koanf:"federation"`
 }
 
 // V1GitHubAppConfig holds the GitHub App configuration in settings.yaml format.
@@ -372,6 +375,28 @@ type V1SchedulerConfig struct {
 	// pool saturation) is active out-of-the-box. Set to 0 for unlimited
 	// (pre-fix behavior), or a higher value for larger deployments.
 	MaxConcurrency *int `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty" koanf:"max_concurrency"`
+}
+
+// V1FederationConfig is the admin API wire format for federation settings.
+type V1FederationConfig struct {
+	Enabled          *bool                   `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	TrustedIssuers   []V1TrustedIssuerConfig `json:"trusted_issuers,omitempty" yaml:"trusted_issuers,omitempty" koanf:"trusted_issuers"`
+	Algorithms       []string                `json:"algorithms,omitempty" yaml:"algorithms,omitempty" koanf:"algorithms"`
+	RefreshInterval  string                  `json:"refresh_interval,omitempty" yaml:"refresh_interval,omitempty" koanf:"refresh_interval"`
+	DebounceInterval string                  `json:"debounce_interval,omitempty" yaml:"debounce_interval,omitempty" koanf:"debounce_interval"`
+}
+
+// V1TrustedIssuerConfig is the admin API wire format for a single trusted issuer.
+type V1TrustedIssuerConfig struct {
+	IssuerURL        string   `json:"issuer_url" yaml:"issuer_url" koanf:"issuer_url"`
+	JWKSURL          string   `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
+	ExpectedAudience string   `json:"expected_audience,omitempty" yaml:"expected_audience,omitempty" koanf:"expected_audience"`
+	AllowedProjects  []string `json:"allowed_projects,omitempty" yaml:"allowed_projects,omitempty" koanf:"allowed_projects"`
+	AllowedRootUsers []string `json:"allowed_root_users,omitempty" yaml:"allowed_root_users,omitempty" koanf:"allowed_root_users"`
+	DefaultScopes    []string `json:"default_scopes,omitempty" yaml:"default_scopes,omitempty" koanf:"default_scopes"`
+	IssuerType       string   `json:"issuer_type,omitempty" yaml:"issuer_type,omitempty" koanf:"issuer_type"`
+	DefaultRole      string   `json:"default_role,omitempty" yaml:"default_role,omitempty" koanf:"default_role"`
+	AllowedEmails    []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
 }
 
 // V1NotificationChannelConfig holds configuration for an external notification channel.
@@ -1565,6 +1590,27 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.Scheduler.MaxConcurrency = v1.Scheduler.MaxConcurrency // both are *int; nil propagates
 	}
 
+	// Federation
+	if v1.Federation != nil {
+		if v1.Federation.Enabled != nil {
+			gc.Federation.Enabled = *v1.Federation.Enabled
+		}
+		for _, vi := range v1.Federation.TrustedIssuers {
+			gc.Federation.TrustedIssuers = append(gc.Federation.TrustedIssuers, TrustedIssuerConfig(vi))
+		}
+		gc.Federation.Algorithms = v1.Federation.Algorithms
+		if v1.Federation.RefreshInterval != "" {
+			if d, err := time.ParseDuration(v1.Federation.RefreshInterval); err == nil {
+				gc.Federation.Cache.RefreshInterval = d
+			}
+		}
+		if v1.Federation.DebounceInterval != "" {
+			if d, err := time.ParseDuration(v1.Federation.DebounceInterval); err == nil {
+				gc.Federation.Cache.DebounceInterval = d
+			}
+		}
+	}
+
 	return &gc
 }
 
@@ -1727,6 +1773,23 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1.Scheduler = &V1SchedulerConfig{
 			IntervalSeconds: gc.Scheduler.IntervalSeconds,
 			MaxConcurrency:  gc.Scheduler.MaxConcurrency,
+		}
+	}
+
+	// Federation
+	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
+		v1.Federation = &V1FederationConfig{
+			Enabled:    &gc.Federation.Enabled,
+			Algorithms: gc.Federation.Algorithms,
+		}
+		if gc.Federation.Cache.RefreshInterval > 0 {
+			v1.Federation.RefreshInterval = gc.Federation.Cache.RefreshInterval.String()
+		}
+		if gc.Federation.Cache.DebounceInterval > 0 {
+			v1.Federation.DebounceInterval = gc.Federation.Cache.DebounceInterval.String()
+		}
+		for _, ti := range gc.Federation.TrustedIssuers {
+			v1.Federation.TrustedIssuers = append(v1.Federation.TrustedIssuers, V1TrustedIssuerConfig(ti))
 		}
 	}
 

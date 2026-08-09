@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -54,9 +55,11 @@ type AuthConfig struct {
 	ProxyUserProvisioner func(ctx context.Context, info *ProxyUserInfo) (UserIdentity, error)
 	// AuthMode is the exclusive human auth mode: "oauth", "proxy", "dev".
 	AuthMode string
-	// FederationAuthenticator validates OIDC tokens from trusted external hubs.
-	// nil when federation is disabled.
-	FederationAuthenticator *FederationAuthenticator
+	// FederationAuth points to the server's atomic.Pointer for the
+	// FederationAuthenticator. nil when federation was never configured.
+	// The middleware loads from this pointer on each request to see
+	// hot-reloaded authenticators.
+	FederationAuth *atomic.Pointer[FederationAuthenticator]
 	// Debug enables verbose logging
 	Debug bool
 	// Logger is the subsystem logger for auth middleware (defaults to slog.Default())
@@ -145,13 +148,17 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 			// Step 1.5: Federation OIDC token (X-Scion-Federation-Token header)
 			if federationToken := r.Header.Get(FederationTokenHeader); federationToken != "" {
-				if cfg.FederationAuthenticator == nil {
+				var fedAuth *FederationAuthenticator
+				if cfg.FederationAuth != nil {
+					fedAuth = cfg.FederationAuth.Load()
+				}
+				if fedAuth == nil {
 					// Header present but federation not enabled — reject, don't silently ignore
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"federation authentication is not configured", nil)
 					return
 				}
-				identity, err := cfg.FederationAuthenticator.Authenticate(federationToken)
+				identity, err := fedAuth.Authenticate(federationToken)
 				if err != nil {
 					if cfg.Debug {
 						log.Debug("Federation token validation failed", "error", err)

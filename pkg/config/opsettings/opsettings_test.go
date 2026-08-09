@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/file"
@@ -31,7 +32,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "telemetry",
 		"agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports"}
+		"project_defaults", "auto_expose_ports", "federation"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -114,6 +115,11 @@ func TestOwningSection(t *testing.T) {
 		{"server.github_app.webhooks_enabled", "github_app"},
 		{"server.notification_channels", "notifications"},
 		{"auto_expose_ports.enabled", "auto_expose_ports"},
+		{"server.federation.enabled", "federation"},
+		{"server.federation.trusted_issuers", "federation"},
+		{"server.federation.algorithms", "federation"},
+		{"server.federation.refresh_interval", "federation"},
+		{"server.federation.debounce_interval", "federation"},
 	}
 	for _, tt := range tests {
 		got := OwningSection(tt.key)
@@ -194,6 +200,9 @@ func TestValidateValidDoc(t *testing.T) {
 		{"project_defaults", `{}`},
 		{"auto_expose_ports", `{"enabled":true}`},
 		{"auto_expose_ports", `{}`},
+		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://hub.example.com","issuer_type":"hub"}],"algorithms":["RS256"]}`},
+		{"federation", `{"enabled":false}`},
+		{"federation", `{}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -216,6 +225,10 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"github_app", `{"app_id":"not-a-number"}`, "wrong type for int64"},
 		{"project_defaults", `{"default_scratchpad":"yes"}`, "wrong type for boolean"},
 		{"project_defaults", `{"unknown_field":true}`, "additional property"},
+		{"federation", `{"trusted_issuers":[{"issuer_url":""}]}`, "empty issuer_url (minLength)"},
+		{"federation", `{"algorithms":["INVALID"]}`, "invalid algorithm enum"},
+		{"federation", `{"trusted_issuers":[{"issuer_type":"unknown"}]}`, "invalid issuer_type enum"},
+		{"federation", `{"unknown_field": true}`, "additional property"},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -236,6 +249,64 @@ func TestValidateInvalidJSON(t *testing.T) {
 	errs := Validate("access", json.RawMessage(`{invalid`))
 	if len(errs) == 0 {
 		t.Error("expected error for invalid JSON")
+	}
+}
+
+// --- FederationSettings section document tests ---
+
+func TestFederationSettingsRoundTrip(t *testing.T) {
+	enabled := true
+	original := &FederationSettings{
+		Enabled: &enabled,
+		TrustedIssuers: []config.V1TrustedIssuerConfig{
+			{
+				IssuerURL:        "https://hub-a.example.com",
+				JWKSURL:          "https://hub-a.example.com/.well-known/jwks.json",
+				ExpectedAudience: "https://hub-b.example.com",
+				AllowedProjects:  []string{"proj1"},
+				AllowedRootUsers: []string{"admin@example.com"},
+				DefaultScopes:    []string{"agent:status:update"},
+				IssuerType:       "hub",
+			},
+		},
+		Algorithms:       []string{"RS256"},
+		RefreshInterval:  "1h",
+		DebounceInterval: "5s",
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var restored FederationSettings
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if *restored.Enabled != true {
+		t.Errorf("Enabled: got %v, want true", *restored.Enabled)
+	}
+	if len(restored.TrustedIssuers) != 1 {
+		t.Fatalf("TrustedIssuers: got %d, want 1", len(restored.TrustedIssuers))
+	}
+	if restored.TrustedIssuers[0].IssuerURL != "https://hub-a.example.com" {
+		t.Errorf("IssuerURL: got %q, want %q", restored.TrustedIssuers[0].IssuerURL, "https://hub-a.example.com")
+	}
+	if restored.TrustedIssuers[0].IssuerType != "hub" {
+		t.Errorf("IssuerType: got %q, want %q", restored.TrustedIssuers[0].IssuerType, "hub")
+	}
+	if restored.RefreshInterval != "1h" {
+		t.Errorf("RefreshInterval: got %q, want %q", restored.RefreshInterval, "1h")
+	}
+	if restored.DebounceInterval != "5s" {
+		t.Errorf("DebounceInterval: got %q, want %q", restored.DebounceInterval, "5s")
+	}
+
+	// Validate the JSON against the section schema
+	errs := Validate("federation", json.RawMessage(data))
+	if len(errs) > 0 {
+		t.Errorf("section doc should validate against schema, got: %v", errs)
 	}
 }
 
