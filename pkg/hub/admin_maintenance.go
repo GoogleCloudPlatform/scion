@@ -696,11 +696,14 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	log := s.maintenanceLog
 	log.Info("Hub restart requested via admin API", "user", user.Email(), "service", serviceName)
 
-	// Fire-and-forget: start the restart but don't wait for it.
-	// "systemctl restart" sends SIGTERM to this process, so cmd.Run()
-	// would never return. Using cmd.Start() lets us return success first.
-	cmd := exec.Command("sudo", "systemctl", "restart", serviceName)
-	if err := cmd.Start(); err != nil {
+	// Use --no-block so systemd schedules the restart asynchronously.
+	// Without it, "systemctl restart" waits for the service to fully
+	// stop and restart — but this process IS the service, creating a
+	// deadlock.  With --no-block, systemd returns immediately, cmd.Run()
+	// completes, and we can send the response before the process is
+	// killed.
+	cmd := exec.Command("sudo", "systemctl", "restart", "--no-block", serviceName)
+	if err := cmd.Run(); err != nil {
 		log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to initiate restart", nil)
