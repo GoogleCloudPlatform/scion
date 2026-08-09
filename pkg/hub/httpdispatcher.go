@@ -944,6 +944,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 }
 
 // DispatchAgentProvision provisions an agent on the runtime broker without starting it.
+// It uses the same GatherEnv two-pass mechanism as DispatchAgentCreateWithGather so
+// that as_needed env vars (e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION) are
+// resolved before auth provisioning runs on the broker.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
@@ -959,10 +962,70 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		return err
 	}
 	req.ProvisionOnly = true
+	req.GatherEnv = true
+
+	// Track which scope provided each key
+	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
+
+	// First pass: use CreateAgentWithGather so the broker can report which
+	// env vars are still needed (returned as a 202 with env requirements).
+	resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+	if isHashMismatchError(err) {
+		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
+			resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+		}
+	}
+	if errors.Is(err, ErrLifecycleDeferred) {
+		envReqs, err = d.deferredCreateWithGather(ctx, agent)
+		if err != nil {
+			return err
+		}
+		// Fall through to the second-pass as_needed resolution below.
+	} else if err != nil {
+		return err
+	} else if resp != nil {
+		d.applyBrokerResponse(agent, resp)
+	}
+
+	// Second pass: if the broker reported needed keys, check whether any can
+	// be satisfied by as_needed env vars or secrets — mirroring the pattern in
+	// DispatchAgentCreateWithGather. We inline this instead of calling
+	// DispatchFinalizeEnv because the finalize path does not set ProvisionOnly.
+	if envReqs != nil && len(envReqs.Needs) > 0 {
+		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+		if len(asNeededEnv) > 0 {
+			if req.ResolvedEnv == nil {
+				req.ResolvedEnv = make(map[string]string)
+			}
+			for k, v := range asNeededEnv {
+				req.ResolvedEnv[k] = v
+			}
+			req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
+
+			// Replay the provision request with the resolved env.
+			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+			if isHashMismatchError(err2) {
+				if repairErr := d.repairHashMismatch(ctx, agent, err2); repairErr == nil {
+					resp2, envReqs2, err2 = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+				}
+			}
+			if err2 != nil {
+				return err2
+			}
+			if envReqs2 != nil && len(envReqs2.Needs) > 0 {
+				d.log.Warn("DispatchAgentProvision: env vars still missing after second pass",
+					"agent", agent.Name, "needs", envReqs2.Needs)
+			}
+			if resp2 != nil {
+				d.applyBrokerResponse(agent, resp2)
+			}
+		}
+	}
 
 	// Merge resolved storage env vars back into AppliedConfig so they are
 	// visible in the advanced config form. Exclude internal SCION_* vars
-	// and dev tokens which are injected at start time.
+	// and dev tokens which are injected at start time. This runs after both
+	// passes so that as_needed vars resolved in the second pass are included.
 	if agent.AppliedConfig != nil && len(req.ResolvedEnv) > 0 {
 		if agent.AppliedConfig.Env == nil {
 			agent.AppliedConfig.Env = make(map[string]string)
@@ -977,17 +1040,6 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		}
 	}
 
-	resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
-	if isHashMismatchError(err) {
-		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-			resp, err = d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
-		}
-	}
-	if err != nil {
-		return err
-	}
-
-	d.applyBrokerResponse(agent, resp)
 	return nil
 }
 
