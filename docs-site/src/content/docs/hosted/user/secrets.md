@@ -79,6 +79,21 @@ scion hub secret set ANTHROPIC_API_KEY sk-ant-api01-...
 scion hub secret set --project DB_PASSWORD my-secure-password
 ```
 
+#### Streamlined Project Secrets via `scion secret`
+
+While `scion hub secret` manages secrets at any scope (user, project, broker, hub), you can use the streamlined, top-level `scion secret` command group on your host to manage project-scoped secrets directly within your current project context:
+
+```bash
+# Set a project-scoped secret (inferred from current directory context)
+scion secret set ANTHROPIC_API_KEY sk-ant-api01-...
+
+# List all project secrets (metadata only)
+scion secret list
+
+# Get metadata for a specific project secret
+scion secret get ANTHROPIC_API_KEY
+```
+
 :::tip[Graceful Raw vs. Base64 Fallback]
 To prevent silent integration failures (such as when the web UI sends raw plaintext but the underlying REST endpoint accepts base64), all four of Scion's secret-write API handlers (Hub, User, Project, and Broker scopes) feature a **graceful fallback mechanism**.
 
