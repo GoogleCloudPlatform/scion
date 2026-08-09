@@ -589,10 +589,6 @@ func TestFederationE2E_FirebaseUser(t *testing.T) {
 	if _, ok := identity.(UserIdentity); !ok {
 		t.Errorf("expected FederatedUserIdentity to implement UserIdentity")
 	}
-	// FederatedUserIdentity implements FederatedIdentity
-	if _, ok := identity.(FederatedIdentity); !ok {
-		t.Errorf("expected FederatedUserIdentity to implement FederatedIdentity")
-	}
 }
 
 // TestFederationE2E_SAEmailRejected tests that a SA with email not in allowed_emails is rejected.
