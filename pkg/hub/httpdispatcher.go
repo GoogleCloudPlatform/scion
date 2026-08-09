@@ -976,11 +976,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		}
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
-		envReqs, err = d.deferredCreateWithGather(ctx, agent)
-		if err != nil {
-			return err
-		}
-		// Fall through to the second-pass as_needed resolution below.
+		// deferredCreateWithGather dispatches via DispatchAgentCreateWithGather which
+		// does not set ProvisionOnly — fall back to returning the error rather than
+		// accidentally triggering a full create on the remote node.
+		return fmt.Errorf("provision not supported for cross-node broker: %w", err)
 	} else if err != nil {
 		return err
 	} else if resp != nil {
