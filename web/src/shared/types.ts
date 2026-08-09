@@ -446,6 +446,10 @@ export interface Agent {
   createdBy?: string;
   appliedConfig?: AgentAppliedConfig;
 
+  // Authorization role resolved at creation time. Immutable after creation.
+  // Values: "none", "readonly", "baseline", "full".
+  agentRole?: string;
+
   // Ordered ancestor chain [root, ..., parent]; last entry is the direct
   // parent (user or spawning agent). Drives the lineage graph view.
   ancestry?: string[];

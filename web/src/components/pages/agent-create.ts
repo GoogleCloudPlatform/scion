@@ -99,6 +99,9 @@ export class ScionPageAgentCreate extends LitElement {
   private branch = '';
 
   @state()
+  private agentRole = '';
+
+  @state()
   private task = '';
 
   @state()
@@ -518,6 +521,9 @@ export class ScionPageAgentCreate extends LitElement {
       if (this.task.trim()) {
         body.task = this.task.trim();
       }
+      if (this.agentRole) {
+        body.agentRole = this.agentRole;
+      }
 
       const builtLabels = this.buildLabels();
       if (builtLabels) {
@@ -654,6 +660,9 @@ export class ScionPageAgentCreate extends LitElement {
       }
       if (this.task.trim()) {
         body.task = this.task.trim();
+      }
+      if (this.agentRole) {
+        body.agentRole = this.agentRole;
       }
 
       const builtLabels = this.buildLabels();
@@ -1224,6 +1233,25 @@ private selectBrokerForProject(): void {
               <sl-option value="none">No Authentication</sl-option>
             </sl-select>
             <div class="hint">Override the authentication method for the harness.</div>
+          </div>
+
+          <div class="form-field">
+            <label for="agent-role">Agent Role</label>
+            <sl-select
+              id="agent-role"
+              placeholder="Select a role..."
+              .value=${this.agentRole}
+              @sl-change=${(e: Event) => {
+                this.agentRole = (e.target as HTMLElement & { value: string }).value;
+              }}
+            >
+              <sl-option value="">Default (determined by project settings)</sl-option>
+              <sl-option value="none">None (no hub access)</sl-option>
+              <sl-option value="readonly">Read-only</sl-option>
+              <sl-option value="baseline">Baseline (standard)</sl-option>
+              <sl-option value="full">Full (requires admin)</sl-option>
+            </sl-select>
+            <div class="hint">Authorization role for hub API access. Determines which operations the agent can perform.</div>
           </div>
 
           <div class="form-field">
