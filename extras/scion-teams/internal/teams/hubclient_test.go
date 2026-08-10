@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,7 +50,7 @@ func TestHubClient_DeliverInbound(t *testing.T) {
 	defer ts.Close()
 
 	hmacKey := base64.StdEncoding.EncodeToString([]byte("test-secret-key-1234"))
-	client := NewHubClient(ts.URL, hmacKey, "teams-broker-1")
+	client := NewHubClient(ts.URL, hmacKey, "teams-broker-1", slog.Default())
 	client.httpClient = ts.Client()
 
 	msg := &messages.StructuredMessage{
@@ -88,7 +89,7 @@ func TestHubClient_DeliverInbound_HubError(t *testing.T) {
 	defer ts.Close()
 
 	hmacKey := base64.StdEncoding.EncodeToString([]byte("test-key"))
-	client := NewHubClient(ts.URL, hmacKey, "broker-1")
+	client := NewHubClient(ts.URL, hmacKey, "broker-1", slog.Default())
 	client.httpClient = ts.Client()
 
 	msg := &messages.StructuredMessage{
@@ -110,7 +111,7 @@ func TestHubClient_DeliverInbound_Hub4xx(t *testing.T) {
 	defer ts.Close()
 
 	hmacKey := base64.StdEncoding.EncodeToString([]byte("key"))
-	client := NewHubClient(ts.URL, hmacKey, "broker")
+	client := NewHubClient(ts.URL, hmacKey, "broker", slog.Default())
 	client.httpClient = ts.Client()
 
 	msg := &messages.StructuredMessage{
@@ -144,7 +145,7 @@ func TestHubClient_DeliverCallback(t *testing.T) {
 	defer ts.Close()
 
 	hmacKey := base64.StdEncoding.EncodeToString([]byte("secret"))
-	client := NewHubClient(ts.URL, hmacKey, "broker")
+	client := NewHubClient(ts.URL, hmacKey, "broker", slog.Default())
 	client.httpClient = ts.Client()
 
 	data := map[string]interface{}{
@@ -159,7 +160,7 @@ func TestHubClient_DeliverCallback(t *testing.T) {
 
 func TestHubClient_SignRequest_NoCredentials(t *testing.T) {
 	// When no HMAC credentials are set, signing should be a no-op.
-	client := NewHubClient("http://example.com", "", "")
+	client := NewHubClient("http://example.com", "", "", slog.Default())
 
 	req, _ := http.NewRequest("GET", "http://example.com/test", nil)
 	err := client.signRequest(req)

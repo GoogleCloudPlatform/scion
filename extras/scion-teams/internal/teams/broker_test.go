@@ -129,7 +129,7 @@ func TestBroker_GetInfo(t *testing.T) {
 
 	info, err := broker.GetInfo()
 	require.NoError(t, err)
-	assert.Equal(t, "scion-teams", info.Name)
+	assert.Equal(t, "teams", info.Name)
 	assert.Equal(t, "teams", info.ChannelID)
 	assert.Contains(t, info.Capabilities, "inbound")
 }

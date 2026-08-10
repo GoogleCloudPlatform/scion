@@ -111,6 +111,9 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 	}
 
 	// Phase 1 requires Azure credentials.
+	// NOTE: Re-calling Configure with different Phase 1 credentials does not
+	// recreate the TokenProvider or JWTValidator — a process restart is required.
+	// This is acceptable for Phase 1 but should be improved for production.
 	if b.config.AppID != "" && b.config.AppSecret != "" && b.config.TenantID != "" {
 		if b.phase < 1 {
 			b.tokenProvider = NewTokenProvider(b.config.AppID, b.config.AppSecret, b.config.TenantID)
@@ -138,7 +141,7 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 	// Phase 2 requires hub connection details AND phase 1 to be complete.
 	if b.config.HubURL != "" && b.config.HMACKey != "" && b.config.BrokerID != "" {
 		if b.phase == 1 {
-			b.hubClient = NewHubClient(b.config.HubURL, b.config.HMACKey, b.config.BrokerID)
+			b.hubClient = NewHubClient(b.config.HubURL, b.config.HMACKey, b.config.BrokerID, b.log)
 			b.phase = 2
 			b.configured = true
 			b.log.Info("Phase 2 configuration complete",
@@ -210,7 +213,7 @@ func (b *TeamsBroker) Unsubscribe(pattern string) error {
 // Phase 1 stub — outbound messaging is implemented in Phase 2.
 func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.log.Debug("Publish called (stub in Phase 1)", "topic", topic, "msg", msg.Msg)
-	return fmt.Errorf("outbound messaging not yet implemented (Phase 2)")
+	return nil
 }
 
 // Close implements MessageBrokerPluginInterface.Close.
@@ -236,7 +239,7 @@ func (b *TeamsBroker) Close() error {
 // GetInfo implements MessageBrokerPluginInterface.GetInfo.
 func (b *TeamsBroker) GetInfo() (*plugin.PluginInfo, error) {
 	return &plugin.PluginInfo{
-		Name:            "scion-teams",
+		Name:            "teams",
 		Version:         "0.1.0",
 		MinScionVersion: "0.1.0",
 		ChannelID:       "teams",

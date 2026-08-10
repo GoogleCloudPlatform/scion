@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,14 +30,43 @@ import (
 
 // mockActivityHandler records activities for test assertions.
 type mockActivityHandler struct {
+	mu         sync.Mutex
 	activities []*Activity
 	response   *InvokeResponse
 	err        error
+	done       chan struct{} // closed after HandleActivity completes (for async tests)
+}
+
+func newMockActivityHandler() *mockActivityHandler {
+	return &mockActivityHandler{
+		done: make(chan struct{}, 1),
+	}
 }
 
 func (m *mockActivityHandler) HandleActivity(_ context.Context, activity *Activity) (*InvokeResponse, error) {
+	m.mu.Lock()
 	m.activities = append(m.activities, activity)
+	m.mu.Unlock()
+	select {
+	case m.done <- struct{}{}:
+	default:
+	}
 	return m.response, m.err
+}
+
+// waitForActivity blocks until HandleActivity has been called at least once.
+func (m *mockActivityHandler) waitForActivity(t *testing.T) {
+	t.Helper()
+	<-m.done
+}
+
+// getActivities returns a copy of the recorded activities.
+func (m *mockActivityHandler) getActivities() []*Activity {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]*Activity, len(m.activities))
+	copy(cp, m.activities)
+	return cp
 }
 
 // testWebhookServer creates a webhook server with a test JWKS for validation.
@@ -59,7 +89,7 @@ func testWebhookServer(t *testing.T, handler ActivityHandler) (*httptest.Server,
 }
 
 func TestWebhookServer_ValidActivity(t *testing.T) {
-	handler := &mockActivityHandler{}
+	handler := newMockActivityHandler()
 	ts, tj := testWebhookServer(t, handler)
 	defer ts.Close()
 	defer tj.close()
@@ -93,14 +123,18 @@ func TestWebhookServer_ValidActivity(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Len(t, handler.activities, 1)
-	assert.Equal(t, "message", handler.activities[0].Type)
-	assert.Equal(t, "Hello bot!", handler.activities[0].Text)
-	assert.Equal(t, "Test User", handler.activities[0].From.Name)
+
+	// Non-invoke activities are dispatched asynchronously; wait for completion.
+	handler.waitForActivity(t)
+	activities := handler.getActivities()
+	require.Len(t, activities, 1)
+	assert.Equal(t, "message", activities[0].Type)
+	assert.Equal(t, "Hello bot!", activities[0].Text)
+	assert.Equal(t, "Test User", activities[0].From.Name)
 }
 
 func TestWebhookServer_MissingAuthorization(t *testing.T) {
-	handler := &mockActivityHandler{}
+	handler := newMockActivityHandler()
 	ts, tj := testWebhookServer(t, handler)
 	defer ts.Close()
 	defer tj.close()
@@ -120,7 +154,7 @@ func TestWebhookServer_MissingAuthorization(t *testing.T) {
 }
 
 func TestWebhookServer_InvalidJWT(t *testing.T) {
-	handler := &mockActivityHandler{}
+	handler := newMockActivityHandler()
 	ts, tj := testWebhookServer(t, handler)
 	defer ts.Close()
 	defer tj.close()
@@ -141,7 +175,7 @@ func TestWebhookServer_InvalidJWT(t *testing.T) {
 }
 
 func TestWebhookServer_MalformedJSON(t *testing.T) {
-	handler := &mockActivityHandler{}
+	handler := newMockActivityHandler()
 	ts, tj := testWebhookServer(t, handler)
 	defer ts.Close()
 	defer tj.close()
@@ -175,7 +209,7 @@ func TestWebhookServer_ActivityTypeRouting(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handler := &mockActivityHandler{}
+			handler := newMockActivityHandler()
 			ts, tj := testWebhookServer(t, handler)
 			defer ts.Close()
 			defer tj.close()
@@ -204,18 +238,21 @@ func TestWebhookServer_ActivityTypeRouting(t *testing.T) {
 			defer resp.Body.Close()
 
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
-			require.Len(t, handler.activities, 1)
-			assert.Equal(t, tt.activityType, handler.activities[0].Type)
+
+			// Non-invoke activities are dispatched asynchronously.
+			handler.waitForActivity(t)
+			activities := handler.getActivities()
+			require.Len(t, activities, 1)
+			assert.Equal(t, tt.activityType, activities[0].Type)
 		})
 	}
 }
 
 func TestWebhookServer_InvokeResponse(t *testing.T) {
-	handler := &mockActivityHandler{
-		response: &InvokeResponse{
-			Status: http.StatusOK,
-			Body:   map[string]string{"result": "success"},
-		},
+	handler := newMockActivityHandler()
+	handler.response = &InvokeResponse{
+		Status: http.StatusOK,
+		Body:   map[string]string{"result": "success"},
 	}
 	ts, tj := testWebhookServer(t, handler)
 	defer ts.Close()
@@ -250,7 +287,7 @@ func TestWebhookServer_InvokeResponse(t *testing.T) {
 }
 
 func TestWebhookServer_HealthEndpoint(t *testing.T) {
-	handler := &mockActivityHandler{}
+	handler := newMockActivityHandler()
 	ts, tj := testWebhookServer(t, handler)
 	defer ts.Close()
 	defer tj.close()

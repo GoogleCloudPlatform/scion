@@ -241,6 +241,25 @@ func TestJWTValidator_ExpiredToken(t *testing.T) {
 	assert.Contains(t, err.Error(), "token is expired")
 }
 
+func TestJWTValidator_NbfInFuture(t *testing.T) {
+	tj := newTestJWKS(t)
+	defer tj.close()
+
+	appID := "test-app-id"
+	v := NewJWTValidator(appID)
+	v.openIDMetadataURL = tj.server.URL + "/.well-known/openidconfiguration"
+	v.httpClient = tj.server.Client()
+
+	claims := tj.validClaims(appID)
+	claims["nbf"] = time.Now().Add(1 * time.Hour).Unix() // Not valid yet.
+
+	tokenString := tj.signToken(claims)
+
+	_, err := v.ValidateToken(context.Background(), tokenString)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "token is not valid yet")
+}
+
 func TestJWTValidator_WrongAudience(t *testing.T) {
 	tj := newTestJWKS(t)
 	defer tj.close()

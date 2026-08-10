@@ -124,7 +124,7 @@ func (ws *WebhookServer) handleMessages(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// 2. Read and deserialize Activity.
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20)) // 1MB limit
 	if err != nil {
 		ws.log.Error("Failed to read request body", "error", err)
 		http.Error(w, "failed to read body", http.StatusBadRequest)
@@ -146,6 +146,19 @@ func (ws *WebhookServer) handleMessages(w http.ResponseWriter, r *http.Request) 
 	)
 
 	// 3. Dispatch to handler.
+	// For non-invoke activities, acknowledge immediately and dispatch async.
+	// This avoids blocking the HTTP response on hub delivery (design doc §4.1).
+	if activity.Type != "invoke" {
+		w.WriteHeader(http.StatusOK)
+		go func() {
+			if _, err := ws.handler.HandleActivity(context.Background(), &activity); err != nil {
+				ws.log.Error("Async activity handler error", "error", err, "type", activity.Type)
+			}
+		}()
+		return
+	}
+
+	// Invoke activities need synchronous processing to return InvokeResponse.
 	invokeResp, err := ws.handler.HandleActivity(r.Context(), &activity)
 	if err != nil {
 		ws.log.Error("Activity handler error", "error", err, "type", activity.Type)
@@ -153,15 +166,14 @@ func (ws *WebhookServer) handleMessages(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 4. Return response. For invoke activities, return the InvokeResponse body.
-	if activity.Type == "invoke" && invokeResp != nil {
+	// Return the InvokeResponse body.
+	if invokeResp != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(invokeResp.Status)
 		json.NewEncoder(w).Encode(invokeResp.Body)
 		return
 	}
 
-	// For all other activity types, acknowledge with 200 OK.
 	w.WriteHeader(http.StatusOK)
 }
 

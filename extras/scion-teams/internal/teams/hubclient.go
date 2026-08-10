@@ -35,15 +35,17 @@ type HubClient struct {
 	hmacKey    string
 	brokerID   string
 	httpClient *http.Client
+	log        *slog.Logger
 }
 
 // NewHubClient creates a new HubClient for delivering messages to the hub.
-func NewHubClient(hubURL, hmacKey, brokerID string) *HubClient {
+func NewHubClient(hubURL, hmacKey, brokerID string, log *slog.Logger) *HubClient {
 	return &HubClient{
 		hubURL:     hubURL,
 		hmacKey:    hmacKey,
 		brokerID:   brokerID,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
+		log:        log,
 	}
 }
 
@@ -67,7 +69,7 @@ func (c *HubClient) DeliverInbound(ctx context.Context, topic string, msg *messa
 
 	url := c.hubURL + "/api/v1/broker/inbound"
 
-	slog.Debug("Delivering inbound message to hub",
+	c.log.Debug("Delivering inbound message to hub",
 		"url", url,
 		"topic", topic,
 		"sender", msg.Sender,
@@ -144,13 +146,9 @@ func (c *HubClient) signRequest(req *http.Request) error {
 		return nil
 	}
 
-	secretKey, err := base64.StdEncoding.DecodeString(c.hmacKey)
+	secretKey, err := decodeBase64(c.hmacKey)
 	if err != nil {
-		// Try URL-safe base64.
-		secretKey, err = base64.URLEncoding.DecodeString(c.hmacKey)
-		if err != nil {
-			return fmt.Errorf("decode HMAC key: %w", err)
-		}
+		return fmt.Errorf("decode HMAC key: %w", err)
 	}
 
 	auth := &apiclient.HMACAuth{
@@ -158,4 +156,22 @@ func (c *HubClient) signRequest(req *http.Request) error {
 		SecretKey: secretKey,
 	}
 	return auth.ApplyAuth(req)
+}
+
+// decodeBase64 tries standard and URL-safe base64 decoding, with and without
+// padding, matching the Discord plugin's approach.
+func decodeBase64(s string) ([]byte, error) {
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	if b, err := base64.URLEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return nil, fmt.Errorf("invalid base64 encoding")
 }
