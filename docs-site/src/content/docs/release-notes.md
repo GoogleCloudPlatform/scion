@@ -4,14 +4,15 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of July 27 -- August 2, 2026
+## Latest: Week of August 3 -- 9, 2026
 
-This week delivered a full-stack session metrics subsystem from agent-side telemetry aggregation through API endpoints and web UI dashboards, completed the config-driven auth migration that eliminates all hardcoded per-provider credentials, and shipped pre-start customization hooks at both project and hub scope. The A2A protocol bridge gained admin UI integration with live config management, Discord added one-step thread+agent creation and file retrieval commands, and a sustained chain of auth and injection fixes resolved a class of Vertex AI restart failures.
+This week marked a massive leap forward for Scion's production readiness, headlined by an end-to-end security and identity federation overhaul that includes OIDC provider capabilities, tiered agent authorization roles, and multi-issuer OIDC logins. Alongside these security enhancements, the platform introduced a comprehensive observability suite featuring real-time diagnostic logs, active health-monitoring alerts, and server-side OTel tracing. Additionally, a redesigned user onboarding flow and major high-availability updates to the A2A Protocol Bridge solidify Scion's capability to run at enterprise scale.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-07-27/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-08-03/)
 
 ## Previous Weeks
 
+- [Week of July 27 -- August 2, 2026](/scion/release-notes/2026-07-27/)
 - [Week of July 19--25, 2026](/scion/release-notes/2026-07-19/)
 - [Week of July 12--19, 2026](/scion/release-notes/2026-07-12/)
 
