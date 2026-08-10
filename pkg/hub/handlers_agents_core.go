@@ -1963,14 +1963,36 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		attribute.String("scion.agent.id", agent.ID),
 	)
 
-	// Enforce policy-based authorization: only the agent's creator (owner) or admins can delete
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionDelete)
+	// Authorize by caller kind: users by delete policy, agents by lifecycle
+	// scope + same-project isolation (as in handleAgentAction). Fail closed
+	// for a caller that is neither — a user-only check would silently skip
+	// agent callers, which do not satisfy the UserIdentity interface.
+	switch ident := GetIdentityFromContext(ctx).(type) {
+	case UserIdentity:
+		decision := s.authzService.CheckAccess(ctx, ident, agentResource(agent), ActionDelete)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Only the agent's creator can delete it", nil)
 			return
 		}
+	case AgentIdentity:
+		if !ident.HasScope(ScopeAgentLifecycle) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Missing required scope: project:agent:lifecycle", nil)
+			return
+		}
+		// An empty project ID on either side must never authorize: two empty
+		// strings compare equal, so a malformed token or corrupted record would
+		// otherwise slip past the isolation gate.
+		if agent.ProjectID == "" || ident.ProjectID() == "" || agent.ProjectID != ident.ProjectID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Agents can only manage agents within their own project", nil)
+			return
+		}
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"This action requires user or agent authentication", nil)
+		return
 	}
 
 	query := r.URL.Query()
