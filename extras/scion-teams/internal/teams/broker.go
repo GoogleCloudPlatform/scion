@@ -44,6 +44,8 @@ type Config struct {
 	TenantID       string
 	ListenAddress  string
 	DBPath         string
+	DBType         string // "sqlite" (default) or "postgres"
+	DBDSN          string // PostgreSQL DSN (required when DBType=postgres)
 	MentionRouting bool
 
 	// Phase 2: Hub connection.
@@ -68,20 +70,13 @@ type TeamsBroker struct {
 	sender    *Sender
 	sendQueue *SendQueue
 
+	// Persistent store (Phase 3).
+	store Store
+
 	configured bool
 	phase      int // 1 or 2
 
 	mu sync.Mutex
-
-	// In-memory conversation references (proper Store in Phase 3).
-	conversationRefs map[string]*ConversationReference
-
-	// In-memory channel links (proper Store in Phase 3).
-	channelLinks map[string]*ChannelLink
-
-	// In-memory conversation contexts (proper Store in Phase 3).
-	// Key: teamsUserID + ":" + projectID + ":" + agentSlug.
-	conversationContexts map[string]*ConversationContext
 
 	// Subscription tracking.
 	subscriptions map[string]bool
@@ -91,11 +86,8 @@ type TeamsBroker struct {
 // NewBroker creates a new TeamsBroker instance.
 func NewBroker(log *slog.Logger) *TeamsBroker {
 	return &TeamsBroker{
-		log:                  log,
-		conversationRefs:     make(map[string]*ConversationReference),
-		channelLinks:         make(map[string]*ChannelLink),
-		conversationContexts: make(map[string]*ConversationContext),
-		subscriptions:        make(map[string]bool),
+		log:           log,
+		subscriptions: make(map[string]bool),
 	}
 }
 
@@ -131,6 +123,12 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 	if v, ok := config["db_path"]; ok {
 		b.config.DBPath = v
 	}
+	if v, ok := config["db_type"]; ok {
+		b.config.DBType = v
+	}
+	if v, ok := config["db_dsn"]; ok {
+		b.config.DBDSN = v
+	}
 	if v, ok := config["mention_routing"]; ok {
 		b.config.MentionRouting = v != "false"
 	}
@@ -143,11 +141,27 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 		if b.phase < 1 {
 			b.tokenProvider = NewTokenProvider(b.config.AppID, b.config.AppSecret, b.config.TenantID)
 			b.jwtValidator = NewJWTValidator(b.config.AppID)
+
+			// Initialize persistence store.
+			var storeErr error
+			if b.config.DBType == "postgres" {
+				if b.config.DBDSN == "" {
+					return fmt.Errorf("db_dsn is required when db_type=postgres")
+				}
+				b.store, storeErr = NewPostgresStore(b.config.DBDSN)
+			} else {
+				b.store, storeErr = NewSQLiteStore(b.config.DBPath)
+			}
+			if storeErr != nil {
+				return fmt.Errorf("initialize store: %w", storeErr)
+			}
+
 			b.phase = 1
 			b.log.Info("Phase 1 configuration complete",
 				"app_id", b.config.AppID,
 				"tenant_id", b.config.TenantID,
 				"listen_address", b.config.ListenAddress,
+				"db_type", b.config.DBType,
 			)
 		}
 	}
@@ -310,12 +324,17 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	}
 	var targets []sendTarget
 
+	b.mu.Lock()
+	store := b.store
+	b.mu.Unlock()
+
 	// Priority 1: ThreadID match.
-	if msg.ThreadID != "" {
-		b.mu.Lock()
-		ref, ok := b.conversationRefs[msg.ThreadID]
-		b.mu.Unlock()
-		if ok {
+	if msg.ThreadID != "" && store != nil {
+		ref, err := store.GetConversationReference(ctx, msg.ThreadID)
+		if err != nil {
+			b.log.Warn("Error looking up conversation reference", "thread_id", msg.ThreadID, "error", err)
+		}
+		if ref != nil {
 			targets = append(targets, sendTarget{
 				conversationID: ref.ConversationID,
 				serviceURL:     ref.ServiceURL,
@@ -327,11 +346,12 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	if len(targets) == 0 && msg.Metadata != nil {
 		if convID, ok := msg.Metadata["teams_conversation_id"]; ok && convID != "" {
 			serviceURL := msg.Metadata["teams_service_url"]
-			if serviceURL == "" {
-				b.mu.Lock()
-				ref, ok := b.conversationRefs[convID]
-				b.mu.Unlock()
-				if ok {
+			if serviceURL == "" && store != nil {
+				ref, err := store.GetConversationReference(ctx, convID)
+				if err != nil {
+					b.log.Warn("Error looking up conversation reference", "conversation_id", convID, "error", err)
+				}
+				if ref != nil {
 					serviceURL = ref.ServiceURL
 				}
 			}
@@ -346,7 +366,7 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	}
 
 	// Priority 3: ConversationContext — last context for recipient+project+agent.
-	if len(targets) == 0 && msg.Recipient != "" && projectID != "" {
+	if len(targets) == 0 && msg.Recipient != "" && projectID != "" && store != nil {
 		ccSlug := agentSlug
 		if ccSlug == "" && strings.HasPrefix(msg.Sender, "agent:") {
 			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
@@ -357,22 +377,19 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 			recipientID = msg.Recipient
 		}
 
-		ccKey := conversationContextKey(recipientID, projectID, ccSlug)
-		b.mu.Lock()
-		cc, ok := b.conversationContexts[ccKey]
-		b.mu.Unlock()
-		if ok && cc.LastConversationID != "" {
-			serviceURL := ""
-			b.mu.Lock()
-			ref, refOK := b.conversationRefs[cc.LastConversationID]
-			b.mu.Unlock()
-			if refOK {
-				serviceURL = ref.ServiceURL
+		cc, err := store.GetConversationContext(ctx, recipientID, projectID, ccSlug)
+		if err != nil {
+			b.log.Warn("Error looking up conversation context", "error", err)
+		}
+		if cc != nil && cc.LastConversationID != "" {
+			ref, err := store.GetConversationReference(ctx, cc.LastConversationID)
+			if err != nil {
+				b.log.Warn("Error looking up conversation reference for context", "error", err)
 			}
-			if serviceURL != "" {
+			if ref != nil && ref.ServiceURL != "" {
 				targets = append(targets, sendTarget{
 					conversationID: cc.LastConversationID,
-					serviceURL:     serviceURL,
+					serviceURL:     ref.ServiceURL,
 					replyToID:      cc.LastActivityID,
 				})
 			}
@@ -380,24 +397,26 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	}
 
 	// Priority 4: ChannelLinks broadcast.
-	if len(targets) == 0 && projectID != "" {
-		b.mu.Lock()
-		for _, link := range b.channelLinks {
-			if link.Active && (link.ProjectID == projectID || link.ProjectSlug == projectID) {
-				serviceURL := ""
-				ref, ok := b.conversationRefs[link.ConversationID]
-				if ok {
-					serviceURL = ref.ServiceURL
+	if len(targets) == 0 && projectID != "" && store != nil {
+		links, err := store.GetChannelLinksForProject(ctx, projectID)
+		if err != nil {
+			b.log.Warn("Error looking up channel links", "project_id", projectID, "error", err)
+		}
+		for _, link := range links {
+			if link.Active {
+				ref, err := store.GetConversationReference(ctx, link.ConversationID)
+				if err != nil {
+					b.log.Warn("Error looking up conversation reference for link", "conversation_id", link.ConversationID, "error", err)
+					continue
 				}
-				if serviceURL != "" {
+				if ref != nil && ref.ServiceURL != "" {
 					targets = append(targets, sendTarget{
 						conversationID: link.ConversationID,
-						serviceURL:     serviceURL,
+						serviceURL:     ref.ServiceURL,
 					})
 				}
 			}
 		}
-		b.mu.Unlock()
 	}
 
 	if len(targets) == 0 {
@@ -449,24 +468,30 @@ func parsePublishTopic(topic string) (projectID, agentSlug string) {
 	return
 }
 
-// conversationContextKey builds the map key for conversation context lookups.
-func conversationContextKey(teamsUserID, projectID, agentSlug string) string {
-	return teamsUserID + ":" + projectID + ":" + agentSlug
-}
-
-// SetConversationContext updates the in-memory conversation context.
+// SetConversationContext persists the conversation context via the store.
 func (b *TeamsBroker) SetConversationContext(cc *ConversationContext) {
-	key := conversationContextKey(cc.TeamsUserID, cc.ProjectID, cc.AgentSlug)
 	b.mu.Lock()
-	b.conversationContexts[key] = cc
+	store := b.store
 	b.mu.Unlock()
+
+	if store != nil {
+		if err := store.SetConversationContext(context.Background(), cc); err != nil {
+			b.log.Warn("Failed to persist conversation context", "error", err)
+		}
+	}
 }
 
-// AddChannelLink adds or updates a channel link in the in-memory map.
+// AddChannelLink creates or updates a channel link via the store.
 func (b *TeamsBroker) AddChannelLink(link *ChannelLink) {
 	b.mu.Lock()
-	b.channelLinks[link.ConversationID] = link
+	store := b.store
 	b.mu.Unlock()
+
+	if store != nil {
+		if err := store.CreateChannelLink(context.Background(), link); err != nil {
+			b.log.Warn("Failed to persist channel link", "error", err)
+		}
+	}
 }
 
 // Close implements MessageBrokerPluginInterface.Close.
@@ -486,6 +511,12 @@ func (b *TeamsBroker) Close() error {
 			b.log.Warn("Error stopping webhook server on close", "error", err)
 		}
 		b.serverRunning = false
+	}
+
+	if b.store != nil {
+		if err := b.store.Close(); err != nil {
+			b.log.Warn("Error closing store", "error", err)
+		}
 	}
 
 	b.subscriptions = make(map[string]bool)
@@ -705,13 +736,16 @@ func isValidAgentSlug(s string) bool {
 	return true
 }
 
-// upsertConversationRef updates the in-memory conversation reference map.
+// upsertConversationRef persists the conversation reference via the store.
 func (b *TeamsBroker) upsertConversationRef(activity *Activity) {
 	ref := &ConversationReference{
-		ServiceURL:     activity.ServiceURL,
-		ConversationID: activity.Conversation.ID,
-		ChannelID:      activity.ChannelID,
-		BotID:          activity.Recipient.ID,
+		ConversationID:   activity.Conversation.ID,
+		ServiceURL:       activity.ServiceURL,
+		BotID:            activity.Recipient.ID,
+		BotName:          activity.Recipient.Name,
+		ConversationType: activity.Conversation.ConversationType,
+		ChannelID:        activity.ChannelID,
+		UpdatedAt:        time.Now(),
 	}
 
 	if activity.Conversation.TenantID != "" {
@@ -720,7 +754,25 @@ func (b *TeamsBroker) upsertConversationRef(activity *Activity) {
 		ref.TenantID = activity.ChannelData.Tenant.ID
 	}
 
+	// Extract team ID from channel data.
+	if activity.ChannelData != nil {
+		if activity.ChannelData.TeamsTeamID != "" {
+			ref.TeamID = activity.ChannelData.TeamsTeamID
+		} else if activity.ChannelData.Team != nil && activity.ChannelData.Team.ID != "" {
+			ref.TeamID = activity.ChannelData.Team.ID
+		}
+	}
+
 	b.mu.Lock()
-	b.conversationRefs[activity.Conversation.ID] = ref
+	store := b.store
 	b.mu.Unlock()
+
+	if store != nil {
+		if err := store.UpsertConversationReference(context.Background(), ref); err != nil {
+			b.log.Warn("Failed to upsert conversation reference",
+				"conversation_id", ref.ConversationID,
+				"error", err,
+			)
+		}
+	}
 }

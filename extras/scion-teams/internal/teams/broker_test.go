@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -37,15 +38,18 @@ func TestBroker_Configure_Phase1(t *testing.T) {
 		"app_secret":     "test-secret",
 		"tenant_id":      "test-tenant",
 		"listen_address": ":4000",
+		"db_path":        filepath.Join(t.TempDir(), "test.db"),
 	})
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, broker.phase)
 	assert.NotNil(t, broker.tokenProvider)
 	assert.NotNil(t, broker.jwtValidator)
+	assert.NotNil(t, broker.store)
 	assert.False(t, broker.configured)
 	assert.Equal(t, "test-app-id", broker.config.AppID)
 	assert.Equal(t, ":4000", broker.config.ListenAddress)
+	t.Cleanup(func() { broker.Close() })
 }
 
 func TestBroker_Configure_Phase2(t *testing.T) {
@@ -56,6 +60,7 @@ func TestBroker_Configure_Phase2(t *testing.T) {
 		"app_id":     "test-app-id",
 		"app_secret": "test-secret",
 		"tenant_id":  "test-tenant",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 1, broker.phase)
@@ -70,6 +75,7 @@ func TestBroker_Configure_Phase2(t *testing.T) {
 	assert.Equal(t, 2, broker.phase)
 	assert.True(t, broker.configured)
 	assert.NotNil(t, broker.hubClient)
+	t.Cleanup(func() { broker.Close() })
 }
 
 func TestBroker_Configure_BothPhasesAtOnce(t *testing.T) {
@@ -82,10 +88,12 @@ func TestBroker_Configure_BothPhasesAtOnce(t *testing.T) {
 		"hub_url":    "http://localhost:8080",
 		"hmac_key":   "dGVzdC1rZXk=",
 		"broker_id":  "teams-broker-1",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, broker.phase)
 	assert.True(t, broker.configured)
+	t.Cleanup(func() { broker.Close() })
 }
 
 func TestBroker_Configure_MissingPhase1(t *testing.T) {
@@ -109,12 +117,13 @@ func TestBroker_Configure_Defaults(t *testing.T) {
 		"app_id":     "id",
 		"app_secret": "secret",
 		"tenant_id":  "tenant",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
 	})
 	require.NoError(t, err)
 
 	assert.Equal(t, ":3978", broker.config.ListenAddress)
-	assert.Equal(t, "teams.db", broker.config.DBPath)
 	assert.True(t, broker.config.MentionRouting)
+	t.Cleanup(func() { broker.Close() })
 }
 
 func TestBroker_Configure_MentionRoutingDisable(t *testing.T) {
@@ -125,9 +134,11 @@ func TestBroker_Configure_MentionRoutingDisable(t *testing.T) {
 		"app_secret":      "secret",
 		"tenant_id":       "tenant",
 		"mention_routing": "false",
+		"db_path":         filepath.Join(t.TempDir(), "test.db"),
 	})
 	require.NoError(t, err)
 	assert.False(t, broker.config.MentionRouting)
+	t.Cleanup(func() { broker.Close() })
 }
 
 func TestBroker_GetInfo(t *testing.T) {
@@ -158,7 +169,9 @@ func TestBroker_HealthCheck_ConfiguredNoServer(t *testing.T) {
 		"hub_url":    "http://hub",
 		"hmac_key":   "key",
 		"broker_id":  "broker",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
 	})
+	t.Cleanup(func() { broker.Close() })
 
 	health, err := broker.HealthCheck()
 	require.NoError(t, err)
@@ -179,7 +192,9 @@ func TestBroker_HandleActivity_Message(t *testing.T) {
 		"app_id":     "bot-id",
 		"app_secret": "secret",
 		"tenant_id":  "tenant",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
 	})
+	t.Cleanup(func() { broker.Close() })
 
 	activity := &Activity{
 		Type:      "message",
@@ -198,11 +213,10 @@ func TestBroker_HandleActivity_Message(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, resp) // message type returns nil InvokeResponse
 
-	// Verify conversation ref was stored.
-	broker.mu.Lock()
-	ref, ok := broker.conversationRefs["conv-1"]
-	broker.mu.Unlock()
-	assert.True(t, ok)
+	// Verify conversation ref was stored via the store.
+	ref, err := broker.store.GetConversationReference(context.Background(), "conv-1")
+	require.NoError(t, err)
+	require.NotNil(t, ref)
 	assert.Equal(t, "https://smba.trafficmanager.net/amer/", ref.ServiceURL)
 }
 
@@ -212,7 +226,9 @@ func TestBroker_HandleActivity_SkipsSelf(t *testing.T) {
 		"app_id":     "bot-id",
 		"app_secret": "secret",
 		"tenant_id":  "tenant",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
 	})
+	t.Cleanup(func() { broker.Close() })
 
 	// Message from the bot itself should be skipped.
 	activity := &Activity{
@@ -318,12 +334,12 @@ func TestBroker_Publish_MetadataConversationTarget(t *testing.T) {
 	configureBrokerForPublish(t, broker)
 
 	// Store a conversation reference with a valid service URL.
-	broker.mu.Lock()
-	broker.conversationRefs["conv-target"] = &ConversationReference{
-		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+	ctx := context.Background()
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "conv-target",
-	}
-	broker.mu.Unlock()
+		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+		UpdatedAt:      time.Now(),
+	}))
 
 	// The message targets a specific conversation via metadata.
 	msg := &messages.StructuredMessage{
@@ -333,7 +349,7 @@ func TestBroker_Publish_MetadataConversationTarget(t *testing.T) {
 		Type:    messages.TypeInstruction,
 		Metadata: map[string]string{
 			"teams_conversation_id": "conv-target",
-			"teams_service_url":    "https://smba.trafficmanager.net/amer/",
+			"teams_service_url":     "https://smba.trafficmanager.net/amer/",
 		},
 	}
 
@@ -347,21 +363,23 @@ func TestBroker_Publish_ChannelLinkBroadcast(t *testing.T) {
 	broker := NewBroker(slog.Default())
 	configureBrokerForPublish(t, broker)
 
-	// Add a channel link.
+	ctx := context.Background()
+
+	// Add a channel link via the store.
 	broker.AddChannelLink(&ChannelLink{
 		ConversationID: "linked-conv",
 		ProjectID:      "test-project",
 		ProjectSlug:    "test-project",
 		Active:         true,
+		LinkedAt:       time.Now(),
 	})
 
 	// Add conversation ref for the linked conversation.
-	broker.mu.Lock()
-	broker.conversationRefs["linked-conv"] = &ConversationReference{
-		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "linked-conv",
-	}
-	broker.mu.Unlock()
+		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+		UpdatedAt:      time.Now(),
+	}))
 
 	msg := &messages.StructuredMessage{
 		Version: messages.Version,
@@ -380,22 +398,24 @@ func TestBroker_Publish_ConversationContextRouting(t *testing.T) {
 	broker := NewBroker(slog.Default())
 	configureBrokerForPublish(t, broker)
 
-	// Set a conversation context.
+	ctx := context.Background()
+
+	// Set a conversation context via the store.
 	broker.SetConversationContext(&ConversationContext{
 		TeamsUserID:        "user-1",
 		ProjectID:          "myproject",
 		AgentSlug:          "builder",
 		LastConversationID: "ctx-conv",
 		LastActivityID:     "ctx-act",
+		LastMessageAt:      time.Now(),
 	})
 
 	// Add conversation ref.
-	broker.mu.Lock()
-	broker.conversationRefs["ctx-conv"] = &ConversationReference{
-		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "ctx-conv",
-	}
-	broker.mu.Unlock()
+		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+		UpdatedAt:      time.Now(),
+	}))
 
 	msg := &messages.StructuredMessage{
 		Version:     messages.Version,
@@ -432,7 +452,9 @@ func TestBroker_HandleActivity_EchoPrevention(t *testing.T) {
 		"app_id":     "bot-id",
 		"app_secret": "secret",
 		"tenant_id":  "tenant",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
 	})
+	t.Cleanup(func() { broker.Close() })
 
 	// Simulate an inbound message from the bot itself (self-ID check).
 	activity := &Activity{
@@ -467,44 +489,38 @@ func TestBroker_ParsePublishTopic(t *testing.T) {
 	}
 }
 
-func TestBroker_ConversationContextKey(t *testing.T) {
-	key := conversationContextKey("user1", "proj1", "agent1")
-	assert.Equal(t, "user1:proj1:agent1", key)
-}
-
 func TestBroker_AddChannelLink(t *testing.T) {
 	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
 
 	broker.AddChannelLink(&ChannelLink{
 		ConversationID: "conv-1",
 		ProjectID:      "proj-1",
 		Active:         true,
+		LinkedAt:       time.Now(),
 	})
 
-	broker.mu.Lock()
-	link, ok := broker.channelLinks["conv-1"]
-	broker.mu.Unlock()
-
-	assert.True(t, ok)
+	link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
+	require.NoError(t, err)
+	require.NotNil(t, link)
 	assert.Equal(t, "proj-1", link.ProjectID)
 }
 
 func TestBroker_SetConversationContext(t *testing.T) {
 	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
 
 	broker.SetConversationContext(&ConversationContext{
 		TeamsUserID:        "u1",
 		ProjectID:          "p1",
 		AgentSlug:          "a1",
 		LastConversationID: "conv-1",
+		LastMessageAt:      time.Now(),
 	})
 
-	key := conversationContextKey("u1", "p1", "a1")
-	broker.mu.Lock()
-	cc, ok := broker.conversationContexts[key]
-	broker.mu.Unlock()
-
-	assert.True(t, ok)
+	cc, err := broker.store.GetConversationContext(context.Background(), "u1", "p1", "a1")
+	require.NoError(t, err)
+	require.NotNil(t, cc)
 	assert.Equal(t, "conv-1", cc.LastConversationID)
 }
 
@@ -520,9 +536,12 @@ func configureBrokerForPublish(t *testing.T, broker *TeamsBroker) {
 		"hub_url":    "http://localhost:8080",
 		"hmac_key":   "dGVzdC1rZXk=",
 		"broker_id":  "teams-broker-1",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, broker.sendQueue)
+	require.NotNil(t, broker.store)
+	t.Cleanup(func() { broker.Close() })
 }
 
 // configureBrokerWithAPI sets up a broker whose Sender points at apiServer
@@ -572,28 +591,32 @@ func TestBroker_Publish_MultiTargetReplyToIDs(t *testing.T) {
 	broker := NewBroker(slog.Default())
 	configureBrokerWithAPI(t, broker, apiServer.URL)
 
-	// Set up two conversations with different replyToIDs via metadata routing.
-	broker.mu.Lock()
-	broker.conversationRefs["conv-A"] = &ConversationReference{
-		ServiceURL:     apiServer.URL,
+	ctx := context.Background()
+
+	// Set up two conversations with conversation references via the store.
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "conv-A",
-	}
-	broker.conversationRefs["conv-B"] = &ConversationReference{
 		ServiceURL:     apiServer.URL,
+		UpdatedAt:      time.Now(),
+	}))
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "conv-B",
-	}
+		ServiceURL:     apiServer.URL,
+		UpdatedAt:      time.Now(),
+	}))
 	// Link both conversations to the same project.
-	broker.channelLinks["conv-A"] = &ChannelLink{
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
 		ConversationID: "conv-A",
 		ProjectID:      "multi-proj",
 		Active:         true,
-	}
-	broker.channelLinks["conv-B"] = &ChannelLink{
+		LinkedAt:       time.Now(),
+	}))
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
 		ConversationID: "conv-B",
 		ProjectID:      "multi-proj",
 		Active:         true,
-	}
-	broker.mu.Unlock()
+		LinkedAt:       time.Now(),
+	}))
 
 	msg := &messages.StructuredMessage{
 		Version: messages.Version,
@@ -627,13 +650,14 @@ func TestBroker_Publish_ThreadIDRouting(t *testing.T) {
 	broker := NewBroker(slog.Default())
 	configureBrokerWithAPI(t, broker, apiServer.URL)
 
+	ctx := context.Background()
+
 	// Store a conversation reference that matches a thread ID.
-	broker.mu.Lock()
-	broker.conversationRefs["thread-123"] = &ConversationReference{
-		ServiceURL:     apiServer.URL,
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "thread-123",
-	}
-	broker.mu.Unlock()
+		ServiceURL:     apiServer.URL,
+		UpdatedAt:      time.Now(),
+	}))
 
 	msg := &messages.StructuredMessage{
 		Version:  messages.Version,

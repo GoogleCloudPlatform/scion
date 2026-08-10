@@ -110,23 +110,69 @@ type InvokeResponse struct {
 // ConversationReference stores the information needed to send a proactive
 // message to a conversation. Upserted on every inbound activity.
 type ConversationReference struct {
-	ServiceURL     string
-	ConversationID string
-	ChannelID      string
-	TenantID       string
-	BotID          string
+	ConversationID   string
+	ServiceURL       string
+	BotID            string
+	BotName          string
+	TenantID         string
+	ConversationType string // "personal", "groupChat", or "channel"
+	TeamID           string
+	ChannelID        string
+	UpdatedAt        time.Time
 }
 
 // ChannelLink maps a Teams conversation to a Scion project.
 type ChannelLink struct {
+	ConversationID     string
+	TeamID             string
+	TeamName           string
+	ChannelName        string
+	ProjectID          string
+	ProjectSlug        string
+	DefaultAgent       string
+	LinkedBy           string // Azure AD object ID of user who ran setup
+	LinkedAt           time.Time
+	Active             bool
+	ShowAgentToAgent   bool
+	ShowAssistantReply bool
+	ShowStateChanges   bool
+	ChatOnly           bool
+}
+
+// TeamsUserMapping links a Teams user to a Scion user identity.
+type TeamsUserMapping struct {
+	TeamsUserID      string
+	TeamsDisplayName string
+	ScionUserID      string
+	ScionEmail       string
+	LinkedAt         time.Time
+	AutoLinked       bool
+}
+
+// ProjectAgents caches the list of agents for a project.
+type ProjectAgents struct {
+	ProjectID   string
+	AgentSlugs  []string
+	RefreshedAt time.Time
+}
+
+// PendingAskUser represents an ask-user callback awaiting a Teams user response.
+type PendingAskUser struct {
+	RequestID      string
+	ActivityID     string // Teams activity ID of the prompt message
 	ConversationID string
-	TeamID         string
-	TeamName       string
-	ChannelName    string
+	AgentSlug      string
 	ProjectID      string
-	ProjectSlug    string
-	DefaultAgent   string
-	Active         bool
+	Choices        []string
+	ExpiresAt      time.Time
+	Responded      bool
+}
+
+// CallbackLookup maps a short callback ID to its full data payload.
+type CallbackLookup struct {
+	ShortID   string
+	FullData  string
+	ExpiresAt time.Time
 }
 
 // ConversationContext tracks the last conversation context for a
