@@ -55,9 +55,13 @@ func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
 
 	if ops := s.GetOperationalSettings(); ops != nil {
 		enabled = ops.ProjectDefaultScratchpad()
-	} else if s.config.DefaultScratchpad != nil {
-		// File/SQLite mode: read from settings.yaml via ApplySnapshot.
-		enabled = *s.config.DefaultScratchpad
+	} else {
+		s.mu.RLock()
+		if s.config.DefaultScratchpad != nil {
+			// File/SQLite mode: read from settings.yaml via ApplySnapshot.
+			enabled = *s.config.DefaultScratchpad
+		}
+		s.mu.RUnlock()
 	}
 
 	writeJSON(w, http.StatusOK, opsettings.ProjectDefaultsSettings{
