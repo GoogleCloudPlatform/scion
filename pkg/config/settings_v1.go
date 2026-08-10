@@ -300,11 +300,19 @@ type VersionedSettings struct {
 
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *AutoExposePortsSettings `json:"auto_expose_ports,omitempty" yaml:"auto_expose_ports,omitempty" koanf:"auto_expose_ports"`
+
+	// ProjectDefaults controls hub-level defaults applied at project creation time.
+	ProjectDefaults *ProjectDefaultsSettings `json:"project_defaults,omitempty" yaml:"project_defaults,omitempty" koanf:"project_defaults"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
 type AutoExposePortsSettings struct {
 	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+}
+
+// ProjectDefaultsSettings holds project creation defaults in settings.yaml.
+type ProjectDefaultsSettings struct {
+	DefaultScratchpad *bool `json:"default_scratchpad,omitempty" yaml:"default_scratchpad,omitempty" koanf:"default_scratchpad"`
 }
 
 // V1ServerConfig holds server-side configuration in the versioned settings format.

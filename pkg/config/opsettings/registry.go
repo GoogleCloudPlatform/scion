@@ -119,13 +119,14 @@ func init() {
 			New:        func() any { return &NotificationsSettings{} },
 		},
 		{
-			// project_defaults is durable via DB but has no settings.yaml
-			// representation. It controls hub-level defaults applied at
+			// project_defaults controls hub-level defaults applied at
 			// project creation time (e.g. default scratchpad shared dir).
 			// Absent DB row = compiled defaults (default_scratchpad=true).
-			Name:       "project_defaults",
-			KoanfPaths: nil,
-			New:        func() any { return &ProjectDefaultsSettings{} },
+			Name: "project_defaults",
+			KoanfPaths: []string{
+				"project_defaults.default_scratchpad",
+			},
+			New: func() any { return &ProjectDefaultsSettings{} },
 		},
 		{
 			Name: "federation",

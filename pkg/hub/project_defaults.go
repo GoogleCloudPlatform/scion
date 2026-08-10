@@ -20,14 +20,22 @@ import "github.com/GoogleCloudPlatform/scion/pkg/api"
 // for new projects. Returns a scratchpad shared dir when enabled (the
 // compiled default), or nil when the operator has explicitly disabled it.
 //
-// Thread-safe: reads from OperationalSettings under its internal lock.
+// Thread-safe: reads from OperationalSettings under its internal lock,
+// or from s.config.DefaultScratchpad under s.mu.
 func (s *Server) defaultProjectSharedDirs() []api.SharedDir {
 	enabled := true // compiled default: ON
 
 	if ops := s.GetOperationalSettings(); ops != nil {
 		enabled = ops.ProjectDefaultScratchpad()
+	} else {
+		s.mu.RLock()
+		if s.config.DefaultScratchpad != nil {
+			// File/SQLite mode: read from settings.yaml via ApplySnapshot.
+			enabled = *s.config.DefaultScratchpad
+		}
+		s.mu.RUnlock()
 	}
-	// File/SQLite mode: ops is nil → compiled default (ON) applies.
+	// File/SQLite mode with no settings.yaml override → compiled default (ON) applies.
 
 	if !enabled {
 		return nil

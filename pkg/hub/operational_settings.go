@@ -90,6 +90,9 @@ type Layer1Snapshot struct {
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
 
+	// Project defaults
+	DefaultScratchpad *bool
+
 	// Agent defaults
 	DefaultTemplate      string
 	DefaultHarnessConfig string
@@ -582,6 +585,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		v := k.Bool("auto_expose_ports.enabled")
 		snap.AutoExposePortsEnabled = &v
 	}
+
+	// Project defaults
+	if k.Exists("project_defaults.default_scratchpad") {
+		v := k.Bool("project_defaults.default_scratchpad")
+		snap.DefaultScratchpad = &v
+	}
 	teleSub := k.Cut("telemetry")
 	if teleSub != nil && len(teleSub.Keys()) > 0 {
 		data, err := json.Marshal(teleSub.Raw())
@@ -703,6 +712,9 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap.GitHubInstallationURL = gc.GitHubApp.InstallationURL
 	snap.GitHubPrivateKeyPath = gc.GitHubApp.PrivateKeyPath
 
+	// Project defaults — read from settings.yaml project_defaults section
+	snap.DefaultScratchpad = gc.DefaultScratchpad
+
 	// Federation — read from GlobalConfig
 	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
 		snap.FederationConfig = &gc.Federation
@@ -742,6 +754,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		s.config.AutoExposePortsDefault = snap.AutoExposePortsEnabled
 		if oldVal == nil || *oldVal != *snap.AutoExposePortsEnabled {
 			applied = append(applied, "auto_expose_ports_default")
+		}
+	}
+
+	// Project defaults
+	if snap.DefaultScratchpad != nil {
+		oldVal := s.config.DefaultScratchpad
+		s.config.DefaultScratchpad = snap.DefaultScratchpad
+		if oldVal == nil || *oldVal != *snap.DefaultScratchpad {
+			applied = append(applied, "default_scratchpad")
 		}
 	}
 

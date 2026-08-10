@@ -363,6 +363,11 @@ type GlobalConfig struct {
 	AdminMode          bool   `json:"adminMode" yaml:"adminMode" koanf:"adminMode"`
 	MaintenanceMessage string `json:"maintenanceMessage" yaml:"maintenanceMessage" koanf:"maintenanceMessage"`
 
+	// DefaultScratchpad controls whether new projects automatically get a
+	// "scratchpad" shared directory. Populated from settings.yaml
+	// project_defaults.default_scratchpad in file/SQLite mode.
+	DefaultScratchpad *bool `json:"-" yaml:"-" koanf:"-"`
+
 	// Telemetry default — when set, the Hub exposes this as the default telemetry opt-in
 	// state for new agents via GET /api/v1/settings/public.
 	TelemetryEnabled *bool `json:"telemetryEnabled,omitempty" yaml:"telemetryEnabled,omitempty" koanf:"telemetryEnabled"`
@@ -1277,6 +1282,18 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 					gc.TelemetryEnabled = telCfg.Enabled
 				}
 				gc.TelemetryConfig = &telCfg
+			}
+		}
+	}
+
+	// Check for top-level "project_defaults" section — it lives outside
+	// "server" in settings.yaml and controls hub-level project creation defaults.
+	if pdRaw, ok := raw["project_defaults"]; ok && pdRaw != nil {
+		if pdMap, ok := pdRaw.(map[string]interface{}); ok {
+			if ds, ok := pdMap["default_scratchpad"]; ok {
+				if b, ok := ds.(bool); ok {
+					gc.DefaultScratchpad = &b
+				}
 			}
 		}
 	}
