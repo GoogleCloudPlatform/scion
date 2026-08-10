@@ -484,16 +484,108 @@ func (h *CommandHandler) showAgentStatus(ctx context.Context, activity *Activity
 	return h.sendReply(ctx, activity, fmt.Sprintf("Agent **%s** not found in project **%s**.", agentSlug, link.ProjectSlug))
 }
 
-// handleRegister is a placeholder for Phase 5 identity linking.
+// handleRegister links the user's Teams identity to their Scion account via a
+// code-based verification flow. The code is registered with the hub and
+// displayed to the user via an Adaptive Card.
 func (h *CommandHandler) handleRegister(ctx context.Context, activity *Activity) error {
-	return h.sendReply(ctx, activity,
-		"Identity linking will be available in a future update. Stay tuned!")
+	teamsUserID := activity.From.AadObjectID
+	if teamsUserID == "" {
+		teamsUserID = activity.From.ID
+	}
+	if teamsUserID == "" {
+		return h.sendReply(ctx, activity, "Could not determine your Teams user ID. Please try again.")
+	}
+
+	// Check if already linked.
+	store := h.broker.store
+	if store != nil {
+		existing, err := store.GetUserMapping(ctx, teamsUserID)
+		if err != nil {
+			h.log.Warn("Error checking existing user mapping", "error", err)
+		}
+		if existing != nil {
+			return h.sendReply(ctx, activity,
+				fmt.Sprintf("Your Teams account is already linked to Scion user **%s** (%s). Use `unregister` first to change.",
+					existing.ScionUserID, existing.ScionEmail))
+		}
+	}
+
+	hubClient := h.broker.hubClient
+	if hubClient == nil {
+		return h.sendReply(ctx, activity, "Hub client not configured. Cannot register identity.")
+	}
+
+	code, err := hubClient.RegisterTeamsLink(ctx, teamsUserID)
+	if err != nil {
+		h.log.Error("Failed to register identity link code with hub", "error", err)
+		return h.sendReply(ctx, activity, "Failed to start identity linking. Please try again later.")
+	}
+
+	// Send an Adaptive Card showing the code and instructions.
+	card := NewAdaptiveCard()
+	card.Body = append(card.Body,
+		TextBlock{
+			Type:   "TextBlock",
+			Text:   "Link Your Teams Account to Scion",
+			Weight: "Bolder",
+			Size:   "Medium",
+		},
+		TextBlock{
+			Type:     "TextBlock",
+			Text:     "To complete the link, enter the following code in the Scion web UI:",
+			Wrap:     true,
+			IsSubtle: true,
+		},
+		TextBlock{
+			Type:   "TextBlock",
+			Text:   code,
+			Weight: "Bolder",
+			Size:   "ExtraLarge",
+			HorizontalAlignment: "Center",
+		},
+		TextBlock{
+			Type:     "TextBlock",
+			Text:     "This code expires in 15 minutes. Go to your Scion dashboard and navigate to **Settings → Identity Linking** to enter the code.",
+			Wrap:     true,
+			IsSubtle: true,
+		},
+	)
+
+	return h.sendCardReply(ctx, activity, card)
 }
 
-// handleUnregister is a placeholder for Phase 5 identity unlinking.
+// handleUnregister removes the user's Teams-to-Scion identity link.
 func (h *CommandHandler) handleUnregister(ctx context.Context, activity *Activity) error {
+	teamsUserID := activity.From.AadObjectID
+	if teamsUserID == "" {
+		teamsUserID = activity.From.ID
+	}
+	if teamsUserID == "" {
+		return h.sendReply(ctx, activity, "Could not determine your Teams user ID. Please try again.")
+	}
+
+	store := h.broker.store
+	if store == nil {
+		return h.sendReply(ctx, activity, "Store not initialized. Cannot unregister.")
+	}
+
+	existing, err := store.GetUserMapping(ctx, teamsUserID)
+	if err != nil {
+		h.log.Warn("Error looking up user mapping", "error", err)
+		return h.sendReply(ctx, activity, "An error occurred. Please try again.")
+	}
+	if existing == nil {
+		return h.sendReply(ctx, activity, "Your Teams account is not linked to any Scion account.")
+	}
+
+	if err := store.DeleteUserMapping(ctx, teamsUserID); err != nil {
+		h.log.Error("Failed to delete user mapping", "error", err)
+		return h.sendReply(ctx, activity, "Failed to unlink your account. Please try again.")
+	}
+
 	return h.sendReply(ctx, activity,
-		"Identity unlinking will be available in a future update. Stay tuned!")
+		fmt.Sprintf("✅ Your Teams account has been unlinked from Scion user **%s** (%s).",
+			existing.ScionUserID, existing.ScionEmail))
 }
 
 // handleHelp sends a card listing all available commands.

@@ -43,6 +43,9 @@ const (
 	// Google Chat
 	SecretGChatSigningKey = "GCHAT_SIGNING_KEY"
 
+	// Teams
+	SecretTeamsAppSecret = "TEAMS_APP_SECRET"
+
 	// A2A Bridge
 	SecretA2AAPIKey = "A2A_API_KEY"
 )
@@ -165,6 +168,9 @@ var PluginSecretKeyMap = map[string][]IntegrationSecretMapping{
 	"chat-app": {
 		{SecretGChatSigningKey, "signing_key"},
 	},
+	"teams": {
+		{SecretTeamsAppSecret, "app_secret"},
+	},
 	"a2a-bridge": {
 		{SecretA2AAPIKey, "api_key"},
 	},
@@ -210,6 +216,7 @@ var backendSecretKeys = []string{
 	SecretDiscordBotToken, SecretDiscordPublicKey,
 	SecretSlackBotToken, SecretSlackAppToken, SecretSlackSigningSecret,
 	SecretGChatSigningKey,
+	SecretTeamsAppSecret,
 	SecretA2AAPIKey,
 }
 
@@ -615,6 +622,11 @@ func CreatePluginConfigFile(pluginName, configFilePath string) error {
 		content += "listen_address: \":3000\"\n"
 		content += "db_path: \"~/.scion/scion-slack.db\"\n"
 		content += "agent_cache_ttl: \"5m\"\n"
+	case "teams":
+		content += "app_id: \"\"\n"
+		content += "tenant_id: \"\"\n"
+		content += "listen_address: \":3978\"\n"
+		content += "db_path: \"~/.scion/scion-teams.db\"\n"
 	}
 
 	return os.WriteFile(resolved, []byte(content), 0600)
@@ -645,6 +657,7 @@ func LoadPluginConfigFile(configFile string, inlineConfig map[string]string) (ma
 		SecretDiscordBotToken, SecretDiscordPublicKey,
 		SecretSlackBotToken, SecretSlackAppToken, SecretSlackSigningSecret,
 		SecretGChatSigningKey,
+		SecretTeamsAppSecret,
 	} {
 		delete(fileConfig, strings.ToLower(secretKey))
 		delete(fileConfig, secretKey)

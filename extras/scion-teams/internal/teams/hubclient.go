@@ -17,11 +17,13 @@ package teams
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/url"
 	"time"
@@ -285,6 +287,114 @@ func (c *HubClient) GetProjectStatus(ctx context.Context, projectID string) (*Pr
 	}
 
 	return &ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}, nil
+}
+
+// --- Hub API identity linking methods ---
+
+// RegisterTeamsLink registers a pending identity link code with the hub.
+// POST /api/v1/teams/link
+func (c *HubClient) RegisterTeamsLink(ctx context.Context, teamsUserID string) (string, error) {
+	code := generateLinkCode()
+
+	payload := struct {
+		Code        string `json:"code"`
+		TeamsUserID string `json:"teamsUserId"`
+	}{
+		Code:        code,
+		TeamsUserID: teamsUserID,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal link request: %w", err)
+	}
+
+	u := c.hubURL + "/api/v1/teams/link"
+
+	req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create link request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	if err := c.signRequest(req); err != nil {
+		return "", fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("link request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return "", fmt.Errorf("hub link returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return code, nil
+}
+
+// CheckTeamsLinkStatus polls the hub for the status of a pending identity link.
+// GET /api/v1/teams/link/status?teams_user_id=...
+func (c *HubClient) CheckTeamsLinkStatus(ctx context.Context, teamsUserID string) (string, string, error) {
+	u := fmt.Sprintf("%s/api/v1/teams/link/status?teams_user_id=%s",
+		c.hubURL, url.QueryEscape(teamsUserID))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("create link status request: %w", err)
+	}
+
+	if err := c.signRequest(req); err != nil {
+		return "", "", fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("link status request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return "", "", fmt.Errorf("link status returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		User   *struct {
+			ID    string `json:"id"`
+			Email string `json:"email"`
+		} `json:"user,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", fmt.Errorf("decode link status response: %w", err)
+	}
+
+	userID := ""
+	if result.User != nil {
+		userID = result.User.ID
+	}
+
+	return result.Status, userID, nil
+}
+
+// generateLinkCode produces a 6-character uppercase alphanumeric code using
+// crypto/rand. Characters I, O, 0, and 1 are excluded to avoid confusion.
+func generateLinkCode() string {
+	const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	b := make([]byte, 6)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		if err != nil {
+			// Fallback should never happen in practice.
+			b[i] = chars[i%len(chars)]
+			continue
+		}
+		b[i] = chars[n.Int64()]
+	}
+	return string(b)
 }
 
 // signRequest adds HMAC authentication headers to the request.

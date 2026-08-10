@@ -221,13 +221,14 @@ type CardAction interface {
 
 // TextBlock displays text in an Adaptive Card.
 type TextBlock struct {
-	Type     string `json:"type"`                // "TextBlock"
-	Text     string `json:"text"`
-	Weight   string `json:"weight,omitempty"`    // "Bolder"
-	Size     string `json:"size,omitempty"`      // "Small", "Medium", "Large"
-	Color    string `json:"color,omitempty"`     // "Accent", "Good", "Warning", "Attention"
-	Wrap     bool   `json:"wrap,omitempty"`
-	IsSubtle bool   `json:"isSubtle,omitempty"`
+	Type                string `json:"type"`                          // "TextBlock"
+	Text                string `json:"text"`
+	Weight              string `json:"weight,omitempty"`              // "Bolder"
+	Size                string `json:"size,omitempty"`                // "Small", "Medium", "Large", "ExtraLarge"
+	Color               string `json:"color,omitempty"`               // "Accent", "Good", "Warning", "Attention"
+	Wrap                bool   `json:"wrap,omitempty"`
+	IsSubtle            bool   `json:"isSubtle,omitempty"`
+	HorizontalAlignment string `json:"horizontalAlignment,omitempty"` // "Left", "Center", "Right"
 }
 
 func (TextBlock) cardElement() {}

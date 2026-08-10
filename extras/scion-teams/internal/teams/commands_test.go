@@ -477,7 +477,7 @@ func TestHelpCommand(t *testing.T) {
 	assert.NotEmpty(t, ms.sent[0].Attachments)
 }
 
-func TestRegisterCommand_Placeholder(t *testing.T) {
+func TestRegisterCommand_NoHubClient(t *testing.T) {
 	broker, ms := testBrokerWithStore(t, nil)
 	handler := broker.commandHandler
 
@@ -487,10 +487,56 @@ func TestRegisterCommand_Placeholder(t *testing.T) {
 	assert.NoError(t, err)
 
 	require.NotEmpty(t, ms.sent)
-	assert.Contains(t, ms.sent[0].Text, "future update")
+	assert.Contains(t, ms.sent[0].Text, "Hub client not configured")
 }
 
-func TestUnregisterCommand_Placeholder(t *testing.T) {
+func TestRegisterCommand_Success(t *testing.T) {
+	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/teams/link" {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	broker, ms := testBrokerWithStore(t, hubHandler)
+	handler := broker.commandHandler
+
+	activity := testActivity("register")
+	handled, err := handler.Handle(context.Background(), activity)
+	assert.True(t, handled)
+	assert.NoError(t, err)
+
+	// Should send an Adaptive Card with the link code.
+	require.NotEmpty(t, ms.sent)
+	assert.NotEmpty(t, ms.sent[0].Attachments, "expected an Adaptive Card reply")
+}
+
+func TestRegisterCommand_AlreadyLinked(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, nil)
+	handler := broker.commandHandler
+
+	// Pre-create a user mapping.
+	err := broker.store.CreateUserMapping(context.Background(), &TeamsUserMapping{
+		TeamsUserID:      "aad-user-1",
+		TeamsDisplayName: "Test User",
+		ScionUserID:      "scion-1",
+		ScionEmail:       "user@example.com",
+		LinkedAt:         time.Now(),
+	})
+	require.NoError(t, err)
+
+	activity := testActivity("register")
+	handled, cmdErr := handler.Handle(context.Background(), activity)
+	assert.True(t, handled)
+	assert.NoError(t, cmdErr)
+
+	require.NotEmpty(t, ms.sent)
+	assert.Contains(t, ms.sent[0].Text, "already linked")
+}
+
+func TestUnregisterCommand_NotLinked(t *testing.T) {
 	broker, ms := testBrokerWithStore(t, nil)
 	handler := broker.commandHandler
 
@@ -500,7 +546,35 @@ func TestUnregisterCommand_Placeholder(t *testing.T) {
 	assert.NoError(t, err)
 
 	require.NotEmpty(t, ms.sent)
-	assert.Contains(t, ms.sent[0].Text, "future update")
+	assert.Contains(t, ms.sent[0].Text, "not linked")
+}
+
+func TestUnregisterCommand_Success(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, nil)
+	handler := broker.commandHandler
+
+	// Pre-create a user mapping.
+	err := broker.store.CreateUserMapping(context.Background(), &TeamsUserMapping{
+		TeamsUserID:      "aad-user-1",
+		TeamsDisplayName: "Test User",
+		ScionUserID:      "scion-1",
+		ScionEmail:       "user@example.com",
+		LinkedAt:         time.Now(),
+	})
+	require.NoError(t, err)
+
+	activity := testActivity("unregister")
+	handled, cmdErr := handler.Handle(context.Background(), activity)
+	assert.True(t, handled)
+	assert.NoError(t, cmdErr)
+
+	require.NotEmpty(t, ms.sent)
+	assert.Contains(t, ms.sent[0].Text, "unlinked")
+
+	// Verify mapping was deleted.
+	mapping, err := broker.store.GetUserMapping(context.Background(), "aad-user-1")
+	require.NoError(t, err)
+	assert.Nil(t, mapping)
 }
 
 func TestAgentPhaseEmoji(t *testing.T) {
