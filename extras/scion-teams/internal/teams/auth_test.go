@@ -163,6 +163,121 @@ func TestTokenProvider_ErrorHandling(t *testing.T) {
 	assert.Contains(t, err.Error(), "401")
 }
 
+// ---------- TokenProvider fallback (fallbackOrError) tests ----------
+
+func TestTokenProvider_FallbackOnRefreshFailure_CachedTokenValid(t *testing.T) {
+	// Scenario: refresh fails but cached token is still valid (not yet expired).
+	// Expected: returns the cached token without error.
+
+	callCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			// First call succeeds — populates the cache.
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(tokenResponse{
+				AccessToken: "cached-valid-token",
+				ExpiresIn:   3600, // 1 hour
+				TokenType:   "Bearer",
+			})
+			return
+		}
+		// Subsequent calls fail — simulate Azure AD outage.
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+	}))
+	defer ts.Close()
+
+	tp := NewTokenProvider("app", "secret", "tenant")
+	tp.httpClient = ts.Client()
+	tp.tokenEndpoint = ts.URL
+
+	ctx := context.Background()
+
+	// Populate the cache with a valid token.
+	token, err := tp.GetToken(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "cached-valid-token", token)
+	assert.Equal(t, 1, callCount)
+
+	// Move expiresAt so token is still valid but inside the proactive refresh window.
+	// This forces a refresh attempt on the next GetToken call.
+	tp.mu.Lock()
+	tp.expiresAt = time.Now().Add(3 * time.Minute) // Within 5-min refresh window, but not expired.
+	tp.mu.Unlock()
+
+	// GetToken should attempt refresh (fails with 500), then fall back to cached token.
+	token, err = tp.GetToken(ctx)
+	require.NoError(t, err, "should return cached token when refresh fails but token is still valid")
+	assert.Equal(t, "cached-valid-token", token)
+	assert.Equal(t, 2, callCount, "should have attempted a refresh")
+}
+
+func TestTokenProvider_FallbackOnRefreshFailure_CachedTokenExpired(t *testing.T) {
+	// Scenario: refresh fails and cached token has actually expired.
+	// Expected: returns the HTTP error (no fallback).
+
+	callCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			// First call succeeds — populates the cache.
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(tokenResponse{
+				AccessToken: "soon-expired-token",
+				ExpiresIn:   3600,
+				TokenType:   "Bearer",
+			})
+			return
+		}
+		// Subsequent calls fail.
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+	}))
+	defer ts.Close()
+
+	tp := NewTokenProvider("app", "secret", "tenant")
+	tp.httpClient = ts.Client()
+	tp.tokenEndpoint = ts.URL
+
+	ctx := context.Background()
+
+	// Populate the cache.
+	token, err := tp.GetToken(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "soon-expired-token", token)
+
+	// Set expiresAt to the past — token is truly expired.
+	tp.mu.Lock()
+	tp.expiresAt = time.Now().Add(-1 * time.Minute)
+	tp.mu.Unlock()
+
+	// GetToken should attempt refresh (fails), and since the cached token is
+	// expired, it should return the error.
+	_, err = tp.GetToken(ctx)
+	assert.Error(t, err, "should return error when refresh fails and cached token is expired")
+	assert.Contains(t, err.Error(), "500")
+}
+
+func TestTokenProvider_FallbackOnRefreshFailure_NoCachedToken(t *testing.T) {
+	// Scenario: fresh TokenProvider with no cached token; token endpoint returns error.
+	// Expected: returns the error directly (no fallback possible).
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("service unavailable"))
+	}))
+	defer ts.Close()
+
+	tp := NewTokenProvider("app", "secret", "tenant")
+	tp.httpClient = ts.Client()
+	tp.tokenEndpoint = ts.URL
+
+	_, err := tp.GetToken(context.Background())
+	assert.Error(t, err, "should return error when no cached token exists and refresh fails")
+	assert.Contains(t, err.Error(), "503")
+}
+
 // ---------- JWTValidator tests ----------
 
 // testJWKS sets up a test RSA key pair and JWKS/OpenID metadata endpoints.

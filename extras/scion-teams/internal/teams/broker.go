@@ -553,9 +553,9 @@ func (b *TeamsBroker) Close() error {
 		publishLock.ReleaseHandle()
 	}
 
-	// Drain in-flight sends before closing the queue.
+	// Close the send queue: closes per-conversation channels, lets workers
+	// drain buffered items, and waits for all workers to finish.
 	if sendQueue != nil {
-		sendQueue.WaitDrain(5 * time.Second)
 		sendQueue.Close()
 	}
 
