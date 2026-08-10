@@ -1,0 +1,45 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "{{APP_ID}}",
+  "developer": {
+    "name": "Your Organization",
+    "websiteUrl": "https://example.com",
+    "privacyUrl": "https://example.com/privacy",
+    "termsOfUseUrl": "https://example.com/terms"
+  },
+  "name": {
+    "short": "Scion",
+    "full": "Scion Agent Orchestration"
+  },
+  "description": {
+    "short": "Interact with Scion agents from Microsoft Teams",
+    "full": "Bidirectional messaging between Microsoft Teams and Scion agents. Link channels to projects, receive agent updates, and interact with agents directly from Teams."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#4F6BED",
+  "bots": [{
+    "botId": "{{APP_ID}}",
+    "scopes": ["personal", "team", "groupChat"],
+    "supportsFiles": false,
+    "isNotificationOnly": false,
+    "commandLists": [{
+      "scopes": ["personal", "team", "groupChat"],
+      "commands": [
+        { "title": "setup", "description": "Link this channel to a Scion project" },
+        { "title": "unlink", "description": "Unlink this channel" },
+        { "title": "agents", "description": "List agents in the linked project" },
+        { "title": "status", "description": "Show project/agent status" },
+        { "title": "register", "description": "Link your Teams account to Scion" },
+        { "title": "unregister", "description": "Unlink your Teams account from Scion" },
+        { "title": "help", "description": "Show available commands" }
+      ]
+    }]
+  }],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": []
+}

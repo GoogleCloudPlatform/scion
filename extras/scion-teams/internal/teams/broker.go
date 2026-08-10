@@ -73,6 +73,10 @@ type TeamsBroker struct {
 	// Persistent store (Phase 3).
 	store Store
 
+	// Command and callback handlers (Phase 4).
+	commandHandler  *CommandHandler
+	callbackHandler *CallbackHandler
+
 	configured bool
 	phase      int // 1 or 2
 
@@ -195,6 +199,10 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 			// Initialize outbound messaging components.
 			b.sender = NewSender(b.tokenProvider, b.log)
 			b.sendQueue = NewSendQueue(b.sender, b.config.SendQueueSize, b.config.SendMinDelay, b.log)
+
+			// Initialize command and callback handlers (Phase 4).
+			b.commandHandler = NewCommandHandler(b, b.log)
+			b.callbackHandler = NewCallbackHandler(b, b.log)
 
 			b.phase = 2
 			b.configured = true
@@ -587,7 +595,10 @@ func (b *TeamsBroker) HandleActivity(ctx context.Context, activity *Activity) (*
 		handleConversationUpdate(activity, b.log)
 		return nil, nil
 	case "invoke":
-		b.log.Debug("Invoke activity received (stub in Phase 1)",
+		if b.callbackHandler != nil {
+			return b.callbackHandler.HandleInvoke(ctx, activity)
+		}
+		b.log.Debug("Invoke activity received but no callback handler",
 			"name", activity.Name,
 			"conversation_id", activity.Conversation.ID,
 		)
@@ -607,12 +618,24 @@ func (b *TeamsBroker) HandleActivity(ctx context.Context, activity *Activity) (*
 }
 
 // handleMessage processes an incoming message Activity:
-// converts it to a StructuredMessage and delivers it to the hub.
+// routes through command handler first, then converts to StructuredMessage
+// and delivers it to the hub.
 func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) error {
 	// Skip messages from the bot itself (secondary echo guard).
 	if b.config != nil && activity.From.ID == b.config.AppID {
 		b.log.Debug("Skipping message from self", "activity_id", activity.ID)
 		return nil
+	}
+
+	// Route through command handler before default message handling.
+	if b.commandHandler != nil {
+		handled, err := b.commandHandler.Handle(ctx, activity)
+		if err != nil {
+			b.log.Error("Command handler error", "error", err)
+		}
+		if handled {
+			return nil // command was processed, don't forward to hub
+		}
 	}
 
 	botID := ""

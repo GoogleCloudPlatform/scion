@@ -140,6 +140,152 @@ func (c *HubClient) DeliverCallback(ctx context.Context, data map[string]interfa
 	return nil
 }
 
+// --- Hub API query types ---
+
+// AgentInfo holds information about a single agent returned by the hub API.
+type AgentInfo struct {
+	ID       string `json:"id"`
+	Slug     string `json:"slug"`
+	Activity string `json:"activity,omitempty"`
+	Phase    string `json:"phase,omitempty"`
+}
+
+// ProjectOption represents a project returned by the hub API.
+type ProjectOption struct {
+	ID   string
+	Name string
+	Slug string
+}
+
+// --- Hub API query responses ---
+
+type hubProjectsResponse struct {
+	Projects []hubProject `json:"projects"`
+}
+
+type hubProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+type hubAgentsResponse struct {
+	Agents []hubAgent `json:"agents"`
+}
+
+type hubAgent struct {
+	ID       string `json:"id"`
+	Slug     string `json:"slug"`
+	Activity string `json:"activity"`
+	Phase    string `json:"phase"`
+}
+
+// --- Hub API query methods ---
+
+// ListAgents returns the agents for a given project.
+// GET /api/v1/projects/{projectID}/agents
+func (c *HubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
+	u := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create list agents request: %w", err)
+	}
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list agents request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list agents returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result hubAgentsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode list agents response: %w", err)
+	}
+
+	agents := make([]AgentInfo, len(result.Agents))
+	for i, a := range result.Agents {
+		agents[i] = AgentInfo{ID: a.ID, Slug: a.Slug, Activity: a.Activity, Phase: a.Phase}
+	}
+	return agents, nil
+}
+
+// ListProjects returns all projects visible to the broker.
+// GET /api/v1/projects
+func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
+	u := c.hubURL + "/api/v1/projects"
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create list projects request: %w", err)
+	}
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list projects request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list projects returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result hubProjectsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode list projects response: %w", err)
+	}
+
+	projects := make([]ProjectOption, len(result.Projects))
+	for i, p := range result.Projects {
+		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
+	}
+	return projects, nil
+}
+
+// GetProjectStatus returns the details of a single project.
+// GET /api/v1/projects/{projectID}
+func (c *HubClient) GetProjectStatus(ctx context.Context, projectID string) (*ProjectOption, error) {
+	u := fmt.Sprintf("%s/api/v1/projects/%s", c.hubURL, projectID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create get project request: %w", err)
+	}
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get project request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get project returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var p hubProject
+	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+		return nil, fmt.Errorf("decode get project response: %w", err)
+	}
+
+	return &ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}, nil
+}
+
 // signRequest adds HMAC authentication headers to the request.
 func (c *HubClient) signRequest(req *http.Request) error {
 	if c.brokerID == "" || c.hmacKey == "" {
