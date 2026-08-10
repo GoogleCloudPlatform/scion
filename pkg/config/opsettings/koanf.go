@@ -108,6 +108,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"auto_expose_ports": {
 		"auto_expose_ports.enabled": "enabled",
 	},
+	"project_defaults": {
+		"project_defaults.default_scratchpad": "default_scratchpad",
+	},
 	"federation": {
 		"server.federation.enabled":           "enabled",
 		"server.federation.trusted_issuers":   "trusted_issuers",
@@ -144,6 +147,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"auto_expose_ports": {
 		"enabled": "auto_expose_ports.enabled",
+	},
+	"project_defaults": {
+		"default_scratchpad": "project_defaults.default_scratchpad",
 	},
 	"federation": {
 		"enabled":           "server.federation.enabled",

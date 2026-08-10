@@ -26,8 +26,11 @@ func (s *Server) defaultProjectSharedDirs() []api.SharedDir {
 
 	if ops := s.GetOperationalSettings(); ops != nil {
 		enabled = ops.ProjectDefaultScratchpad()
+	} else if s.config.DefaultScratchpad != nil {
+		// File/SQLite mode: read from settings.yaml via ApplySnapshot.
+		enabled = *s.config.DefaultScratchpad
 	}
-	// File/SQLite mode: ops is nil → compiled default (ON) applies.
+	// File/SQLite mode with no settings.yaml override → compiled default (ON) applies.
 
 	if !enabled {
 		return nil

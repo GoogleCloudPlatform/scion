@@ -67,8 +67,7 @@ func TestSectionMarshalUnmarshal(t *testing.T) {
 func TestSectionHasKoanfPaths(t *testing.T) {
 	// Sections that are DB-only (no settings.yaml representation).
 	dbOnlySections := map[string]bool{
-		"maintenance":      true,
-		"project_defaults": true,
+		"maintenance": true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {
