@@ -75,7 +75,7 @@ func testBrokerWithStore(t *testing.T, hubHandler http.HandlerFunc) (*TeamsBroke
 	}
 	// Override the sender's httpClient to point to our test server.
 	broker.sender.httpClient = &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout:   5 * time.Second,
 		Transport: &testTransport{baseURL: senderServer.URL},
 	}
 

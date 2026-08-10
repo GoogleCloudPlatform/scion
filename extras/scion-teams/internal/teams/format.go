@@ -275,9 +275,9 @@ func buildStatusCard(msg *messages.StructuredMessage, agentSlug string) *Adaptiv
 				Width: "auto",
 				Items: []CardElement{
 					TextBlock{
-						Type:   "TextBlock",
-						Text:   "ℹ️",
-						Size:   "Medium",
+						Type: "TextBlock",
+						Text: "ℹ️",
+						Size: "Medium",
 					},
 				},
 			},

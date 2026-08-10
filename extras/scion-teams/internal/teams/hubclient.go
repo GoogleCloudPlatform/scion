@@ -54,7 +54,7 @@ func NewHubClient(hubURL, hmacKey, brokerID string, log *slog.Logger) *HubClient
 
 // inboundPayload is the JSON body POSTed to the hub's inbound endpoint.
 type inboundPayload struct {
-	Topic   string                    `json:"topic"`
+	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
 }
 

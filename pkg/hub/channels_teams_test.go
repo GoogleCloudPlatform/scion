@@ -36,7 +36,7 @@ func newTestTeamsChannel(t *testing.T, activityHandler http.HandlerFunc) *TeamsC
 	// Mock token endpoint.
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(teamsTokenResponse{
+		_ = json.NewEncoder(w).Encode(teamsTokenResponse{
 			AccessToken: "test-token-12345",
 			ExpiresIn:   3600,
 			TokenType:   "Bearer",
@@ -264,7 +264,7 @@ func TestTeamsChannel_Deliver_Success(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"id": "activity-1"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "activity-1"})
 	}))
 
 	msg := &messages.StructuredMessage{
@@ -289,9 +289,9 @@ func TestTeamsChannel_Deliver_UrgentMessage(t *testing.T) {
 
 	ch := newTestTeamsChannel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &receivedActivity)
+		_ = json.Unmarshal(body, &receivedActivity)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"id": "activity-1"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "activity-1"})
 	}))
 
 	msg := &messages.StructuredMessage{
@@ -312,7 +312,7 @@ func TestTeamsChannel_Deliver_AuthError(t *testing.T) {
 	// Mock token endpoint that returns an error.
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"invalid_client"}`))
+		_, _ = w.Write([]byte(`{"error":"invalid_client"}`))
 	}))
 	defer tokenServer.Close()
 
@@ -343,7 +343,7 @@ func TestTeamsChannel_Deliver_AuthError(t *testing.T) {
 func TestTeamsChannel_Deliver_APIError(t *testing.T) {
 	ch := newTestTeamsChannel(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte(`{"error":{"code":"BotNotInConversation","message":"The bot is not part of the conversation roster."}}`))
+		_, _ = w.Write([]byte(`{"error":{"code":"BotNotInConversation","message":"The bot is not part of the conversation roster."}}`))
 	}))
 
 	msg := &messages.StructuredMessage{
@@ -364,7 +364,7 @@ func TestTeamsChannel_TokenCaching(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&tokenRequests, 1)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(teamsTokenResponse{
+		_ = json.NewEncoder(w).Encode(teamsTokenResponse{
 			AccessToken: "cached-token",
 			ExpiresIn:   3600,
 			TokenType:   "Bearer",
@@ -374,7 +374,7 @@ func TestTeamsChannel_TokenCaching(t *testing.T) {
 
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{"id": "act-1"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "act-1"})
 	}))
 	defer apiServer.Close()
 

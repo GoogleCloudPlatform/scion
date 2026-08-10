@@ -161,9 +161,9 @@ func formatTeamsNotification(msg *messages.StructuredMessage) string {
 		sb.WriteString("**[URGENT]** ")
 	}
 
-	sb.WriteString(fmt.Sprintf("**[%s]** from **%s**", msg.Type, msg.Sender))
+	fmt.Fprintf(&sb, "**[%s]** from **%s**", msg.Type, msg.Sender)
 	if msg.Recipient != "" {
-		sb.WriteString(fmt.Sprintf(" to %s", msg.Recipient))
+		fmt.Fprintf(&sb, " to %s", msg.Recipient)
 	}
 	sb.WriteString("\n\n")
 	sb.WriteString(msg.Msg)
@@ -189,7 +189,7 @@ type teamsTokenProvider struct {
 }
 
 const (
-	teamsChannelTokenScope        = "https://api.botframework.com/.default"
+	teamsChannelTokenScope         = "https://api.botframework.com/.default"
 	teamsChannelTokenRefreshWindow = 5 * time.Minute
 )
 
@@ -248,7 +248,7 @@ func (tp *teamsTokenProvider) refresh(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

@@ -336,8 +336,8 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *
 		ThreadID:  pending.ConversationID,
 		Metadata: map[string]string{
 			"teams_conversation_id": pending.ConversationID,
-			"project_id":           pending.ProjectID,
-			"ask_request_id":       pending.RequestID,
+			"project_id":            pending.ProjectID,
+			"ask_request_id":        pending.RequestID,
 		},
 	}
 
@@ -381,4 +381,3 @@ func (h *CallbackHandler) respondWithUpdatedCard(activity *Activity, text string
 		Body:   updatedAttachment,
 	}
 }
-

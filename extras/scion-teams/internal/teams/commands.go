@@ -537,10 +537,10 @@ func (h *CommandHandler) handleRegister(ctx context.Context, activity *Activity)
 			IsSubtle: true,
 		},
 		TextBlock{
-			Type:   "TextBlock",
-			Text:   code,
-			Weight: "Bolder",
-			Size:   "ExtraLarge",
+			Type:                "TextBlock",
+			Text:                code,
+			Weight:              "Bolder",
+			Size:                "ExtraLarge",
 			HorizontalAlignment: "Center",
 		},
 		TextBlock{

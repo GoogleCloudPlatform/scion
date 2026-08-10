@@ -221,11 +221,11 @@ type CardAction interface {
 
 // TextBlock displays text in an Adaptive Card.
 type TextBlock struct {
-	Type                string `json:"type"`                          // "TextBlock"
+	Type                string `json:"type"` // "TextBlock"
 	Text                string `json:"text"`
-	Weight              string `json:"weight,omitempty"`              // "Bolder"
-	Size                string `json:"size,omitempty"`                // "Small", "Medium", "Large", "ExtraLarge"
-	Color               string `json:"color,omitempty"`               // "Accent", "Good", "Warning", "Attention"
+	Weight              string `json:"weight,omitempty"` // "Bolder"
+	Size                string `json:"size,omitempty"`   // "Small", "Medium", "Large", "ExtraLarge"
+	Color               string `json:"color,omitempty"`  // "Accent", "Good", "Warning", "Attention"
 	Wrap                bool   `json:"wrap,omitempty"`
 	IsSubtle            bool   `json:"isSubtle,omitempty"`
 	HorizontalAlignment string `json:"horizontalAlignment,omitempty"` // "Left", "Center", "Right"
@@ -250,9 +250,9 @@ type Column struct {
 
 // Image displays an image in an Adaptive Card.
 type Image struct {
-	Type string `json:"type"`            // "Image"
+	Type string `json:"type"` // "Image"
 	URL  string `json:"url"`
-	Size string `json:"size,omitempty"`  // "Small", "Medium", "Large"
+	Size string `json:"size,omitempty"` // "Small", "Medium", "Large"
 	Alt  string `json:"altText,omitempty"`
 }
 
@@ -268,7 +268,7 @@ func (Container) cardElement() {}
 
 // InputText is an Adaptive Card text input field.
 type InputText struct {
-	Type        string `json:"type"`                    // "Input.Text"
+	Type        string `json:"type"` // "Input.Text"
 	ID          string `json:"id"`
 	IsMultiline bool   `json:"isMultiline,omitempty"`
 	Placeholder string `json:"placeholder,omitempty"`
@@ -278,7 +278,7 @@ func (InputText) cardElement() {}
 
 // ActionSubmit is a button that submits data back to the bot.
 type ActionSubmit struct {
-	Type  string      `json:"type"`            // "Action.Submit"
+	Type  string      `json:"type"` // "Action.Submit"
 	Title string      `json:"title"`
 	Style string      `json:"style,omitempty"` // "positive", "destructive"
 	Data  interface{} `json:"data"`
@@ -288,7 +288,7 @@ func (ActionSubmit) cardAction() {}
 
 // ActionOpenURL opens a URL when clicked.
 type ActionOpenURL struct {
-	Type  string `json:"type"`  // "Action.OpenUrl"
+	Type  string `json:"type"` // "Action.OpenUrl"
 	Title string `json:"title"`
 	URL   string `json:"url"`
 }

@@ -88,13 +88,13 @@ func TestActivityToStructuredMessage_ChannelData(t *testing.T) {
 
 func TestActivityToStructuredMessage_ReplyToID(t *testing.T) {
 	activity := &Activity{
-		Type:      "message",
-		ID:        "act-789",
-		Timestamp: "2026-01-15T12:00:00Z",
-		Text:      "Reply message",
-		From:      ChannelAccount{ID: "user-3", Name: "Charlie"},
+		Type:         "message",
+		ID:           "act-789",
+		Timestamp:    "2026-01-15T12:00:00Z",
+		Text:         "Reply message",
+		From:         ChannelAccount{ID: "user-3", Name: "Charlie"},
 		Conversation: ConversationAccount{ID: "conv-ghi"},
-		ReplyToID: "parent-act-001",
+		ReplyToID:    "parent-act-001",
 	}
 
 	msg := activityToStructuredMessage(activity, "bot-1")
@@ -106,11 +106,11 @@ func TestActivityToStructuredMessage_ReplyToID(t *testing.T) {
 func TestActivityToStructuredMessage_FallbackSenderID(t *testing.T) {
 	// When AadObjectID is empty, fall back to From.ID.
 	activity := &Activity{
-		Type:      "message",
-		ID:        "act-fallback",
-		Timestamp: "2026-01-15T13:00:00Z",
-		Text:      "Test",
-		From:      ChannelAccount{ID: "user-no-aad", Name: "NoAad"},
+		Type:         "message",
+		ID:           "act-fallback",
+		Timestamp:    "2026-01-15T13:00:00Z",
+		Text:         "Test",
+		From:         ChannelAccount{ID: "user-no-aad", Name: "NoAad"},
 		Conversation: ConversationAccount{ID: "conv-j"},
 	}
 
@@ -121,10 +121,10 @@ func TestActivityToStructuredMessage_FallbackSenderID(t *testing.T) {
 
 func TestActivityToStructuredMessage_EmptyTimestamp(t *testing.T) {
 	activity := &Activity{
-		Type: "message",
-		ID:   "act-notime",
-		Text: "No timestamp",
-		From: ChannelAccount{ID: "u1", Name: "User"},
+		Type:         "message",
+		ID:           "act-notime",
+		Text:         "No timestamp",
+		From:         ChannelAccount{ID: "u1", Name: "User"},
 		Conversation: ConversationAccount{ID: "c1"},
 	}
 
@@ -234,8 +234,8 @@ func TestIsValidAgentSlug(t *testing.T) {
 	assert.True(t, isValidAgentSlug("agent_123"))
 	assert.True(t, isValidAgentSlug("ab"))
 	assert.False(t, isValidAgentSlug("a"))          // too short
-	assert.False(t, isValidAgentSlug(""))            // empty
-	assert.False(t, isValidAgentSlug("HAS-CAPS"))    // uppercase
-	assert.False(t, isValidAgentSlug("has spaces"))  // spaces
-	assert.False(t, isValidAgentSlug("has.dots"))    // dots
+	assert.False(t, isValidAgentSlug(""))           // empty
+	assert.False(t, isValidAgentSlug("HAS-CAPS"))   // uppercase
+	assert.False(t, isValidAgentSlug("has spaces")) // spaces
+	assert.False(t, isValidAgentSlug("has.dots"))   // dots
 }
