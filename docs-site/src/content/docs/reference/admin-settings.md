@@ -22,7 +22,7 @@ Settings are classified into two layers:
 | Layer | Examples | Behavior |
 |-------|----------|----------|
 | **Layer-0** (bootstrap) | `server.mode`, `server.database.*`, `server.storage.*`, `server.secrets.*`, `server.hub.port`, `server.auth.dev_mode` | Always resolved from bootstrap configuration. Cannot be changed via the admin UI in database mode. |
-| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `telemetry.*`, `agent_defaults.*`, `server.github_app.*`, `server.notification_channels` | In database mode, stored in the database and editable via the admin UI. Bootstrap values serve as initial defaults. |
+| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `telemetry.*`, `agent_defaults.*`, `server.github_app.*`, `server.notification_channels`, `server.federation.*` | In database mode, stored in the database and editable via the admin UI. Bootstrap values serve as initial defaults. |
 
 ### Database Mode
 
@@ -165,7 +165,7 @@ To streamline management of complex environments, the **General** settings tab i
 1. **General Card**: Houses central Hub identity, registration endpoints, and core server configurations.
 2. **Agent Defaults Card** (with dedicated sub-tabs):
    - Configures default resource constraints (`max_turns`, `max_duration`, limits). These fields can be cleared to blank in the UI, which persists them as `null` in the Hub settings database instead of preserving their previous values, allowing administrators to remove default constraints entirely.
-   - Introduces **Default Model** (`default_model`) and **Default Thinking Level** (`default_thinking_level`) fields directly into the agent default pipeline.
+   - Introduces **Default Model** (`default_model`), **Default Thinking Level** (`default_thinking_level`), and **Default Agent Role** (`default_agent_role`) fields directly into the agent default pipeline (with the default agent role updated from `baseline` to `full` for usability).
    - Houses the **Telemetry Toggle**, which has been moved to this card to keep telemetry configuration closely aligned with operational defaults.
 3. **Project Default Settings Card**: Configures platform-level default annotations and behaviors for newly created projects.
 

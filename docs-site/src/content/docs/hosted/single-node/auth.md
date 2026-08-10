@@ -144,8 +144,22 @@ Use this token to authenticate agents to external services like HashiCorp Vault,
 
 Scion supports inbound OIDC-based federation authentication. This allows external identities (such as other Scion Hubs, Google Cloud Service Accounts, or Firebase/Google users) to authenticate against the Hub API using OIDC ID tokens from trusted issuers.
 
-### Configuration
-Federation is feature-gated and configured under the `server.federation` block in `settings.yaml`:
+### Configuration and Runtime Management
+
+Federation authentication is feature-gated. It can be configured initially at bootstrap via the `server.federation` block in `settings.yaml`, or managed dynamically at runtime via the **Admin UI** (using the `opsettings` pattern).
+
+#### Runtime Administration (Admin UI)
+When running in database mode, administrators can manage OIDC federation configuration directly in the Admin UI without restarting the Hub:
+* **Issuer CRUD**: Create, read, update, and delete trusted OIDC issuers dynamically. The interface provides conditional input fields based on the selected identity/issuer type.
+* **Hot-Reloading**: Changes saved in the UI are immediately applied cluster-wide. The backend utilizes an `atomic.Pointer` to hot-reload the `FederationAuthenticator`, ensuring a zero-downtime, lock-free path for inbound federated requests.
+* **Semantic Validation**: The Admin API performs strict semantic validation on save, preventing malformed issuer rules or invalid URLs from reaching the live runtime.
+
+#### Static Bootstrap Configuration (`settings.yaml`)
+Alternatively, or for initial bootstrapping, you can configure federation statically in your configuration file.
+
+:::note[OIDC Wiring Guarantee]
+Federation and OIDC configurations are fully wired end-to-end into the server's config schemas (`hub.ServerConfig` and `V1ServerConfig`), ensuring no federation fields are silently dropped on file load. In combo-server setups, standard `/.well-known/` discovery endpoints are routed correctly and are not intercepted by the SPA catch-all routing.
+:::
 
 ```yaml
 server:
