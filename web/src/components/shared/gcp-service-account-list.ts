@@ -90,6 +90,7 @@ export class ScionGCPServiceAccountList extends LitElement {
   @state() private mintDescription = '';
   @state() private mintDialogLoading = false;
   @state() private mintDialogError: string | null = null;
+  @state() private mintAllowSelfActAs = true;
 
   // Quota info
   @state() private mintQuota: GCPMintQuotaInfo | null = null;
@@ -286,6 +287,7 @@ export class ScionGCPServiceAccountList extends LitElement {
     this.mintAccountId = '';
     this.mintDisplayName = '';
     this.mintDescription = '';
+    this.mintAllowSelfActAs = true;
     this.mintDialogError = null;
     this.mintDialogOpen = true;
   }
@@ -305,6 +307,7 @@ export class ScionGCPServiceAccountList extends LitElement {
       if (this.mintAccountId.trim()) body.account_id = this.mintAccountId.trim();
       if (this.mintDisplayName.trim()) body.display_name = this.mintDisplayName.trim();
       if (this.mintDescription.trim()) body.description = this.mintDescription.trim();
+      if (!this.mintAllowSelfActAs) body.allow_self_act_as = false;
 
       // Non-null asserted through a guard rather than a `!`: openMintDialog is
       // unreachable at hub scope (renderMintAffordance returns nothing there),
@@ -933,10 +936,23 @@ export class ScionGCPServiceAccountList extends LitElement {
             }}
           ></sl-input>
 
+          <sl-checkbox
+            ?checked=${this.mintAllowSelfActAs}
+            @sl-change=${(e: Event) => {
+              this.mintAllowSelfActAs = (e.target as HTMLInputElement).checked;
+            }}
+          >
+            Allow this service account to act as itself
+            <div slot="help-text">
+              Enables using this SA as a project default, allowing agents to create
+              sub-agents that run as this same identity. Recommended for most use cases.
+            </div>
+          </sl-checkbox>
+
           <div class="dialog-hint">
             <sl-icon name="info-circle"></sl-icon>
-            The Hub will create a new service account in its own GCP project. The SA starts with
-            no IAM permissions and is automatically verified for impersonation.
+            The Hub will create a new service account in its own GCP project. The SA is
+            automatically verified for impersonation by the Hub.
           </div>
 
           ${this.mintDialogError ? html`<div class="dialog-error">${this.mintDialogError}</div>` : nothing}

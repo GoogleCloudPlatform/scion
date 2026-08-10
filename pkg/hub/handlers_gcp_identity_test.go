@@ -293,6 +293,59 @@ func TestMintGCPServiceAccount_Success(t *testing.T) {
 	assert.Len(t, mock.createdSAs, 1)
 }
 
+func TestMintGCPServiceAccount_SelfActAs_Default(t *testing.T) {
+	srv, _, mock := testServerWithMinting(t)
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	// No allow_self_act_as field → default true → both grants
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	require.Len(t, mock.iamPolicies, 2, "expected tokenCreator + serviceAccountUser grants")
+	assert.Equal(t, "roles/iam.serviceAccountTokenCreator", mock.iamPolicies[0].Role)
+	assert.Equal(t, "serviceAccount:hub-sa@test-hub-project.iam.gserviceaccount.com", mock.iamPolicies[0].Member)
+	assert.Equal(t, "roles/iam.serviceAccountUser", mock.iamPolicies[1].Role)
+	// Self-grant: member is serviceAccount:<minted-sa-email>
+	assert.Equal(t, "serviceAccount:"+mock.lastEmail, mock.iamPolicies[1].Member)
+	assert.Equal(t, mock.lastEmail, mock.iamPolicies[1].SAEmail)
+}
+
+func TestMintGCPServiceAccount_SelfActAs_ExplicitFalse(t *testing.T) {
+	srv, _, mock := testServerWithMinting(t)
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	// Explicit false → only tokenCreator grant
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]interface{}{
+			"allow_self_act_as": false,
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	require.Len(t, mock.iamPolicies, 1, "expected only tokenCreator grant")
+	assert.Equal(t, "roles/iam.serviceAccountTokenCreator", mock.iamPolicies[0].Role)
+}
+
+func TestMintGCPServiceAccount_SelfActAs_ExplicitTrue(t *testing.T) {
+	srv, _, mock := testServerWithMinting(t)
+	projectID := createTestProjectForSA(t, srv, nil)
+
+	// Explicit true → both grants
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
+		map[string]interface{}{
+			"allow_self_act_as": true,
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	require.Len(t, mock.iamPolicies, 2, "expected tokenCreator + serviceAccountUser grants")
+	assert.Equal(t, "roles/iam.serviceAccountTokenCreator", mock.iamPolicies[0].Role)
+	assert.Equal(t, "roles/iam.serviceAccountUser", mock.iamPolicies[1].Role)
+	assert.Equal(t, "serviceAccount:"+mock.lastEmail, mock.iamPolicies[1].Member)
+}
+
 func TestMintGCPServiceAccount_CustomAccountID(t *testing.T) {
 	srv, _, mock := testServerWithMinting(t)
 	projectID := createTestProjectForSA(t, srv, nil)

@@ -634,9 +634,10 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 
 // mintGCPServiceAccountRequest is the request body for POST .../gcp-service-accounts/mint.
 type mintGCPServiceAccountRequest struct {
-	AccountID   string `json:"account_id"`   // Optional custom SA account ID (will be prefixed with scion-)
-	DisplayName string `json:"display_name"` // Optional display name
-	Description string `json:"description"`  // Optional description
+	AccountID      string `json:"account_id"`                  // Optional custom SA account ID (will be prefixed with scion-)
+	DisplayName    string `json:"display_name"`                // Optional display name
+	Description    string `json:"description"`                 // Optional description
+	AllowSelfActAs *bool  `json:"allow_self_act_as,omitempty"` // nil = default true; grant SA serviceAccountUser on itself
 }
 
 // gcpSAAccountIDRegexp validates GCP SA account IDs: 6-30 chars, [a-z][a-z0-9-]*[a-z0-9].
@@ -879,8 +880,25 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	slog.Info("GCP SA mint: SA created and tokenCreator grant succeeded",
-		"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail)
+	// Optionally grant the minted SA serviceAccountUser on itself so it
+	// can be used as a project-default SA where agents create sub-agents
+	// running as the same identity.
+	allowSelfActAs := req.AllowSelfActAs == nil || *req.AllowSelfActAs
+	if allowSelfActAs {
+		saMember := "serviceAccount:" + saEmail
+		if err := retryIAMGrant(r.Context(), func() error {
+			return s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, saMember, "roles/iam.serviceAccountUser")
+		}); err != nil {
+			cleanupAndFail("self serviceAccountUser grant on minted SA", err)
+			return
+		}
+		slog.Info("GCP SA mint: self-actAs grant succeeded",
+			"project_id", projectID, "sa_email", saEmail)
+	}
+
+	slog.Info("GCP SA mint: SA created and IAM grants succeeded",
+		"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail,
+		"self_act_as", allowSelfActAs)
 
 	// Store the SA record — only reached when ALL required IAM mutations succeeded.
 	sa := &store.GCPServiceAccount{
@@ -916,7 +934,8 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 
 	slog.Info("GCP SA minted",
 		"project_id", projectID, "sa_id", sa.ID, "email", saEmail,
-		"account_id", accountID, "project", projectID, "user", user.ID())
+		"account_id", accountID, "project", projectID, "user", user.ID(),
+		"self_act_as", allowSelfActAs)
 
 	writeJSON(w, http.StatusCreated, sa)
 }
