@@ -685,9 +685,12 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	})
 
 	t.Run("agent deletes its own descendant", func(t *testing.T) {
-		// Via the ancestry bypass, which the conversion leaves untouched.
+		// Upstream #1097 gates agent DELETE on ScopeAgentLifecycle + project
+		// isolation. A legitimate agent-to-agent delete carries the lifecycle
+		// scope; the test verifies the ancestry bypass still lets the call
+		// through once that prerequisite is met.
 		f := bypassAgentsSetup(t)
-		rec := f.asAgent(t, http.MethodDelete, "/api/v1/agents/"+f.child.ID, nil)
+		rec := f.asAgent(t, http.MethodDelete, "/api/v1/agents/"+f.child.ID, nil, ScopeAgentLifecycle)
 		assert.NotEqual(t, http.StatusForbidden, rec.Code,
 			"an agent must still be able to delete its own descendant; got %d: %s",
 			rec.Code, rec.Body.String())
