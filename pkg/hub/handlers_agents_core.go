@@ -2346,20 +2346,41 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Extract the current token from the request to refresh it
-	token := extractAgentToken(r)
-	if token == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"no agent token found in request", nil)
+	// Look up the agent record to re-derive scopes from the stored role.
+	// This is critical for backward compatibility: legacy agents created
+	// before the role system have tokens with old scope sets (missing
+	// ScopeProjectRead, etc.). Copying old scopes verbatim on refresh
+	// would perpetuate the gap. By re-deriving from the stored role via
+	// agentRoleAndScopes → Server.GenerateAgentToken → ScopesForRole,
+	// the refreshed token always reflects the current role definition.
+	agent, err := s.store.GetAgent(r.Context(), id)
+	if err != nil {
+		slog.Warn("Token refresh: failed to look up agent for role-based scope derivation",
+			"agent_id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to look up agent record", nil)
 		return
 	}
 
-	newToken, expiresAt, err := s.agentTokenService.RefreshAgentToken(token)
+	agentRole, additionalScopes := agentRoleAndScopes(agent)
+	newToken, err := s.GenerateAgentToken(
+		agent.ID, agent.ProjectID, agentIdent.Ancestry(),
+		agentRole, additionalScopes,
+	)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-			"failed to refresh token: "+err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to generate refreshed token: "+err.Error(), nil)
 		return
 	}
+
+	// Parse the new token to extract the expiry for the response.
+	newClaims, err := s.agentTokenService.ValidateAgentToken(newToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to validate refreshed token", nil)
+		return
+	}
+	expiresAt := newClaims.Expiry.Time()
 
 	// Build the generalized tokens[] array.
 	// App tokens are always present; transport tokens are added when
