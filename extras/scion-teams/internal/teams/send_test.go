@@ -299,3 +299,130 @@ func TestSender_APIError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "400")
 }
+
+func TestSender_401RetryNetworkFailure_NoPanic(t *testing.T) {
+	// C2 + R6: When the first request returns 401, the token is refreshed,
+	// but the retry request fails at the network level. This must not panic
+	// (previously the deferred resp.Body.Close() panicked on nil resp).
+
+	var requestCount int32
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	}))
+	defer tokenServer.Close()
+
+	tp := NewTokenProvider("app", "secret", "tenant")
+	tp.tokenEndpoint = tokenServer.URL
+	tp.httpClient = tokenServer.Client()
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := atomic.AddInt32(&requestCount, 1)
+		if count == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// For the retry: close the connection abruptly to simulate network failure.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("server doesn't support hijacking")
+		}
+		conn, _, _ := hj.Hijack()
+		conn.Close()
+	}))
+	defer apiServer.Close()
+
+	sender := NewSender(tp, slog.Default())
+	sender.httpClient = apiServer.Client()
+
+	activity := &Activity{Type: "message", Text: "test"}
+	_, err := sender.sendActivity(context.Background(),
+		apiServer.URL, "conv-1", activity)
+
+	// Should return an error, not panic.
+	assert.Error(t, err)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&requestCount))
+}
+
+func TestSender_DeleteActivity_401Retry(t *testing.T) {
+	// R4: Verify deleteActivity also retries on 401.
+
+	var requestCount int32
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := atomic.AddInt32(&requestCount, 0) // just need different tokens
+		_ = count
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "tok", ExpiresIn: 3600})
+	}))
+	defer tokenServer.Close()
+
+	tp := NewTokenProvider("app", "secret", "tenant")
+	tp.tokenEndpoint = tokenServer.URL
+	tp.httpClient = tokenServer.Client()
+
+	var apiRequestCount int32
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := atomic.AddInt32(&apiRequestCount, 1)
+		if count == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		assert.Equal(t, "DELETE", r.Method)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	sender := NewSender(tp, slog.Default())
+	sender.httpClient = apiServer.Client()
+
+	err := sender.deleteActivity(context.Background(),
+		apiServer.URL, "conv-1", "act-1")
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&apiRequestCount))
+}
+
+func TestBuildAPIURL_URLEncoding(t *testing.T) {
+	// R5: Verify that conversationID and activityID with special characters
+	// are properly percent-encoded.
+
+	tests := []struct {
+		name           string
+		serviceURL     string
+		conversationID string
+		activityID     string
+		wantContains   string
+		wantNotContain string
+	}{
+		{
+			name:           "conversationID with spaces",
+			serviceURL:     "https://api.example.com",
+			conversationID: "conv id with spaces",
+			activityID:     "",
+			wantContains:   "conv%20id%20with%20spaces",
+		},
+		{
+			name:           "activityID with slashes",
+			serviceURL:     "https://api.example.com",
+			conversationID: "conv-1",
+			activityID:     "act/with/slashes",
+			wantContains:   "act%2Fwith%2Fslashes",
+		},
+		{
+			name:           "normal IDs unchanged",
+			serviceURL:     "https://api.example.com",
+			conversationID: "conv-123",
+			activityID:     "act-456",
+			wantContains:   "/v3/conversations/conv-123/activities/act-456",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildAPIURL(tt.serviceURL, tt.conversationID, tt.activityID)
+			assert.Contains(t, result, tt.wantContains)
+		})
+	}
+}

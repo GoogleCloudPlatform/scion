@@ -112,6 +112,41 @@ func TestTokenProvider_RefreshOnExpiry(t *testing.T) {
 	assert.Equal(t, 2, callCount)
 }
 
+func TestTokenProvider_InvalidateToken(t *testing.T) {
+	// R3: InvalidateToken clears the cache and forces a refresh.
+	callCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tokenResponse{
+			AccessToken: fmt.Sprintf("token-%d", callCount),
+			ExpiresIn:   3600,
+		})
+	}))
+	defer ts.Close()
+
+	tp := NewTokenProvider("app", "secret", "tenant")
+	tp.httpClient = ts.Client()
+	tp.tokenEndpoint = ts.URL
+
+	ctx := context.Background()
+
+	// Get initial token.
+	token, err := tp.GetToken(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "token-1", token)
+	assert.Equal(t, 1, callCount)
+
+	// Invalidate.
+	tp.InvalidateToken()
+
+	// Next GetToken should force a refresh.
+	token, err = tp.GetToken(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "token-2", token)
+	assert.Equal(t, 2, callCount)
+}
+
 func TestTokenProvider_ErrorHandling(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

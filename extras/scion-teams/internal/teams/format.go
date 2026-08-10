@@ -27,6 +27,14 @@ const (
 	// without special formatting are sent as plain text instead of cards.
 	plainTextThreshold = 100
 
+	// maxCardTextLength is the maximum character length for message bodies
+	// included in Adaptive Card templates. Longer bodies are truncated
+	// with a "... [truncated]" suffix.
+	maxCardTextLength = 4096
+
+	// truncationSuffix is appended to truncated message bodies.
+	truncationSuffix = "... [truncated]"
+
 	// adaptiveCardContentType is the MIME type for Adaptive Card attachments.
 	adaptiveCardContentType = "application/vnd.microsoft.card.adaptive"
 )
@@ -55,12 +63,17 @@ func formatStructuredMessage(msg *messages.StructuredMessage) (*Activity, error)
 	// Plain text fallback: short messages or msg.Plain = true.
 	if isPlainTextMessage(msg) {
 		text := msg.Msg
-		if agentSlug != "" {
+		if agentSlug != "" && text != "" {
 			text = fmt.Sprintf("[%s] %s", agentSlug, text)
+		} else if agentSlug != "" {
+			text = fmt.Sprintf("[%s]", agentSlug)
 		}
 		activity.Text = text
 		return activity, nil
 	}
+
+	// Truncate long message bodies before card rendering.
+	msg.Msg = truncateText(msg.Msg, maxCardTextLength)
 
 	// Build the appropriate Adaptive Card.
 	var card *AdaptiveCard
@@ -241,6 +254,11 @@ func buildAskUserCard(msg *messages.StructuredMessage, agentSlug string) *Adapti
 
 // buildStatusCard creates an Adaptive Card for system/status update messages.
 // Uses a ColumnSet with a status icon placeholder and subtle message text.
+//
+// NOTE: The design doc specifies an Image element for the status icon, but
+// we intentionally use an emoji text character ("ℹ️") instead. This avoids
+// a dependency on external image hosting for the icon URL while keeping
+// the visual intent of the status indicator.
 func buildStatusCard(msg *messages.StructuredMessage, agentSlug string) *AdaptiveCard {
 	card := NewAdaptiveCard()
 
@@ -304,6 +322,15 @@ func isPlainTextMessage(msg *messages.StructuredMessage) bool {
 	}
 
 	return true
+}
+
+// truncateText truncates s to maxLen characters. If truncated, it appends
+// the truncation suffix so the user knows the message was cut.
+func truncateText(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-len(truncationSuffix)] + truncationSuffix
 }
 
 // deriveAgentSlug extracts the agent display name from the sender field.

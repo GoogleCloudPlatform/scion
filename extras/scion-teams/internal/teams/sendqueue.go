@@ -26,6 +26,7 @@ const (
 	defaultTeamsSendQueueSize = 100
 	defaultTeamsSendMinDelay  = 200 * time.Millisecond
 	defaultTeamsIdleTimeout   = 5 * time.Minute
+	maxSendRetries            = 3
 )
 
 // sendQueueRequest represents a message waiting to be sent through the queue.
@@ -170,21 +171,25 @@ func (sq *SendQueue) worker(conversationID string, cq *conversationQueue) {
 			}
 			idleTimer.Reset(defaultTeamsIdleTimeout)
 
-			// Send the message.
-			activityID, err := sq.sendOne(req)
-			if req.result != nil {
-				req.result <- &sendQueueResult{activityID: activityID, err: err}
-			}
-
-			// Handle 429 rate limiting: pause the worker.
-			var retryErr *RetryAfterError
-			if errors.As(err, &retryErr) {
-				sq.log.Warn("Rate limited, pausing worker",
-					"conversation_id", conversationID,
-					"retry_after", retryErr.RetryAfter,
-				)
-				time.Sleep(retryErr.RetryAfter)
-				continue
+			// Send the message, retrying on 429 up to maxSendRetries times.
+			retries := 0
+			for {
+				activityID, err := sq.sendOne(req)
+				var retryErr *RetryAfterError
+				if errors.As(err, &retryErr) && retries < maxSendRetries {
+					retries++
+					sq.log.Warn("Rate limited, retrying message",
+						"conversation_id", conversationID,
+						"retry_after", retryErr.RetryAfter,
+						"attempt", retries,
+					)
+					time.Sleep(retryErr.RetryAfter)
+					continue
+				}
+				if req.result != nil {
+					req.result <- &sendQueueResult{activityID: activityID, err: err}
+				}
+				break
 			}
 
 			// Enforce minimum delay between sends.

@@ -72,6 +72,15 @@ func NewTokenProvider(appID, appSecret, tenantID string) *TokenProvider {
 	}
 }
 
+// InvalidateToken clears the cached token so that the next GetToken call
+// forces a refresh. Used after receiving a 401 to discard a stale token.
+func (tp *TokenProvider) InvalidateToken() {
+	tp.mu.Lock()
+	tp.token = ""
+	tp.expiresAt = time.Time{}
+	tp.mu.Unlock()
+}
+
 // GetToken returns a valid access token, refreshing if necessary.
 func (tp *TokenProvider) GetToken(ctx context.Context) (string, error) {
 	tp.mu.RLock()

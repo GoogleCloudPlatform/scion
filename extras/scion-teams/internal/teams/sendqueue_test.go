@@ -154,6 +154,73 @@ func TestSendQueue_OverflowDropsOldest(t *testing.T) {
 	}
 }
 
+func TestSendQueue_429RetrySuccess(t *testing.T) {
+	// R2 + R6: Verify that a 429-rated message is retried (not dropped)
+	// and eventually succeeds.
+
+	tp, tokenServer := newTestTokenProvider(t)
+	defer tokenServer.Close()
+
+	var requestCount int32
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := atomic.AddInt32(&requestCount, 1)
+		if count <= 2 {
+			// First two requests: rate limit.
+			w.Header().Set("Retry-After", "0") // 0 seconds for fast test
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		// Third request: succeed.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ActivityResponse{ID: "retry-success"})
+	}))
+	defer apiServer.Close()
+
+	sender := NewSender(tp, slog.Default())
+	sender.httpClient = apiServer.Client()
+
+	sq := NewSendQueue(sender, 10, 1*time.Millisecond, slog.Default())
+	defer sq.Close()
+
+	activity := &Activity{Type: "message", Text: "rate limited"}
+	actID, err := sq.Enqueue(context.Background(), "conv-1", apiServer.URL, activity)
+
+	require.NoError(t, err)
+	assert.Equal(t, "retry-success", actID)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&requestCount),
+		"should have retried after 429s")
+}
+
+func TestSendQueue_429ExhaustsRetries(t *testing.T) {
+	// R2: Verify that after maxSendRetries 429s the error is returned (not infinite loop).
+
+	tp, tokenServer := newTestTokenProvider(t)
+	defer tokenServer.Close()
+
+	var requestCount int32
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer apiServer.Close()
+
+	sender := NewSender(tp, slog.Default())
+	sender.httpClient = apiServer.Client()
+
+	sq := NewSendQueue(sender, 10, 1*time.Millisecond, slog.Default())
+	defer sq.Close()
+
+	activity := &Activity{Type: "message", Text: "always limited"}
+	_, err := sq.Enqueue(context.Background(), "conv-1", apiServer.URL, activity)
+
+	require.Error(t, err)
+	var retryErr *RetryAfterError
+	assert.ErrorAs(t, err, &retryErr)
+	// 1 initial + 3 retries = 4 total requests.
+	assert.Equal(t, int32(4), atomic.LoadInt32(&requestCount))
+}
+
 func TestSendQueue_ContextCancellation(t *testing.T) {
 	tp, tokenServer := newTestTokenProvider(t)
 	defer tokenServer.Close()

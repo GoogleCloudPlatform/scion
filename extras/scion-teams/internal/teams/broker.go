@@ -405,13 +405,22 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		return nil
 	}
 
+	// TODO(Phase 3): Add dedup guard before sending. Discord has dedup
+	// protection via message nonces; Teams should get equivalent protection
+	// when the Store layer is integrated in Phase 3.
+
 	// Send to each target via the SendQueue.
+	// Shallow-copy the activity per target to avoid a data race: the worker
+	// goroutine reads the Activity while this loop mutates ReplyToID.
 	var sendErrors []error
 	for _, target := range targets {
+		a := *activity // shallow copy
 		if target.replyToID != "" {
-			activity.ReplyToID = target.replyToID
+			a.ReplyToID = target.replyToID
+		} else {
+			a.ReplyToID = "" // explicitly clear
 		}
-		_, sendErr := sendQueue.Enqueue(ctx, target.conversationID, target.serviceURL, activity)
+		_, sendErr := sendQueue.Enqueue(ctx, target.conversationID, target.serviceURL, &a)
 		if sendErr != nil {
 			b.log.Error("Failed to send to conversation",
 				"conversation_id", target.conversationID,

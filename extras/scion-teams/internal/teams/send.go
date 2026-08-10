@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -80,9 +81,9 @@ func (s *Sender) updateActivity(ctx context.Context, serviceURL, conversationID,
 // deleteActivity deletes an existing Activity.
 // DELETE {serviceUrl}/v3/conversations/{conversationId}/activities/{activityId}
 func (s *Sender) deleteActivity(ctx context.Context, serviceURL, conversationID, activityID string) error {
-	url := buildAPIURL(serviceURL, conversationID, activityID)
+	apiURL := buildAPIURL(serviceURL, conversationID, activityID)
 
-	resp, err := s.doRequest(ctx, http.MethodDelete, url, nil)
+	resp, err := s.doWithRetry(ctx, http.MethodDelete, apiURL, nil)
 	if err != nil {
 		return err
 	}
@@ -100,13 +101,13 @@ func (s *Sender) deleteActivity(ctx context.Context, serviceURL, conversationID,
 
 // doSendRequest executes a POST or PUT with a JSON body, handling auth
 // and 401 retry. Returns the activity ID from the response.
-func (s *Sender) doSendRequest(ctx context.Context, method, url string, activity *Activity) (string, error) {
+func (s *Sender) doSendRequest(ctx context.Context, method, apiURL string, activity *Activity) (string, error) {
 	body, err := json.Marshal(activity)
 	if err != nil {
 		return "", fmt.Errorf("marshal activity: %w", err)
 	}
 
-	resp, err := s.doRequest(ctx, method, url, body)
+	resp, err := s.doWithRetry(ctx, method, apiURL, body)
 	if err != nil {
 		return "", err
 	}
@@ -114,26 +115,6 @@ func (s *Sender) doSendRequest(ctx context.Context, method, url string, activity
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return "", parseRetryAfter(resp)
-	}
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		// Token may have expired — force refresh and retry once.
-		s.log.Debug("Got 401, refreshing token and retrying", "url", url)
-		s.tokenProvider.mu.Lock()
-		s.tokenProvider.token = "" // Force refresh.
-		s.tokenProvider.expiresAt = time.Time{}
-		s.tokenProvider.mu.Unlock()
-
-		resp.Body.Close()
-		resp, err = s.doRequest(ctx, method, url, body)
-		if err != nil {
-			return "", err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == http.StatusTooManyRequests {
-			return "", parseRetryAfter(resp)
-		}
 	}
 
 	if resp.StatusCode >= 400 {
@@ -148,6 +129,32 @@ func (s *Sender) doSendRequest(ctx context.Context, method, url string, activity
 	}
 
 	return result.ID, nil
+}
+
+// doWithRetry executes an HTTP request with automatic 401 retry. If the
+// first request returns 401, it invalidates the cached token, fetches a
+// fresh one, and retries once. The caller owns the returned response body.
+func (s *Sender) doWithRetry(ctx context.Context, method, apiURL string, body []byte) (*http.Response, error) {
+	resp, err := s.doRequest(ctx, method, apiURL, body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		// Token may have expired — force refresh and retry once.
+		s.log.Debug("Got 401, refreshing token and retrying", "url", apiURL)
+		resp.Body.Close() // close first response before retrying
+
+		s.tokenProvider.InvalidateToken()
+
+		retryResp, retryErr := s.doRequest(ctx, method, apiURL, body)
+		if retryErr != nil {
+			return nil, retryErr // no nil resp to close
+		}
+		return retryResp, nil
+	}
+
+	return resp, nil
 }
 
 // doRequest creates and executes an authorized HTTP request.
@@ -200,13 +207,15 @@ func (s *Sender) parseErrorResponse(resp *http.Response) error {
 }
 
 // buildAPIURL constructs the Bot Connector REST API URL.
+// Path segments are percent-encoded to prevent injection.
 func buildAPIURL(serviceURL, conversationID, activityID string) string {
 	// Ensure serviceURL doesn't end with a slash.
 	serviceURL = strings.TrimRight(serviceURL, "/")
 
-	base := fmt.Sprintf("%s/v3/conversations/%s/activities", serviceURL, conversationID)
+	base := fmt.Sprintf("%s/v3/conversations/%s/activities",
+		serviceURL, url.PathEscape(conversationID))
 	if activityID != "" {
-		base = fmt.Sprintf("%s/%s", base, activityID)
+		base = fmt.Sprintf("%s/%s", base, url.PathEscape(activityID))
 	}
 	return base
 }

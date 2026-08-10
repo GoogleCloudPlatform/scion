@@ -303,6 +303,7 @@ func TestDeriveAgentSlug(t *testing.T) {
 }
 
 func TestFormatStructuredMessage_EmptyMessage(t *testing.T) {
+	// N1: Verify no trailing space when msg.Msg is empty.
 	msg := &messages.StructuredMessage{
 		Version: messages.Version,
 		Sender:  "agent:bot",
@@ -312,8 +313,8 @@ func TestFormatStructuredMessage_EmptyMessage(t *testing.T) {
 
 	activity, err := formatStructuredMessage(msg)
 	require.NoError(t, err)
-	// Empty short message -> plain text.
-	assert.Equal(t, "[bot] ", activity.Text)
+	// Empty short message -> plain text without trailing space.
+	assert.Equal(t, "[bot]", activity.Text)
 }
 
 func TestFormatStructuredMessage_SpecialCharacters(t *testing.T) {
@@ -399,6 +400,94 @@ func TestBuildAgentResponseCard_NoProject(t *testing.T) {
 	header, ok := card.Body[0].(ColumnSet)
 	require.True(t, ok)
 	assert.Len(t, header.Columns, 1)
+}
+
+func TestFormatStructuredMessage_Truncation(t *testing.T) {
+	// R1: Message bodies exceeding maxCardTextLength are truncated.
+	longBody := strings.Repeat("A", 5000)
+	msg := &messages.StructuredMessage{
+		Version: messages.Version,
+		Sender:  "agent:verbose",
+		Msg:     longBody,
+		Type:    messages.TypeInstruction,
+		Metadata: map[string]string{
+			"project_id": "test",
+		},
+	}
+
+	activity, err := formatStructuredMessage(msg)
+	require.NoError(t, err)
+	require.Len(t, activity.Attachments, 1)
+
+	var card map[string]interface{}
+	err = json.Unmarshal(activity.Attachments[0].Content, &card)
+	require.NoError(t, err)
+
+	body := card["body"].([]interface{})
+	// Body should have at least ColumnSet header + TextBlock.
+	require.GreaterOrEqual(t, len(body), 2)
+
+	textBlock := body[1].(map[string]interface{})
+	text := textBlock["text"].(string)
+
+	// Verify truncation: must be <= maxCardTextLength and end with suffix.
+	assert.LessOrEqual(t, len(text), maxCardTextLength)
+	assert.True(t, strings.HasSuffix(text, truncationSuffix),
+		"truncated text should end with %q", truncationSuffix)
+}
+
+func TestFormatStructuredMessage_NoTruncationUnderLimit(t *testing.T) {
+	// Messages under maxCardTextLength should not be truncated.
+	// Use 200 chars to exceed plainTextThreshold (100) and render as card.
+	cardBody := strings.Repeat("B", 200)
+	msg := &messages.StructuredMessage{
+		Version: messages.Version,
+		Sender:  "agent:concise",
+		Msg:     cardBody,
+		Type:    messages.TypeInstruction,
+		Metadata: map[string]string{
+			"project_id": "test",
+		},
+	}
+
+	activity, err := formatStructuredMessage(msg)
+	require.NoError(t, err)
+	require.Len(t, activity.Attachments, 1)
+
+	var card map[string]interface{}
+	err = json.Unmarshal(activity.Attachments[0].Content, &card)
+	require.NoError(t, err)
+
+	body := card["body"].([]interface{})
+	require.GreaterOrEqual(t, len(body), 2)
+	textBlock := body[1].(map[string]interface{})
+	text := textBlock["text"].(string)
+
+	// Body is under maxCardTextLength, so no truncation suffix.
+	assert.Equal(t, cardBody, text)
+	assert.False(t, strings.HasSuffix(text, truncationSuffix))
+}
+
+func TestTruncateText(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		maxLen int
+		want   string
+	}{
+		{"under limit", "short", 100, "short"},
+		{"at limit", strings.Repeat("x", 100), 100, strings.Repeat("x", 100)},
+		{"over limit", strings.Repeat("x", 200), 100,
+			strings.Repeat("x", 100-len(truncationSuffix)) + truncationSuffix},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateText(tt.input, tt.maxLen)
+			assert.Equal(t, tt.want, got)
+			assert.LessOrEqual(t, len(got), tt.maxLen)
+		})
+	}
 }
 
 func TestBuildAskUserCard_MultipleChoices(t *testing.T) {
