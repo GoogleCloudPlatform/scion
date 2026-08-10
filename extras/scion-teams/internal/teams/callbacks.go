@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -133,8 +132,16 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 		return h.respondWithUpdatedCard(activity, "This request has expired."), nil
 	}
 
+	// When the choice is "custom", use the text typed into the Input.Text field.
+	responseText := choice
+	if choice == "custom" {
+		if replyText, ok := data["reply_text"].(string); ok && replyText != "" {
+			responseText = replyText
+		}
+	}
+
 	// Deliver the response to the hub.
-	if err := h.deliverAskUserResponse(ctx, activity, pending, choice); err != nil {
+	if err := h.deliverAskUserResponse(ctx, activity, pending, responseText); err != nil {
 		h.log.Error("Failed to deliver ask-user response to hub", "error", err)
 		return h.respondWithUpdatedCard(activity, "Failed to deliver your response. Please try again."), nil
 	}
@@ -151,10 +158,12 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 	}
 
 	return h.respondWithUpdatedCard(activity,
-		fmt.Sprintf("Responded: **%s** (by %s)", choice, responder)), nil
+		fmt.Sprintf("Responded: **%s** (by %s)", responseText, responder)), nil
 }
 
 // handleAskInput processes a user clicking "Custom Reply..." on an ask-user card.
+// Returns an Adaptive Card with an Input.Text field so the user can type a
+// custom reply that is submitted back through the invoke flow.
 func (h *CallbackHandler) handleAskInput(ctx context.Context, activity *Activity, data map[string]interface{}) (*InvokeResponse, error) {
 	requestID, _ := data["request_id"].(string)
 
@@ -180,21 +189,48 @@ func (h *CallbackHandler) handleAskInput(ctx context.Context, activity *Activity
 		return h.respondWithUpdatedCard(activity, "This request has expired."), nil
 	}
 
-	// Send a follow-up message asking the user to type their reply.
-	// Teams doesn't support task modules via webhook bot, so we ask inline.
-	sender := h.broker.sender
-	if sender != nil {
-		reply := &Activity{
-			Type: "message",
-			Text: "Please type your reply as a message in this conversation. It will be forwarded to the agent.",
-		}
-		_, sendErr := sender.sendActivity(ctx, activity.ServiceURL, activity.Conversation.ID, reply)
-		if sendErr != nil {
-			h.log.Warn("Failed to send ask_input follow-up", "error", sendErr)
-		}
+	// Return an Adaptive Card with an Input.Text field and Submit button
+	// so the reply stays within the invoke flow.
+	question := "Please provide your reply:"
+	card := &AdaptiveCard{
+		Type:    "AdaptiveCard",
+		Schema:  "http://adaptivecards.io/schemas/adaptive-card.json",
+		Version: "1.5",
+		Body: []CardElement{
+			TextBlock{Type: "TextBlock", Text: fmt.Sprintf("%s needs your input", pending.AgentSlug), Weight: "Bolder"},
+			TextBlock{Type: "TextBlock", Text: question, Wrap: true},
+			InputText{Type: "Input.Text", ID: "reply_text", IsMultiline: true, Placeholder: "Type your reply..."},
+		},
+		Actions: []CardAction{
+			ActionSubmit{Type: "Action.Submit", Title: "Send Reply", Style: "positive",
+				Data: map[string]interface{}{"action": "ask_response", "request_id": requestID, "choice": "custom"}},
+		},
 	}
 
-	return &InvokeResponse{Status: 200, Body: map[string]string{"status": "ok"}}, nil
+	return h.respondWithInputCard(activity, card), nil
+}
+
+// respondWithInputCard creates an InvokeResponse that replaces the original
+// card with the provided Adaptive Card (e.g., one containing Input.Text).
+func (h *CallbackHandler) respondWithInputCard(activity *Activity, card *AdaptiveCard) *InvokeResponse {
+	cardJSON, err := json.Marshal(card)
+	if err != nil {
+		h.log.Error("Failed to marshal input card", "error", err)
+		return &InvokeResponse{Status: 200, Body: map[string]string{"status": "ok"}}
+	}
+
+	updatedAttachment := map[string]interface{}{
+		"statusCode": 200,
+		"type":       "application/vnd.microsoft.card.adaptive",
+		"value":      json.RawMessage(cardJSON),
+	}
+
+	_ = activity // available for future enhancements
+
+	return &InvokeResponse{
+		Status: 200,
+		Body:   updatedAttachment,
+	}
 }
 
 // handleSetupConfirm processes a user confirming project setup from a card.
@@ -346,20 +382,3 @@ func (h *CallbackHandler) respondWithUpdatedCard(activity *Activity, text string
 	}
 }
 
-// agentStatusLine formats a single agent for display.
-func agentStatusLine(agent AgentInfo, defaultAgent string) string {
-	emoji := agentPhaseEmoji(agent.Phase)
-	activityText := agent.Activity
-	if activityText == "" {
-		activityText = agent.Phase
-	}
-	if activityText == "" {
-		activityText = "idle"
-	}
-
-	line := fmt.Sprintf("%s **%s** — %s", emoji, agent.Slug, activityText)
-	if defaultAgent != "" && strings.EqualFold(defaultAgent, agent.Slug) {
-		line += " *(default)*"
-	}
-	return line
-}

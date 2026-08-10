@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -93,7 +94,7 @@ func (c *HubClient) DeliverInbound(ctx context.Context, topic string, msg *messa
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("hub returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -133,7 +134,7 @@ func (c *HubClient) DeliverCallback(ctx context.Context, data map[string]interfa
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("hub callback returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -185,7 +186,7 @@ type hubAgent struct {
 // ListAgents returns the agents for a given project.
 // GET /api/v1/projects/{projectID}/agents
 func (c *HubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
-	u := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
+	u := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, url.PathEscape(projectID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -202,7 +203,7 @@ func (c *HubClient) ListAgents(ctx context.Context, projectID string) ([]AgentIn
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("list agents returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -238,7 +239,7 @@ func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("list projects returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -257,7 +258,7 @@ func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
 // GetProjectStatus returns the details of a single project.
 // GET /api/v1/projects/{projectID}
 func (c *HubClient) GetProjectStatus(ctx context.Context, projectID string) (*ProjectOption, error) {
-	u := fmt.Sprintf("%s/api/v1/projects/%s", c.hubURL, projectID)
+	u := fmt.Sprintf("%s/api/v1/projects/%s", c.hubURL, url.PathEscape(projectID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -274,7 +275,7 @@ func (c *HubClient) GetProjectStatus(ctx context.Context, projectID string) (*Pr
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("get project returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 

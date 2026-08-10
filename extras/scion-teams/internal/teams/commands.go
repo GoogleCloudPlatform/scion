@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 )
@@ -176,6 +177,8 @@ func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, 
 	}
 
 	// Resolve project ID from slug via hub if possible.
+	// TODO: Consider caching the project list or adding a GetProjectBySlug
+	// hub endpoint to avoid the O(N) scan on every setup invocation.
 	projectID := projectSlug
 	hubClient := h.broker.hubClient
 	if hubClient != nil {
@@ -243,6 +246,7 @@ func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, 
 }
 
 // handleUnlink removes the channel link for the current conversation.
+// Only the user who created the link is allowed to unlink it.
 func (h *CommandHandler) handleUnlink(ctx context.Context, activity *Activity) error {
 	store := h.broker.store
 	if store == nil {
@@ -259,12 +263,32 @@ func (h *CommandHandler) handleUnlink(ctx context.Context, activity *Activity) e
 		return h.sendReply(ctx, activity, "This conversation is not linked to any project.")
 	}
 
+	// Authorization: only the user who linked this channel can unlink it.
+	if !isChannelAdmin(activity, link) {
+		return h.sendReply(ctx, activity, "Only the user who linked this channel can unlink it.")
+	}
+
 	if err := store.DeleteChannelLink(ctx, conversationID); err != nil {
 		h.log.Error("Failed to delete channel link", "error", err)
 		return h.sendReply(ctx, activity, "Failed to unlink conversation. Please try again.")
 	}
 
 	return h.sendReply(ctx, activity, fmt.Sprintf("✅ Conversation unlinked from project **%s**.", link.ProjectSlug))
+}
+
+// isChannelAdmin checks whether the activity sender is the user who
+// created the channel link. This can be extended later with Teams
+// Graph API role checks.
+func isChannelAdmin(activity *Activity, link *ChannelLink) bool {
+	if link.LinkedBy == "" {
+		// No recorded linker — allow anyone (backward compat).
+		return true
+	}
+	userID := activity.From.AadObjectID
+	if userID == "" {
+		userID = activity.From.ID
+	}
+	return userID == link.LinkedBy
 }
 
 // handleAgents lists agents in the linked project.
@@ -383,7 +407,7 @@ func (h *CommandHandler) handleStatus(ctx context.Context, activity *Activity, a
 		})
 	}
 
-	// Summarize agent phases.
+	// Summarize agent phases (sorted for consistent output).
 	phases := make(map[string]int)
 	for _, a := range agents {
 		phase := a.Phase
@@ -392,10 +416,15 @@ func (h *CommandHandler) handleStatus(ctx context.Context, activity *Activity, a
 		}
 		phases[phase]++
 	}
-	for phase, count := range phases {
+	phaseKeys := make([]string, 0, len(phases))
+	for phase := range phases {
+		phaseKeys = append(phaseKeys, phase)
+	}
+	sort.Strings(phaseKeys)
+	for _, phase := range phaseKeys {
 		card.Body = append(card.Body, TextBlock{
 			Type:     "TextBlock",
-			Text:     fmt.Sprintf("  %s %s: %d", agentPhaseEmoji(phase), phase, count),
+			Text:     fmt.Sprintf("  %s %s: %d", agentPhaseEmoji(phase), phase, phases[phase]),
 			IsSubtle: true,
 		})
 	}
@@ -404,6 +433,8 @@ func (h *CommandHandler) handleStatus(ctx context.Context, activity *Activity, a
 }
 
 // showAgentStatus shows detailed status for a specific agent.
+// TODO: Consider adding a GetAgent(ctx, projectID, slug) hub endpoint
+// instead of re-fetching the full agent list for a single agent lookup.
 func (h *CommandHandler) showAgentStatus(ctx context.Context, activity *Activity, link *ChannelLink, agentSlug string) error {
 	hubClient := h.broker.hubClient
 	agents, err := hubClient.ListAgents(ctx, link.ProjectID)
@@ -454,19 +485,19 @@ func (h *CommandHandler) showAgentStatus(ctx context.Context, activity *Activity
 }
 
 // handleRegister is a placeholder for Phase 5 identity linking.
-func (h *CommandHandler) handleRegister(_ context.Context, activity *Activity) error {
-	return h.sendReply(context.Background(), activity,
+func (h *CommandHandler) handleRegister(ctx context.Context, activity *Activity) error {
+	return h.sendReply(ctx, activity,
 		"Identity linking will be available in a future update. Stay tuned!")
 }
 
 // handleUnregister is a placeholder for Phase 5 identity unlinking.
-func (h *CommandHandler) handleUnregister(_ context.Context, activity *Activity) error {
-	return h.sendReply(context.Background(), activity,
+func (h *CommandHandler) handleUnregister(ctx context.Context, activity *Activity) error {
+	return h.sendReply(ctx, activity,
 		"Identity unlinking will be available in a future update. Stay tuned!")
 }
 
 // handleHelp sends a card listing all available commands.
-func (h *CommandHandler) handleHelp(_ context.Context, activity *Activity) error {
+func (h *CommandHandler) handleHelp(ctx context.Context, activity *Activity) error {
 	card := NewAdaptiveCard()
 	card.Body = append(card.Body, TextBlock{
 		Type:   "TextBlock",
@@ -496,7 +527,7 @@ func (h *CommandHandler) handleHelp(_ context.Context, activity *Activity) error
 		})
 	}
 
-	return h.sendCardReply(context.Background(), activity, card)
+	return h.sendCardReply(ctx, activity, card)
 }
 
 // --- Helpers ---

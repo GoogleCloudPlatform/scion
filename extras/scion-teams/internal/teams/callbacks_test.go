@@ -174,7 +174,7 @@ func TestCallbackHandler_AskResponse_AlreadyResponded(t *testing.T) {
 }
 
 func TestCallbackHandler_AskInput(t *testing.T) {
-	broker, ms := testBrokerWithStore(t, nil)
+	broker, _ := testBrokerWithStore(t, nil)
 
 	err := broker.store.CreatePendingAskUser(context.Background(), &PendingAskUser{
 		RequestID:      "req-input",
@@ -197,8 +197,30 @@ func TestCallbackHandler_AskInput(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, 200, resp.Status)
 
-	// Should have sent a follow-up message.
-	assert.NotEmpty(t, ms.sent)
+	// The response body should contain an Adaptive Card with an Input.Text field.
+	bodyMap, ok := resp.Body.(map[string]interface{})
+	require.True(t, ok, "expected response body to be a map")
+	assert.Equal(t, "application/vnd.microsoft.card.adaptive", bodyMap["type"])
+
+	// Parse the card value to verify Input.Text is present.
+	cardRaw, ok := bodyMap["value"].(json.RawMessage)
+	require.True(t, ok, "expected card value to be json.RawMessage")
+	var card map[string]interface{}
+	require.NoError(t, json.Unmarshal(cardRaw, &card))
+
+	body, ok := card["body"].([]interface{})
+	require.True(t, ok, "expected card body to be an array")
+	hasInputText := false
+	for _, elem := range body {
+		if m, ok := elem.(map[string]interface{}); ok {
+			if m["type"] == "Input.Text" {
+				hasInputText = true
+				assert.Equal(t, "reply_text", m["id"])
+				break
+			}
+		}
+	}
+	assert.True(t, hasInputText, "expected card body to contain an Input.Text element")
 }
 
 func TestCallbackHandler_SetupConfirm(t *testing.T) {

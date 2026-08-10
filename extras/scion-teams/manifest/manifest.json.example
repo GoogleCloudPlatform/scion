@@ -1,4 +1,5 @@
 {
+  "_comment": "Replace all {{APP_ID}} occurrences with your Azure App Registration client ID (Application ID from the Azure portal).",
   "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
   "manifestVersion": "1.16",
   "version": "1.0.0",

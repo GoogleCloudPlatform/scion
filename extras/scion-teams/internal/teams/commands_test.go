@@ -285,11 +285,12 @@ func TestUnlinkCommand(t *testing.T) {
 	broker, ms := testBrokerWithStore(t, nil)
 	handler := broker.commandHandler
 
-	// Pre-create a channel link.
+	// Pre-create a channel link with same user who will unlink.
 	err := broker.store.CreateChannelLink(context.Background(), &ChannelLink{
 		ConversationID: "conv-1",
 		ProjectID:      "proj-1",
 		ProjectSlug:    "test-project",
+		LinkedBy:       "aad-user-1", // matches testActivity's AadObjectID
 		LinkedAt:       time.Now(),
 		Active:         true,
 	})
@@ -308,6 +309,37 @@ func TestUnlinkCommand(t *testing.T) {
 	// Should reply confirming unlink.
 	require.NotEmpty(t, ms.sent)
 	assert.Contains(t, ms.sent[0].Text, "unlinked")
+}
+
+func TestUnlinkCommand_Unauthorized(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, nil)
+	handler := broker.commandHandler
+
+	// Pre-create a channel link with a different user.
+	err := broker.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ConversationID: "conv-1",
+		ProjectID:      "proj-1",
+		ProjectSlug:    "test-project",
+		LinkedBy:       "aad-other-user",
+		LinkedAt:       time.Now(),
+		Active:         true,
+	})
+	require.NoError(t, err)
+
+	// Activity from a different user.
+	activity := testActivity("unlink")
+	handled, cmdErr := handler.Handle(context.Background(), activity)
+	assert.True(t, handled)
+	assert.NoError(t, cmdErr)
+
+	// Link should NOT be deleted.
+	link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
+	require.NoError(t, err)
+	assert.NotNil(t, link)
+
+	// Should reply with authorization error.
+	require.NotEmpty(t, ms.sent)
+	assert.Contains(t, ms.sent[0].Text, "Only the user who linked")
 }
 
 func TestUnlinkCommand_NotLinked(t *testing.T) {

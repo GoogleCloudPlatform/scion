@@ -265,6 +265,16 @@ type Container struct {
 
 func (Container) cardElement() {}
 
+// InputText is an Adaptive Card text input field.
+type InputText struct {
+	Type        string `json:"type"`                    // "Input.Text"
+	ID          string `json:"id"`
+	IsMultiline bool   `json:"isMultiline,omitempty"`
+	Placeholder string `json:"placeholder,omitempty"`
+}
+
+func (InputText) cardElement() {}
+
 // ActionSubmit is a button that submits data back to the bot.
 type ActionSubmit struct {
 	Type  string      `json:"type"`            // "Action.Submit"
