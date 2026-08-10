@@ -218,6 +218,33 @@ func (sq *SendQueue) removeQueue(conversationID string) {
 	delete(sq.queues, conversationID)
 }
 
+// Len returns the total number of messages buffered across all conversation queues.
+func (sq *SendQueue) Len() int {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+	n := 0
+	for _, cq := range sq.queues {
+		n += len(cq.ch)
+	}
+	return n
+}
+
+// WaitDrain waits for all worker goroutines to finish, up to timeout.
+// Use this before Close() when you want to give in-flight sends a chance
+// to complete gracefully.
+func (sq *SendQueue) WaitDrain(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		sq.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		sq.log.Warn("SendQueue drain timed out", "timeout", timeout)
+	}
+}
+
 // Close shuts down all worker goroutines and waits for them to finish.
 // Messages still in the queues are drained with errors.
 func (sq *SendQueue) Close() {

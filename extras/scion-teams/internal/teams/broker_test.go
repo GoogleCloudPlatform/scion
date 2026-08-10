@@ -636,6 +636,74 @@ func TestBroker_Publish_MultiTargetReplyToIDs(t *testing.T) {
 	sq.Close() // wait for all workers to finish
 }
 
+func TestBroker_Close_Idempotent(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	// First close should succeed.
+	err := broker.Close()
+	require.NoError(t, err)
+
+	// Second close should also succeed (idempotent).
+	err = broker.Close()
+	require.NoError(t, err)
+}
+
+func TestBroker_Close_Unconfigured(t *testing.T) {
+	// Close() on a freshly created broker should be safe.
+	broker := NewBroker(slog.Default())
+	err := broker.Close()
+	require.NoError(t, err)
+
+	// Double-close on unconfigured broker.
+	err = broker.Close()
+	require.NoError(t, err)
+}
+
+func TestBroker_Publish_NotPrimary(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	// Manually set up a publish lock to simulate HA mode (postgres).
+	// The lock is NOT active (no Tick called), so Publish should refuse.
+	locker := &fakeLocker{acquireResult: false}
+	lock := NewPublishLockLoop(locker, 0x5C10000A, slog.Default())
+	broker.mu.Lock()
+	broker.publishLock = lock
+	broker.mu.Unlock()
+
+	msg := &messages.StructuredMessage{
+		Version: messages.Version,
+		Sender:  "agent:test",
+		Msg:     "should fail",
+		Type:    messages.TypeInstruction,
+	}
+
+	err := broker.Publish(context.Background(), "project.agent.event", msg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not primary instance")
+}
+
+func TestBroker_DetailedHealth_Unconfigured(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	status := broker.DetailedHealth()
+	assert.False(t, status.Configured)
+	assert.False(t, status.WebhookActive)
+	assert.False(t, status.StoreReady)
+	assert.Equal(t, "disabled", status.PublishLock)
+	assert.Equal(t, 0, status.QueueDepth)
+}
+
+func TestBroker_DetailedHealth_Configured(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	status := broker.DetailedHealth()
+	assert.True(t, status.Configured)
+	assert.True(t, status.StoreReady)
+	assert.Equal(t, 0, status.QueueDepth)
+}
+
 func TestBroker_Publish_ThreadIDRouting(t *testing.T) {
 	// R6: Verify Priority 1 routing — ThreadID match finds the conversation.
 

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -55,6 +56,8 @@ type TokenProvider struct {
 	appSecret string
 	tenantID  string
 
+	log *slog.Logger
+
 	// httpClient is injectable for testing.
 	httpClient *http.Client
 	// tokenEndpoint allows override for testing.
@@ -67,6 +70,7 @@ func NewTokenProvider(appID, appSecret, tenantID string) *TokenProvider {
 		appID:         appID,
 		appSecret:     appSecret,
 		tenantID:      tenantID,
+		log:           slog.Default(),
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
 		tokenEndpoint: fmt.Sprintf(defaultTokenEndpointTemplate, tenantID),
 	}
@@ -119,30 +123,47 @@ func (tp *TokenProvider) refresh(ctx context.Context) (string, error) {
 
 	req, err := http.NewRequestWithContext(ctx, "POST", tp.tokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
-		return "", fmt.Errorf("create token request: %w", err)
+		return tp.fallbackOrError(fmt.Errorf("create token request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := tp.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("token request failed: %w", err)
+		return tp.fallbackOrError(fmt.Errorf("token request failed: %w", err))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body))
+		return tp.fallbackOrError(fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body)))
 	}
 
 	var result tokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode token response: %w", err)
+		return tp.fallbackOrError(fmt.Errorf("decode token response: %w", err))
 	}
 
 	tp.token = result.AccessToken
 	tp.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
 
 	return tp.token, nil
+}
+
+// fallbackOrError returns the cached token if it is still valid (not yet
+// expired), even if a refresh attempt failed. This allows the broker to
+// ride out transient Azure AD outages using a cached token that hasn't
+// actually expired yet (it's just past the proactive refresh window).
+// Must be called while tp.mu is held.
+func (tp *TokenProvider) fallbackOrError(refreshErr error) (string, error) {
+	if tp.token != "" && time.Now().Before(tp.expiresAt) {
+		// Token is still valid — use it and log a warning.
+		tp.log.Warn("Token refresh failed but cached token still valid, using cached token",
+			"error", refreshErr,
+			"expires_at", tp.expiresAt,
+		)
+		return tp.token, nil
+	}
+	return "", refreshErr
 }
 
 // -------------------------------------------------------------------

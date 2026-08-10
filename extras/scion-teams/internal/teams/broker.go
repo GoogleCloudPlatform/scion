@@ -77,8 +77,12 @@ type TeamsBroker struct {
 	commandHandler  *CommandHandler
 	callbackHandler *CallbackHandler
 
+	// HA advisory lock for outbound publish singleton (Phase 6).
+	publishLock *PublishLockLoop // non-nil in standalone HA mode
+
 	configured bool
-	phase      int // 1 or 2
+	closed     bool // guarded by mu; true after Close()
+	phase      int  // 1 or 2
 
 	mu sync.Mutex
 
@@ -158,6 +162,20 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 			}
 			if storeErr != nil {
 				return fmt.Errorf("initialize store: %w", storeErr)
+			}
+
+			// Set up advisory lock for HA mode when using PostgreSQL.
+			if b.config.DBType == "postgres" && b.store != nil {
+				if locker, ok := b.store.(AdvisoryLocker); ok {
+					b.publishLock = NewPublishLockLoop(locker, 0x5C10000A, b.log)
+					b.publishLock.OnAcquired = func() error {
+						b.log.Info("Acquired publish lock, this instance is primary")
+						return nil
+					}
+					b.publishLock.OnLost = func() {
+						b.log.Warn("Lost publish lock, this instance is now standby")
+					}
+				}
 			}
 
 			b.phase = 1
@@ -299,7 +317,13 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 
 	b.mu.Lock()
 	sendQueue := b.sendQueue
+	publishLock := b.publishLock
 	b.mu.Unlock()
+
+	// In HA mode, only the primary instance may publish.
+	if publishLock != nil && !publishLock.Active() {
+		return fmt.Errorf("not primary instance, publish lock not held")
+	}
 
 	if sendQueue == nil {
 		b.log.Debug("Publish called but send queue not initialized", "topic", topic)
@@ -507,31 +531,49 @@ func (b *TeamsBroker) AddChannelLink(link *ChannelLink) error {
 }
 
 // Close implements MessageBrokerPluginInterface.Close.
+// Close is idempotent: calling it more than once is safe.
 func (b *TeamsBroker) Close() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil
+	}
+	b.closed = true
+	b.subscriptions = make(map[string]bool)
+	sendQueue := b.sendQueue
+	webhookServer := b.webhookServer
+	serverRunning := b.serverRunning
+	store := b.store
+	publishLock := b.publishLock
+	b.serverRunning = false
+	b.mu.Unlock()
 
-	if b.sendQueue != nil {
-		b.sendQueue.Close()
+	// Release advisory lock first (orderly, no OnLost).
+	if publishLock != nil {
+		publishLock.ReleaseHandle()
 	}
 
-	if b.webhookServer != nil && b.serverRunning {
+	// Drain in-flight sends before closing the queue.
+	if sendQueue != nil {
+		sendQueue.WaitDrain(5 * time.Second)
+		sendQueue.Close()
+	}
+
+	if webhookServer != nil && serverRunning {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		if err := b.webhookServer.Stop(ctx); err != nil {
+		if err := webhookServer.Stop(ctx); err != nil {
 			b.log.Warn("Error stopping webhook server on close", "error", err)
 		}
-		b.serverRunning = false
 	}
 
-	if b.store != nil {
-		if err := b.store.Close(); err != nil {
+	if store != nil {
+		if err := store.Close(); err != nil {
 			b.log.Warn("Error closing store", "error", err)
 		}
 	}
 
-	b.subscriptions = make(map[string]bool)
 	b.log.Info("Teams broker closed")
 	return nil
 }
@@ -555,6 +597,21 @@ func (b *TeamsBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	details := map[string]string{
 		"configured": fmt.Sprintf("%v", b.configured),
 		"phase":      fmt.Sprintf("%d", b.phase),
+	}
+
+	// Include publish lock status.
+	if b.publishLock != nil {
+		if b.publishLock.Active() {
+			details["publish_lock"] = "primary"
+		} else {
+			details["publish_lock"] = "standby"
+		}
+	} else {
+		details["publish_lock"] = "disabled"
+	}
+
+	if b.sendQueue != nil {
+		details["queue_depth"] = fmt.Sprintf("%d", b.sendQueue.Len())
 	}
 
 	if b.serverRunning {
