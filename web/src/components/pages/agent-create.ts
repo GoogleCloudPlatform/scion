@@ -1012,11 +1012,21 @@ export class ScionPageAgentCreate extends LitElement {
         <sl-details
           summary="Additional Options"
           ?open=${this.advancedOpen}
-          @sl-show=${() => { this.advancedOpen = true; }}
+          @sl-show=${() => {
+            this.advancedOpen = true;
+            // Force the tab-group to show the General tab when disclosure opens.
+            // sl-tab-group may not initialize correctly when hidden inside sl-details.
+            requestAnimationFrame(() => {
+              const tabGroup = this.shadowRoot?.querySelector('sl-tab-group');
+              if (tabGroup) {
+                (tabGroup as any).show?.('general');
+              }
+            });
+          }}
           @sl-hide=${() => { this.advancedOpen = false; }}
         >
           <sl-tab-group>
-            <sl-tab slot="nav" panel="general">General</sl-tab>
+            <sl-tab slot="nav" panel="general" active>General</sl-tab>
             <sl-tab slot="nav" panel="auth-security">Auth &amp; Security</sl-tab>
             <sl-tab slot="nav" panel="env-labels">Environment &amp; Labels</sl-tab>
             <sl-tab slot="nav" panel="limits">Limits &amp; Resources</sl-tab>
