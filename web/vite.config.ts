@@ -126,6 +126,11 @@ export default defineConfig({
     // Set base to the proxy path so HTML asset URLs and dynamic imports
     // use the full proxy prefix. The proxyPrefixRestorePlugin re-adds
     // the prefix to incoming requests (which the hub proxy strips).
+    //
+    // IMPORTANT: PROXY_BASE_PATH must NEVER be set in production/CI builds.
+    // It is a dev-only env var for previewing the Vite dev server through
+    // the hub's port proxy. In production, base must be '/' so the Go
+    // server can serve the built assets at the site root.
     base: proxyBase || '/',
     // SPA mode: serve index.html for all unmatched routes (history API fallback)
     appType: 'spa',

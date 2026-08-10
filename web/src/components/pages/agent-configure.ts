@@ -783,9 +783,7 @@ export class ScionPageAgentConfigure extends LitElement {
             variant="default"
             ?disabled=${isBusy}
             @click=${() => {
-              const url = new URL('/agents/new', window.location.origin);
-              url.searchParams.set('editingAgentId', this.agentId);
-              window.history.pushState({}, '', url.toString());
+              window.history.pushState({}, '', `/agents/${this.agentId}`);
               window.dispatchEvent(new PopStateEvent('popstate'));
             }}
           >
