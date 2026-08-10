@@ -22,12 +22,16 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
+
+// tenantIDPattern matches a valid UUID (Azure AD tenant IDs are always UUIDs).
+var tenantIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // TeamsChannel delivers notifications to a Microsoft Teams conversation
 // via the Bot Connector REST API. This is an outbound-only notification
@@ -76,11 +80,21 @@ func (c *TeamsChannel) Validate() error {
 	if c.tenantID == "" {
 		return fmt.Errorf("teams channel requires a 'tenant_id' param")
 	}
+	if !tenantIDPattern.MatchString(c.tenantID) {
+		return fmt.Errorf("teams channel tenant_id must be a valid UUID")
+	}
 	if c.conversationID == "" {
 		return fmt.Errorf("teams channel requires a 'conversation_id' param")
 	}
 	if c.serviceURL == "" {
 		return fmt.Errorf("teams channel requires a 'service_url' param")
+	}
+	u, err := url.Parse(c.serviceURL)
+	if err != nil {
+		return fmt.Errorf("teams channel service_url is not a valid URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("teams channel service_url must use https:// (got %q)", u.Scheme)
 	}
 	return nil
 }

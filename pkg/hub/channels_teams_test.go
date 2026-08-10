@@ -72,7 +72,7 @@ func TestTeamsChannel_Validate_Success(t *testing.T) {
 	ch := NewTeamsChannel(map[string]string{
 		"app_id":          "test-app",
 		"app_secret":      "test-secret",
-		"tenant_id":       "test-tenant",
+		"tenant_id":       "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
 		"conversation_id": "conv-123",
 		"service_url":     "https://smba.trafficmanager.net/test/",
 	})
@@ -102,12 +102,12 @@ func TestTeamsChannel_Validate_MissingParams(t *testing.T) {
 		},
 		{
 			name:    "missing conversation_id",
-			params:  map[string]string{"app_id": "a", "app_secret": "s", "tenant_id": "t", "service_url": "u"},
+			params:  map[string]string{"app_id": "a", "app_secret": "s", "tenant_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "service_url": "https://example.com"},
 			wantErr: "conversation_id",
 		},
 		{
 			name:    "missing service_url",
-			params:  map[string]string{"app_id": "a", "app_secret": "s", "tenant_id": "t", "conversation_id": "c"},
+			params:  map[string]string{"app_id": "a", "app_secret": "s", "tenant_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "conversation_id": "c"},
 			wantErr: "service_url",
 		},
 	}
@@ -118,6 +118,131 @@ func TestTeamsChannel_Validate_MissingParams(t *testing.T) {
 			err := ch.Validate()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestTeamsChannel_Validate_ServiceURLMustBeHTTPS(t *testing.T) {
+	tests := []struct {
+		name       string
+		serviceURL string
+		wantErr    string
+	}{
+		{
+			name:       "http scheme rejected",
+			serviceURL: "http://smba.trafficmanager.net/test/",
+			wantErr:    "must use https://",
+		},
+		{
+			name:       "ftp scheme rejected",
+			serviceURL: "ftp://smba.trafficmanager.net/test/",
+			wantErr:    "must use https://",
+		},
+		{
+			name:       "empty scheme rejected",
+			serviceURL: "://smba.trafficmanager.net/test/",
+			wantErr:    "not a valid URL",
+		},
+		{
+			name:       "no scheme rejected",
+			serviceURL: "smba.trafficmanager.net/test/",
+			wantErr:    "must use https://",
+		},
+		{
+			name:       "https accepted",
+			serviceURL: "https://smba.trafficmanager.net/test/",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := NewTeamsChannel(map[string]string{
+				"app_id":          "test-app",
+				"app_secret":      "test-secret",
+				"tenant_id":       "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+				"conversation_id": "conv-123",
+				"service_url":     tc.serviceURL,
+			})
+			err := ch.Validate()
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestTeamsChannel_Validate_TenantIDMustBeUUID(t *testing.T) {
+	tests := []struct {
+		name     string
+		tenantID string
+		wantErr  bool
+	}{
+		{
+			name:     "valid UUID lowercase",
+			tenantID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			wantErr:  false,
+		},
+		{
+			name:     "valid UUID uppercase",
+			tenantID: "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+			wantErr:  false,
+		},
+		{
+			name:     "valid UUID mixed case",
+			tenantID: "a1B2c3D4-E5f6-7890-AbCd-eF1234567890",
+			wantErr:  false,
+		},
+		{
+			name:     "path traversal",
+			tenantID: "../../other",
+			wantErr:  true,
+		},
+		{
+			name:     "contains slash",
+			tenantID: "a1b2c3d4/e5f6-7890-abcd-ef1234567890",
+			wantErr:  true,
+		},
+		{
+			name:     "not a UUID",
+			tenantID: "my-tenant",
+			wantErr:  true,
+		},
+		{
+			name:     "UUID without hyphens",
+			tenantID: "a1b2c3d4e5f67890abcdef1234567890",
+			wantErr:  true,
+		},
+		{
+			name:     "contains whitespace",
+			tenantID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890 ",
+			wantErr:  true,
+		},
+		{
+			name:     "too short",
+			tenantID: "a1b2c3d4",
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := NewTeamsChannel(map[string]string{
+				"app_id":          "test-app",
+				"app_secret":      "test-secret",
+				"tenant_id":       tc.tenantID,
+				"conversation_id": "conv-123",
+				"service_url":     "https://smba.trafficmanager.net/test/",
+			})
+			err := ch.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "tenant_id must be a valid UUID")
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }
