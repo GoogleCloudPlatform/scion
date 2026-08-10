@@ -103,9 +103,16 @@ The effective role granted to an agent at creation is resolved by a **two-gate a
 
 $$\text{effectiveRole} = \min(\text{requestedRole}, \text{userCeiling}, \text{projectMax})$$
 
-1. **Requested Role**: The role requested during agent dispatch (e.g., using the `--role` flag in the CLI). If not specified, defaults to `baseline`.
-2. **User Ceiling**: Capped by the user's own system permissions. A standard `hub:member` has an agent role ceiling of `baseline`. Only a `hub:admin` has a ceiling of `full`.
+1. **Requested Role**: The role requested during agent dispatch (e.g., using the `--role` flag in the CLI). If not specified, the role defaults to the project-level or Hub-level `default_agent_role`.
+   - **Default Role Update**: For better usability, the default fallback role has been changed from `baseline` to `full`.
+   - **Configuration Options**: You can specify `default_agent_role` globally under `agent_defaults` in the Hub settings (via settings/admin UI) or customize it per-project using the admin UI dropdown or the project setting `scion.io/default-agent-role`.
+2. **User Ceiling**: Capped by the user's own system permissions. (Note: The user-ceiling gate is currently configured as a pass-through where all Hub users receive a ceiling of `full`, making the project's maximum role the primary operational limiter).
 3. **Project Max**: Set by the project's `max_agent_role` setting, which defaults to the global Hub configuration (`default_max_agent_role` under `agent_defaults`).
+
+#### Fallback and Fail-Closed Security
+To guard against unauthorized escalations, the role fallback chain and parent lookup enforce fail-closed behavior:
+- **Parent Agent Lookup Failure**: If parent agent lookup fails (e.g., due to transient database issues or invalid parent ID) when spawning a sub-agent, the sub-agent role ceiling defaults to `baseline` instead of failing open.
+- **Corrupted Stored Roles**: If a parent agent's stored role is corrupted or invalid, it is treated as `baseline` for sub-agent creations to ensure robust security.
 
 #### Sub-Agent No-Escalation Enforcement
 To prevent security bypasses via sub-agent creation, Scion enforces strict no-escalation rules:
