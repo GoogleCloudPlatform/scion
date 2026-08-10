@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS teams_channel_links (
 );
 
 CREATE INDEX IF NOT EXISTS idx_teams_channel_links_project ON teams_channel_links(project_id);
+CREATE INDEX IF NOT EXISTS idx_teams_channel_links_project_slug ON teams_channel_links(project_slug);
 CREATE INDEX IF NOT EXISTS idx_teams_channel_links_team ON teams_channel_links(team_id);
 
 CREATE TABLE IF NOT EXISTS teams_conversation_references (
@@ -168,7 +169,7 @@ func (s *postgresStore) GetChannelLink(ctx context.Context, conversationID strin
 }
 
 func (s *postgresStore) GetChannelLinksForProject(ctx context.Context, projectID string) ([]*ChannelLink, error) {
-	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM teams_channel_links WHERE project_id = $1`
+	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM teams_channel_links WHERE (project_id = $1 OR project_slug = $1) AND active = true`
 	rows, err := s.db.QueryContext(ctx, q, projectID)
 	if err != nil {
 		return nil, err

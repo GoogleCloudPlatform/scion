@@ -147,6 +147,48 @@ func TestChannelLinkCRUD(t *testing.T) {
 		assert.Len(t, links, 0)
 	})
 
+	t.Run("GetByProjectSlugFallback", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		// Create a link where ProjectID differs from ProjectSlug.
+		require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+			ConversationID: "conv-slug",
+			TeamID:         "team-1",
+			ProjectID:      "proj-123",
+			ProjectSlug:    "my-project",
+			LinkedAt:       time.Now().UTC(),
+			Active:         true,
+		}))
+
+		// Query by slug should find the link via the slug fallback.
+		links, err := store.GetChannelLinksForProject(ctx, "my-project")
+		require.NoError(t, err)
+		assert.Len(t, links, 1)
+		assert.Equal(t, "conv-slug", links[0].ConversationID)
+		assert.Equal(t, "proj-123", links[0].ProjectID)
+
+		// Query by project ID should also still work.
+		links, err = store.GetChannelLinksForProject(ctx, "proj-123")
+		require.NoError(t, err)
+		assert.Len(t, links, 1)
+		assert.Equal(t, "conv-slug", links[0].ConversationID)
+
+		// Inactive links should not be returned.
+		require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+			ConversationID: "conv-inactive",
+			TeamID:         "team-1",
+			ProjectID:      "proj-123",
+			ProjectSlug:    "my-project",
+			LinkedAt:       time.Now().UTC(),
+			Active:         false,
+		}))
+
+		links, err = store.GetChannelLinksForProject(ctx, "proj-123")
+		require.NoError(t, err)
+		assert.Len(t, links, 1, "inactive links should be excluded")
+	})
+
 	t.Run("GetAll", func(t *testing.T) {
 		store := newTestStore(t)
 		ctx := context.Background()
@@ -809,16 +851,22 @@ func TestCallbackLookup(t *testing.T) {
 	})
 }
 
-// --- Advisory lock (SQLite stub) ---
+// --- Advisory lock (SQLite stub — always acquired in single-node mode) ---
 
-func TestAdvisoryLock_SQLiteReturnsNotAcquired(t *testing.T) {
+func TestAdvisoryLock_SQLiteAlwaysAcquired(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
 	acquired, handle, err := store.TryAdvisoryLock(ctx, 12345)
 	require.NoError(t, err)
-	assert.False(t, acquired)
-	assert.Nil(t, handle)
+	assert.True(t, acquired)
+	require.NotNil(t, handle)
+
+	// Release is a no-op but should not error.
+	require.NoError(t, handle.Release())
+
+	// Verify is a no-op but should not error.
+	require.NoError(t, handle.Verify(ctx))
 }
 
 // --- Store lifecycle ---

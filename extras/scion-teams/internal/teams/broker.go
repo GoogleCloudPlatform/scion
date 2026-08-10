@@ -469,7 +469,7 @@ func parsePublishTopic(topic string) (projectID, agentSlug string) {
 }
 
 // SetConversationContext persists the conversation context via the store.
-func (b *TeamsBroker) SetConversationContext(cc *ConversationContext) {
+func (b *TeamsBroker) SetConversationContext(cc *ConversationContext) error {
 	b.mu.Lock()
 	store := b.store
 	b.mu.Unlock()
@@ -477,12 +477,14 @@ func (b *TeamsBroker) SetConversationContext(cc *ConversationContext) {
 	if store != nil {
 		if err := store.SetConversationContext(context.Background(), cc); err != nil {
 			b.log.Warn("Failed to persist conversation context", "error", err)
+			return fmt.Errorf("persist conversation context: %w", err)
 		}
 	}
+	return nil
 }
 
 // AddChannelLink creates or updates a channel link via the store.
-func (b *TeamsBroker) AddChannelLink(link *ChannelLink) {
+func (b *TeamsBroker) AddChannelLink(link *ChannelLink) error {
 	b.mu.Lock()
 	store := b.store
 	b.mu.Unlock()
@@ -490,8 +492,10 @@ func (b *TeamsBroker) AddChannelLink(link *ChannelLink) {
 	if store != nil {
 		if err := store.CreateChannelLink(context.Background(), link); err != nil {
 			b.log.Warn("Failed to persist channel link", "error", err)
+			return fmt.Errorf("persist channel link: %w", err)
 		}
 	}
+	return nil
 }
 
 // Close implements MessageBrokerPluginInterface.Close.
@@ -664,7 +668,9 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 			projectID = msg.Metadata["project_id"]
 		}
 		if projectID != "" {
-			b.SetConversationContext(&ConversationContext{
+			// Fire-and-forget: error is logged inside SetConversationContext;
+			// a failure here should not block inbound message processing.
+			_ = b.SetConversationContext(&ConversationContext{
 				TeamsUserID:        msg.SenderID,
 				ProjectID:          projectID,
 				AgentSlug:          agentSlug,

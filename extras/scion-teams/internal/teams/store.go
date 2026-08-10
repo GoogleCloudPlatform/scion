@@ -76,7 +76,7 @@ type Store interface {
 	// Advisory locks (HA singleton coordination).
 	// On Postgres, acquires a session-scoped lock on a dedicated connection.
 	// The returned handle MUST be Released when the lock is no longer needed.
-	// On SQLite, returns (false, nil, nil) — advisory locks are PostgreSQL-only.
+	// On SQLite, returns (true, noop-handle, nil) — always acquired in single-node mode.
 	TryAdvisoryLock(ctx context.Context, key int64) (acquired bool, handle *AdvisoryLockHandle, err error)
 
 	// Lifecycle
@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS channel_links (
 );
 
 CREATE INDEX IF NOT EXISTS idx_channel_links_project ON channel_links(project_id);
+CREATE INDEX IF NOT EXISTS idx_channel_links_project_slug ON channel_links(project_slug);
 CREATE INDEX IF NOT EXISTS idx_channel_links_team ON channel_links(team_id);
 
 CREATE TABLE IF NOT EXISTS conversation_references (
@@ -236,8 +237,8 @@ func (s *sqliteStore) GetChannelLink(ctx context.Context, conversationID string)
 }
 
 func (s *sqliteStore) GetChannelLinksForProject(ctx context.Context, projectID string) ([]*ChannelLink, error) {
-	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM channel_links WHERE project_id = ?`
-	rows, err := s.db.QueryContext(ctx, q, projectID)
+	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM channel_links WHERE (project_id = ? OR project_slug = ?) AND active = 1`
+	rows, err := s.db.QueryContext(ctx, q, projectID, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -646,10 +647,13 @@ func scanUserMapping(row *sql.Row) (*TeamsUserMapping, error) {
 	return &m, nil
 }
 
-// --- Advisory locks (SQLite stub — advisory locks are PostgreSQL-only) ---
+// --- Advisory locks (SQLite stub — single-node, no contention) ---
 
 func (s *sqliteStore) TryAdvisoryLock(_ context.Context, _ int64) (bool, *AdvisoryLockHandle, error) {
-	return false, nil, nil
+	return true, NewAdvisoryLockHandle(
+		func() error { return nil },
+		func(_ context.Context) error { return nil },
+	), nil
 }
 
 func boolToInt(b bool) int {

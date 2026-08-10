@@ -366,13 +366,13 @@ func TestBroker_Publish_ChannelLinkBroadcast(t *testing.T) {
 	ctx := context.Background()
 
 	// Add a channel link via the store.
-	broker.AddChannelLink(&ChannelLink{
+	require.NoError(t, broker.AddChannelLink(&ChannelLink{
 		ConversationID: "linked-conv",
 		ProjectID:      "test-project",
 		ProjectSlug:    "test-project",
 		Active:         true,
 		LinkedAt:       time.Now(),
-	})
+	}))
 
 	// Add conversation ref for the linked conversation.
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
@@ -401,14 +401,14 @@ func TestBroker_Publish_ConversationContextRouting(t *testing.T) {
 	ctx := context.Background()
 
 	// Set a conversation context via the store.
-	broker.SetConversationContext(&ConversationContext{
+	require.NoError(t, broker.SetConversationContext(&ConversationContext{
 		TeamsUserID:        "user-1",
 		ProjectID:          "myproject",
 		AgentSlug:          "builder",
 		LastConversationID: "ctx-conv",
 		LastActivityID:     "ctx-act",
 		LastMessageAt:      time.Now(),
-	})
+	}))
 
 	// Add conversation ref.
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
@@ -493,12 +493,12 @@ func TestBroker_AddChannelLink(t *testing.T) {
 	broker := NewBroker(slog.Default())
 	configureBrokerForPublish(t, broker)
 
-	broker.AddChannelLink(&ChannelLink{
+	require.NoError(t, broker.AddChannelLink(&ChannelLink{
 		ConversationID: "conv-1",
 		ProjectID:      "proj-1",
 		Active:         true,
 		LinkedAt:       time.Now(),
-	})
+	}))
 
 	link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
 	require.NoError(t, err)
@@ -510,13 +510,13 @@ func TestBroker_SetConversationContext(t *testing.T) {
 	broker := NewBroker(slog.Default())
 	configureBrokerForPublish(t, broker)
 
-	broker.SetConversationContext(&ConversationContext{
+	require.NoError(t, broker.SetConversationContext(&ConversationContext{
 		TeamsUserID:        "u1",
 		ProjectID:          "p1",
 		AgentSlug:          "a1",
 		LastConversationID: "conv-1",
 		LastMessageAt:      time.Now(),
-	})
+	}))
 
 	cc, err := broker.store.GetConversationContext(context.Background(), "u1", "p1", "a1")
 	require.NoError(t, err)
