@@ -205,8 +205,14 @@ func (d *HTTPAgentDispatcher) SetTokenGenerator(gen AgentTokenGenerator) {
 // scopes (e.g. GCP token) from the agent record. Used by all dispatch call
 // sites to keep role/scope computation in a single place.
 func agentRoleAndScopes(agent *store.Agent) (AgentRole, []AgentTokenScope) {
-	// Default to baseline for backward compat with pre-role agents.
-	role := AgentRoleBaseline
+	if agent == nil {
+		return AgentRoleFull, nil
+	}
+	// Default to full for pre-role agents. This matches the design decision
+	// that null/unset agent role resolves to full (see ScopesForRole and
+	// roleOrdinal). Baseline would deny create/lifecycle/secret scopes that
+	// standing agents (coordinators, leads) need.
+	role := AgentRoleFull
 	if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
 		role = AgentRole(agent.AppliedConfig.AgentRole)
 	}
