@@ -158,7 +158,7 @@ When running in database mode, administrators can manage OIDC federation configu
 Alternatively, or for initial bootstrapping, you can configure federation statically in your configuration file.
 
 :::note[OIDC Wiring Guarantee]
-Federation and OIDC configurations are fully wired end-to-end into the server's config schemas (`hub.ServerConfig` and `V1ServerConfig`), ensuring no federation fields are silently dropped on file load. In combo-server setups, standard `/.well-known/` discovery endpoints are routed correctly and are not intercepted by the SPA catch-all routing.
+Federation and OIDC configurations are fully wired end-to-end into the server's config schemas (`config.GlobalConfig` and `V1ServerConfig`), ensuring no federation fields are silently dropped on file load. In combo-server setups, standard `/.well-known/` discovery endpoints are routed correctly and are not intercepted by the SPA catch-all routing.
 :::
 
 ```yaml
