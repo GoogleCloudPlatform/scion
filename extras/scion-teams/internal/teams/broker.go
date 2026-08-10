@@ -18,12 +18,22 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+)
+
+const (
+	// OriginMarkerKey is the metadata key injected into outbound messages
+	// to identify messages originating from the hub.
+	OriginMarkerKey = "scion_origin"
+
+	// OriginMarkerValue is the marker value for hub-originated messages.
+	OriginMarkerValue = "hub"
 )
 
 // Config holds the parsed configuration for the Teams broker.
@@ -37,9 +47,11 @@ type Config struct {
 	MentionRouting bool
 
 	// Phase 2: Hub connection.
-	HubURL   string
-	HMACKey  string
-	BrokerID string
+	HubURL        string
+	HMACKey       string
+	BrokerID      string
+	SendQueueSize int
+	SendMinDelay  time.Duration
 }
 
 // TeamsBroker implements plugin.MessageBrokerPluginInterface for Microsoft Teams.
@@ -52,6 +64,10 @@ type TeamsBroker struct {
 	webhookServer *WebhookServer
 	hubClient     *HubClient
 
+	// Outbound messaging (Phase 2).
+	sender    *Sender
+	sendQueue *SendQueue
+
 	configured bool
 	phase      int // 1 or 2
 
@@ -59,6 +75,13 @@ type TeamsBroker struct {
 
 	// In-memory conversation references (proper Store in Phase 3).
 	conversationRefs map[string]*ConversationReference
+
+	// In-memory channel links (proper Store in Phase 3).
+	channelLinks map[string]*ChannelLink
+
+	// In-memory conversation contexts (proper Store in Phase 3).
+	// Key: teamsUserID + ":" + projectID + ":" + agentSlug.
+	conversationContexts map[string]*ConversationContext
 
 	// Subscription tracking.
 	subscriptions map[string]bool
@@ -68,9 +91,11 @@ type TeamsBroker struct {
 // NewBroker creates a new TeamsBroker instance.
 func NewBroker(log *slog.Logger) *TeamsBroker {
 	return &TeamsBroker{
-		log:              log,
-		conversationRefs: make(map[string]*ConversationReference),
-		subscriptions:    make(map[string]bool),
+		log:                  log,
+		conversationRefs:     make(map[string]*ConversationReference),
+		channelLinks:         make(map[string]*ChannelLink),
+		conversationContexts: make(map[string]*ConversationContext),
+		subscriptions:        make(map[string]bool),
 	}
 }
 
@@ -137,11 +162,26 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 	if v, ok := config["broker_id"]; ok {
 		b.config.BrokerID = v
 	}
+	if v, ok := config["send_queue_size"]; ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			b.config.SendQueueSize = n
+		}
+	}
+	if v, ok := config["send_min_delay"]; ok {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			b.config.SendMinDelay = d
+		}
+	}
 
 	// Phase 2 requires hub connection details AND phase 1 to be complete.
 	if b.config.HubURL != "" && b.config.HMACKey != "" && b.config.BrokerID != "" {
 		if b.phase == 1 {
 			b.hubClient = NewHubClient(b.config.HubURL, b.config.HMACKey, b.config.BrokerID, b.log)
+
+			// Initialize outbound messaging components.
+			b.sender = NewSender(b.tokenProvider, b.log)
+			b.sendQueue = NewSendQueue(b.sender, b.config.SendQueueSize, b.config.SendMinDelay, b.log)
+
 			b.phase = 2
 			b.configured = true
 			b.log.Info("Phase 2 configuration complete",
@@ -210,16 +250,224 @@ func (b *TeamsBroker) Unsubscribe(pattern string) error {
 }
 
 // Publish implements MessageBrokerPluginInterface.Publish.
-// Phase 1 stub — outbound messaging is implemented in Phase 2.
+// Routes outbound messages to Teams conversations using the priority chain:
+//  1. ThreadID match — look up conversation reference for that thread.
+//  2. Metadata teams_conversation_id — explicit target.
+//  3. ConversationContext — last context for sender+project+agent.
+//  4. ChannelLinks broadcast — all channels linked to the project.
 func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	b.log.Debug("Publish called (stub in Phase 1)", "topic", topic, "msg", msg.Msg)
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+
+	// Echo prevention: skip messages with scion_origin marker.
+	if msg.Metadata != nil {
+		if origin, ok := msg.Metadata[OriginMarkerKey]; ok && origin == OriginMarkerValue {
+			b.log.Debug("Skipping echo (scion_origin marker)",
+				"topic", topic)
+			return nil
+		}
+	}
+
+	// Channel filtering: if the message targets a specific channel that
+	// isn't ours, skip it.
+	if msg.Channel != "" && msg.Channel != "teams" {
+		return nil
+	}
+
+	b.mu.Lock()
+	sendQueue := b.sendQueue
+	b.mu.Unlock()
+
+	if sendQueue == nil {
+		b.log.Debug("Publish called but send queue not initialized", "topic", topic)
+		return nil
+	}
+
+	// Mark outbound messages with origin to prevent echo loops.
+	if msg.Metadata == nil {
+		msg.Metadata = make(map[string]string)
+	}
+	msg.Metadata[OriginMarkerKey] = OriginMarkerValue
+
+	// Extract project and agent from topic.
+	projectID, agentSlug := parsePublishTopic(topic)
+	if msg.Metadata["project_id"] == "" && projectID != "" {
+		msg.Metadata["project_id"] = projectID
+	}
+
+	// Format the message into a Teams Activity.
+	activity, err := formatStructuredMessage(msg)
+	if err != nil {
+		return fmt.Errorf("format message: %w", err)
+	}
+
+	// Resolve target conversations via priority chain.
+	type sendTarget struct {
+		conversationID string
+		serviceURL     string
+		replyToID      string
+	}
+	var targets []sendTarget
+
+	// Priority 1: ThreadID match.
+	if msg.ThreadID != "" {
+		b.mu.Lock()
+		ref, ok := b.conversationRefs[msg.ThreadID]
+		b.mu.Unlock()
+		if ok {
+			targets = append(targets, sendTarget{
+				conversationID: ref.ConversationID,
+				serviceURL:     ref.ServiceURL,
+			})
+		}
+	}
+
+	// Priority 2: Metadata teams_conversation_id.
+	if len(targets) == 0 && msg.Metadata != nil {
+		if convID, ok := msg.Metadata["teams_conversation_id"]; ok && convID != "" {
+			serviceURL := msg.Metadata["teams_service_url"]
+			if serviceURL == "" {
+				b.mu.Lock()
+				ref, ok := b.conversationRefs[convID]
+				b.mu.Unlock()
+				if ok {
+					serviceURL = ref.ServiceURL
+				}
+			}
+			if serviceURL != "" {
+				targets = append(targets, sendTarget{
+					conversationID: convID,
+					serviceURL:     serviceURL,
+					replyToID:      msg.Metadata["teams_reply_to_id"],
+				})
+			}
+		}
+	}
+
+	// Priority 3: ConversationContext — last context for recipient+project+agent.
+	if len(targets) == 0 && msg.Recipient != "" && projectID != "" {
+		ccSlug := agentSlug
+		if ccSlug == "" && strings.HasPrefix(msg.Sender, "agent:") {
+			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
+		}
+
+		recipientID := msg.RecipientID
+		if recipientID == "" {
+			recipientID = msg.Recipient
+		}
+
+		ccKey := conversationContextKey(recipientID, projectID, ccSlug)
+		b.mu.Lock()
+		cc, ok := b.conversationContexts[ccKey]
+		b.mu.Unlock()
+		if ok && cc.LastConversationID != "" {
+			serviceURL := ""
+			b.mu.Lock()
+			ref, refOK := b.conversationRefs[cc.LastConversationID]
+			b.mu.Unlock()
+			if refOK {
+				serviceURL = ref.ServiceURL
+			}
+			if serviceURL != "" {
+				targets = append(targets, sendTarget{
+					conversationID: cc.LastConversationID,
+					serviceURL:     serviceURL,
+					replyToID:      cc.LastActivityID,
+				})
+			}
+		}
+	}
+
+	// Priority 4: ChannelLinks broadcast.
+	if len(targets) == 0 && projectID != "" {
+		b.mu.Lock()
+		for _, link := range b.channelLinks {
+			if link.Active && (link.ProjectID == projectID || link.ProjectSlug == projectID) {
+				serviceURL := ""
+				ref, ok := b.conversationRefs[link.ConversationID]
+				if ok {
+					serviceURL = ref.ServiceURL
+				}
+				if serviceURL != "" {
+					targets = append(targets, sendTarget{
+						conversationID: link.ConversationID,
+						serviceURL:     serviceURL,
+					})
+				}
+			}
+		}
+		b.mu.Unlock()
+	}
+
+	if len(targets) == 0 {
+		b.log.Debug("No Teams conversation for topic, dropping message", "topic", topic)
+		return nil
+	}
+
+	// Send to each target via the SendQueue.
+	var sendErrors []error
+	for _, target := range targets {
+		if target.replyToID != "" {
+			activity.ReplyToID = target.replyToID
+		}
+		_, sendErr := sendQueue.Enqueue(ctx, target.conversationID, target.serviceURL, activity)
+		if sendErr != nil {
+			b.log.Error("Failed to send to conversation",
+				"conversation_id", target.conversationID,
+				"error", sendErr,
+			)
+			sendErrors = append(sendErrors, sendErr)
+		}
+	}
+
+	if len(sendErrors) > 0 {
+		return fmt.Errorf("failed to send to %d/%d targets", len(sendErrors), len(targets))
+	}
 	return nil
+}
+
+// parsePublishTopic extracts projectID and agentSlug from a topic string.
+// Topics follow the pattern "project.agent.event" or similar dot-delimited formats.
+func parsePublishTopic(topic string) (projectID, agentSlug string) {
+	parts := strings.SplitN(topic, ".", 3)
+	if len(parts) >= 1 {
+		projectID = parts[0]
+	}
+	if len(parts) >= 2 {
+		agentSlug = parts[1]
+	}
+	return
+}
+
+// conversationContextKey builds the map key for conversation context lookups.
+func conversationContextKey(teamsUserID, projectID, agentSlug string) string {
+	return teamsUserID + ":" + projectID + ":" + agentSlug
+}
+
+// SetConversationContext updates the in-memory conversation context.
+func (b *TeamsBroker) SetConversationContext(cc *ConversationContext) {
+	key := conversationContextKey(cc.TeamsUserID, cc.ProjectID, cc.AgentSlug)
+	b.mu.Lock()
+	b.conversationContexts[key] = cc
+	b.mu.Unlock()
+}
+
+// AddChannelLink adds or updates a channel link in the in-memory map.
+func (b *TeamsBroker) AddChannelLink(link *ChannelLink) {
+	b.mu.Lock()
+	b.channelLinks[link.ConversationID] = link
+	b.mu.Unlock()
 }
 
 // Close implements MessageBrokerPluginInterface.Close.
 func (b *TeamsBroker) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if b.sendQueue != nil {
+		b.sendQueue.Close()
+	}
 
 	if b.webhookServer != nil && b.serverRunning {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -243,7 +491,7 @@ func (b *TeamsBroker) GetInfo() (*plugin.PluginInfo, error) {
 		Version:         "0.1.0",
 		MinScionVersion: "0.1.0",
 		ChannelID:       "teams",
-		Capabilities:    []string{"inbound"},
+		Capabilities:    []string{"inbound", "outbound"},
 	}, nil
 }
 
@@ -317,7 +565,7 @@ func (b *TeamsBroker) HandleActivity(ctx context.Context, activity *Activity) (*
 // handleMessage processes an incoming message Activity:
 // converts it to a StructuredMessage and delivers it to the hub.
 func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) error {
-	// Skip messages from the bot itself.
+	// Skip messages from the bot itself (secondary echo guard).
 	if b.config != nil && activity.From.ID == b.config.AppID {
 		b.log.Debug("Skipping message from self", "activity_id", activity.ID)
 		return nil
@@ -329,6 +577,16 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 	}
 
 	msg := activityToStructuredMessage(activity, botID)
+
+	// Echo prevention: check for scion_origin marker in the activity's
+	// channel data or value. Messages sent by this bot via Publish() carry
+	// this marker; if the platform echoes them back, we skip them.
+	if msg.Metadata != nil {
+		if origin, ok := msg.Metadata[OriginMarkerKey]; ok && origin == OriginMarkerValue {
+			b.log.Debug("Skipping echo (scion_origin marker on inbound)", "activity_id", activity.ID)
+			return nil
+		}
+	}
 
 	// Apply entity-based mention stripping for more precision.
 	if len(activity.Entities) > 0 && botID != "" {
@@ -354,6 +612,28 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		"text_length", len(msg.Msg),
 		"conversation_id", activity.Conversation.ID,
 	)
+
+	// Update conversation context for routing replies back.
+	if msg.SenderID != "" && msg.Recipient != "" {
+		agentSlug := msg.Recipient
+		if strings.HasPrefix(agentSlug, "agent:") {
+			agentSlug = strings.TrimPrefix(agentSlug, "agent:")
+		}
+		projectID := msg.Channel
+		if projectID == "" && msg.Metadata != nil {
+			projectID = msg.Metadata["project_id"]
+		}
+		if projectID != "" {
+			b.SetConversationContext(&ConversationContext{
+				TeamsUserID:        msg.SenderID,
+				ProjectID:          projectID,
+				AgentSlug:          agentSlug,
+				LastConversationID: activity.Conversation.ID,
+				LastActivityID:     activity.ID,
+				LastMessageAt:      time.Now(),
+			})
+		}
+	}
 
 	if b.hubClient == nil {
 		b.log.Warn("Hub client not configured, message not delivered")

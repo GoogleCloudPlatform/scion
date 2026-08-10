@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -260,4 +261,261 @@ func TestBroker_Close(t *testing.T) {
 
 	err := broker.Close()
 	require.NoError(t, err)
+}
+
+func TestBroker_Publish_EchoPrevention(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	msg := &messages.StructuredMessage{
+		Version: messages.Version,
+		Sender:  "agent:test",
+		Msg:     "echo message",
+		Type:    messages.TypeInstruction,
+		Metadata: map[string]string{
+			OriginMarkerKey: OriginMarkerValue,
+		},
+	}
+
+	err := broker.Publish(context.Background(), "project.agent.event", msg)
+	require.NoError(t, err)
+	// Message should be silently dropped — no error.
+}
+
+func TestBroker_Publish_NilMessage(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	err := broker.Publish(context.Background(), "project.agent.event", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nil")
+}
+
+func TestBroker_Publish_ChannelFilter(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	// Message for a different channel should be silently dropped.
+	msg := &messages.StructuredMessage{
+		Version: messages.Version,
+		Sender:  "agent:test",
+		Msg:     "hello",
+		Type:    messages.TypeInstruction,
+		Channel: "discord", // Not "teams".
+	}
+
+	err := broker.Publish(context.Background(), "project.agent.event", msg)
+	require.NoError(t, err)
+}
+
+func TestBroker_Publish_MetadataConversationTarget(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	// Store a conversation reference with a valid service URL.
+	broker.mu.Lock()
+	broker.conversationRefs["conv-target"] = &ConversationReference{
+		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+		ConversationID: "conv-target",
+	}
+	broker.mu.Unlock()
+
+	// The message targets a specific conversation via metadata.
+	msg := &messages.StructuredMessage{
+		Version: messages.Version,
+		Sender:  "agent:test",
+		Msg:     "targeted message",
+		Type:    messages.TypeInstruction,
+		Metadata: map[string]string{
+			"teams_conversation_id": "conv-target",
+			"teams_service_url":    "https://smba.trafficmanager.net/amer/",
+		},
+	}
+
+	// The actual send will fail (no real API), but routing should work
+	// and the origin marker should be set.
+	_ = broker.Publish(context.Background(), "project.agent.event", msg)
+	assert.Equal(t, OriginMarkerValue, msg.Metadata[OriginMarkerKey])
+}
+
+func TestBroker_Publish_ChannelLinkBroadcast(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	// Add a channel link.
+	broker.AddChannelLink(&ChannelLink{
+		ConversationID: "linked-conv",
+		ProjectID:      "test-project",
+		ProjectSlug:    "test-project",
+		Active:         true,
+	})
+
+	// Add conversation ref for the linked conversation.
+	broker.mu.Lock()
+	broker.conversationRefs["linked-conv"] = &ConversationReference{
+		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+		ConversationID: "linked-conv",
+	}
+	broker.mu.Unlock()
+
+	msg := &messages.StructuredMessage{
+		Version: messages.Version,
+		Sender:  "agent:deploy-bot",
+		Msg:     "broadcast message",
+		Type:    messages.TypeInstruction,
+	}
+
+	// Publish should attempt to send to the linked conversation.
+	// This will fail because the API server isn't real, but the routing should work.
+	_ = broker.Publish(context.Background(), "test-project.deploy-bot.event", msg)
+	assert.Equal(t, OriginMarkerValue, msg.Metadata[OriginMarkerKey])
+}
+
+func TestBroker_Publish_ConversationContextRouting(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	// Set a conversation context.
+	broker.SetConversationContext(&ConversationContext{
+		TeamsUserID:        "user-1",
+		ProjectID:          "myproject",
+		AgentSlug:          "builder",
+		LastConversationID: "ctx-conv",
+		LastActivityID:     "ctx-act",
+	})
+
+	// Add conversation ref.
+	broker.mu.Lock()
+	broker.conversationRefs["ctx-conv"] = &ConversationReference{
+		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+		ConversationID: "ctx-conv",
+	}
+	broker.mu.Unlock()
+
+	msg := &messages.StructuredMessage{
+		Version:     messages.Version,
+		Sender:      "agent:builder",
+		Recipient:   "user-1",
+		RecipientID: "user-1",
+		Msg:         "context routed",
+		Type:        messages.TypeInstruction,
+	}
+
+	_ = broker.Publish(context.Background(), "myproject.builder.event", msg)
+	assert.Equal(t, OriginMarkerValue, msg.Metadata[OriginMarkerKey])
+}
+
+func TestBroker_Publish_NoTargetDrops(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	configureBrokerForPublish(t, broker)
+
+	msg := &messages.StructuredMessage{
+		Version: messages.Version,
+		Sender:  "agent:orphan",
+		Msg:     "no target",
+		Type:    messages.TypeInstruction,
+	}
+
+	// No conversation refs, no channel links, no context -> message dropped.
+	err := broker.Publish(context.Background(), "unknown.orphan.event", msg)
+	require.NoError(t, err) // No error, just silently dropped.
+}
+
+func TestBroker_HandleActivity_EchoPrevention(t *testing.T) {
+	broker := NewBroker(slog.Default())
+	broker.Configure(map[string]string{
+		"app_id":     "bot-id",
+		"app_secret": "secret",
+		"tenant_id":  "tenant",
+	})
+
+	// Simulate an inbound message from the bot itself (self-ID check).
+	activity := &Activity{
+		Type:         "message",
+		ID:           "act-echo",
+		Text:         "echoed message",
+		From:         ChannelAccount{ID: "bot-id", Name: "Bot"},
+		Conversation: ConversationAccount{ID: "conv-echo"},
+	}
+
+	resp, err := broker.HandleActivity(context.Background(), activity)
+	require.NoError(t, err)
+	assert.Nil(t, resp)
+}
+
+func TestBroker_ParsePublishTopic(t *testing.T) {
+	tests := []struct {
+		topic     string
+		projectID string
+		agentSlug string
+	}{
+		{"myproject.agent1.event", "myproject", "agent1"},
+		{"project.agent", "project", "agent"},
+		{"project", "project", ""},
+		{"", "", ""},
+	}
+
+	for _, tt := range tests {
+		pID, aSlug := parsePublishTopic(tt.topic)
+		assert.Equal(t, tt.projectID, pID, "projectID for topic %q", tt.topic)
+		assert.Equal(t, tt.agentSlug, aSlug, "agentSlug for topic %q", tt.topic)
+	}
+}
+
+func TestBroker_ConversationContextKey(t *testing.T) {
+	key := conversationContextKey("user1", "proj1", "agent1")
+	assert.Equal(t, "user1:proj1:agent1", key)
+}
+
+func TestBroker_AddChannelLink(t *testing.T) {
+	broker := NewBroker(slog.Default())
+
+	broker.AddChannelLink(&ChannelLink{
+		ConversationID: "conv-1",
+		ProjectID:      "proj-1",
+		Active:         true,
+	})
+
+	broker.mu.Lock()
+	link, ok := broker.channelLinks["conv-1"]
+	broker.mu.Unlock()
+
+	assert.True(t, ok)
+	assert.Equal(t, "proj-1", link.ProjectID)
+}
+
+func TestBroker_SetConversationContext(t *testing.T) {
+	broker := NewBroker(slog.Default())
+
+	broker.SetConversationContext(&ConversationContext{
+		TeamsUserID:        "u1",
+		ProjectID:          "p1",
+		AgentSlug:          "a1",
+		LastConversationID: "conv-1",
+	})
+
+	key := conversationContextKey("u1", "p1", "a1")
+	broker.mu.Lock()
+	cc, ok := broker.conversationContexts[key]
+	broker.mu.Unlock()
+
+	assert.True(t, ok)
+	assert.Equal(t, "conv-1", cc.LastConversationID)
+}
+
+// configureBrokerForPublish is a test helper that configures a broker with
+// Phase 1 and Phase 2 settings so Publish() can be called.
+func configureBrokerForPublish(t *testing.T, broker *TeamsBroker) {
+	t.Helper()
+
+	err := broker.Configure(map[string]string{
+		"app_id":     "bot-id",
+		"app_secret": "secret",
+		"tenant_id":  "tenant",
+		"hub_url":    "http://localhost:8080",
+		"hmac_key":   "dGVzdC1rZXk=",
+		"broker_id":  "teams-broker-1",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, broker.sendQueue)
 }
