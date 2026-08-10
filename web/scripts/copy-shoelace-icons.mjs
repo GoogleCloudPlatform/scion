@@ -91,6 +91,7 @@ const USED_ICONS = [
   'funnel',
   'gear',
   'github',
+  'globe',
   'graph-up',
   'grid-3x3-gap',
   'hammer',
