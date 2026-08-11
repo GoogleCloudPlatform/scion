@@ -275,13 +275,24 @@ func init() {
 		}
 	}
 
-	// Add help topic command for global flags (must be after flag registration
-	// so PersistentFlags().FlagUsages() includes all flags).
+	// Add help topic command for global flags.
+	// FlagUsages() is evaluated lazily in Run/help so that flags registered
+	// by other files' init() functions are always included regardless of
+	// file-name-driven init order.
 	globalFlagsCmd := &cobra.Command{
 		Use:   "global-flags",
 		Short: "Global flags available to all commands",
-		Long:  "Global flags available to all scion commands:\n\n" + rootCmd.PersistentFlags().FlagUsages(),
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("Global flags available to all scion commands:")
+			fmt.Println()
+			fmt.Print(rootCmd.PersistentFlags().FlagUsages())
+		},
 	}
+	globalFlagsCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		fmt.Println("Global flags available to all scion commands:")
+		fmt.Println()
+		fmt.Print(rootCmd.PersistentFlags().FlagUsages())
+	})
 	rootCmd.AddCommand(globalFlagsCmd)
 
 	// Custom usage template: on subcommands, replace the full Global Flags
@@ -306,12 +317,9 @@ Additional Commands:{{range $cmds}}{{if (and (eq .GroupID "") (or .IsAvailableCo
   {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
 
 Flags:
-{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}{{if not .HasParent}}
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}
 
-Global Flags:
-{{.InheritedFlags.FlagUsages | trimTrailingWhitespaces}}{{else}}
-
-Use "scion help global-flags" for global flag details.{{end}}{{end}}{{if .HasHelpSubCommands}}
+Use "scion help global-flags" for global flag details.{{end}}{{if .HasHelpSubCommands}}
 
 Additional help topics:{{range .Commands}}{{if .IsAdditionalHelpTopicCommand}}
   {{rpad .CommandPath .CommandPathPadding}} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableSubCommands}}
