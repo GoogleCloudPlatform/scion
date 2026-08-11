@@ -9,6 +9,15 @@ Microsoft Teams message broker plugin for the Scion hub. Provides bidirectional 
 **Outbound:** Hub publishes `StructuredMessage`s -> plugin formats them as Adaptive Cards and sends them to linked Teams conversations via the Bot Connector REST API, with card-level agent attribution (agent name in card header).
 **Inbound:** Teams messages (via Bot Framework webhook) -> plugin validates the JWT, converts Activities to `StructuredMessage`s -> delivered to agents via the hub's inbound endpoint.
 
+## Quick Start
+
+1. **Create an Azure App Registration** — get your Application (Client) ID, Tenant ID, and App Secret
+2. **Create an Azure Bot Resource** and set the Messaging Endpoint to `https://<your-domain>/api/messages`
+3. **Enable the Teams channel** on the Azure Bot resource
+4. **Configure the plugin** via the Scion Admin UI and download the app package
+5. **Upload the app package** to Teams Admin Center or sideload it in Teams
+6. **Add the bot to a Teams channel** and run `@BotName setup` to link to a Scion project
+
 ## Prerequisites
 
 - Scion hub running with FanOutBroker support (`server.message_broker.types`)
@@ -20,6 +29,27 @@ Microsoft Teams message broker plugin for the Scion hub. Provides bidirectional 
 - **Standalone mode only:** PostgreSQL database shared with the hub
 
 ## Setup Guide
+
+### Admin UI Setup (Recommended)
+
+If you are running a Scion hub with the admin web UI, this is the fastest way to get the Teams plugin configured:
+
+1. Navigate to your Scion hub admin UI at `/admin/integrations`
+2. Find "Microsoft Teams" and click **Install** (or **Configure** if already installed)
+3. Enter your **Application (Client) ID** and **Tenant ID** from the Azure App Registration (see Step 1 below for how to create one)
+4. Enter your **App Secret** (the client secret value from Azure)
+5. Click **Save** to store the configuration
+6. Click **"Download App Package"** to get the pre-built Teams app manifest (.zip)
+7. Upload the .zip to the Teams Admin Center or sideload it in Teams (see Step 4 below)
+8. **IMPORTANT:** Set the Messaging Endpoint in your Azure Bot resource (see Step 2 below) — without this, Teams cannot send messages to your bot
+
+> **Note:** You still need to create the Azure App Registration (Step 1) and Azure Bot Resource (Step 2) in the Azure Portal. The admin UI handles plugin configuration and manifest packaging, but the Azure-side resources must be created manually.
+
+---
+
+### Manual / Advanced Setup
+
+The following steps describe the full manual setup process. If you used the Admin UI above, you can skip Steps 3, 5, and 6 (the admin UI handles manifest creation, plugin installation, and configuration) — but you still need Steps 1, 2, 4, 7, and 8.
 
 ### 1. Create an Azure App Registration
 
@@ -62,6 +92,12 @@ The Azure Bot resource links the App Registration to the Bot Framework Service a
 5. Go to **Channels** > **Microsoft Teams** > Click **Apply** to enable the Teams channel
 
 > **Note:** The messaging endpoint must be publicly reachable over HTTPS. See [Messaging Endpoint Setup](#messaging-endpoint-setup) for options.
+
+> **⚠️ WARNING: The messaging endpoint is critical.** If you skip setting the messaging endpoint, your bot will appear in Teams but **will not respond to any messages**. The endpoint URL must be set in the Azure Bot resource Configuration page and must follow the format `https://<your-domain>/api/messages`. To verify the endpoint is reachable, run:
+> ```
+> curl -i -X POST https://<your-domain>/api/messages
+> ```
+> You should receive a **401 Unauthorized** response (missing Authorization header), which confirms the endpoint is reachable and the plugin is running.
 
 ### 3. Create the Teams App Manifest
 

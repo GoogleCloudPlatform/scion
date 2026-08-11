@@ -1503,6 +1503,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     if (!appId || !tenantId) return nothing;
 
     const downloadUrl = '/api/v1/admin/integrations/teams/manifest';
+    const messagingEndpoint = `${window.location.origin}/api/messages`;
 
     return html`
       <div class="section">
@@ -1525,6 +1526,33 @@ export class ScionPageAdminIntegrations extends LitElement {
           >
             <sl-icon slot="prefix" name="download"></sl-icon>
             Download App Package
+          </sl-button>
+        </div>
+        <div class="invite-link-container" style="margin-top: 1rem;">
+          <div class="invite-link-info">
+            <sl-icon name="link-45deg"></sl-icon>
+            <div>
+              <p class="invite-link-description">Messaging Endpoint</p>
+              <p class="invite-link-permissions">
+                Set this URL in your Azure Bot resource → Configuration page.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem;">
+          <sl-input
+            readonly
+            value=${messagingEndpoint}
+            style="flex: 1;"
+          ></sl-input>
+          <sl-button
+            size="small"
+            @click=${() => {
+              void navigator.clipboard.writeText(messagingEndpoint);
+            }}
+          >
+            <sl-icon slot="prefix" name="clipboard"></sl-icon>
+            Copy
           </sl-button>
         </div>
       </div>
