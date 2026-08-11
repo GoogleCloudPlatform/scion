@@ -107,7 +107,7 @@ const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
     { key: 'signing_key', label: 'Hub Signing Key', description: 'Shared signing key for hub authentication (HS256 JWT)', required: true },
   ],
   teams: [
-    { key: 'TEAMS_APP_SECRET', label: 'App Secret', description: 'Azure App Registration client secret' },
+    { key: 'app_secret', label: 'App Secret', description: 'Azure App Registration client secret' },
   ],
 };
 
