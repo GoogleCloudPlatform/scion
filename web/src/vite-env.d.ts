@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+/// <reference types="vite/client" />
+
 /**
  * Vite-specific module declarations
  *

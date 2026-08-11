@@ -29,6 +29,31 @@ import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
 
+/**
+ * Strip the Vite base path prefix from a URL pathname so the client-side
+ * router can match application routes when served behind a reverse proxy.
+ * Uses import.meta.env.BASE_URL which Vite injects at build/dev time.
+ * When base is '/' (no proxy), this is a no-op.
+ */
+function stripBasePath(pathname: string): string {
+  const base = import.meta.env.BASE_URL;
+  if (!base || base === '/') return pathname;
+
+  // Normalize: strip trailing slash from base for comparison
+  const baseNoSlash = base.replace(/\/$/, '');
+
+  // Exact match (base path without trailing slash, e.g. /foo)
+  if (pathname === baseNoSlash) return '/';
+
+  // Prefix match (e.g. /foo/bar → /bar)
+  if (pathname.startsWith(base)) {
+    const stripped = pathname.slice(base.length - 1); // keep leading /
+    return stripped || '/';
+  }
+
+  return pathname;
+}
+
 // Inject theme CSS so it loads regardless of whether the page is served by
 // the Vite dev server (index.html) or the Go SPA shell template (web.go).
 {
@@ -70,6 +95,7 @@ import '@shoelace-style/shoelace/dist/components/radio-group/radio-group.js';
 import '@shoelace-style/shoelace/dist/components/radio-button/radio-button.js';
 import '@shoelace-style/shoelace/dist/components/range/range.js';
 import '@shoelace-style/shoelace/dist/components/switch/switch.js';
+import '@shoelace-style/shoelace/dist/components/details/details.js';
 import '@shoelace-style/shoelace/dist/components/tab-group/tab-group.js';
 import '@shoelace-style/shoelace/dist/components/tab/tab.js';
 import '@shoelace-style/shoelace/dist/components/tab-panel/tab-panel.js';
@@ -242,7 +268,7 @@ async function init(): Promise<void> {
 
   // First-run redirect: if the system hasn't completed onboarding, navigate to /onboarding
   const skipRedirectPaths = ['/onboarding', '/login', '/invite'];
-  if (!skipRedirectPaths.includes(window.location.pathname)) {
+  if (!skipRedirectPaths.includes(stripBasePath(window.location.pathname))) {
     try {
       const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
       if (statusRes.ok) {
@@ -257,8 +283,8 @@ async function init(): Promise<void> {
     }
   }
 
-  // Render the initial page based on current URL
-  await renderRoute(window.location.pathname);
+  // Render the initial page based on current URL (strip proxy prefix for route matching)
+  await renderRoute(stripBasePath(window.location.pathname));
 
   // Setup client-side router for navigation
   setupRouter();
@@ -479,7 +505,7 @@ function setupRouter(): void {
 
   // Handle browser back/forward
   window.addEventListener('popstate', () => {
-    void renderRoute(window.location.pathname);
+    void renderRoute(stripBasePath(window.location.pathname));
   });
 }
 
@@ -487,9 +513,15 @@ function setupRouter(): void {
  * Navigates to a new path using the History API
  */
 function navigateTo(path: string): void {
-  if (path === window.location.pathname) return;
+  const currentAppPath = stripBasePath(window.location.pathname);
+  if (path === currentAppPath) return;
 
-  window.history.pushState({}, '', path);
+  // Prefix app-relative paths with the base path for the browser URL bar
+  const base = import.meta.env.BASE_URL;
+  const browserPath = base && base !== '/'
+    ? base.replace(/\/$/, '') + path
+    : path;
+  window.history.pushState({}, '', browserPath);
   void renderRoute(path);
 }
 
