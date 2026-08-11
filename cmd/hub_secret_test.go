@@ -367,7 +367,7 @@ func TestRunSecretSet_PlaintextSendsEncodingRaw(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupSecretProject(t, tmpHome, server.URL)
@@ -397,7 +397,7 @@ func TestRunSecretSet_FileSendsNoEncoding(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupSecretProject(t, tmpHome, server.URL)
