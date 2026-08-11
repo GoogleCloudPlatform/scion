@@ -41,10 +41,9 @@ type sendResult struct {
 	err       error
 }
 
-// spaceWorker holds a per-space buffered channel and done signal.
+// spaceWorker holds a per-space buffered channel.
 type spaceWorker struct {
-	ch   chan sendRequest
-	done chan struct{}
+	ch chan sendRequest
 }
 
 // SendQueue manages per-space outbound message workers to prevent
@@ -106,8 +105,7 @@ func (q *SendQueue) Send(ctx context.Context, req SendMessageRequest) (string, e
 	}
 }
 
-// Close stops all workers and waits for them to finish.
-// Messages still in the queues receive errors.
+// Close stops all workers and waits for them to drain remaining messages.
 func (q *SendQueue) Close() {
 	q.mu.Lock()
 	q.closed = true
@@ -157,8 +155,7 @@ func (q *SendQueue) getOrCreateWorkerLocked(spaceID string) *spaceWorker {
 	}
 
 	w = &spaceWorker{
-		ch:   make(chan sendRequest, q.bufSize),
-		done: make(chan struct{}),
+		ch: make(chan sendRequest, q.bufSize),
 	}
 	q.workers[spaceID] = w
 
@@ -174,7 +171,6 @@ func (q *SendQueue) getOrCreateWorkerLocked(spaceID string) *spaceWorker {
 func (q *SendQueue) worker(spaceID string, w *spaceWorker) {
 	defer q.wg.Done()
 	defer q.removeWorker(spaceID)
-	defer close(w.done)
 
 	idleTimer := time.NewTimer(defaultSendIdleTimeout)
 	defer idleTimer.Stop()
@@ -209,6 +205,19 @@ func (q *SendQueue) worker(spaceID string, w *spaceWorker) {
 			time.Sleep(q.minDelay)
 
 		case <-idleTimer.C:
+			// Check under the lock that the channel is still empty.
+			// Between the timer firing and here, enqueue() may have
+			// written a message — if so, reset the timer and continue.
+			q.mu.Lock()
+			if len(w.ch) > 0 {
+				q.mu.Unlock()
+				idleTimer.Reset(defaultSendIdleTimeout)
+				continue
+			}
+			// Still empty — remove the worker while holding the lock
+			// so no new messages can be enqueued to a dead worker.
+			delete(q.workers, spaceID)
+			q.mu.Unlock()
 			q.log.Debug("send queue worker idle, exiting", "space_id", spaceID)
 			return
 		}
@@ -216,8 +225,7 @@ func (q *SendQueue) worker(spaceID string, w *spaceWorker) {
 }
 
 // sendOne dispatches a single outbound message to the Chat API via the
-// Messenger interface. If the request has a Card but no Text, it uses
-// SendCard; otherwise it uses SendMessage.
+// Messenger.SendMessage method.
 func (q *SendQueue) sendOne(sr sendRequest) (string, error) {
 	return q.messenger.SendMessage(sr.ctx, sr.req)
 }

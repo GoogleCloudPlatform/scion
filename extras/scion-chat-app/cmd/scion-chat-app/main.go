@@ -243,13 +243,13 @@ func main() {
 			messenger,
 			log.With("component", "sendqueue"),
 			cfg.Platforms.GoogleChat.SendQueueSize,
-			cfg.Platforms.GoogleChat.SendMinDelay,
+			cfg.Platforms.GoogleChat.SendMinDelay.Duration,
 		)
 		relay.SetSendQueue(sendQueue)
 		defer sendQueue.Close()
 		log.Info("send queue initialized",
 			"queue_size", cfg.Platforms.GoogleChat.SendQueueSize,
-			"min_delay", cfg.Platforms.GoogleChat.SendMinDelay,
+			"min_delay", cfg.Platforms.GoogleChat.SendMinDelay.Duration,
 		)
 	}
 
