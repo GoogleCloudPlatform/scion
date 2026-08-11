@@ -27,6 +27,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2112,10 +2113,16 @@ func TestAuthProviders_NoOAuthService(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	body, _ := io.ReadAll(resp.Body)
-	var result map[string]bool
+	var result struct {
+		Providers []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
+		} `json:"providers"`
+	}
 	require.NoError(t, json.Unmarshal(body, &result))
-	assert.False(t, result["google"])
-	assert.False(t, result["github"])
+	// No OAuth service means no providers
+	assert.Nil(t, result.Providers)
 }
 
 func TestAuthProviders_WithProviders(t *testing.T) {
@@ -2138,10 +2145,63 @@ func TestAuthProviders_WithProviders(t *testing.T) {
 	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 
 	body, _ := io.ReadAll(resp.Body)
-	var result map[string]bool
+	var result struct {
+		Providers []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
+		} `json:"providers"`
+	}
 	require.NoError(t, json.Unmarshal(body, &result))
-	assert.True(t, result["google"])
-	assert.False(t, result["github"])
+	// Google and GitHub should be in the list (OIDC omitted since not configured)
+	require.Len(t, result.Providers, 2)
+	assert.Equal(t, "google", result.Providers[0].ID)
+	assert.Equal(t, "Google", result.Providers[0].Name)
+	assert.True(t, result.Providers[0].Enabled)
+	assert.Equal(t, "github", result.Providers[1].ID)
+	assert.Equal(t, "GitHub", result.Providers[1].Name)
+	assert.False(t, result.Providers[1].Enabled)
+}
+
+func TestAuthProviders_WithOIDC(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+	oidcCfg := &config.OIDCLoginConfig{
+		Enabled:      true,
+		DisplayName:  "Corporate SSO",
+		IssuerURL:    "https://idp.example.com",
+		ClientID:     "oidc-client-id",
+		ClientSecret: "oidc-secret",
+	}
+	ws.SetOAuthService(NewOAuthService(OAuthConfig{
+		Web: OAuthClientConfig{
+			Google: OAuthProviderConfig{
+				ClientID:     "g-id",
+				ClientSecret: "g-secret",
+			},
+		},
+	}, oidcCfg))
+
+	req := httptest.NewRequest("GET", "/auth/providers", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, _ := io.ReadAll(resp.Body)
+	var result struct {
+		Providers []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
+		} `json:"providers"`
+	}
+	require.NoError(t, json.Unmarshal(body, &result))
+	// Google, GitHub, and OIDC should be listed
+	require.Len(t, result.Providers, 3)
+	assert.Equal(t, "oidc", result.Providers[2].ID)
+	assert.Equal(t, "Corporate SSO", result.Providers[2].Name)
+	assert.True(t, result.Providers[2].Enabled)
 }
 
 // --- SSR Prefetch Tests ---

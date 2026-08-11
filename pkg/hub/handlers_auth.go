@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -235,7 +236,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider := strings.ToLower(strings.TrimSpace(req.Provider))
-	if provider != "google" && provider != "github" {
+	if !hubclient.IsKnownOAuthProvider(provider) {
 		writeError(w, http.StatusBadRequest, "invalid_provider",
 			"unsupported OAuth provider", nil)
 		return
@@ -342,7 +343,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate provider is a known value
-	if provider != "google" && provider != "github" {
+	if !hubclient.IsKnownOAuthProvider(provider) {
 		writeError(w, http.StatusBadRequest, "invalid_provider",
 			"unsupported OAuth provider", nil)
 		return
