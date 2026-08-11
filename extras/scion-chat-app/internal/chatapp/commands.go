@@ -299,7 +299,7 @@ func (r *CommandRouter) handleAction(ctx context.Context, event *ChatEvent) (*Ev
 	case "send":
 		return nil, r.handleSendAction(ctx, event, actionVerb, targetID)
 	case "settings":
-		return r.handleSettingsAction(ctx, event, actionVerb)
+		return nil, r.handleSettingsAction(ctx, event, actionVerb)
 	}
 	return nil, nil
 }

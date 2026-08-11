@@ -409,3 +409,320 @@ func TestHandleUserMessage_ShortAssistantReplyNotTruncated(t *testing.T) {
 		t.Errorf("short message should not be truncated, got %q, want %q", cardContent, shortText)
 	}
 }
+
+// --- resolveOutboundMentions tests ---
+
+func TestResolveOutboundMentions(t *testing.T) {
+	store := newTestStore(t)
+
+	// Seed user mappings for known emails.
+	// PlatformUserID is the raw ID; resolveOutboundMentions wraps it as <users/ID>.
+	if err := store.SetUserMapping(&state.UserMapping{
+		PlatformUserID: "ALICE123",
+		Platform:       "googlechat",
+		HubUserID:      "hub-alice",
+		HubUserEmail:   "alice@example.com",
+		RegisteredBy:   "auto",
+	}); err != nil {
+		t.Fatalf("setting user mapping: %v", err)
+	}
+	if err := store.SetUserMapping(&state.UserMapping{
+		PlatformUserID: "BOB456",
+		Platform:       "googlechat",
+		HubUserID:      "hub-bob",
+		HubUserEmail:   "bob@example.com",
+		RegisteredBy:   "auto",
+	}); err != nil {
+		t.Fatalf("setting user mapping: %v", err)
+	}
+
+	log := slog.Default()
+	relay := NewNotificationRelay(store, nil, log)
+
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "empty string",
+			text: "",
+			want: "",
+		},
+		{
+			name: "no emails in text",
+			text: "just a normal message with no emails",
+			want: "just a normal message with no emails",
+		},
+		{
+			name: "mapped email replaced",
+			text: "Hey alice@example.com can you review?",
+			want: "Hey <users/ALICE123> can you review?",
+		},
+		{
+			name: "unmapped email left as-is",
+			text: "Hey unknown@nowhere.org can you review?",
+			want: "Hey unknown@nowhere.org can you review?",
+		},
+		{
+			name: "multiple emails in one message",
+			text: "CC alice@example.com and bob@example.com for this",
+			want: "CC <users/ALICE123> and <users/BOB456> for this",
+		},
+		{
+			name: "mixed mapped and unmapped emails",
+			text: "alice@example.com and nobody@other.com",
+			want: "<users/ALICE123> and nobody@other.com",
+		},
+		{
+			name: "user: prefix stripped and resolved",
+			text: "message to user:alice@example.com about the build",
+			want: "message to <users/ALICE123> about the build",
+		},
+		{
+			name: "email inside URL path skipped (preceded by /)",
+			text: "see https://example.com/alice@example.com/profile",
+			want: "see https://example.com/alice@example.com/profile",
+		},
+		{
+			name: "email inside URL skipped (preceded by :)",
+			text: "check mailto:alice@example.com for details",
+			want: "check mailto:alice@example.com for details",
+		},
+		{
+			name: "email followed by slash skipped",
+			text: "the path alice@example.com/ is a directory",
+			want: "the path alice@example.com/ is a directory",
+		},
+		{
+			name: "email at start of string resolved",
+			text: "alice@example.com is the lead",
+			want: "<users/ALICE123> is the lead",
+		},
+		{
+			name: "email at end of string resolved",
+			text: "send it to alice@example.com",
+			want: "send it to <users/ALICE123>",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := relay.resolveOutboundMentions(tc.text)
+			if got != tc.want {
+				t.Errorf("resolveOutboundMentions(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+// --- handleFilteredMessage / observe mode tests ---
+
+func TestHandleFilteredMessage_AgentToAgent(t *testing.T) {
+	store := newTestStore(t)
+
+	msg := &messages.StructuredMessage{
+		Sender:    "agent:deploy-agent",
+		Recipient: "agent:review-agent",
+		Msg:       "I finished the deploy.",
+		Type:      messages.TypeInstruction,
+	}
+
+	tests := []struct {
+		name             string
+		showAgentToAgent bool
+		wantMessages     int
+	}{
+		{
+			name:             "ShowAgentToAgent false filters out message",
+			showAgentToAgent: false,
+			wantMessages:     0,
+		},
+		{
+			name:             "ShowAgentToAgent true passes message through",
+			showAgentToAgent: true,
+			wantMessages:     1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := store.SetSpaceLink(&state.SpaceLink{
+				SpaceID:          "spaces/observe-test",
+				Platform:         "googlechat",
+				ProjectID:        "proj-1",
+				ProjectSlug:      "my-project",
+				LinkedBy:         "test",
+				ShowAgentToAgent: tc.showAgentToAgent,
+				ShowStateChanges: true,
+			}); err != nil {
+				t.Fatalf("setting space link: %v", err)
+			}
+
+			fm := &fakeMessenger{}
+			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			relay := NewNotificationRelay(store, fm, log)
+
+			err := relay.handleFilteredMessage(context.Background(), "proj-1", msg, true, false)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(fm.messages) != tc.wantMessages {
+				t.Errorf("expected %d messages, got %d", tc.wantMessages, len(fm.messages))
+			}
+
+			if tc.wantMessages > 0 {
+				got := fm.messages[0]
+				if got.Card == nil {
+					t.Fatal("expected a card in the observed message")
+				}
+				if !strings.Contains(got.Card.Header.Subtitle, "observe mode") {
+					t.Errorf("expected observe mode subtitle, got %q", got.Card.Header.Subtitle)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleFilteredMessage_StateChange(t *testing.T) {
+	store := newTestStore(t)
+
+	msg := &messages.StructuredMessage{
+		Sender: "agent:deploy-agent",
+		Msg:    "Agent status changed to COMPLETED",
+		Type:   messages.TypeStateChange,
+		Status: "completed",
+	}
+
+	tests := []struct {
+		name             string
+		showStateChanges bool
+		wantMessages     int
+	}{
+		{
+			name:             "ShowStateChanges false filters out message",
+			showStateChanges: false,
+			wantMessages:     0,
+		},
+		{
+			name:             "ShowStateChanges true passes message through",
+			showStateChanges: true,
+			wantMessages:     1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := store.SetSpaceLink(&state.SpaceLink{
+				SpaceID:          "spaces/state-test",
+				Platform:         "googlechat",
+				ProjectID:        "proj-2",
+				ProjectSlug:      "my-project",
+				LinkedBy:         "test",
+				ShowAgentToAgent: false,
+				ShowStateChanges: tc.showStateChanges,
+			}); err != nil {
+				t.Fatalf("setting space link: %v", err)
+			}
+
+			fm := &fakeMessenger{}
+			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			relay := NewNotificationRelay(store, fm, log)
+
+			err := relay.handleFilteredMessage(context.Background(), "proj-2", msg, false, true)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(fm.messages) != tc.wantMessages {
+				t.Errorf("expected %d messages, got %d", tc.wantMessages, len(fm.messages))
+			}
+		})
+	}
+}
+
+func TestHandleBrokerMessage_UserTargetedAlwaysPassesThrough(t *testing.T) {
+	store := newTestStore(t)
+
+	// Set up a space with observe mode and state changes both disabled.
+	if err := store.SetUserMapping(&state.UserMapping{
+		PlatformUserID: "users/999",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-9",
+		HubUserEmail:   "user9@example.com",
+		RegisteredBy:   "auto",
+	}); err != nil {
+		t.Fatalf("setting user mapping: %v", err)
+	}
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:          "spaces/all-off",
+		Platform:         "googlechat",
+		ProjectID:        "proj-3",
+		ProjectSlug:      "my-project",
+		LinkedBy:         "test",
+		ShowAgentToAgent: false,
+		ShowStateChanges: false,
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	fm := &fakeMessenger{}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	relay := NewNotificationRelay(store, fm, log)
+
+	msg := &messages.StructuredMessage{
+		Sender:      "agent:test-agent",
+		RecipientID: "hub-user-9",
+		Msg:         "Here is your answer.",
+		Type:        messages.TypeInstruction,
+	}
+
+	// User-targeted topic should always pass through regardless of filter settings.
+	err := relay.HandleBrokerMessage(context.Background(),
+		"scion.grove.proj-3.user.hub-user-9.messages", msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(fm.messages) == 0 {
+		t.Fatal("user-targeted message must always pass through, regardless of observe/state settings")
+	}
+}
+
+func TestHandleFilteredMessage_UnlinkedProjectDropped(t *testing.T) {
+	store := newTestStore(t)
+
+	// Space is linked to proj-A, but message is for proj-B.
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:          "spaces/linked-a",
+		Platform:         "googlechat",
+		ProjectID:        "proj-A",
+		ProjectSlug:      "project-a",
+		LinkedBy:         "test",
+		ShowAgentToAgent: true,
+		ShowStateChanges: true,
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	fm := &fakeMessenger{}
+	log := slog.Default()
+	relay := NewNotificationRelay(store, fm, log)
+
+	msg := &messages.StructuredMessage{
+		Sender:    "agent:deploy",
+		Recipient: "agent:review",
+		Msg:       "hello",
+	}
+
+	// Send for proj-B — no space is linked to it.
+	err := relay.handleFilteredMessage(context.Background(), "proj-B", msg, true, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(fm.messages) != 0 {
+		t.Errorf("expected no messages for unlinked project, got %d", len(fm.messages))
+	}
+}

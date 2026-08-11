@@ -511,7 +511,8 @@ func (n *NotificationRelay) getSubscriberMentions(msg *messages.StructuredMessag
 
 // resolveOutboundMentions scans text for scion user emails (with optional
 // "user:" prefix) and replaces them with Google Chat @mentions when the user
-// has a mapping in the store.
+// has a mapping in the store. Emails embedded in URL paths (preceded by '/'
+// or ':' or followed by '/') are left untouched.
 func (n *NotificationRelay) resolveOutboundMentions(text string) string {
 	if text == "" {
 		return text
@@ -522,14 +523,17 @@ func (n *NotificationRelay) resolveOutboundMentions(text string) string {
 		return text
 	}
 
-	// Iterate in reverse to preserve indices during replacement.
-	for i := len(matches) - 1; i >= 0; i-- {
-		start, end := matches[i][0], matches[i][1]
+	var b strings.Builder
+	b.Grow(len(text))
+	prev := 0
+
+	for _, loc := range matches {
+		start, end := loc[0], loc[1]
 
 		// Skip emails embedded in URL paths.
 		if start > 0 {
-			prev := text[start-1]
-			if prev == '/' || prev == ':' {
+			ch := text[start-1]
+			if ch == '/' || ch == ':' {
 				continue
 			}
 		}
@@ -537,8 +541,7 @@ func (n *NotificationRelay) resolveOutboundMentions(text string) string {
 			continue
 		}
 
-		match := text[start:end]
-		email := match
+		email := text[start:end]
 		if strings.HasPrefix(email, "user:") {
 			email = strings.TrimPrefix(email, "user:")
 		}
@@ -548,11 +551,19 @@ func (n *NotificationRelay) resolveOutboundMentions(text string) string {
 			continue
 		}
 
-		// Google Chat @mention format: <users/USER_ID>
-		text = text[:start] + fmt.Sprintf("<users/%s>", mapping.PlatformUserID) + text[end:]
+		// Write everything before this match, then the replacement.
+		b.WriteString(text[prev:start])
+		fmt.Fprintf(&b, "<users/%s>", mapping.PlatformUserID)
+		prev = end
 	}
 
-	return text
+	// If no replacements were made, return original text.
+	if prev == 0 {
+		return text
+	}
+
+	b.WriteString(text[prev:])
+	return b.String()
 }
 
 // buildMentions returns a formatted @mention string for a user-targeted message.
