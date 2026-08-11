@@ -286,3 +286,148 @@ func openDB(dbPath string) (*sql.DB, error) {
 	}
 	return db, nil
 }
+
+// --- Thread Defaults Tests ---
+
+func TestThreadDefaults_MigrationCreatesTable(t *testing.T) {
+	s := newTestStore(t)
+
+	// Verify the table exists by running a query against it.
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM thread_defaults`).Scan(&count)
+	if err != nil {
+		t.Fatalf("thread_defaults table should exist after migration: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 rows in fresh table, got %d", count)
+	}
+}
+
+func TestGetThreadDefault_ReturnsEmptyWhenNotSet(t *testing.T) {
+	s := newTestStore(t)
+
+	agent, err := s.GetThreadDefault("space-1", "thread-1", "google_chat")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if agent != "" {
+		t.Errorf("expected empty string for unset thread default, got %q", agent)
+	}
+}
+
+func TestSetThreadDefault_InsertAndRetrieve(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "user@example.com"); err != nil {
+		t.Fatalf("set thread default: %v", err)
+	}
+
+	agent, err := s.GetThreadDefault("space-1", "thread-1", "google_chat")
+	if err != nil {
+		t.Fatalf("get thread default: %v", err)
+	}
+	if agent != "my-agent" {
+		t.Errorf("expected %q, got %q", "my-agent", agent)
+	}
+}
+
+func TestSetThreadDefault_ReplaceExisting(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "user@example.com"); err != nil {
+		t.Fatalf("set initial: %v", err)
+	}
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-b", "user@example.com"); err != nil {
+		t.Fatalf("set replacement: %v", err)
+	}
+
+	agent, err := s.GetThreadDefault("space-1", "thread-1", "google_chat")
+	if err != nil {
+		t.Fatalf("get thread default: %v", err)
+	}
+	if agent != "agent-b" {
+		t.Errorf("expected %q after replace, got %q", "agent-b", agent)
+	}
+}
+
+func TestSetThreadDefault_IsolatedPerThread(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "user@example.com"); err != nil {
+		t.Fatalf("set thread-1: %v", err)
+	}
+	if err := s.SetThreadDefault("space-1", "thread-2", "google_chat", "agent-b", "user@example.com"); err != nil {
+		t.Fatalf("set thread-2: %v", err)
+	}
+
+	got1, _ := s.GetThreadDefault("space-1", "thread-1", "google_chat")
+	got2, _ := s.GetThreadDefault("space-1", "thread-2", "google_chat")
+
+	if got1 != "agent-a" {
+		t.Errorf("thread-1: expected %q, got %q", "agent-a", got1)
+	}
+	if got2 != "agent-b" {
+		t.Errorf("thread-2: expected %q, got %q", "agent-b", got2)
+	}
+}
+
+func TestDeleteThreadDefault(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "my-agent", "user@example.com"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := s.DeleteThreadDefault("space-1", "thread-1", "google_chat"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	agent, err := s.GetThreadDefault("space-1", "thread-1", "google_chat")
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if agent != "" {
+		t.Errorf("expected empty after delete, got %q", agent)
+	}
+}
+
+func TestDeleteThreadDefault_NoErrorWhenNotExists(t *testing.T) {
+	s := newTestStore(t)
+
+	// Deleting a non-existent thread default should not error.
+	if err := s.DeleteThreadDefault("space-1", "nonexistent", "google_chat"); err != nil {
+		t.Fatalf("unexpected error deleting nonexistent: %v", err)
+	}
+}
+
+func TestDeleteThreadDefaultsForSpace(t *testing.T) {
+	s := newTestStore(t)
+
+	// Set defaults across two spaces, multiple threads.
+	if err := s.SetThreadDefault("space-1", "thread-1", "google_chat", "agent-a", "u"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := s.SetThreadDefault("space-1", "thread-2", "google_chat", "agent-b", "u"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := s.SetThreadDefault("space-2", "thread-3", "google_chat", "agent-c", "u"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	// Delete all for space-1.
+	if err := s.DeleteThreadDefaultsForSpace("space-1"); err != nil {
+		t.Fatalf("delete for space: %v", err)
+	}
+
+	// space-1 threads should be gone.
+	got1, _ := s.GetThreadDefault("space-1", "thread-1", "google_chat")
+	got2, _ := s.GetThreadDefault("space-1", "thread-2", "google_chat")
+	if got1 != "" || got2 != "" {
+		t.Errorf("space-1 threads should be cleared, got thread-1=%q, thread-2=%q", got1, got2)
+	}
+
+	// space-2 should be unaffected.
+	got3, _ := s.GetThreadDefault("space-2", "thread-3", "google_chat")
+	if got3 != "agent-c" {
+		t.Errorf("space-2 thread-3 should be unaffected, got %q", got3)
+	}
+}

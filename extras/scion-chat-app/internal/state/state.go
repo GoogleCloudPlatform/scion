@@ -114,6 +114,15 @@ func (s *Store) migrate() error {
 			subscribed_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (platform_user_id, platform, agent_id, grove_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS thread_defaults (
+			space_id    TEXT NOT NULL,
+			thread_id   TEXT NOT NULL,
+			agent_slug  TEXT NOT NULL,
+			platform    TEXT NOT NULL DEFAULT 'google_chat',
+			set_by      TEXT NOT NULL DEFAULT '',
+			set_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (space_id, thread_id, platform)
+		)`,
 	}
 
 	for _, m := range migrations {
@@ -402,6 +411,61 @@ func (s *Store) ListAgentSubscriptions(agentID, projectID string) ([]AgentSubscr
 		subs = append(subs, sub)
 	}
 	return subs, rows.Err()
+}
+
+// --- Thread Defaults ---
+
+// GetThreadDefault returns the agent slug for the given thread, or "" if not set.
+func (s *Store) GetThreadDefault(spaceID, threadID, platform string) (string, error) {
+	var agentSlug string
+	err := s.db.QueryRow(
+		`SELECT agent_slug FROM thread_defaults WHERE space_id = ? AND thread_id = ? AND platform = ?`,
+		spaceID, threadID, platform,
+	).Scan(&agentSlug)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get thread default: %w", err)
+	}
+	return agentSlug, nil
+}
+
+// SetThreadDefault inserts or replaces a thread-level default agent.
+func (s *Store) SetThreadDefault(spaceID, threadID, platform, agentSlug, setBy string) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO thread_defaults (space_id, thread_id, platform, agent_slug, set_by, set_at)
+		 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		spaceID, threadID, platform, agentSlug, setBy,
+	)
+	if err != nil {
+		return fmt.Errorf("set thread default: %w", err)
+	}
+	return nil
+}
+
+// DeleteThreadDefault removes a thread-level default agent.
+func (s *Store) DeleteThreadDefault(spaceID, threadID, platform string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM thread_defaults WHERE space_id = ? AND thread_id = ? AND platform = ?`,
+		spaceID, threadID, platform,
+	)
+	if err != nil {
+		return fmt.Errorf("delete thread default: %w", err)
+	}
+	return nil
+}
+
+// DeleteThreadDefaultsForSpace removes all thread-level defaults for a space.
+func (s *Store) DeleteThreadDefaultsForSpace(spaceID string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM thread_defaults WHERE space_id = ?`,
+		spaceID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete thread defaults for space: %w", err)
+	}
+	return nil
 }
 
 // ListUserSubscriptions returns all subscriptions for the given platform user.

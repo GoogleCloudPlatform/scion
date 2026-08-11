@@ -421,6 +421,10 @@ func (r *CommandRouter) handleSpaceJoin(ctx context.Context, event *ChatEvent) e
 
 // handleSpaceRemove is called when the bot is removed from a space.
 func (r *CommandRouter) handleSpaceRemove(ctx context.Context, event *ChatEvent) error {
+	// Clean up thread defaults for this space
+	if err := r.store.DeleteThreadDefaultsForSpace(event.SpaceID); err != nil {
+		r.log.Error("cleaning up thread defaults on removal", "error", err)
+	}
 	// Clean up space link
 	if err := r.store.DeleteSpaceLink(event.SpaceID, event.Platform); err != nil {
 		r.log.Error("cleaning up space link on removal", "error", err)
@@ -462,6 +466,16 @@ func (r *CommandRouter) cmdList(ctx context.Context, event *ChatEvent, args []st
 		return textResponse(event, fmt.Sprintf("No agents in project `%s`.", proj.Slug)), nil
 	}
 
+	// Check for a thread-level default if we're in a thread.
+	var threadDefault string
+	if event.ThreadID != "" {
+		var err error
+		threadDefault, err = r.store.GetThreadDefault(event.SpaceID, event.ThreadID, event.Platform)
+		if err != nil {
+			r.log.Error("failed to get thread default", "error", err)
+		}
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("*Agents in %s:*\n", proj.Slug))
 	for _, a := range agents.Agents {
@@ -470,13 +484,25 @@ func (r *CommandRouter) cmdList(ctx context.Context, event *ChatEvent, args []st
 			status = a.Phase
 		}
 		marker := ""
-		if link.DefaultAgent != "" && a.Slug == link.DefaultAgent {
+		if threadDefault != "" && a.Slug == threadDefault {
+			marker = " †"
+		} else if link.DefaultAgent != "" && a.Slug == link.DefaultAgent {
 			marker = " *"
 		}
 		sb.WriteString(fmt.Sprintf("• `%s` — %s%s\n", a.Slug, status, marker))
 	}
+	hasLegend := false
 	if link.DefaultAgent != "" {
 		sb.WriteString("\n_* default agent_")
+		hasLegend = true
+	}
+	if threadDefault != "" {
+		if hasLegend {
+			sb.WriteString("  ")
+		} else {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("_† thread default_")
 	}
 	return textResponse(event, sb.String()), nil
 }
@@ -656,6 +682,11 @@ func (r *CommandRouter) cmdUnlink(ctx context.Context, event *ChatEvent, args []
 		if err := r.broker.CancelSubscription(pattern); err != nil {
 			r.log.Warn("failed to cancel project subscription", "project_id", link.ProjectID, "error", err)
 		}
+	}
+
+	// Clean up thread defaults for this space.
+	if err := r.store.DeleteThreadDefaultsForSpace(event.SpaceID); err != nil {
+		r.log.Warn("failed to clean up thread defaults on unlink", "error", err)
 	}
 
 	if err := r.store.DeleteSpaceLink(event.SpaceID, event.Platform); err != nil {
@@ -1058,16 +1089,24 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 	// default agent is configured, treat the entire input as the message text.
 	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, agentSlug)
 	if err != nil {
-		if link.DefaultAgent == "" {
+		targetThread := threadID
+		if targetThread == "" {
+			targetThread = event.ThreadID
+		}
+		defaultAgent, resolveErr := r.resolveDefaultAgent(event.SpaceID, targetThread, event.Platform, link.DefaultAgent)
+		if resolveErr != nil {
+			return textResponse(event, fmt.Sprintf("Failed to resolve default agent: %v", resolveErr)), nil
+		}
+		if defaultAgent == "" {
 			return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", agentSlug, err)), nil
 		}
 		r.log.Warn("agent slug lookup failed, falling back to default agent",
 			"original_slug", agentSlug,
-			"default_agent", link.DefaultAgent,
+			"default_agent", defaultAgent,
 			"project_id", link.ProjectID,
 			"error", err,
 		)
-		agentSlug = link.DefaultAgent
+		agentSlug = defaultAgent
 		messageText = strings.Join(remaining, " ")
 		agent, err = client.ProjectAgents(link.ProjectID).Get(ctx, agentSlug)
 		if err != nil {
@@ -1105,15 +1144,46 @@ func (r *CommandRouter) cmdSetDefault(ctx context.Context, event *ChatEvent, arg
 		return linkResp, nil
 	}
 
-	if len(args) == 0 {
+	// Parse --thread flag from args.
+	threadMode := false
+	var filtered []string
+	for _, a := range args {
+		if a == "--thread" {
+			threadMode = true
+		} else {
+			filtered = append(filtered, a)
+		}
+	}
+
+	if threadMode && event.ThreadID == "" {
+		return textResponse(event, "The `--thread` flag can only be used inside a thread."), nil
+	}
+
+	if len(filtered) == 0 {
+		if threadMode {
+			agent, err := r.store.GetThreadDefault(event.SpaceID, event.ThreadID, event.Platform)
+			if err != nil {
+				return textResponse(event, fmt.Sprintf("Failed to get thread default: %v", err)), nil
+			}
+			if agent == "" {
+				return textResponse(event, "No thread-level default agent is set. Usage: `/scionAdmin set-default <agent-slug> --thread`"), nil
+			}
+			return textResponse(event, fmt.Sprintf("Thread default agent is `%s`. Use `/scionAdmin set-default clear --thread` to remove.", agent)), nil
+		}
 		if link.DefaultAgent == "" {
 			return textResponse(event, "No default agent is set. Usage: `/scionAdmin set-default <agent-slug>`"), nil
 		}
 		return textResponse(event, fmt.Sprintf("Default agent is `%s`. Use `/scionAdmin set-default clear` to remove.", link.DefaultAgent)), nil
 	}
 
-	arg := strings.ToLower(args[0])
+	arg := strings.ToLower(filtered[0])
 	if arg == "clear" || arg == "none" {
+		if threadMode {
+			if err := r.store.DeleteThreadDefault(event.SpaceID, event.ThreadID, event.Platform); err != nil {
+				return textResponse(event, fmt.Sprintf("Failed to clear thread default agent: %v", err)), nil
+			}
+			return textResponse(event, "Thread-level default agent cleared."), nil
+		}
 		if err := r.store.ClearDefaultAgent(event.SpaceID, event.Platform); err != nil {
 			return textResponse(event, fmt.Sprintf("Failed to clear default agent: %v", err)), nil
 		}
@@ -1125,9 +1195,16 @@ func (r *CommandRouter) cmdSetDefault(ctx context.Context, event *ChatEvent, arg
 		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, args[0])
+	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, filtered[0])
 	if err != nil {
-		return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", args[0], err)), nil
+		return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", filtered[0], err)), nil
+	}
+
+	if threadMode {
+		if err := r.store.SetThreadDefault(event.SpaceID, event.ThreadID, event.Platform, agent.Slug, event.UserEmail); err != nil {
+			return textResponse(event, fmt.Sprintf("Failed to set thread default agent: %v", err)), nil
+		}
+		return textResponse(event, fmt.Sprintf("Thread default agent set to `%s`. Messages in this thread that don't match an agent name will be sent here.", agent.Slug)), nil
 	}
 
 	if err := r.store.SetDefaultAgent(event.SpaceID, event.Platform, agent.Slug); err != nil {
@@ -1187,6 +1264,14 @@ func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []st
 	if link != nil && link.DefaultAgent != "" {
 		widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Default Agent", Content: link.DefaultAgent})
 	}
+	if link != nil && event.ThreadID != "" {
+		threadAgent, threadErr := r.store.GetThreadDefault(event.SpaceID, event.ThreadID, event.Platform)
+		if threadErr != nil {
+			r.log.Error("failed to get thread default", "error", threadErr)
+		} else if threadAgent != "" {
+			widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Thread Default", Content: threadAgent})
+		}
+	}
 
 	card := Card{
 		Header: CardHeader{
@@ -1234,6 +1319,7 @@ func (r *CommandRouter) cmdAdminHelp(ctx context.Context, event *ChatEvent) (*Ev
 • ` + "`/scionAdmin delete <agent>`" + ` — Delete an agent (with confirmation)
 • ` + "`/scionAdmin logs <agent>`" + ` — View recent agent logs
 • ` + "`/scionAdmin set-default <agent>`" + ` — Set default agent for ` + "`/scion`" + ` messages (clear with ` + "`clear`" + `)
+• ` + "`/scionAdmin set-default <agent> --thread`" + ` — Set default agent for the current thread (clear with ` + "`clear --thread`" + `)
 
 *Space & Identity:*
 • ` + "`/scionAdmin info`" + ` — Show registration, project link, and agent info
@@ -1249,6 +1335,22 @@ func (r *CommandRouter) cmdAdminHelp(ctx context.Context, event *ChatEvent) (*Ev
 Use ` + "`/scion <text>`" + ` to message agents directly.`
 
 	return textResponse(event, help), nil
+}
+
+// resolveDefaultAgent returns the default agent for a message, checking
+// thread-level defaults first (if threadID is non-empty), then falling back
+// to the provided space-level default.
+func (r *CommandRouter) resolveDefaultAgent(spaceID, threadID, platform, spaceDefault string) (string, error) {
+	if threadID != "" {
+		agent, err := r.store.GetThreadDefault(spaceID, threadID, platform)
+		if err != nil {
+			return "", err
+		}
+		if agent != "" {
+			return agent, nil
+		}
+	}
+	return spaceDefault, nil
 }
 
 // --- Helper methods ---
