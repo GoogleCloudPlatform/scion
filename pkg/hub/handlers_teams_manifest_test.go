@@ -171,7 +171,7 @@ func TestHandleTeamsManifestDownload_HappyPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to open manifest.json from zip: %v", err)
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 
 		var manifest teamsManifest
 		if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
@@ -197,7 +197,7 @@ func TestHandleTeamsManifestDownload_HappyPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to open color.png from zip: %v", err)
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 
 		img, err := png.Decode(rc)
 		if err != nil {
@@ -218,7 +218,7 @@ func TestHandleTeamsManifestDownload_HappyPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to open outline.png from zip: %v", err)
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 
 		img, err := png.Decode(rc)
 		if err != nil {
