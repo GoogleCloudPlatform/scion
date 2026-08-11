@@ -177,6 +177,9 @@ const (
 	expectedIssuer = "https://api.botframework.com"
 	// jwksRefreshInterval controls how often the JWKS keys are refreshed.
 	jwksRefreshInterval = 24 * time.Hour
+	// jwksRefreshCooldown is the minimum interval between JWKS refreshes to
+	// prevent cache stampede and DoS via forged kid values.
+	jwksRefreshCooldown = 10 * time.Second
 )
 
 // JWTValidator validates inbound JWTs from the Bot Framework Service.
@@ -248,8 +251,9 @@ func (v *JWTValidator) getKey(ctx context.Context, kid string) (*rsa.PublicKey, 
 		return key, nil
 	}
 
-	// Key not found or keys are stale — refresh.
-	if err := v.refreshKeys(ctx); err != nil {
+	// Key not found or keys are stale — refresh, passing kid for
+	// double-check and cooldown enforcement inside the write lock.
+	if err := v.refreshKeys(ctx, kid); err != nil {
 		return nil, fmt.Errorf("refresh JWKS: %w", err)
 	}
 
@@ -281,9 +285,21 @@ type jwkKey struct {
 	E   string `json:"e"`
 }
 
-func (v *JWTValidator) refreshKeys(ctx context.Context) error {
+func (v *JWTValidator) refreshKeys(ctx context.Context, kid string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+
+	// Double-check: if the requested kid is already present and keys were
+	// loaded recently, another goroutine already refreshed — skip.
+	if _, ok := v.keys[kid]; ok && time.Since(v.keysLoadedAt) <= jwksRefreshInterval {
+		return nil
+	}
+
+	// Cooldown: refuse to refresh if we fetched very recently, preventing
+	// an attacker from flooding the JWKS endpoint with random kid values.
+	if !v.keysLoadedAt.IsZero() && time.Since(v.keysLoadedAt) < jwksRefreshCooldown {
+		return nil
+	}
 
 	// Fetch JWKS URL from OpenID metadata if we haven't yet.
 	if !v.jwksURLFetched {

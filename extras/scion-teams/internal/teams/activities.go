@@ -23,6 +23,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
+// atMentionRegex matches <at>...</at> mention tags injected by Teams.
+// Compiled once at package level to avoid re-compiling on every message.
+var atMentionRegex = regexp.MustCompile(`<at>[^<]*</at>\s*`)
+
 // activityToStructuredMessage converts a Teams Activity into a Scion
 // StructuredMessage for delivery to the hub.
 func activityToStructuredMessage(activity *Activity, botID string) *messages.StructuredMessage {
@@ -106,8 +110,7 @@ func stripBotMention(text string, botID string) string {
 	// We strip all <at>...</at> tags that might be the bot mention.
 	// A more precise approach uses the Entities field, but for the
 	// text-level strip we remove by pattern.
-	atRegex := regexp.MustCompile(`<at>[^<]*</at>\s*`)
-	cleaned := atRegex.ReplaceAllString(text, "")
+	cleaned := atMentionRegex.ReplaceAllString(text, "")
 	return strings.TrimSpace(cleaned)
 }
 

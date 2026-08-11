@@ -678,7 +678,10 @@ func (b *TeamsBroker) HandleActivity(ctx context.Context, activity *Activity) (*
 // routes through command handler first, then converts to StructuredMessage
 // and delivers it to the hub.
 func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) error {
-	// Skip messages from the bot itself (secondary echo guard).
+	// Echo prevention: skip messages from the bot itself.  Outbound
+	// messages sent via Publish() are echoed back by the Teams platform
+	// with activity.From.ID set to the bot's App ID, so comparing the
+	// sender identity is the reliable inbound echo guard (design doc §5.6).
 	if b.config != nil && activity.From.ID == b.config.AppID {
 		b.log.Debug("Skipping message from self", "activity_id", activity.ID)
 		return nil
@@ -701,16 +704,6 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 	}
 
 	msg := activityToStructuredMessage(activity, botID)
-
-	// Echo prevention: check for scion_origin marker in the activity's
-	// channel data or value. Messages sent by this bot via Publish() carry
-	// this marker; if the platform echoes them back, we skip them.
-	if msg.Metadata != nil {
-		if origin, ok := msg.Metadata[OriginMarkerKey]; ok && origin == OriginMarkerValue {
-			b.log.Debug("Skipping echo (scion_origin marker on inbound)", "activity_id", activity.ID)
-			return nil
-		}
-	}
 
 	// Apply entity-based mention stripping for more precision.
 	if len(activity.Entities) > 0 && botID != "" {

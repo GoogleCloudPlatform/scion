@@ -151,6 +151,15 @@ func (ws *WebhookServer) handleMessages(w http.ResponseWriter, r *http.Request) 
 	if activity.Type != "invoke" {
 		w.WriteHeader(http.StatusOK)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					ws.log.Error("Panic in async activity handler",
+						"panic", r,
+						"type", activity.Type,
+						"activity_id", activity.ID,
+					)
+				}
+			}()
 			if _, err := ws.handler.HandleActivity(context.Background(), &activity); err != nil {
 				ws.log.Error("Async activity handler error", "error", err, "type", activity.Type)
 			}

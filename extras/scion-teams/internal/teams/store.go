@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/integration/lockloop"
+	"github.com/mitchellh/go-homedir"
 
 	_ "modernc.org/sqlite"
 )
@@ -92,6 +93,12 @@ type sqliteStore struct {
 // initialises the schema. The returned Store must be closed when no
 // longer needed.
 func NewSQLiteStore(dbPath string) (Store, error) {
+	// Expand ~ in the path; Go's database/sql and SQLite do not handle
+	// tilde expansion, which would create a literal "~" directory.
+	if expanded, err := homedir.Expand(dbPath); err == nil {
+		dbPath = expanded
+	}
+
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
