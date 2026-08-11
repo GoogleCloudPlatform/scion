@@ -62,9 +62,8 @@ type CommandRouter struct {
 	broker      *BrokerServer
 	log         *slog.Logger
 
-	mu             sync.Mutex
-	pendingAuth    map[string]*pendingDeviceAuth // keyed by platformUserID+platform
-	pendingDeletes map[string]string             // keyed by actionID -> agentID
+	mu          sync.Mutex
+	pendingAuth map[string]*pendingDeviceAuth // keyed by platformUserID+platform
 }
 
 // NewCommandRouter creates a new command router.
@@ -85,8 +84,7 @@ func NewCommandRouter(
 		messenger:      messenger,
 		broker:         broker,
 		log:            log,
-		pendingAuth:    make(map[string]*pendingDeviceAuth),
-		pendingDeletes: make(map[string]string),
+		pendingAuth: make(map[string]*pendingDeviceAuth),
 	}
 }
 
