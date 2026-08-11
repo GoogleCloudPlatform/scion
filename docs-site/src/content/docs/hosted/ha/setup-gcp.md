@@ -686,6 +686,26 @@ server:
     host: 127.0.0.1
 ```
 
+:::caution[Critical: Distinguishing IAP Audiences]
+Configuring IAP requires two different audience formats used in separate contexts:
+
+1. **`server.auth.proxy.iap.audience`** (Cloud Run native IAP audience path):
+   - **Format:** `/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE_NAME`
+   - **Purpose:** Used by the Hub to validate incoming IAP-signed JWTs (from browsers and human API calls).
+   - **Where to find:** GCP Console → Security → Identity-Aware Proxy → Select your backend service → click the three dots → select **Signed Header JWT Audience**.
+
+2. **`server.auth.transport.oidc_audience`** (IAP OAuth Client ID):
+   - **Format:** `PROJECT_NUMBER-xxxx.apps.googleusercontent.com`
+   - **Purpose:** Used as the audience minted into OIDC tokens for dispatched agents and brokers to authenticate and traverse Google IAP. IAP requires the OAuth client ID format for validating programmatically minted OIDC tokens, *not* the Cloud Run resource path.
+   - **Where to find:** GCP Console → Security → Identity-Aware Proxy → Select your backend service → click the three dots → select **Edit OAuth Client**.
+
+Using the wrong format for either field will cause startup verification or agent authentication to fail.
+:::
+
+:::tip[Proxy-Authorization Support]
+Cloud Run native IAP fully supports the `Proxy-Authorization: Bearer <Google OIDC ID token>` header. Dispatched agents and brokers can use either `Authorization` or `Proxy-Authorization` for the outer transport layer to pass through IAP. This prevents collisions if your client needs to use the standard `Authorization` header for internal Hub authentication.
+:::
+
 Replace placeholders with your live values:
 ```bash
 sed -e "s|REGISTRY_PLACEHOLDER|$IMAGE_REGISTRY|" \
