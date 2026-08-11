@@ -747,10 +747,14 @@ func (a *Adapter) SendMessage(ctx context.Context, req chatapp.SendMessageReques
 		payload["thread"] = map[string]string{
 			"name": req.ThreadID,
 		}
+	} else if req.ThreadKey != "" {
+		payload["thread"] = map[string]string{
+			"threadKey": req.ThreadKey,
+		}
 	}
 
 	url := fmt.Sprintf("%s/%s/messages", chatAPIBase, req.SpaceID)
-	if req.ThreadID != "" {
+	if req.ThreadID != "" || req.ThreadKey != "" {
 		url += "?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 	}
 
@@ -883,7 +887,7 @@ func (a *Adapter) renderCardV2(card *chatapp.Card) map[string]any {
 		for _, act := range card.Actions {
 			btn := map[string]any{
 				"text":    act.Label,
-				"onClick": a.actionOnClick(act.ActionID),
+				"onClick": a.resolveOnClick(act.ActionID),
 			}
 			if act.Style == "danger" {
 				btn["color"] = map[string]any{
@@ -914,6 +918,15 @@ func (a *Adapter) renderCardV2(card *chatapp.Card) map[string]any {
 	return c
 }
 
+// resolveOnClick returns an openLink onClick when the actionID starts with
+// "link." (the remainder is the URL), or a callback action otherwise.
+func (a *Adapter) resolveOnClick(actionID string) map[string]any {
+	if strings.HasPrefix(actionID, "link.") {
+		return a.openLinkOnClick(strings.TrimPrefix(actionID, "link."))
+	}
+	return a.actionOnClick(actionID)
+}
+
 // actionOnClick builds an onClick action with the full external URL and action ID in parameters.
 func (a *Adapter) actionOnClick(actionID string) map[string]any {
 	return map[string]any{
@@ -922,6 +935,15 @@ func (a *Adapter) actionOnClick(actionID string) map[string]any {
 			"parameters": []any{
 				map[string]any{"key": "action", "value": actionID},
 			},
+		},
+	}
+}
+
+// openLinkOnClick builds an onClick that opens a URL in a new tab.
+func (a *Adapter) openLinkOnClick(url string) map[string]any {
+	return map[string]any{
+		"openLink": map[string]any{
+			"url": url,
 		},
 	}
 }
@@ -946,7 +968,7 @@ func (a *Adapter) renderWidget(w *chatapp.Widget) map[string]any {
 	case chatapp.WidgetButton:
 		btn := map[string]any{
 			"text":    w.Label,
-			"onClick": a.actionOnClick(w.ActionID),
+			"onClick": a.resolveOnClick(w.ActionID),
 		}
 		return map[string]any{
 			"buttonList": map[string]any{

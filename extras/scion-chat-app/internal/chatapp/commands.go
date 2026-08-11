@@ -62,8 +62,13 @@ type CommandRouter struct {
 	broker      *BrokerServer
 	log         *slog.Logger
 
-	mu          sync.Mutex
-	pendingAuth map[string]*pendingDeviceAuth // keyed by platformUserID+platform
+	mu             sync.Mutex
+	pendingAuth    map[string]*pendingDeviceAuth // keyed by platformUserID+platform
+	pendingDeletes map[string]string             // keyed by actionID -> agentID
+
+	// testClient, when non-nil, is returned by clientForUser instead of
+	// going through the identity mapper. Used only in tests.
+	testClient hubclient.Client
 }
 
 // NewCommandRouter creates a new command router.
@@ -301,14 +306,14 @@ func (r *CommandRouter) handleSecretAction(ctx context.Context, event *ChatEvent
 		return nil
 	}
 
-	// targetID is the secret key. The value comes from DialogData.
+	// targetID is the secret key. The value comes from DialogData using the
+	// action ID as the widget key, matching how the input card is constructed.
 	key := targetID
-	value := ""
-	for _, v := range event.DialogData {
-		if v != "" {
-			value = v
-			break
-		}
+	widgetKey := fmt.Sprintf("secret.set.%s", key)
+	value := event.DialogData[widgetKey]
+	if value == "" {
+		// Fall back to the action ID itself as key (for dialog submit events).
+		value = event.DialogData[event.ActionID]
 	}
 	if value == "" {
 		return r.reply(ctx, event, "No secret value provided.")
@@ -1417,7 +1422,7 @@ func (r *CommandRouter) cmdAdminHelp(ctx context.Context, event *ChatEvent) (*Ev
 
 *Secrets:*
 • ` + "`/scionAdmin secret list`" + ` — List project secrets (metadata only)
-• ` + "`/scionAdmin secret set <key> [value]`" + ` — Set a secret value
+• ` + "`/scionAdmin secret set <key>`" + ` — Set a secret value (entered via secure card input)
 • ` + "`/scionAdmin secret get <key>`" + ` — Show secret metadata
 • ` + "`/scionAdmin secret delete <key>`" + ` — Delete a secret
 
@@ -1471,42 +1476,37 @@ func (r *CommandRouter) cmdTerminal(ctx context.Context, event *ChatEvent, args 
 	}
 
 	agentSlug := args[0]
-	agents, err := client.ProjectAgents(link.ProjectID).List(ctx, nil)
+	// Use Get (which supports slug lookup) instead of List+scan.
+	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, agentSlug)
 	if err != nil {
-		return textResponse(event, fmt.Sprintf("Failed to list agents: %v", err)), nil
+		return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", agentSlug, err)), nil
 	}
 
-	for _, agent := range agents.Agents {
-		if strings.EqualFold(agent.Slug, agentSlug) {
-			if strings.ToLower(agent.Phase) != "running" {
-				phase := agent.Phase
-				if phase == "" {
-					phase = "unknown"
-				}
-				return textResponse(event, fmt.Sprintf("Agent `%s` is not running (phase: %s).", agent.Slug, phase)), nil
-			}
-			terminalURL := fmt.Sprintf("%s/agents/%s/terminal", r.hubURL, agent.ID)
-			card := Card{
-				Header: CardHeader{
-					Title:    "Web Terminal",
-					Subtitle: fmt.Sprintf("Agent: %s", agent.Slug),
-				},
-				Sections: []CardSection{
-					{
-						Widgets: []Widget{
-							{Type: WidgetText, Content: fmt.Sprintf("Open the web terminal for agent `%s`:", agent.Slug)},
-						},
-					},
-				},
-				Actions: []CardAction{
-					{Label: "Open Terminal", ActionID: fmt.Sprintf("link.%s", terminalURL), Style: "primary"},
-				},
-			}
-			return cardResponse(event, &card), nil
+	if strings.ToLower(agent.Phase) != "running" {
+		phase := agent.Phase
+		if phase == "" {
+			phase = "unknown"
 		}
+		return textResponse(event, fmt.Sprintf("Agent `%s` is not running (phase: %s).", agent.Slug, phase)), nil
 	}
-
-	return textResponse(event, fmt.Sprintf("Agent `%s` not found in this project.", agentSlug)), nil
+	terminalURL := fmt.Sprintf("%s/agents/%s/terminal", r.hubURL, agent.ID)
+	card := Card{
+		Header: CardHeader{
+			Title:    "Web Terminal",
+			Subtitle: fmt.Sprintf("Agent: %s", agent.Slug),
+		},
+		Sections: []CardSection{
+			{
+				Widgets: []Widget{
+					{Type: WidgetText, Content: fmt.Sprintf("Open the web terminal for agent `%s`:", agent.Slug)},
+				},
+			},
+		},
+		Actions: []CardAction{
+			{Label: "Open Terminal", ActionID: fmt.Sprintf("link.%s", terminalURL), Style: "primary"},
+		},
+	}
+	return cardResponse(event, &card), nil
 }
 
 func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
@@ -1519,13 +1519,9 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 		return resp, nil
 	}
 
-	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
-	if err != nil || mapping == nil {
-		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
-	}
-	client, err := r.idMapper.ClientFor(ctx, mapping)
+	client, err := r.clientForUser(ctx, event)
 	if err != nil {
-		return textResponse(event, fmt.Sprintf("Failed to create client: %v", err)), nil
+		return textResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
 	agentName := args[0]
@@ -1548,13 +1544,17 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 	}
 
 	// Send a kickoff message in the space to start a new thread.
+	// Use a threadKey derived from the agent slug so Google Chat creates a
+	// new thread and subsequent messages can target it.
 	threadMsg := fmt.Sprintf("Agent `%s` created and started.", createResp.Agent.Slug)
 	if instruction != "" {
 		threadMsg += fmt.Sprintf("\n\n*Instruction:* %s", instruction)
 	}
+	threadKey := fmt.Sprintf("scion-agent-%s", createResp.Agent.Slug)
 	_, msgErr := r.messenger.SendMessage(ctx, SendMessageRequest{
-		SpaceID: event.SpaceID,
-		Text:    threadMsg,
+		SpaceID:   event.SpaceID,
+		ThreadKey: threadKey,
+		Text:      threadMsg,
 	})
 	if msgErr != nil {
 		r.log.Warn("failed to post thread kickoff message", "error", msgErr)
@@ -1562,12 +1562,14 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 
 	// If instruction provided, send it to the agent.
 	if instruction != "" {
-		senderEmail := mapping.HubUserEmail
+		senderEmail := event.UserEmail
 		if senderEmail == "" {
-			return textResponse(event, fmt.Sprintf("Agent `%s` created and started, but your user mapping is missing an email to send the instruction.", createResp.Agent.Slug)), nil
+			senderEmail = "unknown"
 		}
 		msg := messages.NewInstruction("user:"+senderEmail, createResp.Agent.Slug, instruction)
-		msg.Channel = r.broker.ChannelName()
+		if r.broker != nil {
+			msg.Channel = r.broker.ChannelName()
+		}
 		if event.ThreadID != "" {
 			msg.ThreadID = event.ThreadID
 		}
@@ -1695,9 +1697,18 @@ func (r *CommandRouter) cmdSecretList(ctx context.Context, event *ChatEvent, lin
 		return textResponse(event, fmt.Sprintf("No secrets found in project `%s`.", link.ProjectSlug)), nil
 	}
 
+	// Cap output to avoid oversized chat messages.
+	const maxSecrets = 50
+	display := secrets.Secrets
+	truncated := false
+	if len(display) > maxSecrets {
+		display = display[:maxSecrets]
+		truncated = true
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("*Secrets in %s* (%d):\n", link.ProjectSlug, len(secrets.Secrets)))
-	for _, sec := range secrets.Secrets {
+	for _, sec := range display {
 		line := fmt.Sprintf("• `%s`", sec.Key)
 		if sec.SecretType != "" {
 			line += fmt.Sprintf(" (type: %s)", sec.SecretType)
@@ -1707,12 +1718,15 @@ func (r *CommandRouter) cmdSecretList(ctx context.Context, event *ChatEvent, lin
 		}
 		sb.WriteString(line + "\n")
 	}
+	if truncated {
+		sb.WriteString(fmt.Sprintf("\n_Showing %d of %d secrets._", maxSecrets, len(secrets.Secrets)))
+	}
 	return textResponse(event, sb.String()), nil
 }
 
 func (r *CommandRouter) cmdSecretSet(ctx context.Context, event *ChatEvent, link *state.SpaceLink, client hubclient.Client, args []string) (*EventResponse, error) {
 	if len(args) < 1 {
-		return textResponse(event, "Usage: `/scionAdmin secret set <key> <value>`"), nil
+		return textResponse(event, "Usage: `/scionAdmin secret set <key>`"), nil
 	}
 
 	key := args[0]
@@ -1720,38 +1734,25 @@ func (r *CommandRouter) cmdSecretSet(ctx context.Context, event *ChatEvent, link
 		return textResponse(event, fmt.Sprintf("Invalid key: %v", err)), nil
 	}
 
-	if len(args) < 2 {
-		// Return a card with an input field for the value.
-		card := Card{
-			Header: CardHeader{
-				Title:    "Set Secret",
-				Subtitle: fmt.Sprintf("Key: %s", key),
-			},
-			Sections: []CardSection{
-				{
-					Widgets: []Widget{
-						{Type: WidgetInput, Label: "Secret Value", ActionID: fmt.Sprintf("secret.set.%s", key)},
-					},
+	// Always use a card-based text input for the secret value to avoid
+	// exposing values in chat history. Any extra args are ignored.
+	card := Card{
+		Header: CardHeader{
+			Title:    "Set Secret",
+			Subtitle: fmt.Sprintf("Key: %s", key),
+		},
+		Sections: []CardSection{
+			{
+				Widgets: []Widget{
+					{Type: WidgetInput, Label: "Secret Value", ActionID: fmt.Sprintf("secret.set.%s", key)},
 				},
 			},
-			Actions: []CardAction{
-				{Label: "Save", ActionID: fmt.Sprintf("secret.set.%s", key), Style: "primary"},
-			},
-		}
-		return cardResponse(event, &card), nil
+		},
+		Actions: []CardAction{
+			{Label: "Save", ActionID: fmt.Sprintf("secret.set.%s", key), Style: "primary"},
+		},
 	}
-
-	value := strings.Join(args[1:], " ")
-	_, err := client.Secrets().Set(ctx, key, &hubclient.SetSecretRequest{
-		Value:   value,
-		Scope:   "project",
-		ScopeID: link.ProjectID,
-	})
-	if err != nil {
-		return textResponse(event, fmt.Sprintf("Failed to set secret `%s`: %v", key, err)), nil
-	}
-
-	return textResponse(event, fmt.Sprintf("Secret `%s` has been set.", key)), nil
+	return cardResponse(event, &card), nil
 }
 
 func (r *CommandRouter) cmdSecretGet(ctx context.Context, event *ChatEvent, link *state.SpaceLink, client hubclient.Client, args []string) (*EventResponse, error) {
@@ -1898,6 +1899,9 @@ func (r *CommandRouter) requireSpaceLink(ctx context.Context, event *ChatEvent) 
 
 // clientForUser creates a Hub client authenticated as the event's user.
 func (r *CommandRouter) clientForUser(ctx context.Context, event *ChatEvent) (hubclient.Client, error) {
+	if r.testClient != nil {
+		return r.testClient, nil
+	}
 	mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
 	if err != nil {
 		return nil, err
