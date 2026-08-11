@@ -466,6 +466,12 @@ func (r *CommandRouter) cmdList(ctx context.Context, event *ChatEvent, args []st
 		return textResponse(event, fmt.Sprintf("No agents in project `%s`.", proj.Slug)), nil
 	}
 
+	// Check for a thread-level default if we're in a thread.
+	var threadDefault string
+	if event.ThreadID != "" {
+		threadDefault, _ = r.store.GetThreadDefault(event.SpaceID, event.ThreadID)
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("*Agents in %s:*\n", proj.Slug))
 	for _, a := range agents.Agents {
@@ -474,13 +480,25 @@ func (r *CommandRouter) cmdList(ctx context.Context, event *ChatEvent, args []st
 			status = a.Phase
 		}
 		marker := ""
-		if link.DefaultAgent != "" && a.Slug == link.DefaultAgent {
+		if threadDefault != "" && a.Slug == threadDefault {
+			marker = " †"
+		} else if link.DefaultAgent != "" && a.Slug == link.DefaultAgent {
 			marker = " *"
 		}
 		sb.WriteString(fmt.Sprintf("• `%s` — %s%s\n", a.Slug, status, marker))
 	}
+	hasLegend := false
 	if link.DefaultAgent != "" {
 		sb.WriteString("\n_* default agent_")
+		hasLegend = true
+	}
+	if threadDefault != "" {
+		if hasLegend {
+			sb.WriteString("  ")
+		} else {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("_† thread default_")
 	}
 	return textResponse(event, sb.String()), nil
 }
@@ -1067,7 +1085,7 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 	// default agent is configured, treat the entire input as the message text.
 	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, agentSlug)
 	if err != nil {
-		defaultAgent, resolveErr := r.resolveDefaultAgent(event.SpaceID, event.ThreadID)
+		defaultAgent, resolveErr := r.resolveDefaultAgent(event.SpaceID, event.ThreadID, link.DefaultAgent)
 		if resolveErr != nil {
 			return textResponse(event, fmt.Sprintf("Failed to resolve default agent: %v", resolveErr)), nil
 		}
@@ -1238,6 +1256,12 @@ func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []st
 	if link != nil && link.DefaultAgent != "" {
 		widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Default Agent", Content: link.DefaultAgent})
 	}
+	if link != nil && event.ThreadID != "" {
+		threadAgent, threadErr := r.store.GetThreadDefault(event.SpaceID, event.ThreadID)
+		if threadErr == nil && threadAgent != "" {
+			widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Thread Default", Content: threadAgent})
+		}
+	}
 
 	card := Card{
 		Header: CardHeader{
@@ -1305,8 +1329,8 @@ Use ` + "`/scion <text>`" + ` to message agents directly.`
 
 // resolveDefaultAgent returns the default agent for a message, checking
 // thread-level defaults first (if threadID is non-empty), then falling back
-// to the space-level default agent.
-func (r *CommandRouter) resolveDefaultAgent(spaceID, threadID string) (string, error) {
+// to the provided space-level default.
+func (r *CommandRouter) resolveDefaultAgent(spaceID, threadID, spaceDefault string) (string, error) {
 	if threadID != "" {
 		agent, err := r.store.GetThreadDefault(spaceID, threadID)
 		if err != nil {
@@ -1316,14 +1340,7 @@ func (r *CommandRouter) resolveDefaultAgent(spaceID, threadID string) (string, e
 			return agent, nil
 		}
 	}
-	link, err := r.store.GetSpaceLink(spaceID, "google_chat")
-	if err != nil {
-		return "", err
-	}
-	if link != nil {
-		return link.DefaultAgent, nil
-	}
-	return "", nil
+	return spaceDefault, nil
 }
 
 // --- Helper methods ---
