@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -581,6 +582,29 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 						Name: bt, Bus: b, Observer: observer, ChannelID: channelID,
 					})
 					log.Printf("Message broker spoke added: name=%s channel_id=%s observer=%v", bt, channelID, observer)
+				}
+
+				// Register the native web channel spoke. It follows the same
+				// contract as every plugin adapter: Subscribe discards the handler
+				// (F7/F8, #944), Publish does real work (webchat_* state).
+				// Observer: true so a state-write failure degrades the thread rail
+				// rather than failing the user's message.
+				if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
+					if rawDB := dbProvider.DB(); rawDB != nil {
+						webStore := hub.NewWebChatStore(rawDB)
+						if err := webStore.Init(); err != nil {
+							log.Printf("Warning: failed to initialize webchat store: %v", err)
+						} else {
+							webSpoke := hub.NewWebChannelBus(logging.Subsystem("hub.eventbus.web"), webStore)
+							namedBuses = append(namedBuses, eventbus.NamedEventBus{
+								Name:      "web",
+								ChannelID: "web",
+								Bus:       webSpoke,
+								Observer:  true,
+							})
+							log.Printf("Message broker spoke added: name=web channel_id=web observer=true")
+						}
+					}
 				}
 
 				fanout := eventbus.NewFanOutEventBus(namedBuses, logging.Subsystem("hub.eventbus.fanout"))
