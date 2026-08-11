@@ -53,8 +53,8 @@ func TestDuration_UnmarshalYAML_Int64Nanoseconds(t *testing.T) {
 		input string
 		want  time.Duration
 	}{
-		{"100000000", 100 * time.Millisecond},   // 100ms in ns
-		{"5000000000", 5 * time.Second},          // 5s in ns
+		{"100000000", 100 * time.Millisecond}, // 100ms in ns
+		{"5000000000", 5 * time.Second},       // 5s in ns
 		{"0", 0},
 	}
 

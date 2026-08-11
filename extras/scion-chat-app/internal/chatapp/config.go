@@ -89,7 +89,7 @@ type GoogleChatConfig struct {
 	ServiceAccountEmail string            `yaml:"service_account_email"`
 	CommandIDMap        map[string]string `yaml:"command_id_map"`
 	SendQueueSize       int               `yaml:"send_queue_size"` // default 100
-	SendMinDelay        Duration           `yaml:"send_min_delay"`  // default "100ms"
+	SendMinDelay        Duration          `yaml:"send_min_delay"`  // default "100ms"
 }
 
 // SlackConfig holds settings for the Slack adapter (future).

@@ -28,7 +28,7 @@ type recordingMessenger struct {
 	mu       sync.Mutex
 	calls    []SendMessageRequest
 	delay    time.Duration // optional per-send delay
-	failNext bool         // if set, next send returns an error
+	failNext bool          // if set, next send returns an error
 }
 
 func (m *recordingMessenger) SendMessage(_ context.Context, req SendMessageRequest) (string, error) {
@@ -51,7 +51,7 @@ func (m *recordingMessenger) SendCard(_ context.Context, spaceID string, card Ca
 func (m *recordingMessenger) UpdateMessage(context.Context, string, SendMessageRequest) error {
 	return nil
 }
-func (m *recordingMessenger) OpenDialog(context.Context, string, Dialog) error  { return nil }
+func (m *recordingMessenger) OpenDialog(context.Context, string, Dialog) error   { return nil }
 func (m *recordingMessenger) UpdateDialog(context.Context, string, Dialog) error { return nil }
 func (m *recordingMessenger) GetUser(context.Context, string) (*ChatUser, error) {
 	return nil, nil

@@ -110,8 +110,14 @@ func (n *NotificationRelay) handleAgentNotification(ctx context.Context, project
 				SpaceID: link.SpaceID,
 				Card:    &card,
 			})
-		} else {
+		} else if n.messenger != nil {
 			_, sendErr = n.messenger.SendCard(ctx, link.SpaceID, card)
+		} else {
+			n.log.Warn("no messenger or send queue configured, skipping notification",
+				"space_id", link.SpaceID,
+				"project_id", projectID,
+			)
+			continue
 		}
 		if sendErr != nil {
 			n.log.Error("failed to send notification card",
@@ -205,8 +211,14 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		var sendErr error
 		if n.sendQueue != nil {
 			_, sendErr = n.sendQueue.Send(ctx, sendReq)
-		} else {
+		} else if n.messenger != nil {
 			_, sendErr = n.messenger.SendMessage(ctx, sendReq)
+		} else {
+			n.log.Warn("no messenger or send queue configured, skipping user message relay",
+				"space_id", link.SpaceID,
+				"recipient", msg.RecipientID,
+			)
+			continue
 		}
 		if sendErr != nil {
 			n.log.Error("failed to relay user message",

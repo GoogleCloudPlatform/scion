@@ -70,6 +70,8 @@ func NewBrokerServer(handler MessageHandler, log *slog.Logger) *BrokerServer {
 // SetHandler replaces the message handler after construction, allowing
 // deferred wiring (e.g. to a notification relay created later).
 func (b *BrokerServer) SetHandler(handler MessageHandler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.handler = handler
 }
 
@@ -117,8 +119,11 @@ func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.
 		"sender", msg.Sender,
 		"type", msg.Type,
 	)
-	if b.handler != nil {
-		return b.handler(ctx, topic, msg)
+	b.mu.RLock()
+	h := b.handler
+	b.mu.RUnlock()
+	if h != nil {
+		return h(ctx, topic, msg)
 	}
 	return nil
 }

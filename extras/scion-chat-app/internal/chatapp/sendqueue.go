@@ -191,6 +191,12 @@ func (q *SendQueue) worker(spaceID string, w *spaceWorker) {
 			}
 			idleTimer.Reset(defaultSendIdleTimeout)
 
+			// Check if context is already cancelled before sending.
+			if err := sr.ctx.Err(); err != nil {
+				sr.result <- sendResult{err: err}
+				continue
+			}
+
 			// Send the message via the Messenger.
 			msgID, err := q.sendOne(sr)
 			sr.result <- sendResult{messageID: msgID, err: err}
@@ -228,4 +234,3 @@ func (q *SendQueue) worker(spaceID string, w *spaceWorker) {
 func (q *SendQueue) sendOne(sr sendRequest) (string, error) {
 	return q.messenger.SendMessage(sr.ctx, sr.req)
 }
-
