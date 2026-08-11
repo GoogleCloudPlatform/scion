@@ -619,7 +619,7 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message)
 		Channel:       msg.Channel,
 		ThreadID:      msg.ThreadID,
 		Visibility:    msg.Visibility,
-		GroupID:        msg.GroupID,
+		GroupID:       msg.GroupID,
 		Read:          msg.Read,
 		DispatchState: msg.DispatchState,
 	}
