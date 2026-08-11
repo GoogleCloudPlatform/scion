@@ -191,8 +191,6 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     { key: 'listen_address', label: 'Webhook Listen Address', description: 'HTTP listen address for webhook mode', defaultValue: ':8443' },
     { key: 'external_url', label: 'External URL', description: 'Public URL where Google Chat sends events', defaultValue: '' },
     { key: 'service_account_email', label: 'Service Account Email', description: 'Email of the GCP service account (for JWT verification)', defaultValue: '' },
-    { key: 'ingress_mode', label: 'Ingress Mode', description: 'How Google Chat events are received', defaultValue: 'http', type: 'select', options: [{ label: 'HTTP Webhook', value: 'http' }, { label: 'Cloud Pub/Sub', value: 'pubsub' }] },
-    { key: 'pubsub_subscription', label: 'Pub/Sub Subscription', description: 'Full Pub/Sub subscription name (projects/PROJECT/subscriptions/SUB)', defaultValue: '' },
   ],
 };
 
