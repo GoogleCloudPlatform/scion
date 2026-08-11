@@ -129,6 +129,39 @@ When active, the Hub exposes standard OIDC discovery and key endpoints:
 - **Key Rotation**: The Hub rotates signing keys every 24 hours automatically, maintaining a key overlap period to ensure seamless token verification during transitions.
 - **Audience Scope**: Tokens are minted targeting specific external audiences.
 
+### Agent Identity Token API
+For programmatic or custom integrations where `sciontool` is not available, agents can request OIDC identity tokens directly from the Hub's token endpoint.
+
+* **Endpoint:** `POST /api/v1/agent/identity-token`
+* **Authentication:** Requires a valid Agent Token header (e.g. `X-Scion-Agent-Token: <scion JWT>`).
+* **Request Body:** Must be JSON and include the mandatory `audience` parameter targeting the external service.
+
+**Example Request:**
+
+```http
+POST /api/v1/agent/identity-token HTTP/1.1
+Host: hub.scion.dev
+X-Scion-Agent-Token: <agent_jwt_token>
+Content-Type: application/json
+
+{
+  "audience": "https://vault.example.com"
+}
+```
+
+:::caution[Audience is Mandatory]
+The `audience` parameter is strictly required in the JSON body. If the `audience` field is missing, empty, or the request body is malformed, the Hub will immediately reject the call with an HTTP `400 Bad Request` status.
+:::
+
+**Example Response (HTTP 200 OK):**
+
+```json
+{
+  "token": "eyJhbGciOiJSUzI1NiIsImtpZCI6Ii4uLiJ9...",
+  "expires_at": "2026-08-11T12:15:00Z"
+}
+```
+
 ### In-Agent Retrieval
 From inside any authorized agent container, retrieve an OIDC identity token using `sciontool`:
 

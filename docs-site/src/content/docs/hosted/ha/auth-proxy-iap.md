@@ -135,8 +135,8 @@ When the Hub is behind IAP (or a Cloud Run invoker-only service), agents need a 
 
 | Layer | Header | Purpose |
 |-------|--------|---------|
-| **Outer (transport)** | `Authorization: Bearer <Google OIDC ID token>` | Satisfies the platform guard (IAP or Cloud Run invoker IAM check). |
-| **Inner (app)** | `X-Scion-Agent-Token: <scion JWT>` | Existing Hub agent authentication. Carried as a custom header so it never collides with the outer `Authorization`. |
+| **Outer (transport)** | `Authorization: Bearer <Google OIDC ID token>` <br/>*or*<br/> `Proxy-Authorization: Bearer <Google OIDC ID token>` | Satisfies the platform guard (IAP or Cloud Run invoker IAM check). Cloud Run native IAP fully supports `Proxy-Authorization`. |
+| **Inner (app)** | `X-Scion-Agent-Token: <scion JWT>` | Existing Hub agent authentication. Carried as a custom header so it never collides with the outer header. |
 
 ### How it works
 

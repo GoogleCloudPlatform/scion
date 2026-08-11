@@ -33,6 +33,13 @@ Agents running inside containers must report status back to the Hub without poss
 
 - **Hub-Issued JWT**: During provisioning, the Hub generates a short-lived JWT scoped specifically to that agent instance.
 - **Claims**: The token includes the `agent_id` (sub), `project_id`, and `scopes`.
+
+  :::caution[Scopes Field Plurality]
+  The agent token JWT strictly uses `"scopes"` (plural, array of strings like `["project:read", "agent:status:update"]`), **NOT** `"scope"` (singular string, which is the standard OAuth 2.0 convention). 
+  
+  Providing the singular `"scope"` field in a token will silently fail, resulting in an empty scopes list and a locked-down agent.
+  :::
+
 - **Role-Based Scopes**: Instead of raw template scopes (which are deprecated), an agent's scopes are governed by its assigned **Tiered Agent Role** (`none`, `readonly`, `baseline`, or `full`):
     - `project:read` (Readonly): Allows reading project state (agents, templates, etc.).
     - `agent:status:update`, `agent:token:refresh`, `project:agent:notify`, `agent:port:forward` (Baseline): Standard operational scopes allowing the agent to report progress, refresh its token, and hold port tunnels.

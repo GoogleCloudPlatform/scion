@@ -544,6 +544,12 @@ $$\text{core-base} \longrightarrow \text{scion-base} \longrightarrow \text{harne
 2. **`scion-base`:** Copies repository code (`cmd/`, `pkg/`, etc.) and builds the `scion` and `sciontool` binaries on top of `core-base`.
 3. **Harnesses:** Pulls `scion-base` and adds target agent packages (like `@google/gemini-cli`).
 
+:::note[Compilation Constraint: `-tags no_embed_web`]
+By default, the Hub’s Go build process compiles and embeds the frontend web assets (`web/dist/`) into the final binary. However, compiling the frontend takes time and is not required for non-hub components.
+
+Any container or binary build for a **non-hub service** (such as the A2A bridge, Discord broker, custom harnesses, or utility binaries) that imports from the `pkg/` module **must compile with `-tags no_embed_web`**. If this tag is omitted, compilation will fail with errors in `web/embed.go` because the required frontend build artifacts do not exist.
+:::
+
 #### Single-Architecture AMD64 Speed Up
 :::tip[Avoid Emulation Build Timeouts]
 The official `cloudbuild-scion-base.yaml` compiles multi-platform (`linux/amd64,linux/arm64`). Under Cloud Build, `arm64` compiles run under slow QEMU emulation on standard `amd64` machines, which **routinely times out after 30 minutes**. 
@@ -668,6 +674,19 @@ server:
       oidc_audience: IAP_CLIENT_ID_PLACEHOLDER
       platform_auth_sa: scion-transport@PROJECT_ID.iam.gserviceaccount.com
 
+  # === OIDC IDENTITY PROVIDER ===
+  # Enables the Hub to act as an OIDC provider, publishing JWKS endpoints
+  # and minting identity tokens for agents to authenticate to external resources.
+  oidc:
+    enabled: true                      # Enabled to support agent identity tokens
+    token_lifetime: 15m                # Lifetime of minted OIDC identity tokens
+
+  # === OIDC FEDERATION ===
+  # Enables inbound federation from trusted external OIDC providers.
+  federation:
+    enabled: false                     # Disabled by default, configure if needed
+    trusted_issuers: []
+
   secrets:
     backend: gcpsm
     gcp_project_id: PROJECT_ID
@@ -685,6 +704,26 @@ server:
     enabled: true
     host: 127.0.0.1
 ```
+
+:::caution[Critical: Distinguishing IAP Audiences]
+Configuring IAP requires two different audience formats used in separate contexts:
+
+1. **`server.auth.proxy.iap.audience`** (Cloud Run native IAP audience path):
+   - **Format:** `/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE_NAME`
+   - **Purpose:** Used by the Hub to validate incoming IAP-signed JWTs (from browsers and human API calls).
+   - **Where to find:** GCP Console → Security → Identity-Aware Proxy → Select your backend service → click the three dots → select **Signed Header JWT Audience**.
+
+2. **`server.auth.transport.oidc_audience`** (IAP OAuth Client ID):
+   - **Format:** `PROJECT_NUMBER-xxxx.apps.googleusercontent.com`
+   - **Purpose:** Used as the audience minted into OIDC tokens for dispatched agents and brokers to authenticate and traverse Google IAP. IAP requires the OAuth client ID format for validating programmatically minted OIDC tokens, *not* the Cloud Run resource path.
+   - **Where to find:** GCP Console → Security → Identity-Aware Proxy → Select your backend service → click the three dots → select **Edit OAuth Client**.
+
+Using the wrong format for either field will cause startup verification or agent authentication to fail.
+:::
+
+:::tip[Proxy-Authorization Support]
+Cloud Run native IAP fully supports the `Proxy-Authorization: Bearer <Google OIDC ID token>` header. Dispatched agents and brokers can use either `Authorization` or `Proxy-Authorization` for the outer transport layer to pass through IAP. This prevents collisions if your client needs to use the standard `Authorization` header for internal Hub authentication.
+:::
 
 Replace placeholders with your live values:
 ```bash
@@ -790,6 +829,26 @@ export HUB_URL=$(gcloud run services describe scion-hub \
   --format="value(status.url)")
 echo "Hub URL: $HUB_URL"
 ```
+
+:::caution[Critical: New Cloud Run URL Format & Hub Endpoint Resolution]
+Cloud Run service URLs are provisioned in two formats:
+- **Legacy:** `https://scion-hub-PROJECT_NUMBER.REGION.run.app`
+- **New (default for newer projects):** `https://scion-hub-HASH-REGION.a.run.app`
+
+When the Hub is protected by IAP, it attempts to automatically resolve its own public URL from the IAP audience path. However, this automatic resolution **only works for the legacy format**. 
+
+If your printed `Hub URL` uses the new format containing a random hash (such as `.a.run.app`), the Hub's auto-derivation will fail, causing agent dispatching and OIDC federation to break. You **must set the `SCION_SERVER_BASE_URL` environment variable explicitly** to resolve this.
+
+**Action Required:**
+If your URL uses the new format, update your Cloud Run service to set this variable now:
+```bash
+gcloud run services update scion-hub \
+  --region=$REGION \
+  --project=$PROJECT_ID \
+  --update-env-vars="SCION_SERVER_BASE_URL=$HUB_URL"
+```
+For more information on how the Hub resolves endpoints, see the [Hub Endpoint Resolution Reference](/scion/reference/server-config/#hub-endpoint-resolution).
+:::
 
 Verify that unauthenticated endpoints are successfully blocked by IAP:
 ```bash
@@ -1093,6 +1152,19 @@ server:
       mode: iap
       oidc_audience: PROJECT_NUMBER-xxxx.apps.googleusercontent.com  # OAuth client ID
       platform_auth_sa: scion-transport@PROJECT_ID.iam.gserviceaccount.com
+
+  # === OIDC IDENTITY PROVIDER ===
+  # Enables the Hub to act as an OIDC provider, publishing JWKS endpoints
+  # and minting identity tokens for agents to authenticate to external resources.
+  oidc:
+    enabled: true                      # Enabled to support agent identity tokens
+    token_lifetime: 15m                # Lifetime of minted OIDC identity tokens
+
+  # === OIDC FEDERATION ===
+  # Enables inbound federation from trusted external OIDC providers.
+  federation:
+    enabled: false                     # Disabled by default, configure if needed
+    trusted_issuers: []
 
   secrets:
     backend: gcpsm
