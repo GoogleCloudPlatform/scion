@@ -25,6 +25,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { navigateTo } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { Agent, CapabilityField, GCPIdentityConfig, GCPServiceAccount, HarnessAdvancedCapabilities } from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
@@ -783,8 +784,7 @@ export class ScionPageAgentConfigure extends LitElement {
             variant="default"
             ?disabled=${isBusy}
             @click=${() => {
-              window.history.pushState({}, '', `/agents/${this.agentId}`);
-              window.dispatchEvent(new PopStateEvent('popstate'));
+              navigateTo(`/agents/${this.agentId}`);
             }}
           >
             <sl-icon slot="prefix" name="arrow-left"></sl-icon>

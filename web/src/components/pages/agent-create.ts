@@ -46,6 +46,7 @@ import { isSharedWorkspace } from '../../shared/types.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
+import { navigateTo } from '../../client/main.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
 import '../shared/status-badge.js';
@@ -481,8 +482,17 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
-  /** Apply project-settings defaults to advanced fields */
+  /** Apply project-settings defaults to advanced fields.
+   *  Resets all project-defaultable fields first so that switching projects
+   *  does not leak the previous project's defaults into the new one. */
   private async applyProjectDefaults(): Promise<void> {
+    // Reset to base defaults before applying new project settings
+    this.maxTurns = 0;
+    this.maxModelCalls = 0;
+    this.maxDuration = '';
+    this.modelSelection = '';
+    this.customModelId = '';
+
     const settings = await this.fetchProjectSettings(this.projectId);
     if (!settings) return;
 
@@ -952,8 +962,7 @@ export class ScionPageAgentCreate extends LitElement {
       }
 
       // Navigate to agent detail page
-      window.history.pushState({}, '', `/agents/${agentId}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo(`/agents/${agentId}`);
     } catch (err) {
       console.error('Failed to create agent:', err);
       this.error = err instanceof Error ? err.message : 'Failed to create agent';
@@ -1073,8 +1082,7 @@ export class ScionPageAgentCreate extends LitElement {
             ?disabled=${this.submitting}
             @click=${() => {
               const dest = this.sourceProject ? `/projects/${this.sourceProject.id}` : '/agents';
-              window.history.pushState({}, '', dest);
-              window.dispatchEvent(new PopStateEvent('popstate'));
+              navigateTo(dest);
             }}
           >
             Cancel

@@ -37,10 +37,20 @@ import { setDocumentTitle } from './page-title.js';
  */
 function stripBasePath(pathname: string): string {
   const base = import.meta.env.BASE_URL;
-  if (base && base !== '/' && pathname.startsWith(base)) {
+  if (!base || base === '/') return pathname;
+
+  // Normalize: strip trailing slash from base for comparison
+  const baseNoSlash = base.replace(/\/$/, '');
+
+  // Exact match (base path without trailing slash, e.g. /foo)
+  if (pathname === baseNoSlash) return '/';
+
+  // Prefix match (e.g. /foo/bar → /bar)
+  if (pathname.startsWith(base)) {
     const stripped = pathname.slice(base.length - 1); // keep leading /
     return stripped || '/';
   }
+
   return pathname;
 }
 
