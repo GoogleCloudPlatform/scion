@@ -354,6 +354,10 @@ type V1ServerConfig struct {
 	// Scheduler configures the Hub background task scheduler.
 	Scheduler *V1SchedulerConfig `json:"scheduler,omitempty" yaml:"scheduler,omitempty" koanf:"scheduler"`
 
+	// OIDCLogin configures an external OIDC provider for web login
+	// (the Hub as Relying Party, not as IdP).
+	OIDCLogin *V1OIDCLoginConfig `json:"oidc_login,omitempty" yaml:"oidc_login,omitempty" koanf:"oidc_login"`
+
 	// OIDC configures the OIDC Identity Provider feature.
 	OIDC *OIDCProviderConfig `json:"oidc,omitempty" yaml:"oidc,omitempty" koanf:"oidc"`
 
@@ -386,6 +390,17 @@ type V1SchedulerConfig struct {
 	// pool saturation) is active out-of-the-box. Set to 0 for unlimited
 	// (pre-fix behavior), or a higher value for larger deployments.
 	MaxConcurrency *int `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty" koanf:"max_concurrency"`
+}
+
+// V1OIDCLoginConfig holds configuration for an external OIDC login provider
+// in the versioned settings format (snake_case).
+type V1OIDCLoginConfig struct {
+	Enabled      *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	DisplayName  string   `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	IssuerURL    string   `json:"issuer_url,omitempty" yaml:"issuer_url,omitempty" koanf:"issuer_url"`
+	ClientID     string   `json:"client_id,omitempty" yaml:"client_id,omitempty" koanf:"client_id"`
+	ClientSecret string   `json:"client_secret,omitempty" yaml:"client_secret,omitempty" koanf:"client_secret"`
+	Scopes       []string `json:"scopes,omitempty" yaml:"scopes,omitempty" koanf:"scopes"`
 }
 
 // V1FederationConfig is the admin API wire format for federation settings.
@@ -1606,6 +1621,20 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.OIDC = *v1.OIDC
 	}
 
+	// OIDC Login (external OIDC provider for web login)
+	if v1.OIDCLogin != nil {
+		if v1.OIDCLogin.Enabled != nil {
+			gc.OIDCLogin.Enabled = *v1.OIDCLogin.Enabled
+		}
+		gc.OIDCLogin.DisplayName = v1.OIDCLogin.DisplayName
+		gc.OIDCLogin.IssuerURL = v1.OIDCLogin.IssuerURL
+		gc.OIDCLogin.ClientID = v1.OIDCLogin.ClientID
+		gc.OIDCLogin.ClientSecret = v1.OIDCLogin.ClientSecret
+		if len(v1.OIDCLogin.Scopes) > 0 {
+			gc.OIDCLogin.Scopes = v1.OIDCLogin.Scopes
+		}
+	}
+
 	// Federation
 	if v1.Federation != nil {
 		if v1.Federation.Enabled != nil {
@@ -1789,6 +1818,18 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1.Scheduler = &V1SchedulerConfig{
 			IntervalSeconds: gc.Scheduler.IntervalSeconds,
 			MaxConcurrency:  gc.Scheduler.MaxConcurrency,
+		}
+	}
+
+	// OIDC Login config (external OIDC provider for web login)
+	if gc.OIDCLogin.Enabled || gc.OIDCLogin.IssuerURL != "" {
+		v1.OIDCLogin = &V1OIDCLoginConfig{
+			Enabled:      &gc.OIDCLogin.Enabled,
+			DisplayName:  gc.OIDCLogin.DisplayName,
+			IssuerURL:    gc.OIDCLogin.IssuerURL,
+			ClientID:     gc.OIDCLogin.ClientID,
+			ClientSecret: gc.OIDCLogin.ClientSecret,
+			Scopes:       gc.OIDCLogin.Scopes,
 		}
 	}
 

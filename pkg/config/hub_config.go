@@ -312,6 +312,26 @@ type OAuthConfig struct {
 	Device OAuthClientConfig `json:"device" yaml:"device" koanf:"device"`
 }
 
+// OIDCLoginConfig holds configuration for an external OIDC provider used
+// for web login (the Hub is the Relying Party, not the IdP).
+// This is distinct from OIDCProviderConfig, which configures the Hub as an IdP.
+type OIDCLoginConfig struct {
+	// Enabled controls whether OIDC login is active. Default: false.
+	Enabled bool `json:"enabled" yaml:"enabled" koanf:"enabled"`
+	// DisplayName is the human-readable label shown on the login button
+	// (e.g. "Corporate SSO", "JB Hunt SSO").
+	DisplayName string `json:"displayName" yaml:"displayName" koanf:"displayName"`
+	// IssuerURL is the OIDC issuer. The Hub will fetch
+	// {IssuerURL}/.well-known/openid-configuration to discover endpoints.
+	IssuerURL string `json:"issuerUrl" yaml:"issuerUrl" koanf:"issuerUrl"`
+	// ClientID is the OAuth2 client ID registered with the OIDC provider.
+	ClientID string `json:"clientId" yaml:"clientId" koanf:"clientId"`
+	// ClientSecret is the OAuth2 client secret.
+	ClientSecret string `json:"clientSecret" yaml:"clientSecret" koanf:"clientSecret"`
+	// Scopes overrides the default OIDC scopes. Default: ["openid", "email", "profile"].
+	Scopes []string `json:"scopes,omitempty" yaml:"scopes,omitempty" koanf:"scopes"`
+}
+
 // OIDCProviderConfig holds configuration for the OIDC Identity Provider feature.
 // When enabled, the Hub acts as a minimal OIDC IdP, issuing RS256-signed identity
 // tokens that agents can use to authenticate to external systems (Vault, GCP WIF, etc.).
@@ -348,6 +368,9 @@ type GlobalConfig struct {
 
 	// OAuth provider settings
 	OAuth OAuthConfig `json:"oauth" yaml:"oauth" koanf:"oauth"`
+
+	// OIDCLogin configures an external OIDC provider for web login.
+	OIDCLogin OIDCLoginConfig `json:"oidcLogin,omitempty" yaml:"oidcLogin,omitempty" koanf:"oidcLogin"`
 
 	// Storage settings
 	Storage StorageConfig `json:"storage" yaml:"storage" koanf:"storage"`
@@ -670,6 +693,12 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		"oauth.device.google.clientSecret": "",
 		"oauth.device.github.clientId":     "",
 		"oauth.device.github.clientSecret": "",
+		// OIDC Login defaults (external OIDC provider for web login)
+		"oidcLogin.enabled":      false,
+		"oidcLogin.displayName":  "",
+		"oidcLogin.issuerUrl":    "",
+		"oidcLogin.clientId":     "",
+		"oidcLogin.clientSecret": "",
 		// Storage defaults
 		"storage.provider":  defaults.Storage.Provider,
 		"storage.bucket":    defaults.Storage.Bucket,

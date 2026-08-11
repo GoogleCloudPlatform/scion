@@ -4333,6 +4333,117 @@ func TestConvertV1FederationConfig_EnabledNilDereference(t *testing.T) {
 	assert.Equal(t, "https://hub-a.example.com", gc.Federation.TrustedIssuers[0].IssuerURL)
 }
 
+// --- OIDC Login Config Tests ---
+
+func TestConvertV1ServerToGlobalConfig_OIDCLogin(t *testing.T) {
+	enabled := true
+	v1 := &V1ServerConfig{
+		OIDCLogin: &V1OIDCLoginConfig{
+			Enabled:      &enabled,
+			DisplayName:  "Corporate SSO",
+			IssuerURL:    "https://sso.example.com/auth/realms/main",
+			ClientID:     "scion-client",
+			ClientSecret: "secret-value",
+			Scopes:       []string{"openid", "email", "custom-scope"},
+		},
+	}
+
+	gc := ConvertV1ServerToGlobalConfig(v1)
+
+	assert.True(t, gc.OIDCLogin.Enabled)
+	assert.Equal(t, "Corporate SSO", gc.OIDCLogin.DisplayName)
+	assert.Equal(t, "https://sso.example.com/auth/realms/main", gc.OIDCLogin.IssuerURL)
+	assert.Equal(t, "scion-client", gc.OIDCLogin.ClientID)
+	assert.Equal(t, "secret-value", gc.OIDCLogin.ClientSecret)
+	assert.Equal(t, []string{"openid", "email", "custom-scope"}, gc.OIDCLogin.Scopes)
+}
+
+func TestConvertV1ServerToGlobalConfig_OIDCLoginNil(t *testing.T) {
+	v1 := &V1ServerConfig{}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+
+	assert.False(t, gc.OIDCLogin.Enabled)
+	assert.Empty(t, gc.OIDCLogin.DisplayName)
+	assert.Empty(t, gc.OIDCLogin.IssuerURL)
+	assert.Empty(t, gc.OIDCLogin.ClientID)
+	assert.Empty(t, gc.OIDCLogin.ClientSecret)
+	assert.Nil(t, gc.OIDCLogin.Scopes)
+}
+
+func TestConvertV1ServerToGlobalConfig_OIDCLoginDefaultScopes(t *testing.T) {
+	enabled := true
+	v1 := &V1ServerConfig{
+		OIDCLogin: &V1OIDCLoginConfig{
+			Enabled:   &enabled,
+			IssuerURL: "https://sso.example.com",
+			ClientID:  "client-id",
+			// Scopes not set — should remain nil (defaults applied at usage time)
+		},
+	}
+
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.True(t, gc.OIDCLogin.Enabled)
+	assert.Nil(t, gc.OIDCLogin.Scopes)
+}
+
+func TestConvertGlobalToV1ServerConfig_OIDCLogin(t *testing.T) {
+	gc := &GlobalConfig{
+		OIDCLogin: OIDCLoginConfig{
+			Enabled:      true,
+			DisplayName:  "JB Hunt SSO",
+			IssuerURL:    "https://sso.example.com/auth/realms/security360",
+			ClientID:     "scion-test",
+			ClientSecret: "test-secret",
+			Scopes:       []string{"openid", "email"},
+		},
+	}
+
+	v1 := ConvertGlobalToV1ServerConfig(gc)
+
+	require.NotNil(t, v1.OIDCLogin)
+	assert.Equal(t, boolPtr(true), v1.OIDCLogin.Enabled)
+	assert.Equal(t, "JB Hunt SSO", v1.OIDCLogin.DisplayName)
+	assert.Equal(t, "https://sso.example.com/auth/realms/security360", v1.OIDCLogin.IssuerURL)
+	assert.Equal(t, "scion-test", v1.OIDCLogin.ClientID)
+	assert.Equal(t, "test-secret", v1.OIDCLogin.ClientSecret)
+	assert.Equal(t, []string{"openid", "email"}, v1.OIDCLogin.Scopes)
+}
+
+func TestConvertGlobalToV1ServerConfig_OIDCLoginDisabledOmitted(t *testing.T) {
+	gc := &GlobalConfig{
+		OIDCLogin: OIDCLoginConfig{
+			Enabled: false,
+			// IssuerURL is empty too, so it should be omitted
+		},
+	}
+
+	v1 := ConvertGlobalToV1ServerConfig(gc)
+	assert.Nil(t, v1.OIDCLogin)
+}
+
+func TestConvertV1OIDCLoginConfig_RoundTrip(t *testing.T) {
+	original := &GlobalConfig{
+		OIDCLogin: OIDCLoginConfig{
+			Enabled:      true,
+			DisplayName:  "Test SSO",
+			IssuerURL:    "https://idp.example.com",
+			ClientID:     "client-123",
+			ClientSecret: "secret-456",
+			Scopes:       []string{"openid", "email", "profile"},
+		},
+	}
+
+	v1 := ConvertGlobalToV1ServerConfig(original)
+	roundTripped := ConvertV1ServerToGlobalConfig(v1)
+
+	assert.Equal(t, original.OIDCLogin.Enabled, roundTripped.OIDCLogin.Enabled)
+	assert.Equal(t, original.OIDCLogin.DisplayName, roundTripped.OIDCLogin.DisplayName)
+	assert.Equal(t, original.OIDCLogin.IssuerURL, roundTripped.OIDCLogin.IssuerURL)
+	assert.Equal(t, original.OIDCLogin.ClientID, roundTripped.OIDCLogin.ClientID)
+	assert.Equal(t, original.OIDCLogin.ClientSecret, roundTripped.OIDCLogin.ClientSecret)
+	assert.Equal(t, original.OIDCLogin.Scopes, roundTripped.OIDCLogin.Scopes)
+}
+
 // --- Helper ---
 
 func boolPtr(b bool) *bool {
