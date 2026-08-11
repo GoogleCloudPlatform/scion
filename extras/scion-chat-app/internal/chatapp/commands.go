@@ -17,8 +17,11 @@ package chatapp
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +62,7 @@ type CommandRouter struct {
 	store       *state.Store
 	idMapper    *identity.Mapper
 	messenger   Messenger
+	downloader  AttachmentDownloader
 	broker      *BrokerServer
 	log         *slog.Logger
 
@@ -105,6 +109,16 @@ func (r *CommandRouter) hubHostname() string {
 // circular dependency between the command router and chat adapter.
 func (r *CommandRouter) SetMessenger(m Messenger) {
 	r.messenger = m
+	// If the messenger also implements AttachmentDownloader, wire it up.
+	if d, ok := m.(AttachmentDownloader); ok {
+		r.downloader = d
+	}
+}
+
+// SetDownloader sets the attachment downloader (used for downloading files
+// from chat platform events).
+func (r *CommandRouter) SetDownloader(d AttachmentDownloader) {
+	r.downloader = d
 }
 
 // HandleEvent processes a ChatEvent and routes it to the appropriate handler.
@@ -1259,6 +1273,33 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 		msg.ThreadID = event.ThreadID
 	}
 
+	// Download and attach any files uploaded with the message.
+	if len(event.Attachments) > 0 && r.downloader != nil {
+		for _, att := range event.Attachments {
+			agentPath, dlErr := r.downloadInboundAttachment(
+				ctx, att, event.SpaceID, link.ProjectSlug, link.ProjectID,
+			)
+			if dlErr != nil {
+				r.log.Error("failed to download attachment",
+					"filename", att.Name, "error", dlErr)
+				if strings.Contains(dlErr.Error(), "too large") {
+					errCard := SizeLimitErrorCard(att.Name, 0)
+					if _, sendErr := r.messenger.SendCard(ctx, event.SpaceID, errCard); sendErr != nil {
+						r.log.Error("failed to send size limit card", "error", sendErr)
+					}
+				}
+				continue
+			}
+			msg.Attachments = append(msg.Attachments, agentPath)
+			if messageText != "" {
+				messageText += "\n"
+			}
+			messageText += fmt.Sprintf("[Attachment: %s (%s)]", att.Name, att.ContentType)
+		}
+		// Update the message body with attachment placeholders.
+		msg.Msg = messageText
+	}
+
 	if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentSlug, msg, false, false, false); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to send message to `%s`: %v", agentSlug, err)), nil
 	}
@@ -1968,6 +2009,76 @@ func (r *CommandRouter) handleSettingsAction(ctx context.Context, event *ChatEve
 		return err
 	}
 	return nil
+}
+
+// --- Attachment handling ---
+
+// downloadInboundAttachment downloads a user-uploaded file from Google Chat and
+// saves it to the shared volume. Returns the agent-visible path.
+func (r *CommandRouter) downloadInboundAttachment(ctx context.Context, att EventAttachment, spaceID, projectSlug, projectID string) (string, error) {
+	if r.downloader == nil {
+		return "", fmt.Errorf("no attachment downloader configured")
+	}
+
+	// Sanitize the conversation ID (space name) for use as a directory.
+	safeConvID := sanitizePathComponent(spaceID)
+	if safeConvID == "" {
+		safeConvID = "unknown"
+	}
+
+	// Resolve the host-side directory.
+	hostDir, err := resolveGChatAttachmentDir(projectSlug, projectID, safeConvID)
+	if err != nil {
+		return "", fmt.Errorf("resolving attachment directory: %w", err)
+	}
+	if mkErr := os.MkdirAll(hostDir, 0o755); mkErr != nil {
+		return "", fmt.Errorf("creating attachment directory: %w", mkErr)
+	}
+
+	// Download the file via the authenticated downloader.
+	body, err := r.downloader.DownloadAttachment(ctx, att.DownloadURI)
+	if err != nil {
+		return "", fmt.Errorf("downloading %q: %w", att.Name, err)
+	}
+	defer body.Close()
+
+	// Build a timestamped filename.
+	safeName := sanitizePathComponent(att.Name)
+	if safeName == "" {
+		safeName = "attachment"
+	}
+	destName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), safeName)
+	destPath := filepath.Join(hostDir, destName)
+
+	f, fErr := os.Create(destPath)
+	if fErr != nil {
+		return "", fmt.Errorf("creating file: %w", fErr)
+	}
+	defer f.Close()
+
+	written, copyErr := io.Copy(f, io.LimitReader(body, MaxAttachmentSize+1))
+	if copyErr != nil {
+		f.Close()
+		os.Remove(destPath)
+		return "", fmt.Errorf("writing attachment: %w", copyErr)
+	}
+	if written > MaxAttachmentSize {
+		f.Close()
+		os.Remove(destPath)
+		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Name, written, MaxAttachmentSize)
+	}
+
+	agentPath := filepath.ToSlash(filepath.Join(
+		"/scion-volumes/scratchpad/.attachments", gchatAttachmentDir, safeConvID, destName,
+	))
+
+	r.log.Info("downloaded Google Chat attachment",
+		"filename", att.Name,
+		"content_type", att.ContentType,
+		"agent_path", agentPath,
+	)
+
+	return agentPath, nil
 }
 
 // --- Helper methods ---

@@ -14,7 +14,10 @@
 
 package chatapp
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Messenger abstracts chat platform operations.
 type Messenger interface {
@@ -25,16 +28,26 @@ type Messenger interface {
 	UpdateDialog(ctx context.Context, triggerID string, dialog Dialog) error
 	GetUser(ctx context.Context, userID string) (*ChatUser, error)
 	SetAgentIdentity(ctx context.Context, agent AgentIdentity) error
+	UploadMedia(ctx context.Context, spaceID, filename string, content io.Reader) (string, error)
 }
 
 // SendMessageRequest contains parameters for sending a message to a chat space.
 type SendMessageRequest struct {
-	SpaceID   string
-	ThreadID  string
-	ThreadKey string // Platform-specific thread key for creating new threads.
-	Text      string
-	Card      *Card
-	AgentID   string
+	SpaceID     string
+	ThreadID    string
+	ThreadKey   string // Platform-specific thread key for creating new threads.
+	Text        string
+	Card        *Card
+	AgentID     string
+	Attachments []Attachment
+}
+
+// Attachment describes a file to send or received from a chat platform.
+type Attachment struct {
+	Filename string // display name of the file
+	Path     string // local file path (for outbound)
+	URL      string // download URL (for inbound)
+	Size     int64
 }
 
 // AgentIdentity represents the visual identity of an agent in chat.
@@ -50,4 +63,9 @@ type ChatUser struct {
 	PlatformID  string
 	DisplayName string
 	Email       string
+}
+
+// AttachmentDownloader can download files from chat platform attachment URIs.
+type AttachmentDownloader interface {
+	DownloadAttachment(ctx context.Context, downloadURI string) (io.ReadCloser, error)
 }

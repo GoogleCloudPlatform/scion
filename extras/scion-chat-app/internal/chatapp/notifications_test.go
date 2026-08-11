@@ -16,6 +16,7 @@ package chatapp
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -90,6 +91,9 @@ func (f *fakeMessenger) OpenDialog(context.Context, string, Dialog) error       
 func (f *fakeMessenger) UpdateDialog(context.Context, string, Dialog) error              { return nil }
 func (f *fakeMessenger) GetUser(context.Context, string) (*ChatUser, error)              { return nil, nil }
 func (f *fakeMessenger) SetAgentIdentity(context.Context, AgentIdentity) error           { return nil }
+func (f *fakeMessenger) UploadMedia(_ context.Context, _, _ string, _ io.Reader) (string, error) {
+	return "uploaded-ref", nil
+}
 
 // newTestStore creates an ephemeral SQLite store in a temp directory.
 func newTestStore(t *testing.T) *state.Store {

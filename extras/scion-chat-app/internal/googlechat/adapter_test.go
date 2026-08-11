@@ -15,8 +15,15 @@
 package googlechat
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/chatapp"
@@ -340,6 +347,272 @@ func TestNormalizeEvent_NilChat(t *testing.T) {
 	event := adapter.normalizeEvent(&rawEvent{})
 	if event != nil {
 		t.Errorf("expected nil event for empty rawEvent, got %+v", event)
+	}
+}
+
+// --- extractAttachments tests ---
+
+func TestExtractAttachments(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *rawMessage
+		want int // number of attachments expected
+	}{
+		{
+			name: "nil message returns nil",
+			msg:  nil,
+			want: 0,
+		},
+		{
+			name: "message with no attachments",
+			msg:  &rawMessage{Text: "hello"},
+			want: 0,
+		},
+		{
+			name: "single attachment",
+			msg: &rawMessage{
+				Attachment: []rawAttachment{
+					{
+						Name:        "attachments/abc",
+						ContentName: "report.pdf",
+						ContentType: "application/pdf",
+						DownloadURI: "https://example.com/download/abc",
+					},
+				},
+			},
+			want: 1,
+		},
+		{
+			name: "attachment without download URI is skipped",
+			msg: &rawMessage{
+				Attachment: []rawAttachment{
+					{
+						Name:        "attachments/abc",
+						ContentName: "report.pdf",
+						ContentType: "application/pdf",
+						DownloadURI: "", // empty
+					},
+				},
+			},
+			want: 0,
+		},
+		{
+			name: "multiple attachments mixed",
+			msg: &rawMessage{
+				Attachment: []rawAttachment{
+					{Name: "a/1", ContentName: "file1.txt", DownloadURI: "https://example.com/1"},
+					{Name: "a/2", ContentName: "", DownloadURI: "https://example.com/2"}, // empty content name, uses Name
+					{Name: "a/3", ContentName: "file3.txt", DownloadURI: ""},             // skipped: no URI
+					{Name: "a/4", ContentName: "file4.txt", DownloadURI: "https://example.com/4"},
+				},
+			},
+			want: 3, // a/1, a/2, a/4
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractAttachments(tt.msg)
+			if len(got) != tt.want {
+				t.Errorf("extractAttachments returned %d attachments, want %d", len(got), tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractAttachments_FallbackName(t *testing.T) {
+	msg := &rawMessage{
+		Attachment: []rawAttachment{
+			{
+				Name:        "attachments/some-id/report.pdf",
+				ContentName: "", // empty content name
+				ContentType: "application/pdf",
+				DownloadURI: "https://example.com/download",
+			},
+		},
+	}
+	got := extractAttachments(msg)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 attachment, got %d", len(got))
+	}
+	// Should fall back to filepath.Base(Name) = "report.pdf"
+	if got[0].Name != "report.pdf" {
+		t.Errorf("Name = %q, want %q", got[0].Name, "report.pdf")
+	}
+}
+
+func TestExtractAttachments_PreferContentName(t *testing.T) {
+	msg := &rawMessage{
+		Attachment: []rawAttachment{
+			{
+				Name:        "attachments/id",
+				ContentName: "user-named.docx",
+				ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				DownloadURI: "https://example.com/download",
+			},
+		},
+	}
+	got := extractAttachments(msg)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 attachment, got %d", len(got))
+	}
+	if got[0].Name != "user-named.docx" {
+		t.Errorf("Name = %q, want %q", got[0].Name, "user-named.docx")
+	}
+}
+
+// --- extractAttachments via normalizeEvent integration ---
+
+func TestNormalizeEvent_MessageWithAttachments(t *testing.T) {
+	adapter := NewAdapter(Config{}, nil, nil, slog.Default())
+
+	event := adapter.normalizeEvent(&rawEvent{
+		Chat: &rawChatPayload{
+			User: &rawUser{Name: "users/1", Email: "u@e.com"},
+			MessagePayload: &rawMessagePayload{
+				Space: &rawSpace{Name: "spaces/s"},
+				Message: &rawMessage{
+					Text: "here are the files",
+					Attachment: []rawAttachment{
+						{
+							ContentName: "data.csv",
+							ContentType: "text/csv",
+							DownloadURI: "https://example.com/dl/1",
+						},
+						{
+							ContentName: "image.png",
+							ContentType: "image/png",
+							DownloadURI: "https://example.com/dl/2",
+						},
+					},
+				},
+			},
+		},
+	})
+	if event == nil {
+		t.Fatal("normalizeEvent returned nil")
+	}
+	if event.Type != chatapp.EventMessage {
+		t.Errorf("Type = %q, want %q", event.Type, chatapp.EventMessage)
+	}
+	if len(event.Attachments) != 2 {
+		t.Errorf("got %d attachments, want 2", len(event.Attachments))
+	}
+	if event.Attachments[0].Name != "data.csv" {
+		t.Errorf("Attachments[0].Name = %q, want %q", event.Attachments[0].Name, "data.csv")
+	}
+}
+
+// --- UploadMedia tests ---
+
+func TestUploadMedia_MultipartRelatedFormat(t *testing.T) {
+	// Set up a test server that captures the request to verify multipart format.
+	var capturedContentType string
+	var capturedBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedContentType = r.Header.Get("Content-Type")
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"attachmentDataRef":{"resourceName":"spaces/abc/attachments/123"}}`))
+	}))
+	defer server.Close()
+
+	adapter := NewAdapter(Config{}, nil, server.Client(), slog.Default())
+	// Override the upload URL base for testing.
+	content := strings.NewReader("file content here")
+
+	// We need to override the URL. Since UploadMedia constructs the URL internally,
+	// we'll test via the captured request. We need to make the adapter point to our
+	// test server. Let's test directly by calling with a space that routes to our server.
+	// Patch the upload URL by using the test server URL.
+	result, err := adapter.uploadMediaToURL(context.Background(), server.URL+"/upload", "test.txt", content)
+	if err != nil {
+		t.Fatalf("UploadMedia failed: %v", err)
+	}
+	if result != "spaces/abc/attachments/123" {
+		t.Errorf("resource name = %q, want %q", result, "spaces/abc/attachments/123")
+	}
+
+	// Verify Content-Type is multipart/related, not multipart/form-data.
+	if !strings.HasPrefix(capturedContentType, "multipart/related") {
+		t.Errorf("Content-Type = %q, want multipart/related prefix", capturedContentType)
+	}
+
+	// Parse the multipart body and verify both parts use CreatePart style.
+	_, params, err := mime.ParseMediaType(capturedContentType)
+	if err != nil {
+		t.Fatalf("parsing Content-Type: %v", err)
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		t.Fatal("no boundary in Content-Type")
+	}
+
+	reader := multipart.NewReader(strings.NewReader(string(capturedBody)), boundary)
+
+	// Part 1: JSON metadata.
+	part1, err := reader.NextPart()
+	if err != nil {
+		t.Fatalf("reading part 1: %v", err)
+	}
+	if ct := part1.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("part 1 Content-Type = %q, want %q", ct, "application/json")
+	}
+	// Part 1 should NOT have Content-Disposition: form-data.
+	if cd := part1.Header.Get("Content-Disposition"); strings.Contains(cd, "form-data") {
+		t.Errorf("part 1 should not have form-data disposition, got: %q", cd)
+	}
+	meta, _ := io.ReadAll(part1)
+	if !strings.Contains(string(meta), "test.txt") {
+		t.Errorf("metadata should contain filename, got: %s", string(meta))
+	}
+
+	// Part 2: file content.
+	part2, err := reader.NextPart()
+	if err != nil {
+		t.Fatalf("reading part 2: %v", err)
+	}
+	if ct := part2.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("part 2 Content-Type = %q, want %q", ct, "application/octet-stream")
+	}
+	// Part 2 should NOT have Content-Disposition: form-data.
+	if cd := part2.Header.Get("Content-Disposition"); strings.Contains(cd, "form-data") {
+		t.Errorf("part 2 should not have form-data disposition, got: %q", cd)
+	}
+	fileContent, _ := io.ReadAll(part2)
+	if string(fileContent) != "file content here" {
+		t.Errorf("file content = %q, want %q", string(fileContent), "file content here")
+	}
+
+	// Should be no more parts.
+	_, err = reader.NextPart()
+	if err != io.EOF {
+		t.Errorf("expected EOF after 2 parts, got: %v", err)
+	}
+}
+
+func TestUploadMedia_HTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":"permission denied"}`))
+	}))
+	defer server.Close()
+
+	adapter := NewAdapter(Config{}, nil, server.Client(), slog.Default())
+	content := strings.NewReader("data")
+
+	_, err := adapter.uploadMediaToURL(context.Background(), server.URL+"/upload", "test.txt", content)
+	if err == nil {
+		t.Fatal("expected error for HTTP 403")
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("error should mention status code 403, got: %v", err)
 	}
 }
 
