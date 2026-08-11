@@ -29,11 +29,12 @@ type Messenger interface {
 
 // SendMessageRequest contains parameters for sending a message to a chat space.
 type SendMessageRequest struct {
-	SpaceID  string
-	ThreadID string
-	Text     string
-	Card     *Card
-	AgentID  string
+	SpaceID   string
+	ThreadID  string
+	ThreadKey string // Platform-specific thread key for creating new threads.
+	Text      string
+	Card      *Card
+	AgentID   string
 }
 
 // AgentIdentity represents the visual identity of an agent in chat.
