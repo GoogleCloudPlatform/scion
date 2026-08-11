@@ -286,6 +286,12 @@ func (r *Reconciler) registerPort(ctx context.Context, port int) error {
 	r.autoExposed[port] = true
 	log.Info("auto-expose: exposed port %d", port)
 
+	// Guard against RegisterPort returning (nil, nil).
+	if exposed == nil {
+		log.Info("auto-expose: registered port %d but received no exposed-port metadata; skipping notification", port)
+		return nil
+	}
+
 	// Notify the agent that a port was auto-exposed.
 	if r.msgClient != nil {
 		notifyMsg := fmt.Sprintf("Port %d has been auto-exposed and is available at: %s — if you are collaborating with a user, consider sharing this URL so they can access what is running on this port.", port, exposed.URL)
