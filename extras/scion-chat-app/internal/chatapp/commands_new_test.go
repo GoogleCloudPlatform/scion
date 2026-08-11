@@ -20,10 +20,10 @@ import (
 type stubAgentService struct {
 	hubclient.AgentService // embed for compile-time interface satisfaction
 
-	getFunc                     func(ctx context.Context, id string) (*hubclient.Agent, error)
-	createFunc                  func(ctx context.Context, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error)
-	startFunc                   func(ctx context.Context, id string) error
-	sendStructuredMessageFunc   func(ctx context.Context, id string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error)
+	getFunc                   func(ctx context.Context, id string) (*hubclient.Agent, error)
+	createFunc                func(ctx context.Context, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error)
+	startFunc                 func(ctx context.Context, id string) error
+	sendStructuredMessageFunc func(ctx context.Context, id string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error)
 }
 
 func (s *stubAgentService) Get(ctx context.Context, id string) (*hubclient.Agent, error) {

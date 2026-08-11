@@ -293,9 +293,9 @@ func (r *CommandRouter) handleAction(ctx context.Context, event *ChatEvent) (*Ev
 			return r.handleSubscribeFilter(ctx, event)
 		}
 	case "secret":
-		return r.handleSecretAction(ctx, event, actionVerb, targetID)
+		return nil, r.handleSecretAction(ctx, event, actionVerb, targetID)
 	case "send":
-		return r.handleSendAction(ctx, event, actionVerb, targetID)
+		return nil, r.handleSendAction(ctx, event, actionVerb, targetID)
 	}
 	return nil, nil
 }
@@ -418,6 +418,14 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 		return r.handleSubscribeFilter(ctx, event)
 	}
 
+	// Google Chat normalizes button clicks that contain form inputs (e.g.
+	// secret set, send select) as DialogSubmit events because formInputs is
+	// non-empty. Fall back to the regular action handler so those buttons
+	// are processed correctly.
+	if event.ActionID != "" {
+		return r.handleAction(ctx, event)
+	}
+
 	return nil, nil
 }
 
@@ -465,7 +473,7 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 	case "status":
 		agent, err := agents.Get(ctx, agentID)
 		if err != nil {
-			return r.reply(ctx, event, fmt.Sprintf("Failed to get agent: %v", err))
+			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to get agent: %v", err))
 		}
 		card := Card{
 			Header: CardHeader{
@@ -489,7 +497,7 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 			},
 		}
 		_, err = r.messenger.SendCard(ctx, event.SpaceID, card)
-		return err
+		return nil, err
 	case "start":
 		if err := agents.Start(ctx, agentID); err != nil {
 			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to start agent: %v", err))
@@ -1505,6 +1513,9 @@ func (r *CommandRouter) cmdTerminal(ctx context.Context, event *ChatEvent, args 
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", agentSlug, err)), nil
 	}
+	if agent == nil {
+		return textResponse(event, fmt.Sprintf("Agent `%s` not found.", agentSlug)), nil
+	}
 
 	if strings.ToLower(agent.Phase) != "running" {
 		phase := agent.Phase
@@ -1561,6 +1572,9 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to create agent: %v", err)), nil
 	}
+	if createResp == nil || createResp.Agent == nil {
+		return textResponse(event, "Failed to create agent: received empty response from server"), nil
+	}
 
 	// Start the agent.
 	if err := client.ProjectAgents(link.ProjectID).Start(ctx, createResp.Agent.Slug); err != nil {
@@ -1575,7 +1589,7 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 		threadMsg += fmt.Sprintf("\n\n*Instruction:* %s", instruction)
 	}
 	threadKey := fmt.Sprintf("scion-agent-%s", createResp.Agent.Slug)
-	_, msgErr := r.messenger.SendMessage(ctx, SendMessageRequest{
+	kickoffMsgName, msgErr := r.messenger.SendMessage(ctx, SendMessageRequest{
 		SpaceID:   event.SpaceID,
 		ThreadKey: threadKey,
 		Text:      threadMsg,
@@ -1591,7 +1605,11 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 		if r.broker != nil {
 			msg.Channel = r.broker.ChannelName()
 		}
-		if event.ThreadID != "" {
+		// Use the newly created thread (derived from the kickoff message name)
+		// so the agent replies in the new thread, not the admin command's thread.
+		if msgErr == nil && kickoffMsgName != "" {
+			msg.ThreadID = strings.Replace(kickoffMsgName, "/messages/", "/threads/", 1)
+		} else if event.ThreadID != "" {
 			msg.ThreadID = event.ThreadID
 		}
 		if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, createResp.Agent.Slug, msg, false, false, false); err != nil {
@@ -1714,7 +1732,7 @@ func (r *CommandRouter) cmdSecretList(ctx context.Context, event *ChatEvent, lin
 		return textResponse(event, fmt.Sprintf("Failed to list secrets: %v", err)), nil
 	}
 
-	if len(secrets.Secrets) == 0 {
+	if secrets == nil || len(secrets.Secrets) == 0 {
 		return textResponse(event, fmt.Sprintf("No secrets found in project `%s`.", link.ProjectSlug)), nil
 	}
 
