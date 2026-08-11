@@ -191,7 +191,7 @@ func TestHandleAgentAction_RequiresSpaceLink(t *testing.T) {
 	for _, verb := range []string{"start", "stop", "logs"} {
 		t.Run(verb, func(t *testing.T) {
 			fm.messages = nil
-			err := router.handleAgentAction(context.Background(), event, verb, "agent-123")
+			_, err := router.handleAgentAction(context.Background(), event, verb, "agent-123")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -208,7 +208,7 @@ func TestHandleAgentAction_RequiresSpaceLink(t *testing.T) {
 // TestExecuteDelete_RequiresSpaceLink verifies that the delete confirmation
 // handler requires a space link for grove scoping.
 func TestExecuteDelete_RequiresSpaceLink(t *testing.T) {
-	router, fm := newTestRouter(t)
+	router, _ := newTestRouter(t)
 	event := &ChatEvent{
 		Type:     EventAction,
 		Platform: "googlechat",
@@ -216,15 +216,16 @@ func TestExecuteDelete_RequiresSpaceLink(t *testing.T) {
 		UserID:   "user-1",
 	}
 
-	err := router.executeDelete(context.Background(), event, "agent-123")
+	resp, err := router.executeDelete(context.Background(), event, "agent-123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(fm.messages) == 0 {
-		t.Fatal("expected a reply message")
+	// executeDelete now returns an UpdateMessage response instead of using r.reply.
+	if resp == nil || resp.UpdateMessage == nil {
+		t.Fatal("expected an UpdateMessage response")
 	}
-	if !strings.Contains(fm.messages[0].Text, "not linked") {
-		t.Errorf("expected 'not linked' reply, got: %s", fm.messages[0].Text)
+	if !strings.Contains(resp.UpdateMessage.Text, "not linked") {
+		t.Errorf("expected 'not linked' in UpdateMessage, got: %s", resp.UpdateMessage.Text)
 	}
 }
 
@@ -243,7 +244,7 @@ func TestDialogSubmitRespond_RequiresSpaceLink(t *testing.T) {
 		},
 	}
 
-	err := router.handleDialogSubmit(context.Background(), event)
+	_, err := router.handleDialogSubmit(context.Background(), event)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
