@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ type EventHandler func(ctx context.Context, event *chatapp.ChatEvent) (*chatapp.
 
 // Adapter implements the chatapp.Messenger interface for Google Chat.
 type Adapter struct {
+	config       Config
 	projectID    string
 	externalURL  string
 	commandIDs   map[string]string // command ID → command name
@@ -44,6 +46,9 @@ type Adapter struct {
 	eventHandler EventHandler
 	httpClient   *http.Client // authenticated client for Chat API calls
 	log          *slog.Logger
+
+	pubsubIngress *PubSubIngress
+	pubsubCancel  context.CancelFunc
 
 	mu     sync.RWMutex
 	spaces map[string]bool // tracked spaces
@@ -57,6 +62,8 @@ type Config struct {
 	CommandIDMap        map[string]string // Console command ID → command name
 	ListenAddress       string
 	Credentials         string // Path to service account key
+	IngressMode         string // "http" (default) or "pubsub"
+	PubSubSubscription  string // Pub/Sub subscription resource name
 }
 
 // NewAdapter creates a new Google Chat adapter.
@@ -68,7 +75,11 @@ func NewAdapter(cfg Config, handler EventHandler, httpClient *http.Client, log *
 	if cmdIDs == nil {
 		cmdIDs = make(map[string]string)
 	}
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Adapter{
+		config:       cfg,
 		projectID:    cfg.ProjectID,
 		externalURL:  cfg.ExternalURL,
 		commandIDs:   cmdIDs,
@@ -79,8 +90,25 @@ func NewAdapter(cfg Config, handler EventHandler, httpClient *http.Client, log *
 	}
 }
 
-// Start begins serving the HTTP webhook endpoint for Google Chat events.
+// Start begins serving events. When ingress_mode is "pubsub", events arrive
+// via Cloud Pub/Sub. Otherwise the default HTTP webhook endpoint is used.
 func (a *Adapter) Start(listenAddr string) error {
+	mode := a.config.IngressMode
+	switch mode {
+	case "pubsub":
+		return a.startPubSub(listenAddr)
+	case "http", "":
+		if a.config.PubSubSubscription != "" {
+			a.log.Warn("pubsub_subscription is set but ingress_mode is not \"pubsub\"; subscription will be ignored")
+		}
+		return a.startHTTP(listenAddr)
+	default:
+		return fmt.Errorf("unknown ingress_mode %q: must be \"http\" or \"pubsub\"", mode)
+	}
+}
+
+// startHTTP serves the HTTP webhook endpoint for Google Chat events.
+func (a *Adapter) startHTTP(listenAddr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /chat/events", a.handleEvent)
 	mux.HandleFunc("GET /chat/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -97,12 +125,74 @@ func (a *Adapter) Start(listenAddr string) error {
 	return a.httpServer.ListenAndServe()
 }
 
-// Stop gracefully shuts down the webhook server.
+// startPubSub creates a Pub/Sub client and starts the PubSubIngress.
+// A minimal HTTP health server is started alongside the subscriber so that
+// Kubernetes liveness/readiness probes have an endpoint to hit.
+func (a *Adapter) startPubSub(listenAddr string) error {
+	sub := a.config.PubSubSubscription
+	if sub == "" {
+		return fmt.Errorf("pubsub ingress mode requires pubsub_subscription to be set")
+	}
+	ingress, err := NewPubSubIngress(sub, a, a.config.Credentials, a.log)
+	if err != nil {
+		return fmt.Errorf("creating pubsub ingress: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a.pubsubCancel = cancel
+	a.pubsubIngress = ingress
+
+	// Bind to the port synchronously to catch startup errors.
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("starting health server listener: %w", err)
+	}
+
+	// Start a minimal health endpoint for probes.
+	a.startHealthServer(ln)
+
+	a.log.Info("starting pubsub ingress", "subscription", sub)
+	return ingress.Start(ctx)
+}
+
+// Stop gracefully shuts down the adapter, covering both HTTP and Pub/Sub modes.
 func (a *Adapter) Stop(ctx context.Context) error {
+	if a.pubsubCancel != nil {
+		a.pubsubCancel()
+	}
+	if a.pubsubIngress != nil {
+		if err := a.pubsubIngress.Stop(); err != nil {
+			a.log.Error("stopping pubsub ingress", "error", err)
+		}
+	}
 	if a.httpServer != nil {
 		return a.httpServer.Shutdown(ctx)
 	}
 	return nil
+}
+
+// startHealthServer starts a minimal HTTP server exposing /healthz for
+// liveness/readiness probes. It is used in Pub/Sub mode where no other
+// HTTP server is running. The listener is pre-bound so that port conflicts
+// are caught synchronously during startup.
+func (a *Adapter) startHealthServer(ln net.Listener) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	})
+
+	a.httpServer = &http.Server{
+		Handler: mux,
+	}
+
+	go func() {
+		a.log.Info("health server starting (pubsub mode)", "address", ln.Addr().String())
+		if err := a.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+			a.log.Error("health server error", "error", err)
+		}
+	}()
 }
 
 // handleEvent processes incoming Google Chat Workspace Add-on events.
@@ -503,6 +593,7 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		}
 		if p.Message != nil {
 			event.Args = strings.TrimSpace(p.Message.ArgumentText)
+			event.MessageName = p.Message.Name
 			if p.Message.Thread != nil {
 				event.ThreadID = p.Message.Thread.Name
 			}
@@ -517,6 +608,7 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		if p.Space != nil {
 			event.SpaceID = p.Space.Name
 		}
+		event.MessageName = p.Message.Name
 		if p.Message.Thread != nil {
 			event.ThreadID = p.Message.Thread.Name
 		}
@@ -544,8 +636,11 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		if p.Space != nil {
 			event.SpaceID = p.Space.Name
 		}
-		if p.Message != nil && p.Message.Thread != nil {
-			event.ThreadID = p.Message.Thread.Name
+		if p.Message != nil {
+			event.MessageName = p.Message.Name
+			if p.Message.Thread != nil {
+				event.ThreadID = p.Message.Thread.Name
+			}
 		}
 		event.IsDialogEvent = p.IsDialogEvent
 

@@ -219,15 +219,22 @@ func main() {
 				CommandIDMap:        cfg.Platforms.GoogleChat.CommandIDMap,
 				ListenAddress:       cfg.Platforms.GoogleChat.ListenAddress,
 				Credentials:         cfg.Platforms.GoogleChat.Credentials,
+				IngressMode:         cfg.Platforms.GoogleChat.IngressMode,
+				PubSubSubscription:  cfg.Platforms.GoogleChat.PubSubSubscription,
 			},
 			cmdRouter.HandleEvent,
 			chatClient,
 			gcLog,
 		)
 		messenger = gcAdapter
+		ingressMode := cfg.Platforms.GoogleChat.IngressMode
+		if ingressMode == "" {
+			ingressMode = "http"
+		}
 		log.Info("google chat adapter initialized",
 			"project_id", cfg.Platforms.GoogleChat.ProjectID,
 			"external_url", cfg.Platforms.GoogleChat.ExternalURL,
+			"ingress_mode", ingressMode,
 		)
 	}
 
