@@ -215,6 +215,19 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 		filter.ParticipantID = user.ID()
 	}
 
+	// Optional query params for chat filtering.
+	if channel := q.Get("channel"); channel != "" {
+		filter.Channel = channel
+	}
+	if visParams := q["visibility"]; len(visParams) > 0 {
+		filter.Visibility = visParams
+	}
+	if beforeStr := q.Get("before"); beforeStr != "" {
+		if t, err := time.Parse(time.RFC3339, beforeStr); err == nil {
+			filter.Before = t
+		}
+	}
+
 	result, err := s.store.ListMessages(ctx, filter, opts)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
