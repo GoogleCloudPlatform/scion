@@ -188,6 +188,7 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/profile\/settings$/, tag: 'scion-page-profile-settings', load: () => import('../components/pages/profile-settings.js') },
   { pattern: /^\/profile\/tokens$/, tag: 'scion-page-profile-tokens', load: () => import('../components/pages/profile-tokens.js') },
   { pattern: /^\/profile\/telegram$/, tag: 'scion-page-profile-telegram', load: () => import('../components/pages/profile-telegram.js') },
+  { pattern: /^\/profile\/teams$/, tag: 'scion-page-profile-teams', load: () => import('../components/pages/profile-teams.js') },
   { pattern: /^\/profile\/discord$/, tag: 'scion-page-profile-discord', load: () => import('../components/pages/profile-discord.js') },
   { pattern: /^\/profile\/skills$/, tag: 'scion-page-profile-skills', load: () => import('../components/pages/profile-skills.js') },
   { pattern: /^\/profile$/, tag: 'scion-page-profile-env-vars', load: () => import('../components/pages/profile-env-vars.js') },
@@ -214,7 +215,7 @@ const STANDALONE_ROUTES = new Set(['scion-login-page', 'scion-page-invite', 'sci
 /**
  * Routes that render inside the profile shell instead of the main app shell
  */
-const PROFILE_ROUTES = new Set(['scion-page-profile-env-vars', 'scion-page-profile-secrets', 'scion-page-profile-settings', 'scion-page-profile-tokens', 'scion-page-profile-telegram', 'scion-page-profile-discord', 'scion-page-profile-skills']);
+const PROFILE_ROUTES = new Set(['scion-page-profile-env-vars', 'scion-page-profile-secrets', 'scion-page-profile-settings', 'scion-page-profile-tokens', 'scion-page-profile-telegram', 'scion-page-profile-teams', 'scion-page-profile-discord', 'scion-page-profile-skills']);
 
 /**
  * Routes that require admin role. Non-admin users are redirected to dashboard.

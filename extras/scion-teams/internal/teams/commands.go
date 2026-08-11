@@ -521,7 +521,11 @@ func (h *CommandHandler) handleRegister(ctx context.Context, activity *Activity)
 		return h.sendReply(ctx, activity, "Failed to start identity linking. Please try again later.")
 	}
 
-	// Send an Adaptive Card showing the code and instructions.
+	// Build a direct registration link so the user can click through.
+	hubURL := strings.TrimRight(h.broker.config.HubURL, "/")
+	linkURL := fmt.Sprintf("%s/profile/teams?code=%s", hubURL, code)
+
+	// Send an Adaptive Card showing the code, instructions, and a clickable link.
 	card := NewAdaptiveCard()
 	card.Body = append(card.Body,
 		TextBlock{
@@ -532,7 +536,7 @@ func (h *CommandHandler) handleRegister(ctx context.Context, activity *Activity)
 		},
 		TextBlock{
 			Type:     "TextBlock",
-			Text:     "To complete the link, enter the following code in the Scion web UI:",
+			Text:     "Click the button below to link your account, or enter the code manually in the Scion web UI.",
 			Wrap:     true,
 			IsSubtle: true,
 		},
@@ -545,11 +549,16 @@ func (h *CommandHandler) handleRegister(ctx context.Context, activity *Activity)
 		},
 		TextBlock{
 			Type:     "TextBlock",
-			Text:     "This code expires in 15 minutes. Go to your Scion dashboard and navigate to **Settings → Identity Linking** to enter the code.",
+			Text:     "This code expires in 15 minutes.",
 			Wrap:     true,
 			IsSubtle: true,
 		},
 	)
+	card.Actions = append(card.Actions, ActionOpenURL{
+		Type:  "Action.OpenUrl",
+		Title: "Link Account",
+		URL:   linkURL,
+	})
 
 	return h.sendCardReply(ctx, activity, card)
 }
