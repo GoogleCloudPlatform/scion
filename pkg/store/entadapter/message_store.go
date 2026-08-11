@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -62,6 +63,18 @@ func (s *MessageStore) WithPublisher(p MessagePublisher) *MessageStore {
 }
 
 func entMessageToStore(e *ent.Message) *store.Message {
+	// Read-time visibility backfill (design §4.6):
+	// Old rows have empty visibility. Normalise so every consumer sees a
+	// consistent value without requiring a data migration.
+	vis := e.Visibility
+	if vis == "" {
+		if e.Type == "assistant-reply" {
+			vis = "verbose"
+		} else {
+			vis = "normal"
+		}
+	}
+
 	return &store.Message{
 		ID:                    e.ID.String(),
 		ProjectID:             e.ProjectID.String(),
@@ -76,6 +89,9 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		Read:                  e.Read,
 		AgentID:               e.AgentID,
 		GroupID:               e.GroupID,
+		Channel:               e.Channel,
+		ThreadID:              e.ThreadID,
+		Visibility:            vis,
 		CreatedAt:             e.Created,
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
@@ -111,6 +127,16 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		SetRead(msg.Read).
 		SetAgentID(msg.AgentID).
 		SetGroupID(msg.GroupID)
+
+	if msg.Channel != "" {
+		create.SetChannel(msg.Channel)
+	}
+	if msg.ThreadID != "" {
+		create.SetThreadID(msg.ThreadID)
+	}
+	if msg.Visibility != "" {
+		create.SetVisibility(msg.Visibility)
+	}
 
 	if msg.Type == "" {
 		create.SetType("instruction")
@@ -186,6 +212,37 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	}
 	if filter.Type != "" {
 		query.Where(message.TypeEQ(filter.Type))
+	}
+	if filter.Channel != "" {
+		query.Where(message.ChannelEQ(filter.Channel))
+	}
+	if len(filter.Visibility) > 0 {
+		query.Where(message.VisibilityIn(filter.Visibility...))
+	}
+	if !filter.Before.IsZero() {
+		query.Where(message.CreatedLT(filter.Before))
+	}
+
+	// Apply cursor-based keyset pagination (F3 fix).
+	// The cursor is a message ID. We look up its (created, id) pair and
+	// apply WHERE (created < cursor_created) OR (created = cursor_created AND id < cursor_id)
+	// to produce disjoint pages in descending created order.
+	if opts.Cursor != "" {
+		cursorID, err := parseUUID(opts.Cursor)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		cursorMsg, err := s.client.Message.Get(ctx, cursorID)
+		if err != nil {
+			return nil, fmt.Errorf("cursor message not found: %w", mapError(err))
+		}
+		query.Where(message.Or(
+			message.CreatedLT(cursorMsg.Created),
+			message.And(
+				message.CreatedEQ(cursorMsg.Created),
+				message.IDLT(cursorMsg.ID),
+			),
+		))
 	}
 
 	totalCount, err := query.Clone().Count(ctx)
