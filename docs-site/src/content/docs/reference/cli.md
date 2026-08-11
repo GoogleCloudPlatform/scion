@@ -18,6 +18,14 @@ These flags are available on all commands:
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output.
 
+:::tip[Decluttered CLI Help]
+To keep subcommand help output clean and readable, global flags are hidden from default subcommand help outputs. You can view the full list of global flags anytime by running:
+
+```bash
+scion help global-flags
+```
+:::
+
 ## Agent Lifecycle
 
 ### `scion start` (or `run`)

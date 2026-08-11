@@ -32,7 +32,7 @@ Scion uses a standardized set of actions:
 Scion enforces strict policy-based authorization for all agent operations:
 - **Agent Creation**: Requires active membership in the target project.
 - **Agent Interaction**: Interacting with an agent (e.g., via PTY/terminal or structured messaging) is restricted to the agent's owner (the creator) or system administrators.
-- **Agent Deletion**: Only the agent's owner or a system administrator can delete an agent.
+- **Agent Deletion**: Only the agent's owner, a system administrator, or authorized agent callers can delete an agent. For an agent caller to perform a deletion, it must have `ScopeAgentLifecycle` (associated with the `full` role) and must target an agent within its own project (which closes a cross-project agent deletion vulnerability).
 
 Scion uses a **Hierarchical Override Model** for policies. Policies can be attached at three levels:
 
@@ -119,6 +119,10 @@ To prevent security bypasses via sub-agent creation, Scion enforces strict no-es
 - When a parent agent spawns a child (sub-agent), the parent agent acts as the requester.
 - A parent agent **cannot** grant a child agent a higher role than its own.
 - Any attempt by an agent to spawn a child with elevated permissions will result in a loud, immediate `403 Forbidden` API rejection.
+
+#### Token Refresh & Scope Re-derivation
+To ensure security policies stay up-to-date and to support legacy agents created prior to the tiered role rollout, the Hub re-derives permissions from the agent's stored role during token refresh (`RefreshAgentToken`), rather than copying old JWT scopes verbatim.
+- **Legacy Agent Compatibility**: Legacy agents that do not have a stored role default to the `full` role. This prevents production regressions where standing agents lose modern required scopes (such as `ScopeProjectRead`, `ScopeAgentLifecycle`, or secret access) after a token refresh.
 
 #### Deprecation of Raw Template Scopes
 With the introduction of tiered agent roles, the raw template field `hubAccess.scopes` has been **deprecated**. Agent permissions must be configured via the named roles.

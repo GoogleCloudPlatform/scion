@@ -58,8 +58,8 @@ Google Cloud Run enforces a strict single-port limitation for incoming traffic. 
 ### Interaction Modes
 The bridge supports three distinct A2A communication mechanics:
 * **Synchronous Blocking (SendMessage)**: The client POSTs a message and holds the HTTP connection open (up to `timeouts.send_message`, default 120s) until the agent produces its final response.
-* **Server-Sent Events (SSE) Streaming (SendStreamingMessage)**: The client opens an SSE connection (`message/stream`) to receive real-time, token-by-token streaming updates as the agent executes.
-* **Asynchronous Webhooks (Push Notifications)**: Clients register a callback URL (`tasks/pushNotification/set`). The bridge stores this subscription in its state database (SQLite in default mode, PostgreSQL in standalone/HA mode) and POSTs state-change alerts (running, completed, input-required, error) to the webhook as they occur.
+* **Server-Sent Events (SSE) Streaming (SendStreamingMessage)**: The client initiates streaming to receive real-time, token-by-token streaming updates as the agent executes.
+* **Asynchronous Webhooks (Push Notifications)**: Clients register a callback URL (via the `CreateTaskPushNotificationConfig` method). The bridge stores this subscription in its state database (SQLite in default mode, PostgreSQL in standalone/HA mode) and POSTs state-change alerts (running, completed, input-required, error) to the webhook as they occur.
 
 ---
 
@@ -296,7 +296,7 @@ curl -X POST https://a2a.example.com/projects/my-coding-project/agents/code-help
   -d '{
     "jsonrpc": "2.0",
     "id": "desktop-test-1",
-    "method": "message/send",
+    "method": "SendMessage",
     "params": {
       "message": {
         "role": "user",
@@ -360,15 +360,15 @@ Standard A2A JSON-RPC methods supported at the `/jsonrpc` endpoint:
 
 | JSON-RPC Method | Description |
 | :--- | :--- |
-| `message/send` | Send a message to the agent. Supports standard and blocking modes. Returns the agent's completed response. |
-| `message/stream` | Send a message and establish an SSE streaming connection. Real-time token updates are pushed over the stream. |
-| `tasks/get` | Retrieve detailed status and execution state of a specific task by its unique task ID. |
-| `tasks/list` | List all tasks associated with a particular `contextId` (conversation). |
-| `tasks/cancel` | Cancel an in-progress agent execution task. |
-| `tasks/resubscribe` | Re-attach an active SSE streaming connection to an ongoing task (useful on connection drops). |
-| `tasks/pushNotification/set` | Register a webhook callback URL to receive real-time POST alerts on task state changes. |
-| `tasks/pushNotification/get` | Retrieve registered webhooks for a specific task. |
-| `tasks/pushNotification/delete` | Remove a webhook callback subscription. |
+| `SendMessage` | Send a message to the agent. Supports standard and blocking modes. Returns the agent's completed response. |
+| `SendStreamingMessage` | Send a message and establish an SSE streaming connection. Real-time token updates are pushed over the stream. |
+| `GetTask` | Retrieve detailed status and execution state of a specific task by its unique task ID. |
+| `ListTasks` | List all tasks associated with a particular `contextId` (conversation). |
+| `CancelTask` | Cancel an in-progress agent execution task. |
+| `SubscribeToTask` | Re-attach an active SSE streaming connection to an ongoing task (useful on connection drops). |
+| `CreateTaskPushNotificationConfig` | Register a webhook callback URL to receive real-time POST alerts on task state changes. |
+| `GetTaskPushNotificationConfig` | Retrieve registered webhooks for a specific task. |
+| `DeleteTaskPushNotificationConfig` | Remove a webhook callback subscription. |
 
 ---
 
