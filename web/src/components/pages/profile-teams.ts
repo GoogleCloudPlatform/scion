@@ -56,15 +56,13 @@ export class ScionPageProfileTeams extends LitElement {
     }
   }
 
-  private async _autoSubmit(): Promise<void> {
+  private async _verifyCode(code: string): Promise<void> {
     this._status = 'submitting';
-    this._message = 'Linking your Microsoft Teams account…';
-
     try {
       const resp = await apiFetch('/api/v1/teams/link/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: this._code }),
+        body: JSON.stringify({ code }),
       });
 
       if (resp.ok) {
@@ -86,6 +84,11 @@ export class ScionPageProfileTeams extends LitElement {
       this._status = 'error';
       this._message = 'Failed to connect to the server. Please try again.';
     }
+  }
+
+  private async _autoSubmit(): Promise<void> {
+    this._message = 'Linking your Microsoft Teams account…';
+    await this._verifyCode(this._code);
   }
 
   static override styles = css`
@@ -219,42 +222,13 @@ export class ScionPageProfileTeams extends LitElement {
 
   private async _handleSubmit(e: Event): Promise<void> {
     e.preventDefault();
-
     if (this._code.length !== 6) {
       this._status = 'error';
       this._message = 'Please enter the full 6-character code.';
       return;
     }
-
-    this._status = 'submitting';
     this._message = '';
-
-    try {
-      const resp = await apiFetch('/api/v1/teams/link/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: this._code }),
-      });
-
-      if (resp.ok) {
-        await resp.json();
-        this._status = 'success';
-        this._message =
-          'Microsoft Teams account linked successfully! You can close this page and return to Teams.';
-        this._code = '';
-      } else {
-        const errData = (await resp.json().catch(() => null)) as {
-          message?: string;
-        } | null;
-        this._status = 'error';
-        this._message =
-          errData?.message ||
-          'Code not found or expired. Please try again with a new code from the bot.';
-      }
-    } catch {
-      this._status = 'error';
-      this._message = 'Failed to connect to the server. Please try again.';
-    }
+    await this._verifyCode(this._code);
   }
 
   private _renderAutoLink() {
