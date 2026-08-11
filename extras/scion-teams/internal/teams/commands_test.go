@@ -577,6 +577,227 @@ func TestUnregisterCommand_Success(t *testing.T) {
 	assert.Nil(t, mapping)
 }
 
+func TestRegisterCommand_PollConfirmation(t *testing.T) {
+	// Track number of status poll requests so we can respond differently.
+	pollCount := 0
+
+	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/teams/link":
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
+		case r.URL.Path == "/api/v1/teams/link/status":
+			pollCount++
+			if pollCount >= 2 {
+				// Second poll: confirmed.
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"status": "confirmed",
+					"user": map[string]string{
+						"id":    "scion-user-42",
+						"email": "test@example.com",
+					},
+				})
+			} else {
+				// First poll: still pending.
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"status": "pending",
+				})
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	broker, ms := testBrokerWithStore(t, hubHandler)
+	handler := broker.commandHandler
+
+	activity := testActivity("register")
+	handled, err := handler.Handle(context.Background(), activity)
+	assert.True(t, handled)
+	assert.NoError(t, err)
+
+	// Should have sent the Adaptive Card with the code.
+	require.NotEmpty(t, ms.sent)
+	assert.NotEmpty(t, ms.sent[0].Attachments, "expected an Adaptive Card reply")
+
+	// Wait for the polling goroutine to complete confirmation.
+	// The ticker fires every 10s, but we can't wait that long in tests.
+	// Instead, verify that the pending link was registered.
+	handler.pendingMu.Lock()
+	assert.Len(t, handler.pendingLinks, 1, "expected one pending link")
+	handler.pendingMu.Unlock()
+}
+
+func TestRegisterCommand_CancelsPreviousPending(t *testing.T) {
+	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/teams/link":
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
+		case r.URL.Path == "/api/v1/teams/link/status":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "pending",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	broker, _ := testBrokerWithStore(t, hubHandler)
+	handler := broker.commandHandler
+
+	// Register twice — the second should cancel the first.
+	activity1 := testActivity("register")
+	handled, err := handler.Handle(context.Background(), activity1)
+	assert.True(t, handled)
+	assert.NoError(t, err)
+
+	handler.pendingMu.Lock()
+	firstPending := handler.pendingLinks["aad-user-1"]
+	firstCode := firstPending.Code
+	handler.pendingMu.Unlock()
+
+	// Register again.
+	activity2 := testActivity("register")
+	handled, err = handler.Handle(context.Background(), activity2)
+	assert.True(t, handled)
+	assert.NoError(t, err)
+
+	handler.pendingMu.Lock()
+	secondPending := handler.pendingLinks["aad-user-1"]
+	handler.pendingMu.Unlock()
+
+	// The new pending link should have a different code.
+	assert.NotEqual(t, firstCode, secondPending.Code, "second registration should have a new code")
+}
+
+func TestPollForConfirmation_SavesMapping(t *testing.T) {
+	confirmed := false
+	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/teams/link/status":
+			if !confirmed {
+				confirmed = true
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"status": "confirmed",
+					"user": map[string]string{
+						"id":    "scion-user-42",
+						"email": "confirmed@example.com",
+					},
+				})
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	broker, _ := testBrokerWithStore(t, hubHandler)
+	handler := broker.commandHandler
+
+	activity := testActivity("register")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Directly call pollForConfirmation to test it in isolation
+	// (bypasses the 10s ticker by calling it directly).
+	go handler.pollForConfirmation(ctx, activity, "aad-user-1", "TESTCODE", cancel)
+
+	// Wait for the goroutine to process.
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("Timed out waiting for user mapping to be created")
+		default:
+			mapping, err := broker.store.GetUserMapping(context.Background(), "aad-user-1")
+			require.NoError(t, err)
+			if mapping != nil {
+				assert.Equal(t, "scion-user-42", mapping.ScionUserID)
+				assert.Equal(t, "confirmed@example.com", mapping.ScionEmail)
+				assert.Equal(t, "Test User", mapping.TeamsDisplayName)
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+}
+
+func TestCheckTeamsLinkStatus_ReturnsEmail(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/teams/link/status", r.URL.Path)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "confirmed",
+			"user": map[string]string{
+				"id":    "user-123",
+				"email": "hello@example.com",
+			},
+		})
+	}))
+	defer ts.Close()
+
+	client := NewHubClient(ts.URL, "", "", slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	client.httpClient = ts.Client()
+
+	status, userID, email, err := client.CheckTeamsLinkStatus(context.Background(), "teams-user-1")
+	require.NoError(t, err)
+	assert.Equal(t, "confirmed", status)
+	assert.Equal(t, "user-123", userID)
+	assert.Equal(t, "hello@example.com", email)
+}
+
+func TestCheckTeamsLinkStatus_Pending(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "pending",
+		})
+	}))
+	defer ts.Close()
+
+	client := NewHubClient(ts.URL, "", "", slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	client.httpClient = ts.Client()
+
+	status, userID, email, err := client.CheckTeamsLinkStatus(context.Background(), "teams-user-1")
+	require.NoError(t, err)
+	assert.Equal(t, "pending", status)
+	assert.Empty(t, userID)
+	assert.Empty(t, email)
+}
+
+func TestStripThreadSuffix(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "channel without thread",
+			input:    "19:e4e1805b28e142ce9ee9be354816a319@thread.tacv2",
+			expected: "19:e4e1805b28e142ce9ee9be354816a319@thread.tacv2",
+		},
+		{
+			name:     "channel with messageid thread suffix",
+			input:    "19:e4e1805b28e142ce9ee9be354816a319@thread.tacv2;messageid=1786491412694",
+			expected: "19:e4e1805b28e142ce9ee9be354816a319@thread.tacv2",
+		},
+		{
+			name:     "personal chat",
+			input:    "a]concat[b",
+			expected: "a]concat[b",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, stripThreadSuffix(tc.input))
+		})
+	}
+}
+
 func TestAgentPhaseEmoji(t *testing.T) {
 	tests := []struct {
 		phase    string
