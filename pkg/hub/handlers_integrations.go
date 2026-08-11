@@ -1083,6 +1083,12 @@ func createSelfManagedAdminConfig(pluginName, configFilePath string) error {
 		content += "provider_org: \"\"\n"
 		content += "provider_url: \"\"\n"
 		content += "projects_json: \"[]\"\n"
+	case "chat-app":
+		content += "project_id: \"\"\n"
+		content += "credentials: \"\"\n"
+		content += "listen_address: \":8443\"\n"
+		content += "external_url: \"\"\n"
+		content += "service_account_email: \"\"\n"
 	}
 
 	return os.WriteFile(resolved, []byte(content), 0600)
@@ -1103,19 +1109,43 @@ func createBridgeConfigTemplate(name, configFilePath, hubEndpoint string) error 
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
-	content := "# Scion A2A bridge bootstrap configuration\n"
-	content += "# This file is operator-managed. Edit it to configure listen addresses,\n"
-	content += "# TLS, state database, and signing key settings.\n"
-	content += "hub:\n"
-	content += "  endpoint: \"" + hubEndpoint + "\"\n"
-	content += "plugin:\n"
-	content += "  listen_address: \"localhost:9090\"\n"
-	content += "# bridge:\n"
-	content += "#   listen_address: \":8081\"\n"
-	content += "# state:\n"
-	content += "#   database: \"~/.scion/scion-a2a-bridge.db\"\n"
-	content += "# logging:\n"
-	content += "#   level: \"info\"\n"
+	var content string
+	switch name {
+	case "chat-app":
+		content = "# Scion Google Chat app bootstrap configuration\n"
+		content += "# This file is operator-managed. Edit it to configure listen addresses,\n"
+		content += "# GCP credentials, and state database settings.\n"
+		content += "hub:\n"
+		content += "  endpoint: \"" + hubEndpoint + "\"\n"
+		content += "plugin:\n"
+		content += "  listen_address: \"localhost:9090\"\n"
+		content += "platforms:\n"
+		content += "  google_chat:\n"
+		content += "    enabled: true\n"
+		content += "    project_id: \"\"\n"
+		content += "    credentials: \"\"\n"
+		content += "    listen_address: \":8443\"\n"
+		content += "    external_url: \"\"\n"
+		content += "    service_account_email: \"\"\n"
+		content += "# state:\n"
+		content += "#   database: \"~/.scion/scion-chat-app.db\"\n"
+		content += "# logging:\n"
+		content += "#   level: \"info\"\n"
+	default:
+		content = "# Scion A2A bridge bootstrap configuration\n"
+		content += "# This file is operator-managed. Edit it to configure listen addresses,\n"
+		content += "# TLS, state database, and signing key settings.\n"
+		content += "hub:\n"
+		content += "  endpoint: \"" + hubEndpoint + "\"\n"
+		content += "plugin:\n"
+		content += "  listen_address: \"localhost:9090\"\n"
+		content += "# bridge:\n"
+		content += "#   listen_address: \":8081\"\n"
+		content += "# state:\n"
+		content += "#   database: \"~/.scion/scion-a2a-bridge.db\"\n"
+		content += "# logging:\n"
+		content += "#   level: \"info\"\n"
+	}
 
 	return os.WriteFile(resolved, []byte(content), 0600)
 }
