@@ -612,7 +612,7 @@ func (n *NotificationRelay) sendOversizeErrorCards(ctx context.Context, attachPa
 		if err != nil {
 			continue
 		}
-		if fi.Size() > maxGChatAttachmentSize {
+		if fi.Size() > MaxAttachmentSize {
 			errCard := SizeLimitErrorCard(fi.Name(), fi.Size())
 			for _, link := range links {
 				if link.ProjectID != projectID || link.Platform != platform {

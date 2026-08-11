@@ -22,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -356,92 +355,13 @@ func (s *PluginServer) Close() error {
 // --- Attachment helpers ---
 
 const (
-	// maxGChatAttachmentSize is the maximum file size for uploads (25 MB).
-	maxGChatAttachmentSize = 25 * 1024 * 1024
+	// MaxAttachmentSize is the maximum file size for chat attachment uploads (25 MB).
+	// Shared by all platform adapters (Google Chat, Discord, etc.).
+	MaxAttachmentSize = 25 * 1024 * 1024
 
 	// gchatAttachmentDir is the subdirectory under .attachments for Google Chat files.
 	gchatAttachmentDir = "_gchat"
 )
-
-// DownloadEventAttachment downloads a file from a Google Chat event attachment
-// and saves it to the shared volume. Returns the agent-visible path.
-//
-// Files are saved to:
-//
-//	/scion-volumes/scratchpad/.attachments/_gchat/<conversationID>/<filename>
-//
-// The httpClient must be authenticated for the Google Chat API.
-func DownloadEventAttachment(ctx context.Context, httpClient *http.Client, att EventAttachment, conversationID, projectSlug, projectID string) (agentPath string, err error) {
-	if att.DownloadURI == "" {
-		return "", fmt.Errorf("attachment has no download URI")
-	}
-	if att.Name == "" {
-		return "", fmt.Errorf("attachment has no name")
-	}
-
-	// Sanitize the conversation ID for use as a directory name.
-	safeConvID := sanitizePathComponent(conversationID)
-	if safeConvID == "" {
-		safeConvID = "unknown"
-	}
-
-	// Resolve the host-side directory for the shared volume.
-	hostDir, err := resolveGChatAttachmentDir(projectSlug, projectID, safeConvID)
-	if err != nil {
-		return "", fmt.Errorf("resolving attachment directory: %w", err)
-	}
-
-	if err := os.MkdirAll(hostDir, 0o755); err != nil {
-		return "", fmt.Errorf("creating attachment directory: %w", err)
-	}
-
-	// Download the file.
-	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, att.DownloadURI, nil)
-	if reqErr != nil {
-		return "", fmt.Errorf("creating download request: %w", reqErr)
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("downloading attachment %q: %w", att.Name, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download %q failed: HTTP %d", att.Name, resp.StatusCode)
-	}
-
-	// Use a timestamped filename to avoid collisions.
-	safeName := sanitizePathComponent(att.Name)
-	if safeName == "" {
-		safeName = "attachment"
-	}
-	destName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), safeName)
-	destPath := filepath.Join(hostDir, destName)
-
-	f, err := os.Create(destPath)
-	if err != nil {
-		return "", fmt.Errorf("creating file: %w", err)
-	}
-	defer f.Close()
-
-	written, err := io.Copy(f, io.LimitReader(resp.Body, maxGChatAttachmentSize+1))
-	if err != nil {
-		os.Remove(destPath)
-		return "", fmt.Errorf("writing attachment: %w", err)
-	}
-	if written > maxGChatAttachmentSize {
-		os.Remove(destPath)
-		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Name, written, maxGChatAttachmentSize)
-	}
-
-	// Build the agent-visible path.
-	agentPath = filepath.ToSlash(filepath.Join(
-		"/scion-volumes/scratchpad/.attachments", gchatAttachmentDir, safeConvID, destName,
-	))
-
-	return agentPath, nil
-}
 
 // ResolveOutboundAttachments converts agent-side attachment paths from a
 // StructuredMessage into Attachment structs with resolved host-side paths.
@@ -473,11 +393,11 @@ func ResolveOutboundAttachments(log *slog.Logger, attachmentPaths []string, proj
 				"error", err)
 			continue
 		}
-		if fi.Size() > maxGChatAttachmentSize {
+		if fi.Size() > MaxAttachmentSize {
 			log.Warn("attachment file too large, skipping",
 				"agent_path", agentPath,
 				"size", fi.Size(),
-				"max", maxGChatAttachmentSize)
+				"max", MaxAttachmentSize)
 			continue
 		}
 
@@ -491,8 +411,22 @@ func ResolveOutboundAttachments(log *slog.Logger, attachmentPaths []string, proj
 }
 
 // SizeLimitErrorCard returns a Card notifying the user that an attachment
-// exceeds the size limit.
+// exceeds the size limit. When size is 0 (unknown), the message omits the
+// specific file size.
 func SizeLimitErrorCard(filename string, size int64) Card {
+	var detail string
+	if size > 0 {
+		detail = fmt.Sprintf(
+			"The file `%s` is %s, which exceeds the 25 MB attachment limit.\n\nPlease reduce the file size and try again.",
+			filename,
+			formatFileSize(size),
+		)
+	} else {
+		detail = fmt.Sprintf(
+			"The file `%s` exceeds the 25 MB attachment limit.\n\nPlease reduce the file size and try again.",
+			filename,
+		)
+	}
 	return Card{
 		Header: CardHeader{
 			Title:    "⚠️ Attachment Too Large",
@@ -502,12 +436,8 @@ func SizeLimitErrorCard(filename string, size int64) Card {
 			{
 				Widgets: []Widget{
 					{
-						Type: WidgetText,
-						Content: fmt.Sprintf(
-							"The file `%s` is %s, which exceeds the 25 MB attachment limit.\n\nPlease reduce the file size and try again.",
-							filename,
-							formatFileSize(size),
-						),
+						Type:    WidgetText,
+						Content: detail,
 					},
 				},
 			},
@@ -549,10 +479,21 @@ func resolveAgentPath(agentPath, projectSlug, projectID string) string {
 		return resolveSharedDirPath(containerPath, projectSlug, projectID)
 	}
 
-	// For absolute paths that aren't container paths, try as host paths.
+	// For absolute paths that aren't container paths, only allow paths
+	// under known safe directories to prevent arbitrary file exfiltration.
 	if strings.HasPrefix(agentPath, "/") {
-		if _, err := os.Stat(agentPath); err == nil {
-			return agentPath
+		safePrefixes := []string{"/workspace/", "/scion-volumes/"}
+		for _, prefix := range safePrefixes {
+			if strings.HasPrefix(agentPath, prefix) {
+				clean := filepath.Clean(agentPath)
+				// Re-check prefix after Clean to prevent traversal (e.g. /workspace/../etc/passwd).
+				if strings.HasPrefix(clean, prefix) {
+					if _, err := os.Stat(clean); err == nil {
+						return clean
+					}
+				}
+				break
+			}
 		}
 	}
 

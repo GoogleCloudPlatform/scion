@@ -15,7 +15,6 @@
 package googlechat
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -38,8 +37,6 @@ const (
 	chatAPIBase  = "https://chat.googleapis.com/v1"
 	uploadAPIBase = "https://chat.googleapis.com/upload/v1"
 
-	// maxAttachmentSize is the maximum file size for uploads (25 MB, matching Discord).
-	maxAttachmentSize = 25 * 1024 * 1024
 )
 
 // EventHandler processes normalized chat events and returns an optional synchronous response.
@@ -795,6 +792,7 @@ func (a *Adapter) SendMessage(ctx context.Context, req chatapp.SendMessageReques
 	// Upload attachments and include references in the message.
 	if len(req.Attachments) > 0 {
 		var attachmentRefs []map[string]any
+		var failedAttachments []string
 		for _, att := range req.Attachments {
 			resourceName, uploadErr := a.uploadAttachment(ctx, req.SpaceID, att)
 			if uploadErr != nil {
@@ -802,6 +800,7 @@ func (a *Adapter) SendMessage(ctx context.Context, req chatapp.SendMessageReques
 					"filename", att.Filename,
 					"error", uploadErr,
 				)
+				failedAttachments = append(failedAttachments, att.Filename)
 				continue
 			}
 			attachmentRefs = append(attachmentRefs, map[string]any{
@@ -812,6 +811,16 @@ func (a *Adapter) SendMessage(ctx context.Context, req chatapp.SendMessageReques
 		}
 		if len(attachmentRefs) > 0 {
 			payload["attachment"] = attachmentRefs
+		}
+		// Surface upload failures in the message text so recipients know
+		// an attachment was intended but could not be delivered.
+		if len(failedAttachments) > 0 {
+			errNote := "\n\n_[Failed to upload: " + strings.Join(failedAttachments, ", ") + "]_"
+			if existing, ok := payload["text"].(string); ok {
+				payload["text"] = existing + errNote
+			} else {
+				payload["text"] = errNote
+			}
 		}
 	}
 
@@ -866,8 +875,8 @@ func (a *Adapter) uploadAttachment(ctx context.Context, spaceID string, att chat
 	if err != nil {
 		return "", fmt.Errorf("stat attachment %q: %w", att.Path, err)
 	}
-	if fi.Size() > maxAttachmentSize {
-		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Filename, fi.Size(), maxAttachmentSize)
+	if fi.Size() > chatapp.MaxAttachmentSize {
+		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Filename, fi.Size(), chatapp.MaxAttachmentSize)
 	}
 
 	f, err := os.Open(att.Path)
@@ -946,54 +955,82 @@ func (a *Adapter) SetAgentIdentity(ctx context.Context, agent chatapp.AgentIdent
 // UploadMedia uploads a file to a Google Chat space and returns the attachment
 // resource name for inclusion in messages.
 //
-// The upload uses the media.upload endpoint with multipart/form-data containing:
-//   - A JSON metadata part with the filename
-//   - The file content part
+// The upload uses the media.upload endpoint with multipart/related containing:
+//   - Part 1: JSON metadata with the filename (Content-Type: application/json)
+//   - Part 2: File content (Content-Type: application/octet-stream)
+//
+// The multipart body is streamed via io.Pipe to avoid buffering the entire file
+// in memory.
 //
 // See https://developers.google.com/workspace/chat/api/reference/rest/v1/media/upload
 func (a *Adapter) UploadMedia(ctx context.Context, spaceID, filename string, content io.Reader) (string, error) {
 	url := fmt.Sprintf("%s/%s/attachments:upload", uploadAPIBase, spaceID)
+	return a.uploadMediaToURL(ctx, url, filename, content)
+}
 
-	// Build multipart body: JSON metadata + file content.
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
+// uploadMediaToURL performs the actual multipart/related upload to the given URL.
+// Extracted from UploadMedia to allow tests to provide a test-server URL.
+func (a *Adapter) uploadMediaToURL(ctx context.Context, url, filename string, content io.Reader) (string, error) {
+	// Use io.Pipe to stream the multipart body without buffering the entire
+	// file in memory.
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	contentType := fmt.Sprintf("multipart/related; boundary=%s", writer.Boundary())
 
-	// Part 1: JSON metadata with filename.
-	metaHeader := make(textproto.MIMEHeader)
-	metaHeader.Set("Content-Type", "application/json")
-	metaPart, err := writer.CreatePart(metaHeader)
-	if err != nil {
-		return "", fmt.Errorf("creating metadata part: %w", err)
-	}
-	metadata := map[string]string{"filename": filename}
-	if err := json.NewEncoder(metaPart).Encode(metadata); err != nil {
-		return "", fmt.Errorf("encoding metadata: %w", err)
-	}
+	// Write multipart parts in a goroutine so the HTTP request can read from
+	// the pipe reader concurrently.
+	var writeErr error
+	go func() {
+		defer pw.Close()
 
-	// Part 2: file content.
-	filePart, err := writer.CreateFormFile("file", filename)
-	if err != nil {
-		return "", fmt.Errorf("creating file part: %w", err)
-	}
-	if _, err := io.Copy(filePart, content); err != nil {
-		return "", fmt.Errorf("copying file content: %w", err)
-	}
+		// Part 1: JSON metadata.
+		metaHeader := make(textproto.MIMEHeader)
+		metaHeader.Set("Content-Type", "application/json")
+		metaPart, err := writer.CreatePart(metaHeader)
+		if err != nil {
+			writeErr = fmt.Errorf("creating metadata part: %w", err)
+			return
+		}
+		metadata := map[string]string{"filename": filename}
+		if err := json.NewEncoder(metaPart).Encode(metadata); err != nil {
+			writeErr = fmt.Errorf("encoding metadata: %w", err)
+			return
+		}
 
-	if err := writer.Close(); err != nil {
-		return "", fmt.Errorf("closing multipart writer: %w", err)
-	}
+		// Part 2: file content with explicit Content-Type header.
+		fileHeader := make(textproto.MIMEHeader)
+		fileHeader.Set("Content-Type", "application/octet-stream")
+		filePart, err := writer.CreatePart(fileHeader)
+		if err != nil {
+			writeErr = fmt.Errorf("creating file part: %w", err)
+			return
+		}
+		if _, err := io.Copy(filePart, content); err != nil {
+			writeErr = fmt.Errorf("copying file content: %w", err)
+			return
+		}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
+		if err := writer.Close(); err != nil {
+			writeErr = fmt.Errorf("closing multipart writer: %w", err)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, pr)
 	if err != nil {
 		return "", fmt.Errorf("creating upload request: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("uploading media: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Check for errors from the writer goroutine.
+	if writeErr != nil {
+		return "", writeErr
+	}
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1014,7 +1051,7 @@ func (a *Adapter) UploadMedia(ctx context.Context, spaceID, filename string, con
 	}
 
 	a.log.Info("uploaded media to Google Chat",
-		"space", spaceID,
+		"url", url,
 		"filename", filename,
 		"resource_name", result.AttachmentDataRef.ResourceName,
 	)

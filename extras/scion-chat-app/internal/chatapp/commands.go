@@ -2056,14 +2056,14 @@ func (r *CommandRouter) downloadInboundAttachment(ctx context.Context, att Event
 	}
 	defer f.Close()
 
-	written, copyErr := io.Copy(f, io.LimitReader(body, maxGChatAttachmentSize+1))
+	written, copyErr := io.Copy(f, io.LimitReader(body, MaxAttachmentSize+1))
 	if copyErr != nil {
 		os.Remove(destPath)
 		return "", fmt.Errorf("writing attachment: %w", copyErr)
 	}
-	if written > maxGChatAttachmentSize {
+	if written > MaxAttachmentSize {
 		os.Remove(destPath)
-		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Name, written, maxGChatAttachmentSize)
+		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Name, written, MaxAttachmentSize)
 	}
 
 	agentPath := filepath.ToSlash(filepath.Join(
