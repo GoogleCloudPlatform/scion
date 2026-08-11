@@ -633,34 +633,39 @@ func TestHandleSecretAction_NoValue(t *testing.T) {
 	}
 }
 
-func TestHandleSecretAction_FallbackToActionID(t *testing.T) {
-	setKey := ""
+func TestCmdSecretList_TruncatedAt50(t *testing.T) {
 	client := newStubClient()
-	client.secrets.setFunc = func(_ context.Context, key string, req *hubclient.SetSecretRequest) (*hubclient.SetSecretResponse, error) {
-		setKey = key
-		return &hubclient.SetSecretResponse{}, nil
+	// Create 60 secrets — only first 50 should be shown.
+	secrets := make([]hubclient.Secret, 60)
+	for i := range secrets {
+		secrets[i] = hubclient.Secret{Key: fmt.Sprintf("SECRET_%03d", i)}
+	}
+	client.secrets.listFunc = func(_ context.Context, opts *hubclient.ListSecretOptions) (*hubclient.ListSecretResponse, error) {
+		return &hubclient.ListSecretResponse{Secrets: secrets}, nil
 	}
 	router, _, _ := newTestRouterWithHub(t, client)
 
-	event := &ChatEvent{
-		Type:     EventAction,
-		Platform: "googlechat",
-		SpaceID:  "spaces/test",
-		UserID:   "user-1",
-		ActionID: "secret.set.MY_KEY",
-		DialogData: map[string]string{
-			"secret.set.MY_KEY": "",
-		},
-	}
-	// Set the ActionID as fallback key in DialogData.
-	event.DialogData[event.ActionID] = "fallback-value"
-
-	err := router.handleSecretAction(context.Background(), event, "set", "MY_KEY")
+	link := &state.SpaceLink{ProjectID: "proj-123", ProjectSlug: "test-project"}
+	resp, err := router.cmdSecretList(context.Background(), testEvent(), link, client)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if setKey != "MY_KEY" {
-		t.Errorf("expected key 'MY_KEY', got: %s", setKey)
+	text := resp.Message.Text
+	// Should contain the total count.
+	if !strings.Contains(text, "(60)") {
+		t.Errorf("expected total count (60) in output, got: %s", text)
+	}
+	// Should show SECRET_049 (last of the 50).
+	if !strings.Contains(text, "SECRET_049") {
+		t.Errorf("expected SECRET_049 in output (50th entry), got: %s", text)
+	}
+	// Should NOT show SECRET_050 (beyond cap).
+	if strings.Contains(text, "SECRET_050") {
+		t.Errorf("expected SECRET_050 to be truncated, but found it in output")
+	}
+	// Should show truncation notice.
+	if !strings.Contains(text, "Showing 50 of 60") {
+		t.Errorf("expected truncation notice 'Showing 50 of 60', got: %s", text)
 	}
 }
 

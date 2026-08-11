@@ -312,10 +312,6 @@ func (r *CommandRouter) handleSecretAction(ctx context.Context, event *ChatEvent
 	widgetKey := fmt.Sprintf("secret.set.%s", key)
 	value := event.DialogData[widgetKey]
 	if value == "" {
-		// Fall back to the action ID itself as key (for dialog submit events).
-		value = event.DialogData[event.ActionID]
-	}
-	if value == "" {
 		return r.reply(ctx, event, "No secret value provided.")
 	}
 
@@ -466,6 +462,34 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 	agents := client.ProjectAgents(link.ProjectID)
 
 	switch verb {
+	case "status":
+		agent, err := agents.Get(ctx, agentID)
+		if err != nil {
+			return r.reply(ctx, event, fmt.Sprintf("Failed to get agent: %v", err))
+		}
+		card := Card{
+			Header: CardHeader{
+				Title:    agent.Name,
+				Subtitle: fmt.Sprintf("Project: %s | %s", link.ProjectSlug, agent.Activity),
+			},
+			Sections: []CardSection{
+				{
+					Widgets: []Widget{
+						{Type: WidgetKeyValue, Label: "Slug", Content: agent.Slug},
+						{Type: WidgetKeyValue, Label: "Phase", Content: agent.Phase},
+						{Type: WidgetKeyValue, Label: "Activity", Content: agent.Activity},
+						{Type: WidgetKeyValue, Label: "Template", Content: agent.Template},
+					},
+				},
+			},
+			Actions: []CardAction{
+				{Label: "Start", ActionID: fmt.Sprintf("agent.start.%s", agent.ID), Style: "primary"},
+				{Label: "Stop", ActionID: fmt.Sprintf("agent.stop.%s", agent.ID), Style: "danger"},
+				{Label: "View Logs", ActionID: fmt.Sprintf("agent.logs.%s", agent.ID)},
+			},
+		}
+		_, err = r.messenger.SendCard(ctx, event.SpaceID, card)
+		return err
 	case "start":
 		if err := agents.Start(ctx, agentID); err != nil {
 			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to start agent: %v", err))
@@ -1562,10 +1586,7 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 
 	// If instruction provided, send it to the agent.
 	if instruction != "" {
-		senderEmail := event.UserEmail
-		if senderEmail == "" {
-			senderEmail = "unknown"
-		}
+		senderEmail := r.senderEmailForUser(ctx, event)
 		msg := messages.NewInstruction("user:"+senderEmail, createResp.Agent.Slug, instruction)
 		if r.broker != nil {
 			msg.Channel = r.broker.ChannelName()
@@ -1895,6 +1916,22 @@ func (r *CommandRouter) requireSpaceLink(ctx context.Context, event *ChatEvent) 
 		return nil, textResponse(event, "This space is not linked to a project. Use `/scionAdmin link <project-slug>` first.")
 	}
 	return link, nil
+}
+
+// senderEmailForUser returns the Hub-registered email for the event's user.
+// Falls back to the chat platform email if no identity mapper is configured
+// (e.g. in tests). This keeps sender identity consistent across all commands.
+func (r *CommandRouter) senderEmailForUser(ctx context.Context, event *ChatEvent) string {
+	if r.idMapper != nil {
+		mapping, err := r.idMapper.Resolve(event.UserID, event.Platform)
+		if err == nil && mapping != nil && mapping.HubUserEmail != "" {
+			return mapping.HubUserEmail
+		}
+	}
+	if event.UserEmail != "" {
+		return event.UserEmail
+	}
+	return "unknown"
 }
 
 // clientForUser creates a Hub client authenticated as the event's user.
