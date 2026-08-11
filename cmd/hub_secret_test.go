@@ -324,6 +324,107 @@ func TestResolveSecretScope_ScopeConflictsWithBroker(t *testing.T) {
 	assert.Contains(t, err.Error(), "cannot specify more than one")
 }
 
+// newSecretSetMockServer creates a mock Hub server that captures secret set request bodies.
+func newSecretSetMockServer(t *testing.T, captured *map[string]interface{}) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.Method == http.MethodPut && len(r.URL.Path) > len("/api/v1/secrets/"):
+			// Capture the request body
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("failed to decode request body: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			*captured = body
+
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"secret":  map[string]interface{}{"key": "TEST_KEY", "scope": "user", "type": "environment", "version": 1, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"},
+				"created": true,
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	return server
+}
+
+func TestRunSecretSet_PlaintextSendsEncodingRaw(t *testing.T) {
+	orig := saveSecretTestState()
+	defer orig.restore()
+
+	var captured map[string]interface{}
+	server := newSecretSetMockServer(t, &captured)
+	defer server.Close()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+
+	projectDir := setupSecretProject(t, tmpHome, server.URL)
+	projectPath = projectDir
+
+	secretProjectScope = ""
+	secretBrokerScope = ""
+	secretScope = ""
+	secretType = ""
+	secretTarget = ""
+	secretAllowProgeny = false
+
+	err := runSecretSet(hubSecretSetCmd, []string{"API_KEY", "sk-abc123"})
+	require.NoError(t, err)
+
+	// Plaintext value must include encoding: "raw"
+	assert.Equal(t, "raw", captured["encoding"], "plaintext values should send encoding=raw")
+	assert.Equal(t, "sk-abc123", captured["value"], "value should be the plaintext input")
+}
+
+func TestRunSecretSet_FileSendsNoEncoding(t *testing.T) {
+	orig := saveSecretTestState()
+	defer orig.restore()
+
+	var captured map[string]interface{}
+	server := newSecretSetMockServer(t, &captured)
+	defer server.Close()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+
+	projectDir := setupSecretProject(t, tmpHome, server.URL)
+	projectPath = projectDir
+
+	secretProjectScope = ""
+	secretBrokerScope = ""
+	secretScope = ""
+	secretType = ""
+	secretTarget = ""
+	secretAllowProgeny = false
+
+	// Create a temp file to read via @file syntax
+	tmpFile := filepath.Join(tmpHome, "secret.txt")
+	require.NoError(t, os.WriteFile(tmpFile, []byte("file-contents"), 0644))
+
+	err := runSecretSet(hubSecretSetCmd, []string{"TLS_CERT", "@" + tmpFile})
+	require.NoError(t, err)
+
+	// @file values are base64-encoded by the CLI; encoding field should be absent
+	_, hasEncoding := captured["encoding"]
+	assert.False(t, hasEncoding, "@file values should not send encoding field")
+
+	// Verify the value is the base64-encoded form of "file-contents"
+	assert.Equal(t, "ZmlsZS1jb250ZW50cw==", captured["value"], "@file value should be base64-encoded")
+}
+
 func TestHubSecretListCmd_ScopeFlag(t *testing.T) {
 	// Verify the --scope flag is registered on all secret subcommands.
 	for _, cmd := range []*cobra.Command{hubSecretSetCmd, hubSecretGetCmd, hubSecretListCmd, hubSecretClearCmd} {

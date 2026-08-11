@@ -72,6 +72,7 @@ type SecretScopeOptions struct {
 // SetSecretRequest is the request for setting a secret.
 type SetSecretRequest struct {
 	Value         string `json:"value"`                   // Required: secret value (write-only)
+	Encoding      string `json:"encoding,omitempty"`      // Value encoding: "raw" (plaintext) or "" (default: base64)
 	Scope         string `json:"scope,omitempty"`         // Scope type (default: user)
 	ScopeID       string `json:"scopeId,omitempty"`       // Required for project/runtime_broker scope
 	Description   string `json:"description,omitempty"`   // Optional description
