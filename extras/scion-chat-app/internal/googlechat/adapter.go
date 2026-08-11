@@ -15,13 +15,18 @@
 package googlechat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net"
 	"net/http"
+	"net/textproto"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -31,6 +36,10 @@ import (
 const (
 	PlatformName = "google_chat"
 	chatAPIBase  = "https://chat.googleapis.com/v1"
+	uploadAPIBase = "https://chat.googleapis.com/upload/v1"
+
+	// maxAttachmentSize is the maximum file size for uploads (25 MB, matching Discord).
+	maxAttachmentSize = 25 * 1024 * 1024
 )
 
 // EventHandler processes normalized chat events and returns an optional synchronous response.
@@ -490,12 +499,25 @@ type rawSpace struct {
 }
 
 type rawMessage struct {
-	Name         string           `json:"name"`
-	Text         string           `json:"text"`
-	ArgumentText string           `json:"argumentText"`
-	Thread       *rawThread       `json:"thread,omitempty"`
-	Annotations  []rawAnnotation  `json:"annotations,omitempty"`
-	SlashCommand *rawSlashCommand `json:"slashCommand,omitempty"`
+	Name         string            `json:"name"`
+	Text         string            `json:"text"`
+	ArgumentText string            `json:"argumentText"`
+	Thread       *rawThread        `json:"thread,omitempty"`
+	Annotations  []rawAnnotation   `json:"annotations,omitempty"`
+	SlashCommand *rawSlashCommand  `json:"slashCommand,omitempty"`
+	Attachment   []rawAttachment   `json:"attachment,omitempty"`
+}
+
+type rawAttachment struct {
+	Name              string                `json:"name"`
+	ContentName       string                `json:"contentName"`
+	ContentType       string                `json:"contentType"`
+	DownloadURI       string                `json:"downloadUri"`
+	AttachmentDataRef *rawAttachmentDataRef `json:"attachmentDataRef,omitempty"`
+}
+
+type rawAttachmentDataRef struct {
+	ResourceName string `json:"resourceName"`
 }
 
 type rawSlashCommand struct {
@@ -612,6 +634,8 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		if p.Message.Thread != nil {
 			event.ThreadID = p.Message.Thread.Name
 		}
+		// Extract attachments from message.
+		event.Attachments = extractAttachments(p.Message)
 		if p.Message.SlashCommand != nil {
 			event.Type = chatapp.EventCommand
 			cmdID := p.Message.SlashCommand.CommandId.String()
@@ -692,6 +716,29 @@ func commandNameFromText(msg *rawMessage) string {
 	return "scion"
 }
 
+// extractAttachments converts raw message attachments to normalized EventAttachment structs.
+func extractAttachments(msg *rawMessage) []chatapp.EventAttachment {
+	if msg == nil || len(msg.Attachment) == 0 {
+		return nil
+	}
+	var attachments []chatapp.EventAttachment
+	for _, a := range msg.Attachment {
+		if a.DownloadURI == "" {
+			continue
+		}
+		name := a.ContentName
+		if name == "" {
+			name = filepath.Base(a.Name)
+		}
+		attachments = append(attachments, chatapp.EventAttachment{
+			Name:        name,
+			ContentType: a.ContentType,
+			DownloadURI: a.DownloadURI,
+		})
+	}
+	return attachments
+}
+
 // getParameters extracts action parameters from commonEventObject.
 func (a *Adapter) getParameters(raw *rawEvent) map[string]string {
 	if raw.CommonEventObject != nil && raw.CommonEventObject.Parameters != nil {
@@ -724,6 +771,8 @@ func (a *Adapter) getFormInputs(raw *rawEvent) map[string]string {
 }
 
 // SendMessage sends a text or card message to a Google Chat space.
+// If the request includes attachments, each file is uploaded via UploadMedia
+// and attached to the message.
 func (a *Adapter) SendMessage(ctx context.Context, req chatapp.SendMessageRequest) (string, error) {
 	payload := map[string]any{}
 
@@ -740,6 +789,29 @@ func (a *Adapter) SendMessage(ctx context.Context, req chatapp.SendMessageReques
 				"cardId": "scion_card",
 				"card":   a.renderCardV2(req.Card),
 			},
+		}
+	}
+
+	// Upload attachments and include references in the message.
+	if len(req.Attachments) > 0 {
+		var attachmentRefs []map[string]any
+		for _, att := range req.Attachments {
+			resourceName, uploadErr := a.uploadAttachment(ctx, req.SpaceID, att)
+			if uploadErr != nil {
+				a.log.Error("failed to upload attachment",
+					"filename", att.Filename,
+					"error", uploadErr,
+				)
+				continue
+			}
+			attachmentRefs = append(attachmentRefs, map[string]any{
+				"attachmentDataRef": map[string]string{
+					"resourceName": resourceName,
+				},
+			})
+		}
+		if len(attachmentRefs) > 0 {
+			payload["attachment"] = attachmentRefs
 		}
 	}
 
@@ -763,6 +835,7 @@ func (a *Adapter) SendMessage(ctx context.Context, req chatapp.SendMessageReques
 		"thread", req.ThreadID,
 		"has_text", hasText,
 		"has_card", hasCard,
+		"has_attachments", len(req.Attachments) > 0,
 		"text_len", len(req.Text),
 	)
 
@@ -780,6 +853,35 @@ func (a *Adapter) SendMessage(ctx context.Context, req chatapp.SendMessageReques
 	}
 	a.log.Info("async message sent", "message_id", result.Name, "space", req.SpaceID)
 	return result.Name, nil
+}
+
+// uploadAttachment opens a local file (or reads from URL) and uploads it via UploadMedia.
+// Returns the attachment resource name. Enforces the 25 MB size limit.
+func (a *Adapter) uploadAttachment(ctx context.Context, spaceID string, att chatapp.Attachment) (string, error) {
+	if att.Path == "" {
+		return "", fmt.Errorf("attachment has no path")
+	}
+
+	fi, err := os.Stat(att.Path)
+	if err != nil {
+		return "", fmt.Errorf("stat attachment %q: %w", att.Path, err)
+	}
+	if fi.Size() > maxAttachmentSize {
+		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Filename, fi.Size(), maxAttachmentSize)
+	}
+
+	f, err := os.Open(att.Path)
+	if err != nil {
+		return "", fmt.Errorf("open attachment %q: %w", att.Path, err)
+	}
+	defer f.Close()
+
+	filename := att.Filename
+	if filename == "" {
+		filename = filepath.Base(att.Path)
+	}
+
+	return a.UploadMedia(ctx, spaceID, filename, f)
 }
 
 // SendCard sends a card-only message to a Google Chat space.
@@ -839,6 +941,104 @@ func (a *Adapter) GetUser(ctx context.Context, userID string) (*chatapp.ChatUser
 func (a *Adapter) SetAgentIdentity(ctx context.Context, agent chatapp.AgentIdentity) error {
 	a.log.Debug("agent identity set (used in card headers)", "slug", agent.Slug)
 	return nil
+}
+
+// UploadMedia uploads a file to a Google Chat space and returns the attachment
+// resource name for inclusion in messages.
+//
+// The upload uses the media.upload endpoint with multipart/form-data containing:
+//   - A JSON metadata part with the filename
+//   - The file content part
+//
+// See https://developers.google.com/workspace/chat/api/reference/rest/v1/media/upload
+func (a *Adapter) UploadMedia(ctx context.Context, spaceID, filename string, content io.Reader) (string, error) {
+	url := fmt.Sprintf("%s/%s/attachments:upload", uploadAPIBase, spaceID)
+
+	// Build multipart body: JSON metadata + file content.
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	// Part 1: JSON metadata with filename.
+	metaHeader := make(textproto.MIMEHeader)
+	metaHeader.Set("Content-Type", "application/json")
+	metaPart, err := writer.CreatePart(metaHeader)
+	if err != nil {
+		return "", fmt.Errorf("creating metadata part: %w", err)
+	}
+	metadata := map[string]string{"filename": filename}
+	if err := json.NewEncoder(metaPart).Encode(metadata); err != nil {
+		return "", fmt.Errorf("encoding metadata: %w", err)
+	}
+
+	// Part 2: file content.
+	filePart, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return "", fmt.Errorf("creating file part: %w", err)
+	}
+	if _, err := io.Copy(filePart, content); err != nil {
+		return "", fmt.Errorf("copying file content: %w", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("closing multipart writer: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
+	if err != nil {
+		return "", fmt.Errorf("creating upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("uploading media: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading upload response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("upload failed (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		AttachmentDataRef struct {
+			ResourceName string `json:"resourceName"`
+		} `json:"attachmentDataRef"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parsing upload response: %w", err)
+	}
+
+	a.log.Info("uploaded media to Google Chat",
+		"space", spaceID,
+		"filename", filename,
+		"resource_name", result.AttachmentDataRef.ResourceName,
+	)
+	return result.AttachmentDataRef.ResourceName, nil
+}
+
+// DownloadAttachment downloads a file from a Google Chat attachment download URI.
+// The download requires authentication, which is handled by the adapter's httpClient.
+func (a *Adapter) DownloadAttachment(ctx context.Context, downloadURI string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURI, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating download request: %w", err)
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("downloading attachment: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download failed (HTTP %d)", resp.StatusCode)
+	}
+
+	return resp.Body, nil
 }
 
 // renderCardV2 converts a platform-agnostic Card to Google Chat Cards V2 format.

@@ -22,6 +22,10 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -347,4 +351,292 @@ func (s *PluginServer) Close() error {
 		return s.listener.Close()
 	}
 	return nil
+}
+
+// --- Attachment helpers ---
+
+const (
+	// maxGChatAttachmentSize is the maximum file size for uploads (25 MB).
+	maxGChatAttachmentSize = 25 * 1024 * 1024
+
+	// gchatAttachmentDir is the subdirectory under .attachments for Google Chat files.
+	gchatAttachmentDir = "_gchat"
+)
+
+// DownloadEventAttachment downloads a file from a Google Chat event attachment
+// and saves it to the shared volume. Returns the agent-visible path.
+//
+// Files are saved to:
+//
+//	/scion-volumes/scratchpad/.attachments/_gchat/<conversationID>/<filename>
+//
+// The httpClient must be authenticated for the Google Chat API.
+func DownloadEventAttachment(ctx context.Context, httpClient *http.Client, att EventAttachment, conversationID, projectSlug, projectID string) (agentPath string, err error) {
+	if att.DownloadURI == "" {
+		return "", fmt.Errorf("attachment has no download URI")
+	}
+	if att.Name == "" {
+		return "", fmt.Errorf("attachment has no name")
+	}
+
+	// Sanitize the conversation ID for use as a directory name.
+	safeConvID := sanitizePathComponent(conversationID)
+	if safeConvID == "" {
+		safeConvID = "unknown"
+	}
+
+	// Resolve the host-side directory for the shared volume.
+	hostDir, err := resolveGChatAttachmentDir(projectSlug, projectID, safeConvID)
+	if err != nil {
+		return "", fmt.Errorf("resolving attachment directory: %w", err)
+	}
+
+	if err := os.MkdirAll(hostDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating attachment directory: %w", err)
+	}
+
+	// Download the file.
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, att.DownloadURI, nil)
+	if reqErr != nil {
+		return "", fmt.Errorf("creating download request: %w", reqErr)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("downloading attachment %q: %w", att.Name, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download %q failed: HTTP %d", att.Name, resp.StatusCode)
+	}
+
+	// Use a timestamped filename to avoid collisions.
+	safeName := sanitizePathComponent(att.Name)
+	if safeName == "" {
+		safeName = "attachment"
+	}
+	destName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), safeName)
+	destPath := filepath.Join(hostDir, destName)
+
+	f, err := os.Create(destPath)
+	if err != nil {
+		return "", fmt.Errorf("creating file: %w", err)
+	}
+	defer f.Close()
+
+	written, err := io.Copy(f, io.LimitReader(resp.Body, maxGChatAttachmentSize+1))
+	if err != nil {
+		os.Remove(destPath)
+		return "", fmt.Errorf("writing attachment: %w", err)
+	}
+	if written > maxGChatAttachmentSize {
+		os.Remove(destPath)
+		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Name, written, maxGChatAttachmentSize)
+	}
+
+	// Build the agent-visible path.
+	agentPath = filepath.ToSlash(filepath.Join(
+		"/scion-volumes/scratchpad/.attachments", gchatAttachmentDir, safeConvID, destName,
+	))
+
+	return agentPath, nil
+}
+
+// ResolveOutboundAttachments converts agent-side attachment paths from a
+// StructuredMessage into Attachment structs with resolved host-side paths.
+// Paths that cannot be resolved or exceed the size limit are skipped with a
+// logged warning.
+func ResolveOutboundAttachments(log *slog.Logger, attachmentPaths []string, projectSlug, projectID string) []Attachment {
+	if len(attachmentPaths) == 0 {
+		return nil
+	}
+
+	var result []Attachment
+	for _, agentPath := range attachmentPaths {
+		if agentPath == "" {
+			continue
+		}
+
+		hostPath := resolveAgentPath(agentPath, projectSlug, projectID)
+		if hostPath == "" {
+			log.Warn("cannot resolve attachment path, skipping",
+				"agent_path", agentPath)
+			continue
+		}
+
+		fi, err := os.Stat(hostPath)
+		if err != nil {
+			log.Warn("attachment file not found, skipping",
+				"agent_path", agentPath,
+				"host_path", hostPath,
+				"error", err)
+			continue
+		}
+		if fi.Size() > maxGChatAttachmentSize {
+			log.Warn("attachment file too large, skipping",
+				"agent_path", agentPath,
+				"size", fi.Size(),
+				"max", maxGChatAttachmentSize)
+			continue
+		}
+
+		result = append(result, Attachment{
+			Filename: filepath.Base(hostPath),
+			Path:     hostPath,
+			Size:     fi.Size(),
+		})
+	}
+	return result
+}
+
+// SizeLimitErrorCard returns a Card notifying the user that an attachment
+// exceeds the size limit.
+func SizeLimitErrorCard(filename string, size int64) Card {
+	return Card{
+		Header: CardHeader{
+			Title:    "⚠️ Attachment Too Large",
+			Subtitle: filename,
+		},
+		Sections: []CardSection{
+			{
+				Widgets: []Widget{
+					{
+						Type: WidgetText,
+						Content: fmt.Sprintf(
+							"The file `%s` is %s, which exceeds the 25 MB attachment limit.\n\nPlease reduce the file size and try again.",
+							filename,
+							formatFileSize(size),
+						),
+					},
+				},
+			},
+		},
+	}
+}
+
+// resolveGChatAttachmentDir returns the host-side directory for storing
+// Google Chat attachments in the shared scratchpad volume.
+func resolveGChatAttachmentDir(projectSlug, projectID, conversationID string) (string, error) {
+	if projectSlug == "" || projectID == "" {
+		return "", fmt.Errorf("project slug or ID is empty")
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory: %w", err)
+	}
+
+	sharedDirBase := sharedDirHostPath(home, projectSlug, projectID, "scratchpad")
+	return filepath.Join(sharedDirBase, ".attachments", gchatAttachmentDir, conversationID), nil
+}
+
+// resolveAgentPath translates agent-side container paths to host-side paths.
+//
+// Supported paths:
+//   - /scion-volumes/<name>/<file> → shared dir host path
+//   - /workspace/.scion-volumes/<name>/<file> → same as above
+//   - Absolute paths starting with / that are already host paths → returned as-is
+func resolveAgentPath(agentPath, projectSlug, projectID string) string {
+	// Handle /scion-volumes/<name>/... paths.
+	if strings.HasPrefix(agentPath, "/scion-volumes/") {
+		return resolveSharedDirPath(agentPath, projectSlug, projectID)
+	}
+
+	// Handle /workspace/.scion-volumes/<name>/... paths.
+	if strings.HasPrefix(agentPath, "/workspace/.scion-volumes/") {
+		containerPath := "/scion-volumes/" + strings.TrimPrefix(agentPath, "/workspace/.scion-volumes/")
+		return resolveSharedDirPath(containerPath, projectSlug, projectID)
+	}
+
+	// For absolute paths that aren't container paths, try as host paths.
+	if strings.HasPrefix(agentPath, "/") {
+		if _, err := os.Stat(agentPath); err == nil {
+			return agentPath
+		}
+	}
+
+	return ""
+}
+
+// resolveSharedDirPath converts a /scion-volumes/<name>/... path to the host-side path.
+func resolveSharedDirPath(containerPath, projectSlug, projectID string) string {
+	if projectSlug == "" || projectID == "" {
+		return ""
+	}
+
+	trimmed := strings.TrimPrefix(containerPath, "/scion-volumes/")
+	if trimmed == "" || trimmed == containerPath {
+		return ""
+	}
+
+	parts := strings.SplitN(trimmed, "/", 2)
+	sharedDirName := parts[0]
+	if sharedDirName == "" || sharedDirName == "." || sharedDirName == ".." {
+		return ""
+	}
+
+	relPath := ""
+	if len(parts) > 1 {
+		relPath = filepath.Clean(parts[1])
+		if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
+			return ""
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	base := sharedDirHostPath(home, projectSlug, projectID, sharedDirName)
+	if relPath == "" || relPath == "." {
+		return base
+	}
+
+	hostPath := filepath.Join(base, relPath)
+	// Verify the resolved path doesn't escape the shared dir.
+	if !strings.HasPrefix(hostPath, base+string(filepath.Separator)) {
+		return ""
+	}
+	return hostPath
+}
+
+// sanitizePathComponent removes characters that are unsafe in file paths.
+func sanitizePathComponent(s string) string {
+	s = filepath.Base(s)
+	s = strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == '\x00' {
+			return '_'
+		}
+		return r
+	}, s)
+	if s == "." || s == ".." || s == "" {
+		return ""
+	}
+	return s
+}
+
+// formatFileSize returns a human-readable file size string.
+func formatFileSize(bytes int64) string {
+	const mb = 1024 * 1024
+	if bytes >= mb {
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(mb))
+	}
+	return fmt.Sprintf("%.1f KB", float64(bytes)/1024.0)
+}
+
+// sharedDirHostPath computes the host-side directory path for a shared
+// directory. This replicates the logic from pkg/config.SharedDirHostPath
+// to avoid pulling in the full config package with its heavy transitive
+// dependencies (ent, koanf, rclone, etc.).
+//
+// Path format: ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>
+func sharedDirHostPath(home, slug, projectID, sharedDirName string) string {
+	shortUUID := strings.ReplaceAll(projectID, "-", "")
+	if len(shortUUID) > 8 {
+		shortUUID = shortUUID[:8]
+	}
+	dirName := fmt.Sprintf("%s__%s", slug, shortUUID)
+	return filepath.Join(home, ".scion", "project-configs", dirName, "shared-dirs", sharedDirName)
 }

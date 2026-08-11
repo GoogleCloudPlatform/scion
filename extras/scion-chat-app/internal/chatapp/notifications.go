@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 
@@ -291,6 +292,24 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		return fmt.Errorf("listing space links: %w", err)
 	}
 
+	// Resolve outbound attachments from agent-side paths.
+	var attachments []Attachment
+	var projectSlug string
+	if len(msg.Attachments) > 0 {
+		for _, link := range links {
+			if link.ProjectID == projectID {
+				projectSlug = link.ProjectSlug
+				attachments = ResolveOutboundAttachments(n.log, msg.Attachments, link.ProjectSlug, link.ProjectID)
+				break
+			}
+		}
+
+		// Check for oversized files and send error cards.
+		if projectSlug != "" {
+			n.sendOversizeErrorCards(ctx, msg.Attachments, projectSlug, projectID, mapping.Platform, links)
+		}
+	}
+
 	for _, link := range links {
 		if link.ProjectID != projectID || link.Platform != mapping.Platform {
 			continue
@@ -313,11 +332,18 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		// Chat API renders them as interactive user pills.
 		mentions := n.buildMentions(mapping.PlatformUserID, agentSlug, link)
 
+		// Re-resolve attachments with this link's project info if not yet resolved.
+		linkAttachments := attachments
+		if linkAttachments == nil && len(msg.Attachments) > 0 {
+			linkAttachments = ResolveOutboundAttachments(n.log, msg.Attachments, link.ProjectSlug, link.ProjectID)
+		}
+
 		sendReq := SendMessageRequest{
-			SpaceID:  link.SpaceID,
-			ThreadID: msg.ThreadID,
-			Text:     mentions,
-			Card:     &card,
+			SpaceID:     link.SpaceID,
+			ThreadID:    msg.ThreadID,
+			Text:        mentions,
+			Card:        &card,
+			Attachments: linkAttachments,
 		}
 		var sendErr error
 		if n.sendQueue != nil {
@@ -569,6 +595,36 @@ func (n *NotificationRelay) resolveOutboundMentions(text string) string {
 
 	b.WriteString(text[prev:])
 	return b.String()
+}
+
+// sendOversizeErrorCards checks agent-side attachment paths for files exceeding
+// the size limit and sends error cards to the relevant spaces.
+func (n *NotificationRelay) sendOversizeErrorCards(ctx context.Context, attachPaths []string, projectSlug, projectID, platform string, links []state.SpaceLink) {
+	for _, agentPath := range attachPaths {
+		if agentPath == "" {
+			continue
+		}
+		hostPath := resolveAgentPath(agentPath, projectSlug, projectID)
+		if hostPath == "" {
+			continue
+		}
+		fi, err := os.Stat(hostPath)
+		if err != nil {
+			continue
+		}
+		if fi.Size() > maxGChatAttachmentSize {
+			errCard := SizeLimitErrorCard(fi.Name(), fi.Size())
+			for _, link := range links {
+				if link.ProjectID != projectID || link.Platform != platform {
+					continue
+				}
+				if _, sendErr := n.messenger.SendCard(ctx, link.SpaceID, errCard); sendErr != nil {
+					n.log.Error("failed to send size limit error card",
+						"space_id", link.SpaceID, "error", sendErr)
+				}
+			}
+		}
+	}
 }
 
 // buildMentions returns a formatted @mention string for a user-targeted message.
