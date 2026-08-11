@@ -121,7 +121,7 @@ func (s *Store) migrate() error {
 			platform    TEXT NOT NULL DEFAULT 'google_chat',
 			set_by      TEXT NOT NULL DEFAULT '',
 			set_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (space_id, thread_id)
+			PRIMARY KEY (space_id, thread_id, platform)
 		)`,
 	}
 
@@ -416,11 +416,11 @@ func (s *Store) ListAgentSubscriptions(agentID, projectID string) ([]AgentSubscr
 // --- Thread Defaults ---
 
 // GetThreadDefault returns the agent slug for the given thread, or "" if not set.
-func (s *Store) GetThreadDefault(spaceID, threadID string) (string, error) {
+func (s *Store) GetThreadDefault(spaceID, threadID, platform string) (string, error) {
 	var agentSlug string
 	err := s.db.QueryRow(
-		`SELECT agent_slug FROM thread_defaults WHERE space_id = ? AND thread_id = ?`,
-		spaceID, threadID,
+		`SELECT agent_slug FROM thread_defaults WHERE space_id = ? AND thread_id = ? AND platform = ?`,
+		spaceID, threadID, platform,
 	).Scan(&agentSlug)
 	if err == sql.ErrNoRows {
 		return "", nil
@@ -432,11 +432,11 @@ func (s *Store) GetThreadDefault(spaceID, threadID string) (string, error) {
 }
 
 // SetThreadDefault inserts or replaces a thread-level default agent.
-func (s *Store) SetThreadDefault(spaceID, threadID, agentSlug, setBy string) error {
+func (s *Store) SetThreadDefault(spaceID, threadID, platform, agentSlug, setBy string) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO thread_defaults (space_id, thread_id, agent_slug, set_by, set_at)
-		 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-		spaceID, threadID, agentSlug, setBy,
+		`INSERT OR REPLACE INTO thread_defaults (space_id, thread_id, platform, agent_slug, set_by, set_at)
+		 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		spaceID, threadID, platform, agentSlug, setBy,
 	)
 	if err != nil {
 		return fmt.Errorf("set thread default: %w", err)
@@ -445,10 +445,10 @@ func (s *Store) SetThreadDefault(spaceID, threadID, agentSlug, setBy string) err
 }
 
 // DeleteThreadDefault removes a thread-level default agent.
-func (s *Store) DeleteThreadDefault(spaceID, threadID string) error {
+func (s *Store) DeleteThreadDefault(spaceID, threadID, platform string) error {
 	_, err := s.db.Exec(
-		`DELETE FROM thread_defaults WHERE space_id = ? AND thread_id = ?`,
-		spaceID, threadID,
+		`DELETE FROM thread_defaults WHERE space_id = ? AND thread_id = ? AND platform = ?`,
+		spaceID, threadID, platform,
 	)
 	if err != nil {
 		return fmt.Errorf("delete thread default: %w", err)

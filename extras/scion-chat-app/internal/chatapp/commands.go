@@ -469,7 +469,11 @@ func (r *CommandRouter) cmdList(ctx context.Context, event *ChatEvent, args []st
 	// Check for a thread-level default if we're in a thread.
 	var threadDefault string
 	if event.ThreadID != "" {
-		threadDefault, _ = r.store.GetThreadDefault(event.SpaceID, event.ThreadID)
+		var err error
+		threadDefault, err = r.store.GetThreadDefault(event.SpaceID, event.ThreadID, event.Platform)
+		if err != nil {
+			r.log.Error("failed to get thread default", "error", err)
+		}
 	}
 
 	var sb strings.Builder
@@ -1085,7 +1089,11 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 	// default agent is configured, treat the entire input as the message text.
 	agent, err := client.ProjectAgents(link.ProjectID).Get(ctx, agentSlug)
 	if err != nil {
-		defaultAgent, resolveErr := r.resolveDefaultAgent(event.SpaceID, event.ThreadID, link.DefaultAgent)
+		targetThread := threadID
+		if targetThread == "" {
+			targetThread = event.ThreadID
+		}
+		defaultAgent, resolveErr := r.resolveDefaultAgent(event.SpaceID, targetThread, event.Platform, link.DefaultAgent)
 		if resolveErr != nil {
 			return textResponse(event, fmt.Sprintf("Failed to resolve default agent: %v", resolveErr)), nil
 		}
@@ -1153,7 +1161,7 @@ func (r *CommandRouter) cmdSetDefault(ctx context.Context, event *ChatEvent, arg
 
 	if len(filtered) == 0 {
 		if threadMode {
-			agent, err := r.store.GetThreadDefault(event.SpaceID, event.ThreadID)
+			agent, err := r.store.GetThreadDefault(event.SpaceID, event.ThreadID, event.Platform)
 			if err != nil {
 				return textResponse(event, fmt.Sprintf("Failed to get thread default: %v", err)), nil
 			}
@@ -1171,7 +1179,7 @@ func (r *CommandRouter) cmdSetDefault(ctx context.Context, event *ChatEvent, arg
 	arg := strings.ToLower(filtered[0])
 	if arg == "clear" || arg == "none" {
 		if threadMode {
-			if err := r.store.DeleteThreadDefault(event.SpaceID, event.ThreadID); err != nil {
+			if err := r.store.DeleteThreadDefault(event.SpaceID, event.ThreadID, event.Platform); err != nil {
 				return textResponse(event, fmt.Sprintf("Failed to clear thread default agent: %v", err)), nil
 			}
 			return textResponse(event, "Thread-level default agent cleared."), nil
@@ -1193,7 +1201,7 @@ func (r *CommandRouter) cmdSetDefault(ctx context.Context, event *ChatEvent, arg
 	}
 
 	if threadMode {
-		if err := r.store.SetThreadDefault(event.SpaceID, event.ThreadID, agent.Slug, event.UserEmail); err != nil {
+		if err := r.store.SetThreadDefault(event.SpaceID, event.ThreadID, event.Platform, agent.Slug, event.UserEmail); err != nil {
 			return textResponse(event, fmt.Sprintf("Failed to set thread default agent: %v", err)), nil
 		}
 		return textResponse(event, fmt.Sprintf("Thread default agent set to `%s`. Messages in this thread that don't match an agent name will be sent here.", agent.Slug)), nil
@@ -1257,8 +1265,10 @@ func (r *CommandRouter) cmdInfo(ctx context.Context, event *ChatEvent, args []st
 		widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Default Agent", Content: link.DefaultAgent})
 	}
 	if link != nil && event.ThreadID != "" {
-		threadAgent, threadErr := r.store.GetThreadDefault(event.SpaceID, event.ThreadID)
-		if threadErr == nil && threadAgent != "" {
+		threadAgent, threadErr := r.store.GetThreadDefault(event.SpaceID, event.ThreadID, event.Platform)
+		if threadErr != nil {
+			r.log.Error("failed to get thread default", "error", threadErr)
+		} else if threadAgent != "" {
 			widgets = append(widgets, Widget{Type: WidgetKeyValue, Label: "Thread Default", Content: threadAgent})
 		}
 	}
@@ -1330,9 +1340,9 @@ Use ` + "`/scion <text>`" + ` to message agents directly.`
 // resolveDefaultAgent returns the default agent for a message, checking
 // thread-level defaults first (if threadID is non-empty), then falling back
 // to the provided space-level default.
-func (r *CommandRouter) resolveDefaultAgent(spaceID, threadID, spaceDefault string) (string, error) {
+func (r *CommandRouter) resolveDefaultAgent(spaceID, threadID, platform, spaceDefault string) (string, error) {
 	if threadID != "" {
-		agent, err := r.store.GetThreadDefault(spaceID, threadID)
+		agent, err := r.store.GetThreadDefault(spaceID, threadID, platform)
 		if err != nil {
 			return "", err
 		}

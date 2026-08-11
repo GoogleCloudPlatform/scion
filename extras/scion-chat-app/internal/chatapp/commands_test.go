@@ -270,9 +270,9 @@ func TestResolveDefaultAgent_ThreadDefaultTakesPrecedence(t *testing.T) {
 		DefaultAgent: "space-agent",
 	})
 	// Set a thread-level default.
-	router.store.SetThreadDefault("spaces/test", "thread-1", "thread-agent", "user@example.com")
+	router.store.SetThreadDefault("spaces/test", "thread-1", "googlechat", "thread-agent", "user@example.com")
 
-	agent, err := router.resolveDefaultAgent("spaces/test", "thread-1", "space-agent")
+	agent, err := router.resolveDefaultAgent("spaces/test", "thread-1", "googlechat", "space-agent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestResolveDefaultAgent_FallsBackToSpaceDefault(t *testing.T) {
 		DefaultAgent: "space-agent",
 	})
 
-	agent, err := router.resolveDefaultAgent("spaces/test", "thread-1", "space-agent")
+	agent, err := router.resolveDefaultAgent("spaces/test", "thread-1", "googlechat", "space-agent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestResolveDefaultAgent_FallsBackToSpaceDefault(t *testing.T) {
 func TestResolveDefaultAgent_EmptyWhenNeitherSet(t *testing.T) {
 	router, _ := newTestRouter(t)
 
-	agent, err := router.resolveDefaultAgent("spaces/test", "thread-1", "")
+	agent, err := router.resolveDefaultAgent("spaces/test", "thread-1", "googlechat", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -319,9 +319,9 @@ func TestResolveDefaultAgent_EmptyThreadIDSkipsLookup(t *testing.T) {
 	router, _ := newTestRouter(t)
 
 	// Even with a thread default set, passing empty threadID should skip it.
-	router.store.SetThreadDefault("spaces/test", "thread-1", "thread-agent", "u")
+	router.store.SetThreadDefault("spaces/test", "thread-1", "googlechat", "thread-agent", "u")
 
-	agent, err := router.resolveDefaultAgent("spaces/test", "", "space-agent")
+	agent, err := router.resolveDefaultAgent("spaces/test", "", "googlechat", "space-agent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestCmdSetDefault_ThreadQueryShowsCurrentDefault(t *testing.T) {
 		ProjectSlug: "my-project",
 		LinkedBy:    "user-1",
 	})
-	router.store.SetThreadDefault("spaces/test", "thread-1", "my-agent", "u")
+	router.store.SetThreadDefault("spaces/test", "thread-1", "googlechat", "my-agent", "u")
 
 	event := &ChatEvent{
 		Type:     EventCommand,
@@ -432,8 +432,8 @@ func TestHandleSpaceRemove_CleansUpThreadDefaults(t *testing.T) {
 		ProjectSlug: "my-project",
 		LinkedBy:    "user-1",
 	})
-	router.store.SetThreadDefault("spaces/test", "thread-1", "agent-a", "u")
-	router.store.SetThreadDefault("spaces/test", "thread-2", "agent-b", "u")
+	router.store.SetThreadDefault("spaces/test", "thread-1", "googlechat", "agent-a", "u")
+	router.store.SetThreadDefault("spaces/test", "thread-2", "googlechat", "agent-b", "u")
 
 	event := &ChatEvent{
 		Type:     EventSpaceRemove,
@@ -447,8 +447,8 @@ func TestHandleSpaceRemove_CleansUpThreadDefaults(t *testing.T) {
 	}
 
 	// Verify thread defaults are cleaned up.
-	got1, _ := router.store.GetThreadDefault("spaces/test", "thread-1")
-	got2, _ := router.store.GetThreadDefault("spaces/test", "thread-2")
+	got1, _ := router.store.GetThreadDefault("spaces/test", "thread-1", "googlechat")
+	got2, _ := router.store.GetThreadDefault("spaces/test", "thread-2", "googlechat")
 	if got1 != "" || got2 != "" {
 		t.Errorf("thread defaults should be cleaned up after space removal, got thread-1=%q, thread-2=%q", got1, got2)
 	}
