@@ -393,6 +393,12 @@ func ResolveOutboundAttachments(log *slog.Logger, attachmentPaths []string, proj
 				"error", err)
 			continue
 		}
+		if fi.IsDir() {
+			log.Warn("attachment path is a directory, skipping",
+				"agent_path", agentPath,
+				"host_path", hostPath)
+			continue
+		}
 		if fi.Size() > MaxAttachmentSize {
 			log.Warn("attachment file too large, skipping",
 				"agent_path", agentPath,
@@ -485,7 +491,7 @@ func resolveAgentPath(agentPath, projectSlug, projectID string) string {
 		safePrefixes := []string{"/workspace/", "/scion-volumes/"}
 		for _, prefix := range safePrefixes {
 			if strings.HasPrefix(agentPath, prefix) {
-				clean := filepath.Clean(agentPath)
+				clean := filepath.ToSlash(filepath.Clean(agentPath))
 				// Re-check prefix after Clean to prevent traversal (e.g. /workspace/../etc/passwd).
 				if strings.HasPrefix(clean, prefix) {
 					if _, err := os.Stat(clean); err == nil {
@@ -513,7 +519,7 @@ func resolveSharedDirPath(containerPath, projectSlug, projectID string) string {
 
 	parts := strings.SplitN(trimmed, "/", 2)
 	sharedDirName := parts[0]
-	if sharedDirName == "" || sharedDirName == "." || sharedDirName == ".." {
+	if sharedDirName == "" || sharedDirName == "." || sharedDirName == ".." || strings.ContainsAny(sharedDirName, "/\\") {
 		return ""
 	}
 

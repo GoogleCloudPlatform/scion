@@ -401,8 +401,8 @@ func TestExtractAttachments(t *testing.T) {
 			msg: &rawMessage{
 				Attachment: []rawAttachment{
 					{Name: "a/1", ContentName: "file1.txt", DownloadURI: "https://example.com/1"},
-					{Name: "a/2", ContentName: "", DownloadURI: "https://example.com/2"},       // empty content name, uses Name
-					{Name: "a/3", ContentName: "file3.txt", DownloadURI: ""},                    // skipped: no URI
+					{Name: "a/2", ContentName: "", DownloadURI: "https://example.com/2"}, // empty content name, uses Name
+					{Name: "a/3", ContentName: "file3.txt", DownloadURI: ""},             // skipped: no URI
 					{Name: "a/4", ContentName: "file4.txt", DownloadURI: "https://example.com/4"},
 				},
 			},

@@ -332,18 +332,12 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		// Chat API renders them as interactive user pills.
 		mentions := n.buildMentions(mapping.PlatformUserID, agentSlug, link)
 
-		// Re-resolve attachments with this link's project info if not yet resolved.
-		linkAttachments := attachments
-		if linkAttachments == nil && len(msg.Attachments) > 0 {
-			linkAttachments = ResolveOutboundAttachments(n.log, msg.Attachments, link.ProjectSlug, link.ProjectID)
-		}
-
 		sendReq := SendMessageRequest{
 			SpaceID:     link.SpaceID,
 			ThreadID:    msg.ThreadID,
 			Text:        mentions,
 			Card:        &card,
-			Attachments: linkAttachments,
+			Attachments: attachments,
 		}
 		var sendErr error
 		if n.sendQueue != nil {

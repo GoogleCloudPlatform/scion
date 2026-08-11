@@ -33,10 +33,9 @@ import (
 )
 
 const (
-	PlatformName = "google_chat"
-	chatAPIBase  = "https://chat.googleapis.com/v1"
+	PlatformName  = "google_chat"
+	chatAPIBase   = "https://chat.googleapis.com/v1"
 	uploadAPIBase = "https://chat.googleapis.com/upload/v1"
-
 )
 
 // EventHandler processes normalized chat events and returns an optional synchronous response.
@@ -496,13 +495,13 @@ type rawSpace struct {
 }
 
 type rawMessage struct {
-	Name         string            `json:"name"`
-	Text         string            `json:"text"`
-	ArgumentText string            `json:"argumentText"`
-	Thread       *rawThread        `json:"thread,omitempty"`
-	Annotations  []rawAnnotation   `json:"annotations,omitempty"`
-	SlashCommand *rawSlashCommand  `json:"slashCommand,omitempty"`
-	Attachment   []rawAttachment   `json:"attachment,omitempty"`
+	Name         string           `json:"name"`
+	Text         string           `json:"text"`
+	ArgumentText string           `json:"argumentText"`
+	Thread       *rawThread       `json:"thread,omitempty"`
+	Annotations  []rawAnnotation  `json:"annotations,omitempty"`
+	SlashCommand *rawSlashCommand `json:"slashCommand,omitempty"`
+	Attachment   []rawAttachment  `json:"attachment,omitempty"`
 }
 
 type rawAttachment struct {
@@ -979,9 +978,17 @@ func (a *Adapter) uploadMediaToURL(ctx context.Context, url, filename string, co
 
 	// Write multipart parts in a goroutine so the HTTP request can read from
 	// the pipe reader concurrently.
-	var writeErr error
+	errChan := make(chan error, 1)
 	go func() {
-		defer pw.Close()
+		var writeErr error
+		defer func() {
+			if writeErr != nil {
+				pw.CloseWithError(writeErr)
+			} else {
+				pw.Close()
+			}
+			errChan <- writeErr
+		}()
 
 		// Part 1: JSON metadata.
 		metaHeader := make(textproto.MIMEHeader)
@@ -1028,7 +1035,7 @@ func (a *Adapter) uploadMediaToURL(ctx context.Context, url, filename string, co
 	defer resp.Body.Close()
 
 	// Check for errors from the writer goroutine.
-	if writeErr != nil {
+	if writeErr := <-errChan; writeErr != nil {
 		return "", writeErr
 	}
 

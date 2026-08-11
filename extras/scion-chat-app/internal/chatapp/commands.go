@@ -57,14 +57,14 @@ type pendingDeviceAuth struct {
 
 // CommandRouter parses and executes chat commands.
 type CommandRouter struct {
-	adminClient    hubclient.Client
-	hubURL         string
-	store          *state.Store
-	idMapper       *identity.Mapper
-	messenger      Messenger
-	downloader     AttachmentDownloader
-	broker         *BrokerServer
-	log            *slog.Logger
+	adminClient hubclient.Client
+	hubURL      string
+	store       *state.Store
+	idMapper    *identity.Mapper
+	messenger   Messenger
+	downloader  AttachmentDownloader
+	broker      *BrokerServer
+	log         *slog.Logger
 
 	mu             sync.Mutex
 	pendingAuth    map[string]*pendingDeviceAuth // keyed by platformUserID+platform
@@ -2058,10 +2058,12 @@ func (r *CommandRouter) downloadInboundAttachment(ctx context.Context, att Event
 
 	written, copyErr := io.Copy(f, io.LimitReader(body, MaxAttachmentSize+1))
 	if copyErr != nil {
+		f.Close()
 		os.Remove(destPath)
 		return "", fmt.Errorf("writing attachment: %w", copyErr)
 	}
 	if written > MaxAttachmentSize {
+		f.Close()
 		os.Remove(destPath)
 		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Name, written, MaxAttachmentSize)
 	}
