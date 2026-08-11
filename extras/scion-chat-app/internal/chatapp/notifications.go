@@ -70,7 +70,7 @@ func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic strin
 		return nil
 	}
 
-	if parts[0] != "grove" || len(parts) < 2 {
+	if parts[0] != "grove" {
 		n.log.Debug("ignoring non-grove topic", "topic", topic)
 		return nil
 	}
@@ -530,11 +530,16 @@ func (n *NotificationRelay) resolveOutboundMentions(text string) string {
 	for _, loc := range matches {
 		start, end := loc[0], loc[1]
 
-		// Skip emails embedded in URL paths.
+		// Skip emails embedded in URL paths or mailto links.
 		if start > 0 {
-			ch := text[start-1]
-			if ch == '/' || ch == ':' {
+			if text[start-1] == '/' {
 				continue
+			}
+			if text[start-1] == ':' {
+				preceding := text[:start]
+				if strings.HasSuffix(preceding, "mailto:") || strings.HasSuffix(preceding, "http:") || strings.HasSuffix(preceding, "https:") {
+					continue
+				}
 			}
 		}
 		if end < len(text) && text[end] == '/' {

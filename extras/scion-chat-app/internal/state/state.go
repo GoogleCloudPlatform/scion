@@ -273,7 +273,7 @@ func (s *Store) GetUserMappingByHubEmail(hubEmail string) (*UserMapping, error) 
 	m := &UserMapping{}
 	err := s.db.QueryRow(
 		`SELECT platform_user_id, platform, hub_user_id, hub_user_email, registered_at, registered_by
-		 FROM user_mappings WHERE hub_user_email = ?`,
+		 FROM user_mappings WHERE hub_user_email = ? COLLATE NOCASE`,
 		hubEmail,
 	).Scan(&m.PlatformUserID, &m.Platform, &m.HubUserID, &m.HubUserEmail, &m.RegisteredAt, &m.RegisteredBy)
 	if err == sql.ErrNoRows {

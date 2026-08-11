@@ -767,11 +767,12 @@ func (r *CommandRouter) cmdLink(ctx context.Context, event *ChatEvent, args []st
 
 	// Save the link
 	link := &state.SpaceLink{
-		SpaceID:     event.SpaceID,
-		Platform:    event.Platform,
-		ProjectID:   proj.ID,
-		ProjectSlug: proj.Slug,
-		LinkedBy:    mapping.HubUserID,
+		SpaceID:          event.SpaceID,
+		Platform:         event.Platform,
+		ProjectID:        proj.ID,
+		ProjectSlug:      proj.Slug,
+		LinkedBy:         mapping.HubUserID,
+		ShowStateChanges: true,
 	}
 	if err := r.store.SetSpaceLink(link); err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to save link: %v", err)), nil
