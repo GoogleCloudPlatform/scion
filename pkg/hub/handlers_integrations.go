@@ -166,6 +166,7 @@ var knownPluginCatalog = []KnownPlugin{
 	{Name: "discord", Platform: "discord", BinaryName: "scion-plugin-discord", SourceDir: "extras/scion-discord", Description: "Chat integration — built and managed by the Hub"},
 	{Name: "slack", Platform: "slack", BinaryName: "scion-plugin-slack", SourceDir: "extras/scion-slack", Description: "Chat integration — built and managed by the Hub"},
 	{Name: "a2a-bridge", Platform: "a2a", BinaryName: "scion-a2a-bridge", SourceDir: "extras/scion-a2a-bridge", SelfManaged: true, Description: "External service — installed separately, managed via admin UI"},
+	{Name: "chat-app", Platform: "gchat", BinaryName: "scion-chat-app", SourceDir: "extras/scion-chat-app", SelfManaged: true, Description: "Google Chat integration — installed separately, managed via admin UI"},
 }
 
 var knownPluginSet = func() map[string]bool {

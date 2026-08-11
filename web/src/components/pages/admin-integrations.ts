@@ -103,6 +103,9 @@ const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
   a2a: [
     { key: 'api_key', label: 'API Key', description: 'Static API key for apiKey/bearer auth schemes' },
   ],
+  gchat: [
+    { key: 'signing_key', label: 'Hub Signing Key', description: 'Shared signing key for hub authentication (HS256 JWT)', required: true },
+  ],
 };
 
 function resolvePlatform(name: string): string {
@@ -181,6 +184,15 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     { key: 'uat_cache_ttl', label: 'UAT Cache TTL',
       description: 'How long to cache UAT validation results',
       defaultValue: '60s', placeholder: '60s' },
+  ],
+  gchat: [
+    { key: 'project_id', label: 'GCP Project ID', description: 'Google Cloud project ID hosting the Chat app', defaultValue: '' },
+    { key: 'credentials', label: 'Credentials Path', description: 'Path to service account key JSON file (leave empty for ADC)', defaultValue: '' },
+    { key: 'listen_address', label: 'Webhook Listen Address', description: 'HTTP listen address for webhook mode', defaultValue: ':8443' },
+    { key: 'external_url', label: 'External URL', description: 'Public URL where Google Chat sends events', defaultValue: '' },
+    { key: 'service_account_email', label: 'Service Account Email', description: 'Email of the GCP service account (for JWT verification)', defaultValue: '' },
+    { key: 'ingress_mode', label: 'Ingress Mode', description: 'How Google Chat events are received', defaultValue: 'http', type: 'select', options: [{ label: 'HTTP Webhook', value: 'http' }, { label: 'Cloud Pub/Sub', value: 'pubsub' }] },
+    { key: 'pubsub_subscription', label: 'Pub/Sub Subscription', description: 'Full Pub/Sub subscription name (projects/PROJECT/subscriptions/SUB)', defaultValue: '' },
   ],
 };
 
