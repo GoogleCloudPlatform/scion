@@ -544,6 +544,12 @@ $$\text{core-base} \longrightarrow \text{scion-base} \longrightarrow \text{harne
 2. **`scion-base`:** Copies repository code (`cmd/`, `pkg/`, etc.) and builds the `scion` and `sciontool` binaries on top of `core-base`.
 3. **Harnesses:** Pulls `scion-base` and adds target agent packages (like `@google/gemini-cli`).
 
+:::note[Compilation Constraint: `-tags no_embed_web`]
+By default, the Hub’s Go build process compiles and embeds the frontend web assets (`web/dist/`) into the final binary. However, compiling the frontend takes time and is not required for non-hub components.
+
+Any container or binary build for a **non-hub service** (such as the A2A bridge, Discord broker, custom harnesses, or utility binaries) that imports from the `pkg/` module **must compile with `-tags no_embed_web`**. If this tag is omitted, compilation will fail with errors in `web/embed.go` because the required frontend build artifacts do not exist.
+:::
+
 #### Single-Architecture AMD64 Speed Up
 :::tip[Avoid Emulation Build Timeouts]
 The official `cloudbuild-scion-base.yaml` compiles multi-platform (`linux/amd64,linux/arm64`). Under Cloud Build, `arm64` compiles run under slow QEMU emulation on standard `amd64` machines, which **routinely times out after 30 minutes**. 

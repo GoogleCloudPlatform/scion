@@ -85,9 +85,9 @@ From your Scion repository root, compile the Go binary:
 # Using the project Makefile
 make build-a2a-bridge
 
-# Or compiling manually
+# Or compiling manually (requires the -tags no_embed_web flag to skip embedding frontend assets)
 cd extras/scion-a2a-bridge
-go build -o scion-a2a-bridge ./cmd/scion-a2a-bridge/
+go build -tags no_embed_web -o scion-a2a-bridge ./cmd/scion-a2a-bridge/
 ```
 
 Verify the binary is available:
