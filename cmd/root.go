@@ -14,6 +14,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var (
@@ -86,7 +87,7 @@ return an error instead of blocking.`,
 
 		requiresProject := true
 		switch cmdName {
-		case "help", "version", "completion", "doctor", "whoami":
+		case "help", "version", "completion", "doctor", "whoami", "global-flags":
 			requiresProject = false
 		case "init":
 			// Both top-level init and project init don't require existing project
@@ -264,6 +265,67 @@ func init() {
 
 	// Debug mode flag
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output (equivalent to SCION_DEBUG=1)")
+
+	// Hide flags leaked from rclone via transitive import.
+	// These are registered on pflag.CommandLine (the global flag set), which
+	// cobra merges into the root command's flags automatically.
+	for _, name := range []string{"cpuprofile", "memprofile", "stats"} {
+		if f := pflag.CommandLine.Lookup(name); f != nil {
+			f.Hidden = true
+		}
+	}
+
+	// Add help topic command for global flags.
+	// FlagUsages() is evaluated lazily in Run/help so that flags registered
+	// by other files' init() functions are always included regardless of
+	// file-name-driven init order.
+	globalFlagsCmd := &cobra.Command{
+		Use:   "global-flags",
+		Short: "Global flags available to all commands",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("Global flags available to all scion commands:")
+			fmt.Println()
+			fmt.Print(rootCmd.PersistentFlags().FlagUsages())
+		},
+	}
+	globalFlagsCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		fmt.Println("Global flags available to all scion commands:")
+		fmt.Println()
+		fmt.Print(rootCmd.PersistentFlags().FlagUsages())
+	})
+	rootCmd.AddCommand(globalFlagsCmd)
+
+	// Custom usage template: on subcommands, replace the full Global Flags
+	// block with a one-liner reference to "scion help global-flags".
+	rootCmd.SetUsageTemplate(`Usage:{{if .Runnable}}
+  {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
+  {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
+
+Aliases:
+  {{.NameAndAliases}}{{end}}{{if .HasExample}}
+
+Examples:
+{{.Example}}{{end}}{{if .HasAvailableSubCommands}}{{$cmds := .Commands}}{{if eq (len .Groups) 0}}
+
+Available Commands:{{range $cmds}}{{if (or .IsAvailableCommand (eq .Name "help"))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{else}}{{range $group := .Groups}}
+
+{{.Title}}{{range $cmds}}{{if (and (eq .GroupID $group.ID) (or .IsAvailableCommand (eq .Name "help")))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if not .AllChildCommandsHaveGroup}}
+
+Additional Commands:{{range $cmds}}{{if (and (eq .GroupID "") (or .IsAvailableCommand (eq .Name "help")))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
+
+Flags:
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}
+
+Use "scion help global-flags" for global flag details.{{end}}{{if .HasHelpSubCommands}}
+
+Additional help topics:{{range .Commands}}{{if .IsAdditionalHelpTopicCommand}}
+  {{rpad .CommandPath .CommandPathPadding}} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableSubCommands}}
+
+Use "{{.CommandPath}} [command] --help" for more information about a command.{{end}}
+`)
 }
 
 // GetHubEndpoint returns the effective Hub endpoint based on flags, settings,
@@ -387,7 +449,7 @@ func checkAgentContainerContext(cmd *cobra.Command) error {
 
 	cmdName := cmd.Name()
 	switch cmdName {
-	case "help", "version", "completion", "doctor", "config", "whoami", "scion":
+	case "help", "version", "completion", "doctor", "config", "whoami", "scion", "global-flags":
 		return nil
 	}
 	if cmd.Parent() != nil && cmd.Parent().Name() == "config" {

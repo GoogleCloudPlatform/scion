@@ -46,6 +46,7 @@ var agentAllowed = map[string]bool{
 	"suspend":                     true,
 	"version":                     true,
 	"whoami":                      true,
+	"global-flags":                true,
 	"notifications":               true,
 	"notifications.ack":           true,
 	"notifications.subscribe":     true,
