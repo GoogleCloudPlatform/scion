@@ -1610,9 +1610,10 @@ type Message struct {
 	Read        bool      `json:"read"`    // Whether recipient has read/acknowledged
 	AgentID     string    `json:"agentId"` // The agent involved (sender or recipient)
 	GroupID     string    `json:"groupId,omitempty"`
-	Channel     string    `json:"channel,omitempty"`
-	ThreadID    string    `json:"threadId,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
+	Channel    string `json:"channel,omitempty"`
+	ThreadID   string `json:"threadId,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch
 	// intent (design §5.2/§6.1).
@@ -1665,8 +1666,11 @@ type MessageFilter struct {
 	// Evaluated independently of RecipientID/SenderID; callers
 	// generally pick one approach or the other.
 	ParticipantID string
-	OnlyUnread    bool   // Only unread messages
-	Type          string // Filter by message type
+	OnlyUnread    bool     // Only unread messages
+	Type          string   // Filter by message type
+	Channel       string   // Filter by channel (e.g. "web", "discord")
+	Visibility    []string // Filter to listed visibility levels
+	Before        time.Time // Upper bound for created_at (exclusive)
 }
 
 // =============================================================================
