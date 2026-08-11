@@ -34,7 +34,7 @@ func newTestWebChatStore(t *testing.T) (WebChatStore, *sql.DB) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
 
-	store := NewWebChatStore(db)
+	store := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, store.Init())
 
 	return store, db
@@ -61,7 +61,7 @@ func TestWebChatStore_Init_Idempotent(t *testing.T) {
 	defer db.Close() //nolint:errcheck
 
 	// Init again should not fail.
-	store2 := NewWebChatStore(db)
+	store2 := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, store2.Init())
 }
 
@@ -74,9 +74,9 @@ func TestWebChatStore_TouchThread_Insert(t *testing.T) {
 	err := store.TouchThread(ctx, "user1", "proj1", "agent1", "msg-123", now)
 	require.NoError(t, err)
 
-	// Verify the row was inserted.
-	var userID, projectID, agentID, messageID string
-	var activityAt time.Time
+	// Verify the row was inserted. SQLite stores timestamps as TEXT, so
+	// scan into a string rather than time.Time.
+	var userID, projectID, agentID, messageID, activityAt string
 	err = db.QueryRow(`SELECT user_id, project_id, agent_id, last_message_id, last_activity_at
 		FROM webchat_thread WHERE user_id = 'user1'`).Scan(&userID, &projectID, &agentID, &messageID, &activityAt)
 	require.NoError(t, err)
@@ -84,6 +84,7 @@ func TestWebChatStore_TouchThread_Insert(t *testing.T) {
 	require.Equal(t, "proj1", projectID)
 	require.Equal(t, "agent1", agentID)
 	require.Equal(t, "msg-123", messageID)
+	require.NotEmpty(t, activityAt)
 }
 
 func TestWebChatStore_TouchThread_Upsert(t *testing.T) {

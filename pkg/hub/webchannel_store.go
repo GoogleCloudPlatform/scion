@@ -29,6 +29,13 @@ import (
 // (see extras/scion-discord/internal/discord/store.go). They are NOT
 // Ent entities — this keeps the Ent migration graph clean and preserves
 // the option to extract native chat into a plugin binary later.
+//
+// Two implementations exist — one per dialect:
+//   - sqliteWebChatStore  (this file)       — uses ? placeholders, TEXT/INTEGER DDL
+//   - pgWebChatStore      (webchannel_store_postgres.go) — uses $N placeholders, TIMESTAMPTZ/BOOLEAN DDL
+//
+// This mirrors the Discord store split
+// (extras/scion-discord/internal/discord/store.go vs store_postgres.go).
 type WebChatStore interface {
 	// Init creates the webchat_* tables if they do not exist.
 	Init() error
@@ -45,28 +52,38 @@ type WebChatStore interface {
 	RecordChannel(ctx context.Context, userID, projectID, agentID, channel string, messageAt time.Time) error
 }
 
-// sqlWebChatStore implements WebChatStore using a *sql.DB handle.
-// It uses portable SQL that works on both SQLite and Postgres.
-type sqlWebChatStore struct {
+// NewWebChatStore creates a new WebChatStore backed by the given database.
+// The driverName selects the SQL dialect: "postgres" or "pgx" for Postgres,
+// anything else (including "" and "sqlite") for SQLite.
+func NewWebChatStore(db *sql.DB, driverName string) WebChatStore {
+	switch driverName {
+	case "postgres", "pgx":
+		return &pgWebChatStore{db: db}
+	default:
+		return &sqliteWebChatStore{db: db}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SQLite implementation
+// ---------------------------------------------------------------------------
+
+// sqliteWebChatStore implements WebChatStore for SQLite.
+// Uses ? placeholders and SQLite-appropriate DDL types (TEXT, INTEGER).
+type sqliteWebChatStore struct {
 	db *sql.DB
 }
 
-// NewWebChatStore creates a new WebChatStore backed by the given database.
-func NewWebChatStore(db *sql.DB) WebChatStore {
-	return &sqlWebChatStore{db: db}
-}
-
-// Init creates the webchat_* tables if they do not exist.
-// Uses portable SQL compatible with both SQLite and Postgres.
-func (s *sqlWebChatStore) Init() error {
+// Init creates the webchat_* tables using SQLite DDL conventions.
+func (s *sqliteWebChatStore) Init() error {
 	const ddl = `
 CREATE TABLE IF NOT EXISTS webchat_thread (
     user_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     last_message_id TEXT,
-    last_activity_at TIMESTAMP,
-    last_read_at TIMESTAMP,
+    last_activity_at TEXT,
+    last_read_at TEXT,
     PRIMARY KEY (user_id, project_id, agent_id)
 );
 
@@ -75,7 +92,7 @@ CREATE TABLE IF NOT EXISTS webchat_conversation_context (
     project_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     last_channel TEXT,
-    last_message_at TIMESTAMP,
+    last_message_at TEXT,
     PRIMARY KEY (user_id, project_id, agent_id)
 );
 
@@ -84,9 +101,9 @@ CREATE TABLE IF NOT EXISTS webchat_thread_prefs (
     project_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     visibility_mode TEXT DEFAULT 'conversation',
-    show_state_changes BOOLEAN DEFAULT true,
-    show_agent_to_agent BOOLEAN DEFAULT false,
-    muted BOOLEAN DEFAULT false,
+    show_state_changes INTEGER DEFAULT 0,
+    show_agent_to_agent INTEGER DEFAULT 0,
+    muted INTEGER DEFAULT 0,
     PRIMARY KEY (user_id, project_id, agent_id)
 );
 `
@@ -98,10 +115,7 @@ CREATE TABLE IF NOT EXISTS webchat_thread_prefs (
 }
 
 // TouchThread upserts the thread watermark for the given (user, project, agent) triple.
-//
-// Uses INSERT ... ON CONFLICT ... DO UPDATE which is portable across SQLite ≥3.24
-// and all supported Postgres versions.
-func (s *sqlWebChatStore) TouchThread(ctx context.Context, userID, projectID, agentID, messageID string, activityAt time.Time) error {
+func (s *sqliteWebChatStore) TouchThread(ctx context.Context, userID, projectID, agentID, messageID string, activityAt time.Time) error {
 	const query = `
 INSERT INTO webchat_thread (user_id, project_id, agent_id, last_message_id, last_activity_at)
 VALUES (?, ?, ?, ?, ?)
@@ -118,10 +132,7 @@ DO UPDATE SET
 }
 
 // RecordChannel upserts the reply-affinity context for the given (user, project, agent) triple.
-//
-// Uses INSERT ... ON CONFLICT ... DO UPDATE which is portable across SQLite ≥3.24
-// and all supported Postgres versions.
-func (s *sqlWebChatStore) RecordChannel(ctx context.Context, userID, projectID, agentID, channel string, messageAt time.Time) error {
+func (s *sqliteWebChatStore) RecordChannel(ctx context.Context, userID, projectID, agentID, channel string, messageAt time.Time) error {
 	const query = `
 INSERT INTO webchat_conversation_context (user_id, project_id, agent_id, last_channel, last_message_at)
 VALUES (?, ?, ?, ?, ?)

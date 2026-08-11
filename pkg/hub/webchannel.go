@@ -44,9 +44,8 @@ import (
 // Registered as Observer: true, so a webchat_* write failure degrades the
 // rail rather than failing the user's message.
 type webChannelBus struct {
-	log      *slog.Logger
-	store    WebChatStore
-	patterns []string
+	log   *slog.Logger
+	store WebChatStore
 }
 
 // NewWebChannelBus creates a web channel spoke backed by the given store.
@@ -75,6 +74,11 @@ func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages
 
 	// 1. Thread watermark — this is what makes the Phase 5 rail endpoint
 	//    a single indexed read instead of an aggregate query.
+	//
+	// messageID is "" because StructuredMessage has no ID field — the
+	// store-assigned ID is only available after deliverToUser persists the
+	// message on the inprocess spoke, which runs concurrently. Phase 5
+	// will address this gap (design §5.3).
 	if err := b.store.TouchThread(ctx, userID, projectID, agentID, "", now); err != nil {
 		b.log.Error("Failed to update thread watermark",
 			"user_id", userID, "project_id", projectID, "agent_id", agentID, "error", err)
@@ -91,11 +95,12 @@ func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages
 	return nil
 }
 
-// Subscribe records the pattern and DISCARDS the handler. This is not a
-// shortcut — it is the same contract every plugin adapter follows (F7).
-// A real handler causes double-persist plus double-SSE (F8, issue #944).
-func (b *webChannelBus) Subscribe(pattern string, _ eventbus.EventHandler) (eventbus.Subscription, error) {
-	b.patterns = append(b.patterns, pattern)
+// Subscribe DISCARDS the handler. This is not a shortcut — it is the same
+// contract every plugin adapter follows (F7). A real handler causes
+// double-persist plus double-SSE (F8, issue #944). Unlike plugin adapters
+// that track activeSubs for reconnect replay, the web spoke has no
+// reconnect path, so patterns are not retained.
+func (b *webChannelBus) Subscribe(_ string, _ eventbus.EventHandler) (eventbus.Subscription, error) {
 	return webNoopSubscription{}, nil
 }
 

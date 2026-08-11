@@ -591,7 +591,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				// rather than failing the user's message.
 				if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
 					if rawDB := dbProvider.DB(); rawDB != nil {
-						webStore := hub.NewWebChatStore(rawDB)
+						webStore := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
 						if err := webStore.Init(); err != nil {
 							log.Printf("Warning: failed to initialize webchat store: %v", err)
 						} else {
