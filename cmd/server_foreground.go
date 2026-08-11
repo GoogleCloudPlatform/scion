@@ -1466,6 +1466,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		// new host that changed the HubID). Operators enabling this must supply a
 		// session secret or pre-provision the signing keys.
 		RequireStableSigningKey: os.Getenv("SCION_REQUIRE_STABLE_SIGNING_KEY") == "true",
+		OIDCLogin:               cfg.OIDCLogin,
 		OIDCConfig:              cfg.OIDC,
 		Federation:              cfg.Federation,
 	}

@@ -236,6 +236,8 @@ type ServerConfig struct {
 	// DevUserConfig holds optional identity overrides for the development user.
 	DevUserConfig DevUserConfig
 
+	// OIDCLogin holds configuration for an external OIDC provider for web login.
+	OIDCLogin config.OIDCLoginConfig
 	// OIDCConfig holds configuration for the OIDC Identity Provider feature.
 	// When Enabled, the hub initializes an OIDCKeyManager and exposes OIDC endpoints.
 	OIDCConfig config.OIDCProviderConfig
@@ -982,14 +984,20 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize Teams link service
 	srv.teamsLinkService = NewTeamsLinkService()
 
-	// Initialize OAuth service if configured
-	if cfg.OAuthConfig.IsConfigured() {
-		srv.oauthService = NewOAuthService(cfg.OAuthConfig)
+	// Initialize OAuth service if configured (traditional OAuth or OIDC login)
+	oidcLoginCfg := &cfg.OIDCLogin // may be zero-value (Enabled=false)
+	if cfg.OAuthConfig.IsConfigured() || cfg.OIDCLogin.Enabled {
+		srv.oauthService = NewOAuthService(cfg.OAuthConfig, oidcLoginCfg)
 		slog.Info("OAuth service initialized")
 		// Log which providers are configured
 		logOAuthProviders("Web", cfg.OAuthConfig.Web)
 		logOAuthProviders("CLI", cfg.OAuthConfig.CLI)
 		logOAuthProviders("Device", cfg.OAuthConfig.Device)
+		if cfg.OIDCLogin.Enabled {
+			slog.Info("OIDC login provider configured",
+				"displayName", cfg.OIDCLogin.DisplayName,
+				"issuerUrl", cfg.OIDCLogin.IssuerURL)
+		}
 	} else {
 		slog.Info("OAuth service NOT configured - no providers available")
 		slog.Info("To enable OAuth, set environment variables SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID, etc.")

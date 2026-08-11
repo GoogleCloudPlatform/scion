@@ -28,6 +28,7 @@ type OAuthClientType string
 const (
 	OAuthProviderGoogle = "google"
 	OAuthProviderGitHub = "github"
+	OAuthProviderOIDC   = "oidc"
 
 	OAuthClientTypeWeb    OAuthClientType = "web"
 	OAuthClientTypeCLI    OAuthClientType = "cli"
@@ -38,6 +39,7 @@ func OAuthProviderOrder() []string {
 	return []string{
 		OAuthProviderGoogle,
 		OAuthProviderGitHub,
+		OAuthProviderOIDC,
 	}
 }
 

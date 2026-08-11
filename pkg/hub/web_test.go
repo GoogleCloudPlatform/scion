@@ -1207,7 +1207,7 @@ func TestOAuthLogin_Redirect(t *testing.T) {
 				ClientSecret: "test-client-secret",
 			},
 		},
-	})
+	}, nil)
 
 	req := httptest.NewRequest("GET", "/auth/login/google", nil)
 	rec := httptest.NewRecorder()
@@ -1237,7 +1237,7 @@ func TestOAuthLogin_ProviderNotConfigured(t *testing.T) {
 			},
 			// GitHub not configured
 		},
-	})
+	}, nil)
 
 	req := httptest.NewRequest("GET", "/auth/login/github", nil)
 	rec := httptest.NewRecorder()
@@ -1272,7 +1272,7 @@ func TestOAuthCallback_StateMismatch(t *testing.T) {
 				ClientSecret: "test-secret",
 			},
 		},
-	})
+	}, nil)
 	// Set a mock store so the handler doesn't short-circuit with 503
 	ws.store = &mockWebStore{}
 
@@ -1661,7 +1661,7 @@ func TestHandleOAuthCallback_CookieOverflowRetry(t *testing.T) {
 				ClientSecret: "test-client-secret",
 			},
 		},
-	})
+	}, nil)
 	// Use enterprise-sized identity fields. These values are embedded in both
 	// Hub JWT tokens (access + refresh), so longer values produce bigger tokens.
 	// Combined with identity session values and securecookie encoding overhead
@@ -1777,7 +1777,7 @@ func TestSetters(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 
 	// Verify setters don't panic and fields are set
-	oauthSvc := NewOAuthService(OAuthConfig{})
+	oauthSvc := NewOAuthService(OAuthConfig{}, nil)
 	ws.SetOAuthService(oauthSvc)
 	assert.Equal(t, oauthSvc, ws.oauthService)
 
@@ -2083,7 +2083,7 @@ func TestLoginPageNoOAuthAttributes(t *testing.T) {
 				ClientSecret: "test-google-secret",
 			},
 		},
-	})
+	}, nil)
 	ws.SetOAuthService(oauthSvc)
 
 	req := httptest.NewRequest("GET", "/login", nil)
@@ -2127,7 +2127,7 @@ func TestAuthProviders_WithProviders(t *testing.T) {
 				ClientSecret: "g-secret",
 			},
 		},
-	}))
+	}, nil))
 
 	req := httptest.NewRequest("GET", "/auth/providers", nil)
 	rec := httptest.NewRecorder()
