@@ -1498,8 +1498,8 @@ export class ScionPageAdminIntegrations extends LitElement {
     const platform = resolvePlatform(d.name);
     if (platform !== 'teams') return nothing;
 
-    const appId = (this.editedSettings['app_id'] ?? '').trim();
-    const tenantId = (this.editedSettings['tenant_id'] ?? '').trim();
+    const appId = (d.settings['app_id'] ?? '').trim();
+    const tenantId = (d.settings['tenant_id'] ?? '').trim();
     if (!appId || !tenantId) return nothing;
 
     const downloadUrl = '/api/v1/admin/integrations/teams/manifest';

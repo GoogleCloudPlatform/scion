@@ -24,8 +24,19 @@ import (
 	"image/png"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+)
+
+// Cached placeholder PNGs — generated once, reused on every request.
+var (
+	colorPNGOnce     sync.Once
+	outlinePNGOnce   sync.Once
+	cachedColorPNG   []byte
+	cachedOutlinePNG []byte
+	colorPNGErr      error
+	outlinePNGErr    error
 )
 
 // teamsManifest mirrors the Azure Teams app manifest schema (v1.16).
@@ -138,10 +149,12 @@ func (s *Server) handleTeamsManifestDownload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Add color.png (192x192).
-	colorPNG, err := generatePlaceholderPNG(192, color.RGBA{R: 74, G: 144, B: 217, A: 255})
-	if err != nil {
-		slog.Error("failed to generate color.png", "error", err)
+	// Add color.png (192x192) — uses cached, pre-generated image.
+	colorPNGOnce.Do(func() {
+		cachedColorPNG, colorPNGErr = generatePlaceholderPNG(192, color.RGBA{R: 74, G: 144, B: 217, A: 255})
+	})
+	if colorPNGErr != nil {
+		slog.Error("failed to generate color.png", "error", colorPNGErr)
 		http.Error(w, "internal error generating manifest", http.StatusInternalServerError)
 		return
 	}
@@ -151,16 +164,18 @@ func (s *Server) handleTeamsManifestDownload(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "internal error generating zip", http.StatusInternalServerError)
 		return
 	}
-	if _, err := cf.Write(colorPNG); err != nil {
+	if _, err := cf.Write(cachedColorPNG); err != nil {
 		slog.Error("failed to write color.png", "error", err)
 		http.Error(w, "internal error generating zip", http.StatusInternalServerError)
 		return
 	}
 
-	// Add outline.png (32x32).
-	outlinePNG, err := generatePlaceholderPNG(32, color.RGBA{R: 255, G: 255, B: 255, A: 255})
-	if err != nil {
-		slog.Error("failed to generate outline.png", "error", err)
+	// Add outline.png (32x32) — uses cached, pre-generated image.
+	outlinePNGOnce.Do(func() {
+		cachedOutlinePNG, outlinePNGErr = generatePlaceholderPNG(32, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+	})
+	if outlinePNGErr != nil {
+		slog.Error("failed to generate outline.png", "error", outlinePNGErr)
 		http.Error(w, "internal error generating manifest", http.StatusInternalServerError)
 		return
 	}
@@ -170,7 +185,7 @@ func (s *Server) handleTeamsManifestDownload(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "internal error generating zip", http.StatusInternalServerError)
 		return
 	}
-	if _, err := of.Write(outlinePNG); err != nil {
+	if _, err := of.Write(cachedOutlinePNG); err != nil {
 		slog.Error("failed to write outline.png", "error", err)
 		http.Error(w, "internal error generating zip", http.StatusInternalServerError)
 		return
