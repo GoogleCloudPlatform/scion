@@ -139,7 +139,12 @@ func (s *Server) handleTeamsManifestDownload(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Add color.png (192x192).
-	colorPNG := generatePlaceholderPNG(192, color.RGBA{R: 74, G: 144, B: 217, A: 255})
+	colorPNG, err := generatePlaceholderPNG(192, color.RGBA{R: 74, G: 144, B: 217, A: 255})
+	if err != nil {
+		slog.Error("failed to generate color.png", "error", err)
+		http.Error(w, "internal error generating manifest", http.StatusInternalServerError)
+		return
+	}
 	cf, err := zw.Create("color.png")
 	if err != nil {
 		slog.Error("failed to create color.png in zip", "error", err)
@@ -153,7 +158,12 @@ func (s *Server) handleTeamsManifestDownload(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Add outline.png (32x32).
-	outlinePNG := generatePlaceholderPNG(32, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+	outlinePNG, err := generatePlaceholderPNG(32, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+	if err != nil {
+		slog.Error("failed to generate outline.png", "error", err)
+		http.Error(w, "internal error generating manifest", http.StatusInternalServerError)
+		return
+	}
 	of, err := zw.Create("outline.png")
 	if err != nil {
 		slog.Error("failed to create outline.png in zip", "error", err)
@@ -176,7 +186,9 @@ func (s *Server) handleTeamsManifestDownload(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Disposition", `attachment; filename="teams-app.zip"`)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", buf.Len()))
 	w.WriteHeader(http.StatusOK)
-	w.Write(buf.Bytes())
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		slog.Error("failed to write manifest zip response", "error", err)
+	}
 }
 
 // loadTeamsConfig reads the current Teams integration config.
@@ -251,7 +263,7 @@ func buildTeamsManifest(appID string) teamsManifest {
 }
 
 // generatePlaceholderPNG creates a minimal solid-color PNG of the given size.
-func generatePlaceholderPNG(size int, c color.Color) []byte {
+func generatePlaceholderPNG(size int, c color.Color) ([]byte, error) {
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
@@ -259,6 +271,8 @@ func generatePlaceholderPNG(size int, c color.Color) []byte {
 		}
 	}
 	var buf bytes.Buffer
-	_ = png.Encode(&buf, img)
-	return buf.Bytes()
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, fmt.Errorf("encode PNG: %w", err)
+	}
+	return buf.Bytes(), nil
 }
