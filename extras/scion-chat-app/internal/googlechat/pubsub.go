@@ -75,10 +75,11 @@ func NewPubSubIngress(subscriptionResource string, adapter *Adapter, credentials
 // Start begins pulling messages from the Pub/Sub subscription. Each message
 // is unmarshalled, normalized via the adapter's normalizeEvent, passed to the
 // event handler, and the response is dispatched asynchronously via Chat API
-// calls. Messages are acked early (after parsing) to avoid redelivery — the
-// existing dedup filter (Phase 2) handles any duplicate messages.
+// calls. Messages are acked only after successful processing to preserve
+// Pub/Sub's at-least-once delivery guarantees.
 func (p *PubSubIngress) Start(ctx context.Context) error {
 	p.log.Info("pubsub ingress starting", "subscription", p.subscription.String())
+	defer p.client.Close()
 
 	return p.subscription.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 		p.log.Debug("pubsub message received",
@@ -111,11 +112,7 @@ func (p *PubSubIngress) Start(ctx context.Context) error {
 			"message_id", msg.ID,
 		)
 
-		// 3. Ack early — after successful parsing, before processing.
-		// The dedup filter handles any duplicate Pub/Sub messages.
-		msg.Ack()
-
-		// 4. Pass to event handler.
+		// 3. Pass to event handler.
 		resp, err := p.adapter.eventHandler(ctx, event)
 		if err != nil {
 			p.log.Error("event handler error",
@@ -123,10 +120,11 @@ func (p *PubSubIngress) Start(ctx context.Context) error {
 				"error", err,
 				"message_id", msg.ID,
 			)
+			msg.Nack()
 			return
 		}
 
-		// 5. Convert EventResponse to async API calls.
+		// 4. Convert EventResponse to async API calls.
 		if resp != nil {
 			if err := p.handleAsyncResponse(ctx, event, resp); err != nil {
 				p.log.Error("async response error",
@@ -134,16 +132,19 @@ func (p *PubSubIngress) Start(ctx context.Context) error {
 					"error", err,
 					"message_id", msg.ID,
 				)
+				msg.Nack()
+				return
 			}
 		}
+
+		// 5. Ack after successful processing.
+		msg.Ack()
 	})
 }
 
-// Stop closes the underlying Pub/Sub client.
+// Stop is a no-op — the Pub/Sub client is closed via defer in Start after
+// Receive returns, ensuring all in-flight message handlers complete first.
 func (p *PubSubIngress) Stop() error {
-	if p.client != nil {
-		return p.client.Close()
-	}
 	return nil
 }
 
@@ -224,8 +225,8 @@ func dialogToCard(d *chatapp.Dialog) chatapp.Card {
 		switch f.Type {
 		case "text", "textarea":
 			widgets = append(widgets, chatapp.Widget{
-				Type:    chatapp.WidgetInput,
-				Label:   f.Label,
+				Type:     chatapp.WidgetInput,
+				Label:    f.Label,
 				ActionID: f.ID,
 			})
 		case "select", "checkbox":

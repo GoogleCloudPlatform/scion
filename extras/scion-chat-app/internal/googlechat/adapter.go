@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -73,6 +74,9 @@ func NewAdapter(cfg Config, handler EventHandler, httpClient *http.Client, log *
 	cmdIDs := cfg.CommandIDMap
 	if cmdIDs == nil {
 		cmdIDs = make(map[string]string)
+	}
+	if log == nil {
+		log = slog.Default()
 	}
 	return &Adapter{
 		config:       cfg,
@@ -138,8 +142,15 @@ func (a *Adapter) startPubSub(listenAddr string) error {
 	a.pubsubCancel = cancel
 	a.pubsubIngress = ingress
 
+	// Bind to the port synchronously to catch startup errors.
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("starting health server listener: %w", err)
+	}
+
 	// Start a minimal health endpoint for probes.
-	a.startHealthServer(listenAddr)
+	a.startHealthServer(ln)
 
 	a.log.Info("starting pubsub ingress", "subscription", sub)
 	return ingress.Start(ctx)
@@ -163,8 +174,9 @@ func (a *Adapter) Stop(ctx context.Context) error {
 
 // startHealthServer starts a minimal HTTP server exposing /healthz for
 // liveness/readiness probes. It is used in Pub/Sub mode where no other
-// HTTP server is running.
-func (a *Adapter) startHealthServer(listenAddr string) {
+// HTTP server is running. The listener is pre-bound so that port conflicts
+// are caught synchronously during startup.
+func (a *Adapter) startHealthServer(ln net.Listener) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -172,13 +184,12 @@ func (a *Adapter) startHealthServer(listenAddr string) {
 	})
 
 	a.httpServer = &http.Server{
-		Addr:    listenAddr,
 		Handler: mux,
 	}
 
 	go func() {
-		a.log.Info("health server starting (pubsub mode)", "address", listenAddr)
-		if err := a.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		a.log.Info("health server starting (pubsub mode)", "address", ln.Addr().String())
+		if err := a.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			a.log.Error("health server error", "error", err)
 		}
 	}()
