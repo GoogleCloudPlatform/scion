@@ -42,6 +42,9 @@ type OutboundMessageRequest struct {
 	Channel     string            `json:"channel,omitempty"`
 	ThreadID    string            `json:"thread_id,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	// Visibility controls which consumers see this message.
+	// One of "normal", "verbose", "full". Empty defaults to "normal".
+	Visibility string `json:"visibility,omitempty"`
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
@@ -76,6 +79,17 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if req.Type == "" {
 		req.Type = "input-needed"
+	}
+
+	// Validate and default visibility.
+	switch req.Visibility {
+	case "":
+		req.Visibility = messages.VisibilityNormal
+	case messages.VisibilityNormal, messages.VisibilityVerbose, messages.VisibilityFull:
+		// valid
+	default:
+		ValidationError(w, fmt.Sprintf("invalid visibility %q; must be one of: normal, verbose, full", req.Visibility), nil)
+		return
 	}
 
 	agent, err := s.store.GetAgent(ctx, id)
@@ -175,6 +189,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		AgentID:     agent.ID,
 		Channel:     req.Channel,
 		ThreadID:    req.ThreadID,
+		Visibility:  req.Visibility,
 		CreatedAt:   time.Now(),
 	}
 
@@ -190,6 +205,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Attachments: req.Attachments,
 		Channel:     req.Channel,
 		ThreadID:    req.ThreadID,
+		Visibility:  req.Visibility,
 		Metadata:    req.Metadata,
 	}
 	// Propagate recipients and group_id from metadata for group-set messages.
