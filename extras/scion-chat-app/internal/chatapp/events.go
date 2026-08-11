@@ -20,6 +20,7 @@ type ChatEvent struct {
 	Platform        string
 	SpaceID         string
 	ThreadID        string
+	MessageName     string // message resource name (e.g. "spaces/x/messages/y") for UpdateMessage
 	UserID          string
 	UserEmail       string // user's email from the chat platform (Google-asserted identity)
 	UserDisplayName string

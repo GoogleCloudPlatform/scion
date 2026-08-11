@@ -37,6 +37,7 @@ type EventHandler func(ctx context.Context, event *chatapp.ChatEvent) (*chatapp.
 
 // Adapter implements the chatapp.Messenger interface for Google Chat.
 type Adapter struct {
+	config       Config
 	projectID    string
 	externalURL  string
 	commandIDs   map[string]string // command ID → command name
@@ -57,6 +58,8 @@ type Config struct {
 	CommandIDMap        map[string]string // Console command ID → command name
 	ListenAddress       string
 	Credentials         string // Path to service account key
+	IngressMode         string // "http" (default) or "pubsub"
+	PubSubSubscription  string // Pub/Sub subscription resource name
 }
 
 // NewAdapter creates a new Google Chat adapter.
@@ -69,6 +72,7 @@ func NewAdapter(cfg Config, handler EventHandler, httpClient *http.Client, log *
 		cmdIDs = make(map[string]string)
 	}
 	return &Adapter{
+		config:       cfg,
 		projectID:    cfg.ProjectID,
 		externalURL:  cfg.ExternalURL,
 		commandIDs:   cmdIDs,
@@ -79,8 +83,18 @@ func NewAdapter(cfg Config, handler EventHandler, httpClient *http.Client, log *
 	}
 }
 
-// Start begins serving the HTTP webhook endpoint for Google Chat events.
+// Start begins serving events. When ingress_mode is "pubsub" (or a
+// pubsub_subscription is configured), events arrive via Cloud Pub/Sub.
+// Otherwise the default HTTP webhook endpoint is used.
 func (a *Adapter) Start(listenAddr string) error {
+	if a.config.IngressMode == "pubsub" || a.config.PubSubSubscription != "" {
+		return a.startPubSub()
+	}
+	return a.startHTTP(listenAddr)
+}
+
+// startHTTP serves the HTTP webhook endpoint for Google Chat events.
+func (a *Adapter) startHTTP(listenAddr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /chat/events", a.handleEvent)
 	mux.HandleFunc("GET /chat/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -95,6 +109,20 @@ func (a *Adapter) Start(listenAddr string) error {
 
 	a.log.Info("google chat webhook server starting", "address", listenAddr)
 	return a.httpServer.ListenAndServe()
+}
+
+// startPubSub creates a Pub/Sub client and starts the PubSubIngress.
+func (a *Adapter) startPubSub() error {
+	sub := a.config.PubSubSubscription
+	if sub == "" {
+		return fmt.Errorf("pubsub ingress mode requires pubsub_subscription to be set")
+	}
+	ingress, err := NewPubSubIngress(sub, a, a.config.Credentials, a.log)
+	if err != nil {
+		return fmt.Errorf("creating pubsub ingress: %w", err)
+	}
+	a.log.Info("starting pubsub ingress", "subscription", sub)
+	return ingress.Start(context.Background())
 }
 
 // Stop gracefully shuts down the webhook server.
@@ -503,6 +531,7 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		}
 		if p.Message != nil {
 			event.Args = strings.TrimSpace(p.Message.ArgumentText)
+			event.MessageName = p.Message.Name
 			if p.Message.Thread != nil {
 				event.ThreadID = p.Message.Thread.Name
 			}
@@ -517,6 +546,7 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		if p.Space != nil {
 			event.SpaceID = p.Space.Name
 		}
+		event.MessageName = p.Message.Name
 		if p.Message.Thread != nil {
 			event.ThreadID = p.Message.Thread.Name
 		}
@@ -544,8 +574,11 @@ func (a *Adapter) normalizeEvent(raw *rawEvent) *chatapp.ChatEvent {
 		if p.Space != nil {
 			event.SpaceID = p.Space.Name
 		}
-		if p.Message != nil && p.Message.Thread != nil {
-			event.ThreadID = p.Message.Thread.Name
+		if p.Message != nil {
+			event.MessageName = p.Message.Name
+			if p.Message.Thread != nil {
+				event.ThreadID = p.Message.Thread.Name
+			}
 		}
 		event.IsDialogEvent = p.IsDialogEvent
 

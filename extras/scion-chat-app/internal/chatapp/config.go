@@ -90,6 +90,8 @@ type GoogleChatConfig struct {
 	CommandIDMap        map[string]string `yaml:"command_id_map"`
 	SendQueueSize       int               `yaml:"send_queue_size"` // default 100
 	SendMinDelay        Duration          `yaml:"send_min_delay"`  // default "100ms"
+	IngressMode         string            `yaml:"ingress_mode"`        // "http" (default) or "pubsub"
+	PubSubSubscription  string            `yaml:"pubsub_subscription"` // e.g. "projects/my-proj/subscriptions/chat-events"
 }
 
 // SlackConfig holds settings for the Slack adapter (future).
