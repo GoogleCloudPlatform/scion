@@ -119,9 +119,10 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		// whether the CLI binary exists in the container image.
 		if os.Getenv("K_SERVICE") != "" {
 			util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), docker daemon unavailable — using cloudrun runtime")
-			rt := NewCloudRunRuntime(rtConfig.CloudRun)
-			if vs != nil && vs.Server != nil {
-				rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+			rt, err := NewCloudRunRuntime(rtConfig.CloudRun)
+			if err != nil {
+				util.Debugf("GetRuntime: failed to create cloudrun runtime for K_SERVICE fallback: %v", err)
+				return &ErrorRuntime{Err: err}
 			}
 			return rt
 		}
