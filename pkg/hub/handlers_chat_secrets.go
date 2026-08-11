@@ -108,6 +108,8 @@ func ChatSecretDescription(secretKey string) string {
 		return "Discord application public key"
 	case config.SecretGChatSigningKey:
 		return "Google Chat signing key"
+	case config.SecretTeamsAppSecret:
+		return "Microsoft Teams app secret (Azure App Registration client secret)"
 	default:
 		slog.Warn("Unknown chat secret key", "key", secretKey)
 		return "Chat integration secret"

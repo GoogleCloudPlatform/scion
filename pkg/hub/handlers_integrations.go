@@ -167,6 +167,7 @@ var knownPluginCatalog = []KnownPlugin{
 	{Name: "slack", Platform: "slack", BinaryName: "scion-plugin-slack", SourceDir: "extras/scion-slack", Description: "Chat integration — built and managed by the Hub"},
 	{Name: "a2a-bridge", Platform: "a2a", BinaryName: "scion-a2a-bridge", SourceDir: "extras/scion-a2a-bridge", SelfManaged: true, Description: "External service — installed separately, managed via admin UI"},
 	{Name: "chat-app", Platform: "gchat", BinaryName: "scion-chat-app", SourceDir: "extras/scion-chat-app", SelfManaged: true, Description: "Google Chat integration — installed separately, managed via admin UI"},
+	{Name: "teams", Platform: "teams", BinaryName: "scion-plugin-teams", SourceDir: "extras/scion-teams", Description: "Chat integration — built and managed by the Hub"},
 }
 
 var knownPluginSet = func() map[string]bool {
@@ -1377,6 +1378,8 @@ func resolvePlatform(name string) string {
 		return "gchat"
 	case "a2a-bridge":
 		return "a2a"
+	case "teams":
+		return "teams"
 	default:
 		return name
 	}
