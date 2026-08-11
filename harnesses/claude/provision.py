@@ -37,9 +37,8 @@ This script's job:
   3. Update .claude.json project paths to point at the container workspace.
   4. Translate universal MCP servers into Claude Code's native mcpServers
      format in .claude.json.
-  5. Resolve the requested model (the SCION_MODEL env var), mapping size
-     aliases (small/medium/large/extra-large) through config.yaml's
-     model_aliases, and publish it as ANTHROPIC_MODEL in the env overlay.
+  5. Publish the resolved model (the SCION_MODEL env var, already resolved
+     by the Go side) as ANTHROPIC_MODEL in the env overlay.
   6. Write outputs/resolved-auth.json describing the chosen method.
   7. Write outputs/env.json with env vars to project into the harness process
      (e.g. ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_MODEL, or
@@ -77,22 +76,6 @@ CLAUDE_AUTH_FILE = "~/.claude/.credentials.json"
 # environment always wins over the provisioner's env overlay — which made the
 # requested model impossible to apply.
 DEFAULT_MODEL = "opus"
-
-# The canonical size aliases, mirroring config.KnownModelAliases
-# (pkg/config/templates.go). Only these four resolve through config.yaml's
-# model_aliases map; anything else is treated as a concrete model name.
-KNOWN_MODEL_ALIASES = frozenset({"small", "medium", "large", "extra-large"})
-
-# Shorthand spellings for those aliases, mirroring config.NormalizeModelAlias
-# (pkg/config/templates.go). Deliberately no extra spellings: a form accepted
-# here but not there would make ANTHROPIC_MODEL disagree with the --model flag
-# the Go side computes from the same request.
-MODEL_ALIAS_SHORTHAND = {
-    "s": "small",
-    "m": "medium",
-    "l": "large",
-    "xl": "extra-large",
-}
 
 AUTH = scion_harness.AuthSpec(
     harness="claude",
@@ -240,70 +223,21 @@ def _update_project_paths(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.atomic_write_json(claude_json_path, cfg)
 
 
-def _normalize_model_alias(model: str) -> str:
-    """Lower-case a model string and expand the single-letter shorthands.
-
-    Mirrors config.NormalizeModelAlias (pkg/config/templates.go) exactly so the
-    model this script derives cannot disagree with the one the Go side derives
-    for --model / SCION_MODEL. Keep the two in sync.
-    """
-    normalized = model.strip().lower()
-    return MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
-
-
-def _resolve_model_alias(ctx: scion_harness.ProvisionContext, raw_model: str) -> str:
-    """Resolve a size alias (e.g. 'medium') to a concrete Claude model name.
-
-    Mirrors config.ResolveModelAlias (pkg/config/templates.go): only the four
-    canonical tiers are treated as aliases, and the concrete name they map to
-    comes from config.yaml's model_aliases block so operators can re-point the
-    tiers without touching this script. Anything else (e.g. 'sonnet' or
-    'claude-sonnet-4-5') is a concrete model name and passes through.
-    """
-    if not raw_model:
-        return ""
-
-    normalized = _normalize_model_alias(raw_model)
-    if normalized not in KNOWN_MODEL_ALIASES:
-        return normalized
-
-    aliases = ctx.harness_config.get("model_aliases") or {}
-    if not isinstance(aliases, dict):
-        return normalized
-
-    concrete = aliases.get(normalized)
-    if not concrete:
-        return normalized
-
-    if str(concrete) != raw_model:
-        ctx.info(f"resolved model alias {raw_model!r} → {concrete!r}")
-    return str(concrete)
-
-
 def _apply_model(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> str:
-    """Resolve the requested model and publish it as ANTHROPIC_MODEL.
+    """Read the resolved model from SCION_MODEL and publish as ANTHROPIC_MODEL.
 
-    The request arrives as the SCION_MODEL env var, which Scion injects into
-    every agent container from the agent's applied config. (The manifest has no
-    model_resolution field — see changelog 2026-07-20 — so SCION_MODEL is the
-    only live channel, and it can still carry a raw tier name: an agent started
-    with `--model medium` reaches the container as SCION_MODEL=medium.)
-
-    Where this sits in Claude Code's precedence chain
-    (--model > ANTHROPIC_MODEL > settings.json `model`): when the agent has a
-    model configured, pkg/agent/run.go also prepends `--model <resolved>` to
-    the CLI args, and that outranks ANTHROPIC_MODEL. ANTHROPIC_MODEL is what
-    covers the rest — the default when nothing is requested, subprocesses the
-    harness spawns, and any consumer reading the env var directly — and this
-    keeps it agreeing with the flag instead of contradicting it.
+    SCION_MODEL arrives already resolved by the Go side (pkg/agent/provision.go
+    and pkg/hub/handlers_agent_create_helpers.go resolve size aliases before the
+    container starts). This function applies it as ANTHROPIC_MODEL and handles
+    the edge case where ANTHROPIC_MODEL is already set in the environment.
 
     Returns the concrete model name that was applied.
     """
-    requested = os.environ.get("SCION_MODEL", "").strip()
-    model = _resolve_model_alias(ctx, requested) or DEFAULT_MODEL
+    raw = os.environ.get("SCION_MODEL", "").strip()
+    model = raw or DEFAULT_MODEL
 
     preset = os.environ.get("ANTHROPIC_MODEL", "").strip()
-    if requested and preset and preset != model:
+    if raw and preset and preset != model:
         ctx.warn(
             f"ANTHROPIC_MODEL={preset!r} is set in the container environment and "
             f"takes precedence over the requested model {model!r}. This usually "

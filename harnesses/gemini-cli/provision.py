@@ -178,37 +178,18 @@ def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> bool:
     return _is_meaningful_system_prompt(system_prompt)
 
 
-def _resolve_model_alias(ctx: scion_harness.ProvisionContext) -> None:
-    """Resolve SCION_MODEL alias using harness_config model_aliases.
+def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
+    """Apply resolved model from SCION_MODEL to ~/.gemini/settings.json.
 
-    When SCION_MODEL is a tier name (e.g. 'large', 'L', 'Small') rather
-    than a concrete model string, resolve it via the model_aliases map
-    from config.yaml and update ~/.gemini/settings.json accordingly.
+    SCION_MODEL arrives already resolved by the Go side (pkg/agent/provision.go
+    and pkg/hub/handlers_agent_create_helpers.go resolve size aliases before the
+    container starts). This function writes the concrete model into
+    ~/.gemini/settings.json so the Gemini CLI uses it.
     """
-    raw_model = os.environ.get("SCION_MODEL", "")
-    if not raw_model:
+    model = os.environ.get("SCION_MODEL", "").strip()
+    if not model:
         return
 
-    aliases: dict[str, str] = ctx.harness_config.get("model_aliases") or {}
-    if not aliases:
-        return
-
-    # Normalize: lowercase, handle single-letter and shorthand aliases.
-    normalized = raw_model.lower()
-    _shorthand = {"s": "small", "m": "medium", "l": "large", "xl": "extra-large"}
-    normalized = _shorthand.get(normalized, normalized)
-
-    concrete = aliases.get(normalized)
-    if not concrete:
-        # Already a concrete model name (not a known alias) — nothing to do.
-        return
-
-    if concrete == raw_model:
-        return
-
-    ctx.info(f"resolved model alias {raw_model!r} → {concrete!r}")
-
-    # Update Gemini settings.json so the CLI uses the resolved model.
     settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
     settings: dict[str, Any] = {}
     if os.path.isfile(settings_path):
@@ -224,8 +205,9 @@ def _resolve_model_alias(ctx: scion_harness.ProvisionContext) -> None:
         model_section = {}
         settings["model"] = model_section
 
-    model_section["name"] = concrete
+    model_section["name"] = model
     scion_harness.atomic_write_json(settings_path, settings)
+    ctx.info(f"model={model}")
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:
@@ -250,9 +232,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.write_outputs(resolved, env=env, extra=extra)
     ctx.info(f"method={resolved.method}")
 
-    # Resolve model alias (e.g. 'large' → 'gemini-3.1-pro-preview') and
-    # update ~/.gemini/settings.json so the CLI uses the concrete model.
-    _resolve_model_alias(ctx)
+    # Apply the resolved model to ~/.gemini/settings.json. SCION_MODEL
+    # arrives already resolved by the Go side.
+    _apply_model(ctx)
 
     harness_cfg = ctx.harness_config
     instructions_file = str(harness_cfg.get("instructions_file") or ".gemini/GEMINI.md")
