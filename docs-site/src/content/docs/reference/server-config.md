@@ -244,6 +244,21 @@ Configuration for inbound OIDC-based federation authentication.
 | `default_role` | string | `"viewer"` | Default role for federated users (`issuer_type: user`). |
 | `allowed_emails` | list of strings | | Restrict user tokens to specific email claims (supports wildcards e.g. `*@example.com`). |
 
+### Project Defaults (`project_defaults`)
+
+Configuration for project-level default behaviors across the Hub. Unlike most other server configurations, `project_defaults` is declared as a **top-level section** in `settings.yaml` (outside of the `server:` block).
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `default_scratchpad` | bool | `true` | If enabled, automatically provisions a default `scratchpad` shared directory when a new project is created. |
+
+**Example:**
+```yaml
+# Declared at the top level of settings.yaml
+project_defaults:
+  default_scratchpad: true
+```
+
 ## Environment Variables
 
 :::tip[Database Mode]
