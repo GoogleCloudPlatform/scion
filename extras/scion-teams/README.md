@@ -95,7 +95,7 @@ The Azure Bot resource links the App Registration to the Bot Framework Service a
 
 > **⚠️ WARNING: The messaging endpoint is critical.** If you skip setting the messaging endpoint, your bot will appear in Teams but **will not respond to any messages**. The endpoint URL must be set in the Azure Bot resource Configuration page and must follow the format `https://<your-domain>/api/messages`. To verify the endpoint is reachable, run:
 > ```
-> curl -X POST https://<your-domain>/api/messages
+> curl -i -X POST https://<your-domain>/api/messages
 > ```
 > You should receive a **401 Unauthorized** response (missing Authorization header), which confirms the endpoint is reachable and the plugin is running.
 
