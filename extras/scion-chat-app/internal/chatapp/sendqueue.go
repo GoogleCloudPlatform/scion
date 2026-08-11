@@ -170,7 +170,6 @@ func (q *SendQueue) getOrCreateWorkerLocked(spaceID string) *spaceWorker {
 // timeout and is cleaned up.
 func (q *SendQueue) worker(spaceID string, w *spaceWorker) {
 	defer q.wg.Done()
-	defer q.removeWorker(spaceID)
 
 	idleTimer := time.NewTimer(defaultSendIdleTimeout)
 	defer idleTimer.Stop()
@@ -230,9 +229,3 @@ func (q *SendQueue) sendOne(sr sendRequest) (string, error) {
 	return q.messenger.SendMessage(sr.ctx, sr.req)
 }
 
-// removeWorker removes the per-space worker from the map when it exits.
-func (q *SendQueue) removeWorker(spaceID string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	delete(q.workers, spaceID)
-}
