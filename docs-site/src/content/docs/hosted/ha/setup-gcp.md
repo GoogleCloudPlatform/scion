@@ -817,6 +817,26 @@ export HUB_URL=$(gcloud run services describe scion-hub \
 echo "Hub URL: $HUB_URL"
 ```
 
+:::caution[Critical: New Cloud Run URL Format & Hub Endpoint Resolution]
+Cloud Run service URLs are provisioned in two formats:
+- **Legacy:** `https://scion-hub-PROJECT_NUMBER.REGION.run.app`
+- **New (default for newer projects):** `https://scion-hub-HASH-REGION.a.run.app`
+
+When the Hub is protected by IAP, it attempts to automatically resolve its own public URL from the IAP audience path. However, this automatic resolution **only works for the legacy format**. 
+
+If your printed `Hub URL` uses the new format containing a random hash (such as `.a.run.app`), the Hub's auto-derivation will fail, causing agent dispatching and OIDC federation to break. You **must set the `SCION_SERVER_BASE_URL` environment variable explicitly** to resolve this.
+
+**Action Required:**
+If your URL uses the new format, update your Cloud Run service to set this variable now:
+```bash
+gcloud run services update scion-hub \
+  --region=$REGION \
+  --project=$PROJECT_ID \
+  --update-env-vars="SCION_SERVER_BASE_URL=$HUB_URL"
+```
+For more information on how the Hub resolves endpoints, see the [Hub Endpoint Resolution Reference](/scion/reference/server-config/#hub-endpoint-resolution).
+:::
+
 Verify that unauthenticated endpoints are successfully blocked by IAP:
 ```bash
 curl -s -o /dev/null -w "%{http_code}" "$HUB_URL/"
