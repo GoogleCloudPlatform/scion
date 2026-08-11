@@ -75,6 +75,22 @@ func (Message) Fields() []ent.Field {
 		field.Time("dispatched_at").
 			Optional().
 			Nillable(),
+		// channel identifies the integration that originated or targets
+		// this message (e.g. "web", "discord", "telegram").
+		field.String("channel").
+			Optional().
+			MaxLen(64),
+		// thread_id groups messages into a conversation thread. By
+		// convention, web-originated messages use "agent:<agentID>".
+		field.String("thread_id").
+			Optional().
+			MaxLen(256),
+		// visibility controls which consumers see this message:
+		// "normal", "verbose", or "full". Empty is treated as "normal"
+		// at read time (backfill in the store adapter).
+		field.String("visibility").
+			Optional().
+			MaxLen(16),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

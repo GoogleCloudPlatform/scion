@@ -23181,6 +23181,9 @@ type MessageMutation struct {
 	dispatch_state          *string
 	dispatch_failure_reason *string
 	dispatched_at           *time.Time
+	channel                 *string
+	thread_id               *string
+	visibility              *string
 	created                 *time.Time
 	clearedFields           map[string]struct{}
 	done                    bool
@@ -23910,6 +23913,153 @@ func (m *MessageMutation) ResetDispatchedAt() {
 	delete(m.clearedFields, message.FieldDispatchedAt)
 }
 
+// SetChannel sets the "channel" field.
+func (m *MessageMutation) SetChannel(s string) {
+	m.channel = &s
+}
+
+// Channel returns the value of the "channel" field in the mutation.
+func (m *MessageMutation) Channel() (r string, exists bool) {
+	v := m.channel
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChannel returns the old "channel" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldChannel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChannel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChannel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChannel: %w", err)
+	}
+	return oldValue.Channel, nil
+}
+
+// ClearChannel clears the value of the "channel" field.
+func (m *MessageMutation) ClearChannel() {
+	m.channel = nil
+	m.clearedFields[message.FieldChannel] = struct{}{}
+}
+
+// ChannelCleared returns if the "channel" field was cleared in this mutation.
+func (m *MessageMutation) ChannelCleared() bool {
+	_, ok := m.clearedFields[message.FieldChannel]
+	return ok
+}
+
+// ResetChannel resets all changes to the "channel" field.
+func (m *MessageMutation) ResetChannel() {
+	m.channel = nil
+	delete(m.clearedFields, message.FieldChannel)
+}
+
+// SetThreadID sets the "thread_id" field.
+func (m *MessageMutation) SetThreadID(s string) {
+	m.thread_id = &s
+}
+
+// ThreadID returns the value of the "thread_id" field in the mutation.
+func (m *MessageMutation) ThreadID() (r string, exists bool) {
+	v := m.thread_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldThreadID returns the old "thread_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldThreadID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldThreadID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldThreadID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldThreadID: %w", err)
+	}
+	return oldValue.ThreadID, nil
+}
+
+// ClearThreadID clears the value of the "thread_id" field.
+func (m *MessageMutation) ClearThreadID() {
+	m.thread_id = nil
+	m.clearedFields[message.FieldThreadID] = struct{}{}
+}
+
+// ThreadIDCleared returns if the "thread_id" field was cleared in this mutation.
+func (m *MessageMutation) ThreadIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldThreadID]
+	return ok
+}
+
+// ResetThreadID resets all changes to the "thread_id" field.
+func (m *MessageMutation) ResetThreadID() {
+	m.thread_id = nil
+	delete(m.clearedFields, message.FieldThreadID)
+}
+
+// SetVisibility sets the "visibility" field.
+func (m *MessageMutation) SetVisibility(s string) {
+	m.visibility = &s
+}
+
+// Visibility returns the value of the "visibility" field in the mutation.
+func (m *MessageMutation) Visibility() (r string, exists bool) {
+	v := m.visibility
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVisibility returns the old "visibility" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldVisibility(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVisibility is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVisibility requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVisibility: %w", err)
+	}
+	return oldValue.Visibility, nil
+}
+
+// ClearVisibility clears the value of the "visibility" field.
+func (m *MessageMutation) ClearVisibility() {
+	m.visibility = nil
+	m.clearedFields[message.FieldVisibility] = struct{}{}
+}
+
+// VisibilityCleared returns if the "visibility" field was cleared in this mutation.
+func (m *MessageMutation) VisibilityCleared() bool {
+	_, ok := m.clearedFields[message.FieldVisibility]
+	return ok
+}
+
+// ResetVisibility resets all changes to the "visibility" field.
+func (m *MessageMutation) ResetVisibility() {
+	m.visibility = nil
+	delete(m.clearedFields, message.FieldVisibility)
+}
+
 // SetCreated sets the "created" field.
 func (m *MessageMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -23980,7 +24130,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 16)
+	fields := make([]string, 0, 19)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -24026,6 +24176,15 @@ func (m *MessageMutation) Fields() []string {
 	if m.dispatched_at != nil {
 		fields = append(fields, message.FieldDispatchedAt)
 	}
+	if m.channel != nil {
+		fields = append(fields, message.FieldChannel)
+	}
+	if m.thread_id != nil {
+		fields = append(fields, message.FieldThreadID)
+	}
+	if m.visibility != nil {
+		fields = append(fields, message.FieldVisibility)
+	}
 	if m.created != nil {
 		fields = append(fields, message.FieldCreated)
 	}
@@ -24067,6 +24226,12 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.DispatchFailureReason()
 	case message.FieldDispatchedAt:
 		return m.DispatchedAt()
+	case message.FieldChannel:
+		return m.Channel()
+	case message.FieldThreadID:
+		return m.ThreadID()
+	case message.FieldVisibility:
+		return m.Visibility()
 	case message.FieldCreated:
 		return m.Created()
 	}
@@ -24108,6 +24273,12 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldDispatchFailureReason(ctx)
 	case message.FieldDispatchedAt:
 		return m.OldDispatchedAt(ctx)
+	case message.FieldChannel:
+		return m.OldChannel(ctx)
+	case message.FieldThreadID:
+		return m.OldThreadID(ctx)
+	case message.FieldVisibility:
+		return m.OldVisibility(ctx)
 	case message.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -24224,6 +24395,27 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDispatchedAt(v)
 		return nil
+	case message.FieldChannel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChannel(v)
+		return nil
+	case message.FieldThreadID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetThreadID(v)
+		return nil
+	case message.FieldVisibility:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVisibility(v)
+		return nil
 	case message.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -24279,6 +24471,15 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldDispatchedAt) {
 		fields = append(fields, message.FieldDispatchedAt)
 	}
+	if m.FieldCleared(message.FieldChannel) {
+		fields = append(fields, message.FieldChannel)
+	}
+	if m.FieldCleared(message.FieldThreadID) {
+		fields = append(fields, message.FieldThreadID)
+	}
+	if m.FieldCleared(message.FieldVisibility) {
+		fields = append(fields, message.FieldVisibility)
+	}
 	return fields
 }
 
@@ -24310,6 +24511,15 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldDispatchedAt:
 		m.ClearDispatchedAt()
+		return nil
+	case message.FieldChannel:
+		m.ClearChannel()
+		return nil
+	case message.FieldThreadID:
+		m.ClearThreadID()
+		return nil
+	case message.FieldVisibility:
+		m.ClearVisibility()
 		return nil
 	}
 	return fmt.Errorf("unknown Message nullable field %s", name)
@@ -24363,6 +24573,15 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldDispatchedAt:
 		m.ResetDispatchedAt()
+		return nil
+	case message.FieldChannel:
+		m.ResetChannel()
+		return nil
+	case message.FieldThreadID:
+		m.ResetThreadID()
+		return nil
+	case message.FieldVisibility:
+		m.ResetVisibility()
 		return nil
 	case message.FieldCreated:
 		m.ResetCreated()

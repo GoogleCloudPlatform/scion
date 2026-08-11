@@ -202,6 +202,48 @@ func (_c *MessageCreate) SetNillableDispatchedAt(v *time.Time) *MessageCreate {
 	return _c
 }
 
+// SetChannel sets the "channel" field.
+func (_c *MessageCreate) SetChannel(v string) *MessageCreate {
+	_c.mutation.SetChannel(v)
+	return _c
+}
+
+// SetNillableChannel sets the "channel" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableChannel(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetChannel(*v)
+	}
+	return _c
+}
+
+// SetThreadID sets the "thread_id" field.
+func (_c *MessageCreate) SetThreadID(v string) *MessageCreate {
+	_c.mutation.SetThreadID(v)
+	return _c
+}
+
+// SetNillableThreadID sets the "thread_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableThreadID(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetThreadID(*v)
+	}
+	return _c
+}
+
+// SetVisibility sets the "visibility" field.
+func (_c *MessageCreate) SetVisibility(v string) *MessageCreate {
+	_c.mutation.SetVisibility(v)
+	return _c
+}
+
+// SetNillableVisibility sets the "visibility" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableVisibility(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetVisibility(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *MessageCreate) SetCreated(v time.Time) *MessageCreate {
 	_c.mutation.SetCreated(v)
@@ -339,6 +381,21 @@ func (_c *MessageCreate) check() error {
 	if _, ok := _c.mutation.DispatchState(); !ok {
 		return &ValidationError{Name: "dispatch_state", err: errors.New(`ent: missing required field "Message.dispatch_state"`)}
 	}
+	if v, ok := _c.mutation.Channel(); ok {
+		if err := message.ChannelValidator(v); err != nil {
+			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.ThreadID(); ok {
+		if err := message.ThreadIDValidator(v); err != nil {
+			return &ValidationError{Name: "thread_id", err: fmt.Errorf(`ent: validator failed for field "Message.thread_id": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.Visibility(); ok {
+		if err := message.VisibilityValidator(v); err != nil {
+			return &ValidationError{Name: "visibility", err: fmt.Errorf(`ent: validator failed for field "Message.visibility": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Message.created"`)}
 	}
@@ -437,6 +494,18 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DispatchedAt(); ok {
 		_spec.SetField(message.FieldDispatchedAt, field.TypeTime, value)
 		_node.DispatchedAt = &value
+	}
+	if value, ok := _c.mutation.Channel(); ok {
+		_spec.SetField(message.FieldChannel, field.TypeString, value)
+		_node.Channel = value
+	}
+	if value, ok := _c.mutation.ThreadID(); ok {
+		_spec.SetField(message.FieldThreadID, field.TypeString, value)
+		_node.ThreadID = value
+	}
+	if value, ok := _c.mutation.Visibility(); ok {
+		_spec.SetField(message.FieldVisibility, field.TypeString, value)
+		_node.Visibility = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(message.FieldCreated, field.TypeTime, value)
@@ -707,6 +776,60 @@ func (u *MessageUpsert) UpdateDispatchedAt() *MessageUpsert {
 // ClearDispatchedAt clears the value of the "dispatched_at" field.
 func (u *MessageUpsert) ClearDispatchedAt() *MessageUpsert {
 	u.SetNull(message.FieldDispatchedAt)
+	return u
+}
+
+// SetChannel sets the "channel" field.
+func (u *MessageUpsert) SetChannel(v string) *MessageUpsert {
+	u.Set(message.FieldChannel, v)
+	return u
+}
+
+// UpdateChannel sets the "channel" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateChannel() *MessageUpsert {
+	u.SetExcluded(message.FieldChannel)
+	return u
+}
+
+// ClearChannel clears the value of the "channel" field.
+func (u *MessageUpsert) ClearChannel() *MessageUpsert {
+	u.SetNull(message.FieldChannel)
+	return u
+}
+
+// SetThreadID sets the "thread_id" field.
+func (u *MessageUpsert) SetThreadID(v string) *MessageUpsert {
+	u.Set(message.FieldThreadID, v)
+	return u
+}
+
+// UpdateThreadID sets the "thread_id" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateThreadID() *MessageUpsert {
+	u.SetExcluded(message.FieldThreadID)
+	return u
+}
+
+// ClearThreadID clears the value of the "thread_id" field.
+func (u *MessageUpsert) ClearThreadID() *MessageUpsert {
+	u.SetNull(message.FieldThreadID)
+	return u
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *MessageUpsert) SetVisibility(v string) *MessageUpsert {
+	u.Set(message.FieldVisibility, v)
+	return u
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateVisibility() *MessageUpsert {
+	u.SetExcluded(message.FieldVisibility)
+	return u
+}
+
+// ClearVisibility clears the value of the "visibility" field.
+func (u *MessageUpsert) ClearVisibility() *MessageUpsert {
+	u.SetNull(message.FieldVisibility)
 	return u
 }
 
@@ -1010,6 +1133,69 @@ func (u *MessageUpsertOne) UpdateDispatchedAt() *MessageUpsertOne {
 func (u *MessageUpsertOne) ClearDispatchedAt() *MessageUpsertOne {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearDispatchedAt()
+	})
+}
+
+// SetChannel sets the "channel" field.
+func (u *MessageUpsertOne) SetChannel(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetChannel(v)
+	})
+}
+
+// UpdateChannel sets the "channel" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateChannel() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateChannel()
+	})
+}
+
+// ClearChannel clears the value of the "channel" field.
+func (u *MessageUpsertOne) ClearChannel() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearChannel()
+	})
+}
+
+// SetThreadID sets the "thread_id" field.
+func (u *MessageUpsertOne) SetThreadID(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetThreadID(v)
+	})
+}
+
+// UpdateThreadID sets the "thread_id" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateThreadID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateThreadID()
+	})
+}
+
+// ClearThreadID clears the value of the "thread_id" field.
+func (u *MessageUpsertOne) ClearThreadID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearThreadID()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *MessageUpsertOne) SetVisibility(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateVisibility() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// ClearVisibility clears the value of the "visibility" field.
+func (u *MessageUpsertOne) ClearVisibility() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearVisibility()
 	})
 }
 
@@ -1480,6 +1666,69 @@ func (u *MessageUpsertBulk) UpdateDispatchedAt() *MessageUpsertBulk {
 func (u *MessageUpsertBulk) ClearDispatchedAt() *MessageUpsertBulk {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearDispatchedAt()
+	})
+}
+
+// SetChannel sets the "channel" field.
+func (u *MessageUpsertBulk) SetChannel(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetChannel(v)
+	})
+}
+
+// UpdateChannel sets the "channel" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateChannel() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateChannel()
+	})
+}
+
+// ClearChannel clears the value of the "channel" field.
+func (u *MessageUpsertBulk) ClearChannel() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearChannel()
+	})
+}
+
+// SetThreadID sets the "thread_id" field.
+func (u *MessageUpsertBulk) SetThreadID(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetThreadID(v)
+	})
+}
+
+// UpdateThreadID sets the "thread_id" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateThreadID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateThreadID()
+	})
+}
+
+// ClearThreadID clears the value of the "thread_id" field.
+func (u *MessageUpsertBulk) ClearThreadID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearThreadID()
+	})
+}
+
+// SetVisibility sets the "visibility" field.
+func (u *MessageUpsertBulk) SetVisibility(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetVisibility(v)
+	})
+}
+
+// UpdateVisibility sets the "visibility" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateVisibility() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateVisibility()
+	})
+}
+
+// ClearVisibility clears the value of the "visibility" field.
+func (u *MessageUpsertBulk) ClearVisibility() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearVisibility()
 	})
 }
 

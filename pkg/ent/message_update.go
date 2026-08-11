@@ -275,6 +275,66 @@ func (_u *MessageUpdate) ClearDispatchedAt() *MessageUpdate {
 	return _u
 }
 
+// SetChannel sets the "channel" field.
+func (_u *MessageUpdate) SetChannel(v string) *MessageUpdate {
+	_u.mutation.SetChannel(v)
+	return _u
+}
+
+// SetNillableChannel sets the "channel" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableChannel(v *string) *MessageUpdate {
+	if v != nil {
+		_u.SetChannel(*v)
+	}
+	return _u
+}
+
+// ClearChannel clears the value of the "channel" field.
+func (_u *MessageUpdate) ClearChannel() *MessageUpdate {
+	_u.mutation.ClearChannel()
+	return _u
+}
+
+// SetThreadID sets the "thread_id" field.
+func (_u *MessageUpdate) SetThreadID(v string) *MessageUpdate {
+	_u.mutation.SetThreadID(v)
+	return _u
+}
+
+// SetNillableThreadID sets the "thread_id" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableThreadID(v *string) *MessageUpdate {
+	if v != nil {
+		_u.SetThreadID(*v)
+	}
+	return _u
+}
+
+// ClearThreadID clears the value of the "thread_id" field.
+func (_u *MessageUpdate) ClearThreadID() *MessageUpdate {
+	_u.mutation.ClearThreadID()
+	return _u
+}
+
+// SetVisibility sets the "visibility" field.
+func (_u *MessageUpdate) SetVisibility(v string) *MessageUpdate {
+	_u.mutation.SetVisibility(v)
+	return _u
+}
+
+// SetNillableVisibility sets the "visibility" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableVisibility(v *string) *MessageUpdate {
+	if v != nil {
+		_u.SetVisibility(*v)
+	}
+	return _u
+}
+
+// ClearVisibility clears the value of the "visibility" field.
+func (_u *MessageUpdate) ClearVisibility() *MessageUpdate {
+	_u.mutation.ClearVisibility()
+	return _u
+}
+
 // Mutation returns the MessageMutation object of the builder.
 func (_u *MessageUpdate) Mutation() *MessageMutation {
 	return _u.mutation
@@ -322,6 +382,21 @@ func (_u *MessageUpdate) check() error {
 	if v, ok := _u.mutation.Msg(); ok {
 		if err := message.MsgValidator(v); err != nil {
 			return &ValidationError{Name: "msg", err: fmt.Errorf(`ent: validator failed for field "Message.msg": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.Channel(); ok {
+		if err := message.ChannelValidator(v); err != nil {
+			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.ThreadID(); ok {
+		if err := message.ThreadIDValidator(v); err != nil {
+			return &ValidationError{Name: "thread_id", err: fmt.Errorf(`ent: validator failed for field "Message.thread_id": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.Visibility(); ok {
+		if err := message.VisibilityValidator(v); err != nil {
+			return &ValidationError{Name: "visibility", err: fmt.Errorf(`ent: validator failed for field "Message.visibility": %w`, err)}
 		}
 	}
 	return nil
@@ -401,6 +476,24 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.DispatchedAtCleared() {
 		_spec.ClearField(message.FieldDispatchedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Channel(); ok {
+		_spec.SetField(message.FieldChannel, field.TypeString, value)
+	}
+	if _u.mutation.ChannelCleared() {
+		_spec.ClearField(message.FieldChannel, field.TypeString)
+	}
+	if value, ok := _u.mutation.ThreadID(); ok {
+		_spec.SetField(message.FieldThreadID, field.TypeString, value)
+	}
+	if _u.mutation.ThreadIDCleared() {
+		_spec.ClearField(message.FieldThreadID, field.TypeString)
+	}
+	if value, ok := _u.mutation.Visibility(); ok {
+		_spec.SetField(message.FieldVisibility, field.TypeString, value)
+	}
+	if _u.mutation.VisibilityCleared() {
+		_spec.ClearField(message.FieldVisibility, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -668,6 +761,66 @@ func (_u *MessageUpdateOne) ClearDispatchedAt() *MessageUpdateOne {
 	return _u
 }
 
+// SetChannel sets the "channel" field.
+func (_u *MessageUpdateOne) SetChannel(v string) *MessageUpdateOne {
+	_u.mutation.SetChannel(v)
+	return _u
+}
+
+// SetNillableChannel sets the "channel" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableChannel(v *string) *MessageUpdateOne {
+	if v != nil {
+		_u.SetChannel(*v)
+	}
+	return _u
+}
+
+// ClearChannel clears the value of the "channel" field.
+func (_u *MessageUpdateOne) ClearChannel() *MessageUpdateOne {
+	_u.mutation.ClearChannel()
+	return _u
+}
+
+// SetThreadID sets the "thread_id" field.
+func (_u *MessageUpdateOne) SetThreadID(v string) *MessageUpdateOne {
+	_u.mutation.SetThreadID(v)
+	return _u
+}
+
+// SetNillableThreadID sets the "thread_id" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableThreadID(v *string) *MessageUpdateOne {
+	if v != nil {
+		_u.SetThreadID(*v)
+	}
+	return _u
+}
+
+// ClearThreadID clears the value of the "thread_id" field.
+func (_u *MessageUpdateOne) ClearThreadID() *MessageUpdateOne {
+	_u.mutation.ClearThreadID()
+	return _u
+}
+
+// SetVisibility sets the "visibility" field.
+func (_u *MessageUpdateOne) SetVisibility(v string) *MessageUpdateOne {
+	_u.mutation.SetVisibility(v)
+	return _u
+}
+
+// SetNillableVisibility sets the "visibility" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableVisibility(v *string) *MessageUpdateOne {
+	if v != nil {
+		_u.SetVisibility(*v)
+	}
+	return _u
+}
+
+// ClearVisibility clears the value of the "visibility" field.
+func (_u *MessageUpdateOne) ClearVisibility() *MessageUpdateOne {
+	_u.mutation.ClearVisibility()
+	return _u
+}
+
 // Mutation returns the MessageMutation object of the builder.
 func (_u *MessageUpdateOne) Mutation() *MessageMutation {
 	return _u.mutation
@@ -728,6 +881,21 @@ func (_u *MessageUpdateOne) check() error {
 	if v, ok := _u.mutation.Msg(); ok {
 		if err := message.MsgValidator(v); err != nil {
 			return &ValidationError{Name: "msg", err: fmt.Errorf(`ent: validator failed for field "Message.msg": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.Channel(); ok {
+		if err := message.ChannelValidator(v); err != nil {
+			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.ThreadID(); ok {
+		if err := message.ThreadIDValidator(v); err != nil {
+			return &ValidationError{Name: "thread_id", err: fmt.Errorf(`ent: validator failed for field "Message.thread_id": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.Visibility(); ok {
+		if err := message.VisibilityValidator(v); err != nil {
+			return &ValidationError{Name: "visibility", err: fmt.Errorf(`ent: validator failed for field "Message.visibility": %w`, err)}
 		}
 	}
 	return nil
@@ -824,6 +992,24 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.DispatchedAtCleared() {
 		_spec.ClearField(message.FieldDispatchedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Channel(); ok {
+		_spec.SetField(message.FieldChannel, field.TypeString, value)
+	}
+	if _u.mutation.ChannelCleared() {
+		_spec.ClearField(message.FieldChannel, field.TypeString)
+	}
+	if value, ok := _u.mutation.ThreadID(); ok {
+		_spec.SetField(message.FieldThreadID, field.TypeString, value)
+	}
+	if _u.mutation.ThreadIDCleared() {
+		_spec.ClearField(message.FieldThreadID, field.TypeString)
+	}
+	if value, ok := _u.mutation.Visibility(); ok {
+		_spec.SetField(message.FieldVisibility, field.TypeString, value)
+	}
+	if _u.mutation.VisibilityCleared() {
+		_spec.ClearField(message.FieldVisibility, field.TypeString)
 	}
 	_node = &Message{config: _u.config}
 	_spec.Assign = _node.assignValues

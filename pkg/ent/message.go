@@ -48,6 +48,12 @@ type Message struct {
 	DispatchFailureReason *string `json:"dispatch_failure_reason,omitempty"`
 	// DispatchedAt holds the value of the "dispatched_at" field.
 	DispatchedAt *time.Time `json:"dispatched_at,omitempty"`
+	// Channel holds the value of the "channel" field.
+	Channel string `json:"channel,omitempty"`
+	// ThreadID holds the value of the "thread_id" field.
+	ThreadID string `json:"thread_id,omitempty"`
+	// Visibility holds the value of the "visibility" field.
+	Visibility string `json:"visibility,omitempty"`
 	// Created holds the value of the "created" field.
 	Created      time.Time `json:"created,omitempty"`
 	selectValues sql.SelectValues
@@ -60,7 +66,7 @@ func (*Message) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead:
 			values[i] = new(sql.NullBool)
-		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason:
+		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason, message.FieldChannel, message.FieldThreadID, message.FieldVisibility:
 			values[i] = new(sql.NullString)
 		case message.FieldDispatchedAt, message.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -179,6 +185,24 @@ func (_m *Message) assignValues(columns []string, values []any) error {
 				_m.DispatchedAt = new(time.Time)
 				*_m.DispatchedAt = value.Time
 			}
+		case message.FieldChannel:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field channel", values[i])
+			} else if value.Valid {
+				_m.Channel = value.String
+			}
+		case message.FieldThreadID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field thread_id", values[i])
+			} else if value.Valid {
+				_m.ThreadID = value.String
+			}
+		case message.FieldVisibility:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field visibility", values[i])
+			} else if value.Valid {
+				_m.Visibility = value.String
+			}
 		case message.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -269,6 +293,15 @@ func (_m *Message) String() string {
 		builder.WriteString("dispatched_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("channel=")
+	builder.WriteString(_m.Channel)
+	builder.WriteString(", ")
+	builder.WriteString("thread_id=")
+	builder.WriteString(_m.ThreadID)
+	builder.WriteString(", ")
+	builder.WriteString("visibility=")
+	builder.WriteString(_m.Visibility)
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))
