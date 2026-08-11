@@ -454,6 +454,298 @@ func TestHandleSpaceRemove_CleansUpThreadDefaults(t *testing.T) {
 	}
 }
 
+// --- handleSettingsAction tests ---
+
+// newTestRouterWithStore creates a CommandRouter with a given store for
+// test cases that need to pre-populate store data.
+func newTestRouterWithStore(t *testing.T, store *state.Store) (*CommandRouter, *fakeMessenger) {
+	t.Helper()
+	fm := &fakeMessenger{}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	router := &CommandRouter{
+		store:       store,
+		messenger:   fm,
+		log:         log,
+		pendingAuth: make(map[string]*pendingDeviceAuth),
+	}
+	return router, fm
+}
+
+func TestHandleSettingsAction_ToggleObserveOn(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:          "spaces/settings-test",
+		Platform:         "googlechat",
+		ProjectID:        "proj-1",
+		ProjectSlug:      "my-project",
+		LinkedBy:         "test",
+		ShowAgentToAgent: false, // starts OFF
+		ShowStateChanges: true,
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	router, fm := newTestRouterWithStore(t, store)
+	event := &ChatEvent{
+		Type:     EventAction,
+		Platform: "googlechat",
+		SpaceID:  "spaces/settings-test",
+		UserID:   "user-1",
+		ActionID: "settings.observe",
+	}
+
+	err := router.handleSettingsAction(context.Background(), event, "observe")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify the DB was updated.
+	link, err := store.GetSpaceLink("spaces/settings-test", "googlechat")
+	if err != nil {
+		t.Fatalf("getting space link: %v", err)
+	}
+	if !link.ShowAgentToAgent {
+		t.Error("expected ShowAgentToAgent to be toggled ON")
+	}
+
+	// Verify a card was sent back with updated state.
+	if len(fm.messages) == 0 {
+		t.Fatal("expected a settings card to be sent")
+	}
+	got := fm.messages[0]
+	if got.Card == nil {
+		t.Fatal("expected a card in the response")
+	}
+	foundObserve := false
+	for _, action := range got.Card.Actions {
+		if strings.Contains(action.Label, "Observe Mode: ON") {
+			foundObserve = true
+		}
+	}
+	if !foundObserve {
+		t.Error("expected settings card to show 'Observe Mode: ON'")
+	}
+}
+
+func TestHandleSettingsAction_ToggleObserveOff(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:          "spaces/settings-test2",
+		Platform:         "googlechat",
+		ProjectID:        "proj-1",
+		ProjectSlug:      "my-project",
+		LinkedBy:         "test",
+		ShowAgentToAgent: true, // starts ON
+		ShowStateChanges: true,
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	router, fm := newTestRouterWithStore(t, store)
+	event := &ChatEvent{
+		Type:     EventAction,
+		Platform: "googlechat",
+		SpaceID:  "spaces/settings-test2",
+		UserID:   "user-1",
+		ActionID: "settings.observe",
+	}
+
+	err := router.handleSettingsAction(context.Background(), event, "observe")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	link, err := store.GetSpaceLink("spaces/settings-test2", "googlechat")
+	if err != nil {
+		t.Fatalf("getting space link: %v", err)
+	}
+	if link.ShowAgentToAgent {
+		t.Error("expected ShowAgentToAgent to be toggled OFF")
+	}
+
+	if len(fm.messages) == 0 {
+		t.Fatal("expected a settings card to be sent")
+	}
+	got := fm.messages[0]
+	if got.Card == nil {
+		t.Fatal("expected a card in the response")
+	}
+	foundObserve := false
+	for _, action := range got.Card.Actions {
+		if strings.Contains(action.Label, "Observe Mode: OFF") {
+			foundObserve = true
+		}
+	}
+	if !foundObserve {
+		t.Error("expected settings card to show 'Observe Mode: OFF'")
+	}
+}
+
+func TestHandleSettingsAction_ToggleStateChanges(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:          "spaces/settings-test3",
+		Platform:         "googlechat",
+		ProjectID:        "proj-1",
+		ProjectSlug:      "my-project",
+		LinkedBy:         "test",
+		ShowAgentToAgent: false,
+		ShowStateChanges: true, // starts ON
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	router, fm := newTestRouterWithStore(t, store)
+	event := &ChatEvent{
+		Type:     EventAction,
+		Platform: "googlechat",
+		SpaceID:  "spaces/settings-test3",
+		UserID:   "user-1",
+		ActionID: "settings.statechange",
+	}
+
+	// Toggle OFF.
+	err := router.handleSettingsAction(context.Background(), event, "statechange")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	link, err := store.GetSpaceLink("spaces/settings-test3", "googlechat")
+	if err != nil {
+		t.Fatalf("getting space link: %v", err)
+	}
+	if link.ShowStateChanges {
+		t.Error("expected ShowStateChanges to be toggled OFF")
+	}
+
+	if len(fm.messages) == 0 {
+		t.Fatal("expected a settings card to be sent")
+	}
+	got := fm.messages[0]
+	if got.Card == nil {
+		t.Fatal("expected a card in the response")
+	}
+	foundState := false
+	for _, action := range got.Card.Actions {
+		if strings.Contains(action.Label, "State Notifications: OFF") {
+			foundState = true
+		}
+	}
+	if !foundState {
+		t.Error("expected settings card to show 'State Notifications: OFF'")
+	}
+
+	// Toggle back ON.
+	fm.messages = nil
+	err = router.handleSettingsAction(context.Background(), event, "statechange")
+	if err != nil {
+		t.Fatalf("unexpected error on second toggle: %v", err)
+	}
+
+	link, err = store.GetSpaceLink("spaces/settings-test3", "googlechat")
+	if err != nil {
+		t.Fatalf("getting space link: %v", err)
+	}
+	if !link.ShowStateChanges {
+		t.Error("expected ShowStateChanges to be toggled back ON")
+	}
+}
+
+func TestHandleSettingsAction_RequiresSpaceLink(t *testing.T) {
+	router, fm := newTestRouter(t)
+	event := &ChatEvent{
+		Type:     EventAction,
+		Platform: "googlechat",
+		SpaceID:  "spaces/unlinked",
+		UserID:   "user-1",
+	}
+
+	err := router.handleSettingsAction(context.Background(), event, "observe")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(fm.messages) == 0 {
+		t.Fatal("expected a reply message")
+	}
+	if !strings.Contains(fm.messages[0].Text, "not linked") {
+		t.Errorf("expected 'not linked' reply, got: %s", fm.messages[0].Text)
+	}
+}
+
+func TestCmdSettings_RequiresSpaceLink(t *testing.T) {
+	router, _ := newTestRouter(t)
+	event := &ChatEvent{
+		Type:     EventCommand,
+		Platform: "googlechat",
+		SpaceID:  "spaces/unlinked",
+		UserID:   "user-1",
+	}
+
+	resp, err := router.cmdSettings(context.Background(), event, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.Message == nil {
+		t.Fatal("expected a response")
+	}
+	if !strings.Contains(resp.Message.Text, "not linked") {
+		t.Errorf("expected 'not linked' message, got: %s", resp.Message.Text)
+	}
+}
+
+func TestCmdSettings_ShowsCurrentState(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:          "spaces/settings-view",
+		Platform:         "googlechat",
+		ProjectID:        "proj-1",
+		ProjectSlug:      "my-project",
+		LinkedBy:         "test",
+		ShowAgentToAgent: true,
+		ShowStateChanges: false,
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	router, _ := newTestRouterWithStore(t, store)
+	event := &ChatEvent{
+		Type:     EventCommand,
+		Platform: "googlechat",
+		SpaceID:  "spaces/settings-view",
+		UserID:   "user-1",
+	}
+
+	resp, err := router.cmdSettings(context.Background(), event, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.Message == nil || resp.Message.Card == nil {
+		t.Fatal("expected a card response")
+	}
+
+	card := resp.Message.Card
+	if card.Header.Title != "Space Settings" {
+		t.Errorf("unexpected card title: %q", card.Header.Title)
+	}
+
+	var observeLabel, stateLabel string
+	for _, a := range card.Actions {
+		if strings.Contains(a.Label, "Observe Mode") {
+			observeLabel = a.Label
+		}
+		if strings.Contains(a.Label, "State Notifications") {
+			stateLabel = a.Label
+		}
+	}
+	if observeLabel != "Observe Mode: ON" {
+		t.Errorf("expected observe label 'Observe Mode: ON', got %q", observeLabel)
+	}
+	if stateLabel != "State Notifications: OFF" {
+		t.Errorf("expected state label 'State Notifications: OFF', got %q", stateLabel)
+	}
+}
+
 // TestDeleteConfirmAction_UpdatesMessage verifies that the card-based delete
 // confirm action (agent.delete.confirm.<id>) returns an UpdateMessage response.
 func TestDeleteConfirmAction_UpdatesMessage(t *testing.T) {
