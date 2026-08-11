@@ -43,6 +43,7 @@ export { ScionPageAdminUsers } from './pages/admin-users.js';
 export { ScionPageAdminGroups } from './pages/admin-groups.js';
 export { ScionPageProfileEnvVars } from './pages/profile-env-vars.js';
 export { ScionPageProfileSecrets } from './pages/profile-secrets.js';
+export { ScionPageProfileTeams } from './pages/profile-teams.js';
 export { ScionPageSettings } from './pages/settings.js';
 export { ScionPage404 } from './pages/not-found.js';
 export { ScionLoginPage } from './pages/login.js';

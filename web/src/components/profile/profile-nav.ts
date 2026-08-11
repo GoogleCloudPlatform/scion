@@ -54,7 +54,10 @@ const PROFILE_SECTIONS: NavSection[] = [
   },
   {
     title: 'Integrations',
-    items: [{ path: '/profile/telegram', label: 'Telegram', icon: 'send' }],
+    items: [
+      { path: '/profile/telegram', label: 'Telegram', icon: 'send' },
+      { path: '/profile/teams', label: 'Microsoft Teams', icon: 'chat-square' },
+    ],
   },
 ];
 
