@@ -129,6 +129,8 @@ func newChannelFromConfig(cfg ChannelConfig) (NotificationChannel, error) {
 	switch cfg.Type {
 	case "discord":
 		return NewDiscordChannel(cfg.Params), nil
+	case "teams":
+		return NewTeamsChannel(cfg.Params), nil
 	case "email":
 		return NewEmailChannel(cfg.Params), nil
 	case "slack":

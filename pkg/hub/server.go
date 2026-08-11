@@ -707,6 +707,9 @@ type Server struct {
 	// Discord link service for code-based account linking (nil = disabled)
 	discordLinkService *DiscordLinkService
 
+	// Teams link service for code-based account linking (nil = disabled)
+	teamsLinkService *TeamsLinkService
+
 	// Plugin manager for broker integration admin API (nil = no integrations)
 	pluginManager IntegrationManager
 
@@ -975,6 +978,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize Discord link service
 	srv.discordLinkService = NewDiscordLinkService()
+
+	// Initialize Teams link service
+	srv.teamsLinkService = NewTeamsLinkService()
 
 	// Initialize OAuth service if configured
 	if cfg.OAuthConfig.IsConfigured() {
@@ -2998,6 +3004,9 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.discordLinkService != nil {
 			s.discordLinkService.Close()
 		}
+		if s.teamsLinkService != nil {
+			s.teamsLinkService.Close()
+		}
 		if s.events != nil {
 			s.events.Close()
 		}
@@ -3193,6 +3202,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/discord/link", s.handleDiscordLink)
 	s.mux.HandleFunc("/api/v1/discord/link/verify", s.handleDiscordLinkVerify)
 	s.mux.HandleFunc("/api/v1/discord/link/status", s.handleDiscordLinkStatus)
+
+	// Teams account linking endpoints
+	s.mux.HandleFunc("/api/v1/teams/link", s.handleTeamsLink)
+	s.mux.HandleFunc("/api/v1/teams/link/verify", s.handleTeamsLinkVerify)
+	s.mux.HandleFunc("/api/v1/teams/link/status", s.handleTeamsLinkStatus)
 
 	// Unified resource import endpoint (templates + harness-configs, global + project)
 	s.mux.HandleFunc("/api/v1/resources/import", s.handleResourcesImport)
