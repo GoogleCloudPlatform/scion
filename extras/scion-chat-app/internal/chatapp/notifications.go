@@ -28,6 +28,7 @@ import (
 type NotificationRelay struct {
 	store     *state.Store
 	messenger Messenger
+	sendQueue *SendQueue
 	log       *slog.Logger
 }
 
@@ -38,6 +39,12 @@ func NewNotificationRelay(store *state.Store, messenger Messenger, log *slog.Log
 		messenger: messenger,
 		log:       log,
 	}
+}
+
+// SetSendQueue attaches a send queue to route outbound messages through
+// per-space workers instead of sending directly via the messenger.
+func (n *NotificationRelay) SetSendQueue(sq *SendQueue) {
+	n.sendQueue = sq
 }
 
 // HandleBrokerMessage processes a message received via the broker plugin's Publish() path.
@@ -97,11 +104,20 @@ func (n *NotificationRelay) handleAgentNotification(ctx context.Context, project
 			})
 		}
 
-		if _, err := n.messenger.SendCard(ctx, link.SpaceID, card); err != nil {
+		var sendErr error
+		if n.sendQueue != nil {
+			_, sendErr = n.sendQueue.Send(ctx, SendMessageRequest{
+				SpaceID: link.SpaceID,
+				Card:    &card,
+			})
+		} else {
+			_, sendErr = n.messenger.SendCard(ctx, link.SpaceID, card)
+		}
+		if sendErr != nil {
 			n.log.Error("failed to send notification card",
 				"space_id", link.SpaceID,
 				"project_id", projectID,
-				"error", err,
+				"error", sendErr,
 			)
 			// Continue to other spaces
 		}
@@ -180,16 +196,23 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		// Chat API renders them as interactive user pills.
 		mentions := n.buildMentions(mapping.PlatformUserID, agentSlug, link)
 
-		if _, err := n.messenger.SendMessage(ctx, SendMessageRequest{
+		sendReq := SendMessageRequest{
 			SpaceID:  link.SpaceID,
 			ThreadID: msg.ThreadID,
 			Text:     mentions,
 			Card:     &card,
-		}); err != nil {
+		}
+		var sendErr error
+		if n.sendQueue != nil {
+			_, sendErr = n.sendQueue.Send(ctx, sendReq)
+		} else {
+			_, sendErr = n.messenger.SendMessage(ctx, sendReq)
+		}
+		if sendErr != nil {
 			n.log.Error("failed to relay user message",
 				"space_id", link.SpaceID,
 				"recipient", msg.RecipientID,
-				"error", err,
+				"error", sendErr,
 			)
 		}
 	}

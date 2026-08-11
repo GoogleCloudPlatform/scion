@@ -14,6 +14,8 @@
 
 package chatapp
 
+import "time"
+
 // Config holds the chat app configuration.
 type Config struct {
 	Hub           HubConfig           `yaml:"hub"`
@@ -53,6 +55,8 @@ type GoogleChatConfig struct {
 	ExternalURL         string            `yaml:"external_url"`
 	ServiceAccountEmail string            `yaml:"service_account_email"`
 	CommandIDMap        map[string]string `yaml:"command_id_map"`
+	SendQueueSize       int               `yaml:"send_queue_size"` // default 100
+	SendMinDelay        time.Duration     `yaml:"send_min_delay"`  // default 100ms
 }
 
 // SlackConfig holds settings for the Slack adapter (future).
