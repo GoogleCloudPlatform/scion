@@ -77,13 +77,13 @@ func NewCommandRouter(
 	log *slog.Logger,
 ) *CommandRouter {
 	return &CommandRouter{
-		adminClient:    adminClient,
-		hubURL:         hubURL,
-		store:          store,
-		idMapper:       idMapper,
-		messenger:      messenger,
-		broker:         broker,
-		log:            log,
+		adminClient: adminClient,
+		hubURL:      hubURL,
+		store:       store,
+		idMapper:    idMapper,
+		messenger:   messenger,
+		broker:      broker,
+		log:         log,
 		pendingAuth: make(map[string]*pendingDeviceAuth),
 	}
 }
@@ -343,7 +343,7 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 	// backward compatibility with any remaining dialog-based flows).
 	if strings.HasPrefix(event.ActionID, "agent.delete.confirm.") {
 		agentID := strings.TrimPrefix(event.ActionID, "agent.delete.confirm.")
-		return r.executeDelete(ctx, event, agentID)
+		return r.executeDelete(ctx, event, agentID, "")
 	}
 
 	// Handle subscription activity filter (arrives here when checkboxes are
@@ -363,8 +363,14 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 		//   agent.delete.confirm.<id> → execute deletion, update card in place
 		//   agent.delete.cancel.<id>  → cancel deletion, update card in place
 		if strings.HasPrefix(agentID, "confirm.") {
-			realID := strings.TrimPrefix(agentID, "confirm.")
-			return r.executeDelete(ctx, event, realID)
+			trimmed := strings.TrimPrefix(agentID, "confirm.")
+			parts := strings.SplitN(trimmed, ".", 2)
+			realID := parts[0]
+			var slug string
+			if len(parts) > 1 {
+				slug = parts[1]
+			}
+			return r.executeDelete(ctx, event, realID, slug)
 		}
 		if strings.HasPrefix(agentID, "cancel.") {
 			return updateMessageResponse(event, "Deletion cancelled."), nil
@@ -860,8 +866,8 @@ func (r *CommandRouter) showDeleteConfirmation(ctx context.Context, event *ChatE
 		return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", agentSlug, err)), nil
 	}
 
-	confirmID := fmt.Sprintf("agent.delete.confirm.%s", agent.ID)
-	cancelID := fmt.Sprintf("agent.delete.cancel.%s", agent.ID)
+	confirmID := fmt.Sprintf("agent.delete.confirm.%s.%s", agent.ID, agent.Slug)
+	cancelID := fmt.Sprintf("agent.delete.cancel.%s.%s", agent.ID, agent.Slug)
 
 	card := Card{
 		Header: CardHeader{
@@ -889,7 +895,7 @@ func (r *CommandRouter) showDeleteConfirmation(ctx context.Context, event *ChatE
 
 // executeDelete performs the actual agent deletion after confirmation.
 // Returns an UpdateMessage response to replace the confirmation card in place.
-func (r *CommandRouter) executeDelete(ctx context.Context, event *ChatEvent, agentID string) (*EventResponse, error) {
+func (r *CommandRouter) executeDelete(ctx context.Context, event *ChatEvent, agentID, agentSlug string) (*EventResponse, error) {
 	link, err := r.store.GetSpaceLink(event.SpaceID, event.Platform)
 	if err != nil {
 		return nil, fmt.Errorf("getting space link: %w", err)
@@ -906,7 +912,11 @@ func (r *CommandRouter) executeDelete(ctx context.Context, event *ChatEvent, age
 	if err := client.ProjectAgents(link.ProjectID).Delete(ctx, agentID, nil); err != nil {
 		return updateMessageResponse(event, fmt.Sprintf("Failed to delete agent: %v", err)), nil
 	}
-	return updateMessageResponse(event, fmt.Sprintf("Agent `%s` deleted.", agentID)), nil
+	deletedName := agentSlug
+	if deletedName == "" {
+		deletedName = agentID
+	}
+	return updateMessageResponse(event, fmt.Sprintf("Agent `%s` deleted.", deletedName)), nil
 }
 
 func (r *CommandRouter) cmdLogs(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {

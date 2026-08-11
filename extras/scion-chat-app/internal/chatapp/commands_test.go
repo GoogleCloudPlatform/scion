@@ -20,9 +20,9 @@ func newTestRouter(t *testing.T) (*CommandRouter, *fakeMessenger) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	router := &CommandRouter{
-		store:          store,
-		messenger:      fm,
-		log:            log,
+		store:       store,
+		messenger:   fm,
+		log:         log,
 		pendingAuth: make(map[string]*pendingDeviceAuth),
 	}
 	return router, fm
@@ -215,7 +215,7 @@ func TestExecuteDelete_RequiresSpaceLink(t *testing.T) {
 		UserID:   "user-1",
 	}
 
-	resp, err := router.executeDelete(context.Background(), event, "agent-123")
+	resp, err := router.executeDelete(context.Background(), event, "agent-123", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
