@@ -674,6 +674,19 @@ server:
       oidc_audience: IAP_CLIENT_ID_PLACEHOLDER
       platform_auth_sa: scion-transport@PROJECT_ID.iam.gserviceaccount.com
 
+  # === OIDC IDENTITY PROVIDER ===
+  # Enables the Hub to act as an OIDC provider, publishing JWKS endpoints
+  # and minting identity tokens for agents to authenticate to external resources.
+  oidc:
+    enabled: true                      # Enabled to support agent identity tokens
+    token_lifetime: 15m                # Lifetime of minted OIDC identity tokens
+
+  # === OIDC FEDERATION ===
+  # Enables inbound federation from trusted external OIDC providers.
+  federation:
+    enabled: false                     # Disabled by default, configure if needed
+    trusted_issuers: []
+
   secrets:
     backend: gcpsm
     gcp_project_id: PROJECT_ID
@@ -1139,6 +1152,19 @@ server:
       mode: iap
       oidc_audience: PROJECT_NUMBER-xxxx.apps.googleusercontent.com  # OAuth client ID
       platform_auth_sa: scion-transport@PROJECT_ID.iam.gserviceaccount.com
+
+  # === OIDC IDENTITY PROVIDER ===
+  # Enables the Hub to act as an OIDC provider, publishing JWKS endpoints
+  # and minting identity tokens for agents to authenticate to external resources.
+  oidc:
+    enabled: true                      # Enabled to support agent identity tokens
+    token_lifetime: 15m                # Lifetime of minted OIDC identity tokens
+
+  # === OIDC FEDERATION ===
+  # Enables inbound federation from trusted external OIDC providers.
+  federation:
+    enabled: false                     # Disabled by default, configure if needed
+    trusted_issuers: []
 
   secrets:
     backend: gcpsm
