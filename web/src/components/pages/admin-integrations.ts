@@ -103,6 +103,9 @@ const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
   a2a: [
     { key: 'api_key', label: 'API Key', description: 'Static API key for apiKey/bearer auth schemes' },
   ],
+  gchat: [
+    { key: 'signing_key', label: 'Hub Signing Key', description: 'Shared signing key for hub authentication (HS256 JWT)', required: true },
+  ],
 };
 
 function resolvePlatform(name: string): string {
@@ -181,6 +184,13 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     { key: 'uat_cache_ttl', label: 'UAT Cache TTL',
       description: 'How long to cache UAT validation results',
       defaultValue: '60s', placeholder: '60s' },
+  ],
+  gchat: [
+    { key: 'project_id', label: 'GCP Project ID', description: 'Google Cloud project ID hosting the Chat app', defaultValue: '' },
+    { key: 'credentials', label: 'Credentials Path', description: 'Path to service account key JSON file (leave empty for ADC)', defaultValue: '' },
+    { key: 'listen_address', label: 'Webhook Listen Address', description: 'HTTP listen address for webhook mode', defaultValue: ':8443' },
+    { key: 'external_url', label: 'External URL', description: 'Public URL where Google Chat sends events', defaultValue: '' },
+    { key: 'service_account_email', label: 'Service Account Email', description: 'Email of the GCP service account (for JWT verification)', defaultValue: '' },
   ],
 };
 
@@ -994,7 +1004,7 @@ export class ScionPageAdminIntegrations extends LitElement {
 
       ${this.renderStatusSection(d.status)}
       ${this.renderSetupBanner(d)}
-      ${this.renderA2ASetupSection(d)}
+      ${this.renderSelfManagedSetupSection(d)}
       ${this.renderSecretsSection(d)}
       ${this.renderConfigSection(d)}
       ${this.renderA2AProjectsSection(d)}
@@ -1473,25 +1483,41 @@ export class ScionPageAdminIntegrations extends LitElement {
     `;
   }
 
-  private renderA2ASetupSection(d: IntegrationDetail) {
+  private renderSelfManagedSetupSection(d: IntegrationDetail) {
     const platform = resolvePlatform(d.name);
-    if (platform !== 'a2a') return nothing;
 
-    // Only show the setup section when the bridge is not connected.
+    // Determine binary/config/label per self-managed platform.
+    let binaryName: string;
+    let configFile: string;
+    let label: string;
+    switch (platform) {
+      case 'a2a':
+        binaryName = 'scion-a2a-bridge';
+        configFile = '~/.scion/scion-a2a-bridge.yaml';
+        label = 'A2A bridge';
+        break;
+      case 'gchat':
+        binaryName = 'scion-chat-app';
+        configFile = '~/.scion/scion-chat-app.yaml';
+        label = 'Google Chat app';
+        break;
+      default:
+        return nothing;
+    }
+
+    // Only show the setup section when the process is not connected.
     if (d.status?.connected) return nothing;
 
-    const binaryName = 'scion-a2a-bridge';
-    const configFile = '~/.scion/scion-a2a-bridge.yaml';
     const startCommand = `${binaryName} -config ${configFile}`;
 
     return html`
       <div class="section">
-        <h3 class="section-title">Bridge Setup</h3>
+        <h3 class="section-title">Service Setup</h3>
         <div class="setup-banner">
           <sl-icon name="info-circle"></sl-icon>
           <div>
-            <strong>The A2A bridge process is not connected</strong>
-            Start the bridge process and click Reconnect to activate.
+            <strong>The ${label} process is not connected</strong>
+            Start the process and click Reconnect to activate.
           </div>
         </div>
         <div style="font-size: 0.875rem; display: flex; flex-direction: column; gap: 0.5rem;">
