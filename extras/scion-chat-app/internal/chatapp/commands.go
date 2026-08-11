@@ -217,6 +217,8 @@ func (r *CommandRouter) handleAdminCommand(ctx context.Context, event *ChatEvent
 		resp, err = r.cmdSend(ctx, event, args)
 	case "secret":
 		resp, err = r.cmdSecret(ctx, event, args)
+	case "settings":
+		resp, err = r.cmdSettings(ctx, event, args)
 	case "help":
 		if len(args) == 0 {
 			resp, err = r.cmdAdminHelp(ctx, event)
@@ -296,6 +298,8 @@ func (r *CommandRouter) handleAction(ctx context.Context, event *ChatEvent) (*Ev
 		return nil, r.handleSecretAction(ctx, event, actionVerb, targetID)
 	case "send":
 		return nil, r.handleSendAction(ctx, event, actionVerb, targetID)
+	case "settings":
+		return r.handleSettingsAction(ctx, event, actionVerb)
 	}
 	return nil, nil
 }
@@ -773,10 +777,10 @@ func (r *CommandRouter) cmdLink(ctx context.Context, event *ChatEvent, args []st
 		return textResponse(event, fmt.Sprintf("Failed to save link: %v", err)), nil
 	}
 
-	// Subscribe only to user-targeted messages so that agent-to-agent
-	// traffic and broadcasts do not leak into chat.
+	// Subscribe to all project messages; observe mode filtering is
+	// applied at delivery time in HandleBrokerMessage.
 	if r.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.user.>", proj.ID)
+		pattern := fmt.Sprintf("scion.grove.%s.>", proj.ID)
 		if err := r.broker.RequestSubscription(pattern); err != nil {
 			r.log.Warn("failed to request project subscription", "project_id", proj.ID, "error", err)
 		}
@@ -796,7 +800,7 @@ func (r *CommandRouter) cmdUnlink(ctx context.Context, event *ChatEvent, args []
 
 	// Cancel broker subscription (must match the pattern used during link).
 	if r.broker != nil {
-		pattern := fmt.Sprintf("scion.grove.%s.user.>", link.ProjectID)
+		pattern := fmt.Sprintf("scion.grove.%s.>", link.ProjectID)
 		if err := r.broker.CancelSubscription(pattern); err != nil {
 			r.log.Warn("failed to cancel project subscription", "project_id", link.ProjectID, "error", err)
 		}
@@ -1464,6 +1468,7 @@ func (r *CommandRouter) cmdAdminHelp(ctx context.Context, event *ChatEvent) (*Ev
 • ` + "`/scionAdmin unlink`" + ` — Unlink this space
 • ` + "`/scionAdmin register`" + ` — Register your chat account
 • ` + "`/scionAdmin unregister`" + ` — Unregister your account
+• ` + "`/scionAdmin settings`" + ` — Toggle observe mode and notification filters
 
 *Notifications:*
 • ` + "`/scionAdmin subscribe <agent>`" + ` — Subscribe to agent notifications
@@ -1873,6 +1878,93 @@ func validateSecretKey(key string) error {
 	}
 	if strings.ContainsAny(key, " \t\n\r=:") {
 		return fmt.Errorf("secret key must not contain spaces, tabs, newlines, '=' or ':'")
+	}
+	return nil
+}
+
+// --- Settings command ---
+
+func (r *CommandRouter) cmdSettings(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
+	link, resp := r.requireSpaceLink(ctx, event)
+	if resp != nil {
+		return resp, nil
+	}
+
+	return r.buildSettingsCard(event, link), nil
+}
+
+// buildSettingsCard creates a card showing the current observe mode and state notification settings.
+func (r *CommandRouter) buildSettingsCard(event *ChatEvent, link *state.SpaceLink) *EventResponse {
+	observeLabel := "Observe Mode: OFF"
+	if link.ShowAgentToAgent {
+		observeLabel = "Observe Mode: ON"
+	}
+	stateLabel := "State Notifications: OFF"
+	if link.ShowStateChanges {
+		stateLabel = "State Notifications: ON"
+	}
+
+	card := Card{
+		Header: CardHeader{
+			Title:    "Space Settings",
+			Subtitle: fmt.Sprintf("Project: %s", link.ProjectSlug),
+		},
+		Sections: []CardSection{
+			{
+				Header: "Message Filtering",
+				Widgets: []Widget{
+					{Type: WidgetText, Content: "Control which messages are relayed to this space."},
+				},
+			},
+		},
+		Actions: []CardAction{
+			{Label: observeLabel, ActionID: "settings.observe"},
+			{Label: stateLabel, ActionID: "settings.statechange"},
+		},
+	}
+
+	return cardResponse(event, &card)
+}
+
+// handleSettingsAction toggles observe mode or state change notification settings.
+func (r *CommandRouter) handleSettingsAction(ctx context.Context, event *ChatEvent, verb string) error {
+	link, err := r.store.GetSpaceLink(event.SpaceID, event.Platform)
+	if err != nil {
+		return fmt.Errorf("getting space link: %w", err)
+	}
+	if link == nil {
+		return r.reply(ctx, event, "This space is not linked to a project.")
+	}
+
+	switch verb {
+	case "observe":
+		link.ShowAgentToAgent = !link.ShowAgentToAgent
+		if err := r.store.SetShowAgentToAgent(event.SpaceID, event.Platform, link.ShowAgentToAgent); err != nil {
+			return r.reply(ctx, event, fmt.Sprintf("Failed to update setting: %v", err))
+		}
+	case "statechange":
+		link.ShowStateChanges = !link.ShowStateChanges
+		if err := r.store.SetShowStateChanges(event.SpaceID, event.Platform, link.ShowStateChanges); err != nil {
+			return r.reply(ctx, event, fmt.Sprintf("Failed to update setting: %v", err))
+		}
+	default:
+		return r.reply(ctx, event, fmt.Sprintf("Unknown setting: `%s`", verb))
+	}
+
+	// Re-render the settings card with updated state via UpdateMessage
+	resp := r.buildSettingsCard(event, link)
+	if resp.Message != nil && resp.Message.Card != nil {
+		if event.ActionData != "" {
+			// Use UpdateMessage to refresh the card in-place
+			if err := r.messenger.UpdateMessage(ctx, event.ActionData, *resp.Message); err != nil {
+				r.log.Warn("failed to update settings card, sending new message", "error", err)
+				_, err = r.messenger.SendCard(ctx, event.SpaceID, *resp.Message.Card)
+				return err
+			}
+			return nil
+		}
+		_, err = r.messenger.SendCard(ctx, event.SpaceID, *resp.Message.Card)
+		return err
 	}
 	return nil
 }

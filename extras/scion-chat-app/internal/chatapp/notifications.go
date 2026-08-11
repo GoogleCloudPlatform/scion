@@ -18,11 +18,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
+
+// outboundEmailRe matches scion user emails in outbound messages, with optional "user:" prefix.
+var outboundEmailRe = regexp.MustCompile(`(?:user:)?[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
 
 // NotificationRelay routes agent notifications to chat spaces as rich cards.
 type NotificationRelay struct {
@@ -48,12 +52,14 @@ func (n *NotificationRelay) SetSendQueue(sq *SendQueue) {
 }
 
 // HandleBrokerMessage processes a message received via the broker plugin's Publish() path.
-// Only user-targeted messages (from explicit "scion message" commands) are relayed
-// to chat. All other topics are dropped to prevent harness output leaking into chat.
+// User-targeted messages are always relayed. Agent-to-agent messages and state
+// changes are relayed only when observe mode / state notifications are enabled
+// on the space link.
 //
-// Expected topic:
+// Expected topics:
 //
 //	scion.grove.<projectID>.user.<userID>.messages  — user-targeted message
+//	scion.grove.<projectID>.agent.<agentID>.messages — agent-targeted message
 func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	// Strip the "scion." prefix used by the broker topic hierarchy.
 	normalized := strings.TrimPrefix(topic, "scion.")
@@ -64,16 +70,118 @@ func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic strin
 		return nil
 	}
 
-	// Only relay user-targeted messages (from explicit "scion message"
-	// commands). All other topics (agent-to-agent, broadcasts, etc.) are
-	// dropped so that harness terminal output does not leak into chat.
-	if parts[0] == "grove" && len(parts) >= 5 && parts[2] == "user" {
-		projectID := parts[1]
+	if parts[0] != "grove" || len(parts) < 2 {
+		n.log.Debug("ignoring non-grove topic", "topic", topic)
+		return nil
+	}
+	projectID := parts[1]
+
+	// Classify the message for filtering.
+	isAgentToAgent := msg != nil &&
+		strings.HasPrefix(msg.Sender, "agent:") &&
+		strings.HasPrefix(msg.Recipient, "agent:")
+	isStateChange := msg != nil && msg.Type == messages.TypeStateChange
+
+	// User-targeted messages are always relayed (they were explicitly
+	// sent to a specific user and bypass observe/filter settings).
+	if len(parts) >= 5 && parts[2] == "user" {
 		return n.handleUserMessage(ctx, projectID, msg)
+	}
+
+	// Agent-to-agent and state change messages require observe filtering.
+	if isAgentToAgent || isStateChange {
+		return n.handleFilteredMessage(ctx, projectID, msg, isAgentToAgent, isStateChange)
 	}
 
 	n.log.Debug("ignoring non-user-targeted topic", "topic", topic)
 	return nil
+}
+
+// handleFilteredMessage relays agent-to-agent or state change messages to
+// linked spaces, applying per-space observe mode and state change filters.
+func (n *NotificationRelay) handleFilteredMessage(ctx context.Context, projectID string, msg *messages.StructuredMessage, isAgentToAgent, isStateChange bool) error {
+	links, err := n.store.ListSpaceLinks()
+	if err != nil {
+		return fmt.Errorf("listing space links: %w", err)
+	}
+
+	for _, link := range links {
+		if link.ProjectID != projectID {
+			continue
+		}
+
+		if isAgentToAgent && !link.ShowAgentToAgent {
+			n.log.Debug("observe mode disabled, filtering agent-to-agent message",
+				"space_id", link.SpaceID)
+			continue
+		}
+		if isStateChange && !link.ShowStateChanges {
+			n.log.Debug("state change notifications disabled, filtering",
+				"space_id", link.SpaceID)
+			continue
+		}
+
+		// Route to the appropriate renderer.
+		if isAgentToAgent {
+			card := n.renderObservedMessage(msg)
+			if _, err := n.messenger.SendCard(ctx, link.SpaceID, card); err != nil {
+				n.log.Error("failed to send observed message",
+					"space_id", link.SpaceID,
+					"error", err,
+				)
+			}
+		} else {
+			// State change notification — use the existing card renderer.
+			card := n.renderNotificationCard(msg)
+			mentions := n.getSubscriberMentions(msg, link)
+			if mentions != "" {
+				card.Sections = append(card.Sections, CardSection{
+					Widgets: []Widget{
+						{Type: WidgetText, Content: mentions},
+					},
+				})
+			}
+			if _, err := n.messenger.SendCard(ctx, link.SpaceID, card); err != nil {
+				n.log.Error("failed to send state change notification",
+					"space_id", link.SpaceID,
+					"error", err,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+// renderObservedMessage creates a card for an observed agent-to-agent message,
+// visually distinct from direct user messages.
+func (n *NotificationRelay) renderObservedMessage(msg *messages.StructuredMessage) Card {
+	senderSlug := msg.Sender
+	if idx := strings.Index(senderSlug, ":"); idx >= 0 {
+		senderSlug = senderSlug[idx+1:]
+	}
+	recipientSlug := msg.Recipient
+	if idx := strings.Index(recipientSlug, ":"); idx >= 0 {
+		recipientSlug = recipientSlug[idx+1:]
+	}
+
+	body := n.resolveOutboundMentions(msg.Msg)
+	if len(body) > 500 {
+		body = body[:500] + fmt.Sprintf("\n[%d chars truncated]", len(body)-500)
+	}
+
+	return Card{
+		Header: CardHeader{
+			Title:    fmt.Sprintf("%s → %s", senderSlug, recipientSlug),
+			Subtitle: "Agent-to-agent message (observe mode)",
+		},
+		Sections: []CardSection{
+			{
+				Widgets: []Widget{
+					{Type: WidgetText, Content: body},
+				},
+			},
+		},
+	}
 }
 
 // handleAgentNotification renders an agent status notification as a card in linked spaces.
@@ -173,6 +281,9 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 	if idx := strings.Index(agentSlug, ":"); idx >= 0 {
 		agentSlug = agentSlug[idx+1:]
 	}
+
+	// Resolve outbound mentions (replace hub emails with @mentions).
+	msg.Msg = n.resolveOutboundMentions(msg.Msg)
 
 	// Find spaces linked to the project from the message topic
 	links, err := n.store.ListSpaceLinks()
@@ -396,6 +507,52 @@ func (n *NotificationRelay) getSubscriberMentions(msg *messages.StructuredMessag
 		return ""
 	}
 	return "CC: " + strings.Join(mentions, " ")
+}
+
+// resolveOutboundMentions scans text for scion user emails (with optional
+// "user:" prefix) and replaces them with Google Chat @mentions when the user
+// has a mapping in the store.
+func (n *NotificationRelay) resolveOutboundMentions(text string) string {
+	if text == "" {
+		return text
+	}
+
+	matches := outboundEmailRe.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+
+	// Iterate in reverse to preserve indices during replacement.
+	for i := len(matches) - 1; i >= 0; i-- {
+		start, end := matches[i][0], matches[i][1]
+
+		// Skip emails embedded in URL paths.
+		if start > 0 {
+			prev := text[start-1]
+			if prev == '/' || prev == ':' {
+				continue
+			}
+		}
+		if end < len(text) && text[end] == '/' {
+			continue
+		}
+
+		match := text[start:end]
+		email := match
+		if strings.HasPrefix(email, "user:") {
+			email = strings.TrimPrefix(email, "user:")
+		}
+
+		mapping, err := n.store.GetUserMappingByHubEmail(email)
+		if err != nil || mapping == nil {
+			continue
+		}
+
+		// Google Chat @mention format: <users/USER_ID>
+		text = text[:start] + fmt.Sprintf("<users/%s>", mapping.PlatformUserID) + text[end:]
+	}
+
+	return text
 }
 
 // buildMentions returns a formatted @mention string for a user-targeted message.
