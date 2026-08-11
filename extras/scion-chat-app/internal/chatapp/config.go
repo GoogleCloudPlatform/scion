@@ -14,6 +14,41 @@
 
 package chatapp
 
+import (
+	"fmt"
+	"strconv"
+	"time"
+)
+
+// Duration is a time.Duration that supports human-readable YAML values
+// like "100ms", "5s", or "2m30s" via time.ParseDuration. Bare integers
+// are treated as nanoseconds for backward compatibility.
+type Duration struct {
+	time.Duration
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler to parse human-readable durations.
+func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return fmt.Errorf("duration must be a string (e.g. \"100ms\") or integer nanoseconds: %w", err)
+	}
+
+	// Try human-readable duration first (e.g. "100ms", "5s").
+	if parsed, err := time.ParseDuration(s); err == nil {
+		d.Duration = parsed
+		return nil
+	}
+
+	// Fall back to bare integer as nanoseconds for backward compatibility.
+	if ns, err := strconv.ParseInt(s, 10, 64); err == nil {
+		d.Duration = time.Duration(ns)
+		return nil
+	}
+
+	return fmt.Errorf("invalid duration %q: must be a duration string (e.g. \"100ms\") or integer nanoseconds", s)
+}
+
 // Config holds the chat app configuration.
 type Config struct {
 	Hub           HubConfig           `yaml:"hub"`
@@ -53,6 +88,8 @@ type GoogleChatConfig struct {
 	ExternalURL         string            `yaml:"external_url"`
 	ServiceAccountEmail string            `yaml:"service_account_email"`
 	CommandIDMap        map[string]string `yaml:"command_id_map"`
+	SendQueueSize       int               `yaml:"send_queue_size"` // default 100
+	SendMinDelay        Duration          `yaml:"send_min_delay"`  // default "100ms"
 }
 
 // SlackConfig holds settings for the Slack adapter (future).

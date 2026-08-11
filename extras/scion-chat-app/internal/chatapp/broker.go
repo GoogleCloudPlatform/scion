@@ -16,6 +16,8 @@ package chatapp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,6 +28,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	goplugin "github.com/hashicorp/go-plugin"
+)
+
+const (
+	// dedupTTL is how long a message fingerprint is remembered for deduplication.
+	dedupTTL = 5 * time.Minute
 )
 
 // MessageHandler is called when a message is received from the Hub via the broker plugin.
@@ -41,6 +48,9 @@ type BrokerServer struct {
 	subscriptions map[string]bool
 	configured    bool
 	channelName   string
+
+	sentIDs   map[string]time.Time
+	sentIDsMu sync.Mutex
 }
 
 // Compile-time interface checks.
@@ -53,12 +63,15 @@ func NewBrokerServer(handler MessageHandler, log *slog.Logger) *BrokerServer {
 		handler:       handler,
 		log:           log,
 		subscriptions: make(map[string]bool),
+		sentIDs:       make(map[string]time.Time),
 	}
 }
 
 // SetHandler replaces the message handler after construction, allowing
 // deferred wiring (e.g. to a notification relay created later).
 func (b *BrokerServer) SetHandler(handler MessageHandler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.handler = handler
 }
 
@@ -82,15 +95,67 @@ func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.
 	if msg == nil {
 		return nil
 	}
+
+	// Dedup check: compute SHA256 fingerprint and skip if seen within TTL.
+	dedupKey := msgDedupKey(msg)
+	if dedupKey != "" {
+		b.sentIDsMu.Lock()
+		if t, ok := b.sentIDs[dedupKey]; ok && time.Since(t) < dedupTTL {
+			b.sentIDsMu.Unlock()
+			b.log.Debug("skipping duplicate message",
+				"topic", topic,
+				"sender", msg.Sender,
+				"dedup_key", dedupKey,
+			)
+			return nil
+		}
+		b.sentIDs[dedupKey] = time.Now()
+		b.pruneSentIDsLocked()
+		b.sentIDsMu.Unlock()
+	}
+
 	b.log.Debug("received message via broker",
 		"topic", topic,
 		"sender", msg.Sender,
 		"type", msg.Type,
 	)
-	if b.handler != nil {
-		return b.handler(ctx, topic, msg)
+	b.mu.RLock()
+	h := b.handler
+	b.mu.RUnlock()
+	if h != nil {
+		return h(ctx, topic, msg)
 	}
 	return nil
+}
+
+// msgDedupKey returns a stable SHA256 fingerprint for a message, used to detect
+// duplicate deliveries of the same logical message.
+func msgDedupKey(msg *messages.StructuredMessage) string {
+	if msg == nil || msg.Msg == "" {
+		return ""
+	}
+	h := sha256.New()
+	h.Write([]byte(msg.Sender))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Recipient))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Timestamp))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Type))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.Msg))
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+// pruneSentIDsLocked removes dedup entries older than dedupTTL.
+// Must be called with b.sentIDsMu held.
+func (b *BrokerServer) pruneSentIDsLocked() {
+	now := time.Now()
+	for k, t := range b.sentIDs {
+		if now.Sub(t) > dedupTTL {
+			delete(b.sentIDs, k)
+		}
+	}
 }
 
 // ChannelName returns the configured channel name in a thread-safe manner.
