@@ -62,9 +62,8 @@ type CommandRouter struct {
 	broker      *BrokerServer
 	log         *slog.Logger
 
-	mu             sync.Mutex
-	pendingAuth    map[string]*pendingDeviceAuth // keyed by platformUserID+platform
-	pendingDeletes map[string]string             // keyed by actionID -> agentID
+	mu          sync.Mutex
+	pendingAuth map[string]*pendingDeviceAuth // keyed by platformUserID+platform
 }
 
 // NewCommandRouter creates a new command router.
@@ -78,15 +77,14 @@ func NewCommandRouter(
 	log *slog.Logger,
 ) *CommandRouter {
 	return &CommandRouter{
-		adminClient:    adminClient,
-		hubURL:         hubURL,
-		store:          store,
-		idMapper:       idMapper,
-		messenger:      messenger,
-		broker:         broker,
-		log:            log,
-		pendingAuth:    make(map[string]*pendingDeviceAuth),
-		pendingDeletes: make(map[string]string),
+		adminClient: adminClient,
+		hubURL:      hubURL,
+		store:       store,
+		idMapper:    idMapper,
+		messenger:   messenger,
+		broker:      broker,
+		log:         log,
+		pendingAuth: make(map[string]*pendingDeviceAuth),
 	}
 }
 
@@ -116,9 +114,9 @@ func (r *CommandRouter) HandleEvent(ctx context.Context, event *ChatEvent) (*Eve
 	case EventMessage:
 		return nil, r.handleMessage(ctx, event)
 	case EventAction:
-		return nil, r.handleAction(ctx, event)
+		return r.handleAction(ctx, event)
 	case EventDialogSubmit:
-		return nil, r.handleDialogSubmit(ctx, event)
+		return r.handleDialogSubmit(ctx, event)
 	case EventSpaceJoin:
 		return nil, r.handleSpaceJoin(ctx, event)
 	case EventSpaceRemove:
@@ -251,10 +249,10 @@ func (r *CommandRouter) handleMessage(ctx context.Context, event *ChatEvent) err
 }
 
 // handleAction processes button clicks and interactive elements.
-func (r *CommandRouter) handleAction(ctx context.Context, event *ChatEvent) error {
+func (r *CommandRouter) handleAction(ctx context.Context, event *ChatEvent) (*EventResponse, error) {
 	parts := strings.Split(event.ActionID, ".")
 	if len(parts) < 2 {
-		return nil
+		return nil, nil
 	}
 
 	actionType := parts[0]
@@ -271,16 +269,22 @@ func (r *CommandRouter) handleAction(ctx context.Context, event *ChatEvent) erro
 		if actionVerb == "ack" && targetID != "" {
 			client, err := r.clientForUser(ctx, event)
 			if err != nil {
-				return r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
+				return nil, r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
 			}
-			return client.Notifications().Acknowledge(ctx, targetID)
+			return nil, client.Notifications().Acknowledge(ctx, targetID)
+		}
+	case "subscribe":
+		// Card-based subscribe filter: arrives as EventAction when no
+		// checkboxes are selected (no formInputs).
+		if actionVerb == "filter" && targetID != "" {
+			return r.handleSubscribeFilter(ctx, event)
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // handleDialogSubmit processes form submissions from interactive cards.
-func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent) error {
+func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent) (*EventResponse, error) {
 	// Handle agent.respond submissions (ask_user inline response)
 	if strings.HasPrefix(event.ActionID, "agent.respond.") {
 		agentID := strings.TrimPrefix(event.ActionID, "agent.respond.")
@@ -296,33 +300,33 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 			}
 		}
 		if responseText == "" {
-			return r.reply(ctx, event, "No response text provided.")
+			return nil, r.reply(ctx, event, "No response text provided.")
 		}
 
 		link, err := r.store.GetSpaceLink(event.SpaceID, event.Platform)
 		if err != nil {
-			return fmt.Errorf("getting space link: %w", err)
+			return nil, fmt.Errorf("getting space link: %w", err)
 		}
 		if link == nil {
-			return r.reply(ctx, event, "This space is not linked to a project.")
+			return nil, r.reply(ctx, event, "This space is not linked to a project.")
 		}
 
 		mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
 		if err != nil {
 			r.log.Error("Failed to resolve user mapping", "error", err, "userID", event.UserID)
-			return r.reply(ctx, event, "Something went wrong, please try again later.")
+			return nil, r.reply(ctx, event, "Something went wrong, please try again later.")
 		}
 		if mapping == nil {
-			return r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
+			return nil, r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
 		}
 		client, err := r.idMapper.ClientFor(ctx, mapping)
 		if err != nil {
-			return r.reply(ctx, event, fmt.Sprintf("Failed to create client: %v", err))
+			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to create client: %v", err))
 		}
 
 		senderEmail := mapping.HubUserEmail
 		if senderEmail == "" {
-			return r.reply(ctx, event, "Your user mapping is missing a valid email address.")
+			return nil, r.reply(ctx, event, "Your user mapping is missing a valid email address.")
 		}
 		msg := messages.NewInstruction("user:"+senderEmail, agentID, responseText)
 		msg.Channel = r.broker.ChannelName()
@@ -330,38 +334,63 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 			msg.ThreadID = event.ThreadID
 		}
 		if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, agentID, msg, false, false, false); err != nil {
-			return r.reply(ctx, event, fmt.Sprintf("Failed to send response to agent: %v", err))
+			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to send response to agent: %v", err))
 		}
-		return r.reply(ctx, event, fmt.Sprintf("Response sent to agent `%s`.", agentID))
+		return nil, r.reply(ctx, event, fmt.Sprintf("Response sent to agent `%s`.", agentID))
 	}
 
-	// Handle delete confirmation
+	// Handle delete confirmation (also handled via card action; kept for
+	// backward compatibility with any remaining dialog-based flows).
 	if strings.HasPrefix(event.ActionID, "agent.delete.confirm.") {
 		agentID := strings.TrimPrefix(event.ActionID, "agent.delete.confirm.")
-		return r.executeDelete(ctx, event, agentID)
+		return r.executeDelete(ctx, event, agentID, "")
 	}
 
-	// Handle subscription activity filter dialog
+	// Handle subscription activity filter (arrives here when checkboxes are
+	// selected, producing formInputs that the adapter classifies as DialogSubmit).
 	if strings.HasPrefix(event.ActionID, "subscribe.filter.") {
 		return r.handleSubscribeFilter(ctx, event)
 	}
 
-	return nil
+	return nil, nil
 }
 
 // handleAgentAction processes agent-specific button actions.
-func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent, verb, agentID string) error {
+func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent, verb, agentID string) (*EventResponse, error) {
+	switch verb {
+	case "delete":
+		// Sub-actions from the delete confirmation card:
+		//   agent.delete.confirm.<id> → execute deletion, update card in place
+		//   agent.delete.cancel.<id>  → cancel deletion, update card in place
+		if strings.HasPrefix(agentID, "confirm.") {
+			trimmed := strings.TrimPrefix(agentID, "confirm.")
+			parts := strings.SplitN(trimmed, ".", 2)
+			realID := parts[0]
+			var slug string
+			if len(parts) > 1 {
+				slug = parts[1]
+			}
+			return r.executeDelete(ctx, event, realID, slug)
+		}
+		if strings.HasPrefix(agentID, "cancel.") {
+			return updateMessageResponse(event, "Deletion cancelled."), nil
+		}
+		// Plain agent.delete.<id> → show the confirmation card
+		return r.showDeleteConfirmation(ctx, event, agentID)
+	}
+
+	// All other verbs require a space link and authenticated client.
 	link, err := r.store.GetSpaceLink(event.SpaceID, event.Platform)
 	if err != nil {
-		return fmt.Errorf("getting space link: %w", err)
+		return nil, fmt.Errorf("getting space link: %w", err)
 	}
 	if link == nil {
-		return r.reply(ctx, event, "This space is not linked to a project.")
+		return nil, r.reply(ctx, event, "This space is not linked to a project.")
 	}
 
 	client, err := r.clientForUser(ctx, event)
 	if err != nil {
-		return r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
+		return nil, r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
 	}
 
 	agents := client.ProjectAgents(link.ProjectID)
@@ -369,42 +398,29 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 	switch verb {
 	case "start":
 		if err := agents.Start(ctx, agentID); err != nil {
-			return r.reply(ctx, event, fmt.Sprintf("Failed to start agent: %v", err))
+			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to start agent: %v", err))
 		}
-		return r.reply(ctx, event, fmt.Sprintf("Agent `%s` started.", agentID))
+		return nil, r.reply(ctx, event, fmt.Sprintf("Agent `%s` started.", agentID))
 	case "stop":
 		if err := agents.Stop(ctx, agentID); err != nil {
-			return r.reply(ctx, event, fmt.Sprintf("Failed to stop agent: %v", err))
+			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to stop agent: %v", err))
 		}
-		return r.reply(ctx, event, fmt.Sprintf("Agent `%s` stopped.", agentID))
+		return nil, r.reply(ctx, event, fmt.Sprintf("Agent `%s` stopped.", agentID))
 	case "logs":
 		logs, err := agents.GetLogs(ctx, agentID, &hubclient.GetLogsOptions{Tail: 50})
 		if err != nil {
-			return r.reply(ctx, event, fmt.Sprintf("Failed to get logs: %v", err))
+			return nil, r.reply(ctx, event, fmt.Sprintf("Failed to get logs: %v", err))
 		}
 		if len(logs) > 2000 {
 			logs = logs[len(logs)-2000:]
 		}
-		return r.reply(ctx, event, fmt.Sprintf("*Logs for `%s`:*\n```\n%s\n```", agentID, logs))
+		return nil, r.reply(ctx, event, fmt.Sprintf("*Logs for `%s`:*\n```\n%s\n```", agentID, logs))
 	case "respond":
 		// This is handled via dialog submit when user fills the inline input field.
 		// If triggered as a plain action (no dialog data), prompt for input.
-		return r.reply(ctx, event, fmt.Sprintf("Use the inline response field in the notification card to respond to agent `%s`.", agentID))
-	case "delete":
-		resp, err := r.showDeleteConfirmation(ctx, event, agentID)
-		if err != nil {
-			return err
-		}
-		if resp != nil && resp.Message != nil {
-			if resp.Message.Card != nil {
-				_, err = r.messenger.SendCard(ctx, event.SpaceID, *resp.Message.Card)
-			} else {
-				_, err = r.messenger.SendMessage(ctx, *resp.Message)
-			}
-		}
-		return err
+		return nil, r.reply(ctx, event, fmt.Sprintf("Use the inline response field in the notification card to respond to agent `%s`.", agentID))
 	}
-	return nil
+	return nil, nil
 }
 
 // handleSpaceJoin is called when the bot is added to a space.
@@ -850,7 +866,8 @@ func (r *CommandRouter) showDeleteConfirmation(ctx context.Context, event *ChatE
 		return textResponse(event, fmt.Sprintf("Agent `%s` not found: %v", agentSlug, err)), nil
 	}
 
-	confirmID := fmt.Sprintf("agent.delete.confirm.%s", agent.ID)
+	confirmID := fmt.Sprintf("agent.delete.confirm.%s.%s", agent.ID, agent.Slug)
+	cancelID := fmt.Sprintf("agent.delete.cancel.%s.%s", agent.ID, agent.Slug)
 
 	card := Card{
 		Header: CardHeader{
@@ -860,7 +877,7 @@ func (r *CommandRouter) showDeleteConfirmation(ctx context.Context, event *ChatE
 		Sections: []CardSection{
 			{
 				Widgets: []Widget{
-					{Type: WidgetText, Content: fmt.Sprintf("Are you sure you want to delete agent `%s`?\n\nThis action cannot be undone.", agent.Slug)},
+					{Type: WidgetText, Content: fmt.Sprintf("Are you sure you want to delete agent *%s*?\n\nThis action cannot be undone.", agent.Slug)},
 					{Type: WidgetKeyValue, Label: "Name", Content: agent.Name},
 					{Type: WidgetKeyValue, Label: "Phase", Content: agent.Phase},
 					{Type: WidgetKeyValue, Label: "Activity", Content: agent.Activity},
@@ -868,8 +885,8 @@ func (r *CommandRouter) showDeleteConfirmation(ctx context.Context, event *ChatE
 			},
 		},
 		Actions: []CardAction{
-			{Label: "Delete", ActionID: confirmID, Style: "danger"},
-			{Label: "Cancel", ActionID: "noop"},
+			{Label: "Confirm Delete", ActionID: confirmID, Style: "danger"},
+			{Label: "Cancel", ActionID: cancelID},
 		},
 	}
 
@@ -877,24 +894,29 @@ func (r *CommandRouter) showDeleteConfirmation(ctx context.Context, event *ChatE
 }
 
 // executeDelete performs the actual agent deletion after confirmation.
-func (r *CommandRouter) executeDelete(ctx context.Context, event *ChatEvent, agentID string) error {
+// Returns an UpdateMessage response to replace the confirmation card in place.
+func (r *CommandRouter) executeDelete(ctx context.Context, event *ChatEvent, agentID, agentSlug string) (*EventResponse, error) {
 	link, err := r.store.GetSpaceLink(event.SpaceID, event.Platform)
 	if err != nil {
-		return fmt.Errorf("getting space link: %w", err)
+		return nil, fmt.Errorf("getting space link: %w", err)
 	}
 	if link == nil {
-		return r.reply(ctx, event, "This space is not linked to a project.")
+		return updateMessageResponse(event, "This space is not linked to a project."), nil
 	}
 
 	client, err := r.clientForUser(ctx, event)
 	if err != nil {
-		return r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
+		return updateMessageResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
 	if err := client.ProjectAgents(link.ProjectID).Delete(ctx, agentID, nil); err != nil {
-		return r.reply(ctx, event, fmt.Sprintf("Failed to delete agent: %v", err))
+		return updateMessageResponse(event, fmt.Sprintf("Failed to delete agent: %v", err)), nil
 	}
-	return r.reply(ctx, event, fmt.Sprintf("Agent `%s` deleted.", agentID))
+	deletedName := agentSlug
+	if deletedName == "" {
+		deletedName = agentID
+	}
+	return updateMessageResponse(event, fmt.Sprintf("Agent `%s` deleted.", deletedName)), nil
 }
 
 func (r *CommandRouter) cmdLogs(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
@@ -996,17 +1018,21 @@ func (r *CommandRouter) cmdSubscribe(ctx context.Context, event *ChatEvent, args
 	return cardResponse(event, &card), nil
 }
 
-// handleSubscribeFilter processes the subscription activity filter dialog submission.
-func (r *CommandRouter) handleSubscribeFilter(ctx context.Context, event *ChatEvent) error {
+// handleSubscribeFilter processes the subscription activity filter submission.
+// This handler is reached via both EventAction (no checkboxes selected) and
+// EventDialogSubmit (checkboxes selected, producing formInputs).
+// Returns an UpdateMessage response to replace the filter card in place.
+func (r *CommandRouter) handleSubscribeFilter(ctx context.Context, event *ChatEvent) (*EventResponse, error) {
 	// ActionID format: subscribe.filter.<projectID>.<agentSlug>
 	parts := strings.SplitN(event.ActionID, ".", 4)
 	if len(parts) < 4 {
-		return r.reply(ctx, event, "Invalid subscription filter action.")
+		return updateMessageResponse(event, "Invalid subscription filter action."), nil
 	}
 	projectID := parts[2]
 	agentSlug := parts[3]
 
-	// Collect selected activities from dialog data
+	// Collect selected activities from form data (populated from card
+	// checkbox widgets via commonEventObject.formInputs).
 	var activities string
 	if selected, ok := event.DialogData[event.ActionID]; ok && selected != "" {
 		activities = selected
@@ -1020,7 +1046,7 @@ func (r *CommandRouter) handleSubscribeFilter(ctx context.Context, event *ChatEv
 		Activities:     activities,
 	}
 	if err := r.store.SetAgentSubscription(sub); err != nil {
-		return r.reply(ctx, event, fmt.Sprintf("Failed to subscribe: %v", err))
+		return updateMessageResponse(event, fmt.Sprintf("Failed to subscribe: %v", err)), nil
 	}
 
 	msg := fmt.Sprintf("Subscribed to notifications for agent `%s`.", agentSlug)
@@ -1029,7 +1055,7 @@ func (r *CommandRouter) handleSubscribeFilter(ctx context.Context, event *ChatEv
 	} else {
 		msg += " Receiving all activity types."
 	}
-	return r.reply(ctx, event, msg)
+	return updateMessageResponse(event, msg), nil
 }
 
 func (r *CommandRouter) cmdUnsubscribe(ctx context.Context, event *ChatEvent, args []string) (*EventResponse, error) {
@@ -1384,6 +1410,18 @@ func cardResponse(event *ChatEvent, card *Card) *EventResponse {
 			SpaceID:  event.SpaceID,
 			ThreadID: event.ThreadID,
 			Card:     card,
+		},
+	}
+}
+
+// updateMessageResponse creates a synchronous EventResponse that updates the
+// triggering message in place (e.g. replacing a confirmation card with a result).
+func updateMessageResponse(event *ChatEvent, text string) *EventResponse {
+	return &EventResponse{
+		UpdateMessage: &SendMessageRequest{
+			SpaceID:  event.SpaceID,
+			ThreadID: event.ThreadID,
+			Text:     text,
 		},
 	}
 }

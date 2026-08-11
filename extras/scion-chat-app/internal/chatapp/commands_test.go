@@ -20,11 +20,10 @@ func newTestRouter(t *testing.T) (*CommandRouter, *fakeMessenger) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	router := &CommandRouter{
-		store:          store,
-		messenger:      fm,
-		log:            log,
-		pendingAuth:    make(map[string]*pendingDeviceAuth),
-		pendingDeletes: make(map[string]string),
+		store:       store,
+		messenger:   fm,
+		log:         log,
+		pendingAuth: make(map[string]*pendingDeviceAuth),
 	}
 	return router, fm
 }
@@ -191,7 +190,7 @@ func TestHandleAgentAction_RequiresSpaceLink(t *testing.T) {
 	for _, verb := range []string{"start", "stop", "logs"} {
 		t.Run(verb, func(t *testing.T) {
 			fm.messages = nil
-			err := router.handleAgentAction(context.Background(), event, verb, "agent-123")
+			_, err := router.handleAgentAction(context.Background(), event, verb, "agent-123")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -208,7 +207,7 @@ func TestHandleAgentAction_RequiresSpaceLink(t *testing.T) {
 // TestExecuteDelete_RequiresSpaceLink verifies that the delete confirmation
 // handler requires a space link for grove scoping.
 func TestExecuteDelete_RequiresSpaceLink(t *testing.T) {
-	router, fm := newTestRouter(t)
+	router, _ := newTestRouter(t)
 	event := &ChatEvent{
 		Type:     EventAction,
 		Platform: "googlechat",
@@ -216,15 +215,16 @@ func TestExecuteDelete_RequiresSpaceLink(t *testing.T) {
 		UserID:   "user-1",
 	}
 
-	err := router.executeDelete(context.Background(), event, "agent-123")
+	resp, err := router.executeDelete(context.Background(), event, "agent-123", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(fm.messages) == 0 {
-		t.Fatal("expected a reply message")
+	// executeDelete now returns an UpdateMessage response instead of using r.reply.
+	if resp == nil || resp.UpdateMessage == nil {
+		t.Fatal("expected an UpdateMessage response")
 	}
-	if !strings.Contains(fm.messages[0].Text, "not linked") {
-		t.Errorf("expected 'not linked' reply, got: %s", fm.messages[0].Text)
+	if !strings.Contains(resp.UpdateMessage.Text, "not linked") {
+		t.Errorf("expected 'not linked' in UpdateMessage, got: %s", resp.UpdateMessage.Text)
 	}
 }
 
@@ -243,7 +243,7 @@ func TestDialogSubmitRespond_RequiresSpaceLink(t *testing.T) {
 		},
 	}
 
-	err := router.handleDialogSubmit(context.Background(), event)
+	_, err := router.handleDialogSubmit(context.Background(), event)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -451,5 +451,95 @@ func TestHandleSpaceRemove_CleansUpThreadDefaults(t *testing.T) {
 	got2, _ := router.store.GetThreadDefault("spaces/test", "thread-2", "googlechat")
 	if got1 != "" || got2 != "" {
 		t.Errorf("thread defaults should be cleaned up after space removal, got thread-1=%q, thread-2=%q", got1, got2)
+	}
+}
+
+// TestDeleteConfirmAction_UpdatesMessage verifies that the card-based delete
+// confirm action (agent.delete.confirm.<id>) returns an UpdateMessage response.
+func TestDeleteConfirmAction_UpdatesMessage(t *testing.T) {
+	router, _ := newTestRouter(t)
+	event := &ChatEvent{
+		Type:     EventAction,
+		Platform: "googlechat",
+		SpaceID:  "spaces/unlinked",
+		UserID:   "user-1",
+		ActionID: "agent.delete.confirm.agent-123",
+	}
+
+	// With no space link, executeDelete returns an UpdateMessage with "not linked".
+	resp, err := router.handleAgentAction(context.Background(), event, "delete", "confirm.agent-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.UpdateMessage == nil {
+		t.Fatal("expected an UpdateMessage response")
+	}
+	if !strings.Contains(resp.UpdateMessage.Text, "not linked") {
+		t.Errorf("expected 'not linked' in UpdateMessage, got: %s", resp.UpdateMessage.Text)
+	}
+}
+
+// TestDeleteCancelAction_UpdatesMessage verifies that the card-based delete
+// cancel action (agent.delete.cancel.<id>) returns an UpdateMessage with
+// "Deletion cancelled."
+func TestDeleteCancelAction_UpdatesMessage(t *testing.T) {
+	router, _ := newTestRouter(t)
+	event := &ChatEvent{
+		Type:     EventAction,
+		Platform: "googlechat",
+		SpaceID:  "spaces/test",
+		UserID:   "user-1",
+		ActionID: "agent.delete.cancel.agent-123",
+	}
+
+	resp, err := router.handleAgentAction(context.Background(), event, "delete", "cancel.agent-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.UpdateMessage == nil {
+		t.Fatal("expected an UpdateMessage response")
+	}
+	if resp.UpdateMessage.Text != "Deletion cancelled." {
+		t.Errorf("expected 'Deletion cancelled.' in UpdateMessage, got: %s", resp.UpdateMessage.Text)
+	}
+}
+
+// TestSubscribeFilterAction_UpdatesMessage verifies that the card-based
+// subscribe filter action (arriving as EventAction when no checkboxes are
+// selected) saves the subscription and returns an UpdateMessage.
+func TestSubscribeFilterAction_UpdatesMessage(t *testing.T) {
+	router, _ := newTestRouter(t)
+
+	// Seed a space link so handleSubscribeFilter can save the subscription.
+	if err := router.store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:     "spaces/linked",
+		Platform:    "googlechat",
+		ProjectID:   "proj-1",
+		ProjectSlug: "my-project",
+		LinkedBy:    "test",
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	event := &ChatEvent{
+		Type:     EventAction,
+		Platform: "googlechat",
+		SpaceID:  "spaces/linked",
+		UserID:   "user-1",
+		ActionID: "subscribe.filter.proj-1.my-agent",
+	}
+
+	resp, err := router.handleAction(context.Background(), event)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.UpdateMessage == nil {
+		t.Fatal("expected an UpdateMessage response")
+	}
+	if !strings.Contains(resp.UpdateMessage.Text, "Subscribed to notifications") {
+		t.Errorf("expected subscription confirmation, got: %s", resp.UpdateMessage.Text)
+	}
+	if !strings.Contains(resp.UpdateMessage.Text, "all activity types") {
+		t.Errorf("expected 'all activity types' (no checkboxes), got: %s", resp.UpdateMessage.Text)
 	}
 }
