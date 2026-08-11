@@ -37,9 +37,8 @@ This script's job:
   3. Update .claude.json project paths to point at the container workspace.
   4. Translate universal MCP servers into Claude Code's native mcpServers
      format in .claude.json.
-  5. Resolve the requested model (the SCION_MODEL env var), mapping size
-     aliases (small/medium/large/extra-large) through config.yaml's
-     model_aliases, and publish it as ANTHROPIC_MODEL in the env overlay.
+  5. Publish the resolved model (the SCION_MODEL env var, already resolved
+     by the Go side) as ANTHROPIC_MODEL in the env overlay.
   6. Write outputs/resolved-auth.json describing the chosen method.
   7. Write outputs/env.json with env vars to project into the harness process
      (e.g. ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_MODEL, or
@@ -234,10 +233,11 @@ def _apply_model(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> st
 
     Returns the concrete model name that was applied.
     """
-    model = os.environ.get("SCION_MODEL", "").strip() or DEFAULT_MODEL
+    raw = os.environ.get("SCION_MODEL", "").strip()
+    model = raw or DEFAULT_MODEL
 
     preset = os.environ.get("ANTHROPIC_MODEL", "").strip()
-    if model != DEFAULT_MODEL and preset and preset != model:
+    if raw and preset and preset != model:
         ctx.warn(
             f"ANTHROPIC_MODEL={preset!r} is set in the container environment and "
             f"takes precedence over the requested model {model!r}. This usually "
