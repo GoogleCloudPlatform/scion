@@ -1590,6 +1590,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       : this.harnessConfigSelection;
   }
 
+  private get hasHarnessConfigErrors(): boolean {
+    return Object.keys(this.harnessConfigErrors).length > 0;
+  }
+
   private readOnlyReason(koanfKey: string): 'bootstrap' | 'env' | null {
     if (this.settingsTier === 'db') {
       return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
@@ -2543,10 +2547,14 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab-panel name="gcp-identity">${this.renderGCPIdentityTab()}</sl-tab-panel>
       </sl-tab-group>
 
+      ${this.hasHarnessConfigErrors
+        ? html`<div class="error" style="margin-bottom:0.75rem;">Cannot save: one or more harness config entries contain invalid JSON. Fix the errors on the Runtimes &amp; Profiles tab before saving.</div>`
+        : nothing}
       <div class="actions">
         <sl-button
           variant="primary"
           ?loading=${this.saving}
+          ?disabled=${this.hasHarnessConfigErrors}
           @click=${() => {
             void this.handleSave();
           }}
@@ -3369,14 +3377,14 @@ export class ScionPageAdminServerConfig extends LitElement {
                   size="small"
                   variant="default"
                   ?disabled=${!this.newRuntimeName.trim() ||
-                    !!this.runtimes[this.newRuntimeName.trim()]}
+                    this.newRuntimeName.trim() in this.runtimes}
                   @click=${() => this.addRuntime()}
                 >
                   <sl-icon slot="prefix" name="plus-circle"></sl-icon>
                   Add Runtime
                 </sl-button>
               </div>
-              ${this.runtimes[this.newRuntimeName.trim()]
+              ${this.newRuntimeName.trim() in this.runtimes
                 ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A runtime named "${this.newRuntimeName.trim()}" already exists.</small>`
                 : nothing}
             `
@@ -3561,7 +3569,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private addRuntime(): void {
     const name = this.newRuntimeName.trim();
-    if (!name || this.runtimes[name]) return;
+    if (!name || name in this.runtimes) return;
     this.runtimes = { ...this.runtimes, [name]: { type: 'docker' } };
     this.newRuntimeName = '';
   }
@@ -3605,14 +3613,14 @@ export class ScionPageAdminServerConfig extends LitElement {
                   size="small"
                   variant="default"
                   ?disabled=${!this.newProfileName.trim() ||
-                    !!this.profiles[this.newProfileName.trim()]}
+                    this.newProfileName.trim() in this.profiles}
                   @click=${() => this.addProfile()}
                 >
                   <sl-icon slot="prefix" name="plus-circle"></sl-icon>
                   Add Profile
                 </sl-button>
               </div>
-              ${this.profiles[this.newProfileName.trim()]
+              ${this.newProfileName.trim() in this.profiles
                 ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A profile named "${this.newProfileName.trim()}" already exists.</small>`
                 : nothing}
             `
@@ -3801,7 +3809,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private addProfile(): void {
     const name = this.newProfileName.trim();
-    if (!name || this.profiles[name]) return;
+    if (!name || name in this.profiles) return;
     const runtimeNames = Object.keys(this.runtimes);
     this.profiles = {
       ...this.profiles,
@@ -3846,14 +3854,14 @@ export class ScionPageAdminServerConfig extends LitElement {
                   size="small"
                   variant="default"
                   ?disabled=${!this.newHarnessConfigName.trim() ||
-                    !!this.harnessConfigsMap[this.newHarnessConfigName.trim()]}
+                    this.newHarnessConfigName.trim() in this.harnessConfigsMap}
                   @click=${() => this.addHarnessConfig()}
                 >
                   <sl-icon slot="prefix" name="plus-circle"></sl-icon>
                   Add Harness Config
                 </sl-button>
               </div>
-              ${this.harnessConfigsMap[this.newHarnessConfigName.trim()]
+              ${this.newHarnessConfigName.trim() in this.harnessConfigsMap
                 ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A config named "${this.newHarnessConfigName.trim()}" already exists.</small>`
                 : nothing}
             `
@@ -3927,7 +3935,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private addHarnessConfig(): void {
     const name = this.newHarnessConfigName.trim();
-    if (!name || this.harnessConfigsMap[name]) return;
+    if (!name || name in this.harnessConfigsMap) return;
     this.harnessConfigsMap = {
       ...this.harnessConfigsMap,
       [name]: { harness: 'claude-code' },
@@ -3939,6 +3947,12 @@ export class ScionPageAdminServerConfig extends LitElement {
     const updated = { ...this.harnessConfigsMap };
     delete updated[name];
     this.harnessConfigsMap = updated;
+    // Clear any associated validation error
+    if (name in this.harnessConfigErrors) {
+      const errors = { ...this.harnessConfigErrors };
+      delete errors[name];
+      this.harnessConfigErrors = errors;
+    }
   }
 
   private renderBrokerTab() {
