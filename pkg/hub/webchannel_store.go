@@ -36,11 +36,6 @@ import (
 //
 // This mirrors the Discord store split
 // (extras/scion-discord/internal/discord/store.go vs store_postgres.go).
-// ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
-type ThreadPrefs struct {
-	VisibilityMode string `json:"visibility_mode"`
-}
-
 type WebChatStore interface {
 	// Init creates the webchat_* tables if they do not exist.
 	Init() error
@@ -62,6 +57,11 @@ type WebChatStore interface {
 
 	// SetThreadPrefs upserts the display preferences for a (user, project, agent) thread.
 	SetThreadPrefs(ctx context.Context, userID, projectID, agentID string, prefs ThreadPrefs) error
+}
+
+// ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
+type ThreadPrefs struct {
+	VisibilityMode string `json:"visibility_mode"`
 }
 
 // NewWebChatStore creates a new WebChatStore backed by the given database.

@@ -94,7 +94,6 @@ export class ScionChatThread extends LitElement {
   @state() private loadingOlder = false;
   @state() private hasOlderMessages = true;
   @state() private loaded = false;
-  @state() private prefsLoaded = false;
 
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
@@ -274,10 +273,7 @@ export class ScionChatThread extends LitElement {
 
   /** Load saved preferences first, then fetch history. */
   private async loadPrefsAndHistory(): Promise<void> {
-    if (!this.prefsLoaded) {
-      await this.loadPrefs();
-      this.prefsLoaded = true;
-    }
+    await this.loadPrefs();
     await this.initialLoad();
   }
 
@@ -292,8 +288,8 @@ export class ScionChatThread extends LitElement {
           this.visibilityMode = data.visibility_mode as VisibilityMode;
         }
       }
-    } catch {
-      // Non-fatal — use default mode.
+    } catch (err) {
+      console.warn('Failed to load chat prefs, using defaults', err);
     }
   }
 
@@ -306,8 +302,8 @@ export class ScionChatThread extends LitElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ visibility_mode: mode }),
       });
-    } catch {
-      // Non-fatal — pref not saved but mode still applies locally.
+    } catch (err) {
+      console.warn('Failed to save chat prefs', err);
     }
   }
 
