@@ -318,6 +318,42 @@ func (s *AgentStore) GetAgentBySlug(ctx context.Context, projectID, slug string)
 	return entAgentToStore(a), nil
 }
 
+// GetAgentsByIDs retrieves agents by a list of IDs.
+// Returns only agents that exist; missing IDs are silently skipped.
+func (s *AgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	uuids := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := parseUUID(id)
+		if err != nil {
+			continue // skip invalid UUIDs
+		}
+		uuids = append(uuids, uid)
+	}
+
+	if len(uuids) == 0 {
+		return nil, nil
+	}
+
+	agents, err := s.client.Agent.Query().
+		Where(agent.IDIn(uuids...), agent.DeletedAtIsNil()).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	result := make(map[string]*store.Agent, len(agents))
+	for _, a := range agents {
+		sa := entAgentToStore(a)
+		result[sa.ID] = sa
+	}
+
+	return result, nil
+}
+
 // UpdateAgent updates an existing agent using optimistic locking on
 // state_version. The mutable field set mirrors the legacy SQLite store:
 // identity-adjacent operational fields are updated, while immutable lineage

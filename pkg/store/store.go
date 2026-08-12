@@ -150,6 +150,11 @@ type AgentStore interface {
 	// Returns ErrNotFound if the agent doesn't exist.
 	GetAgentBySlug(ctx context.Context, projectID, slug string) (*Agent, error)
 
+	// GetAgentsByIDs retrieves agents by a list of IDs.
+	// Returns only agents that exist; missing IDs are silently skipped.
+	// The returned map is keyed by agent ID.
+	GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*Agent, error)
+
 	// UpdateAgent updates an existing agent.
 	// Uses optimistic locking via StateVersion.
 	// Returns ErrNotFound if agent doesn't exist.
@@ -1240,6 +1245,11 @@ type MessageStore interface {
 	// GetMessage returns a single message by ID.
 	// Returns ErrNotFound if the message doesn't exist.
 	GetMessage(ctx context.Context, id string) (*Message, error)
+
+	// GetMessagesByIDs retrieves messages by a list of IDs.
+	// Returns only messages that exist; missing IDs are silently skipped.
+	// The returned map is keyed by message ID.
+	GetMessagesByIDs(ctx context.Context, ids []string) (map[string]*Message, error)
 
 	// ListMessages returns messages matching the given filter.
 	// Results are ordered by created_at DESC.

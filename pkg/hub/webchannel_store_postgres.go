@@ -132,3 +132,49 @@ DO UPDATE SET visibility_mode = EXCLUDED.visibility_mode
 	}
 	return nil
 }
+
+// GetThreads returns thread watermarks for the given user and project.
+func (s *pgWebChatStore) GetThreads(ctx context.Context, userID, projectID string, limit int) ([]WebChatThread, error) {
+	const query = `
+SELECT agent_id, COALESCE(last_message_id, ''), last_activity_at, last_read_at
+  FROM webchat_thread
+ WHERE user_id = $1 AND project_id = $2
+ ORDER BY last_activity_at DESC
+ LIMIT $3
+`
+	rows, err := s.db.QueryContext(ctx, query, userID, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: get threads: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var threads []WebChatThread
+	for rows.Next() {
+		var t WebChatThread
+		var activityAt *time.Time
+		var readAt *time.Time
+		if err := rows.Scan(&t.AgentID, &t.LastMessageID, &activityAt, &readAt); err != nil {
+			return nil, fmt.Errorf("webchat store: scan thread: %w", err)
+		}
+		if activityAt != nil {
+			t.LastActivityAt = *activityAt
+		}
+		t.LastReadAt = readAt
+		threads = append(threads, t)
+	}
+	return threads, rows.Err()
+}
+
+// MarkThreadRead advances the last_read_at watermark to now.
+func (s *pgWebChatStore) MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error {
+	const query = `
+UPDATE webchat_thread
+   SET last_read_at = NOW()
+ WHERE user_id = $1 AND project_id = $2 AND agent_id = $3
+`
+	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID)
+	if err != nil {
+		return fmt.Errorf("webchat store: mark thread read: %w", err)
+	}
+	return nil
+}

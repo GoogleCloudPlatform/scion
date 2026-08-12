@@ -57,11 +57,29 @@ type WebChatStore interface {
 
 	// SetThreadPrefs upserts the display preferences for a (user, project, agent) thread.
 	SetThreadPrefs(ctx context.Context, userID, projectID, agentID string, prefs ThreadPrefs) error
+
+	// GetThreads returns thread watermarks for the given user and project,
+	// ordered by last_activity_at descending, limited to `limit` rows.
+	// This is the backing query for GET /api/v1/chat/threads.
+	GetThreads(ctx context.Context, userID, projectID string, limit int) ([]WebChatThread, error)
+
+	// MarkThreadRead advances the last_read_at watermark for the given
+	// (user, project, agent) thread to the current time.
+	MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error
 }
 
 // ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
 type ThreadPrefs struct {
 	VisibilityMode string `json:"visibility_mode"`
+}
+
+// WebChatThread is a single row from the webchat_thread table,
+// returned by GetThreads.
+type WebChatThread struct {
+	AgentID        string
+	LastMessageID  string
+	LastActivityAt time.Time
+	LastReadAt     *time.Time // nil if never read
 }
 
 // NewWebChatStore creates a new WebChatStore backed by the given database.
@@ -186,6 +204,66 @@ DO UPDATE SET visibility_mode = excluded.visibility_mode
 	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, prefs.VisibilityMode)
 	if err != nil {
 		return fmt.Errorf("webchat store: set thread prefs: %w", err)
+	}
+	return nil
+}
+
+// GetThreads returns thread watermarks for the given user and project.
+func (s *sqliteWebChatStore) GetThreads(ctx context.Context, userID, projectID string, limit int) ([]WebChatThread, error) {
+	const query = `
+SELECT agent_id, COALESCE(last_message_id, ''), COALESCE(last_activity_at, ''), last_read_at
+  FROM webchat_thread
+ WHERE user_id = ? AND project_id = ?
+ ORDER BY last_activity_at DESC
+ LIMIT ?
+`
+	rows, err := s.db.QueryContext(ctx, query, userID, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: get threads: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var threads []WebChatThread
+	for rows.Next() {
+		var t WebChatThread
+		var activityStr string
+		var readStr *string
+		if err := rows.Scan(&t.AgentID, &t.LastMessageID, &activityStr, &readStr); err != nil {
+			return nil, fmt.Errorf("webchat store: scan thread: %w", err)
+		}
+		if activityStr != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, activityStr); err == nil {
+				t.LastActivityAt = parsed
+			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", activityStr); err == nil {
+				t.LastActivityAt = parsed
+			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", activityStr); err == nil {
+				t.LastActivityAt = parsed
+			}
+		}
+		if readStr != nil && *readStr != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, *readStr); err == nil {
+				t.LastReadAt = &parsed
+			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", *readStr); err == nil {
+				t.LastReadAt = &parsed
+			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", *readStr); err == nil {
+				t.LastReadAt = &parsed
+			}
+		}
+		threads = append(threads, t)
+	}
+	return threads, rows.Err()
+}
+
+// MarkThreadRead advances the last_read_at watermark to now.
+func (s *sqliteWebChatStore) MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error {
+	const query = `
+UPDATE webchat_thread
+   SET last_read_at = ?
+ WHERE user_id = ? AND project_id = ? AND agent_id = ?
+`
+	_, err := s.db.ExecContext(ctx, query, time.Now().UTC().Format(time.RFC3339Nano), userID, projectID, agentID)
+	if err != nil {
+		return fmt.Errorf("webchat store: mark thread read: %w", err)
 	}
 	return nil
 }

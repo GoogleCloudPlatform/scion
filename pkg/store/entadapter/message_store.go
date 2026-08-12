@@ -184,6 +184,42 @@ func (s *MessageStore) GetMessage(ctx context.Context, id string) (*store.Messag
 	return entMessageToStore(e), nil
 }
 
+// GetMessagesByIDs retrieves messages by a list of IDs.
+// Returns only messages that exist; missing IDs are silently skipped.
+func (s *MessageStore) GetMessagesByIDs(ctx context.Context, ids []string) (map[string]*store.Message, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	uuids := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := parseUUID(id)
+		if err != nil {
+			continue // skip invalid UUIDs
+		}
+		uuids = append(uuids, uid)
+	}
+
+	if len(uuids) == 0 {
+		return nil, nil
+	}
+
+	msgs, err := s.client.Message.Query().
+		Where(message.IDIn(uuids...)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	result := make(map[string]*store.Message, len(msgs))
+	for _, m := range msgs {
+		sm := entMessageToStore(m)
+		result[sm.ID] = sm
+	}
+
+	return result, nil
+}
+
 // encodeCursor produces a self-contained, opaque pagination cursor that embeds
 // both the created timestamp and the message ID. Format: base64(RFC3339Nano + "," + uuid).
 // This avoids a DB round-trip on decode and makes pagination resilient to message deletion.

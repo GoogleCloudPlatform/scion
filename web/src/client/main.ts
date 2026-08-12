@@ -28,6 +28,7 @@ import type { PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
+import { isFeatureEnabled } from '../utils/feature-flags.js';
 
 /**
  * Strip the Vite base path prefix from a URL pathname so the client-side
@@ -221,6 +222,9 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/agents\/[^/]+\/configure$/, tag: 'scion-page-agent-configure', load: () => import('../components/pages/agent-configure.js') },
   { pattern: /^\/agents\/[^/]+\/terminal$/, tag: 'scion-page-terminal', load: () => import('../components/pages/terminal.js') },
   { pattern: /^\/agents\/[^/]+$/, tag: 'scion-page-agent-detail', load: () => import('../components/pages/agent-detail.js') },
+  // Chat mode routes (Phase 5 — top-level chat)
+  { pattern: /^\/chat$/, tag: 'scion-page-chat', load: () => import('../components/pages/chat.js') },
+  { pattern: /^\/chat\/[^/]+$/, tag: 'scion-page-chat', load: () => import('../components/pages/chat.js') },
 ];
 
 /**
@@ -234,9 +238,33 @@ const STANDALONE_ROUTES = new Set(['scion-login-page', 'scion-page-invite', 'sci
 const PROFILE_ROUTES = new Set(['scion-page-profile-env-vars', 'scion-page-profile-secrets', 'scion-page-profile-settings', 'scion-page-profile-tokens', 'scion-page-profile-telegram', 'scion-page-profile-teams', 'scion-page-profile-discord', 'scion-page-profile-skills']);
 
 /**
+ * Routes that render inside the chat shell (Phase 5 — top-level chat mode).
+ * NOT standalone (chat has chrome, just different chrome from app shell).
+ */
+const CHAT_ROUTES = new Set(['scion-page-chat']);
+
+/**
  * Routes that require admin role. Non-admin users are redirected to dashboard.
  */
 const ADMIN_ROUTES = new Set(['scion-page-settings', 'scion-page-admin-scheduler', 'scion-page-admin-maintenance', 'scion-page-admin-users', 'scion-page-admin-groups', 'scion-page-admin-group-detail', 'scion-page-admin-server-config', 'scion-page-admin-federation', 'scion-page-admin-integrations', 'scion-page-admin-skill-registries', 'scion-page-admin-skill-registry-detail', 'scion-page-diagnostics', 'scion-page-health-dashboard']);
+
+// ---------------------------------------------------------------------------
+// Global error boundary — registered once so all shells share it.
+// Without this, unhandled errors in a long-lived surface (like chat mode)
+// silently fail. See design.md Section 4.1.
+// ---------------------------------------------------------------------------
+window.addEventListener('error', (event) => {
+  console.error('[Scion] Unhandled error:', {
+    message: event.message,
+    source: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+    error: event.error,
+  });
+});
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('[Scion] Unhandled promise rejection:', event.reason);
+});
 
 /**
  * Initialize the client-side application
@@ -354,11 +382,12 @@ function resolveRoute(path: string): RouteConfig {
 /**
  * Determines which shell type a route tag requires.
  */
-type ShellType = 'standalone' | 'profile' | 'app';
+type ShellType = 'standalone' | 'profile' | 'chat' | 'app';
 
 function getShellType(tag: string): ShellType {
   if (STANDALONE_ROUTES.has(tag)) return 'standalone';
   if (PROFILE_ROUTES.has(tag)) return 'profile';
+  if (CHAT_ROUTES.has(tag)) return 'chat';
   return 'app';
 }
 
@@ -404,9 +433,15 @@ async function renderRoute(path: string): Promise<void> {
     return;
   }
 
+  // Block /chat routes when the native_chat feature flag is disabled (O2).
+  if (CHAT_ROUTES.has(tag) && !isFeatureEnabled('web.native_chat')) {
+    navigateTo('/');
+    return;
+  }
+
   const shellType = getShellType(tag);
 
-  // Lazy-load the page component module (and profile shell if needed).
+  // Lazy-load the page component module (and profile/chat shell if needed).
   // The import registers the custom element as a side effect.
   const thisNav = ++navigationId;
   const loads: Promise<unknown>[] = [route.load()];
@@ -414,6 +449,11 @@ async function renderRoute(path: string): Promise<void> {
     loads.push(
       import('../components/profile/profile-shell.js'),
       import('../components/profile/profile-nav.js'),
+    );
+  }
+  if (shellType === 'chat' && !customElements.get('scion-chat-shell')) {
+    loads.push(
+      import('../components/chat/chat-shell.js'),
     );
   }
   await Promise.all(loads);
@@ -454,7 +494,13 @@ async function renderRoute(path: string): Promise<void> {
   } else {
     // Create the shell for the first time — clear any SSR-rendered content
     appContainer.innerHTML = '';
-    const shellTag = shellType === 'profile' ? 'scion-profile-shell' : 'scion-app';
+    const SHELL_TAGS: Record<ShellType, string> = {
+      standalone: '', // handled above — standalone pages render without a shell
+      chat: 'scion-chat-shell',
+      profile: 'scion-profile-shell',
+      app: 'scion-app',
+    };
+    const shellTag = SHELL_TAGS[shellType] ?? 'scion-app';
     const shell = document.createElement(shellTag) as HTMLElement & {
       currentPath: string;
       user: User | null;
