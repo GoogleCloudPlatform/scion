@@ -1,6 +1,6 @@
 # Scion Local Orchestration Design
 
-This document covers the core design principles for the local `scion` CLI and its orchestration of containerized agents. For a comprehensive overview of the entire Scion platform (including Hosted architecture), see [agents.md](../agents.md).
+This document covers the core design principles for the local `scion` CLI and its orchestration of containerized agents. For a comprehensive overview of the entire Scion platform (including Hosted architecture), see [AGENTS.md](../AGENTS.md).
 
 ## Architecture
 
