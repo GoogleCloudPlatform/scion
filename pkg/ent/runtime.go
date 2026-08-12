@@ -294,14 +294,6 @@ func init() {
 	chatlinkcodeDescUserIdentifier := chatlinkcodeFields[2].Descriptor()
 	// chatlinkcode.UserIdentifierValidator is a validator for the "user_identifier" field. It is called by the builders before save.
 	chatlinkcode.UserIdentifierValidator = chatlinkcodeDescUserIdentifier.Validators[0].(func(string) error)
-	// chatlinkcodeDescProvider is the schema descriptor for provider field.
-	chatlinkcodeDescProvider := chatlinkcodeFields[3].Descriptor()
-	// chatlinkcode.ProviderValidator is a validator for the "provider" field. It is called by the builders before save.
-	chatlinkcode.ProviderValidator = chatlinkcodeDescProvider.Validators[0].(func(string) error)
-	// chatlinkcodeDescStatus is the schema descriptor for status field.
-	chatlinkcodeDescStatus := chatlinkcodeFields[4].Descriptor()
-	// chatlinkcode.DefaultStatus holds the default value on creation for the status field.
-	chatlinkcode.DefaultStatus = chatlinkcodeDescStatus.Default.(string)
 	// chatlinkcodeDescCreatedAt is the schema descriptor for created_at field.
 	chatlinkcodeDescCreatedAt := chatlinkcodeFields[8].Descriptor()
 	// chatlinkcode.DefaultCreatedAt holds the default value on creation for the created_at field.

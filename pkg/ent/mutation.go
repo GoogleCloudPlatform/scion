@@ -9855,8 +9855,8 @@ type ChatLinkCodeMutation struct {
 	id              *uuid.UUID
 	code_hash       *string
 	user_identifier *string
-	provider        *string
-	status          *string
+	provider        *chatlinkcode.Provider
+	status          *chatlinkcode.Status
 	user_id         *string
 	user_email      *string
 	expires_at      *time.Time
@@ -10044,12 +10044,12 @@ func (m *ChatLinkCodeMutation) ResetUserIdentifier() {
 }
 
 // SetProvider sets the "provider" field.
-func (m *ChatLinkCodeMutation) SetProvider(s string) {
-	m.provider = &s
+func (m *ChatLinkCodeMutation) SetProvider(c chatlinkcode.Provider) {
+	m.provider = &c
 }
 
 // Provider returns the value of the "provider" field in the mutation.
-func (m *ChatLinkCodeMutation) Provider() (r string, exists bool) {
+func (m *ChatLinkCodeMutation) Provider() (r chatlinkcode.Provider, exists bool) {
 	v := m.provider
 	if v == nil {
 		return
@@ -10060,7 +10060,7 @@ func (m *ChatLinkCodeMutation) Provider() (r string, exists bool) {
 // OldProvider returns the old "provider" field's value of the ChatLinkCode entity.
 // If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *ChatLinkCodeMutation) OldProvider(ctx context.Context) (v string, err error) {
+func (m *ChatLinkCodeMutation) OldProvider(ctx context.Context) (v chatlinkcode.Provider, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldProvider is only allowed on UpdateOne operations")
 	}
@@ -10080,12 +10080,12 @@ func (m *ChatLinkCodeMutation) ResetProvider() {
 }
 
 // SetStatus sets the "status" field.
-func (m *ChatLinkCodeMutation) SetStatus(s string) {
-	m.status = &s
+func (m *ChatLinkCodeMutation) SetStatus(c chatlinkcode.Status) {
+	m.status = &c
 }
 
 // Status returns the value of the "status" field in the mutation.
-func (m *ChatLinkCodeMutation) Status() (r string, exists bool) {
+func (m *ChatLinkCodeMutation) Status() (r chatlinkcode.Status, exists bool) {
 	v := m.status
 	if v == nil {
 		return
@@ -10096,7 +10096,7 @@ func (m *ChatLinkCodeMutation) Status() (r string, exists bool) {
 // OldStatus returns the old "status" field's value of the ChatLinkCode entity.
 // If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *ChatLinkCodeMutation) OldStatus(ctx context.Context) (v string, err error) {
+func (m *ChatLinkCodeMutation) OldStatus(ctx context.Context) (v chatlinkcode.Status, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
 	}
@@ -10417,14 +10417,14 @@ func (m *ChatLinkCodeMutation) SetField(name string, value ent.Value) error {
 		m.SetUserIdentifier(v)
 		return nil
 	case chatlinkcode.FieldProvider:
-		v, ok := value.(string)
+		v, ok := value.(chatlinkcode.Provider)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetProvider(v)
 		return nil
 	case chatlinkcode.FieldStatus:
-		v, ok := value.(string)
+		v, ok := value.(chatlinkcode.Status)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}

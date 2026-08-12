@@ -22,9 +22,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
 
-const discordProvider = "discord"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+)
 
 const discordLinkCodeTTL = 15 * time.Minute
 
@@ -87,7 +87,7 @@ func (s *DiscordLinkService) RegisterCode(code, discordUserID string) {
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := db.RegisterCode(ctx, code, discordUserID, discordProvider, discordLinkCodeTTL); err != nil {
+		if err := db.RegisterCode(ctx, code, discordUserID, chatlinkcode.ProviderDiscord, discordLinkCodeTTL); err != nil {
 			slog.Error("Discord link: DB RegisterCode failed, falling back to in-memory", "error", err)
 		} else {
 			return
@@ -123,10 +123,11 @@ func (s *DiscordLinkService) VerifyCode(code, userID, userEmail string) (discord
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		uid, reason := db.VerifyCode(ctx, code, discordProvider, userID, userEmail)
+		uid, reason := db.VerifyCode(ctx, code, chatlinkcode.ProviderDiscord, userID, userEmail)
 		if reason == "" || reason == "code_not_found" || reason == "code_expired" {
 			return uid, reason
 		}
+		slog.Error("Discord link: DB VerifyCode failed, falling back to in-memory", "reason", reason)
 	}
 
 	// In-memory fallback.
@@ -161,7 +162,7 @@ func (s *DiscordLinkService) GetStatusByDiscordUser(discordUserID string) (statu
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return db.GetStatusByUser(ctx, discordProvider, discordUserID)
+		return db.GetStatusByUser(ctx, chatlinkcode.ProviderDiscord, discordUserID)
 	}
 
 	// In-memory fallback.
@@ -188,7 +189,7 @@ func (s *DiscordLinkService) ConsumePending(discordUserID string) {
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		db.ConsumePending(ctx, discordProvider, discordUserID)
+		db.ConsumePending(ctx, chatlinkcode.ProviderDiscord, discordUserID)
 		return
 	}
 

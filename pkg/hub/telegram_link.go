@@ -22,9 +22,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
 
-const telegramProvider = "telegram"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+)
 
 const telegramLinkCodeTTL = 15 * time.Minute
 
@@ -93,7 +93,7 @@ func (s *TelegramLinkService) RegisterCode(code, telegramUserID string) {
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := db.RegisterCode(ctx, code, telegramUserID, telegramProvider, telegramLinkCodeTTL); err != nil {
+		if err := db.RegisterCode(ctx, code, telegramUserID, chatlinkcode.ProviderTelegram, telegramLinkCodeTTL); err != nil {
 			slog.Error("Telegram link: DB RegisterCode failed, falling back to in-memory", "error", err)
 		} else {
 			return
@@ -129,10 +129,11 @@ func (s *TelegramLinkService) VerifyCode(code, userID, userEmail string) (telegr
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		uid, reason := db.VerifyCode(ctx, code, telegramProvider, userID, userEmail)
+		uid, reason := db.VerifyCode(ctx, code, chatlinkcode.ProviderTelegram, userID, userEmail)
 		if reason == "" || reason == "code_not_found" || reason == "code_expired" {
 			return uid, reason
 		}
+		slog.Error("Telegram link: DB VerifyCode failed, falling back to in-memory", "reason", reason)
 	}
 
 	// In-memory fallback.
@@ -166,7 +167,7 @@ func (s *TelegramLinkService) GetStatusByTelegramUser(telegramUserID string) (st
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return db.GetStatusByUser(ctx, telegramProvider, telegramUserID)
+		return db.GetStatusByUser(ctx, chatlinkcode.ProviderTelegram, telegramUserID)
 	}
 
 	// In-memory fallback.
@@ -193,7 +194,7 @@ func (s *TelegramLinkService) ConsumePending(telegramUserID string) {
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		db.ConsumePending(ctx, telegramProvider, telegramUserID)
+		db.ConsumePending(ctx, chatlinkcode.ProviderTelegram, telegramUserID)
 		return
 	}
 

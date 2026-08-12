@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"time"
 
@@ -45,36 +46,64 @@ func hashCode(code string) string {
 
 // RegisterCode stores a pending link code. Any existing pending code for the
 // same provider+userIdentifier is removed first (a user can only have one
-// active code at a time).
-func (s *ChatLinkStore) RegisterCode(ctx context.Context, code, userIdentifier, provider string, ttl time.Duration) error {
+// active code at a time). The delete + insert are wrapped in a transaction
+// so that a crash between the two cannot leave the user without a code.
+func (s *ChatLinkStore) RegisterCode(ctx context.Context, code, userIdentifier string, provider chatlinkcode.Provider, ttl time.Duration) error {
 	codeHash := hashCode(code)
 
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("chat link register: begin tx: %w", err)
+	}
+
 	// Delete any previous pending code for this provider + user.
-	_, _ = s.client.ChatLinkCode.
+	if _, err := tx.ChatLinkCode.
 		Delete().
 		Where(
 			chatlinkcode.ProviderEQ(provider),
 			chatlinkcode.UserIdentifierEQ(userIdentifier),
 		).
-		Exec(ctx)
+		Exec(ctx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("chat link register: delete old codes: %w", err)
+	}
 
 	// Insert the new code.
-	return s.client.ChatLinkCode.
+	if err := tx.ChatLinkCode.
 		Create().
 		SetCodeHash(codeHash).
 		SetUserIdentifier(userIdentifier).
 		SetProvider(provider).
-		SetStatus("pending").
+		SetStatus(chatlinkcode.StatusPending).
 		SetExpiresAt(time.Now().Add(ttl)).
-		Exec(ctx)
+		Exec(ctx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("chat link register: insert: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("chat link register: commit: %w", err)
+	}
+	return nil
 }
 
 // VerifyCode confirms a pending link code. On success it marks the code as
 // confirmed, stores the Scion user details, and returns the platform-specific
-// user identifier. Returns ("", reason) on failure.
-func (s *ChatLinkStore) VerifyCode(ctx context.Context, code, provider, userID, userEmail string) (userIdentifier string, errReason string) {
+// user identifier.
+//
+// The state transition uses a conditional UPDATE (WHERE status='pending')
+// to prevent a TOCTOU race: two concurrent verifications on different
+// instances cannot both succeed.
+//
+// Returns:
+//   - (userIdentifier, "")       — success
+//   - ("", "code_not_found")     — no matching code found
+//   - ("", "code_expired")       — code exists but is expired
+//   - ("", "db_error")           — a database error occurred (callers may fall back)
+func (s *ChatLinkStore) VerifyCode(ctx context.Context, code string, provider chatlinkcode.Provider, userID, userEmail string) (userIdentifier string, errReason string) {
 	codeHash := hashCode(code)
 
+	// First, look up the code to get its metadata.
 	row, err := s.client.ChatLinkCode.
 		Query().
 		Where(
@@ -86,7 +115,10 @@ func (s *ChatLinkStore) VerifyCode(ctx context.Context, code, provider, userID, 
 		if ent.IsNotFound(err) {
 			return "", "code_not_found"
 		}
-		return "", "code_not_found"
+		// Genuine DB error — return a distinct reason so callers can
+		// distinguish this from a legitimate not-found and optionally
+		// fall back to in-memory.
+		return "", "db_error"
 	}
 
 	if time.Now().After(row.ExpiresAt) {
@@ -95,25 +127,38 @@ func (s *ChatLinkStore) VerifyCode(ctx context.Context, code, provider, userID, 
 		return "", "code_expired"
 	}
 
-	if row.Status == "confirmed" {
+	if row.Status == chatlinkcode.StatusConfirmed {
 		// Already confirmed — return the identifier.
 		return row.UserIdentifier, ""
 	}
 
-	// Mark as confirmed and store the verifying user's details.
-	_ = s.client.ChatLinkCode.
-		UpdateOneID(row.ID).
-		SetStatus("confirmed").
+	// Atomic conditional UPDATE: only transition pending → confirmed.
+	// If another instance raced us, n will be 0.
+	n, err := s.client.ChatLinkCode.
+		Update().
+		Where(
+			chatlinkcode.IDEQ(row.ID),
+			chatlinkcode.StatusEQ(chatlinkcode.StatusPending),
+		).
+		SetStatus(chatlinkcode.StatusConfirmed).
 		SetUserID(userID).
 		SetUserEmail(userEmail).
-		Exec(ctx)
+		Save(ctx)
+	if err != nil {
+		return "", "db_error"
+	}
+	if n == 0 {
+		// Another instance confirmed this code between our read and update.
+		// The code is consumed; treat as not found for this caller.
+		return "", "code_not_found"
+	}
 
 	return row.UserIdentifier, ""
 }
 
 // GetStatusByUser returns the linking status for a provider-specific user
 // identifier. Returns (status, scionUserID, scionUserEmail).
-func (s *ChatLinkStore) GetStatusByUser(ctx context.Context, provider, userIdentifier string) (status, userID, userEmail string) {
+func (s *ChatLinkStore) GetStatusByUser(ctx context.Context, provider chatlinkcode.Provider, userIdentifier string) (status, userID, userEmail string) {
 	row, err := s.client.ChatLinkCode.
 		Query().
 		Where(
@@ -137,11 +182,11 @@ func (s *ChatLinkStore) GetStatusByUser(ctx context.Context, provider, userIdent
 	if row.UserEmail != nil {
 		email = *row.UserEmail
 	}
-	return row.Status, uid, email
+	return string(row.Status), uid, email
 }
 
 // ConsumePending removes a confirmed entry so it isn't returned again.
-func (s *ChatLinkStore) ConsumePending(ctx context.Context, provider, userIdentifier string) {
+func (s *ChatLinkStore) ConsumePending(ctx context.Context, provider chatlinkcode.Provider, userIdentifier string) {
 	_, _ = s.client.ChatLinkCode.
 		Delete().
 		Where(

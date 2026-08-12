@@ -22,9 +22,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
 
-const teamsProvider = "teams"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+)
 
 const teamsLinkCodeTTL = 15 * time.Minute
 
@@ -87,7 +87,7 @@ func (s *TeamsLinkService) RegisterCode(code, teamsUserID string) {
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := db.RegisterCode(ctx, code, teamsUserID, teamsProvider, teamsLinkCodeTTL); err != nil {
+		if err := db.RegisterCode(ctx, code, teamsUserID, chatlinkcode.ProviderTeams, teamsLinkCodeTTL); err != nil {
 			slog.Error("Teams link: DB RegisterCode failed, falling back to in-memory", "error", err)
 		} else {
 			return
@@ -124,10 +124,11 @@ func (s *TeamsLinkService) VerifyCode(code, userID, userEmail string) (teamsUser
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		uid, reason := db.VerifyCode(ctx, code, teamsProvider, userID, userEmail)
+		uid, reason := db.VerifyCode(ctx, code, chatlinkcode.ProviderTeams, userID, userEmail)
 		if reason == "" || reason == "code_not_found" || reason == "code_expired" {
 			return uid, reason
 		}
+		slog.Error("Teams link: DB VerifyCode failed, falling back to in-memory", "reason", reason)
 	}
 
 	// In-memory fallback.
@@ -162,7 +163,7 @@ func (s *TeamsLinkService) GetStatusByTeamsUser(teamsUserID string) (status, use
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return db.GetStatusByUser(ctx, teamsProvider, teamsUserID)
+		return db.GetStatusByUser(ctx, chatlinkcode.ProviderTeams, teamsUserID)
 	}
 
 	// In-memory fallback.
@@ -189,7 +190,7 @@ func (s *TeamsLinkService) ConsumePending(teamsUserID string) {
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		db.ConsumePending(ctx, teamsProvider, teamsUserID)
+		db.ConsumePending(ctx, chatlinkcode.ProviderTeams, teamsUserID)
 		return
 	}
 

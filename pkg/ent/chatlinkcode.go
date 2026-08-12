@@ -23,9 +23,9 @@ type ChatLinkCode struct {
 	// Platform-specific user ID (Telegram user ID, Discord user ID, Teams AAD object ID)
 	UserIdentifier string `json:"user_identifier,omitempty"`
 	// Chat provider: telegram, discord, or teams
-	Provider string `json:"provider,omitempty"`
+	Provider chatlinkcode.Provider `json:"provider,omitempty"`
 	// Link status: pending or confirmed
-	Status string `json:"status,omitempty"`
+	Status chatlinkcode.Status `json:"status,omitempty"`
 	// Scion user ID, set when a logged-in user confirms the code
 	UserID *string `json:"user_id,omitempty"`
 	// Scion user email, set when a logged-in user confirms the code
@@ -85,13 +85,13 @@ func (_m *ChatLinkCode) assignValues(columns []string, values []any) error {
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field provider", values[i])
 			} else if value.Valid {
-				_m.Provider = value.String
+				_m.Provider = chatlinkcode.Provider(value.String)
 			}
 		case chatlinkcode.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field status", values[i])
 			} else if value.Valid {
-				_m.Status = value.String
+				_m.Status = chatlinkcode.Status(value.String)
 			}
 		case chatlinkcode.FieldUserID:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -161,10 +161,10 @@ func (_m *ChatLinkCode) String() string {
 	builder.WriteString(_m.UserIdentifier)
 	builder.WriteString(", ")
 	builder.WriteString("provider=")
-	builder.WriteString(_m.Provider)
+	builder.WriteString(fmt.Sprintf("%v", _m.Provider))
 	builder.WriteString(", ")
 	builder.WriteString("status=")
-	builder.WriteString(_m.Status)
+	builder.WriteString(fmt.Sprintf("%v", _m.Status))
 	builder.WriteString(", ")
 	if v := _m.UserID; v != nil {
 		builder.WriteString("user_id=")

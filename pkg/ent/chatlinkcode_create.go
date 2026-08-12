@@ -37,19 +37,19 @@ func (_c *ChatLinkCodeCreate) SetUserIdentifier(v string) *ChatLinkCodeCreate {
 }
 
 // SetProvider sets the "provider" field.
-func (_c *ChatLinkCodeCreate) SetProvider(v string) *ChatLinkCodeCreate {
+func (_c *ChatLinkCodeCreate) SetProvider(v chatlinkcode.Provider) *ChatLinkCodeCreate {
 	_c.mutation.SetProvider(v)
 	return _c
 }
 
 // SetStatus sets the "status" field.
-func (_c *ChatLinkCodeCreate) SetStatus(v string) *ChatLinkCodeCreate {
+func (_c *ChatLinkCodeCreate) SetStatus(v chatlinkcode.Status) *ChatLinkCodeCreate {
 	_c.mutation.SetStatus(v)
 	return _c
 }
 
 // SetNillableStatus sets the "status" field if the given value is not nil.
-func (_c *ChatLinkCodeCreate) SetNillableStatus(v *string) *ChatLinkCodeCreate {
+func (_c *ChatLinkCodeCreate) SetNillableStatus(v *chatlinkcode.Status) *ChatLinkCodeCreate {
 	if v != nil {
 		_c.SetStatus(*v)
 	}
@@ -196,6 +196,11 @@ func (_c *ChatLinkCodeCreate) check() error {
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "ChatLinkCode.status"`)}
 	}
+	if v, ok := _c.mutation.Status(); ok {
+		if err := chatlinkcode.StatusValidator(v); err != nil {
+			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "ChatLinkCode.status": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.ExpiresAt(); !ok {
 		return &ValidationError{Name: "expires_at", err: errors.New(`ent: missing required field "ChatLinkCode.expires_at"`)}
 	}
@@ -247,11 +252,11 @@ func (_c *ChatLinkCodeCreate) createSpec() (*ChatLinkCode, *sqlgraph.CreateSpec)
 		_node.UserIdentifier = value
 	}
 	if value, ok := _c.mutation.Provider(); ok {
-		_spec.SetField(chatlinkcode.FieldProvider, field.TypeString, value)
+		_spec.SetField(chatlinkcode.FieldProvider, field.TypeEnum, value)
 		_node.Provider = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
-		_spec.SetField(chatlinkcode.FieldStatus, field.TypeString, value)
+		_spec.SetField(chatlinkcode.FieldStatus, field.TypeEnum, value)
 		_node.Status = value
 	}
 	if value, ok := _c.mutation.UserID(); ok {
@@ -347,7 +352,7 @@ func (u *ChatLinkCodeUpsert) UpdateUserIdentifier() *ChatLinkCodeUpsert {
 }
 
 // SetProvider sets the "provider" field.
-func (u *ChatLinkCodeUpsert) SetProvider(v string) *ChatLinkCodeUpsert {
+func (u *ChatLinkCodeUpsert) SetProvider(v chatlinkcode.Provider) *ChatLinkCodeUpsert {
 	u.Set(chatlinkcode.FieldProvider, v)
 	return u
 }
@@ -359,7 +364,7 @@ func (u *ChatLinkCodeUpsert) UpdateProvider() *ChatLinkCodeUpsert {
 }
 
 // SetStatus sets the "status" field.
-func (u *ChatLinkCodeUpsert) SetStatus(v string) *ChatLinkCodeUpsert {
+func (u *ChatLinkCodeUpsert) SetStatus(v chatlinkcode.Status) *ChatLinkCodeUpsert {
 	u.Set(chatlinkcode.FieldStatus, v)
 	return u
 }
@@ -498,7 +503,7 @@ func (u *ChatLinkCodeUpsertOne) UpdateUserIdentifier() *ChatLinkCodeUpsertOne {
 }
 
 // SetProvider sets the "provider" field.
-func (u *ChatLinkCodeUpsertOne) SetProvider(v string) *ChatLinkCodeUpsertOne {
+func (u *ChatLinkCodeUpsertOne) SetProvider(v chatlinkcode.Provider) *ChatLinkCodeUpsertOne {
 	return u.Update(func(s *ChatLinkCodeUpsert) {
 		s.SetProvider(v)
 	})
@@ -512,7 +517,7 @@ func (u *ChatLinkCodeUpsertOne) UpdateProvider() *ChatLinkCodeUpsertOne {
 }
 
 // SetStatus sets the "status" field.
-func (u *ChatLinkCodeUpsertOne) SetStatus(v string) *ChatLinkCodeUpsertOne {
+func (u *ChatLinkCodeUpsertOne) SetStatus(v chatlinkcode.Status) *ChatLinkCodeUpsertOne {
 	return u.Update(func(s *ChatLinkCodeUpsert) {
 		s.SetStatus(v)
 	})
@@ -828,7 +833,7 @@ func (u *ChatLinkCodeUpsertBulk) UpdateUserIdentifier() *ChatLinkCodeUpsertBulk 
 }
 
 // SetProvider sets the "provider" field.
-func (u *ChatLinkCodeUpsertBulk) SetProvider(v string) *ChatLinkCodeUpsertBulk {
+func (u *ChatLinkCodeUpsertBulk) SetProvider(v chatlinkcode.Provider) *ChatLinkCodeUpsertBulk {
 	return u.Update(func(s *ChatLinkCodeUpsert) {
 		s.SetProvider(v)
 	})
@@ -842,7 +847,7 @@ func (u *ChatLinkCodeUpsertBulk) UpdateProvider() *ChatLinkCodeUpsertBulk {
 }
 
 // SetStatus sets the "status" field.
-func (u *ChatLinkCodeUpsertBulk) SetStatus(v string) *ChatLinkCodeUpsertBulk {
+func (u *ChatLinkCodeUpsertBulk) SetStatus(v chatlinkcode.Status) *ChatLinkCodeUpsertBulk {
 	return u.Update(func(s *ChatLinkCodeUpsert) {
 		s.SetStatus(v)
 	})

@@ -46,11 +46,12 @@ func (ChatLinkCode) Fields() []ent.Field {
 		field.String("user_identifier").
 			NotEmpty().
 			Comment("Platform-specific user ID (Telegram user ID, Discord user ID, Teams AAD object ID)"),
-		field.String("provider").
-			NotEmpty().
+		field.Enum("provider").
+			Values("telegram", "discord", "teams").
 			Comment("Chat provider: telegram, discord, or teams"),
-		field.String("status").
+		field.Enum("status").
 			Default("pending").
+			Values("pending", "confirmed").
 			Comment("Link status: pending or confirmed"),
 		field.String("user_id").
 			Optional().

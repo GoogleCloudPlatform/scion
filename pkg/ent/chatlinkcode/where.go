@@ -65,16 +65,6 @@ func UserIdentifier(v string) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldEQ(FieldUserIdentifier, v))
 }
 
-// Provider applies equality check predicate on the "provider" field. It's identical to ProviderEQ.
-func Provider(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldEQ(FieldProvider, v))
-}
-
-// Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
-func Status(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldEQ(FieldStatus, v))
-}
-
 // UserID applies equality check predicate on the "user_id" field. It's identical to UserIDEQ.
 func UserID(v string) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldEQ(FieldUserID, v))
@@ -226,133 +216,43 @@ func UserIdentifierContainsFold(v string) predicate.ChatLinkCode {
 }
 
 // ProviderEQ applies the EQ predicate on the "provider" field.
-func ProviderEQ(v string) predicate.ChatLinkCode {
+func ProviderEQ(v Provider) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldEQ(FieldProvider, v))
 }
 
 // ProviderNEQ applies the NEQ predicate on the "provider" field.
-func ProviderNEQ(v string) predicate.ChatLinkCode {
+func ProviderNEQ(v Provider) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldNEQ(FieldProvider, v))
 }
 
 // ProviderIn applies the In predicate on the "provider" field.
-func ProviderIn(vs ...string) predicate.ChatLinkCode {
+func ProviderIn(vs ...Provider) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldIn(FieldProvider, vs...))
 }
 
 // ProviderNotIn applies the NotIn predicate on the "provider" field.
-func ProviderNotIn(vs ...string) predicate.ChatLinkCode {
+func ProviderNotIn(vs ...Provider) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldNotIn(FieldProvider, vs...))
 }
 
-// ProviderGT applies the GT predicate on the "provider" field.
-func ProviderGT(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldGT(FieldProvider, v))
-}
-
-// ProviderGTE applies the GTE predicate on the "provider" field.
-func ProviderGTE(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldGTE(FieldProvider, v))
-}
-
-// ProviderLT applies the LT predicate on the "provider" field.
-func ProviderLT(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldLT(FieldProvider, v))
-}
-
-// ProviderLTE applies the LTE predicate on the "provider" field.
-func ProviderLTE(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldLTE(FieldProvider, v))
-}
-
-// ProviderContains applies the Contains predicate on the "provider" field.
-func ProviderContains(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldContains(FieldProvider, v))
-}
-
-// ProviderHasPrefix applies the HasPrefix predicate on the "provider" field.
-func ProviderHasPrefix(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldHasPrefix(FieldProvider, v))
-}
-
-// ProviderHasSuffix applies the HasSuffix predicate on the "provider" field.
-func ProviderHasSuffix(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldHasSuffix(FieldProvider, v))
-}
-
-// ProviderEqualFold applies the EqualFold predicate on the "provider" field.
-func ProviderEqualFold(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldEqualFold(FieldProvider, v))
-}
-
-// ProviderContainsFold applies the ContainsFold predicate on the "provider" field.
-func ProviderContainsFold(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldContainsFold(FieldProvider, v))
-}
-
 // StatusEQ applies the EQ predicate on the "status" field.
-func StatusEQ(v string) predicate.ChatLinkCode {
+func StatusEQ(v Status) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldEQ(FieldStatus, v))
 }
 
 // StatusNEQ applies the NEQ predicate on the "status" field.
-func StatusNEQ(v string) predicate.ChatLinkCode {
+func StatusNEQ(v Status) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldNEQ(FieldStatus, v))
 }
 
 // StatusIn applies the In predicate on the "status" field.
-func StatusIn(vs ...string) predicate.ChatLinkCode {
+func StatusIn(vs ...Status) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldIn(FieldStatus, vs...))
 }
 
 // StatusNotIn applies the NotIn predicate on the "status" field.
-func StatusNotIn(vs ...string) predicate.ChatLinkCode {
+func StatusNotIn(vs ...Status) predicate.ChatLinkCode {
 	return predicate.ChatLinkCode(sql.FieldNotIn(FieldStatus, vs...))
-}
-
-// StatusGT applies the GT predicate on the "status" field.
-func StatusGT(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldGT(FieldStatus, v))
-}
-
-// StatusGTE applies the GTE predicate on the "status" field.
-func StatusGTE(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldGTE(FieldStatus, v))
-}
-
-// StatusLT applies the LT predicate on the "status" field.
-func StatusLT(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldLT(FieldStatus, v))
-}
-
-// StatusLTE applies the LTE predicate on the "status" field.
-func StatusLTE(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldLTE(FieldStatus, v))
-}
-
-// StatusContains applies the Contains predicate on the "status" field.
-func StatusContains(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldContains(FieldStatus, v))
-}
-
-// StatusHasPrefix applies the HasPrefix predicate on the "status" field.
-func StatusHasPrefix(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldHasPrefix(FieldStatus, v))
-}
-
-// StatusHasSuffix applies the HasSuffix predicate on the "status" field.
-func StatusHasSuffix(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldHasSuffix(FieldStatus, v))
-}
-
-// StatusEqualFold applies the EqualFold predicate on the "status" field.
-func StatusEqualFold(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldEqualFold(FieldStatus, v))
-}
-
-// StatusContainsFold applies the ContainsFold predicate on the "status" field.
-func StatusContainsFold(v string) predicate.ChatLinkCode {
-	return predicate.ChatLinkCode(sql.FieldContainsFold(FieldStatus, v))
 }
 
 // UserIDEQ applies the EQ predicate on the "user_id" field.

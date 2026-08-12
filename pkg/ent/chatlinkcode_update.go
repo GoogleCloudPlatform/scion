@@ -57,13 +57,13 @@ func (_u *ChatLinkCodeUpdate) SetNillableUserIdentifier(v *string) *ChatLinkCode
 }
 
 // SetProvider sets the "provider" field.
-func (_u *ChatLinkCodeUpdate) SetProvider(v string) *ChatLinkCodeUpdate {
+func (_u *ChatLinkCodeUpdate) SetProvider(v chatlinkcode.Provider) *ChatLinkCodeUpdate {
 	_u.mutation.SetProvider(v)
 	return _u
 }
 
 // SetNillableProvider sets the "provider" field if the given value is not nil.
-func (_u *ChatLinkCodeUpdate) SetNillableProvider(v *string) *ChatLinkCodeUpdate {
+func (_u *ChatLinkCodeUpdate) SetNillableProvider(v *chatlinkcode.Provider) *ChatLinkCodeUpdate {
 	if v != nil {
 		_u.SetProvider(*v)
 	}
@@ -71,13 +71,13 @@ func (_u *ChatLinkCodeUpdate) SetNillableProvider(v *string) *ChatLinkCodeUpdate
 }
 
 // SetStatus sets the "status" field.
-func (_u *ChatLinkCodeUpdate) SetStatus(v string) *ChatLinkCodeUpdate {
+func (_u *ChatLinkCodeUpdate) SetStatus(v chatlinkcode.Status) *ChatLinkCodeUpdate {
 	_u.mutation.SetStatus(v)
 	return _u
 }
 
 // SetNillableStatus sets the "status" field if the given value is not nil.
-func (_u *ChatLinkCodeUpdate) SetNillableStatus(v *string) *ChatLinkCodeUpdate {
+func (_u *ChatLinkCodeUpdate) SetNillableStatus(v *chatlinkcode.Status) *ChatLinkCodeUpdate {
 	if v != nil {
 		_u.SetStatus(*v)
 	}
@@ -187,6 +187,11 @@ func (_u *ChatLinkCodeUpdate) check() error {
 			return &ValidationError{Name: "provider", err: fmt.Errorf(`ent: validator failed for field "ChatLinkCode.provider": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.Status(); ok {
+		if err := chatlinkcode.StatusValidator(v); err != nil {
+			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "ChatLinkCode.status": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -209,10 +214,10 @@ func (_u *ChatLinkCodeUpdate) sqlSave(ctx context.Context) (_node int, err error
 		_spec.SetField(chatlinkcode.FieldUserIdentifier, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Provider(); ok {
-		_spec.SetField(chatlinkcode.FieldProvider, field.TypeString, value)
+		_spec.SetField(chatlinkcode.FieldProvider, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
-		_spec.SetField(chatlinkcode.FieldStatus, field.TypeString, value)
+		_spec.SetField(chatlinkcode.FieldStatus, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.UserID(); ok {
 		_spec.SetField(chatlinkcode.FieldUserID, field.TypeString, value)
@@ -278,13 +283,13 @@ func (_u *ChatLinkCodeUpdateOne) SetNillableUserIdentifier(v *string) *ChatLinkC
 }
 
 // SetProvider sets the "provider" field.
-func (_u *ChatLinkCodeUpdateOne) SetProvider(v string) *ChatLinkCodeUpdateOne {
+func (_u *ChatLinkCodeUpdateOne) SetProvider(v chatlinkcode.Provider) *ChatLinkCodeUpdateOne {
 	_u.mutation.SetProvider(v)
 	return _u
 }
 
 // SetNillableProvider sets the "provider" field if the given value is not nil.
-func (_u *ChatLinkCodeUpdateOne) SetNillableProvider(v *string) *ChatLinkCodeUpdateOne {
+func (_u *ChatLinkCodeUpdateOne) SetNillableProvider(v *chatlinkcode.Provider) *ChatLinkCodeUpdateOne {
 	if v != nil {
 		_u.SetProvider(*v)
 	}
@@ -292,13 +297,13 @@ func (_u *ChatLinkCodeUpdateOne) SetNillableProvider(v *string) *ChatLinkCodeUpd
 }
 
 // SetStatus sets the "status" field.
-func (_u *ChatLinkCodeUpdateOne) SetStatus(v string) *ChatLinkCodeUpdateOne {
+func (_u *ChatLinkCodeUpdateOne) SetStatus(v chatlinkcode.Status) *ChatLinkCodeUpdateOne {
 	_u.mutation.SetStatus(v)
 	return _u
 }
 
 // SetNillableStatus sets the "status" field if the given value is not nil.
-func (_u *ChatLinkCodeUpdateOne) SetNillableStatus(v *string) *ChatLinkCodeUpdateOne {
+func (_u *ChatLinkCodeUpdateOne) SetNillableStatus(v *chatlinkcode.Status) *ChatLinkCodeUpdateOne {
 	if v != nil {
 		_u.SetStatus(*v)
 	}
@@ -421,6 +426,11 @@ func (_u *ChatLinkCodeUpdateOne) check() error {
 			return &ValidationError{Name: "provider", err: fmt.Errorf(`ent: validator failed for field "ChatLinkCode.provider": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.Status(); ok {
+		if err := chatlinkcode.StatusValidator(v); err != nil {
+			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "ChatLinkCode.status": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -460,10 +470,10 @@ func (_u *ChatLinkCodeUpdateOne) sqlSave(ctx context.Context) (_node *ChatLinkCo
 		_spec.SetField(chatlinkcode.FieldUserIdentifier, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Provider(); ok {
-		_spec.SetField(chatlinkcode.FieldProvider, field.TypeString, value)
+		_spec.SetField(chatlinkcode.FieldProvider, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
-		_spec.SetField(chatlinkcode.FieldStatus, field.TypeString, value)
+		_spec.SetField(chatlinkcode.FieldStatus, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.UserID(); ok {
 		_spec.SetField(chatlinkcode.FieldUserID, field.TypeString, value)

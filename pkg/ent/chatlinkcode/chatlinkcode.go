@@ -3,6 +3,7 @@
 package chatlinkcode
 
 import (
+	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
@@ -62,15 +63,61 @@ var (
 	CodeHashValidator func(string) error
 	// UserIdentifierValidator is a validator for the "user_identifier" field. It is called by the builders before save.
 	UserIdentifierValidator func(string) error
-	// ProviderValidator is a validator for the "provider" field. It is called by the builders before save.
-	ProviderValidator func(string) error
-	// DefaultStatus holds the default value on creation for the "status" field.
-	DefaultStatus string
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
+
+// Provider defines the type for the "provider" enum field.
+type Provider string
+
+// Provider values.
+const (
+	ProviderTelegram Provider = "telegram"
+	ProviderDiscord  Provider = "discord"
+	ProviderTeams    Provider = "teams"
+)
+
+func (pr Provider) String() string {
+	return string(pr)
+}
+
+// ProviderValidator is a validator for the "provider" field enum values. It is called by the builders before save.
+func ProviderValidator(pr Provider) error {
+	switch pr {
+	case ProviderTelegram, ProviderDiscord, ProviderTeams:
+		return nil
+	default:
+		return fmt.Errorf("chatlinkcode: invalid enum value for provider field: %q", pr)
+	}
+}
+
+// Status defines the type for the "status" enum field.
+type Status string
+
+// StatusPending is the default value of the Status enum.
+const DefaultStatus = StatusPending
+
+// Status values.
+const (
+	StatusPending   Status = "pending"
+	StatusConfirmed Status = "confirmed"
+)
+
+func (s Status) String() string {
+	return string(s)
+}
+
+// StatusValidator is a validator for the "status" field enum values. It is called by the builders before save.
+func StatusValidator(s Status) error {
+	switch s {
+	case StatusPending, StatusConfirmed:
+		return nil
+	default:
+		return fmt.Errorf("chatlinkcode: invalid enum value for status field: %q", s)
+	}
+}
 
 // OrderOption defines the ordering options for the ChatLinkCode queries.
 type OrderOption func(*sql.Selector)
