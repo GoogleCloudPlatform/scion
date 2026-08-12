@@ -54,19 +54,25 @@ const maxEditableFileSize = 1 * 1024 * 1024
 
 // workspaceWriteBlocked returns true when workspace writes should be rejected
 // with 503 Service Unavailable. This happens when the hub is running on Cloud
-// Run (K_SERVICE is set) and workspace storage backend is "local" (or empty),
-// meaning writes would go to ephemeral tmpfs and be silently lost on recycle.
+// Run (K_SERVICE is set) and no durable storage backend is configured.
+//
+// Uses an allowlist of known-durable backends rather than a blocklist, so that
+// an unrecognized backend value fails closed (blocked) rather than silently
+// writing to ephemeral storage.
 func (s *Server) workspaceWriteBlocked() bool {
 	// Not on Cloud Run → writes are fine (self-hosted with local disk)
 	if os.Getenv("K_SERVICE") == "" {
 		return false
 	}
-	// On Cloud Run with durable storage configured → writes are fine
+	// On Cloud Run — only allow writes if a known durable backend is configured
 	wsCfg := s.config.WorkspaceStorageConfig
-	if wsCfg != nil && wsCfg.Backend != "" && wsCfg.Backend != "local" {
-		return false
+	if wsCfg != nil {
+		switch wsCfg.Backend {
+		case "nfs", "cloudrun-volume", "gke-shared-volume":
+			return false // Known durable backend → writes allowed
+		}
 	}
-	// On Cloud Run with local/no backend → block writes
+	// No config, empty backend, "local", or unrecognized → block writes
 	return true
 }
 

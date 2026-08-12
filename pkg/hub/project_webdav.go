@@ -121,7 +121,7 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	handler.ServeHTTP(w, r)
 
 	// Update sync state after successful write operations
-	if r.Method == "PUT" || r.Method == "DELETE" || r.Method == "MKCOL" || r.Method == "MOVE" {
+	if r.Method == "PUT" || r.Method == "DELETE" || r.Method == "MKCOL" || r.Method == "MOVE" || r.Method == "COPY" {
 		go s.updateProjectSyncState(project.ID, workspacePath)
 	}
 }
