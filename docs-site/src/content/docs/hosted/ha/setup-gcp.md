@@ -406,7 +406,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 #   --role="roles/iam.securityReviewer"
 ```
 
-Without this permission, Policy Troubleshooter checks will fail with a `PermissionDenied` error, which results in a **fail-closed** denial of service account assignment in Scion.
+Without this permission, Policy Troubleshooter checks will return an indeterminate or unknown status (such as ACCESS_STATE_UNKNOWN_INFO_DENIED), which results in a **fail-closed** denial of service account assignment in Scion.
 
 ### 2f. Transport SA — IAP Access
 
