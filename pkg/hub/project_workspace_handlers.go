@@ -39,6 +39,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
+// errWorkspaceWritesUnavailable is the error message returned when workspace
+// writes are blocked because the deployment has no durable storage backend.
+const errWorkspaceWritesUnavailable = "Workspace writes are not available in this deployment configuration. Configure durable workspace storage (NFS) to enable file editing."
+
 // maxUploadTotalSize is the maximum total request body size for file uploads (100MB).
 const maxUploadTotalSize = 100 * 1024 * 1024
 
@@ -47,6 +51,39 @@ const maxUploadFileSize = 50 * 1024 * 1024
 
 // maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
 const maxEditableFileSize = 1 * 1024 * 1024
+
+// isCloudRunEnv checks K_SERVICE to determine if we're running on Cloud Run.
+// In production, K_SERVICE is set once at container startup and never changes,
+// so calling os.Getenv is effectively a cached lookup (the C library caches
+// the environment block). This avoids the complexity of sync.Once while
+// remaining test-friendly via t.Setenv.
+func isCloudRunEnv() bool {
+	return os.Getenv("K_SERVICE") != ""
+}
+
+// workspaceWriteBlocked returns true when workspace writes should be rejected
+// with 503 Service Unavailable. This happens when the hub is running on Cloud
+// Run (K_SERVICE is set) and no durable storage backend is configured.
+//
+// Uses an allowlist of known-durable backends rather than a blocklist, so that
+// an unrecognized backend value fails closed (blocked) rather than silently
+// writing to ephemeral storage.
+func (s *Server) workspaceWriteBlocked() bool {
+	// Not on Cloud Run → writes are fine (self-hosted with local disk)
+	if !isCloudRunEnv() {
+		return false
+	}
+	// On Cloud Run — only allow writes if a known durable backend is configured
+	wsCfg := s.config.WorkspaceStorageConfig
+	if wsCfg != nil {
+		switch wsCfg.Backend {
+		case "nfs", "cloudrun-volume", "gke-shared-volume":
+			return false // Known durable backend → writes allowed
+		}
+	}
+	// No config, empty backend, "local", or unrecognized → block writes
+	return true
+}
 
 // ProjectWorkspaceFile represents a file in a project workspace.
 type ProjectWorkspaceFile struct {
@@ -282,6 +319,12 @@ func (s *Server) handleSharedDirFileList(w http.ResponseWriter, r *http.Request,
 
 // handleProjectWorkspaceUpload handles file uploads to a project workspace.
 func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Request, workspacePath string) {
+	// Phase 0 safety gate: reject writes on Cloud Run without durable storage
+	if s.workspaceWriteBlocked() {
+		writeError(w, http.StatusServiceUnavailable, "workspace_writes_unavailable", errWorkspaceWritesUnavailable, nil)
+		return
+	}
+
 	// Apply total request body size limit
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
 
@@ -623,6 +666,12 @@ type ProjectWorkspaceWriteRequest struct {
 // server checks that the file has not been modified since that time and returns
 // 409 Conflict if it has.
 func (s *Server) handleProjectWorkspaceWrite(w http.ResponseWriter, r *http.Request, workspacePath, filePath string) {
+	// Phase 0 safety gate: reject writes on Cloud Run without durable storage
+	if s.workspaceWriteBlocked() {
+		writeError(w, http.StatusServiceUnavailable, "workspace_writes_unavailable", errWorkspaceWritesUnavailable, nil)
+		return
+	}
+
 	// Validate the file path
 	if err := validateWorkspaceFilePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
@@ -687,6 +736,12 @@ func (s *Server) handleProjectWorkspaceWrite(w http.ResponseWriter, r *http.Requ
 
 // handleProjectWorkspaceDelete deletes a file from a project workspace.
 func (s *Server) handleProjectWorkspaceDelete(w http.ResponseWriter, workspacePath, filePath string) {
+	// Phase 0 safety gate: reject writes on Cloud Run without durable storage
+	if s.workspaceWriteBlocked() {
+		writeError(w, http.StatusServiceUnavailable, "workspace_writes_unavailable", errWorkspaceWritesUnavailable, nil)
+		return
+	}
+
 	// Validate the file path
 	if err := validateWorkspaceFilePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
@@ -893,6 +948,14 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Phase 0 safety gate: reject pull on Cloud Run without durable storage.
+	// Pull modifies the workspace filesystem, so it is a write operation.
+	if s.workspaceWriteBlocked() {
+		writeError(w, http.StatusServiceUnavailable, "workspace_writes_unavailable",
+			errWorkspaceWritesUnavailable, nil)
+		return
+	}
+
 	ctx := r.Context()
 
 	project, err := s.store.GetProject(ctx, projectID)
@@ -906,7 +969,7 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		InternalError(w)
 		return

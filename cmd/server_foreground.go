@@ -1544,6 +1544,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		OIDCLogin:               cfg.OIDCLogin,
 		OIDCConfig:              cfg.OIDC,
 		Federation:              cfg.Federation,
+		WorkspaceStorageConfig:  cfg.WorkspaceStorage,
 	}
 
 	// In hosted mode every replica must share the same session secret for

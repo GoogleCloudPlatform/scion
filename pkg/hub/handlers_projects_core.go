@@ -698,9 +698,81 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
 // It prefers projects/<slug> and falls back to groves/<slug> for backward compatibility
 // with workspaces created before the grove-to-project rename.
+//
+// When the server has a workspace storage config with backend "nfs" or
+// "cloudrun-volume", the NFS/volume-backed path is returned instead.
+// A backward-compatible fallback checks the NFS path first, then the
+// legacy local path, so existing local deployments continue to work
+// when NFS is first configured.
+func (s *Server) hubManagedProjectPath(slug string) (string, error) {
+	if err := validateProjectSlug(slug); err != nil {
+		return "", err
+	}
+
+	wsCfg := s.config.WorkspaceStorageConfig
+
+	// --- NFS backend ---
+	if wsCfg != nil && wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
+		share := wsCfg.NFS.Shares[0]
+		mountBase := filepath.Join(wsCfg.NFS.MountRoot, share.ID)
+		nfsPath := filepath.Join(mountBase, "hub-projects", slug)
+		if hasWorkspaceContent(nfsPath) {
+			return nfsPath, nil
+		}
+		// Fallback: check legacy local path for backward compatibility
+		if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
+			return localPath, nil
+		}
+		// Neither has content — return NFS path (new projects go to NFS)
+		return nfsPath, nil
+	}
+
+	// --- Cloud Run volume backend ---
+	if wsCfg != nil && wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil {
+		subPathRoot := wsCfg.CloudRunVolume.SubPathRoot
+		if subPathRoot == "" {
+			subPathRoot = "projects"
+		}
+		crPath := filepath.Join("/mnt", wsCfg.CloudRunVolume.VolumeName, subPathRoot, "hub-projects", slug)
+		if hasWorkspaceContent(crPath) {
+			return crPath, nil
+		}
+		// Fallback: check legacy local path
+		if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
+			return localPath, nil
+		}
+		return crPath, nil
+	}
+
+	// --- Default: local ephemeral path (existing behavior) ---
+	return localProjectPath(slug)
+}
+
+// hubManagedProjectPath is the package-level backward-compatible wrapper used by
+// callers that don't have access to a Server (e.g. resolveHubProjectSharedDirPath).
+// It always returns the local path. Server-method callers should prefer
+// s.hubManagedProjectPath for durable-storage awareness.
 func hubManagedProjectPath(slug string) (string, error) {
+	return localProjectPath(slug)
+}
+
+// validateProjectSlug rejects empty slugs and slugs containing path-traversal
+// characters (/, \, ..) to prevent directory-traversal attacks.
+func validateProjectSlug(slug string) error {
 	if slug == "" {
-		return "", fmt.Errorf("project slug must not be empty")
+		return fmt.Errorf("project slug must not be empty")
+	}
+	if strings.Contains(slug, "/") || strings.Contains(slug, "\\") || strings.Contains(slug, "..") {
+		return fmt.Errorf("project slug contains invalid characters")
+	}
+	return nil
+}
+
+// localProjectPath returns the legacy local filesystem path for a hub-managed
+// project workspace under ~/.scion/projects/<slug>, with groves/<slug> fallback.
+func localProjectPath(slug string) (string, error) {
+	if err := validateProjectSlug(slug); err != nil {
+		return "", err
 	}
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -714,7 +786,6 @@ func hubManagedProjectPath(slug string) (string, error) {
 	if hasWorkspaceContent(grovesPath) {
 		return grovesPath, nil
 	}
-	// Neither has content — return projects path (will be created on demand)
 	return projectsPath, nil
 }
 
@@ -741,7 +812,7 @@ func hasWorkspaceContent(dir string) bool {
 // hub connection settings. Unlike regular projects, hub-managed projects store
 // settings directly in the .scion directory (no split storage or marker files).
 func (s *Server) initHubManagedProject(project *store.Project) error {
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return err
 	}
@@ -791,7 +862,7 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 // seeds the .scion project structure on top. If the clone fails, the workspace
 // directory is cleaned up and an error is returned.
 func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store.Project) error {
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return err
 	}
@@ -967,7 +1038,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	}
 
 	// Download from GCS to Hub filesystem
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to get project path", "agent_id", agent.ID, "error", err)
 		return
@@ -2318,7 +2389,7 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 
 	// Migrate hub-managed project filesystem paths (best-effort).
 	// Derive newPath from oldPath's parent to preserve the directory type (groves/ vs projects/).
-	if oldPath, err := hubManagedProjectPath(oldSlug); err == nil {
+	if oldPath, err := s.hubManagedProjectPath(oldSlug); err == nil {
 		if _, statErr := os.Stat(oldPath); statErr == nil {
 			newPath := filepath.Join(filepath.Dir(oldPath), newSlug)
 			if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
@@ -2452,15 +2523,17 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	// For hub-native and shared-workspace projects, remove the filesystem directory.
+	// For hub-native and shared-workspace projects, remove the filesystem directory
+	// and clean up the per-project WebDAV lock store to prevent memory leaks.
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		if projectPath, err := hubManagedProjectPath(project.Slug); err == nil {
+		if projectPath, err := s.hubManagedProjectPath(project.Slug); err == nil {
 			if err := util.RemoveAllSafe(projectPath); err != nil {
 				s.projectsLogger().Warn("failed to remove hub-managed project directory",
 					"project_id", id, "slug", project.Slug, "path", projectPath, "error", err)
 			}
 		}
 	}
+	s.webdavLocks.Delete(id)
 
 	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).
 	// This stores external settings, templates, and agent homes for both

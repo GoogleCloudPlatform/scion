@@ -1607,9 +1607,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 	}
 
-	// Workspace storage NFS defaults (conditional on backend=nfs)
+	// Workspace storage — thread into GlobalConfig so the hub can read it.
 	if v1.WorkspaceStorage != nil {
 		v1.WorkspaceStorage.ApplyNFSDefaults()
+		gc.WorkspaceStorage = v1.WorkspaceStorage
 	}
 
 	// GitHub App

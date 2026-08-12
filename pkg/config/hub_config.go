@@ -453,6 +453,11 @@ type GlobalConfig struct {
 	// OIDC Identity Provider settings
 	OIDC OIDCProviderConfig `json:"oidc,omitempty" yaml:"oidc,omitempty" koanf:"oidc"`
 
+	// WorkspaceStorage selects the workspace storage backend for hub-managed
+	// project workspaces. Nil or Backend=="" / "local" preserves the legacy
+	// node-local behavior. Populated from server.workspace_storage in settings.yaml.
+	WorkspaceStorage *V1WorkspaceStorageConfig `json:"-" yaml:"-" koanf:"-"`
+
 	// Federation settings for hub-hub authentication
 	Federation FederationConfig `json:"federation,omitempty" yaml:"federation,omitempty" koanf:"federation"`
 

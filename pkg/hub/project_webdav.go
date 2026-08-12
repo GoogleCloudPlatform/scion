@@ -86,10 +86,31 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	}
 	prefix := r.URL.Path[:prefixEnd+len("/dav")]
 
+	// Phase 0 safety gate: reject write operations on Cloud Run without durable storage.
+	if s.workspaceWriteBlocked() {
+		switch r.Method {
+		case "PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH":
+			writeError(w, http.StatusServiceUnavailable, "workspace_writes_unavailable",
+				errWorkspaceWritesUnavailable, nil)
+			return
+		}
+	}
+
+	// Look up or create a per-project lock store so that WebDAV locks
+	// survive across HTTP requests within a single instance. Previously,
+	// NewMemLS() was called per-request, making locks completely ephemeral.
+	// Use Load first to avoid allocating a new MemLS on every request.
+	var lockStore interface{}
+	if ls, ok := s.webdavLocks.Load(projectID); ok {
+		lockStore = ls
+	} else {
+		lockStore, _ = s.webdavLocks.LoadOrStore(projectID, webdav.NewMemLS())
+	}
+
 	handler := &webdav.Handler{
 		Prefix:     prefix,
 		FileSystem: &filteredFS{root: webdav.Dir(workspacePath)},
-		LockSystem: webdav.NewMemLS(),
+		LockSystem: lockStore.(webdav.LockSystem),
 		Logger: func(r *http.Request, err error) {
 			if err != nil {
 				slog.Debug("webdav operation", "method", r.Method, "path", r.URL.Path, "error", err)
@@ -100,7 +121,7 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	handler.ServeHTTP(w, r)
 
 	// Update sync state after successful write operations
-	if r.Method == "PUT" || r.Method == "DELETE" || r.Method == "MKCOL" || r.Method == "MOVE" {
+	if r.Method == "PUT" || r.Method == "DELETE" || r.Method == "MKCOL" || r.Method == "MOVE" || r.Method == "COPY" {
 		go s.updateProjectSyncState(project.ID, workspacePath)
 	}
 }
@@ -136,7 +157,7 @@ func (s *Server) updateProjectSyncState(projectID, workspacePath string) {
 func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Project) (string, error) {
 	// Hub-managed projects (no git remote) always have a managed workspace
 	if project.GitRemote == "" {
-		path, err := hubManagedProjectPath(project.Slug)
+		path, err := s.hubManagedProjectPath(project.Slug)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve project path")
 		}
@@ -145,7 +166,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 
 	// Shared-workspace git projects have a managed workspace on the hub
 	if project.IsSharedWorkspace() {
-		path, err := hubManagedProjectPath(project.Slug)
+		path, err := s.hubManagedProjectPath(project.Slug)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve project path")
 		}
@@ -174,14 +195,14 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 
 	// Remote linked project: serve from the hub's cached copy.
 	// The cache is populated via cache/refresh or cache/notify endpoints.
-	cachePath, err := hubManagedProjectPath(project.Slug)
+	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve project cache path")
 	}
 
 	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
 	// The client should trigger a cache/refresh to populate it.
-	if !hasProjectCache(project.Slug) {
+	if !s.hasProjectCache(project.Slug) {
 		slog.Debug("linked project cache not yet populated",
 			"project_id", project.ID, "slug", project.Slug)
 	}
