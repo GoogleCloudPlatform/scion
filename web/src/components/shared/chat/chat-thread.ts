@@ -511,6 +511,8 @@ export class ScionChatThread extends LitElement {
       const removed = sorted.splice(0, sorted.length - MAX_BUFFER);
       for (const msg of removed) {
         this.messageMap.delete(msg.id);
+        // Prune mention results for evicted messages (R1 fix).
+        this.mentionResultsByMessageId.delete(msg.id);
       }
     }
 
@@ -644,14 +646,20 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) {
         this.sendError = await extractApiError(res, 'Failed to send message');
       } else {
-        const data = (await res.json()) as {
-          message_id?: string;
-          mention_results?: MentionResult[];
-        };
-        if (data?.message_id && data?.mention_results && data.mention_results.length > 0) {
-          const updated = new Map(this.mentionResultsByMessageId);
-          updated.set(data.message_id, data.mention_results);
-          this.mentionResultsByMessageId = updated;
+        // Only parse the JSON body when mentions were sent (O1 fix).
+        if (mentions && mentions.length > 0) {
+          const contentType = res.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            const data = (await res.json()) as {
+              message_id?: string;
+              mention_results?: MentionResult[];
+            };
+            if (data?.message_id && data?.mention_results && data.mention_results.length > 0) {
+              const updated = new Map(this.mentionResultsByMessageId);
+              updated.set(data.message_id, data.mention_results);
+              this.mentionResultsByMessageId = updated;
+            }
+          }
         }
         onSuccess();
       }

@@ -68,6 +68,15 @@ export class ScionMentionAutocomplete extends LitElement {
   /** Internal tracking of the trigger position. */
   private triggerStart = -1;
 
+  /** Cached mirror div for caret position measurement (O2 fix). */
+  private mirrorDiv: HTMLDivElement | null = null;
+
+  /** Cached marker span inside the mirror div. */
+  private mirrorMarker: HTMLSpanElement | null = null;
+
+  /** Last known textarea width used for the cached mirror div. */
+  private mirrorWidth = 0;
+
   static override styles = css`
     :host {
       display: block;
@@ -120,6 +129,21 @@ export class ScionMentionAutocomplete extends LitElement {
       font-style: italic;
     }
   `;
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.removeMirrorDiv();
+  }
+
+  /** Remove the cached mirror div from the DOM (cleanup). */
+  private removeMirrorDiv(): void {
+    if (this.mirrorDiv && this.mirrorDiv.parentNode) {
+      this.mirrorDiv.parentNode.removeChild(this.mirrorDiv);
+    }
+    this.mirrorDiv = null;
+    this.mirrorMarker = null;
+    this.mirrorWidth = 0;
+  }
 
   override render() {
     if (!this.active || this.candidates.length === 0) return nothing;
@@ -265,12 +289,14 @@ export class ScionMentionAutocomplete extends LitElement {
 
   /**
    * Checks whether a position in the text is inside a fenced code block.
-   * Fences are triple backticks (```) on their own line.
+   * Fences are exactly triple backticks (```) at the start of a line,
+   * optionally followed by a language tag — but NOT four or more backticks
+   * (which are inline constructs, not fence delimiters) (O3 fix).
    */
   private isInsideCodeFence(text: string, pos: number): boolean {
     const before = text.slice(0, pos);
-    // Count triple-backtick fence markers (``` at the start of a line).
-    const fencePattern = /^```/gm;
+    // Match exactly triple backticks at line start, not followed by another backtick.
+    const fencePattern = /^```(?!`)/gm;
     let count = 0;
     while (fencePattern.exec(before) !== null) {
       count++;
@@ -343,53 +369,64 @@ export class ScionMentionAutocomplete extends LitElement {
     this.dismiss();
   }
 
+  /** Styles copied from the textarea onto the mirror div. */
+  private static readonly MIRROR_STYLES = [
+    'font-family', 'font-size', 'font-weight', 'line-height',
+    'letter-spacing', 'word-spacing', 'padding-top', 'padding-right',
+    'padding-bottom', 'padding-left', 'border-width', 'box-sizing',
+    'white-space', 'word-wrap', 'overflow-wrap',
+  ] as const;
+
   /**
    * Position the dropdown near the caret using a mirrored-div measurement.
-   * The dropdown is positioned relative to the host element.
+   * The mirror div is cached and reused across keystrokes; it is only
+   * recreated when the textarea dimensions change (O2 fix).
    */
   private positionDropdown(textarea: HTMLTextAreaElement, triggerPos: number): void {
-    // Use a mirrored div to measure caret position.
-    const mirror = document.createElement('div');
-    const computed = window.getComputedStyle(textarea);
+    const currentWidth = textarea.offsetWidth;
 
-    // Copy relevant styles to the mirror.
-    const stylesToCopy = [
-      'font-family', 'font-size', 'font-weight', 'line-height',
-      'letter-spacing', 'word-spacing', 'padding-top', 'padding-right',
-      'padding-bottom', 'padding-left', 'border-width', 'box-sizing',
-      'white-space', 'word-wrap', 'overflow-wrap',
-    ];
+    // Create or recreate the mirror div if needed.
+    if (!this.mirrorDiv || !this.mirrorDiv.parentNode || this.mirrorWidth !== currentWidth) {
+      this.removeMirrorDiv();
 
-    mirror.style.position = 'absolute';
-    mirror.style.visibility = 'hidden';
-    mirror.style.whiteSpace = 'pre-wrap';
-    mirror.style.wordWrap = 'break-word';
-    mirror.style.width = `${textarea.offsetWidth}px`;
+      const mirror = document.createElement('div');
+      const computed = window.getComputedStyle(textarea);
 
-    for (const prop of stylesToCopy) {
-      mirror.style.setProperty(prop, computed.getPropertyValue(prop));
+      mirror.style.position = 'absolute';
+      mirror.style.visibility = 'hidden';
+      mirror.style.whiteSpace = 'pre-wrap';
+      mirror.style.wordWrap = 'break-word';
+      mirror.style.width = `${currentWidth}px`;
+
+      for (const prop of ScionMentionAutocomplete.MIRROR_STYLES) {
+        mirror.style.setProperty(prop, computed.getPropertyValue(prop));
+      }
+
+      const marker = document.createElement('span');
+      marker.textContent = '@';
+
+      mirror.appendChild(document.createTextNode(''));
+      mirror.appendChild(marker);
+
+      document.body.appendChild(mirror);
+
+      this.mirrorDiv = mirror;
+      this.mirrorMarker = marker;
+      this.mirrorWidth = currentWidth;
     }
 
-    // Insert text up to the trigger, then a marker span.
+    // Update the text content before the marker.
     const textBefore = textarea.value.slice(0, triggerPos);
-    mirror.textContent = textBefore;
-    const marker = document.createElement('span');
-    marker.textContent = '@';
-    mirror.appendChild(marker);
-
-    document.body.appendChild(mirror);
+    this.mirrorDiv.firstChild!.textContent = textBefore;
 
     // Measure position relative to the host element.
-    const markerRect = marker.getBoundingClientRect();
+    const markerRect = this.mirrorMarker!.getBoundingClientRect();
     const hostRect = this.getBoundingClientRect();
 
     this.dropdownLeft = Math.max(
       0,
       markerRect.left - hostRect.left
     );
-
-    // Clean up.
-    document.body.removeChild(mirror);
   }
 
   /**
