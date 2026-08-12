@@ -2868,6 +2868,24 @@ func TestAgentCreate_ProjectSlugResolution(t *testing.T) {
 	}
 }
 
+// TestAgentCreate_ProjectSlugNotFound verifies that createAgent returns 404
+// when the projectId field contains a slug that does not match any project.
+func TestAgentCreate_ProjectSlugNotFound(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create agent using a non-existent project slug
+	body := map[string]interface{}{
+		"name":      "Ghost Agent",
+		"projectId": "non-existent-project", // slug that doesn't exist
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestEnrichAgents_ResolvesTemplateSlug verifies that enrichAgents populates
 // the Template field with the slug from TemplateID for agents that were created
 // before this fix (with UUIDs stored in Template).

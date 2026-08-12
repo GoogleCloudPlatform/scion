@@ -308,9 +308,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve project slug to UUID if needed (mirrors listAgents pattern).
 	if gouuid.Validate(req.ProjectID) != nil {
-		if project, err := s.store.GetProjectBySlug(ctx, req.ProjectID); err == nil && project != nil {
-			req.ProjectID = project.ID
+		project, err := s.store.GetProjectBySlug(ctx, req.ProjectID)
+		if err != nil {
+			if err == store.ErrNotFound {
+				NotFound(w, "Project")
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
 		}
+		req.ProjectID = project.ID
 	}
 
 	if req.CleanupMode != "" && req.CleanupMode != "strict" && req.CleanupMode != "force" {
