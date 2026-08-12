@@ -545,8 +545,14 @@ func (b *TeamsBroker) Close() error {
 	serverRunning := b.serverRunning
 	store := b.store
 	publishLock := b.publishLock
+	commandHandler := b.commandHandler
 	b.serverRunning = false
 	b.mu.Unlock()
+
+	// Cancel pending polling goroutines in the command handler.
+	if commandHandler != nil {
+		commandHandler.Close()
+	}
 
 	// Release advisory lock first (orderly, no OnLost).
 	if publishLock != nil {
@@ -763,10 +769,15 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 	// Thread-based channels append ";messageid=..." to the conversation ID;
 	// strip that suffix so we match the channel-level link stored during setup.
 	convID := stripThreadSuffix(activity.Conversation.ID)
+
+	b.mu.Lock()
+	store := b.store
+	b.mu.Unlock()
+
 	var link *ChannelLink
-	if b.store != nil {
+	if store != nil {
 		var err error
-		link, err = b.store.GetChannelLink(ctx, convID)
+		link, err = store.GetChannelLink(ctx, convID)
 		if err != nil {
 			b.log.Warn("Error looking up channel link for topic routing", "error", err)
 		}

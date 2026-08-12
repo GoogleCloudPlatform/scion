@@ -52,6 +52,18 @@ func NewCommandHandler(broker *TeamsBroker, log *slog.Logger) *CommandHandler {
 	}
 }
 
+// Close cancels all pending polling goroutines.
+func (h *CommandHandler) Close() {
+	h.pendingMu.Lock()
+	defer h.pendingMu.Unlock()
+	for _, link := range h.pendingLinks {
+		if link.Cancel != nil {
+			link.Cancel()
+		}
+	}
+	h.pendingLinks = make(map[string]*pendingTeamsLink)
+}
+
 // Handle checks if the activity text starts with a known command and dispatches it.
 // Returns (handled bool, err error). If handled=false, the caller should
 // treat the message as a regular chat message.
@@ -627,7 +639,11 @@ func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Acti
 
 			if status == "confirmed" && userID != "" {
 				// Save user mapping.
-				if h.broker.store != nil {
+				h.broker.mu.Lock()
+				store := h.broker.store
+				h.broker.mu.Unlock()
+
+				if store != nil {
 					mapping := &TeamsUserMapping{
 						TeamsUserID:      teamsUserID,
 						TeamsDisplayName: activity.From.Name,
@@ -635,7 +651,7 @@ func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Acti
 						ScionEmail:       email,
 						LinkedAt:         time.Now(),
 					}
-					if err := h.broker.store.CreateUserMapping(ctx, mapping); err != nil {
+					if err := store.CreateUserMapping(ctx, mapping); err != nil {
 						h.log.Error("Failed to save user mapping", "error", err)
 					}
 				}
