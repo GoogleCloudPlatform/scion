@@ -475,7 +475,7 @@ export class ScionChatThread extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async handleChatSend(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, plain, interrupt } = e.detail;
+    const { text, plain, interrupt, onSuccess } = e.detail;
     if (!text || this.sending) return;
 
     this.sending = true;
@@ -493,6 +493,8 @@ export class ScionChatThread extends LitElement {
 
       if (!res.ok) {
         this.sendError = await extractApiError(res, 'Failed to send message');
+      } else {
+        onSuccess();
       }
     } catch (err) {
       this.sendError = err instanceof Error ? err.message : 'Failed to send message';

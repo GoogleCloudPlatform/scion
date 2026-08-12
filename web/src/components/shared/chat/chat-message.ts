@@ -79,6 +79,8 @@ export class ScionChatMessage extends LitElement {
   @state()
   private renderedHtml = '';
 
+  private renderTaskId = 0;
+
   static override styles = css`
     :host {
       display: block;
@@ -366,28 +368,28 @@ export class ScionChatMessage extends LitElement {
     if (changed.has('body') || changed.has('plain')) {
       void this.renderContent();
     }
-    this.injectCopyButtons();
+    if (changed.has('renderedHtml')) {
+      this.injectCopyButtons();
+    }
   }
 
   /** Inject copy buttons on all code blocks inside rendered markdown. */
   private injectCopyButtons(): void {
-    this.updateComplete.then(() => {
-      this.shadowRoot?.querySelectorAll('.md-content pre').forEach((pre) => {
-        if (pre.querySelector('.copy-btn')) return;
-        const btn = document.createElement('button');
-        btn.className = 'copy-btn';
-        btn.textContent = 'Copy';
-        btn.addEventListener('click', () => {
-          const code =
-            pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
-          navigator.clipboard.writeText(code);
-          btn.textContent = 'Copied!';
-          setTimeout(() => {
-            btn.textContent = 'Copy';
-          }, 1500);
-        });
-        pre.appendChild(btn);
+    this.shadowRoot?.querySelectorAll('.md-content pre').forEach((pre) => {
+      if (pre.querySelector('.copy-btn')) return;
+      const btn = document.createElement('button');
+      btn.className = 'copy-btn';
+      btn.textContent = 'Copy';
+      btn.addEventListener('click', () => {
+        const code =
+          pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
+        navigator.clipboard.writeText(code);
+        btn.textContent = 'Copied!';
+        setTimeout(() => {
+          btn.textContent = 'Copy';
+        }, 1500);
       });
+      pre.appendChild(btn);
     });
   }
 
@@ -396,11 +398,13 @@ export class ScionChatMessage extends LitElement {
       this.renderedHtml = '';
       return;
     }
+    const taskId = ++this.renderTaskId;
     try {
       const renderer = await getMarkdownRenderer();
+      if (taskId !== this.renderTaskId) return;
       this.renderedHtml = renderer.render(this.body);
     } catch {
-      // Fall back to plain text on error
+      if (taskId !== this.renderTaskId) return;
       this.renderedHtml = '';
     }
   }
@@ -496,7 +500,7 @@ export class ScionChatMessage extends LitElement {
       '#f59e0b', '#ef4444', '#ec4899', '#6366f1',
     ];
     let hash = 0;
-    const s = this.agentSlug || this.sender;
+    const s = this.agentSlug || this.sender || '';
     for (let i = 0; i < s.length; i++) {
       hash = s.charCodeAt(i) + ((hash << 5) - hash);
     }
@@ -505,7 +509,7 @@ export class ScionChatMessage extends LitElement {
 
   /** First two characters of the agent slug or sender name. */
   private getInitials(): string {
-    const s = this.agentSlug || this.sender;
+    const s = this.agentSlug || this.sender || '';
     return s.substring(0, 2);
   }
 

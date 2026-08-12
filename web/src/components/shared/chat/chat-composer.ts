@@ -38,6 +38,7 @@ export interface ChatSendDetail {
   text: string;
   plain: boolean;
   interrupt: boolean;
+  onSuccess: () => void;
 }
 
 /**
@@ -215,7 +216,7 @@ export class ScionChatComposer extends LitElement {
   }
 
   private handleKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       this.handleSend();
     }
@@ -239,15 +240,15 @@ export class ScionChatComposer extends LitElement {
           text: trimmed,
           plain: this.plain,
           interrupt: this.interrupt,
+          onSuccess: () => {
+            this.text = '';
+            this.runeCount = 0;
+          },
         },
         bubbles: true,
         composed: true,
       })
     );
-
-    // Clear the input after sending
-    this.text = '';
-    this.runeCount = 0;
   }
 }
 
