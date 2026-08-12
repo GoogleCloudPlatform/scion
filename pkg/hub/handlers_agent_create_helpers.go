@@ -152,7 +152,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	if project != nil && (project.GitRemote == "" || project.IsSharedWorkspace()) {
 		existingWorkspace := agent.AppliedConfig.Workspace
 		if existingWorkspace == "" {
-			workspacePath, err := hubManagedProjectPath(project.Slug)
+			workspacePath, err := s.hubManagedProjectPath(project.Slug)
 			if err == nil {
 				agent.AppliedConfig.Workspace = workspacePath
 			}

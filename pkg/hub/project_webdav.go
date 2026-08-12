@@ -86,6 +86,16 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	}
 	prefix := r.URL.Path[:prefixEnd+len("/dav")]
 
+	// Phase 0 safety gate: reject write operations on Cloud Run without durable storage.
+	if s.workspaceWriteBlocked() {
+		switch r.Method {
+		case "PUT", "DELETE", "MKCOL", "MOVE", "PROPPATCH":
+			writeError(w, http.StatusServiceUnavailable, "workspace_writes_unavailable",
+				"Workspace writes are not available in this deployment configuration. Configure durable workspace storage (NFS) to enable file editing.", nil)
+			return
+		}
+	}
+
 	handler := &webdav.Handler{
 		Prefix:     prefix,
 		FileSystem: &filteredFS{root: webdav.Dir(workspacePath)},
@@ -136,7 +146,7 @@ func (s *Server) updateProjectSyncState(projectID, workspacePath string) {
 func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Project) (string, error) {
 	// Hub-managed projects (no git remote) always have a managed workspace
 	if project.GitRemote == "" {
-		path, err := hubManagedProjectPath(project.Slug)
+		path, err := s.hubManagedProjectPath(project.Slug)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve project path")
 		}
@@ -145,7 +155,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 
 	// Shared-workspace git projects have a managed workspace on the hub
 	if project.IsSharedWorkspace() {
-		path, err := hubManagedProjectPath(project.Slug)
+		path, err := s.hubManagedProjectPath(project.Slug)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve project path")
 		}
@@ -174,7 +184,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 
 	// Remote linked project: serve from the hub's cached copy.
 	// The cache is populated via cache/refresh or cache/notify endpoints.
-	cachePath, err := hubManagedProjectPath(project.Slug)
+	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve project cache path")
 	}

@@ -215,7 +215,7 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	// Check if a cache exists on disk
-	cachePath, err := hubManagedProjectPath(project.Slug)
+	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		InternalError(w)
 		return
@@ -274,7 +274,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	}
 
 	// Download the latest workspace from GCS to local cache
-	cachePath, err := hubManagedProjectPath(project.Slug)
+	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		InternalError(w)
 		return
@@ -363,7 +363,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *sto
 	}
 
 	// Download from GCS to local cache
-	cachePath, err := hubManagedProjectPath(project.Slug)
+	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve cache path: %w", err)
 	}

@@ -261,6 +261,13 @@ type ServerConfig struct {
 	// Used by the federation authenticator to enforce HTTPS on issuer URLs
 	// in non-dev/non-workstation modes.
 	Mode string
+
+	// WorkspaceStorageConfig selects the workspace storage backend for
+	// hub-managed project workspaces. When Backend is "nfs" or
+	// "cloudrun-volume", hubManagedProjectPath returns a path on the
+	// configured durable mount instead of the node-local home directory.
+	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
+	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.

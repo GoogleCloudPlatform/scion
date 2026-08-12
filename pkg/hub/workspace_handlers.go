@@ -691,7 +691,7 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 		return
 	}
 
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
 		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: failed to get project path", "error", err)
 		return
