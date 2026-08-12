@@ -541,6 +541,8 @@ export class ScionPageAdminFederation extends LitElement {
 
   private async downloadJWKS(): Promise<void> {
     this.downloading = true;
+    this.error = null;
+    this.successMessage = null;
     try {
       const resp = await apiFetch('/.well-known/jwks.json');
       if (!resp.ok) {
@@ -552,7 +554,9 @@ export class ScionPageAdminFederation extends LitElement {
       const a = document.createElement('a');
       a.href = url;
       a.download = 'scion-jwks.json';
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch {
       this.error = 'Failed to download JWKS: could not connect to server';
