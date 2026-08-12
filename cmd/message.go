@@ -25,7 +25,6 @@ import (
 	"sync"
 	"text/tabwriter"
 	"time"
-	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -909,57 +908,18 @@ func validateChannel(hubCtx *HubContext, channel string) error {
 	return fmt.Errorf("channel %q is not registered; available channels: %s", channel, strings.Join(available, ", "))
 }
 
-// extractMentions scans message text for @name tokens and returns a deduplicated
-// list of mentioned names (without the @ prefix). Trailing punctuation (except
-// underscores and hyphens) is stripped from each token.
+// extractMentions delegates to the shared messages.ExtractMentions.
 func extractMentions(text string) []string {
-	var mentions []string
-	seen := make(map[string]bool)
-	for _, word := range strings.Fields(text) {
-		if !strings.HasPrefix(word, "@") {
-			continue
-		}
-		name := strings.TrimPrefix(word, "@")
-		name = strings.TrimRightFunc(name, func(r rune) bool {
-			return unicode.IsPunct(r) && r != '_' && r != '-'
-		})
-		if name == "" {
-			continue
-		}
-		lower := strings.ToLower(name)
-		if !seen[lower] {
-			seen[lower] = true
-			mentions = append(mentions, name)
-		}
-	}
-	return mentions
+	return messages.ExtractMentions(text)
 }
 
-// parseCCFlag parses the --cc flag value into a slice of agent names.
-// Names are comma-separated and whitespace-trimmed.
+// parseCCFlag delegates to the shared messages.ParseCCFlag.
 func parseCCFlag(cc string) []string {
-	if cc == "" {
-		return nil
-	}
-	parts := strings.Split(cc, ",")
-	var names []string
-	seen := make(map[string]bool)
-	for _, p := range parts {
-		name := strings.TrimSpace(p)
-		if name == "" {
-			continue
-		}
-		lower := strings.ToLower(name)
-		if !seen[lower] {
-			seen[lower] = true
-			names = append(names, name)
-		}
-	}
-	return names
+	return messages.ParseCCFlag(cc)
 }
 
-// maxMentionRecipients caps the number of mention recipients to avoid spam.
-const maxMentionRecipients = 10
+// maxMentionRecipients is an alias for the shared constant.
+const maxMentionRecipients = messages.MaxMentionRecipients
 
 // sendMentionMessages resolves @mentions and --cc names against project agents
 // and sends TypeMention messages to each resolved agent. The primary recipient

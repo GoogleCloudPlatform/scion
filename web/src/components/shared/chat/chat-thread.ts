@@ -39,13 +39,20 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
-import type { Message } from '../../../shared/types.js';
+import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
 import type { VisibilityMode, VisibilityChangeDetail } from './chat-visibility-toggle.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
 import './chat-visibility-toggle.js';
+
+/** Result from server-side mention fan-out. */
+interface MentionResult {
+  slug: string;
+  status: string;
+  error?: string;
+}
 
 /** Maximum messages kept in the buffer. */
 const MAX_BUFFER = 500;
@@ -83,6 +90,10 @@ export class ScionChatThread extends LitElement {
   @property({ type: Boolean })
   showVisibilityToggle = false;
 
+  /** Agents available for @-mention in the composer. */
+  @property({ type: Array })
+  agents: Agent[] = [];
+
   @state() private messages: Message[] = [];
   @state() private messageMap = new Map<string, Message>();
   @state() private loading = false;
@@ -94,6 +105,8 @@ export class ScionChatThread extends LitElement {
   @state() private loadingOlder = false;
   @state() private hasOlderMessages = true;
   @state() private loaded = false;
+  /** Mention results keyed by message ID (for "also notified" footer per message). */
+  @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
@@ -257,6 +270,18 @@ export class ScionChatThread extends LitElement {
       color: var(--scion-danger-600, #dc2626);
       background: var(--scion-danger-50, #fef2f2);
       border-top: 1px solid var(--scion-danger-200, #fecaca);
+    }
+
+    /* Mention results footer */
+    .mention-results {
+      padding: 0.25rem 1rem;
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #64748b);
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .mention-results .mention-slug {
+      font-weight: 600;
     }
   `;
 
@@ -486,6 +511,8 @@ export class ScionChatThread extends LitElement {
       const removed = sorted.splice(0, sorted.length - MAX_BUFFER);
       for (const msg of removed) {
         this.messageMap.delete(msg.id);
+        // Prune mention results for evicted messages (R1 fix).
+        this.mentionResultsByMessageId.delete(msg.id);
       }
     }
 
@@ -594,25 +621,50 @@ export class ScionChatThread extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async handleChatSend(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, plain, interrupt, onSuccess } = e.detail;
+    const { text, plain, interrupt, mentions, onSuccess } = e.detail;
     if (!text || this.sending) return;
 
     this.sending = true;
     this.sendError = null;
 
     try {
+      // Build the POST body, including mentions when present.
+      const body: Record<string, unknown> = {
+        structured_message: { msg: text, plain },
+        interrupt,
+      };
+      if (mentions && mentions.length > 0) {
+        body.mentions = mentions;
+      }
+
       const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(this.agentId)}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          structured_message: { msg: text, plain },
-          interrupt,
-        }),
+        body: JSON.stringify(body),
       });
 
       if (!res.ok) {
         this.sendError = await extractApiError(res, 'Failed to send message');
       } else {
+        // Only parse the JSON body when mentions were sent (O1 fix).
+        if (mentions && mentions.length > 0) {
+          try {
+            const contentType = res.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              const data = (await res.json()) as {
+                message_id?: string;
+                mention_results?: MentionResult[];
+              };
+              if (data?.message_id && data?.mention_results && data.mention_results.length > 0) {
+                const updated = new Map(this.mentionResultsByMessageId);
+                updated.set(data.message_id, data.mention_results);
+                this.mentionResultsByMessageId = updated;
+              }
+            }
+          } catch (err) {
+            console.error('Failed to parse mention results response:', err);
+          }
+        }
         onSuccess();
       }
     } catch (err) {
@@ -638,6 +690,7 @@ export class ScionChatThread extends LitElement {
           ? html`
               <scion-chat-composer
                 ?disabled=${this.sending}
+                .agents=${this.agents}
                 @chat-send=${this.handleChatSend}
               ></scion-chat-composer>
             `
@@ -793,12 +846,32 @@ export class ScionChatThread extends LitElement {
         ></scion-chat-message>
       `);
 
+      // Render "also notified" footer under the specific message bubble (O3).
+      const msgMentionResults = this.mentionResultsByMessageId.get(msg.id);
+      if (msgMentionResults) {
+        const delivered = msgMentionResults.filter((r) => r.status === 'delivered');
+        if (delivered.length > 0) {
+          const slugs = delivered.map(
+            (r) => html`<span class="mention-slug">@${r.slug}</span>`
+          );
+          rows.push(html`
+            <div class="mention-results">
+              Also notified: ${slugs.reduce(
+                (acc, s, i) => (i === 0 ? [s] : [...acc, ', ', s]),
+                [] as unknown[]
+              )}
+            </div>
+          `);
+        }
+      }
+
       prevSender = msg.sender;
       prevTimestamp = msgTime;
     }
 
     return rows;
   }
+
 }
 
 declare global {

@@ -21,7 +21,8 @@
  * - Character counter (rune-aware via Intl.Segmenter where available)
  * - 2000 character limit with visual feedback (AC10)
  * - Defaults to plain: false (design section 4.7)
- * - Sends via `chat-send` custom event: {text, plain, interrupt}
+ * - Sends via `chat-send` custom event: {text, plain, interrupt, mentions}
+ * - @-mention autocomplete integration (Phase 4)
  * - The composer knows nothing about the network
  * - Send on Enter (Shift+Enter for newline)
  * - Interrupt toggle
@@ -29,6 +30,9 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import type { Agent } from '../../../shared/types.js';
+import type { MentionAcceptDetail } from './mention-autocomplete.js';
+import './mention-autocomplete.js';
 
 /** Maximum message length in rune count. */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -39,6 +43,7 @@ export interface ChatSendDetail {
   plain: boolean;
   interrupt: boolean;
   onSuccess: () => void;
+  mentions: string[];
 }
 
 /**
@@ -63,10 +68,17 @@ export class ScionChatComposer extends LitElement {
   @property({ type: Boolean })
   disabled = false;
 
+  /** Agents available for @-mention (passed from parent). */
+  @property({ type: Array })
+  agents: Agent[] = [];
+
   @state() private text = '';
   @state() private plain = false;
   @state() private interrupt = false;
   @state() private runeCount = 0;
+
+  /** Set of accepted mention slugs. Filtered to those still present on send. */
+  private acceptedMentions = new Set<string>();
 
   static override styles = css`
     :host {
@@ -166,6 +178,10 @@ export class ScionChatComposer extends LitElement {
               @keydown=${this.handleKeydown}
               ?disabled=${this.disabled}
             ></sl-textarea>
+            <scion-mention-autocomplete
+              .agents=${this.agents}
+              @mention-accept=${this.handleMentionAccept}
+            ></scion-mention-autocomplete>
           </div>
           <sl-button
             class="send-btn"
@@ -213,13 +229,61 @@ export class ScionChatComposer extends LitElement {
     const target = e.target as HTMLInputElement;
     this.text = target.value;
     this.runeCount = countRunes(this.text);
+
+    // Feed the autocomplete component.
+    const autocomplete = this.shadowRoot?.querySelector(
+      'scion-mention-autocomplete'
+    ) as import('./mention-autocomplete.js').ScionMentionAutocomplete | null;
+    if (autocomplete) {
+      const textarea = this.getTextareaElement();
+      if (textarea) {
+        autocomplete.handleInput(this.text, textarea.selectionStart ?? this.text.length, textarea);
+      }
+    }
   }
 
   private handleKeydown(e: KeyboardEvent): void {
+    // Let the autocomplete handle keys first.
+    const autocomplete = this.shadowRoot?.querySelector(
+      'scion-mention-autocomplete'
+    ) as import('./mention-autocomplete.js').ScionMentionAutocomplete | null;
+    if (autocomplete?.handleKeydown(e)) {
+      return; // consumed by autocomplete
+    }
+
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       this.handleSend();
     }
+  }
+
+  private handleMentionAccept(e: CustomEvent<MentionAcceptDetail>): void {
+    const { slug, triggerStart } = e.detail;
+    const textarea = this.getTextareaElement();
+    if (!textarea) return;
+
+    // Compute what to replace: from @-trigger to current cursor position.
+    const cursorPos = textarea.selectionStart ?? this.text.length;
+    const before = this.text.slice(0, triggerStart);
+    const after = this.text.slice(cursorPos);
+    const insertion = `@${slug} `;
+
+    this.text = before + insertion + after;
+    this.runeCount = countRunes(this.text);
+
+    // Track the accepted mention.
+    this.acceptedMentions.add(slug);
+
+    // Restore cursor position after the inserted text.
+    const newCursorPos = triggerStart + insertion.length;
+    this.updateComplete.then(() => {
+      const ta = this.getTextareaElement();
+      if (ta) {
+        ta.value = this.text;
+        ta.setSelectionRange(newCursorPos, newCursorPos);
+        ta.focus();
+      }
+    });
   }
 
   private handlePlainToggle(e: Event): void {
@@ -234,20 +298,40 @@ export class ScionChatComposer extends LitElement {
     const trimmed = this.text.trim();
     if (!trimmed || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled) return;
 
+    // Filter accepted mentions to those still literally present in the text.
+    const mentions = [...this.acceptedMentions].filter((slug) =>
+      trimmed.includes(`@${slug}`)
+    );
+
     this.dispatchEvent(
       new CustomEvent<ChatSendDetail>('chat-send', {
         detail: {
           text: trimmed,
           plain: this.plain,
           interrupt: this.interrupt,
+          mentions,
           onSuccess: () => {
             this.text = '';
             this.runeCount = 0;
+            this.acceptedMentions.clear();
           },
         },
         bubbles: true,
         composed: true,
       })
+    );
+  }
+
+  /**
+   * Get the underlying HTMLTextAreaElement from the sl-textarea shadow DOM.
+   */
+  private getTextareaElement(): HTMLTextAreaElement | null {
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    if (!slTextarea) return null;
+    // Shoelace sl-textarea wraps a native <textarea> inside its shadow root.
+    return (
+      (slTextarea.shadowRoot?.querySelector('textarea') as HTMLTextAreaElement) ??
+      null
     );
   }
 }
