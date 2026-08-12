@@ -16,8 +16,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -44,30 +42,25 @@ func NewNonceCacheStore(client *ent.Client) *NonceCacheStore {
 // stores it with the given TTL. Returns true if the nonce is new (request is
 // valid); returns false if the nonce already exists (replay detected).
 //
-// The check-and-insert is performed using an INSERT … ON CONFLICT DO NOTHING
-// pattern: if the unique constraint on nonce fires, no row is inserted and the
-// returned count is 0, indicating a replay. This is safe under concurrent
-// writes from multiple hub replicas.
+// The insert relies on the unique constraint on the nonce column: if the
+// nonce already exists the database rejects the INSERT with a constraint
+// error, which ent surfaces as ConstraintError. Any other error is treated
+// as fail-closed (returns false) to avoid silently accepting replays.
 func (s *NonceCacheStore) CheckAndStore(ctx context.Context, nonce string, ttl time.Duration) (bool, error) {
 	expiresAt := time.Now().Add(ttl)
 
-	// Use Create with OnConflict to perform an atomic check-and-insert.
-	// If the nonce already exists (unique constraint violation), the
-	// OnConflict handler does nothing and we detect the replay.
-	err := s.client.NonceCache.
+	// Plain insert — the unique constraint on nonce rejects duplicates.
+	_, err := s.client.NonceCache.
 		Create().
 		SetNonce(nonce).
 		SetExpiresAt(expiresAt).
-		OnConflictColumns(noncecache.FieldNonce).
-		DoNothing().
-		Exec(ctx)
+		Save(ctx)
 	if err != nil {
-		// When DoNothing fires (conflict — nonce already exists), the driver
-		// returns zero affected rows. Ent surfaces this as NotFoundError on
-		// Postgres and as sql.ErrNoRows on SQLite. Both indicate a replay.
-		if ent.IsNotFound(err) || errors.Is(err, sql.ErrNoRows) {
-			return false, nil // replay detected
+		// Unique constraint violation → nonce already exists → replay.
+		if ent.IsConstraintError(err) {
+			return false, nil
 		}
+		// Any other DB error → fail-closed (reject the request).
 		return false, err
 	}
 
