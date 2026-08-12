@@ -4,7 +4,7 @@ Run multiple agents in parallel — each in its own container, with its own work
 
 _sci·on /ˈsīən/ — a young shoot or twig, cut for grafting or rooting._
 
-Scion is an experimental multi-agent orchestration testbed designed to manage "deep agents" running in containers.
+Scion is a multi-agent orchestration platform designed to manage "deep agents" running in containers.
 
 
 Scion orchestrates "deep agents" (Claude Code, Gemini CLI, and others) as isolated, concurrent processes. Each agent gets its own container, (optional) git worktree, and credentials — so they can work on different parts of your project without stepping on each other. Agents run locally, on remote VMs, or across Kubernetes clusters.
@@ -94,7 +94,7 @@ scion init
 
 Scion auto-detects your OS and configures the default runtime (Docker on Linux/Windows, Container on macOS). Override this in `.scion/settings.yaml`.
 
-**NOTE** Currently this project is early and experimental. Most of the concepts are settled in, but many features may not be fully implemented, anything might break or change and the future is not set. Local use is relatively stable, Hub based workflows now highly usable, Kubernetes runtime support still has rough edges.
+**NOTE** This project is evolving rapidly. Local mode, Hub-based workflows, and Kubernetes runtime are all supported and in active use. Expect continued iteration — APIs and configuration may change between releases.
 
 ### Start Agents
 
@@ -153,11 +153,11 @@ Visit our **[Documentation Site](https://googlecloudplatform.github.io/scion/)**
 
 ## Project Status
 
-This project is evolving and experimental. Core concepts are settled, but expect rough edges:
+Scion is in active development. Core concepts are settled and all deployment modes are supported:
 
-- **Local mode** — relatively stable. Increasingly focused on local "workstation" mode where a full local server runs.
-- **Single-node Hub** — Mature and is in use for many projects inside google
-- **Distributed HA** — early, with known rough edges
+- **Local mode** — stable, with an increasingly capable local "workstation" mode where a full local server runs.
+- **Single-node Hub** — mature and in use for many projects inside Google.
+- **Distributed HA** — supported on GCP (Cloud Run + GKE), with continued evolution.
 
 See the [public roadmap](https://github.com/orgs/scion-frontiers/projects/5/views/2) for details.
 
