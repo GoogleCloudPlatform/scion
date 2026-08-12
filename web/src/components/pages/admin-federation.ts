@@ -49,6 +49,7 @@ export class ScionPageAdminFederation extends LitElement {
   @state() private error: string | null = null;
   @state() private successMessage: string | null = null;
   @state() private saving = false;
+  @state() private downloading = false;
 
   // Global federation settings
   @state() private enabled = false;
@@ -536,6 +537,34 @@ export class ScionPageAdminFederation extends LitElement {
     void this.save();
   }
 
+  // --- JWKS Download ---
+
+  private async downloadJWKS(): Promise<void> {
+    this.downloading = true;
+    this.error = null;
+    this.successMessage = null;
+    try {
+      const resp = await apiFetch('/.well-known/jwks.json');
+      if (!resp.ok) {
+        this.error = await extractApiError(resp, 'Failed to download JWKS');
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'scion-jwks.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      this.error = 'Failed to download JWKS: could not connect to server';
+    } finally {
+      this.downloading = false;
+    }
+  }
+
   // --- Helpers for comma-separated array fields ---
 
   private arrayToCommaString(arr?: string[]): string {
@@ -592,6 +621,10 @@ export class ScionPageAdminFederation extends LitElement {
       <div class="section">
         <div class="section-header">
           <h3 class="section-title">Global Settings</h3>
+          <sl-button size="small" variant="default" ?loading=${this.downloading} @click=${() => { void this.downloadJWKS(); }}>
+            <sl-icon slot="prefix" name="download"></sl-icon>
+            Download JWKS
+          </sl-button>
         </div>
 
         <div class="form-field mb-1">
