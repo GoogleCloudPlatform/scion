@@ -152,12 +152,12 @@ _Avoid_: environment, runtime config, preset, runtime profile
 _See also_: Runtime Broker, Runtime
 
 **Message Broker**:
-The pluggable system that brokers messages between Scion actors (agents and users) and messaging surfaces — built-in brokers such as the web UI Messages view, and broker plugins to external systems like Telegram, Discord, Slack, and Google Chat. Backs the `scion message` command. Always write in full; "broker" alone is forbidden because it collides with Runtime Broker.
+The pluggable system that brokers messages between Scion actors (agents and users) and messaging surfaces — built-in brokers such as the web UI Messages view, and broker plugins to external systems like Telegram, Discord, Slack, Google Chat, and Microsoft Teams. Backs the `scion message` command. Always write in full; "broker" alone is forbidden because it collides with Runtime Broker.
 _Avoid_: broker, message bus, queue, pub/sub
 _See also_: Broker plugin, Built-in broker, Plugin, Event Bus (distinct), Runtime Broker (distinct, same word)
 
 **Broker plugin**:
-A Message Broker implementation for a specific external messaging system (e.g. Telegram, Google Chat), loaded through the broker plugin interface (`PluginTypeBroker`).
+A Message Broker implementation for a specific external messaging system (e.g. Telegram, Discord, Google Chat, Microsoft Teams), loaded through the broker plugin interface (`PluginTypeBroker`).
 _Avoid_: connector, bridge, adapter
 _See also_: Message Broker, Built-in broker, Plugin
 

@@ -5,7 +5,7 @@ description: Connect Scion to Telegram, Discord, and A2A for external messaging 
 
 ## Overview
 
-Scion can relay agent messages and notifications to external platforms, extending communication beyond the CLI and Web Dashboard. Three channels are available: **Telegram** (bidirectional group chat), **Discord** (bidirectional chat and outbound notifications), and **A2A protocol** (expose agents as A2A endpoints for programmatic interaction).
+Scion can relay agent messages and notifications to external platforms, extending communication beyond the CLI and Web Dashboard. Multiple external channels are supported: **Telegram** (bidirectional group chat), **Discord** (bidirectional chat and outbound notifications), **Google Chat** (comprehensive bidirectional workspace integration), **Microsoft Teams** (enterprise-grade bidirectional channel messaging), and the **A2A protocol** (exposing agents as programmatically queryable endpoints).
 
 ## Telegram
 
@@ -158,6 +158,54 @@ Set the webhook URL in one of two ways:
 - **Environment variable:** Set `SCION_DISCORD_WEBHOOK_URL`.
 
 For more details, see [Hub Setup — Discord Integration](/scion/hosted/single-node/hub-server/#discord-integration).
+
+## Google Chat
+
+Scion provides a powerful **Google Chat** integration (powered by the `scion-chat-app` plugin) that lets users message agents, manage agent lifecycles, and receive real-time notifications directly from within their Google Workspace. It runs as both a Google Workspace Add-on (HTTP Service) and a message broker plugin.
+
+### Key Capabilities
+
+- **Bidirectional Messaging**: Chat with agents directly within Space conversations.
+- **Agent and Space Administration**: Run slash commands (`/scion` to message agents, `/scionAdmin` for space/agent administration, including `terminal`, `thread`, `send`, and `secret`).
+- **Thread-Level Default Agent Routing**: Set specific default agents on a per-thread basis within Google Chat spaces.
+- **Card-Based Interactive Flows**: For firewall-restricted or high-security deployments where interactive dialogs are unavailable, the plugin uses rich Card-based flows for space deletion and notification subscription setups.
+- **Inbound Attachment Handling**: Send files up to 25 MB directly to agent workspaces using the Google Chat API's `media.upload` pipeline, backed by strict path-traversal sanitization.
+- **Reliable Message Delivery**: Deduplicates outgoing and incoming messages using a dedicated per-space send queue to protect against duplicate posts and network jitter.
+- **Cloud Pub/Sub Ingress Mode**: Supports Cloud Pub/Sub ingress, allowing the plugin to run securely in firewalled, private network environments without exposing a public HTTPS webhook endpoint.
+- **Observe Mode Filtering**: Optionally monitor and filter public space conversations using outbound mention resolution with settings toggles.
+
+### Commands
+
+Google Chat utilizes the following slash commands:
+
+- **`/scion`**: Message, list, or control agents.
+- **`/scionAdmin`**: Perform administrative tasks like starting, stopping, linking spaces to Scion projects, configuring notification subscriptions, and managing secrets.
+
+For advanced deployment instructions, API scopes, and configuration details, see [extras/scion-chat-app/README.md](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-chat-app).
+
+## Microsoft Teams
+
+The Microsoft Teams integration (powered by the `scion-plugin-teams` plugin) brings Scion's bidirectional messaging and agent control directly into Microsoft Teams channels and conversations via the Azure Bot Framework.
+
+### Key Capabilities
+
+- **Bidirectional Messaging**: Users interact with agents in Channels or Group Chats, with inbound topics automatically routed using the canonical `scion.project` format.
+- **Card-Level Agent Attribution**: While Teams utilizes a single bot identity (as defined in the downloadable App Manifest), outbound cards are styled as **Adaptive Cards** and explicitly display the sending agent's name (bolded, accent-colored) and project slug in the header for clear attribution.
+- **Authentication**: Bidirectional communication is secured via Azure Active Directory (Azure AD) OAuth2 and JWT validation.
+- **Flexible Storage**: Supports both local SQLite and robust PostgreSQL backends.
+- **Sideloading and Deployment**: Admins configure the plugin via the Scion Admin UI, download the automatically compiled App Manifest package (`.zip`), and sideload or publish it to the Teams Admin Center.
+- **Channel Prefix Resiliency**: Handles the hidden `28:` bot prefix Teams adds to bot entity IDs in channel contexts, ensuring slash and bot commands work flawlessly in all group contexts.
+
+### Bot Commands
+
+Interact with the Teams bot using these `@-mention` commands:
+
+- **`@BotName setup`**: Binds a Teams channel or group conversation to a specific Scion project.
+- **`@BotName register`**: Pairs your Teams account with your Scion Hub identity.
+- **`@BotName unregister`**: Unlinks your Teams account from the Hub.
+- **`@BotName agents`**: Lists all running agents within the bound project.
+
+For step-by-step setup guides, App Manifest templates, and Azure AD registration details, see the [Microsoft Teams Plugin Guide](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-teams).
 
 ## A2A Protocol Bridge
 

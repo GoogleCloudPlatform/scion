@@ -312,9 +312,9 @@ curl -X POST https://a2a.example.com/projects/my-coding-project/agents/code-help
 
 When the A2A bridge is configured with per-user authentication, callers present their own individual credentials instead of a shared static API key. This activates **CallerIdentity context propagation** and granular task isolation.
 
-### The Two Per-User Schemes
+### Per-User & Federation Schemes
 
-The A2A bridge supports two per-user authentication schemes, specified via `auth.scheme` in the bridge configuration:
+The A2A bridge supports three authentication schemes for granular access control, specified via `auth.scheme` in the bridge configuration:
 
 #### 1. `hubUAT` (Recommended for Desktop App Federation)
 * **How it works**: Callers present a Scion User Access Token (`Authorization: Bearer scion_pat_...`) created via the CLI.
@@ -326,10 +326,19 @@ The A2A bridge supports two per-user authentication schemes, specified via `auth
 * **How it works**: Callers present a Scion-signed User JWT.
 * **Local Validation**: The bridge validates the JWT signature locally using the HS256 `hub.signing_key` secret shared with the Hub. Since this happens entirely locally, it requires no active API calls to the Hub, making it extremely fast.
 
+#### 3. `oidcFederation` (For Federated Access)
+* **How it works**: Callers present an OIDC ID token issued by a trusted federation provider.
+* **Token Verification & Bookkeeping**: The bridge decodes the OIDC token and performs local bookkeeping. It fully supports RFC 7519 `aud` (audience) claim validation, accepting the claim in either string or array-of-strings format.
+* **Transport Auth Wiring**: Integrated with Google Cloud Identity-Aware Proxy (IAP) transport auth wiring to automatically resolve and bypass platform-level guards when accessing protected backends.
+
 ### Per-User Isolation Benefits
 
 * **Task Ownership & Visibility**: Users can only see, query, and cancel/interrupt tasks they created. One user cannot view or modify the active tasks of another user. This is enforced at the SQLite level using a `ScopedTaskStore`.
 * **Audit Trails & Attribution**: All downstream Hub API calls made by the bridge (such as sending messages or interrupting containers) propagate the user's actual `CallerIdentity`. The Hub's audit logs will show the real user's identity as the initiator rather than the bridge admin's service account.
+* **Extended Identity Context**: The propagated `CallerIdentity` carries critical security metadata, including:
+  - **`CallerKey`**: Resolves the exact key/token credentials used to authenticate the request.
+  - **`IsAgent`**: Identifies whether the calling entity is a federated agent or a human user.
+  - **`SenderLabel`**: A human-readable attribution tag attached to transaction and delivery logs.
 
 ---
 

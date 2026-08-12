@@ -37,6 +37,18 @@ These variables are required for standard user login in production.
 | `SCION_SERVER_AUTH_GITHUB_CLIENTSECRET` | GitHub OAuth App Client Secret. |
 | `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS` | Comma-separated list of email domains allowed to sign in. |
 
+#### External OIDC Login Provider
+These variables configure user login via an external OIDC provider (e.g. Okta, Keycloak).
+
+| Variable | Description |
+| :--- | :--- |
+| `SCION_SERVER_OIDC_LOGIN_ENABLED` | Set to `"true"` to enable the external OIDC login option. |
+| `SCION_SERVER_OIDC_LOGIN_DISPLAY_NAME` | Human-readable label shown on the login button (e.g. `"Corporate SSO"`). |
+| `SCION_SERVER_OIDC_LOGIN_ISSUER_URL` | Base issuer URL of the OIDC provider (used for auto-discovery). |
+| `SCION_SERVER_OIDC_LOGIN_CLIENT_ID` | Client ID registered with the OIDC provider. |
+| `SCION_SERVER_OIDC_LOGIN_CLIENT_SECRET` | Client Secret registered with the provider (can be empty for public clients). |
+| `SCION_SERVER_OIDC_LOGIN_SCOPES` | Comma-separated list of scopes to request (defaults to `"openid,email,profile"`). |
+
 #### Development Authentication
 Used for local testing without setting up full OAuth.
 

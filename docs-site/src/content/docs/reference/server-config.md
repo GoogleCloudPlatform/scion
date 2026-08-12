@@ -246,6 +246,19 @@ Configuration for inbound OIDC-based federation authentication.
 | `default_role` | string | `"viewer"` | Default role for federated users (`issuer_type: user`). |
 | `allowed_emails` | list of strings | | Restrict user tokens to specific email claims (supports wildcards e.g. `*@example.com`). |
 
+### OIDC Login (`server.oidc_login`)
+
+Configuration for an external OIDC provider used for Web UI user login.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | bool | `false` | Enable the external OIDC login provider. |
+| `display_name` | string | | The human-readable label shown on the login button (e.g. `"Corporate SSO"`). |
+| `issuer_url` | string | | The exact OIDC issuer URL. Used to perform discovery via `{issuer_url}/.well-known/openid-configuration`. |
+| `client_id` | string | | The OAuth2/OIDC Client ID. |
+| `client_secret` | string | | The OAuth2/OIDC Client Secret (can be empty for public OIDC clients). |
+| `scopes` | list of strings | `["openid", "email", "profile"]` | Overrides the default scopes requested during login. |
+
 ### Project Defaults (`project_defaults`)
 
 Configuration for project-level default behaviors across the Hub. Unlike most other server configurations, `project_defaults` is declared as a **top-level section** in `settings.yaml` (outside of the `server:` block).
@@ -483,7 +496,7 @@ Settings required before the database connection exists, or that are restart-bou
 | :--- | :--- |
 | Database | `database.*` |
 | Listeners | `hub.port`, `hub.host`, `hub.read_timeout`, `hub.write_timeout`, `broker.*` |
-| Auth stack | `auth.mode`, `auth.dev_mode`, `auth.dev_token`, `auth.dev_token_file`, `auth.proxy.*`, `auth.transport.*`, `oauth.*` |
+| Auth stack | `auth.mode`, `auth.dev_mode`, `auth.dev_token`, `auth.dev_token_file`, `auth.proxy.*`, `auth.transport.*`, `oauth.*`, `oidc_login.*` |
 | Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*` |
 | Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
 | Logging | `log_level`, `log_format` |
