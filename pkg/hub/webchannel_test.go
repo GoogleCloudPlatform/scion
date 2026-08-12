@@ -233,6 +233,32 @@ func TestWebChannelBus_Publish_NilMessage(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestWebChannelBus_Publish_ObserverOnlyIgnored(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	log := slog.Default()
+	bus := NewWebChannelBus(log, store)
+
+	msg := &messages.StructuredMessage{
+		Version:      messages.Version,
+		Sender:       "agent:coder",
+		SenderID:     "agent-uuid-1",
+		Recipient:    "agent:reviewer",
+		RecipientID:  "agent-uuid-2",
+		Msg:          "agent-to-agent observation",
+		Type:         messages.TypeInstruction,
+		ObserverOnly: true,
+	}
+	err := bus.Publish(context.Background(), "scion.project.proj1.user.user1.messages", msg)
+	require.NoError(t, err)
+
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM webchat_thread").Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 0, count, "ObserverOnly messages must not create webchat_thread rows")
+}
+
 func TestWebChannelBus_Publish_BroadcastIgnored(t *testing.T) {
 	store, db := newTestWebChatStore(t)
 	defer db.Close() //nolint:errcheck
