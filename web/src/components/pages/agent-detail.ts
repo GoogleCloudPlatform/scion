@@ -1090,22 +1090,19 @@ export class ScionPageAgentDetail extends LitElement {
           </sl-radio-button>
         </sl-radio-group>
       </div>
-      ${this.chatViewActive
-        ? html`
-            <scion-chat-thread
-              agentId=${this.agentId}
-              agentName=${agent.name || ''}
-              ?canSend=${can(agent._capabilities, 'message')}
-            ></scion-chat-thread>
-          `
-        : html`
-            <scion-agent-message-viewer
-              agentId=${this.agentId}
-              agentName=${agent.name || ''}
-              ?canSend=${can(agent._capabilities, 'message')}
-              ?cloudLogging=${agent.cloudLogging || false}
-            ></scion-agent-message-viewer>
-          `}
+      <scion-chat-thread
+        agentId=${this.agentId}
+        agentName=${agent.name || ''}
+        ?canSend=${can(agent._capabilities, 'message')}
+        style="display: ${this.chatViewActive ? '' : 'none'}"
+      ></scion-chat-thread>
+      <scion-agent-message-viewer
+        agentId=${this.agentId}
+        agentName=${agent.name || ''}
+        ?canSend=${can(agent._capabilities, 'message')}
+        ?cloudLogging=${agent.cloudLogging || false}
+        style="display: ${this.chatViewActive ? 'none' : ''}"
+      ></scion-agent-message-viewer>
     `;
   }
 

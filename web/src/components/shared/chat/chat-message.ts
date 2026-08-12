@@ -237,6 +237,27 @@ export class ScionChatMessage extends LitElement {
       font-size: 0.8125rem;
     }
 
+    .copy-btn {
+      position: absolute;
+      top: 0.375rem;
+      right: 0.375rem;
+      padding: 0.125rem 0.5rem;
+      font-size: 0.6875rem;
+      font-family: inherit;
+      line-height: 1.25rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.25rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      opacity: 0.6;
+      transition: opacity 0.15s;
+    }
+
+    .copy-btn:hover {
+      opacity: 1;
+    }
+
     .md-content ul,
     .md-content ol {
       margin: 0.25em 0 0.5em;
@@ -345,6 +366,29 @@ export class ScionChatMessage extends LitElement {
     if (changed.has('body') || changed.has('plain')) {
       void this.renderContent();
     }
+    this.injectCopyButtons();
+  }
+
+  /** Inject copy buttons on all code blocks inside rendered markdown. */
+  private injectCopyButtons(): void {
+    this.updateComplete.then(() => {
+      this.shadowRoot?.querySelectorAll('.md-content pre').forEach((pre) => {
+        if (pre.querySelector('.copy-btn')) return;
+        const btn = document.createElement('button');
+        btn.className = 'copy-btn';
+        btn.textContent = 'Copy';
+        btn.addEventListener('click', () => {
+          const code =
+            pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
+          navigator.clipboard.writeText(code);
+          btn.textContent = 'Copied!';
+          setTimeout(() => {
+            btn.textContent = 'Copy';
+          }, 1500);
+        });
+        pre.appendChild(btn);
+      });
+    });
   }
 
   private async renderContent(): Promise<void> {

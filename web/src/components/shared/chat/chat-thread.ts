@@ -327,6 +327,11 @@ export class ScionChatThread extends LitElement {
   }
 
   private async backfillSince(): Promise<void> {
+    // Guard: skip backfill if we have no messages yet (initial load handles that).
+    // Note: lastKnownTimestamp is not sent in the request — the API does not
+    // support an `after`/`since` parameter (§5.1). We fetch the latest page and
+    // rely on mergeMessages() to deduplicate by ID. If >50 messages arrive
+    // during a single timeout gap, intermediate messages may be missed.
     if (!this.lastKnownTimestamp) return;
 
     const params = new URLSearchParams({
@@ -378,7 +383,7 @@ export class ScionChatThread extends LitElement {
   // ---------------------------------------------------------------------------
 
   private startStream(): void {
-    if (this.eventSource || !this.agentId) return;
+    if (!this.isConnected || this.eventSource || !this.agentId) return;
 
     const url = `/api/v1/agents/${this.agentId}/messages/stream`;
     this.eventSource = new EventSource(url);
