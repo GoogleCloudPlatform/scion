@@ -101,6 +101,10 @@ const (
 	// plugin secrets from settings.yaml to the secret backend at boot time.
 	LockInlineSecretsMigration AdvisoryLockKey = 0x5C100011
 
+	// LockNonceCacheEviction guards the periodic HMAC nonce cache eviction
+	// that purges expired nonce entries from the database.
+	LockNonceCacheEviction AdvisoryLockKey = 0x5C100012
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant

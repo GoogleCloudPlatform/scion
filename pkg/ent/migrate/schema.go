@@ -754,6 +754,31 @@ var (
 			},
 		},
 	}
+	// NonceCacheColumns holds the columns for the "nonce_cache" table.
+	NonceCacheColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "nonce", Type: field.TypeString, Unique: true},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// NonceCacheTable holds the schema information for the "nonce_cache" table.
+	NonceCacheTable = &schema.Table{
+		Name:       "nonce_cache",
+		Columns:    NonceCacheColumns,
+		PrimaryKey: []*schema.Column{NonceCacheColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "noncecache_nonce",
+				Unique:  true,
+				Columns: []*schema.Column{NonceCacheColumns[1]},
+			},
+			{
+				Name:    "noncecache_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{NonceCacheColumns[2]},
+			},
+		},
+	}
 	// NotificationsColumns holds the columns for the "notifications" table.
 	NotificationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1464,6 +1489,7 @@ var (
 		MaintenanceOperationsTable,
 		MaintenanceOperationRunsTable,
 		MessagesTable,
+		NonceCacheTable,
 		NotificationsTable,
 		NotificationSubscriptionsTable,
 		PolicyBindingsTable,
@@ -1549,6 +1575,9 @@ func init() {
 	}
 	MessagesTable.Annotation = &entsql.Annotation{
 		Table: "messages",
+	}
+	NonceCacheTable.Annotation = &entsql.Annotation{
+		Table: "nonce_cache",
 	}
 	NotificationsTable.Annotation = &entsql.Annotation{
 		Table: "notifications",

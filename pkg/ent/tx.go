@@ -60,6 +60,8 @@ type Tx struct {
 	MaintenanceOperationRun *MaintenanceOperationRunClient
 	// Message is the client for interacting with the Message builders.
 	Message *MessageClient
+	// NonceCache is the client for interacting with the NonceCache builders.
+	NonceCache *NonceCacheClient
 	// Notification is the client for interacting with the Notification builders.
 	Notification *NotificationClient
 	// NotificationSubscription is the client for interacting with the NotificationSubscription builders.
@@ -253,6 +255,7 @@ func (tx *Tx) init() {
 	tx.MaintenanceOperation = NewMaintenanceOperationClient(tx.config)
 	tx.MaintenanceOperationRun = NewMaintenanceOperationRunClient(tx.config)
 	tx.Message = NewMessageClient(tx.config)
+	tx.NonceCache = NewNonceCacheClient(tx.config)
 	tx.Notification = NewNotificationClient(tx.config)
 	tx.NotificationSubscription = NewNotificationSubscriptionClient(tx.config)
 	tx.PolicyBinding = NewPolicyBindingClient(tx.config)

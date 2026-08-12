@@ -78,6 +78,9 @@ type MaintenanceOperationRun func(*sql.Selector)
 // Message is the predicate function for message builders.
 type Message func(*sql.Selector)
 
+// NonceCache is the predicate function for noncecache builders.
+type NonceCache func(*sql.Selector)
+
 // Notification is the predicate function for notification builders.
 type Notification func(*sql.Selector)
 
