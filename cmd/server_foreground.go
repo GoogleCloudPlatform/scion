@@ -1164,6 +1164,14 @@ func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.C
 // fn runs unconditionally — single-writer backends don't need coordination.
 // This is the generic helper for boot-time migrations that must not race
 // across replicas (audit finding C6).
+//
+// When the lock is held by another replica, fn is silently skipped. This is
+// safe because all guarded boot migrations are idempotent: each one checks
+// whether its work has already been done (e.g. MigrateStorageOnFirstBoot
+// checks for existing namespaced objects, BootstrapBundledResources uses
+// SkipIfAnyExist, migrateInlineSecrets checks for existing secret values)
+// and no-ops if so. The winning replica does the work; the others skip it
+// here and will see the completed state on their next access.
 func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryLockKey, label string, fn func()) {
 	if s == nil {
 		fn()
@@ -1179,11 +1187,14 @@ func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryL
 		slog.Error("Failed to acquire advisory lock", "label", label, "error", err)
 		return
 	}
-	defer func() { _ = release() }()
 	if !acquired {
+		// release is safe to call even when not acquired (per AdvisoryLocker
+		// contract), but we call it here explicitly before returning.
+		_ = release()
 		slog.Info("Advisory lock held by another replica, skipping", "label", label)
 		return
 	}
+	defer func() { _ = release() }()
 	fn()
 }
 

@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/knadh/koanf/parsers/yaml"
@@ -102,21 +103,37 @@ func DefaultHubID() string {
 	return hex.EncodeToString(h[:6]) // 12 hex chars
 }
 
+// resolvedHubIDOnce guards the one-time computation of the fallback hub ID
+// (from K_SERVICE or hostname). The result is cached because ResolveHubID is
+// called multiple times during startup and the inputs (hostname, K_SERVICE)
+// do not change within a process lifetime.
+var (
+	resolvedHubIDOnce  sync.Once
+	resolvedHubIDValue string
+)
+
 // ResolveHubID returns the configured HubID if set. On Cloud Run (K_SERVICE
 // env var present) it derives a stable ID from the service name instead of
 // the hostname, which changes per instance/revision. Falls back to the
 // hostname-based DefaultHubID for local/workstation use.
+//
+// The derived fallback is cached after first computation to avoid redundant
+// os.Hostname() + SHA256 calls on repeated invocations during startup.
 func (c *HubServerConfig) ResolveHubID() string {
 	if c.HubID != "" {
 		return c.HubID
 	}
-	if kService := os.Getenv("K_SERVICE"); kService != "" {
-		slog.Warn("hub_id not explicitly configured on Cloud Run; deriving from K_SERVICE — set server.hub.hub_id in settings.yaml for stability",
-			"k_service", kService)
-		h := sha256.Sum256([]byte(kService))
-		return hex.EncodeToString(h[:6])
-	}
-	return DefaultHubID()
+	resolvedHubIDOnce.Do(func() {
+		if kService := os.Getenv("K_SERVICE"); kService != "" {
+			slog.Warn("hub_id not explicitly configured on Cloud Run; deriving from K_SERVICE — set server.hub.hub_id in settings.yaml for stability",
+				"k_service", kService)
+			h := sha256.Sum256([]byte(kService))
+			resolvedHubIDValue = hex.EncodeToString(h[:6])
+		} else {
+			resolvedHubIDValue = DefaultHubID()
+		}
+	})
+	return resolvedHubIDValue
 }
 
 // IsHubIDUnconfigured returns true when hub_id was not explicitly set in
