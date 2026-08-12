@@ -22,6 +22,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -216,8 +217,36 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	if filter.Channel != "" {
 		query.Where(message.ChannelEQ(filter.Channel))
 	}
+	// Visibility filter with NULL backfill awareness (review R1 fix):
+	// Old rows have NULL visibility. The read-time backfill in entMessageToStore
+	// normalises after fetch, but a simple IN predicate drops NULL rows before
+	// they reach the Go layer. We expand the predicate to mirror the backfill
+	// logic: NULL + type != "assistant-reply" → normal; NULL + type = "assistant-reply" → verbose.
 	if len(filter.Visibility) > 0 {
-		query.Where(message.VisibilityIn(filter.Visibility...))
+		var preds []predicate.Message
+		for _, v := range filter.Visibility {
+			switch v {
+			case "normal":
+				preds = append(preds,
+					message.VisibilityEQ("normal"),
+					message.And(
+						message.VisibilityIsNil(),
+						message.TypeNEQ("assistant-reply"),
+					),
+				)
+			case "verbose":
+				preds = append(preds,
+					message.VisibilityEQ("verbose"),
+					message.And(
+						message.VisibilityIsNil(),
+						message.TypeEQ("assistant-reply"),
+					),
+				)
+			default: // "full" or future values
+				preds = append(preds, message.VisibilityEQ(v))
+			}
+		}
+		query.Where(message.Or(preds...))
 	}
 	if !filter.Before.IsZero() {
 		query.Where(message.CreatedLT(filter.Before))
@@ -227,6 +256,9 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	// The cursor is a message ID. We look up its (created, id) pair and
 	// apply WHERE (created < cursor_created) OR (created = cursor_created AND id < cursor_id)
 	// to produce disjoint pages in descending created order.
+	// Optimisation note: the extra DB round-trip for timestamp lookup could be
+	// eliminated by encoding (created, id) into a base64 compound cursor. Not
+	// worth the complexity until pagination is a measured bottleneck.
 	if opts.Cursor != "" {
 		cursorID, err := parseUUID(opts.Cursor)
 		if err != nil {
@@ -245,6 +277,11 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		))
 	}
 
+	// NOTE: totalCount is computed after cursor/filter predicates are applied,
+	// so it represents "messages remaining after cursor" rather than "total
+	// messages matching the base filter". This is intentional for now — cursor
+	// is rarely combined with totalCount, and computing the unfiltered total
+	// would require a separate query without the cursor predicate.
 	totalCount, err := query.Clone().Count(ctx)
 	if err != nil {
 		return nil, err

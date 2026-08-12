@@ -222,6 +222,9 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	if visParams := q["visibility"]; len(visParams) > 0 {
 		filter.Visibility = visParams
 	}
+	// Intentionally ignore parse errors on "before" — an invalid value is
+	// silently dropped, matching the convention used by "limit" above and
+	// other query params in the codebase.
 	if beforeStr := q.Get("before"); beforeStr != "" {
 		if t, err := time.Parse(time.RFC3339, beforeStr); err == nil {
 			filter.Before = t
