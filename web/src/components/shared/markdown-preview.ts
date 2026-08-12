@@ -23,41 +23,7 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-
-// ────────────────────────────────────────────────────────────
-// Lazy-loaded markdown rendering
-// ────────────────────────────────────────────────────────────
-
-interface MarkdownRenderer {
-  render(markdown: string): string;
-}
-
-let rendererPromise: Promise<MarkdownRenderer> | null = null;
-
-async function loadRenderer(): Promise<MarkdownRenderer> {
-  if (!rendererPromise) {
-    rendererPromise = (async () => {
-      const [{ marked }, DOMPurify] = await Promise.all([
-        import('marked'),
-        import('dompurify'),
-      ]);
-
-      const purify = DOMPurify.default ?? DOMPurify;
-
-      return {
-        render(markdown: string): string {
-          const rawHtml = marked.parse(markdown, { async: false }) as string;
-          return purify.sanitize(rawHtml);
-        },
-      };
-    })();
-  }
-  return rendererPromise;
-}
-
-// ────────────────────────────────────────────────────────────
-// Component
-// ────────────────────────────────────────────────────────────
+import { getMarkdownRenderer } from '../../utils/markdown.js';
 
 @customElement('scion-markdown-preview')
 export class ScionMarkdownPreview extends LitElement {
@@ -242,7 +208,7 @@ export class ScionMarkdownPreview extends LitElement {
     this.error = null;
 
     try {
-      const renderer = await loadRenderer();
+      const renderer = await getMarkdownRenderer();
       this.renderedHtml = renderer.render(this.content);
     } catch (err) {
       console.error('Failed to render markdown:', err);
