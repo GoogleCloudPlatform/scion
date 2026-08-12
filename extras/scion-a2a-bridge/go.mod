@@ -30,6 +30,7 @@ require (
 	cloud.google.com/go/logging v1.13.2 // indirect
 	cloud.google.com/go/longrunning v1.0.0 // indirect
 	cloud.google.com/go/monitoring v1.24.3 // indirect
+	cloud.google.com/go/policytroubleshooter v1.11.7 // indirect
 	cloud.google.com/go/storage v1.59.1 // indirect
 	entgo.io/ent v0.14.5 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.34.0 // indirect
