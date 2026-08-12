@@ -184,6 +184,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture arrival time before dispatch so the persisted CreatedAt reflects
+	// when the hub received the message, not when dispatch completed (which can
+	// be up to 30s later under retry).
+	now := time.Now().UTC()
+
 	retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer retryCancel()
 
@@ -210,7 +215,6 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// so that messages from external channels (Discord, Telegram) appear in
 	// the web chat — both live and after a refresh. This mirrors the
 	// persistence + SSE pattern used by handleAgentMessage.
-	now := time.Now()
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
 		ProjectID:     agent.ProjectID,
@@ -225,6 +229,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		Channel:       req.Message.Channel,
 		ThreadID:      req.Message.ThreadID,
 		Visibility:    req.Message.Visibility,
+		Broadcasted:   req.Message.Broadcasted,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
 	}
@@ -258,6 +263,12 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			if err := s.webChatStore.RecordChannel(r.Context(), senderUserID, agent.ProjectID, agent.ID, req.Message.Channel, now); err != nil {
 				log.Error("Failed to record conversation context for broker inbound",
 					"user_id", senderUserID, "agent_id", agent.ID, "channel", req.Message.Channel, "error", err)
+			}
+			// Update the thread watermark so the Phase 5 thread rail reflects
+			// inbound broker messages (last_activity_at / last_message_id).
+			if err := s.webChatStore.TouchThread(r.Context(), senderUserID, agent.ProjectID, agent.ID, storeMsg.ID, now); err != nil {
+				log.Error("Failed to update thread watermark for broker inbound",
+					"user_id", senderUserID, "agent_id", agent.ID, "error", err)
 			}
 		}
 	}
