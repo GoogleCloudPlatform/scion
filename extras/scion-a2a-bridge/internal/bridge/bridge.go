@@ -1149,19 +1149,28 @@ func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, erro
 		}
 		mintAuth := identity.NewMintingAuth(b.minter,
 			hubUserID, b.config.Hub.User, "admin", 5*time.Minute)
+
 		// Compose: transport auth (IAP/invoker) → federation header injection.
 		base := http.DefaultTransport
 		if b.transportSrc != nil {
 			base = transportauth.Wrap(base, b.transportSrc, b.transportMode)
 		}
-		return hubclient.New(b.config.Hub.Endpoint,
-			hubclient.WithAuthenticator(mintAuth),
+
+		// WithHTTPClient must come before WithAuthenticator so that the
+		// federation header transport is set as the base before auth wraps it.
+		opts := []hubclient.Option{
 			hubclient.WithHTTPClient(&http.Client{
 				Transport: &federationHeaderTransport{
 					base:  base,
 					token: caller.RawToken,
 				},
-			}))
+			}),
+			hubclient.WithAuthenticator(mintAuth),
+		}
+		if b.transportSrc != nil {
+			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
+		}
+		return hubclient.New(b.config.Hub.Endpoint, opts...)
 	default:
 		return nil, fmt.Errorf("unknown token type: %s", caller.TokenType)
 	}

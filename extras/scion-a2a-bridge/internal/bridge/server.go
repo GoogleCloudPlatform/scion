@@ -476,6 +476,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			// Federation pass-through: decode the JWT WITHOUT verification
 			// for bridge-local bookkeeping (task isolation, logging).
 			// The hub validates the token via X-Scion-Federation-Token.
+			//
+			// NOTE: The bridge decodes federation tokens WITHOUT signature verification.
+			// This is by design: the hub validates the token via its FederationAuthenticator
+			// when the bridge passes it in the X-Scion-Federation-Token header.
+			// Bridge-level signature verification requires public OIDC discovery
+			// endpoints, which is tracked as issue #930.
 			token := extractBearerToken(r)
 			if token == "" {
 				http.Error(w, "unauthorized: missing bearer token", http.StatusUnauthorized)

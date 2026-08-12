@@ -75,7 +75,11 @@ func decodeFederationToken(tokenString string) (*CallerIdentity, error) {
 	}
 
 	// Decode the payload (second part), adding padding if needed.
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	payloadStr := parts[1]
+	if l := len(payloadStr) % 4; l > 0 {
+		payloadStr += strings.Repeat("=", 4-l)
+	}
+	payload, err := base64.URLEncoding.DecodeString(payloadStr)
 	if err != nil {
 		return nil, fmt.Errorf("federation: failed to decode JWT payload: %w", err)
 	}
