@@ -51,6 +51,12 @@ type WebChatStore interface {
 	// untagged replies back to the channel the user last spoke from.
 	RecordChannel(ctx context.Context, userID, projectID, agentID, channel string, messageAt time.Time) error
 
+	// GetLastChannel returns the last channel recorded for (user, project, agent),
+	// or "" if no row exists. Used for reply affinity: when an agent sends an
+	// untagged reply, the hub checks here to route to the channel the user last
+	// spoke from.
+	GetLastChannel(ctx context.Context, userID, projectID, agentID string) (string, error)
+
 	// GetThreadPrefs returns the display preferences for a (user, project, agent) thread.
 	// Returns default prefs (visibility_mode = "conversation") if no row exists.
 	GetThreadPrefs(ctx context.Context, userID, projectID, agentID string) (ThreadPrefs, error)
@@ -176,6 +182,20 @@ DO UPDATE SET
 		return fmt.Errorf("webchat store: record channel: %w", err)
 	}
 	return nil
+}
+
+// GetLastChannel returns the last channel for (user, project, agent), or "" if no row exists.
+func (s *sqliteWebChatStore) GetLastChannel(ctx context.Context, userID, projectID, agentID string) (string, error) {
+	const query = `SELECT last_channel FROM webchat_conversation_context WHERE user_id = ? AND project_id = ? AND agent_id = ?`
+	var channel sql.NullString
+	err := s.db.QueryRowContext(ctx, query, userID, projectID, agentID).Scan(&channel)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("webchat store: get last channel: %w", err)
+	}
+	return channel.String, nil
 }
 
 // GetThreadPrefs returns the display preferences for the given (user, project, agent) triple.
