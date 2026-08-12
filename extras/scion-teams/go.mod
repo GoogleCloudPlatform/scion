@@ -7,6 +7,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/jackc/pgx/v5 v5.9.2
+	github.com/mitchellh/go-homedir v1.1.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.84.0-dev.0.20260723093437-b6eac429d7b6
 	modernc.org/sqlite v1.56.0
@@ -24,6 +25,7 @@ require (
 	cloud.google.com/go/logging v1.13.2 // indirect
 	cloud.google.com/go/longrunning v1.0.0 // indirect
 	cloud.google.com/go/monitoring v1.24.3 // indirect
+	cloud.google.com/go/policytroubleshooter v1.11.7 // indirect
 	cloud.google.com/go/secretmanager v1.16.0 // indirect
 	cloud.google.com/go/storage v1.59.1 // indirect
 	entgo.io/ent v0.14.5 // indirect
@@ -102,7 +104,6 @@ require (
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-runewidth v0.0.24 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
-	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/moby/spdystream v0.5.1 // indirect
