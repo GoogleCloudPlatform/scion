@@ -149,7 +149,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// (recipient, project, agent) triple. If a row exists, route to the
 	// channel the user last spoke from. If no row exists, leave channel
 	// empty so the message fans out to all spokes (today's default behavior).
-	if req.Channel == "" && recipientID != "" && s.webChatStore != nil {
+	if req.Channel == "" && recipientID != "" && s.webChatStore != nil && s.GetMessageBrokerProxy() != nil {
 		if lastCh, err := s.webChatStore.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); err != nil {
 			s.messageLog.Error("Failed to look up reply affinity",
 				"recipient_id", recipientID, "agent_id", agent.ID, "error", err)

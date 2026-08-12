@@ -211,6 +211,19 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		"type", req.Message.Type,
 	)
 
+	// Resolve the sender's user ID before persisting the message. The
+	// upstream permission check already did a user lookup for "user:" senders,
+	// but req.Message.SenderID may still be empty if the originating plugin
+	// didn't populate it.  Resolving early guarantees that both the persisted
+	// storeMsg and the webChatStore calls below use a valid ID.
+	senderUserID := req.Message.SenderID
+	if senderUserID == "" && strings.HasPrefix(req.Message.Sender, "user:") {
+		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
+		if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil {
+			senderUserID = u.ID
+		}
+	}
+
 	// F5 fix (Phase 6): Persist the inbound message and publish an SSE event
 	// so that messages from external channels (Discord, Telegram) appear in
 	// the web chat — both live and after a refresh. This mirrors the
@@ -219,7 +232,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		ID:            api.NewUUID(),
 		ProjectID:     agent.ProjectID,
 		Sender:        req.Message.Sender,
-		SenderID:      req.Message.SenderID,
+		SenderID:      senderUserID,
 		Recipient:     "agent:" + agent.Slug,
 		RecipientID:   agent.ID,
 		Msg:           req.Message.Msg,
@@ -251,14 +264,6 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// can be routed back to the channel the user last spoke from (AC22).
 	// Only record for user-identity senders with a known channel.
 	if s.webChatStore != nil && req.Message.Channel != "" && strings.HasPrefix(req.Message.Sender, "user:") {
-		senderUserID := req.Message.SenderID
-		if senderUserID == "" {
-			// Try to resolve from the email we already validated above.
-			senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
-			if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil {
-				senderUserID = u.ID
-			}
-		}
 		if senderUserID != "" {
 			if err := s.webChatStore.RecordChannel(r.Context(), senderUserID, agent.ProjectID, agent.ID, req.Message.Channel, now); err != nil {
 				log.Error("Failed to record conversation context for broker inbound",
