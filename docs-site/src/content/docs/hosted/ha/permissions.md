@@ -69,6 +69,43 @@ A policy defines the rules for access:
 - **Effect**: Can be `allow` or `deny`.
 - **Conditions**: (Future) Optional rules based on resource labels or time-of-day.
 
+## GCP Service Account Assignment Gates
+
+To prevent lateral privilege escalation—where an agent with low privileges creates a child agent with high privileges, or a user assigns a highly privileged GCP service account they shouldn't have access to—Scion implements a secure, **two-layer gate** for binding a GCP service account to any agent:
+
+1. **Layer 1: Scion Hub Policy**: The Hub's built-in policy engine verifies the caller has the `ActionAssign` permission on the GCP service account resource within Scion.
+2. **Layer 2: GCP IAM Policy (`actAs`)**: If `gcp_iam_check_mode` is set to `enforce` (see [Server Configuration Reference](/scion/reference/server-config/)), the Hub evaluates Google Cloud's IAM delegation model via the **GCP Policy Troubleshooter v3 API**. It verifies that the caller's GCP principal possesses `iam.serviceAccounts.actAs` permission on the target service account.
+
+### The `actAs` Validation Gate
+
+The `actAs` (impersonation) check is critical because binding a service account to an agent grants that agent real cloud authority. 
+
+| Layer | Checked Authority | Action | Checked Principal |
+| :--- | :--- | :--- | :--- |
+| **Hub Policy** | Inside Scion | `ActionAssign` | Scion User/Agent |
+| **GCP IAM** | Inside Google Cloud | `iam.serviceAccounts.actAs` | Caller's GCP Principal |
+
+*Note: The Hub's own `roles/iam.serviceAccountTokenCreator` permission is used to perform impersonated credential probes. It is NOT the permission checked on the caller. The permission evaluated on the caller is `iam.serviceAccounts.actAs` (typically granted via `roles/iam.serviceAccountUser`).*
+
+### Fail-Closed Resolution
+
+If Policy Troubleshooter returns an indeterminate or unknown status (e.g., `ACCESS_STATE_UNKNOWN_CONDITIONAL` due to IAM conditions, or `ACCESS_STATE_UNKNOWN_INFO_DENIED` due to insufficient Hub reviewer permissions), Scion **fails closed** and denies the assignment immediately. There is no fallback to `getIamPolicy`, which can easily fail open or miss complex project-level, group-level, or org-level bindings.
+
+### Asymmetric Cache TTLs
+
+To maintain high API performance without violating security constraints, assignment decisions are cached using asymmetric TTLs:
+- **Allow TTL**: **60 seconds**
+- **Deny TTL**: **10 seconds**
+- **Indeterminate / Error States**: **Never cached**. Transient failures are retried immediately on the next request to prevent short outages from becoming fixed-length service blocks.
+
+The cache is automatically invalidated for a target service account when that service account is deleted, or when a Hub-initiated IAM mutation occurs.
+
+### IAM Prerequisites for Enforcement
+
+For Policy Troubleshooter to evaluate a caller's IAM permission across the organization, the Scion Hub's own GCP service account must be granted the **IAM Security Reviewer** role (`roles/iam.securityReviewer`) at either the Google Cloud project or organization level.
+
+---
+
 ## Roles
 
 To simplify management, Scion separates roles into **User Roles** (for human operators) and **Agent Roles** (for running agents).
