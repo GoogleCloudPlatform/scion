@@ -87,6 +87,18 @@ Scion implements a robust, hierarchical RBAC (Role-Based Access Control) and pol
 - **Actions**: Standardized CRUD actions (`create`, `read`, `update`, `delete`, `list`) plus resource-specific actions (`start`, `stop`, `attach`, `message`).
 - **Lattice-Based Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes via a two-gate authority lattice.
 
+### 3.3 GCP Service Account Assignment Gates
+
+To prevent lateral privilege escalation, Scion implements a strict two-layer delegation check when binding a GCP service account to any agent:
+- **Layer 1: Scion Hub Policy**: The Hub's policy engine checks if the caller holds the `ActionAssign` permission on the target GCP service account resource within Scion.
+- **Layer 2: GCP IAM (`actAs`)**: When `gcp_iam_check_mode` is set to `"enforce"`, the Hub performs an out-of-band call via Google's **Policy Troubleshooter v3 API** to verify that the caller's GCP principal possesses `iam.serviceAccounts.actAs` permission on the target service account.
+
+Key security attributes of the GCP IAM check include:
+- **Fail-Closed Design**: If the Policy Troubleshooter returns an indeterminate result (due to conditional bindings or insufficient Hub reviewer permissions), the check fails closed, and assignment is blocked. There is no fallback to insecure alternatives like `getIamPolicy`.
+- **Asymmetric Caching**: Approved assignments are cached for **60 seconds**, and denials are cached for **10 seconds**. Indeterminate or error states are never cached.
+- **Auditing**: Every service account assignment check—both allowed and denied—generates a permanent audit log entry detailing the principal, target service account, and Policy Troubleshooter decision.
+- **Hub-Scoped SAs**: Real hub-scoped service accounts can be assigned across projects. However, to prevent privilege bypasses, hub-scoped assignments are immediately rejected if `gcp_iam_check_mode` is not set to `"enforce"`.
+
 ## 4. Secret Management
 
 Scion provides a typed, scope-aware secret management system. Secret values are never stored in plaintext in the Hub database. For a user-facing guide, see [Secret Management](/scion/hosted/user/secrets/).
