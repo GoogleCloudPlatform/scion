@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -42,10 +43,13 @@ type oidcCacheEntry struct {
 }
 
 // oidcProxyCache provides a simple TTL cache for proxied OIDC responses.
+// A singleflight.Group deduplicates concurrent fetches for the same key,
+// preventing cache stampedes when the cache is empty or expired.
 type oidcProxyCache struct {
 	mu      sync.RWMutex
 	entries map[string]*oidcCacheEntry
 	ttl     time.Duration
+	flight  singleflight.Group
 }
 
 func newOIDCProxyCache(ttl time.Duration) *oidcProxyCache {
@@ -128,42 +132,75 @@ func (s *Server) handleJWKSProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 // fetchCachedOIDC fetches an OIDC endpoint from the hub, using the cache
-// when available. The bridge's transport auth (IAP credentials) is applied
-// to reach hubs behind identity-aware proxies.
+// when available. Concurrent requests for the same cache key are deduplicated
+// via singleflight to prevent cache stampedes. The bridge's transport auth
+// (IAP credentials) is applied to reach hubs behind identity-aware proxies.
 func (s *Server) fetchCachedOIDC(ctx context.Context, cacheKey, hubURL string) ([]byte, error) {
-	if s.bridge.oidcCache != nil {
-		if cached := s.bridge.oidcCache.get(cacheKey); cached != nil {
+	cache := s.bridge.oidcCache
+
+	// Fast path: return from cache if present and not expired.
+	if cache != nil {
+		if cached := cache.get(cacheKey); cached != nil {
 			return cached, nil
 		}
 	}
 
-	client := s.bridge.oidcHTTPClient()
+	// fetchFromHub performs the actual HTTP request to the hub.
+	fetchFromHub := func() ([]byte, error) {
+		client := s.bridge.oidcHTTPClient()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hubURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, hubURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request for %s: %w", hubURL, err)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("GET %s: %w", hubURL, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("GET %s: status %d", hubURL, resp.StatusCode)
+		}
+
+		body, err := io.ReadAll(io.LimitReader(resp.Body, oidcProxyMaxBody+1))
+		if err != nil {
+			return nil, fmt.Errorf("reading response from %s: %w", hubURL, err)
+		}
+		if int64(len(body)) > oidcProxyMaxBody {
+			return nil, fmt.Errorf("response from %s exceeded maximum size of %d bytes", hubURL, oidcProxyMaxBody)
+		}
+
+		return body, nil
+	}
+
+	// Without a cache, fetch directly.
+	if cache == nil {
+		return fetchFromHub()
+	}
+
+	// Use singleflight to deduplicate concurrent fetches for the same key.
+	// This prevents a thundering herd when the cache is empty or expired.
+	val, err, _ := cache.flight.Do(cacheKey, func() (interface{}, error) {
+		// Double-check after winning the singleflight race.
+		if cached := cache.get(cacheKey); cached != nil {
+			return cached, nil
+		}
+
+		body, err := fetchFromHub()
+		if err != nil {
+			return nil, err
+		}
+
+		cache.set(cacheKey, body)
+		return body, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("creating request for %s: %w", hubURL, err)
+		return nil, err
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", hubURL, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: status %d", hubURL, resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, oidcProxyMaxBody))
-	if err != nil {
-		return nil, fmt.Errorf("reading response from %s: %w", hubURL, err)
-	}
-
-	if s.bridge.oidcCache != nil {
-		s.bridge.oidcCache.set(cacheKey, body)
-	}
-
-	return body, nil
+	return val.([]byte), nil
 }
 
 // rewriteJWKSURI takes the raw OIDC discovery JSON and rewrites the jwks_uri
@@ -184,15 +221,19 @@ func rewriteJWKSURI(body []byte, bridgeExternalURL string) ([]byte, error) {
 	return rewritten, nil
 }
 
-// oidcHTTPClient returns an HTTP client configured with the bridge's transport
-// auth (IAP / Cloud Run invoker) for reaching the hub's OIDC endpoints.
+// oidcHTTPClient returns a shared HTTP client configured with the bridge's
+// transport auth (IAP / Cloud Run invoker) for reaching the hub's OIDC
+// endpoints. The client is created once and reused for connection pooling.
 func (b *Bridge) oidcHTTPClient() *http.Client {
-	transport := http.DefaultTransport
-	if b.transportSrc != nil {
-		transport = transportauth.Wrap(transport, b.transportSrc, b.transportMode)
-	}
-	return &http.Client{
-		Transport: transport,
-		Timeout:   10 * time.Second,
-	}
+	b.oidcClientOnce.Do(func() {
+		transport := http.DefaultTransport
+		if b.transportSrc != nil {
+			transport = transportauth.Wrap(transport, b.transportSrc, b.transportMode)
+		}
+		b.oidcClient = &http.Client{
+			Transport: transport,
+			Timeout:   10 * time.Second,
+		}
+	})
+	return b.oidcClient
 }

@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -39,10 +40,10 @@ func fakeHubOIDC(t *testing.T) *httptest.Server {
 
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		doc := map[string]interface{}{
-			"issuer":   "https://hub.example.com",
-			"jwks_uri": "https://hub.example.com/.well-known/jwks.json",
-			"response_types_supported":            []string{"id_token"},
-			"subject_types_supported":             []string{"public"},
+			"issuer":                                "https://hub.example.com",
+			"jwks_uri":                              "https://hub.example.com/.well-known/jwks.json",
+			"response_types_supported":              []string{"id_token"},
+			"subject_types_supported":               []string{"public"},
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -390,6 +391,73 @@ func TestRewriteJWKSURITrailingSlash(t *testing.T) {
 	want := "https://bridge.example.com/.well-known/jwks.json"
 	if doc["jwks_uri"] != want {
 		t.Errorf("jwks_uri = %q, want %q (trailing slash should be trimmed)", doc["jwks_uri"], want)
+	}
+}
+
+func TestOIDCProxyOversizedBody(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Write more than oidcProxyMaxBody (1 MB) bytes.
+		w.Write(make([]byte, 1<<20+1))
+	}))
+	t.Cleanup(hub.Close)
+
+	_, ts := newTestServerWithHub(t, hub.URL)
+
+	resp, err := http.Get(ts.URL + "/.well-known/jwks.json")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 when response exceeds max body size", resp.StatusCode)
+	}
+}
+
+func TestOIDCProxySingleflight(t *testing.T) {
+	var fetchCount atomic.Int32
+	// Add a small delay to ensure requests overlap.
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"keys": []map[string]string{{"kid": "k1"}},
+		})
+	}))
+	t.Cleanup(hub.Close)
+
+	_, ts := newTestServerWithHub(t, hub.URL)
+
+	// Launch multiple concurrent requests.
+	const n = 10
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := http.Get(ts.URL + "/.well-known/jwks.json")
+			if err != nil {
+				errs <- err
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				errs <- fmt.Errorf("status = %d, want 200", resp.StatusCode)
+				return
+			}
+			errs <- nil
+		}()
+	}
+
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("request %d: %v", i, err)
+		}
+	}
+
+	// With singleflight, only 1 request should reach the hub.
+	if count := fetchCount.Load(); count != 1 {
+		t.Errorf("hub was fetched %d times, want 1 (singleflight should deduplicate)", count)
 	}
 }
 

@@ -85,6 +85,11 @@ type Bridge struct {
 	// oidcCache caches proxied OIDC discovery and JWKS responses from the hub.
 	oidcCache *oidcProxyCache
 
+	// oidcClientOnce ensures the shared OIDC HTTP client is created exactly once.
+	oidcClientOnce sync.Once
+	// oidcClient is the cached HTTP client for reaching the hub's OIDC endpoints.
+	oidcClient *http.Client
+
 	// agentCache caches lookupAgent results to avoid listing all agents per call.
 	agentCacheMu sync.RWMutex
 	agentCache   map[string]*agentCacheEntry
