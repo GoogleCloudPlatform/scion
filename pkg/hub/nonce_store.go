@@ -74,11 +74,12 @@ func (s *NonceCacheStore) CheckAndStore(ctx context.Context, nonce string, ttl t
 	return true, nil // nonce is new
 }
 
-// PurgeExpired deletes all nonce entries where expires_at < now.
-func (s *NonceCacheStore) PurgeExpired(ctx context.Context) error {
-	_, err := s.client.NonceCache.
+// PurgeExpired deletes all nonce entries where expires_at < now and returns
+// the number of rows removed for observability.
+func (s *NonceCacheStore) PurgeExpired(ctx context.Context) (int, error) {
+	count, err := s.client.NonceCache.
 		Delete().
 		Where(noncecache.ExpiresAtLT(time.Now())).
 		Exec(ctx)
-	return err
+	return count, err
 }

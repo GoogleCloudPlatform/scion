@@ -3860,8 +3860,13 @@ func (s *Server) nonceCacheEvictionHandler() func(ctx context.Context) {
 			return
 		}
 
-		if err := s.nonceCacheStore.PurgeExpired(ctx); err != nil {
+		purged, err := s.nonceCacheStore.PurgeExpired(ctx)
+		if err != nil {
 			slog.Error("Scheduler: nonce cache eviction failed", "error", err)
+			return
+		}
+		if purged > 0 {
+			slog.Info("Scheduler: nonce cache eviction completed", "purged", purged)
 		}
 	}
 }

@@ -83,8 +83,9 @@ func TestNonceCacheStore_PurgeExpired(t *testing.T) {
 	require.True(t, isNew)
 
 	// Purge expired entries
-	err = store.PurgeExpired(ctx)
+	purged, err := store.PurgeExpired(ctx)
 	require.NoError(t, err)
+	require.Equal(t, 1, purged, "should have purged exactly 1 expired nonce")
 
 	// The expired nonce should now be gone — re-inserting should succeed
 	isNew, err = store.CheckAndStore(ctx, "nonce-expired", 10*time.Minute)

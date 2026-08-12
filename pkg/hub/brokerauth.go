@@ -534,7 +534,7 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 	// Validate nonce if enabled — use DB-backed store for multi-instance
 	// replay protection when configured; otherwise use in-memory cache.
 	// DB errors are fail-closed (request is rejected, not silently passed).
-	if nonce != "" && s.config.EnableNonceCache {
+	if s.config.EnableNonceCache {
 		if s.nonceStore != nil {
 			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
 			if err != nil {
@@ -807,7 +807,7 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 	// Only add nonce to cache after successful validation — use DB-backed
 	// store for multi-instance replay protection when configured; otherwise
 	// use in-memory cache. DB errors are fail-closed.
-	if nonce != "" && s.config.EnableNonceCache {
+	if s.config.EnableNonceCache {
 		if s.nonceStore != nil {
 			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
 			if err != nil {
