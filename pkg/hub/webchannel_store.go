@@ -234,10 +234,18 @@ SELECT agent_id, COALESCE(last_message_id, ''), COALESCE(last_activity_at, ''), 
 		if activityStr != "" {
 			if parsed, err := time.Parse(time.RFC3339Nano, activityStr); err == nil {
 				t.LastActivityAt = parsed
+			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", activityStr); err == nil {
+				t.LastActivityAt = parsed
+			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", activityStr); err == nil {
+				t.LastActivityAt = parsed
 			}
 		}
 		if readStr != nil && *readStr != "" {
 			if parsed, err := time.Parse(time.RFC3339Nano, *readStr); err == nil {
+				t.LastReadAt = &parsed
+			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", *readStr); err == nil {
+				t.LastReadAt = &parsed
+			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", *readStr); err == nil {
 				t.LastReadAt = &parsed
 			}
 		}

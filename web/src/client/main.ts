@@ -253,9 +253,15 @@ const ADMIN_ROUTES = new Set(['scion-page-settings', 'scion-page-admin-scheduler
 // Without this, unhandled errors in a long-lived surface (like chat mode)
 // silently fail. See design.md Section 4.1.
 // ---------------------------------------------------------------------------
-window.onerror = (message, source, lineno, colno, error) => {
-  console.error('[Scion] Unhandled error:', { message, source, lineno, colno, error });
-};
+window.addEventListener('error', (event) => {
+  console.error('[Scion] Unhandled error:', {
+    message: event.message,
+    source: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+    error: event.error,
+  });
+});
 window.addEventListener('unhandledrejection', (event) => {
   console.error('[Scion] Unhandled promise rejection:', event.reason);
 });

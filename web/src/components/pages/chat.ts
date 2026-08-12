@@ -74,6 +74,9 @@ export class ScionPageChat extends LitElement {
   /** Debounce timer for rail refresh to avoid rapid-fire reloads. */
   private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Cached project ID to avoid redundant /api/v1/projects?limit=1 fetches. */
+  private _cachedProjectId = '';
+
   static override styles = css`
     :host {
       display: flex;
@@ -353,10 +356,15 @@ export class ScionPageChat extends LitElement {
 
   /** Resolve the project ID from page context. */
   private async resolveProjectId(): Promise<string> {
+    if (this._cachedProjectId) return this._cachedProjectId;
+
     // Try to get from URL query param
     const url = new URL(window.location.href);
     const qProject = url.searchParams.get('projectId');
-    if (qProject) return qProject;
+    if (qProject) {
+      this._cachedProjectId = qProject;
+      return qProject;
+    }
 
     // Fall back to fetching the user's projects and using the first one
     try {
@@ -364,7 +372,8 @@ export class ScionPageChat extends LitElement {
       if (res.ok) {
         const data = (await res.json()) as { items?: { id: string }[] };
         if (data.items && data.items.length > 0) {
-          return data.items[0].id;
+          this._cachedProjectId = data.items[0].id;
+          return this._cachedProjectId;
         }
       }
     } catch {
@@ -540,6 +549,7 @@ export class ScionPageChat extends LitElement {
   /** Format a timestamp as a relative time string. */
   private formatRelativeTime(iso: string): string {
     const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
     const now = Date.now();
     const diffMs = now - d.getTime();
     const diffMin = Math.floor(diffMs / 60000);

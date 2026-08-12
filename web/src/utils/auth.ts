@@ -26,7 +26,7 @@
  * Uses the Vite BASE_URL to construct correct paths behind a reverse proxy.
  */
 export function performLogout(): void {
-  const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+  const base = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '');
   fetch(`${base}/auth/logout`, {
     method: 'POST',
     credentials: 'include',
