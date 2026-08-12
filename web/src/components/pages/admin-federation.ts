@@ -49,6 +49,7 @@ export class ScionPageAdminFederation extends LitElement {
   @state() private error: string | null = null;
   @state() private successMessage: string | null = null;
   @state() private saving = false;
+  @state() private downloading = false;
 
   // Global federation settings
   @state() private enabled = false;
@@ -539,10 +540,11 @@ export class ScionPageAdminFederation extends LitElement {
   // --- JWKS Download ---
 
   private async downloadJWKS(): Promise<void> {
+    this.downloading = true;
     try {
-      const resp = await fetch('/.well-known/jwks.json');
+      const resp = await apiFetch('/.well-known/jwks.json');
       if (!resp.ok) {
-        this.error = `Failed to download JWKS: ${resp.status} ${resp.statusText}`;
+        this.error = await extractApiError(resp, 'Failed to download JWKS');
         return;
       }
       const blob = await resp.blob();
@@ -554,6 +556,8 @@ export class ScionPageAdminFederation extends LitElement {
       URL.revokeObjectURL(url);
     } catch {
       this.error = 'Failed to download JWKS: could not connect to server';
+    } finally {
+      this.downloading = false;
     }
   }
 
@@ -613,7 +617,7 @@ export class ScionPageAdminFederation extends LitElement {
       <div class="section">
         <div class="section-header">
           <h3 class="section-title">Global Settings</h3>
-          <sl-button size="small" variant="default" @click=${() => { void this.downloadJWKS(); }}>
+          <sl-button size="small" variant="default" ?loading=${this.downloading} @click=${() => { void this.downloadJWKS(); }}>
             <sl-icon slot="prefix" name="download"></sl-icon>
             Download JWKS
           </sl-button>
