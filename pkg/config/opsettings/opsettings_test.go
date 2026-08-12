@@ -786,9 +786,9 @@ func TestClassifyKeys(t *testing.T) {
 		"telemetry.enabled",       // Layer-1 (telemetry)
 		"server.hub.port",         // Layer-0 (bootstrap)
 		"default_max_turns",       // Layer-1 (agent_defaults)
-		"runtimes",                // unclassified
+		"runtimes",                // Layer-1 (runtimes)
 		"schema_version",          // unclassified
-		"profiles",                // unclassified
+		"profiles",                // Layer-1 (profiles)
 	}
 	l1, l0, unclassified := ClassifyKeys(keys)
 
@@ -800,6 +800,12 @@ func TestClassifyKeys(t *testing.T) {
 	}
 	if len(l1["agent_defaults"]) != 1 || l1["agent_defaults"][0] != "default_max_turns" {
 		t.Errorf("expected agent_defaults to contain default_max_turns, got %v", l1["agent_defaults"])
+	}
+	if len(l1["runtimes"]) != 1 || l1["runtimes"][0] != "runtimes" {
+		t.Errorf("expected runtimes section to contain runtimes key, got %v", l1["runtimes"])
+	}
+	if len(l1["profiles"]) != 1 || l1["profiles"][0] != "profiles" {
+		t.Errorf("expected profiles section to contain profiles key, got %v", l1["profiles"])
 	}
 
 	expectedL0 := map[string]bool{
@@ -817,9 +823,7 @@ func TestClassifyKeys(t *testing.T) {
 
 	// Unclassified keys — neither Layer-0 nor Layer-1.
 	expectedUnclassified := map[string]bool{
-		"runtimes":       true,
 		"schema_version": true,
-		"profiles":       true,
 	}
 	if len(unclassified) != len(expectedUnclassified) {
 		t.Errorf("expected %d unclassified keys, got %d: %v", len(expectedUnclassified), len(unclassified), unclassified)
@@ -875,9 +879,6 @@ func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
 func TestClassifyKeys_UnclassifiedKeys(t *testing.T) {
 	// Keys that exist in the settings file but are not Layer-0 or Layer-1.
 	unclassifiedKeys := []string{
-		"runtimes",
-		"harness_configs",
-		"profiles",
 		"schema_version",
 		"active_profile",
 		"workspace_path",
@@ -892,6 +893,46 @@ func TestClassifyKeys_UnclassifiedKeys(t *testing.T) {
 	}
 	if len(unclassified) != len(unclassifiedKeys) {
 		t.Errorf("expected %d unclassified keys, got %d: %v", len(unclassifiedKeys), len(unclassified), unclassified)
+	}
+}
+
+func TestClassifyKeys_MapSectionsAreLayer1(t *testing.T) {
+	// runtimes, profiles, harness_configs are now Layer-1 sections.
+	keys := []string{"runtimes", "profiles", "harness_configs"}
+	l1, l0, unclassified := ClassifyKeys(keys)
+
+	if len(l0) > 0 {
+		t.Errorf("expected no Layer-0 keys, got %v", l0)
+	}
+	if len(unclassified) > 0 {
+		t.Errorf("expected no unclassified keys, got %v", unclassified)
+	}
+	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
+		if len(l1[sec]) != 1 || l1[sec][0] != sec {
+			t.Errorf("expected %s to be Layer-1, got %v", sec, l1[sec])
+		}
+	}
+}
+
+func TestOwningSection_MapSectionNestedKeys(t *testing.T) {
+	// Prefix-only registration means nested keys are owned by the parent section.
+	tests := []struct {
+		key     string
+		section string
+	}{
+		{"runtimes", "runtimes"},
+		{"runtimes.cloudrun", "runtimes"},
+		{"runtimes.cloudrun.type", "runtimes"},
+		{"profiles", "profiles"},
+		{"profiles.default.runtime", "profiles"},
+		{"harness_configs", "harness_configs"},
+		{"harness_configs.claude-code.harness", "harness_configs"},
+	}
+	for _, tt := range tests {
+		got := OwningSection(tt.key)
+		if got != tt.section {
+			t.Errorf("OwningSection(%q) = %q, want %q", tt.key, got, tt.section)
+		}
 	}
 }
 
@@ -1133,6 +1174,209 @@ func TestAutoExposePortsEmptyExtract(t *testing.T) {
 	}
 	if len(doc) != 0 {
 		t.Errorf("expected empty doc for absent auto_expose_ports, got %v", doc)
+	}
+}
+
+// TestRuntimesKoanfRoundTrip verifies that runtimes can be extracted from
+// koanf and loaded back without data loss (map-of-objects section).
+func TestRuntimesKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"runtimes.docker.type":   "docker",
+		"runtimes.cloudrun.type": "cloudrun-instances",
+		"runtimes.cloudrun.gke":  true,
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	// Extract.
+	raw, err := ExtractSectionFromKoanf(k, "runtimes")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	docker, ok := doc["docker"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected docker entry in runtimes doc, got %v", doc)
+	}
+	if docker["type"] != "docker" {
+		t.Errorf("expected docker.type=docker, got %v", docker["type"])
+	}
+	cloudrun, ok := doc["cloudrun"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected cloudrun entry in runtimes doc, got %v", doc)
+	}
+	if cloudrun["type"] != "cloudrun-instances" {
+		t.Errorf("expected cloudrun.type=cloudrun-instances, got %v", cloudrun["type"])
+	}
+
+	// Reload into a fresh koanf.
+	sections := map[string]json.RawMessage{"runtimes": raw}
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+
+	if reloaded.String("runtimes.docker.type") != "docker" {
+		t.Errorf("expected runtimes.docker.type=docker, got %v", reloaded.Get("runtimes.docker.type"))
+	}
+	if reloaded.String("runtimes.cloudrun.type") != "cloudrun-instances" {
+		t.Errorf("expected runtimes.cloudrun.type=cloudrun-instances, got %v", reloaded.Get("runtimes.cloudrun.type"))
+	}
+}
+
+// TestProfilesKoanfRoundTrip verifies that profiles can be extracted and reloaded.
+func TestProfilesKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"profiles.default.runtime":          "cloudrun",
+		"profiles.default.default_template": "medium",
+		"profiles.dev.runtime":              "docker",
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	raw, err := ExtractSectionFromKoanf(k, "profiles")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	defaultProfile, ok := doc["default"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected default entry in profiles doc, got %v", doc)
+	}
+	if defaultProfile["runtime"] != "cloudrun" {
+		t.Errorf("expected default.runtime=cloudrun, got %v", defaultProfile["runtime"])
+	}
+
+	// Reload.
+	sections := map[string]json.RawMessage{"profiles": raw}
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+	if reloaded.String("profiles.default.runtime") != "cloudrun" {
+		t.Errorf("expected profiles.default.runtime=cloudrun, got %v", reloaded.Get("profiles.default.runtime"))
+	}
+}
+
+// TestHarnessConfigsKoanfRoundTrip verifies that harness_configs can be extracted and reloaded.
+func TestHarnessConfigsKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"harness_configs.claude-code.harness": "claude-code",
+		"harness_configs.claude-code.image":   "gcr.io/test/claude-code:latest",
+		"harness_configs.aider.harness":       "aider",
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	raw, err := ExtractSectionFromKoanf(k, "harness_configs")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	claudeCode, ok := doc["claude-code"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected claude-code entry in harness_configs doc, got %v", doc)
+	}
+	if claudeCode["harness"] != "claude-code" {
+		t.Errorf("expected harness=claude-code, got %v", claudeCode["harness"])
+	}
+
+	// Reload.
+	sections := map[string]json.RawMessage{"harness_configs": raw}
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+	if reloaded.String("harness_configs.claude-code.harness") != "claude-code" {
+		t.Errorf("expected harness_configs.claude-code.harness=claude-code, got %v", reloaded.Get("harness_configs.claude-code.harness"))
+	}
+}
+
+// TestMapSectionsEmptyExtract verifies that extracting map-of-objects sections
+// from an empty koanf produces empty documents.
+func TestMapSectionsEmptyExtract(t *testing.T) {
+	k := koanf.New(".")
+	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
+		raw, err := ExtractSectionFromKoanf(k, sec)
+		if err != nil {
+			t.Fatalf("extract %s: %v", sec, err)
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("unmarshal %s: %v", sec, err)
+		}
+		if len(doc) != 0 {
+			t.Errorf("expected empty doc for absent %s, got %v", sec, doc)
+		}
+	}
+}
+
+// TestMapSectionsSchemaValidation verifies that the JSON schemas validate
+// map-of-objects section documents correctly.
+func TestMapSectionsSchemaValidation(t *testing.T) {
+	// Valid runtimes doc.
+	errs := Validate("runtimes", json.RawMessage(`{"docker": {"type": "docker"}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected valid runtimes doc, got errors: %v", errs)
+	}
+
+	// Valid profiles doc.
+	errs = Validate("profiles", json.RawMessage(`{"default": {"runtime": "cloudrun"}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected valid profiles doc, got errors: %v", errs)
+	}
+
+	// Valid harness_configs doc.
+	errs = Validate("harness_configs", json.RawMessage(`{"claude-code": {"harness": "claude-code", "image": "test:latest"}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected valid harness_configs doc, got errors: %v", errs)
+	}
+
+	// Valid empty docs.
+	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
+		errs = Validate(sec, json.RawMessage(`{}`))
+		if len(errs) > 0 {
+			t.Errorf("expected valid empty %s doc, got errors: %v", sec, errs)
+		}
+	}
+
+	// Invalid: harness_configs entry missing required "harness" field.
+	errs = Validate("harness_configs", json.RawMessage(`{"bad": {"image": "test:latest"}}`))
+	if len(errs) == 0 {
+		t.Error("expected validation error for harness_configs entry missing 'harness' field")
+	}
+}
+
+// TestMapSectionsInSectionNames verifies that the three new sections appear
+// in the SectionNames() output.
+func TestMapSectionsInSectionNames(t *testing.T) {
+	names := SectionNames()
+	found := make(map[string]bool)
+	for _, n := range names {
+		found[n] = true
+	}
+	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
+		if !found[sec] {
+			t.Errorf("expected %q in SectionNames(), not found", sec)
+		}
 	}
 }
 

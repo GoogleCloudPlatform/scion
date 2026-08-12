@@ -443,3 +443,149 @@ func TestSyncHubSettings_BackfillsPreOriginRows(t *testing.T) {
 		t.Errorf("managed row should not have been overwritten: %s", access.Value)
 	}
 }
+
+// --- Phase 4: seeding for runtimes / profiles / harness_configs ---
+
+func TestSyncHubSettings_SeedsRuntimesFromFile(t *testing.T) {
+	fs := newFakeHubSettingStore()
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"runtimes.docker.type":   "docker",
+		"runtimes.cloudrun.type": "cloudrun-instances",
+	}, "."), nil)
+
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	runtimes, ok := fs.settings["runtimes"]
+	if !ok {
+		t.Fatal("expected runtimes section to be seeded")
+	}
+	if !strings.Contains(string(runtimes.Value), "docker") {
+		t.Errorf("runtimes section missing docker: %s", runtimes.Value)
+	}
+	if runtimes.Origin != "seeded" {
+		t.Errorf("runtimes origin: want seeded, got %s", runtimes.Origin)
+	}
+}
+
+func TestSyncHubSettings_SeedsProfilesAndHarnessConfigs(t *testing.T) {
+	fs := newFakeHubSettingStore()
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"profiles.default.runtime":            "cloudrun",
+		"harness_configs.claude-code.harness": "claude-code",
+		"harness_configs.claude-code.image":   "gcr.io/test/claude-code:latest",
+	}, "."), nil)
+
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	profiles, ok := fs.settings["profiles"]
+	if !ok {
+		t.Fatal("expected profiles section to be seeded")
+	}
+	if !strings.Contains(string(profiles.Value), "cloudrun") {
+		t.Errorf("profiles section missing cloudrun: %s", profiles.Value)
+	}
+	if profiles.Origin != "seeded" {
+		t.Errorf("profiles origin: want seeded, got %s", profiles.Origin)
+	}
+
+	harnessConfigs, ok := fs.settings["harness_configs"]
+	if !ok {
+		t.Fatal("expected harness_configs section to be seeded")
+	}
+	if !strings.Contains(string(harnessConfigs.Value), "claude-code") {
+		t.Errorf("harness_configs section missing claude-code: %s", harnessConfigs.Value)
+	}
+	if harnessConfigs.Origin != "seeded" {
+		t.Errorf("harness_configs origin: want seeded, got %s", harnessConfigs.Origin)
+	}
+}
+
+func TestSyncHubSettings_RuntimesManagedNotOverwritten(t *testing.T) {
+	fs := newFakeHubSettingStore()
+
+	// Pre-populate runtimes as managed (admin-written).
+	fs.settings["runtimes"] = &store.HubSetting{
+		ID:        "runtimes",
+		Section:   "runtimes",
+		Value:     json.RawMessage(`{"k8s": {"type": "kubernetes"}}`),
+		Revision:  3,
+		UpdatedBy: "admin@test.com",
+		Origin:    "managed",
+	}
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"runtimes.docker.type": "docker",
+	}, "."), nil)
+
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// runtimes should NOT have been overwritten — still has admin value.
+	runtimes := fs.settings["runtimes"]
+	if !strings.Contains(string(runtimes.Value), "kubernetes") {
+		t.Errorf("managed runtimes section was overwritten: %s", runtimes.Value)
+	}
+	if runtimes.Revision != 3 {
+		t.Errorf("managed runtimes revision changed: want 3, got %d", runtimes.Revision)
+	}
+}
+
+func TestSyncHubSettings_EmptyMapSectionsSeeded(t *testing.T) {
+	fs := newFakeHubSettingStore()
+
+	// No runtimes/profiles/harness_configs keys in koanf — should seed empty docs.
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"admin@test.com"},
+	}, "."), nil)
+
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Empty map sections should be seeded as "{}".
+	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
+		setting, ok := fs.settings[sec]
+		if !ok {
+			t.Errorf("expected %s section to be seeded (empty doc)", sec)
+			continue
+		}
+		if setting.Origin != "seeded" {
+			t.Errorf("%s origin: want seeded, got %s", sec, setting.Origin)
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal(setting.Value, &doc); err != nil {
+			t.Errorf("%s: unmarshal error: %v", sec, err)
+			continue
+		}
+		if len(doc) != 0 {
+			t.Errorf("%s: expected empty doc, got %v", sec, doc)
+		}
+	}
+}

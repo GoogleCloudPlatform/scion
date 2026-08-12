@@ -26,6 +26,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/v2"
 )
 
 // newTestDBServer creates a test Server configured in postgres mode with a
@@ -358,11 +360,11 @@ func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 
 	// Payload containing only unclassified keys — not Layer-0, not Layer-1.
-	// These must be rejected with 422 (not silently accepted with 200).
+	// runtimes and profiles are now Layer-1, so use truly unclassified keys.
 	body := `{
 		"schema_version": "2",
-		"runtimes": {"go": {"image": "golang:1.21"}},
-		"profiles": {"dev": {}}
+		"workspace_path": "/tmp/ws",
+		"active_profile": "dev"
 	}`
 
 	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
@@ -391,7 +393,7 @@ func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 	for _, k := range keys {
 		keySet[k.(string)] = true
 	}
-	for _, expected := range []string{"schema_version", "runtimes", "profiles"} {
+	for _, expected := range []string{"schema_version", "workspace_path", "active_profile"} {
 		if !keySet[expected] {
 			t.Errorf("expected %q in rejected keys, got %v", expected, keys)
 		}
@@ -408,14 +410,14 @@ func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 
-	// Mix of Layer-1 (admin_emails) and unclassified (runtimes, workspace_path).
+	// Mix of Layer-1 (admin_emails) and unclassified (workspace_path, schema_version).
 	// The whole request must be rejected when unclassified keys are present.
 	body := `{
 		"workspace_path": "/tmp/ws",
+		"schema_version": "2",
 		"server": {
 			"hub": {"admin_emails": ["admin@test.com"]}
-		},
-		"runtimes": {"go": {"image": "golang:1.21"}}
+		}
 	}`
 
 	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
@@ -444,11 +446,11 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) 
 	for _, k := range keys {
 		keySet[k.(string)] = true
 	}
-	if !keySet["runtimes"] {
-		t.Error("expected 'runtimes' in rejected keys")
-	}
 	if !keySet["workspace_path"] {
 		t.Error("expected 'workspace_path' in rejected keys")
+	}
+	if !keySet["schema_version"] {
+		t.Error("expected 'schema_version' in rejected keys")
 	}
 
 	// Nothing written to store — the entire request was rejected.
@@ -456,6 +458,83 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) 
 	defer fakeStore.mu.Unlock()
 	if len(fakeStore.settings) > 0 {
 		t.Error("expected no sections written to store when unclassified keys are present")
+	}
+}
+
+func TestPutServerConfigDB_RuntimesProfilesHarnessConfigs_200Applied(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"runtimes": {"docker": {"type": "docker"}, "cloudrun": {"type": "cloudrun-instances"}},
+		"profiles": {"default": {"runtime": "cloudrun"}},
+		"harness_configs": {"claude-code": {"harness": "claude-code", "image": "test:latest"}}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	reload, ok := resp["reload"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected reload in response")
+	}
+	applied, ok := reload["applied"].([]interface{})
+	if !ok {
+		t.Fatal("expected applied in reload response")
+	}
+
+	appliedSet := make(map[string]bool)
+	for _, a := range applied {
+		appliedSet[a.(string)] = true
+	}
+	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
+		if !appliedSet[sec] {
+			t.Errorf("expected %q in applied sections, got %v", sec, applied)
+		}
+	}
+}
+
+func TestPutServerConfigDB_RuntimesSingleSection_200Applied(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	body := `{
+		"runtimes": {"k8s": {"type": "kubernetes", "namespace": "agents"}}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify the section was persisted.
+	fakeStore.mu.Lock()
+	defer fakeStore.mu.Unlock()
+	doc, ok := fakeStore.settings["runtimes"]
+	if !ok {
+		t.Fatal("expected runtimes section in store")
+	}
+	var runtimes map[string]interface{}
+	if err := json.Unmarshal(doc.Value, &runtimes); err != nil {
+		t.Fatalf("unmarshal runtimes doc: %v", err)
+	}
+	k8s, ok := runtimes["k8s"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected k8s entry in runtimes doc")
+	}
+	if k8s["type"] != "kubernetes" {
+		t.Errorf("expected k8s.type=kubernetes, got %v", k8s["type"])
 	}
 }
 
@@ -1737,6 +1816,131 @@ func TestPutServerConfigDB_ExplicitEmptyPublicURL_ClearsField(t *testing.T) {
 	}
 }
 
+// ---- Presence-aware clearing: map-of-objects sections ----
+
+func TestPutServerConfigDB_ExplicitNullRuntimes_ClearsSection(t *testing.T) {
+	// Explicitly sending "runtimes": null should clear the section to empty map.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Seed existing runtimes section.
+	fakeStore.seed("runtimes", json.RawMessage(`{"cloudrun":{"type":"cloudrun","project":"my-project"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	body := `{"runtimes": null}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify section doc is an empty map, not the old value.
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["runtimes"]
+	fakeStore.mu.Unlock()
+
+	var runtimes map[string]config.V1RuntimeConfig
+	if err := json.Unmarshal(row.Value, &runtimes); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(runtimes) != 0 {
+		t.Errorf("expected empty runtimes after explicit null, got %v", runtimes)
+	}
+}
+
+func TestPutServerConfigDB_ExplicitEmptyProfiles_ClearsSection(t *testing.T) {
+	// Explicitly sending "profiles": {} should clear the section to empty map.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("profiles", json.RawMessage(`{"dev":{"model":"gpt-4","max_turns":10}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	body := `{"profiles": {}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["profiles"]
+	fakeStore.mu.Unlock()
+
+	var profiles map[string]config.V1ProfileConfig
+	if err := json.Unmarshal(row.Value, &profiles); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(profiles) != 0 {
+		t.Errorf("expected empty profiles after explicit {}, got %v", profiles)
+	}
+}
+
+func TestPutServerConfigDB_ExplicitNullHarnessConfigs_ClearsSection(t *testing.T) {
+	// Explicitly sending "harness_configs": null should clear the section.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("harness_configs", json.RawMessage(`{"default":{"harness":"base"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	body := `{"harness_configs": null}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["harness_configs"]
+	fakeStore.mu.Unlock()
+
+	var hc map[string]config.HarnessConfigEntry
+	if err := json.Unmarshal(row.Value, &hc); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(hc) != 0 {
+		t.Errorf("expected empty harness_configs after explicit null, got %v", hc)
+	}
+}
+
+func TestPutServerConfigDB_OmittedRuntimes_PreservesExisting(t *testing.T) {
+	// Omitting runtimes from the PUT body should preserve existing DB values.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("runtimes", json.RawMessage(`{"cloudrun":{"type":"cloudrun","project":"my-project"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	// Update a different field — runtimes not mentioned.
+	body := `{"default_template": "new-template"}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify runtimes are still the original value.
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["runtimes"]
+	fakeStore.mu.Unlock()
+
+	var runtimes map[string]config.V1RuntimeConfig
+	if err := json.Unmarshal(row.Value, &runtimes); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(runtimes) != 1 {
+		t.Errorf("expected 1 runtime entry preserved, got %d", len(runtimes))
+	}
+	if _, ok := runtimes["cloudrun"]; !ok {
+		t.Errorf("expected 'cloudrun' runtime to be preserved")
+	}
+}
+
 // ---- N7: Maintenance message clearing ----
 
 func TestPutMaintenanceDB_ExplicitEmptyMessage_ClearsMessage(t *testing.T) {
@@ -2264,5 +2468,325 @@ func TestResetSection_RequiresAdmin(t *testing.T) {
 
 	if rr.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", rr.Code)
+	}
+}
+
+// --- Phase 5: Propagation verification ---
+
+func TestPropagation_RuntimesVisibleAfterRefresh(t *testing.T) {
+	// Simulate two instances sharing the same store.
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	ops1 := NewOperationalSettings(fakeStore, fileK, envK)
+	ops2 := NewOperationalSettings(fakeStore, fileK, envK)
+
+	// ops1 writes a runtimes section.
+	runtimesDoc := json.RawMessage(`{"docker": {"type": "docker"}, "cloudrun": {"type": "cloudrun-instances"}}`)
+	_, err := ops1.Update(context.Background(), "runtimes", runtimesDoc, "admin@test.com", -1, "managed")
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	// ops2 refreshes and should see the new runtimes.
+	changed, err := ops2.Refresh(context.Background())
+	if err != nil {
+		t.Fatalf("Refresh failed: %v", err)
+	}
+
+	found := false
+	for _, c := range changed {
+		if c == "runtimes" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'runtimes' in changed sections, got %v", changed)
+	}
+
+	// Build snapshot from ops2 and verify runtimes are present.
+	snap := ops2.Snapshot()
+	if len(snap.Runtimes) != 2 {
+		t.Fatalf("expected 2 runtimes in snapshot, got %d", len(snap.Runtimes))
+	}
+	if snap.Runtimes["docker"].Type != "docker" {
+		t.Errorf("expected docker.type=docker, got %v", snap.Runtimes["docker"].Type)
+	}
+	if snap.Runtimes["cloudrun"].Type != "cloudrun-instances" {
+		t.Errorf("expected cloudrun.type=cloudrun-instances, got %v", snap.Runtimes["cloudrun"].Type)
+	}
+}
+
+func TestPropagation_ProfilesAndHarnessConfigsVisibleAfterRefresh(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	ops1 := NewOperationalSettings(fakeStore, fileK, envK)
+	ops2 := NewOperationalSettings(fakeStore, fileK, envK)
+
+	// ops1 writes profiles and harness_configs.
+	_, err := ops1.Update(context.Background(), "profiles",
+		json.RawMessage(`{"default": {"runtime": "cloudrun"}}`), "admin@test.com", -1, "managed")
+	if err != nil {
+		t.Fatalf("Update profiles failed: %v", err)
+	}
+	_, err = ops1.Update(context.Background(), "harness_configs",
+		json.RawMessage(`{"claude-code": {"harness": "claude-code"}}`), "admin@test.com", -1, "managed")
+	if err != nil {
+		t.Fatalf("Update harness_configs failed: %v", err)
+	}
+
+	// ops2 refreshes.
+	_, err = ops2.Refresh(context.Background())
+	if err != nil {
+		t.Fatalf("Refresh failed: %v", err)
+	}
+
+	snap := ops2.Snapshot()
+	if len(snap.Profiles) != 1 || snap.Profiles["default"].Runtime != "cloudrun" {
+		t.Errorf("expected profiles.default.runtime=cloudrun, got %+v", snap.Profiles)
+	}
+	if len(snap.HarnessConfigs) != 1 || snap.HarnessConfigs["claude-code"].Harness != "claude-code" {
+		t.Errorf("expected harness_configs.claude-code.harness=claude-code, got %+v", snap.HarnessConfigs)
+	}
+}
+
+// --- Empty map clearing: admin sets section to {} ---
+
+func TestGetServerConfigDB_EmptyRuntimes_ClearsFileFallback(t *testing.T) {
+	// When file has runtimes but DB has {}, the GET response must NOT show
+	// the file runtimes. The DB empty map takes precedence.
+	fakeStore := newFakeHubSettingStore()
+
+	// Bootstrap koanf with file runtimes.
+	fileK := koanf.New(".")
+	_ = fileK.Load(confmap.Provider(map[string]interface{}{
+		"runtimes.docker.type": "docker",
+	}, "."), nil)
+	envK := emptyKoanf()
+	ops := NewOperationalSettings(fakeStore, fileK, envK)
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	// DB has empty runtimes (admin cleared all entries).
+	fakeStore.seed("runtimes", json.RawMessage(`{}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	// Runtimes should NOT contain the file-loaded "docker" entry.
+	// The empty DB map clears it. (omitempty on the JSON tag means the
+	// response field is nil after deserialization, which is correct —
+	// the file values were cleared.)
+	if len(resp.Runtimes) > 0 {
+		t.Errorf("expected no runtimes entries (DB empty map clears file fallback), got %v", resp.Runtimes)
+	}
+
+	// Section metadata should show source=db.
+	if meta, ok := resp.SectionMeta["runtimes"]; ok {
+		if meta.Source != "db" {
+			t.Errorf("expected runtimes source=db, got %v", meta.Source)
+		}
+	}
+}
+
+func TestSnapshot_EmptyMapSections_PreservedNotNil(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	ops := NewOperationalSettings(fakeStore, fileK, envK)
+
+	// DB has empty docs for all three sections.
+	fakeStore.seed("runtimes", json.RawMessage(`{}`))
+	fakeStore.seed("profiles", json.RawMessage(`{}`))
+	fakeStore.seed("harness_configs", json.RawMessage(`{}`))
+	_, _ = ops.Refresh(context.Background())
+
+	snap := ops.Snapshot()
+
+	if snap.Runtimes == nil {
+		t.Error("expected empty map for runtimes, got nil")
+	}
+	if len(snap.Runtimes) != 0 {
+		t.Errorf("expected 0 runtimes, got %d", len(snap.Runtimes))
+	}
+	if snap.Profiles == nil {
+		t.Error("expected empty map for profiles, got nil")
+	}
+	if snap.HarnessConfigs == nil {
+		t.Error("expected empty map for harness_configs, got nil")
+	}
+}
+
+// --- GET after PUT: runtimes/profiles/harness_configs ---
+
+func TestGetServerConfigDB_RuntimesFromDB(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Seed runtimes into the DB.
+	fakeStore.seed("runtimes", json.RawMessage(`{"docker": {"type": "docker"}, "cloudrun": {"type": "cloudrun-instances"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	// Runtimes should be the DB values.
+	if len(resp.Runtimes) != 2 {
+		t.Fatalf("expected 2 runtimes, got %d", len(resp.Runtimes))
+	}
+	if resp.Runtimes["docker"].Type != "docker" {
+		t.Errorf("expected docker.type=docker, got %v", resp.Runtimes["docker"].Type)
+	}
+	if resp.Runtimes["cloudrun"].Type != "cloudrun-instances" {
+		t.Errorf("expected cloudrun.type=cloudrun-instances, got %v", resp.Runtimes["cloudrun"].Type)
+	}
+
+	// Section metadata should show source=db for runtimes.
+	if meta, ok := resp.SectionMeta["runtimes"]; ok {
+		if meta.Source != "db" {
+			t.Errorf("expected runtimes source=db, got %v", meta.Source)
+		}
+	} else {
+		t.Error("expected runtimes in section_metadata")
+	}
+}
+
+func TestGetServerConfigDB_ProfilesAndHarnessConfigsFromDB(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("profiles", json.RawMessage(`{"default": {"runtime": "cloudrun"}}`))
+	fakeStore.seed("harness_configs", json.RawMessage(`{"claude-code": {"harness": "claude-code", "image": "test:latest"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	if len(resp.Profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(resp.Profiles))
+	}
+	if resp.Profiles["default"].Runtime != "cloudrun" {
+		t.Errorf("expected default.runtime=cloudrun, got %v", resp.Profiles["default"].Runtime)
+	}
+
+	if len(resp.HarnessConfigs) != 1 {
+		t.Fatalf("expected 1 harness config, got %d", len(resp.HarnessConfigs))
+	}
+	if resp.HarnessConfigs["claude-code"].Harness != "claude-code" {
+		t.Errorf("expected claude-code.harness=claude-code, got %v", resp.HarnessConfigs["claude-code"].Harness)
+	}
+}
+
+func TestGetServerConfigDB_MapSections_FileFallback(t *testing.T) {
+	// When no DB rows exist for runtimes/profiles/harness_configs, the file
+	// values should be served (loaded from settings.yaml via Layer-0 fallback).
+	srv, _, ops := newTestDBServer(t)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	// No DB rows — section metadata should show "default" (no bootstrap values either).
+	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
+		if meta, ok := resp.SectionMeta[sec]; ok {
+			if meta.Source != "default" {
+				t.Errorf("expected %s source=default (no DB, no file), got %v", sec, meta.Source)
+			}
+		} else {
+			t.Errorf("expected %s in section_metadata", sec)
+		}
+	}
+}
+
+func TestPutThenGetServerConfigDB_RuntimesRoundTrip(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	// PUT runtimes.
+	putBody := `{
+		"runtimes": {"k8s": {"type": "kubernetes", "namespace": "agents"}}
+	}`
+	putReq := adminRequest(http.MethodPut, "/api/v1/admin/server-config", putBody)
+	putRR := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(putRR, putReq, ops)
+
+	if putRR.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", putRR.Code, putRR.Body.String())
+	}
+
+	// GET and verify the DB values are returned.
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET expected 200, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	if len(resp.Runtimes) != 1 {
+		t.Fatalf("expected 1 runtime, got %d", len(resp.Runtimes))
+	}
+	if resp.Runtimes["k8s"].Type != "kubernetes" {
+		t.Errorf("expected k8s.type=kubernetes, got %v", resp.Runtimes["k8s"].Type)
+	}
+	if resp.Runtimes["k8s"].Namespace != "agents" {
+		t.Errorf("expected k8s.namespace=agents, got %v", resp.Runtimes["k8s"].Namespace)
+	}
+
+	// Section metadata should show source=db after PUT.
+	if meta, ok := resp.SectionMeta["runtimes"]; ok {
+		if meta.Source != "db" {
+			t.Errorf("expected runtimes source=db after PUT, got %v", meta.Source)
+		}
+		if meta.Origin != "managed" {
+			t.Errorf("expected runtimes origin=managed after PUT, got %v", meta.Origin)
+		}
+	} else {
+		t.Error("expected runtimes in section_metadata")
 	}
 }

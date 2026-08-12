@@ -176,6 +176,12 @@ func ExtractSectionFromKoanf(k *koanf.Koanf, sectionName string) (json.RawMessag
 	switch sectionName {
 	case "telemetry":
 		return extractSubtree(k, "telemetry")
+	case "runtimes":
+		return extractSubtree(k, "runtimes")
+	case "profiles":
+		return extractSubtree(k, "profiles")
+	case "harness_configs":
+		return extractSubtree(k, "harness_configs")
 	case "agent_defaults":
 		return extractAgentDefaults(k)
 	case "github_app":
@@ -267,6 +273,12 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 	switch sectionName {
 	case "telemetry":
 		return loadPrefixed(k, "telemetry", raw)
+	case "runtimes":
+		return loadPrefixed(k, "runtimes", raw)
+	case "profiles":
+		return loadPrefixed(k, "profiles", raw)
+	case "harness_configs":
+		return loadPrefixed(k, "harness_configs", raw)
 	case "agent_defaults":
 		return k.Load(confmap.Provider(raw, "."), nil)
 	case "github_app":

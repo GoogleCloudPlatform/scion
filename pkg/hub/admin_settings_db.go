@@ -255,6 +255,19 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
 		resp.Federation = v1Server.Federation
 	}
+
+	// Runtimes / Profiles / HarnessConfigs — snapshot values override file
+	// values. An empty map (len 0, non-nil) from the snapshot is intentional
+	// (admin cleared the section) and must replace the file-loaded defaults.
+	if snap.Runtimes != nil {
+		resp.Runtimes = snap.Runtimes
+	}
+	if snap.Profiles != nil {
+		resp.Profiles = snap.Profiles
+	}
+	if snap.HarnessConfigs != nil {
+		resp.HarnessConfigs = snap.HarnessConfigs
+	}
 }
 
 // buildSectionMetadata reads the OperationalSettings cache to determine
@@ -482,12 +495,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// BREAKING CHANGE (issue #938): Reject unclassified keys (e.g. runtimes,
-	// profiles, harness_configs) with 422 instead of silently accepting with
-	// 200 and dropping them. Previously callers (including the admin UI)
-	// believed the save succeeded when nothing was persisted. The admin UI
-	// frontend handles this via handleSaveError's default case, which
-	// displays body.message to the user.
+	// BREAKING CHANGE (issue #938): Reject unclassified keys (e.g.
+	// schema_version, workspace_path, active_profile) with 422 instead of
+	// silently accepting with 200 and dropping them. Previously callers
+	// (including the admin UI) believed the save succeeded when nothing was
+	// persisted. The admin UI frontend handles this via handleSaveError's
+	// default case, which displays body.message to the user.
 	if len(unclassifiedKeys) > 0 {
 		sort.Strings(unclassifiedKeys)
 		slog.Warn("PUT server-config: rejecting unclassified keys (not Layer-0, not Layer-1)",
@@ -894,7 +907,8 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 // make them invisible.
 //
 // Only the clearable Layer-1 fields are checked here:
-// admin_emails, user_access_mode, notification_channels, public_url.
+// admin_emails, user_access_mode, notification_channels, public_url,
+// runtimes, profiles, harness_configs.
 func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
@@ -932,6 +946,17 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	// public_url: present in hub but empty → add the key.
 	if !keySet["server.hub.public_url"] && hubFP.has("public_url") {
 		keys = append(keys, "server.hub.public_url")
+	}
+
+	// Map-of-objects sections: present as null or {} → add the key to clear.
+	if !keySet["runtimes"] && fp.has("runtimes") {
+		keys = append(keys, "runtimes")
+	}
+	if !keySet["profiles"] && fp.has("profiles") {
+		keys = append(keys, "profiles")
+	}
+	if !keySet["harness_configs"] && fp.has("harness_configs") {
+		keys = append(keys, "harness_configs")
 	}
 
 	return keys
@@ -1116,6 +1141,36 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			}
 		}
 		doc = d
+
+	case "runtimes":
+		if req.Runtimes != nil {
+			doc = req.Runtimes
+		} else if fp.has("runtimes") {
+			// Explicitly sent as null or {} → clear to empty map.
+			doc = map[string]config.V1RuntimeConfig{}
+		} else {
+			return nil, nil
+		}
+
+	case "profiles":
+		if req.Profiles != nil {
+			doc = req.Profiles
+		} else if fp.has("profiles") {
+			// Explicitly sent as null or {} → clear to empty map.
+			doc = map[string]config.V1ProfileConfig{}
+		} else {
+			return nil, nil
+		}
+
+	case "harness_configs":
+		if req.HarnessConfigs != nil {
+			doc = req.HarnessConfigs
+		} else if fp.has("harness_configs") {
+			// Explicitly sent as null or {} → clear to empty map.
+			doc = map[string]config.HarnessConfigEntry{}
+		} else {
+			return nil, nil
+		}
 
 	case "federation":
 		fedSettings := opsettings.FederationSettings{}
