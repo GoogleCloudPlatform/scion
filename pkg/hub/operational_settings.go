@@ -691,9 +691,13 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		runtimesSub := k.Cut("runtimes")
 		if runtimesSub != nil && len(runtimesSub.Keys()) > 0 {
 			data, err := json.Marshal(runtimesSub.Raw())
-			if err == nil {
+			if err != nil {
+				slog.Warn("runtimes: failed to marshal from koanf", "error", err)
+			} else {
 				var runtimes map[string]config.V1RuntimeConfig
-				if json.Unmarshal(data, &runtimes) == nil {
+				if err := json.Unmarshal(data, &runtimes); err != nil {
+					slog.Warn("runtimes: failed to unmarshal snapshot", "error", err)
+				} else {
 					snap.Runtimes = runtimes
 				}
 			}
@@ -705,9 +709,13 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		profilesSub := k.Cut("profiles")
 		if profilesSub != nil && len(profilesSub.Keys()) > 0 {
 			data, err := json.Marshal(profilesSub.Raw())
-			if err == nil {
+			if err != nil {
+				slog.Warn("profiles: failed to marshal from koanf", "error", err)
+			} else {
 				var profiles map[string]config.V1ProfileConfig
-				if json.Unmarshal(data, &profiles) == nil {
+				if err := json.Unmarshal(data, &profiles); err != nil {
+					slog.Warn("profiles: failed to unmarshal snapshot", "error", err)
+				} else {
 					snap.Profiles = profiles
 				}
 			}
@@ -719,9 +727,13 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		hcSub := k.Cut("harness_configs")
 		if hcSub != nil && len(hcSub.Keys()) > 0 {
 			data, err := json.Marshal(hcSub.Raw())
-			if err == nil {
+			if err != nil {
+				slog.Warn("harness_configs: failed to marshal from koanf", "error", err)
+			} else {
 				var harnessConfigs map[string]config.HarnessConfigEntry
-				if json.Unmarshal(data, &harnessConfigs) == nil {
+				if err := json.Unmarshal(data, &harnessConfigs); err != nil {
+					slog.Warn("harness_configs: failed to unmarshal snapshot", "error", err)
+				} else {
 					snap.HarnessConfigs = harnessConfigs
 				}
 			}

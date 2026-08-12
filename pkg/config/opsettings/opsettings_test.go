@@ -1182,9 +1182,9 @@ func TestAutoExposePortsEmptyExtract(t *testing.T) {
 func TestRuntimesKoanfRoundTrip(t *testing.T) {
 	k := koanf.New(".")
 	err := k.Load(confmap.Provider(map[string]interface{}{
-		"runtimes.docker.type":       "docker",
-		"runtimes.cloudrun.type":     "cloudrun-instances",
-		"runtimes.cloudrun.gke":      true,
+		"runtimes.docker.type":   "docker",
+		"runtimes.cloudrun.type": "cloudrun-instances",
+		"runtimes.cloudrun.gke":  true,
 	}, "."), nil)
 	if err != nil {
 		t.Fatalf("load koanf: %v", err)
@@ -1234,9 +1234,9 @@ func TestRuntimesKoanfRoundTrip(t *testing.T) {
 func TestProfilesKoanfRoundTrip(t *testing.T) {
 	k := koanf.New(".")
 	err := k.Load(confmap.Provider(map[string]interface{}{
-		"profiles.default.runtime":              "cloudrun",
-		"profiles.default.default_template":     "medium",
-		"profiles.dev.runtime":                  "docker",
+		"profiles.default.runtime":          "cloudrun",
+		"profiles.default.default_template": "medium",
+		"profiles.dev.runtime":              "docker",
 	}, "."), nil)
 	if err != nil {
 		t.Fatalf("load koanf: %v", err)

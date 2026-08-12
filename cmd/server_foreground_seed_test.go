@@ -480,9 +480,9 @@ func TestSyncHubSettings_SeedsProfilesAndHarnessConfigs(t *testing.T) {
 
 	k := koanf.New(".")
 	_ = k.Load(confmap.Provider(map[string]interface{}{
-		"profiles.default.runtime":                "cloudrun",
-		"harness_configs.claude-code.harness":     "claude-code",
-		"harness_configs.claude-code.image":       "gcr.io/test/claude-code:latest",
+		"profiles.default.runtime":            "cloudrun",
+		"harness_configs.claude-code.harness": "claude-code",
+		"harness_configs.claude-code.image":   "gcr.io/test/claude-code:latest",
 	}, "."), nil)
 
 	err := syncHubSettings(context.Background(), fs, k)
