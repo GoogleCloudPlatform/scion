@@ -648,17 +648,21 @@ export class ScionChatThread extends LitElement {
       } else {
         // Only parse the JSON body when mentions were sent (O1 fix).
         if (mentions && mentions.length > 0) {
-          const contentType = res.headers.get('content-type');
-          if (contentType && contentType.includes('application/json')) {
-            const data = (await res.json()) as {
-              message_id?: string;
-              mention_results?: MentionResult[];
-            };
-            if (data?.message_id && data?.mention_results && data.mention_results.length > 0) {
-              const updated = new Map(this.mentionResultsByMessageId);
-              updated.set(data.message_id, data.mention_results);
-              this.mentionResultsByMessageId = updated;
+          try {
+            const contentType = res.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              const data = (await res.json()) as {
+                message_id?: string;
+                mention_results?: MentionResult[];
+              };
+              if (data?.message_id && data?.mention_results && data.mention_results.length > 0) {
+                const updated = new Map(this.mentionResultsByMessageId);
+                updated.set(data.message_id, data.mention_results);
+                this.mentionResultsByMessageId = updated;
+              }
             }
+          } catch (err) {
+            console.error('Failed to parse mention results response:', err);
           }
         }
         onSuccess();

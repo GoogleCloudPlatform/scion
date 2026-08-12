@@ -310,9 +310,10 @@ export class ScionMentionAutocomplete extends LitElement {
    * matching over slug and name. Exact-prefix matches ranked first.
    */
   private matchAgents(query: string): Agent[] {
+    const agents = this.agents || [];
     if (query === '') {
       // Show all agents when just @ is typed, capped at MAX_DROPDOWN_ITEMS.
-      return this.agents.slice(0, MAX_DROPDOWN_ITEMS);
+      return agents.slice(0, MAX_DROPDOWN_ITEMS);
     }
 
     const lowerQuery = query.toLowerCase();
@@ -320,7 +321,7 @@ export class ScionMentionAutocomplete extends LitElement {
     const prefixMatches: Agent[] = [];
     const subsequenceMatches: Agent[] = [];
 
-    for (const agent of this.agents) {
+    for (const agent of agents) {
       const slug = (agent.slug || agent.name || '').toLowerCase();
       const name = (agent.name || '').toLowerCase();
 

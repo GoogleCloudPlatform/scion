@@ -1280,8 +1280,11 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		if mentionMsg.Metadata != nil {
 			storeMsg.GroupID = mentionMsg.Metadata["group_id"]
 		}
+		var persisted bool
 		if createErr := s.store.CreateMessage(ctx, storeMsg); createErr != nil {
 			s.messageLog.Error("Failed to persist mention message", "slug", r.Slug, "error", createErr)
+		} else {
+			persisted = true
 		}
 		s.events.PublishUserMessage(ctx, storeMsg)
 
@@ -1309,7 +1312,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 				results[i].Status = "error"
 				results[i].Error = "dispatch failed: " + dispatchErr.Error()
 			}
-			if storeMsg.ID != "" {
+			if persisted {
 				if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
 					s.messageLog.Error("Failed to mark mention message as failed", "id", storeMsg.ID, "error", markErr)
 				}
