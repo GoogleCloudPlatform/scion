@@ -62,14 +62,15 @@ func buildOwnerKey(ctx context.Context) (string, bool, error) {
 	}
 	key := route.ProjectSlug + ":" + route.AgentSlug
 	if caller := callerIdentityFromContext(ctx); caller != nil {
-		if caller.UserID != "" {
-			key += ":" + caller.UserID
+		callerKey := caller.CallerKey()
+		if callerKey != "" {
+			key += ":" + callerKey
 		} else {
-			slog.Warn("CallerIdentity present but UserID is empty; rejecting request",
+			slog.Warn("CallerIdentity present but CallerKey is empty; rejecting request",
 				"project", route.ProjectSlug,
 				"agent", route.AgentSlug,
 			)
-			return "", true, fmt.Errorf("CallerIdentity present but UserID is empty: %w", a2a.ErrUnauthenticated)
+			return "", true, fmt.Errorf("CallerIdentity present but CallerKey is empty: %w", a2a.ErrUnauthenticated)
 		}
 	}
 	return key, true, nil

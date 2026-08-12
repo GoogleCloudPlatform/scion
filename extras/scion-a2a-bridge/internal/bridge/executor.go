@@ -102,31 +102,31 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 		}
 
-		// Per-user identity propagation: use the caller's credentials for Hub
+		// Per-user/agent identity propagation: use the caller's credentials for Hub
 		// writes, sender field, and broker subscriptions (mirrors Bridge.SendMessage).
 		caller := callerIdentityFromContext(ctx) // nil in legacy mode
 		var writeClient hubclient.Client = e.bridge.hubClient
-		senderUser := e.bridge.config.Hub.User
+		senderLabel := fmt.Sprintf("user:%s", e.bridge.config.Hub.User)
 
 		if caller != nil {
-			senderUser = caller.Email
+			senderLabel = caller.SenderLabel()
 			var clientErr error
 			writeClient, clientErr = e.bridge.callerHubClient(caller)
 			if clientErr != nil {
-				yield(nil, fmt.Errorf("creating per-user hub client: %w", clientErr))
+				yield(nil, fmt.Errorf("creating per-caller hub client: %w", clientErr))
 				return
 			}
 		}
 
 		// Translate A2A message parts to Scion format.
 		scionMsg := TranslateA2APartsToScion(execCtx.Message.Parts)
-		scionMsg.Sender = fmt.Sprintf("user:%s", senderUser)
+		scionMsg.Sender = senderLabel
 		scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
 		scionMsg.Metadata = map[string]string{"a2aTaskId": string(taskID)}
 
 		// Request broker subscription for responses.
 		if e.bridge.broker != nil {
-			if caller != nil {
+			if caller != nil && !caller.IsAgent() {
 				e.bridge.subscribeAllUserTopics(agentCtx.ProjectID)
 			} else {
 				e.bridge.subscribeAdminUserTopics(agentCtx.ProjectID)
@@ -265,16 +265,16 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 				return
 			}
 
-			// Per-user identity propagation for cancel interrupts.
+			// Per-user/agent identity propagation for cancel interrupts.
 			caller := callerIdentityFromContext(ctx)
 			var cancelClient hubclient.Client = e.bridge.hubClient
-			senderUser := e.bridge.config.Hub.User
+			senderLabel := fmt.Sprintf("user:%s", e.bridge.config.Hub.User)
 			if caller != nil {
-				senderUser = caller.Email
+				senderLabel = caller.SenderLabel()
 				if cc, err := e.bridge.callerHubClient(caller); err == nil {
 					cancelClient = cc
 				} else {
-					e.log.Warn("cancel: failed to create per-user client, falling back to admin",
+					e.log.Warn("cancel: failed to create per-caller client, falling back to admin",
 						"error", err, "task_id", taskID)
 				}
 			}
@@ -283,7 +283,7 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 				interruptMsg := &messages.StructuredMessage{
 					Version:   1,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Sender:    fmt.Sprintf("user:%s", senderUser),
+					Sender:    senderLabel,
 					Recipient: fmt.Sprintf("agent:%s", route.AgentSlug),
 					Msg:       "Task cancelled by A2A client.",
 					Type:      messages.TypeInstruction,

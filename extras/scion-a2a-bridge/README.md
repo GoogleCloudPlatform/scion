@@ -65,15 +65,15 @@ docker run -p 8443:8443 -p 9090:9090 \
 
 ### Supported JSON-RPC methods
 
-- `SendMessage` — send a message (blocking or non-blocking)
-- `SendStreamingMessage` — send a message with SSE streaming response
-- `GetTask` — retrieve task status by ID
-- `ListTasks` — list tasks by context ID
-- `CancelTask` — cancel an in-progress task
-- `SubscribeToTask` — re-attach an SSE stream to an active task
-- `CreateTaskPushNotificationConfig` — register a webhook for task updates
-- `GetTaskPushNotificationConfig` — get push notification config for a task
-- `DeleteTaskPushNotificationConfig` — remove a webhook
+- `message/send` — send a message (blocking or non-blocking)
+- `message/stream` — send a message with SSE streaming response
+- `tasks/get` — retrieve task status by ID
+- `tasks/list` — list tasks by context ID
+- `tasks/cancel` — cancel an in-progress task
+- `tasks/resubscribe` — re-attach an SSE stream to an active task
+- `tasks/pushNotification/set` — register a webhook for task updates
+- `tasks/pushNotification/get` — list webhooks for a task
+- `tasks/pushNotification/delete` — remove a webhook
 
 ## TLS
 
@@ -221,20 +221,18 @@ logging:
 
 ### 4. Configure the Hub
 
-Edit the Hub's `settings.yaml` to enable the message broker and register the bridge as a broker plugin.
+Edit the Hub's `settings.yaml` to enable the message broker and register the bridge as a plugin.
 
-Both `message_broker` and `plugins` are nested under the top-level `server` key. Plugin entries live under `server.plugins.broker.<name>`:
+Add or update these sections:
 
 ```yaml
-schema_version: "1"
-server:
-  message_broker:
-    enabled: true
-  plugins:
-    broker:
-      a2a-bridge:
-        self_managed: true
-        address: "localhost:9090"
+message_broker:
+  enabled: true
+
+plugins:
+  a2a-bridge:
+    type: self_managed
+    address: "localhost:9090"
 ```
 
 The `address` must match `plugin.listen_address` in the bridge config. Restart the Hub after making these changes.
@@ -273,7 +271,7 @@ curl -s http://localhost:8443/projects/PROJECT/agents/AGENT/.well-known/agent-ca
 
 ### 7. Test with a sample JSON-RPC request
 
-Send a `SendMessage` request to an agent's JSON-RPC endpoint:
+Send a `message/send` request to an agent's JSON-RPC endpoint:
 
 ```sh
 curl -s -X POST \
@@ -283,7 +281,7 @@ curl -s -X POST \
   -d '{
     "jsonrpc": "2.0",
     "id": "test-1",
-    "method": "SendMessage",
+    "method": "message/send",
     "params": {
       "message": {
         "role": "user",
@@ -322,7 +320,7 @@ The container runs as non-root user `bridge` (UID 1000). The state database dire
 ## Known Limitations
 
 - **No gRPC or REST transport.** The bridge only supports JSON-RPC 2.0 over HTTP. gRPC and HTTP+JSON/REST transports are not implemented.
-- **Blocking-mode `input-required` flows.** In blocking mode, state-change messages are skipped for waiters so the actual content reply is delivered. A blocking `SendMessage` against an agent that transitions to `input-required` without sending content will time out (default 120s). Use non-blocking mode with push notifications or SSE for `input-required` flows.
+- **Blocking-mode `input-required` flows.** In blocking mode, state-change messages are skipped for waiters so the actual content reply is delivered. A blocking `message/send` against an agent that transitions to `input-required` without sending content will time out (default 120s). Use non-blocking mode with push notifications or SSE for `input-required` flows.
 
 ## Security considerations
 

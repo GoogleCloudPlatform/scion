@@ -126,17 +126,17 @@ func ValidateConfig(cfg *Config) error {
 		return fmt.Errorf("hub.user is required")
 	}
 	switch cfg.Auth.Scheme {
-	case "", "apiKey", "bearer", "none", "hubUAT", "hubJWT":
+	case "", "apiKey", "bearer", "none", "hubUAT", "hubJWT", "federation":
 		// valid
 	default:
-		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubJWT)", cfg.Auth.Scheme)
+		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubJWT, federation)", cfg.Auth.Scheme)
 	}
 	if (cfg.Auth.Scheme == "apiKey" || cfg.Auth.Scheme == "bearer") && cfg.Auth.APIKey == "" {
 		return fmt.Errorf("auth.api_key is required when auth.scheme is %q", cfg.Auth.Scheme)
 	}
 	// api_key is required for legacy schemes and the default (empty) scheme.
-	// hubUAT and hubJWT do not use api_key — they validate per-user credentials instead.
-	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" {
+	// hubUAT, hubJWT, and federation do not use api_key — they validate per-user/agent credentials instead.
+	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" && cfg.Auth.Scheme != "federation" {
 		return fmt.Errorf("auth.api_key is required (set auth.scheme: \"none\" to explicitly disable authentication)")
 	}
 	if cfg.Auth.Scheme == "hubJWT" && cfg.Hub.SigningKey == "" && cfg.Hub.SigningKeySecret == "" {
@@ -168,6 +168,8 @@ func (s *Server) WarnOnOpenAuth() {
 		s.log.Info("bridge auth: hubUAT — per-user Scion UAT authentication enabled")
 	case "hubJWT":
 		s.log.Info("bridge auth: hubJWT — per-user Scion JWT authentication enabled")
+	case "federation":
+		s.log.Info("bridge auth: federation — pass-through OIDC federation authentication enabled (hub validates tokens)")
 	}
 	if cfg.RateLimit.TrustProxy {
 		s.log.Warn("rate_limit.trust_proxy is enabled — X-Forwarded-For is trusted unconditionally, which allows clients to spoof their IP and bypass per-IP rate limits; consider adding network-level proxy restrictions")
@@ -464,6 +466,31 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if err != nil {
 				s.log.Debug("JWT validation failed", "error", err)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ctx := withCallerIdentity(r.Context(), caller)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+
+		case "federation":
+			// Federation pass-through: decode the JWT WITHOUT verification
+			// for bridge-local bookkeeping (task isolation, logging).
+			// The hub validates the token via X-Scion-Federation-Token.
+			//
+			// NOTE: The bridge decodes federation tokens WITHOUT signature verification.
+			// This is by design: the hub validates the token via its FederationAuthenticator
+			// when the bridge passes it in the X-Scion-Federation-Token header.
+			// Bridge-level signature verification requires public OIDC discovery
+			// endpoints, which is tracked as issue #930.
+			token := extractBearerToken(r)
+			if token == "" {
+				http.Error(w, "unauthorized: missing bearer token", http.StatusUnauthorized)
+				return
+			}
+			caller, err := decodeFederationToken(token)
+			if err != nil {
+				s.log.Debug("federation token decode failed", "error", err)
+				http.Error(w, "unauthorized: malformed token", http.StatusUnauthorized)
 				return
 			}
 			ctx := withCallerIdentity(r.Context(), caller)

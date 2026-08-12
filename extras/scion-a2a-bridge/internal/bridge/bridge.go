@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 var (
@@ -84,6 +86,12 @@ type Bridge struct {
 	agentCacheMu sync.RWMutex
 	agentCache   map[string]*agentCacheEntry
 
+	// transportSrc and transportMode hold the resolved transport-layer OIDC
+	// auth (IAP / Cloud Run invoker). Stored so callerHubClient can compose
+	// transport auth into per-caller hub clients.
+	transportSrc  transportauth.TokenSource
+	transportMode transportauth.HeaderMode
+
 	// shutdownCtx is cancelled during graceful shutdown.
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -101,8 +109,21 @@ type activeTaskEntry struct {
 	createdAt time.Time
 }
 
-// New creates a new Bridge instance.
-func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, metrics *Metrics, log *slog.Logger) *Bridge {
+// BridgeOption configures optional Bridge behaviour.
+type BridgeOption func(*Bridge)
+
+// WithTransportAuth stores the resolved transport-layer OIDC auth so that
+// per-caller hub clients include it in their HTTP transport chain.
+func WithTransportAuth(src transportauth.TokenSource, mode transportauth.HeaderMode) BridgeOption {
+	return func(b *Bridge) {
+		b.transportSrc = src
+		b.transportMode = mode
+	}
+}
+
+// New creates a new Bridge instance. Options (e.g. WithTransportAuth) are
+// applied after construction.
+func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMinter, cfg *Config, metrics *Metrics, log *slog.Logger, opts ...BridgeOption) *Bridge {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &Bridge{
 		store:          store,
@@ -118,6 +139,9 @@ func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMi
 		agentCache:     make(map[string]*agentCacheEntry),
 		shutdownCtx:    ctx,
 		shutdownCancel: cancel,
+	}
+	for _, opt := range opts {
+		opt(b)
 	}
 	b.wg.Add(1)
 	go b.janitor()
@@ -418,14 +442,14 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	// In per-user mode, this is a short-lived client authenticated as the caller.
 	// In legacy mode, it's the bridge admin client.
 	writeClient := b.hubClient
-	senderUser := b.config.Hub.User
+	senderLabel := fmt.Sprintf("user:%s", b.config.Hub.User)
 
 	if caller != nil {
-		senderUser = caller.Email
+		senderLabel = caller.SenderLabel()
 		var clientErr error
 		writeClient, clientErr = b.callerHubClient(caller)
 		if clientErr != nil {
-			return nil, fmt.Errorf("creating per-user hub client: %w", clientErr)
+			return nil, fmt.Errorf("creating per-caller hub client: %w", clientErr)
 		}
 	}
 
@@ -444,7 +468,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		Metadata:     "{}",
 	}
 	if caller != nil {
-		task.CallerUserID = caller.UserID
+		task.CallerUserID = caller.CallerKey()
 	}
 	if err := b.store.CreateTask(ctx, task); err != nil {
 		return nil, fmt.Errorf("create task: %w", err)
@@ -454,14 +478,16 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	}
 
 	scionMsg := TranslateA2AToScion(parts)
-	scionMsg.Sender = fmt.Sprintf("user:%s", senderUser)
+	scionMsg.Sender = senderLabel
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	if b.broker != nil {
-		if caller != nil {
+		if caller != nil && !caller.IsAgent() {
 			b.subscribeAllUserTopics(agentCtx.ProjectID)
 		} else {
+			// Legacy and federation callers use admin subscriptions.
+			// Federation callers (agents) don't have personal user topics.
 			b.subscribeAdminUserTopics(agentCtx.ProjectID)
 		}
 	}
@@ -552,20 +578,20 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 
 	caller := callerIdentityFromContext(ctx)
 
-	// Per-user isolation: the follow-up caller must match the task's owner.
-	if caller != nil && task.CallerUserID != "" && caller.UserID != task.CallerUserID {
+	// Per-user/agent isolation: the follow-up caller must match the task's owner.
+	if caller != nil && task.CallerUserID != "" && caller.CallerKey() != task.CallerUserID {
 		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, taskID)
 	}
 
-	// Use per-user client if caller identity is present.
+	// Use per-caller client if caller identity is present.
 	writeClient := b.hubClient
-	senderUser := b.config.Hub.User
+	senderLabel := fmt.Sprintf("user:%s", b.config.Hub.User)
 	if caller != nil {
-		senderUser = caller.Email
+		senderLabel = caller.SenderLabel()
 		var clientErr error
 		writeClient, clientErr = b.callerHubClient(caller)
 		if clientErr != nil {
-			return nil, fmt.Errorf("creating per-user hub client: %w", clientErr)
+			return nil, fmt.Errorf("creating per-caller hub client: %w", clientErr)
 		}
 	}
 
@@ -575,14 +601,14 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 	}
 
 	scionMsg := TranslateA2AToScion(parts)
-	scionMsg.Sender = fmt.Sprintf("user:%s", senderUser)
+	scionMsg.Sender = senderLabel
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", task.AgentSlug)
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	// Re-request broker subscriptions in case the broker reconnected since
 	// the original task was created (subscriptions may have been lost).
 	if b.broker != nil {
-		if caller != nil {
+		if caller != nil && !caller.IsAgent() {
 			b.subscribeAllUserTopics(task.ProjectID)
 		} else {
 			b.subscribeAdminUserTopics(task.ProjectID)
@@ -656,16 +682,16 @@ func (b *Bridge) GetTask(ctx context.Context, taskID string) (*TaskResult, error
 		return nil, nil
 	}
 
-	// Per-user isolation: if the request has a caller identity AND the task
-	// was created by a per-user caller, deny access to other users.
+	// Per-user/agent isolation: if the request has a caller identity AND the
+	// task was created by a per-user/agent caller, deny access to other callers.
 	// Legacy tasks (CallerUserID == "") are visible to all legacy callers
-	// but NOT to per-user callers (prevents information leakage across modes).
+	// but NOT to per-user/agent callers (prevents information leakage across modes).
 	caller := callerIdentityFromContext(ctx)
-	if caller != nil && task.CallerUserID != "" && caller.UserID != task.CallerUserID {
+	if caller != nil && task.CallerUserID != "" && caller.CallerKey() != task.CallerUserID {
 		return nil, nil // not found (avoids leaking existence)
 	}
 	if caller != nil && task.CallerUserID == "" {
-		// Per-user caller cannot see legacy tasks — prevents mode mixing.
+		// Per-user/agent caller cannot see legacy tasks — prevents mode mixing.
 		return nil, nil
 	}
 
@@ -686,8 +712,8 @@ func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult,
 	var tasks []state.Task
 	var err error
 	if caller != nil {
-		// Per-user mode: only list tasks created by this caller.
-		tasks, err = b.store.ListTasksByContextAndCaller(ctx, contextID, caller.UserID)
+		// Per-user/agent mode: only list tasks created by this caller.
+		tasks, err = b.store.ListTasksByContextAndCaller(ctx, contextID, caller.CallerKey())
 	} else {
 		tasks, err = b.store.ListTasksByContext(ctx, contextID)
 	}
@@ -719,13 +745,13 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		return nil, nil
 	}
 
-	// Per-user isolation (same logic as GetTask).
+	// Per-user/agent isolation (same logic as GetTask).
 	caller := callerIdentityFromContext(ctx)
-	if caller != nil && task.CallerUserID != "" && caller.UserID != task.CallerUserID {
+	if caller != nil && task.CallerUserID != "" && caller.CallerKey() != task.CallerUserID {
 		return nil, nil // not found
 	}
 	if caller != nil && task.CallerUserID == "" {
-		return nil, nil // per-user caller cannot cancel legacy tasks
+		return nil, nil // per-user/agent caller cannot cancel legacy tasks
 	}
 
 	if IsTerminalState(task.State) {
@@ -745,20 +771,20 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 			targetAgentID = agent.ID
 		}
 		cancelClient := b.hubClient
-		senderUser := b.config.Hub.User
+		senderLabel := fmt.Sprintf("user:%s", b.config.Hub.User)
 		if caller != nil {
-			senderUser = caller.Email
+			senderLabel = caller.SenderLabel()
 			if cc, err := b.callerHubClient(caller); err == nil {
 				cancelClient = cc
 			} else {
-				b.log.Warn("CancelTask: failed to create per-user client, falling back to admin",
+				b.log.Warn("CancelTask: failed to create per-caller client, falling back to admin",
 					"error", err, "task_id", taskID)
 			}
 		}
 		interruptMsg := &messages.StructuredMessage{
 			Version:   1,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Sender:    fmt.Sprintf("user:%s", senderUser),
+			Sender:    senderLabel,
 			Recipient: fmt.Sprintf("agent:%s", task.AgentSlug),
 			Msg:       "Task cancelled by A2A client.",
 			Type:      messages.TypeInstruction,
@@ -1086,19 +1112,65 @@ func truncate(s string, n int) string {
 // callerHubClient creates a per-request Hub client authenticated as the caller.
 // For UAT callers, the original token is passed through to the Hub.
 // For JWT callers, a fresh 5-minute JWT is minted for the caller's identity.
+// For federation callers, the bridge's admin auth is used with the federation
+// token passed via X-Scion-Federation-Token header.
+//
+// All cases compose transport auth (IAP / Cloud Run invoker) into the HTTP
+// transport chain when configured, so per-caller clients can reach hubs behind
+// identity-aware proxies.
 func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, error) {
 	switch caller.TokenType {
 	case "uat":
-		return hubclient.New(b.config.Hub.Endpoint,
-			hubclient.WithBearerToken(caller.RawToken))
+		opts := []hubclient.Option{hubclient.WithBearerToken(caller.RawToken)}
+		if b.transportSrc != nil {
+			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
+		}
+		return hubclient.New(b.config.Hub.Endpoint, opts...)
 	case "jwt":
 		// Re-mint a 5-minute JWT for the caller's identity using the bridge's
 		// signing key. This is the same infrastructure used for the bridge's
 		// own admin identity.
 		mintAuth := identity.NewMintingAuth(b.minter,
 			caller.UserID, caller.Email, caller.Role, 5*time.Minute)
-		return hubclient.New(b.config.Hub.Endpoint,
-			hubclient.WithAuthenticator(mintAuth))
+		opts := []hubclient.Option{hubclient.WithAuthenticator(mintAuth)}
+		if b.transportSrc != nil {
+			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
+		}
+		return hubclient.New(b.config.Hub.Endpoint, opts...)
+	case "federation":
+		// For federation callers, use the bridge's admin auth for Hub API
+		// access, but inject the X-Scion-Federation-Token header so the Hub
+		// can identify the federated agent. The bridge acts as a proxy:
+		// its admin identity authorizes the API call, the federation header
+		// carries the agent's identity for the Hub to validate.
+		hubUserID := b.config.Hub.UserID
+		if hubUserID == "" {
+			hubUserID = b.config.Hub.User
+		}
+		mintAuth := identity.NewMintingAuth(b.minter,
+			hubUserID, b.config.Hub.User, "admin", 5*time.Minute)
+
+		// Compose: transport auth (IAP/invoker) → federation header injection.
+		base := http.DefaultTransport
+		if b.transportSrc != nil {
+			base = transportauth.Wrap(base, b.transportSrc, b.transportMode)
+		}
+
+		// WithHTTPClient must come before WithAuthenticator so that the
+		// federation header transport is set as the base before auth wraps it.
+		opts := []hubclient.Option{
+			hubclient.WithHTTPClient(&http.Client{
+				Transport: &federationHeaderTransport{
+					base:  base,
+					token: caller.RawToken,
+				},
+			}),
+			hubclient.WithAuthenticator(mintAuth),
+		}
+		if b.transportSrc != nil {
+			opts = append(opts, hubclient.WithTransportAuth(b.transportSrc, b.transportMode))
+		}
+		return hubclient.New(b.config.Hub.Endpoint, opts...)
 	default:
 		return nil, fmt.Errorf("unknown token type: %s", caller.TokenType)
 	}
