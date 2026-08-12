@@ -105,6 +105,10 @@ const (
 	// that purges expired nonce entries from the database.
 	LockNonceCacheEviction AdvisoryLockKey = 0x5C100012
 
+	// LockChatLinkCodeEviction guards the periodic chat link code cleanup
+	// that deletes expired entries from the chat_link_codes table.
+	LockChatLinkCodeEviction AdvisoryLockKey = 0x5C100013
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant

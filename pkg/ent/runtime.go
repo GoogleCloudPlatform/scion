@@ -13,6 +13,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -283,6 +284,24 @@ func init() {
 	brokersecretDescCreated := brokersecretFields[6].Descriptor()
 	// brokersecret.DefaultCreated holds the default value on creation for the created field.
 	brokersecret.DefaultCreated = brokersecretDescCreated.Default.(func() time.Time)
+	chatlinkcodeFields := schema.ChatLinkCode{}.Fields()
+	_ = chatlinkcodeFields
+	// chatlinkcodeDescCodeHash is the schema descriptor for code_hash field.
+	chatlinkcodeDescCodeHash := chatlinkcodeFields[1].Descriptor()
+	// chatlinkcode.CodeHashValidator is a validator for the "code_hash" field. It is called by the builders before save.
+	chatlinkcode.CodeHashValidator = chatlinkcodeDescCodeHash.Validators[0].(func(string) error)
+	// chatlinkcodeDescUserIdentifier is the schema descriptor for user_identifier field.
+	chatlinkcodeDescUserIdentifier := chatlinkcodeFields[2].Descriptor()
+	// chatlinkcode.UserIdentifierValidator is a validator for the "user_identifier" field. It is called by the builders before save.
+	chatlinkcode.UserIdentifierValidator = chatlinkcodeDescUserIdentifier.Validators[0].(func(string) error)
+	// chatlinkcodeDescCreatedAt is the schema descriptor for created_at field.
+	chatlinkcodeDescCreatedAt := chatlinkcodeFields[8].Descriptor()
+	// chatlinkcode.DefaultCreatedAt holds the default value on creation for the created_at field.
+	chatlinkcode.DefaultCreatedAt = chatlinkcodeDescCreatedAt.Default.(func() time.Time)
+	// chatlinkcodeDescID is the schema descriptor for id field.
+	chatlinkcodeDescID := chatlinkcodeFields[0].Descriptor()
+	// chatlinkcode.DefaultID holds the default value on creation for the id field.
+	chatlinkcode.DefaultID = chatlinkcodeDescID.Default.(func() uuid.UUID)
 	envvarFields := schema.EnvVar{}.Fields()
 	_ = envvarFields
 	// envvarDescKey is the schema descriptor for key field.

@@ -261,6 +261,36 @@ var (
 		Columns:    BrokerSecretsColumns,
 		PrimaryKey: []*schema.Column{BrokerSecretsColumns[0]},
 	}
+	// ChatLinkCodesColumns holds the columns for the "chat_link_codes" table.
+	ChatLinkCodesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "code_hash", Type: field.TypeString, Unique: true},
+		{Name: "user_identifier", Type: field.TypeString},
+		{Name: "provider", Type: field.TypeEnum, Enums: []string{"telegram", "discord", "teams"}},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "confirmed"}, Default: "pending"},
+		{Name: "user_id", Type: field.TypeString, Nullable: true},
+		{Name: "user_email", Type: field.TypeString, Nullable: true},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// ChatLinkCodesTable holds the schema information for the "chat_link_codes" table.
+	ChatLinkCodesTable = &schema.Table{
+		Name:       "chat_link_codes",
+		Columns:    ChatLinkCodesColumns,
+		PrimaryKey: []*schema.Column{ChatLinkCodesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "chatlinkcode_provider_user_identifier",
+				Unique:  false,
+				Columns: []*schema.Column{ChatLinkCodesColumns[3], ChatLinkCodesColumns[2]},
+			},
+			{
+				Name:    "chatlinkcode_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{ChatLinkCodesColumns[7]},
+			},
+		},
+	}
 	// EnvVarsColumns holds the columns for the "env_vars" table.
 	EnvVarsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1468,6 +1498,7 @@ var (
 		BrokerDispatchTable,
 		BrokerJoinTokensTable,
 		BrokerSecretsTable,
+		ChatLinkCodesTable,
 		EnvVarsTable,
 		GcpServiceAccountsTable,
 		GithubResolutionCacheTable,
@@ -1527,6 +1558,9 @@ func init() {
 	}
 	BrokerSecretsTable.Annotation = &entsql.Annotation{
 		Table: "broker_secrets",
+	}
+	ChatLinkCodesTable.Annotation = &entsql.Annotation{
+		Table: "chat_link_codes",
 	}
 	EnvVarsTable.Annotation = &entsql.Annotation{
 		Table: "env_vars",

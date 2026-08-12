@@ -15,12 +15,15 @@
 package hub
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 )
 
 const telegramLinkCodeTTL = 15 * time.Minute
@@ -41,12 +44,28 @@ type telegramPendingLink struct {
 }
 
 // TelegramLinkService manages pending Telegram account link codes.
+// When a ChatLinkStore is set, codes are persisted in the database so they
+// survive across Hub instances. Otherwise, an in-memory map is used (single-node only).
+//
+// NOTE: The DB-delegation + in-memory-fallback pattern is intentionally
+// duplicated across TelegramLinkService, DiscordLinkService, and
+// TeamsLinkService. Each service has provider-specific struct fields
+// (TelegramUserID vs DiscordUserID vs TeamsUserID), pending-link types,
+// and HTTP handler signatures that make a shared generic difficult without
+// sacrificing readability. The shared DB logic lives in ChatLinkStore.
 type TelegramLinkService struct {
 	mu      sync.Mutex
-	pending map[string]*telegramPendingLink // code → pending link
+	pending map[string]*telegramPendingLink // code → pending link (in-memory fallback)
 
+	// NOTE: verifyLimiters is per-instance. At min-instances=N the effective
+	// rate limit is N× the configured per-IP limit. This is acceptable as
+	// defense-in-depth; the primary protection is code entropy + expiration.
 	verifyMu       sync.Mutex
 	verifyLimiters map[string]*tokenBucket // IP → token bucket
+
+	// db is the optional DB-backed link code store. When non-nil, all code
+	// operations are delegated to it instead of the in-memory map.
+	db *ChatLinkStore
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -64,8 +83,31 @@ func NewTelegramLinkService() *TelegramLinkService {
 	return s
 }
 
+// SetStore sets the database-backed link code store. When set, all code
+// operations delegate to it instead of the in-memory map.
+func (s *TelegramLinkService) SetStore(store *ChatLinkStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.db = store
+}
+
 // RegisterCode stores a pending link code from the Telegram plugin.
 func (s *TelegramLinkService) RegisterCode(code, telegramUserID string) {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := db.RegisterCode(ctx, code, telegramUserID, chatlinkcode.ProviderTelegram, telegramLinkCodeTTL); err != nil {
+			slog.Error("Telegram link: DB RegisterCode failed, falling back to in-memory", "error", err)
+		} else {
+			return
+		}
+	}
+
+	// In-memory fallback.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -87,6 +129,21 @@ func (s *TelegramLinkService) RegisterCode(code, telegramUserID string) {
 // VerifyCode attempts to confirm a pending link code with the given user.
 // Returns the telegramUserID on success, or empty string with a reason.
 func (s *TelegramLinkService) VerifyCode(code, userID, userEmail string) (telegramUserID string, err string) {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		uid, reason := db.VerifyCode(ctx, code, chatlinkcode.ProviderTelegram, userID, userEmail)
+		if reason == "" || reason == "code_not_found" || reason == "code_expired" {
+			return uid, reason
+		}
+		slog.Error("Telegram link: DB VerifyCode failed, falling back to in-memory", "reason", reason)
+	}
+
+	// In-memory fallback.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -111,6 +168,21 @@ func (s *TelegramLinkService) VerifyCode(code, userID, userEmail string) (telegr
 // GetStatusByTelegramUser returns the linking status for a given Telegram user ID.
 func (s *TelegramLinkService) GetStatusByTelegramUser(telegramUserID string) (status, userID, userEmail string) {
 	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		st, uid, email := db.GetStatusByUser(ctx, chatlinkcode.ProviderTelegram, telegramUserID)
+		if st != "db_error" {
+			return st, uid, email
+		}
+		slog.Error("Telegram link: DB GetStatusByUser failed, falling back to in-memory")
+	}
+
+	// In-memory fallback.
+	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, p := range s.pending {
@@ -126,6 +198,18 @@ func (s *TelegramLinkService) GetStatusByTelegramUser(telegramUserID string) (st
 
 // ConsumePending removes a confirmed entry so it isn't returned again.
 func (s *TelegramLinkService) ConsumePending(telegramUserID string) {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		db.ConsumePending(ctx, chatlinkcode.ProviderTelegram, telegramUserID)
+		return
+	}
+
+	// In-memory fallback.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

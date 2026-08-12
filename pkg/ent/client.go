@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -83,6 +84,8 @@ type Client struct {
 	BrokerJoinToken *BrokerJoinTokenClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
 	BrokerSecret *BrokerSecretClient
+	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
+	ChatLinkCode *ChatLinkCodeClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
@@ -174,6 +177,7 @@ func (c *Client) init() {
 	c.BrokerDispatch = NewBrokerDispatchClient(c.config)
 	c.BrokerJoinToken = NewBrokerJoinTokenClient(c.config)
 	c.BrokerSecret = NewBrokerSecretClient(c.config)
+	c.ChatLinkCode = NewChatLinkCodeClient(c.config)
 	c.EnvVar = NewEnvVarClient(c.config)
 	c.GCPServiceAccount = NewGCPServiceAccountClient(c.config)
 	c.GitHubResolutionCache = NewGitHubResolutionCacheClient(c.config)
@@ -310,6 +314,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
+		ChatLinkCode:             NewChatLinkCodeClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
 		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
 		GitHubResolutionCache:    NewGitHubResolutionCacheClient(cfg),
@@ -373,6 +378,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
+		ChatLinkCode:             NewChatLinkCodeClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
 		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
 		GitHubResolutionCache:    NewGitHubResolutionCacheClient(cfg),
@@ -439,7 +445,7 @@ func (c *Client) Close() error {
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.AccessPolicy, c.Agent, c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey,
-		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.EnvVar,
+		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.ChatLinkCode, c.EnvVar,
 		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
 		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
 		c.IntegrationUpdate, c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
@@ -459,7 +465,7 @@ func (c *Client) Use(hooks ...Hook) {
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.AccessPolicy, c.Agent, c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey,
-		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.EnvVar,
+		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.ChatLinkCode, c.EnvVar,
 		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
 		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
 		c.IntegrationUpdate, c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
@@ -493,6 +499,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.BrokerJoinToken.mutate(ctx, m)
 	case *BrokerSecretMutation:
 		return c.BrokerSecret.mutate(ctx, m)
+	case *ChatLinkCodeMutation:
+		return c.ChatLinkCode.mutate(ctx, m)
 	case *EnvVarMutation:
 		return c.EnvVar.mutate(ctx, m)
 	case *GCPServiceAccountMutation:
@@ -1695,6 +1703,139 @@ func (c *BrokerSecretClient) mutate(ctx context.Context, m *BrokerSecretMutation
 		return (&BrokerSecretDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown BrokerSecret mutation op: %q", m.Op())
+	}
+}
+
+// ChatLinkCodeClient is a client for the ChatLinkCode schema.
+type ChatLinkCodeClient struct {
+	config
+}
+
+// NewChatLinkCodeClient returns a client for the ChatLinkCode from the given config.
+func NewChatLinkCodeClient(c config) *ChatLinkCodeClient {
+	return &ChatLinkCodeClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `chatlinkcode.Hooks(f(g(h())))`.
+func (c *ChatLinkCodeClient) Use(hooks ...Hook) {
+	c.hooks.ChatLinkCode = append(c.hooks.ChatLinkCode, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `chatlinkcode.Intercept(f(g(h())))`.
+func (c *ChatLinkCodeClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ChatLinkCode = append(c.inters.ChatLinkCode, interceptors...)
+}
+
+// Create returns a builder for creating a ChatLinkCode entity.
+func (c *ChatLinkCodeClient) Create() *ChatLinkCodeCreate {
+	mutation := newChatLinkCodeMutation(c.config, OpCreate)
+	return &ChatLinkCodeCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ChatLinkCode entities.
+func (c *ChatLinkCodeClient) CreateBulk(builders ...*ChatLinkCodeCreate) *ChatLinkCodeCreateBulk {
+	return &ChatLinkCodeCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ChatLinkCodeClient) MapCreateBulk(slice any, setFunc func(*ChatLinkCodeCreate, int)) *ChatLinkCodeCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ChatLinkCodeCreateBulk{err: fmt.Errorf("calling to ChatLinkCodeClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ChatLinkCodeCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ChatLinkCodeCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ChatLinkCode.
+func (c *ChatLinkCodeClient) Update() *ChatLinkCodeUpdate {
+	mutation := newChatLinkCodeMutation(c.config, OpUpdate)
+	return &ChatLinkCodeUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ChatLinkCodeClient) UpdateOne(_m *ChatLinkCode) *ChatLinkCodeUpdateOne {
+	mutation := newChatLinkCodeMutation(c.config, OpUpdateOne, withChatLinkCode(_m))
+	return &ChatLinkCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ChatLinkCodeClient) UpdateOneID(id uuid.UUID) *ChatLinkCodeUpdateOne {
+	mutation := newChatLinkCodeMutation(c.config, OpUpdateOne, withChatLinkCodeID(id))
+	return &ChatLinkCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ChatLinkCode.
+func (c *ChatLinkCodeClient) Delete() *ChatLinkCodeDelete {
+	mutation := newChatLinkCodeMutation(c.config, OpDelete)
+	return &ChatLinkCodeDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ChatLinkCodeClient) DeleteOne(_m *ChatLinkCode) *ChatLinkCodeDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ChatLinkCodeClient) DeleteOneID(id uuid.UUID) *ChatLinkCodeDeleteOne {
+	builder := c.Delete().Where(chatlinkcode.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ChatLinkCodeDeleteOne{builder}
+}
+
+// Query returns a query builder for ChatLinkCode.
+func (c *ChatLinkCodeClient) Query() *ChatLinkCodeQuery {
+	return &ChatLinkCodeQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeChatLinkCode},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ChatLinkCode entity by its id.
+func (c *ChatLinkCodeClient) Get(ctx context.Context, id uuid.UUID) (*ChatLinkCode, error) {
+	return c.Query().Where(chatlinkcode.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ChatLinkCodeClient) GetX(ctx context.Context, id uuid.UUID) *ChatLinkCode {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ChatLinkCodeClient) Hooks() []Hook {
+	return c.hooks.ChatLinkCode
+}
+
+// Interceptors returns the client interceptors.
+func (c *ChatLinkCodeClient) Interceptors() []Interceptor {
+	return c.inters.ChatLinkCode
+}
+
+func (c *ChatLinkCodeClient) mutate(ctx context.Context, m *ChatLinkCodeMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ChatLinkCodeCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ChatLinkCodeUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ChatLinkCodeUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ChatLinkCodeDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ChatLinkCode mutation op: %q", m.Op())
 	}
 }
 
@@ -6746,11 +6887,11 @@ func (c *UserAccessTokenClient) mutate(ctx context.Context, m *UserAccessTokenMu
 type (
 	hooks struct {
 		AccessPolicy, Agent, AgentSessionMetrics, AllowListEntry, ApiKey,
-		BrokerDispatch, BrokerJoinToken, BrokerSecret, EnvVar, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LifecycleHook, LifecycleHookAgentPhase, MaintenanceOperation,
-		MaintenanceOperationRun, Message, NonceCache, Notification,
+		BrokerDispatch, BrokerJoinToken, BrokerSecret, ChatLinkCode, EnvVar,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
+		MaintenanceOperation, MaintenanceOperationRun, Message, NonceCache, Notification,
 		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
 		ProjectPreStartHook, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
 		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
@@ -6758,11 +6899,11 @@ type (
 	}
 	inters struct {
 		AccessPolicy, Agent, AgentSessionMetrics, AllowListEntry, ApiKey,
-		BrokerDispatch, BrokerJoinToken, BrokerSecret, EnvVar, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LifecycleHook, LifecycleHookAgentPhase, MaintenanceOperation,
-		MaintenanceOperationRun, Message, NonceCache, Notification,
+		BrokerDispatch, BrokerJoinToken, BrokerSecret, ChatLinkCode, EnvVar,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
+		MaintenanceOperation, MaintenanceOperationRun, Message, NonceCache, Notification,
 		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
 		ProjectPreStartHook, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
 		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,

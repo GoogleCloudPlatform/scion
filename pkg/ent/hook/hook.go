@@ -105,6 +105,18 @@ func (f BrokerSecretFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.BrokerSecretMutation", m)
 }
 
+// The ChatLinkCodeFunc type is an adapter to allow the use of ordinary
+// function as ChatLinkCode mutator.
+type ChatLinkCodeFunc func(context.Context, *ent.ChatLinkCodeMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ChatLinkCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ChatLinkCodeMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ChatLinkCodeMutation", m)
+}
+
 // The EnvVarFunc type is an adapter to allow the use of ordinary
 // function as EnvVar mutator.
 type EnvVarFunc func(context.Context, *ent.EnvVarMutation) (ent.Value, error)

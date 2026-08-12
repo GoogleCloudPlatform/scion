@@ -15,12 +15,15 @@
 package hub
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 )
 
 const teamsLinkCodeTTL = 15 * time.Minute
@@ -35,14 +38,24 @@ type teamsPendingLink struct {
 	UserEmail   string // Scion user email (set after verify)
 }
 
-// TeamsLinkService manages pending Teams account link codes using an
-// in-memory map (single-node only).
+// TeamsLinkService manages pending Teams account link codes.
+// When a ChatLinkStore is set, codes are persisted in the database so they
+// survive across Hub instances. Otherwise, an in-memory map is used (single-node only).
+//
+// NOTE: See TelegramLinkService for why the DB-delegation + in-memory-fallback
+// pattern is intentionally duplicated across the three link services.
 type TeamsLinkService struct {
 	mu      sync.Mutex
-	pending map[string]*teamsPendingLink
+	pending map[string]*teamsPendingLink // in-memory fallback
 
+	// NOTE: verifyLimiters is per-instance. At min-instances=N the effective
+	// rate limit is N× the configured per-IP limit. This is acceptable as
+	// defense-in-depth; the primary protection is code entropy + expiration.
 	verifyMu       sync.Mutex
 	verifyLimiters map[string]*tokenBucket
+
+	// db is the optional DB-backed link code store.
+	db *ChatLinkStore
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -60,8 +73,31 @@ func NewTeamsLinkService() *TeamsLinkService {
 	return s
 }
 
+// SetStore sets the database-backed link code store. When set, all code
+// operations delegate to it instead of the in-memory map.
+func (s *TeamsLinkService) SetStore(store *ChatLinkStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.db = store
+}
+
 // RegisterCode stores a pending link code from the Teams plugin.
 func (s *TeamsLinkService) RegisterCode(code, teamsUserID string) {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := db.RegisterCode(ctx, code, teamsUserID, chatlinkcode.ProviderTeams, teamsLinkCodeTTL); err != nil {
+			slog.Error("Teams link: DB RegisterCode failed, falling back to in-memory", "error", err)
+		} else {
+			return
+		}
+	}
+
+	// In-memory fallback.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -84,6 +120,21 @@ func (s *TeamsLinkService) RegisterCode(code, teamsUserID string) {
 // VerifyCode attempts to confirm a pending link code with the given user.
 // Returns the teamsUserID on success, or empty string with a reason.
 func (s *TeamsLinkService) VerifyCode(code, userID, userEmail string) (teamsUserID string, err string) {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		uid, reason := db.VerifyCode(ctx, code, chatlinkcode.ProviderTeams, userID, userEmail)
+		if reason == "" || reason == "code_not_found" || reason == "code_expired" {
+			return uid, reason
+		}
+		slog.Error("Teams link: DB VerifyCode failed, falling back to in-memory", "reason", reason)
+	}
+
+	// In-memory fallback.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -109,6 +160,21 @@ func (s *TeamsLinkService) VerifyCode(code, userID, userEmail string) (teamsUser
 // GetStatusByTeamsUser returns the linking status for a given Teams user ID.
 func (s *TeamsLinkService) GetStatusByTeamsUser(teamsUserID string) (status, userID, userEmail string) {
 	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		st, uid, email := db.GetStatusByUser(ctx, chatlinkcode.ProviderTeams, teamsUserID)
+		if st != "db_error" {
+			return st, uid, email
+		}
+		slog.Error("Teams link: DB GetStatusByUser failed, falling back to in-memory")
+	}
+
+	// In-memory fallback.
+	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, p := range s.pending {
@@ -124,6 +190,18 @@ func (s *TeamsLinkService) GetStatusByTeamsUser(teamsUserID string) (status, use
 
 // ConsumePending removes a confirmed entry so it isn't returned again.
 func (s *TeamsLinkService) ConsumePending(teamsUserID string) {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		db.ConsumePending(ctx, chatlinkcode.ProviderTeams, teamsUserID)
+		return
+	}
+
+	// In-memory fallback.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

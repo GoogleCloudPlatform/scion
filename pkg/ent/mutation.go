@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -79,6 +80,7 @@ const (
 	TypeBrokerDispatch           = "BrokerDispatch"
 	TypeBrokerJoinToken          = "BrokerJoinToken"
 	TypeBrokerSecret             = "BrokerSecret"
+	TypeChatLinkCode             = "ChatLinkCode"
 	TypeEnvVar                   = "EnvVar"
 	TypeGCPServiceAccount        = "GCPServiceAccount"
 	TypeGitHubResolutionCache    = "GitHubResolutionCache"
@@ -9843,6 +9845,757 @@ func (m *BrokerSecretMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *BrokerSecretMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown BrokerSecret edge %s", name)
+}
+
+// ChatLinkCodeMutation represents an operation that mutates the ChatLinkCode nodes in the graph.
+type ChatLinkCodeMutation struct {
+	config
+	op              Op
+	typ             string
+	id              *uuid.UUID
+	code_hash       *string
+	user_identifier *string
+	provider        *chatlinkcode.Provider
+	status          *chatlinkcode.Status
+	user_id         *string
+	user_email      *string
+	expires_at      *time.Time
+	created_at      *time.Time
+	clearedFields   map[string]struct{}
+	done            bool
+	oldValue        func(context.Context) (*ChatLinkCode, error)
+	predicates      []predicate.ChatLinkCode
+}
+
+var _ ent.Mutation = (*ChatLinkCodeMutation)(nil)
+
+// chatlinkcodeOption allows management of the mutation configuration using functional options.
+type chatlinkcodeOption func(*ChatLinkCodeMutation)
+
+// newChatLinkCodeMutation creates new mutation for the ChatLinkCode entity.
+func newChatLinkCodeMutation(c config, op Op, opts ...chatlinkcodeOption) *ChatLinkCodeMutation {
+	m := &ChatLinkCodeMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeChatLinkCode,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withChatLinkCodeID sets the ID field of the mutation.
+func withChatLinkCodeID(id uuid.UUID) chatlinkcodeOption {
+	return func(m *ChatLinkCodeMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ChatLinkCode
+		)
+		m.oldValue = func(ctx context.Context) (*ChatLinkCode, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ChatLinkCode.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withChatLinkCode sets the old ChatLinkCode of the mutation.
+func withChatLinkCode(node *ChatLinkCode) chatlinkcodeOption {
+	return func(m *ChatLinkCodeMutation) {
+		m.oldValue = func(context.Context) (*ChatLinkCode, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ChatLinkCodeMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ChatLinkCodeMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of ChatLinkCode entities.
+func (m *ChatLinkCodeMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ChatLinkCodeMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ChatLinkCodeMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ChatLinkCode.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetCodeHash sets the "code_hash" field.
+func (m *ChatLinkCodeMutation) SetCodeHash(s string) {
+	m.code_hash = &s
+}
+
+// CodeHash returns the value of the "code_hash" field in the mutation.
+func (m *ChatLinkCodeMutation) CodeHash() (r string, exists bool) {
+	v := m.code_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCodeHash returns the old "code_hash" field's value of the ChatLinkCode entity.
+// If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChatLinkCodeMutation) OldCodeHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCodeHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCodeHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCodeHash: %w", err)
+	}
+	return oldValue.CodeHash, nil
+}
+
+// ResetCodeHash resets all changes to the "code_hash" field.
+func (m *ChatLinkCodeMutation) ResetCodeHash() {
+	m.code_hash = nil
+}
+
+// SetUserIdentifier sets the "user_identifier" field.
+func (m *ChatLinkCodeMutation) SetUserIdentifier(s string) {
+	m.user_identifier = &s
+}
+
+// UserIdentifier returns the value of the "user_identifier" field in the mutation.
+func (m *ChatLinkCodeMutation) UserIdentifier() (r string, exists bool) {
+	v := m.user_identifier
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserIdentifier returns the old "user_identifier" field's value of the ChatLinkCode entity.
+// If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChatLinkCodeMutation) OldUserIdentifier(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserIdentifier is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserIdentifier requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserIdentifier: %w", err)
+	}
+	return oldValue.UserIdentifier, nil
+}
+
+// ResetUserIdentifier resets all changes to the "user_identifier" field.
+func (m *ChatLinkCodeMutation) ResetUserIdentifier() {
+	m.user_identifier = nil
+}
+
+// SetProvider sets the "provider" field.
+func (m *ChatLinkCodeMutation) SetProvider(c chatlinkcode.Provider) {
+	m.provider = &c
+}
+
+// Provider returns the value of the "provider" field in the mutation.
+func (m *ChatLinkCodeMutation) Provider() (r chatlinkcode.Provider, exists bool) {
+	v := m.provider
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProvider returns the old "provider" field's value of the ChatLinkCode entity.
+// If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChatLinkCodeMutation) OldProvider(ctx context.Context) (v chatlinkcode.Provider, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProvider is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProvider requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProvider: %w", err)
+	}
+	return oldValue.Provider, nil
+}
+
+// ResetProvider resets all changes to the "provider" field.
+func (m *ChatLinkCodeMutation) ResetProvider() {
+	m.provider = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *ChatLinkCodeMutation) SetStatus(c chatlinkcode.Status) {
+	m.status = &c
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *ChatLinkCodeMutation) Status() (r chatlinkcode.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the ChatLinkCode entity.
+// If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChatLinkCodeMutation) OldStatus(ctx context.Context) (v chatlinkcode.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *ChatLinkCodeMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetUserID sets the "user_id" field.
+func (m *ChatLinkCodeMutation) SetUserID(s string) {
+	m.user_id = &s
+}
+
+// UserID returns the value of the "user_id" field in the mutation.
+func (m *ChatLinkCodeMutation) UserID() (r string, exists bool) {
+	v := m.user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserID returns the old "user_id" field's value of the ChatLinkCode entity.
+// If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChatLinkCodeMutation) OldUserID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserID: %w", err)
+	}
+	return oldValue.UserID, nil
+}
+
+// ClearUserID clears the value of the "user_id" field.
+func (m *ChatLinkCodeMutation) ClearUserID() {
+	m.user_id = nil
+	m.clearedFields[chatlinkcode.FieldUserID] = struct{}{}
+}
+
+// UserIDCleared returns if the "user_id" field was cleared in this mutation.
+func (m *ChatLinkCodeMutation) UserIDCleared() bool {
+	_, ok := m.clearedFields[chatlinkcode.FieldUserID]
+	return ok
+}
+
+// ResetUserID resets all changes to the "user_id" field.
+func (m *ChatLinkCodeMutation) ResetUserID() {
+	m.user_id = nil
+	delete(m.clearedFields, chatlinkcode.FieldUserID)
+}
+
+// SetUserEmail sets the "user_email" field.
+func (m *ChatLinkCodeMutation) SetUserEmail(s string) {
+	m.user_email = &s
+}
+
+// UserEmail returns the value of the "user_email" field in the mutation.
+func (m *ChatLinkCodeMutation) UserEmail() (r string, exists bool) {
+	v := m.user_email
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserEmail returns the old "user_email" field's value of the ChatLinkCode entity.
+// If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChatLinkCodeMutation) OldUserEmail(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserEmail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserEmail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserEmail: %w", err)
+	}
+	return oldValue.UserEmail, nil
+}
+
+// ClearUserEmail clears the value of the "user_email" field.
+func (m *ChatLinkCodeMutation) ClearUserEmail() {
+	m.user_email = nil
+	m.clearedFields[chatlinkcode.FieldUserEmail] = struct{}{}
+}
+
+// UserEmailCleared returns if the "user_email" field was cleared in this mutation.
+func (m *ChatLinkCodeMutation) UserEmailCleared() bool {
+	_, ok := m.clearedFields[chatlinkcode.FieldUserEmail]
+	return ok
+}
+
+// ResetUserEmail resets all changes to the "user_email" field.
+func (m *ChatLinkCodeMutation) ResetUserEmail() {
+	m.user_email = nil
+	delete(m.clearedFields, chatlinkcode.FieldUserEmail)
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *ChatLinkCodeMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *ChatLinkCodeMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the ChatLinkCode entity.
+// If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChatLinkCodeMutation) OldExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *ChatLinkCodeMutation) ResetExpiresAt() {
+	m.expires_at = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *ChatLinkCodeMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *ChatLinkCodeMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the ChatLinkCode entity.
+// If the ChatLinkCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChatLinkCodeMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *ChatLinkCodeMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// Where appends a list predicates to the ChatLinkCodeMutation builder.
+func (m *ChatLinkCodeMutation) Where(ps ...predicate.ChatLinkCode) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ChatLinkCodeMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ChatLinkCodeMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ChatLinkCode, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ChatLinkCodeMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ChatLinkCodeMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ChatLinkCode).
+func (m *ChatLinkCodeMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ChatLinkCodeMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.code_hash != nil {
+		fields = append(fields, chatlinkcode.FieldCodeHash)
+	}
+	if m.user_identifier != nil {
+		fields = append(fields, chatlinkcode.FieldUserIdentifier)
+	}
+	if m.provider != nil {
+		fields = append(fields, chatlinkcode.FieldProvider)
+	}
+	if m.status != nil {
+		fields = append(fields, chatlinkcode.FieldStatus)
+	}
+	if m.user_id != nil {
+		fields = append(fields, chatlinkcode.FieldUserID)
+	}
+	if m.user_email != nil {
+		fields = append(fields, chatlinkcode.FieldUserEmail)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, chatlinkcode.FieldExpiresAt)
+	}
+	if m.created_at != nil {
+		fields = append(fields, chatlinkcode.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ChatLinkCodeMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case chatlinkcode.FieldCodeHash:
+		return m.CodeHash()
+	case chatlinkcode.FieldUserIdentifier:
+		return m.UserIdentifier()
+	case chatlinkcode.FieldProvider:
+		return m.Provider()
+	case chatlinkcode.FieldStatus:
+		return m.Status()
+	case chatlinkcode.FieldUserID:
+		return m.UserID()
+	case chatlinkcode.FieldUserEmail:
+		return m.UserEmail()
+	case chatlinkcode.FieldExpiresAt:
+		return m.ExpiresAt()
+	case chatlinkcode.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ChatLinkCodeMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case chatlinkcode.FieldCodeHash:
+		return m.OldCodeHash(ctx)
+	case chatlinkcode.FieldUserIdentifier:
+		return m.OldUserIdentifier(ctx)
+	case chatlinkcode.FieldProvider:
+		return m.OldProvider(ctx)
+	case chatlinkcode.FieldStatus:
+		return m.OldStatus(ctx)
+	case chatlinkcode.FieldUserID:
+		return m.OldUserID(ctx)
+	case chatlinkcode.FieldUserEmail:
+		return m.OldUserEmail(ctx)
+	case chatlinkcode.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case chatlinkcode.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown ChatLinkCode field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ChatLinkCodeMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case chatlinkcode.FieldCodeHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCodeHash(v)
+		return nil
+	case chatlinkcode.FieldUserIdentifier:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserIdentifier(v)
+		return nil
+	case chatlinkcode.FieldProvider:
+		v, ok := value.(chatlinkcode.Provider)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProvider(v)
+		return nil
+	case chatlinkcode.FieldStatus:
+		v, ok := value.(chatlinkcode.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case chatlinkcode.FieldUserID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserID(v)
+		return nil
+	case chatlinkcode.FieldUserEmail:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserEmail(v)
+		return nil
+	case chatlinkcode.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case chatlinkcode.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ChatLinkCode field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ChatLinkCodeMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ChatLinkCodeMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ChatLinkCodeMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown ChatLinkCode numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ChatLinkCodeMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(chatlinkcode.FieldUserID) {
+		fields = append(fields, chatlinkcode.FieldUserID)
+	}
+	if m.FieldCleared(chatlinkcode.FieldUserEmail) {
+		fields = append(fields, chatlinkcode.FieldUserEmail)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ChatLinkCodeMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ChatLinkCodeMutation) ClearField(name string) error {
+	switch name {
+	case chatlinkcode.FieldUserID:
+		m.ClearUserID()
+		return nil
+	case chatlinkcode.FieldUserEmail:
+		m.ClearUserEmail()
+		return nil
+	}
+	return fmt.Errorf("unknown ChatLinkCode nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ChatLinkCodeMutation) ResetField(name string) error {
+	switch name {
+	case chatlinkcode.FieldCodeHash:
+		m.ResetCodeHash()
+		return nil
+	case chatlinkcode.FieldUserIdentifier:
+		m.ResetUserIdentifier()
+		return nil
+	case chatlinkcode.FieldProvider:
+		m.ResetProvider()
+		return nil
+	case chatlinkcode.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case chatlinkcode.FieldUserID:
+		m.ResetUserID()
+		return nil
+	case chatlinkcode.FieldUserEmail:
+		m.ResetUserEmail()
+		return nil
+	case chatlinkcode.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case chatlinkcode.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown ChatLinkCode field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ChatLinkCodeMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ChatLinkCodeMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ChatLinkCodeMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ChatLinkCodeMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ChatLinkCodeMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ChatLinkCodeMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ChatLinkCodeMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown ChatLinkCode unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ChatLinkCodeMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown ChatLinkCode edge %s", name)
 }
 
 // EnvVarMutation represents an operation that mutates the EnvVar nodes in the graph.

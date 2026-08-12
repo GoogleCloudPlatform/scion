@@ -865,6 +865,10 @@ type Server struct {
 	// When set, it replaces the in-memory NonceCache in BrokerAuthService for
 	// cross-instance replay protection.
 	nonceCacheStore *NonceCacheStore
+
+	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
+	// When non-nil, Telegram/Discord/Teams link services delegate to it.
+	chatLinkStore *ChatLinkStore
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1890,6 +1894,21 @@ func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn strin
 	if client != nil && s.brokerAuthService != nil {
 		s.nonceCacheStore = NewNonceCacheStore(client)
 		s.brokerAuthService.SetNonceCacheStore(s.nonceCacheStore)
+	}
+
+	// Initialize DB-backed chat link code store and wire it into link services
+	// so codes are shared across Hub instances.
+	if client != nil {
+		s.chatLinkStore = NewChatLinkStore(client)
+		if s.telegramLinkService != nil {
+			s.telegramLinkService.SetStore(s.chatLinkStore)
+		}
+		if s.discordLinkService != nil {
+			s.discordLinkService.SetStore(s.chatLinkStore)
+		}
+		if s.teamsLinkService != nil {
+			s.teamsLinkService.SetStore(s.chatLinkStore)
+		}
 	}
 
 	s.mu.Unlock()
@@ -3031,6 +3050,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		s.scheduler.RegisterRecurringSingleton("nonce-cache-eviction", 5, store.LockNonceCacheEviction, s.nonceCacheEvictionHandler())
 	}
 
+	// Register chat link code TTL eviction (every 5 minutes)
+	if s.chatLinkStore != nil {
+		s.scheduler.RegisterRecurringSingleton("chat-link-code-eviction", 5, store.LockChatLinkCodeEviction, s.chatLinkCodeEvictionHandler())
+	}
+
 	// Register GitHub App health check if the app is configured
 	s.mu.RLock()
 	ghAppConfigured := s.config.GitHubAppConfig.AppID != 0
@@ -3882,6 +3906,24 @@ func (s *Server) nonceCacheEvictionHandler() func(ctx context.Context) {
 		}
 		if purged > 0 {
 			slog.Info("Scheduler: nonce cache eviction completed", "purged", purged)
+		}
+	}
+}
+
+// chatLinkCodeEvictionHandler returns a recurring handler function that
+// purges expired chat link code entries. This prevents the chat_link_codes
+// table from growing unbounded.
+func (s *Server) chatLinkCodeEvictionHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		if s.chatLinkStore == nil {
+			return
+		}
+
+		if err := s.chatLinkStore.PurgeExpired(ctx); err != nil {
+			slog.Error("Scheduler: chat link code eviction failed", "error", err)
 		}
 	}
 }
