@@ -482,12 +482,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// BREAKING CHANGE (issue #938): Reject unclassified keys (e.g. runtimes,
-	// profiles, harness_configs) with 422 instead of silently accepting with
-	// 200 and dropping them. Previously callers (including the admin UI)
-	// believed the save succeeded when nothing was persisted. The admin UI
-	// frontend handles this via handleSaveError's default case, which
-	// displays body.message to the user.
+	// BREAKING CHANGE (issue #938): Reject unclassified keys (e.g.
+	// schema_version, workspace_path, active_profile) with 422 instead of
+	// silently accepting with 200 and dropping them. Previously callers
+	// (including the admin UI) believed the save succeeded when nothing was
+	// persisted. The admin UI frontend handles this via handleSaveError's
+	// default case, which displays body.message to the user.
 	if len(unclassifiedKeys) > 0 {
 		sort.Strings(unclassifiedKeys)
 		slog.Warn("PUT server-config: rejecting unclassified keys (not Layer-0, not Layer-1)",
@@ -1116,6 +1116,27 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			}
 		}
 		doc = d
+
+	case "runtimes":
+		if req.Runtimes != nil {
+			doc = req.Runtimes
+		} else {
+			return nil, nil
+		}
+
+	case "profiles":
+		if req.Profiles != nil {
+			doc = req.Profiles
+		} else {
+			return nil, nil
+		}
+
+	case "harness_configs":
+		if req.HarnessConfigs != nil {
+			doc = req.HarnessConfigs
+		} else {
+			return nil, nil
+		}
 
 	case "federation":
 		fedSettings := opsettings.FederationSettings{}

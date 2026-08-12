@@ -358,11 +358,11 @@ func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 
 	// Payload containing only unclassified keys — not Layer-0, not Layer-1.
-	// These must be rejected with 422 (not silently accepted with 200).
+	// runtimes and profiles are now Layer-1, so use truly unclassified keys.
 	body := `{
 		"schema_version": "2",
-		"runtimes": {"go": {"image": "golang:1.21"}},
-		"profiles": {"dev": {}}
+		"workspace_path": "/tmp/ws",
+		"active_profile": "dev"
 	}`
 
 	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
@@ -391,7 +391,7 @@ func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 	for _, k := range keys {
 		keySet[k.(string)] = true
 	}
-	for _, expected := range []string{"schema_version", "runtimes", "profiles"} {
+	for _, expected := range []string{"schema_version", "workspace_path", "active_profile"} {
 		if !keySet[expected] {
 			t.Errorf("expected %q in rejected keys, got %v", expected, keys)
 		}
@@ -408,14 +408,14 @@ func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 
-	// Mix of Layer-1 (admin_emails) and unclassified (runtimes, workspace_path).
+	// Mix of Layer-1 (admin_emails) and unclassified (workspace_path, schema_version).
 	// The whole request must be rejected when unclassified keys are present.
 	body := `{
 		"workspace_path": "/tmp/ws",
+		"schema_version": "2",
 		"server": {
 			"hub": {"admin_emails": ["admin@test.com"]}
-		},
-		"runtimes": {"go": {"image": "golang:1.21"}}
+		}
 	}`
 
 	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
@@ -444,11 +444,11 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) 
 	for _, k := range keys {
 		keySet[k.(string)] = true
 	}
-	if !keySet["runtimes"] {
-		t.Error("expected 'runtimes' in rejected keys")
-	}
 	if !keySet["workspace_path"] {
 		t.Error("expected 'workspace_path' in rejected keys")
+	}
+	if !keySet["schema_version"] {
+		t.Error("expected 'schema_version' in rejected keys")
 	}
 
 	// Nothing written to store — the entire request was rejected.
@@ -456,6 +456,83 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) 
 	defer fakeStore.mu.Unlock()
 	if len(fakeStore.settings) > 0 {
 		t.Error("expected no sections written to store when unclassified keys are present")
+	}
+}
+
+func TestPutServerConfigDB_RuntimesProfilesHarnessConfigs_200Applied(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"runtimes": {"docker": {"type": "docker"}, "cloudrun": {"type": "cloudrun-instances"}},
+		"profiles": {"default": {"runtime": "cloudrun"}},
+		"harness_configs": {"claude-code": {"harness": "claude-code", "image": "test:latest"}}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	reload, ok := resp["reload"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected reload in response")
+	}
+	applied, ok := reload["applied"].([]interface{})
+	if !ok {
+		t.Fatal("expected applied in reload response")
+	}
+
+	appliedSet := make(map[string]bool)
+	for _, a := range applied {
+		appliedSet[a.(string)] = true
+	}
+	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
+		if !appliedSet[sec] {
+			t.Errorf("expected %q in applied sections, got %v", sec, applied)
+		}
+	}
+}
+
+func TestPutServerConfigDB_RuntimesSingleSection_200Applied(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	body := `{
+		"runtimes": {"k8s": {"type": "kubernetes", "namespace": "agents"}}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify the section was persisted.
+	fakeStore.mu.Lock()
+	defer fakeStore.mu.Unlock()
+	doc, ok := fakeStore.settings["runtimes"]
+	if !ok {
+		t.Fatal("expected runtimes section in store")
+	}
+	var runtimes map[string]interface{}
+	if err := json.Unmarshal(doc.Value, &runtimes); err != nil {
+		t.Fatalf("unmarshal runtimes doc: %v", err)
+	}
+	k8s, ok := runtimes["k8s"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected k8s entry in runtimes doc")
+	}
+	if k8s["type"] != "kubernetes" {
+		t.Errorf("expected k8s.type=kubernetes, got %v", k8s["type"])
 	}
 }
 
