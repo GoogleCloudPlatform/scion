@@ -779,7 +779,30 @@ func (h *CommandHandler) handleDefault(ctx context.Context, activity *Activity, 
 		return h.sendReply(ctx, activity, "Default agent cleared for this channel.")
 	}
 
-	// Set default agent.
+	// Set default agent — validate it exists.
+	hubClient := h.broker.hubClient
+	if hubClient == nil {
+		return h.sendReply(ctx, activity, "Hub client not configured.")
+	}
+
+	agents, err := hubClient.ListAgents(ctx, link.ProjectID)
+	if err != nil {
+		h.log.Error("Failed to list agents for validation", "error", err)
+		return h.sendReply(ctx, activity, "Failed to validate agent. Please try again.")
+	}
+
+	var found bool
+	for _, a := range agents {
+		if strings.EqualFold(a.Slug, agentSlug) {
+			agentSlug = a.Slug // normalize to actual slug
+			found = true
+			break
+		}
+	}
+	if !found {
+		return h.sendReply(ctx, activity, fmt.Sprintf("Agent **%s** not found in project **%s**.", agentSlug, link.ProjectSlug))
+	}
+
 	link.DefaultAgent = agentSlug
 	if err := store.UpdateChannelLink(ctx, link); err != nil {
 		h.log.Error("Failed to set default agent", "error", err)

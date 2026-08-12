@@ -210,7 +210,7 @@ func (h *CallbackHandler) handleAskInput(ctx context.Context, activity *Activity
 			InputText{Type: "Input.Text", ID: "reply_text", IsMultiline: true, Placeholder: "Type your reply..."},
 		},
 		Actions: []CardAction{
-			ActionSubmit{Type: "Action.Submit", Title: "Send Reply", Style: "positive",
+			ActionExecute{Type: "Action.Execute", Title: "Send Reply", Style: "positive",
 				Data: map[string]interface{}{"action": "ask_response", "request_id": requestID, "choice": "custom"}},
 		},
 	}
