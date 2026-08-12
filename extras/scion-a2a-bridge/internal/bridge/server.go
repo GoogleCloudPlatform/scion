@@ -183,6 +183,10 @@ func (s *Server) Handler() http.Handler {
 	// Top-level well-known agent card (registry).
 	mux.HandleFunc("GET /.well-known/agent-card.json", s.handleWellKnownAgentCard)
 
+	// OIDC discovery proxy — publicly exposes the hub's IAP-protected OIDC endpoints.
+	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCDiscoveryProxy)
+	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKSProxy)
+
 	// Per-agent routes — the SDK handler handles JSON-RPC protocol.
 	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
 	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
@@ -391,7 +395,10 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public/operational endpoints skip auth.
-		if r.URL.Path == "/.well-known/agent-card.json" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+		if r.URL.Path == "/.well-known/agent-card.json" ||
+			r.URL.Path == "/.well-known/openid-configuration" ||
+			r.URL.Path == "/.well-known/jwks.json" ||
+			r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -82,6 +82,9 @@ type Bridge struct {
 	// nil in plugin/SQLite mode; polling remains the correctness floor.
 	notifier *Notifier
 
+	// oidcCache caches proxied OIDC discovery and JWKS responses from the hub.
+	oidcCache *oidcProxyCache
+
 	// agentCache caches lookupAgent results to avoid listing all agents per call.
 	agentCacheMu sync.RWMutex
 	agentCache   map[string]*agentCacheEntry
@@ -136,6 +139,7 @@ func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMi
 		push:           NewPushDispatcher(store, cfg, log, ctx),
 		activeTasks:    make(map[string]activeTaskEntry),
 		agentTasks:     make(map[string][]string),
+		oidcCache:      newOIDCProxyCache(oidcProxyCacheTTL),
 		agentCache:     make(map[string]*agentCacheEntry),
 		shutdownCtx:    ctx,
 		shutdownCancel: cancel,
