@@ -76,7 +76,8 @@ type OnBehalfOfResolver interface {
 type BrokerAuthService struct {
 	config             BrokerAuthConfig
 	store              store.Store
-	nonces             *NonceCache
+	nonces             *NonceCache      // in-memory fallback (used when DB is unavailable)
+	nonceStore         *NonceCacheStore // DB-backed nonce cache (used in multi-instance mode)
 	onBehalfOfResolver OnBehalfOfResolver
 }
 
@@ -165,6 +166,18 @@ func (bas *BrokerAuthService) Close() {
 	if bas.nonces != nil {
 		bas.nonces.Stop()
 	}
+}
+
+// SetNonceCacheStore sets a database-backed nonce cache store. When set, the
+// DB store is preferred over the in-memory cache for nonce replay detection.
+// This enables replay protection across multiple hub instances.
+func (bas *BrokerAuthService) SetNonceCacheStore(store *NonceCacheStore) {
+	bas.nonceStore = store
+}
+
+// NonceStore returns the database-backed nonce cache store, or nil if not set.
+func (bas *BrokerAuthService) NonceStore() *NonceCacheStore {
+	return bas.nonceStore
 }
 
 // =============================================================================
@@ -518,10 +531,23 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, fmt.Errorf("timestamp outside acceptable range (skew: %v)", clockSkew)
 	}
 
-	// Validate nonce if enabled
-	if s.nonces != nil && nonce != "" {
-		if !s.nonces.Add(nonce) {
-			return nil, errors.New("nonce already used (possible replay attack)")
+	// Validate nonce if enabled — use DB-backed store for multi-instance
+	// replay protection when configured; otherwise use in-memory cache.
+	// DB errors are fail-closed (request is rejected, not silently passed).
+	// Defence-in-depth: guard against empty nonce reaching the DB store.
+	if s.config.EnableNonceCache && nonce != "" {
+		if s.nonceStore != nil {
+			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
+			if err != nil {
+				return nil, fmt.Errorf("nonce cache check failed: %w", err)
+			}
+			if !isNew {
+				return nil, errors.New("nonce already used (possible replay attack)")
+			}
+		} else if s.nonces != nil {
+			if !s.nonces.Add(nonce) {
+				return nil, errors.New("nonce already used (possible replay attack)")
+			}
 		}
 	}
 
@@ -779,10 +805,23 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		return nil, errors.New("invalid signature")
 	}
 
-	// Only add nonce to cache after successful validation
-	if s.nonces != nil && nonce != "" {
-		if !s.nonces.Add(nonce) {
-			return nil, errors.New("nonce already used (possible replay attack)")
+	// Only add nonce to cache after successful validation — use DB-backed
+	// store for multi-instance replay protection when configured; otherwise
+	// use in-memory cache. DB errors are fail-closed.
+	// Defence-in-depth: guard against empty nonce reaching the DB store.
+	if s.config.EnableNonceCache && nonce != "" {
+		if s.nonceStore != nil {
+			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
+			if err != nil {
+				return nil, fmt.Errorf("nonce cache check failed: %w", err)
+			}
+			if !isNew {
+				return nil, errors.New("nonce already used (possible replay attack)")
+			}
+		} else if s.nonces != nil {
+			if !s.nonces.Add(nonce) {
+				return nil, errors.New("nonce already used (possible replay attack)")
+			}
 		}
 	}
 

@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
@@ -764,6 +765,20 @@ func init() {
 	messageDescID := messageFields[0].Descriptor()
 	// message.DefaultID holds the default value on creation for the id field.
 	message.DefaultID = messageDescID.Default.(func() uuid.UUID)
+	noncecacheFields := schema.NonceCache{}.Fields()
+	_ = noncecacheFields
+	// noncecacheDescNonce is the schema descriptor for nonce field.
+	noncecacheDescNonce := noncecacheFields[1].Descriptor()
+	// noncecache.NonceValidator is a validator for the "nonce" field. It is called by the builders before save.
+	noncecache.NonceValidator = noncecacheDescNonce.Validators[0].(func(string) error)
+	// noncecacheDescCreatedAt is the schema descriptor for created_at field.
+	noncecacheDescCreatedAt := noncecacheFields[3].Descriptor()
+	// noncecache.DefaultCreatedAt holds the default value on creation for the created_at field.
+	noncecache.DefaultCreatedAt = noncecacheDescCreatedAt.Default.(func() time.Time)
+	// noncecacheDescID is the schema descriptor for id field.
+	noncecacheDescID := noncecacheFields[0].Descriptor()
+	// noncecache.DefaultID holds the default value on creation for the id field.
+	noncecache.DefaultID = noncecacheDescID.Default.(func() uuid.UUID)
 	notificationFields := schema.Notification{}.Fields()
 	_ = notificationFields
 	// notificationDescSubscriberType is the schema descriptor for subscriber_type field.

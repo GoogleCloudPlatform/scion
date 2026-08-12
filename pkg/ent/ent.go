@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notificationsubscription"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
@@ -139,6 +140,7 @@ func checkColumn(t, c string) error {
 			maintenanceoperation.Table:     maintenanceoperation.ValidColumn,
 			maintenanceoperationrun.Table:  maintenanceoperationrun.ValidColumn,
 			message.Table:                  message.ValidColumn,
+			noncecache.Table:               noncecache.ValidColumn,
 			notification.Table:             notification.ValidColumn,
 			notificationsubscription.Table: notificationsubscription.ValidColumn,
 			policybinding.Table:            policybinding.ValidColumn,

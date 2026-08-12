@@ -849,6 +849,11 @@ type Server struct {
 
 	// ghResolutionStore is the DB-backed GitHub skill resolution cache (nil when entClient is nil).
 	ghResolutionStore *GitHubResolutionStore
+
+	// nonceCacheStore is the DB-backed HMAC nonce replay cache (nil when entClient is nil).
+	// When set, it replaces the in-memory NonceCache in BrokerAuthService for
+	// cross-instance replay protection.
+	nonceCacheStore *NonceCacheStore
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1863,6 +1868,13 @@ func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn strin
 	// Initialize GitHub resolution store when ent client is available
 	if client != nil {
 		s.ghResolutionStore = NewGitHubResolutionStore(client)
+	}
+
+	// Initialize DB-backed nonce cache store and wire it into the broker auth
+	// service for cross-instance HMAC replay protection.
+	if client != nil && s.brokerAuthService != nil {
+		s.nonceCacheStore = NewNonceCacheStore(client)
+		s.brokerAuthService.SetNonceCacheStore(s.nonceCacheStore)
 	}
 
 	s.mu.Unlock()
@@ -2999,6 +3011,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		s.scheduler.RegisterRecurringSingleton("github-resolution-cache-eviction", 10, store.LockGitHubResolutionCacheEviction, s.githubResolutionCacheEvictionHandler())
 	}
 
+	// Register HMAC nonce cache TTL eviction (every 5 minutes)
+	if s.nonceCacheStore != nil {
+		s.scheduler.RegisterRecurringSingleton("nonce-cache-eviction", 5, store.LockNonceCacheEviction, s.nonceCacheEvictionHandler())
+	}
+
 	// Register GitHub App health check if the app is configured
 	s.mu.RLock()
 	ghAppConfigured := s.config.GitHubAppConfig.AppID != 0
@@ -3826,6 +3843,30 @@ func (s *Server) githubResolutionCacheEvictionHandler() func(ctx context.Context
 
 		if err := s.ghResolutionStore.PurgeExpired(ctx); err != nil {
 			slog.Error("Scheduler: github resolution cache eviction failed", "error", err)
+		}
+	}
+}
+
+// nonceCacheEvictionHandler returns a recurring handler function that purges
+// expired HMAC nonce cache entries from the database. This prevents the nonce
+// table from growing unbounded and reclaims storage for nonces whose TTL has
+// passed.
+func (s *Server) nonceCacheEvictionHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		if s.nonceCacheStore == nil {
+			return
+		}
+
+		purged, err := s.nonceCacheStore.PurgeExpired(ctx)
+		if err != nil {
+			slog.Error("Scheduler: nonce cache eviction failed", "error", err)
+			return
+		}
+		if purged > 0 {
+			slog.Info("Scheduler: nonce cache eviction completed", "purged", purged)
 		}
 	}
 }
