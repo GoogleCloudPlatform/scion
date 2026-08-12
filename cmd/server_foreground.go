@@ -2467,7 +2467,6 @@ func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend, 
 	}
 
 	for name, entry := range vs.Server.Plugins.Broker {
-
 		mergedConfig, mergeErr := config.ResolvePluginConfig(entry.ConfigFile, entry.Config)
 		if mergeErr != nil {
 			log.Printf("Warning: failed to load config file for plugin %q: %v", name, mergeErr)
