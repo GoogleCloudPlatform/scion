@@ -397,6 +397,10 @@ const KOANF_KEY_LABELS: Record<string, string> = {
 
 const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
 
+/** Safe own-property check that won't match inherited keys on user-controlled objects. */
+const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(obj, key);
+
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
   @state() private loading = true;
@@ -562,6 +566,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private runtimes: Record<string, V1RuntimeConfig> = {};
   @state() private profiles: Record<string, V1ProfileConfig> = {};
   @state() private harnessConfigsMap: Record<string, unknown> = {};
+  @state() private harnessConfigsRaw: Record<string, string> = {};
   @state() private newRuntimeName = '';
   @state() private newProfileName = '';
   @state() private newHarnessConfigName = '';
@@ -1540,6 +1545,16 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.harnessConfigsMap = data.harness_configs
       ? (JSON.parse(JSON.stringify(data.harness_configs)) as Record<string, unknown>)
       : {};
+    // Initialize raw strings from parsed objects for textarea binding
+    const rawStrings: Record<string, string> = {};
+    for (const [k, v] of Object.entries(this.harnessConfigsMap)) {
+      try {
+        rawStrings[k] = JSON.stringify(v, null, 2);
+      } catch {
+        rawStrings[k] = String(v);
+      }
+    }
+    this.harnessConfigsRaw = rawStrings;
     this.harnessConfigErrors = {};
 
     // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
@@ -3378,14 +3393,14 @@ export class ScionPageAdminServerConfig extends LitElement {
                   size="small"
                   variant="default"
                   ?disabled=${!this.newRuntimeName.trim() ||
-                    this.newRuntimeName.trim() in this.runtimes}
+                    hasOwn(this.runtimes, this.newRuntimeName.trim())}
                   @click=${() => this.addRuntime()}
                 >
                   <sl-icon slot="prefix" name="plus-circle"></sl-icon>
                   Add Runtime
                 </sl-button>
               </div>
-              ${this.newRuntimeName.trim() in this.runtimes
+              ${hasOwn(this.runtimes, this.newRuntimeName.trim())
                 ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A runtime named "${this.newRuntimeName.trim()}" already exists.</small>`
                 : nothing}
             `
@@ -3602,7 +3617,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private addRuntime(): void {
     const name = this.newRuntimeName.trim();
-    if (!name || name in this.runtimes) return;
+    if (!name || hasOwn(this.runtimes, name)) return;
     this.runtimes = { ...this.runtimes, [name]: { type: 'docker' } };
     this.newRuntimeName = '';
   }
@@ -3646,14 +3661,14 @@ export class ScionPageAdminServerConfig extends LitElement {
                   size="small"
                   variant="default"
                   ?disabled=${!this.newProfileName.trim() ||
-                    this.newProfileName.trim() in this.profiles}
+                    hasOwn(this.profiles, this.newProfileName.trim())}
                   @click=${() => this.addProfile()}
                 >
                   <sl-icon slot="prefix" name="plus-circle"></sl-icon>
                   Add Profile
                 </sl-button>
               </div>
-              ${this.newProfileName.trim() in this.profiles
+              ${hasOwn(this.profiles, this.newProfileName.trim())
                 ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A profile named "${this.newProfileName.trim()}" already exists.</small>`
                 : nothing}
             `
@@ -3868,7 +3883,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private addProfile(): void {
     const name = this.newProfileName.trim();
-    if (!name || name in this.profiles) return;
+    if (!name || hasOwn(this.profiles, name)) return;
     const runtimeNames = Object.keys(this.runtimes);
     this.profiles = {
       ...this.profiles,
@@ -3913,14 +3928,14 @@ export class ScionPageAdminServerConfig extends LitElement {
                   size="small"
                   variant="default"
                   ?disabled=${!this.newHarnessConfigName.trim() ||
-                    this.newHarnessConfigName.trim() in this.harnessConfigsMap}
+                    hasOwn(this.harnessConfigsMap, this.newHarnessConfigName.trim())}
                   @click=${() => this.addHarnessConfig()}
                 >
                   <sl-icon slot="prefix" name="plus-circle"></sl-icon>
                   Add Harness Config
                 </sl-button>
               </div>
-              ${this.newHarnessConfigName.trim() in this.harnessConfigsMap
+              ${hasOwn(this.harnessConfigsMap, this.newHarnessConfigName.trim())
                 ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A config named "${this.newHarnessConfigName.trim()}" already exists.</small>`
                 : nothing}
             `
@@ -3930,13 +3945,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private renderHarnessConfigEntry(name: string, readOnly: boolean) {
-    const value = this.harnessConfigsMap[name];
-    let jsonStr: string;
-    try {
-      jsonStr = JSON.stringify(value, null, 2);
-    } catch {
-      jsonStr = String(value);
-    }
+    const rawStr = this.harnessConfigsRaw[name] ?? '';
     const jsonError = this.harnessConfigErrors[name];
     return html`
       <sl-card class="runtime-card">
@@ -3958,10 +3967,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           <sl-textarea
             rows="8"
             resize="auto"
-            value=${jsonStr}
+            value=${rawStr}
             ?disabled=${readOnly}
             style="font-family: monospace; font-size: 0.8125rem;${jsonError ? ' --sl-input-border-color: var(--sl-color-danger-600);' : ''}"
-            @sl-change=${(e: Event) => {
+            @sl-input=${(e: Event) => {
               this.updateHarnessConfigJson(name, (e.target as HTMLTextAreaElement).value);
             }}
           ></sl-textarea>
@@ -3974,6 +3983,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private updateHarnessConfigJson(name: string, jsonStr: string): void {
+    // Always store raw input so the textarea preserves the user's text
+    this.harnessConfigsRaw = { ...this.harnessConfigsRaw, [name]: jsonStr };
     try {
       const parsed: unknown = JSON.parse(jsonStr);
       const updated = { ...this.harnessConfigsMap };
@@ -3984,7 +3995,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       delete errors[name];
       this.harnessConfigErrors = errors;
     } catch (e) {
-      // Store the error for display
+      // Store the error for display — parsed map keeps last valid value
       this.harnessConfigErrors = {
         ...this.harnessConfigErrors,
         [name]: e instanceof Error ? e.message : 'Invalid JSON',
@@ -3994,10 +4005,15 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private addHarnessConfig(): void {
     const name = this.newHarnessConfigName.trim();
-    if (!name || name in this.harnessConfigsMap) return;
+    if (!name || hasOwn(this.harnessConfigsMap, name)) return;
+    const defaultValue = { harness: 'claude-code' };
     this.harnessConfigsMap = {
       ...this.harnessConfigsMap,
-      [name]: { harness: 'claude-code' },
+      [name]: defaultValue,
+    };
+    this.harnessConfigsRaw = {
+      ...this.harnessConfigsRaw,
+      [name]: JSON.stringify(defaultValue, null, 2),
     };
     this.newHarnessConfigName = '';
   }
@@ -4006,8 +4022,11 @@ export class ScionPageAdminServerConfig extends LitElement {
     const updated = { ...this.harnessConfigsMap };
     delete updated[name];
     this.harnessConfigsMap = updated;
-    // Clear any associated validation error
-    if (name in this.harnessConfigErrors) {
+    // Clear raw string and any associated validation error
+    const raw = { ...this.harnessConfigsRaw };
+    delete raw[name];
+    this.harnessConfigsRaw = raw;
+    if (hasOwn(this.harnessConfigErrors, name)) {
       const errors = { ...this.harnessConfigErrors };
       delete errors[name];
       this.harnessConfigErrors = errors;
