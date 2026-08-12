@@ -133,11 +133,14 @@ func stripBotMentionByEntity(text string, botID string, entities []Entity) strin
 // matchesBotID checks whether an entity's mention ID matches the bot's AppID.
 // Teams may prefix the ID with a scheme like "28:" in channel contexts.
 func matchesBotID(entityID, botID string) bool {
+	if entityID == "" || botID == "" {
+		return false
+	}
 	if entityID == botID {
 		return true
 	}
 	// Teams uses "28:<appid>" format for bots in channel contexts.
-	if strings.HasSuffix(entityID, ":"+botID) {
+	if len(entityID) > len(botID) && strings.HasSuffix(entityID, botID) && entityID[len(entityID)-len(botID)-1] == ':' {
 		return true
 	}
 	return false
