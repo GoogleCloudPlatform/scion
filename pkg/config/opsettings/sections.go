@@ -107,3 +107,15 @@ type ProjectDefaultsSettings struct {
 	// the compiled default is true (ON).
 	DefaultScratchpad *bool `json:"default_scratchpad,omitempty"`
 }
+
+// RuntimesSettings holds the Layer-1 runtimes map (map of named runtime configs).
+// The entire map is stored as a single JSONB document in hub_settings.
+type RuntimesSettings = map[string]config.V1RuntimeConfig
+
+// ProfilesSettings holds the Layer-1 profiles map (map of named profile configs).
+// The entire map is stored as a single JSONB document in hub_settings.
+type ProfilesSettings = map[string]config.V1ProfileConfig
+
+// HarnessConfigsSettings holds the Layer-1 harness_configs map.
+// The entire map is stored as a single JSONB document in hub_settings.
+type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
