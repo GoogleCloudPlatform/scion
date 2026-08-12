@@ -705,8 +705,8 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 // legacy local path, so existing local deployments continue to work
 // when NFS is first configured.
 func (s *Server) hubManagedProjectPath(slug string) (string, error) {
-	if slug == "" {
-		return "", fmt.Errorf("project slug must not be empty")
+	if err := validateProjectSlug(slug); err != nil {
+		return "", err
 	}
 
 	wsCfg := s.config.WorkspaceStorageConfig
@@ -756,11 +756,23 @@ func hubManagedProjectPath(slug string) (string, error) {
 	return localProjectPath(slug)
 }
 
+// validateProjectSlug rejects empty slugs and slugs containing path-traversal
+// characters (/, \, ..) to prevent directory-traversal attacks.
+func validateProjectSlug(slug string) error {
+	if slug == "" {
+		return fmt.Errorf("project slug must not be empty")
+	}
+	if strings.Contains(slug, "/") || strings.Contains(slug, "\\") || strings.Contains(slug, "..") {
+		return fmt.Errorf("project slug contains invalid characters")
+	}
+	return nil
+}
+
 // localProjectPath returns the legacy local filesystem path for a hub-managed
 // project workspace under ~/.scion/projects/<slug>, with groves/<slug> fallback.
 func localProjectPath(slug string) (string, error) {
-	if slug == "" {
-		return "", fmt.Errorf("project slug must not be empty")
+	if err := validateProjectSlug(slug); err != nil {
+		return "", err
 	}
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -2511,7 +2523,8 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	// For hub-native and shared-workspace projects, remove the filesystem directory.
+	// For hub-native and shared-workspace projects, remove the filesystem directory
+	// and clean up the per-project WebDAV lock store to prevent memory leaks.
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
 		if projectPath, err := s.hubManagedProjectPath(project.Slug); err == nil {
 			if err := util.RemoveAllSafe(projectPath); err != nil {
@@ -2520,6 +2533,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 			}
 		}
 	}
+	s.webdavLocks.Delete(id)
 
 	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).
 	// This stores external settings, templates, and agent homes for both

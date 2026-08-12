@@ -124,12 +124,28 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 		return
 	}
 
-	if _, err := os.Stat(mountPath); err != nil {
-		checks["workspace_storage"] = "unhealthy: mount not available"
-		return
+	// Wrap os.Stat in a goroutine with a timeout to prevent blocking on a
+	// hung NFS mount. A stuck stat call would otherwise hang the health
+	// endpoint indefinitely, taking down readiness probes.
+	type statResult struct {
+		err error
 	}
+	ch := make(chan statResult, 1)
+	go func() {
+		_, err := os.Stat(mountPath)
+		ch <- statResult{err: err}
+	}()
 
-	checks["workspace_storage"] = "healthy"
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			checks["workspace_storage"] = "unhealthy: mount not available"
+			return
+		}
+		checks["workspace_storage"] = "healthy"
+	case <-time.After(2 * time.Second):
+		checks["workspace_storage"] = "unhealthy: mount check timed out"
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

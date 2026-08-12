@@ -52,6 +52,15 @@ const maxUploadFileSize = 50 * 1024 * 1024
 // maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
 const maxEditableFileSize = 1 * 1024 * 1024
 
+// isCloudRunEnv checks K_SERVICE to determine if we're running on Cloud Run.
+// In production, K_SERVICE is set once at container startup and never changes,
+// so calling os.Getenv is effectively a cached lookup (the C library caches
+// the environment block). This avoids the complexity of sync.Once while
+// remaining test-friendly via t.Setenv.
+func isCloudRunEnv() bool {
+	return os.Getenv("K_SERVICE") != ""
+}
+
 // workspaceWriteBlocked returns true when workspace writes should be rejected
 // with 503 Service Unavailable. This happens when the hub is running on Cloud
 // Run (K_SERVICE is set) and no durable storage backend is configured.
@@ -61,7 +70,7 @@ const maxEditableFileSize = 1 * 1024 * 1024
 // writing to ephemeral storage.
 func (s *Server) workspaceWriteBlocked() bool {
 	// Not on Cloud Run → writes are fine (self-hosted with local disk)
-	if os.Getenv("K_SERVICE") == "" {
+	if !isCloudRunEnv() {
 		return false
 	}
 	// On Cloud Run — only allow writes if a known durable backend is configured
@@ -936,6 +945,14 @@ func validateWorkspaceFilePath(path string) error {
 func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
+		return
+	}
+
+	// Phase 0 safety gate: reject pull on Cloud Run without durable storage.
+	// Pull modifies the workspace filesystem, so it is a write operation.
+	if s.workspaceWriteBlocked() {
+		writeError(w, http.StatusServiceUnavailable, "workspace_writes_unavailable",
+			errWorkspaceWritesUnavailable, nil)
 		return
 	}
 
