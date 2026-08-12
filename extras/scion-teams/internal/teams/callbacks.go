@@ -38,6 +38,14 @@ func NewCallbackHandler(broker *TeamsBroker, log *slog.Logger) *CallbackHandler 
 	}
 }
 
+// getStore returns the broker's store under the broker mutex.
+func (h *CallbackHandler) getStore() Store {
+	h.broker.mu.Lock()
+	store := h.broker.store
+	h.broker.mu.Unlock()
+	return store
+}
+
 // HandleInvoke processes an invoke activity (Adaptive Card button click).
 // It reads the action field from activity.Value to dispatch to the correct handler.
 func (h *CallbackHandler) HandleInvoke(ctx context.Context, activity *Activity) (*InvokeResponse, error) {
@@ -109,7 +117,7 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 		return h.respondWithUpdatedCard(activity, "Invalid response — missing request ID."), nil
 	}
 
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
 	}
@@ -171,7 +179,7 @@ func (h *CallbackHandler) handleAskInput(ctx context.Context, activity *Activity
 		return h.respondWithUpdatedCard(activity, "Invalid request — missing request ID."), nil
 	}
 
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
 	}
@@ -202,7 +210,7 @@ func (h *CallbackHandler) handleAskInput(ctx context.Context, activity *Activity
 			InputText{Type: "Input.Text", ID: "reply_text", IsMultiline: true, Placeholder: "Type your reply..."},
 		},
 		Actions: []CardAction{
-			ActionSubmit{Type: "Action.Submit", Title: "Send Reply", Style: "positive",
+			ActionExecute{Type: "Action.Execute", Title: "Send Reply", Style: "positive",
 				Data: map[string]interface{}{"action": "ask_response", "request_id": requestID, "choice": "custom"}},
 		},
 	}
@@ -242,7 +250,7 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 		return h.respondWithUpdatedCard(activity, "Invalid setup — missing project information."), nil
 	}
 
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
 	}
@@ -310,7 +318,7 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *
 	senderName := activity.From.Name
 
 	// Try to resolve Teams user to Scion identity.
-	store := h.broker.store
+	store := h.getStore()
 	if store != nil {
 		mapping, err := store.GetUserMapping(ctx, senderID)
 		if err == nil && mapping != nil && mapping.ScionEmail != "" {
