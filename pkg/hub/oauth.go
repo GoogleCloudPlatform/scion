@@ -1064,5 +1064,6 @@ func validateOIDCLoginConfig(cfg *config.OIDCLoginConfig) error {
 	}
 	// clientSecret is intentionally not required: public OIDC clients (e.g.
 	// Keycloak public clients) legitimately have no client secret.
+	// TODO: Implement PKCE (RFC 7636) support for public OIDC clients to prevent authorization code interception attacks.
 	return nil
 }
