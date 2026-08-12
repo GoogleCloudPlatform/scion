@@ -57,6 +57,10 @@
               "description": "Show project or agent status"
             },
             {
+              "title": "default",
+              "description": "Set or show the default agent for this channel"
+            },
+            {
               "title": "register",
               "description": "Link your Teams account to your Scion identity"
             },
