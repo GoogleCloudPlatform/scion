@@ -712,6 +712,10 @@ type Server struct {
 	statelessEmbeddedBroker bool
 	runtimeReloadFunc       func() bool        // Callback to reload the co-located broker runtime; returns true if swapped
 	workstation             bool               // True when running in workstation (non-production) mode
+	// webdavLocks stores per-project WebDAV lock systems keyed by project ID.
+	// This replaces the per-request webdav.NewMemLS() so that locks survive
+	// across HTTP requests within a single instance.
+	webdavLocks sync.Map // map[string]webdav.LockSystem
 	scheduler               *Scheduler         // Unified scheduler for recurring tasks
 	cleanupOnce             sync.Once          // Ensures CleanupResources runs only once
 	ctx                     context.Context    // Server-lifetime context; cancelled on Shutdown

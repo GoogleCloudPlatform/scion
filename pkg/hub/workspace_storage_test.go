@@ -347,6 +347,50 @@ func TestWebDAVSafetyGate_WriteMethodsBlocked(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Phase 2: WebDAV Lock Store Tests
+// ============================================================================
+
+func TestWebDAVLockStore_PerProject(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create two projects
+	p1, _ := createTestHubManagedProject(t, srv, "Lock Project 1")
+	p2, _ := createTestHubManagedProject(t, srv, "Lock Project 2")
+
+	// Send PROPFIND requests to trigger lock store creation
+	doRequest(t, srv, "PROPFIND", fmt.Sprintf("/api/v1/projects/%s/dav/", p1.ID), nil)
+	doRequest(t, srv, "PROPFIND", fmt.Sprintf("/api/v1/projects/%s/dav/", p2.ID), nil)
+
+	// Both should now have lock stores, and they should be different instances
+	ls1, ok1 := srv.webdavLocks.Load(p1.ID)
+	ls2, ok2 := srv.webdavLocks.Load(p2.ID)
+	assert.True(t, ok1, "project 1 should have a lock store")
+	assert.True(t, ok2, "project 2 should have a lock store")
+	assert.NotNil(t, ls1, "project 1 lock store should not be nil")
+	assert.NotNil(t, ls2, "project 2 lock store should not be nil")
+	// Different projects should have independent lock stores
+	assert.True(t, ls1 != ls2, "different projects should have different lock stores")
+}
+
+func TestWebDAVLockStore_SameProjectSharesLocks(t *testing.T) {
+	srv, _ := testServer(t)
+
+	project, _ := createTestHubManagedProject(t, srv, "Lock Shared Project")
+
+	// First PROPFIND triggers lock store creation
+	doRequest(t, srv, "PROPFIND", fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID), nil)
+	ls1, ok := srv.webdavLocks.Load(project.ID)
+	require.True(t, ok)
+
+	// Second request to same project should reuse the same lock store
+	doRequest(t, srv, "PROPFIND", fmt.Sprintf("/api/v1/projects/%s/dav/", project.ID), nil)
+	ls2, ok := srv.webdavLocks.Load(project.ID)
+	require.True(t, ok)
+
+	assert.Same(t, ls1, ls2, "same project should reuse the same lock store across requests")
+}
+
 func TestWebDAVSafetyGate_ReadMethodsAllowed(t *testing.T) {
 	srv, _ := testServer(t)
 	t.Setenv("K_SERVICE", "hub-service")

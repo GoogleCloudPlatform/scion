@@ -96,10 +96,15 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 		}
 	}
 
+	// Look up or create a per-project lock store so that WebDAV locks
+	// survive across HTTP requests within a single instance. Previously,
+	// NewMemLS() was called per-request, making locks completely ephemeral.
+	lockStore, _ := s.webdavLocks.LoadOrStore(projectID, webdav.NewMemLS())
+
 	handler := &webdav.Handler{
 		Prefix:     prefix,
 		FileSystem: &filteredFS{root: webdav.Dir(workspacePath)},
-		LockSystem: webdav.NewMemLS(),
+		LockSystem: lockStore.(webdav.LockSystem),
 		Logger: func(r *http.Request, err error) {
 			if err != nil {
 				slog.Debug("webdav operation", "method", r.Method, "path", r.URL.Path, "error", err)
