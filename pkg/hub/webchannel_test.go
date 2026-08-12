@@ -306,12 +306,14 @@ func TestWebChannelBus_Publish_AgentTopic(t *testing.T) {
 	err := bus.Publish(ctx, topic, msg)
 	require.NoError(t, err)
 
-	// For an agent topic, the agent slug comes from the topic, the user from SenderID.
+	// Phase 6 (O1 fix): for an agent topic, agentID is msg.RecipientID (UUID)
+	// when available, not the slug from the topic. This normalizes both
+	// directions to the same identifier form and prevents duplicate rows.
 	var userID, agentID string
 	err = db.QueryRow(`SELECT user_id, agent_id FROM webchat_thread`).Scan(&userID, &agentID)
 	require.NoError(t, err)
 	require.Equal(t, "alice-uuid", userID)
-	require.Equal(t, "coder", agentID)
+	require.Equal(t, "coder-uuid", agentID)
 }
 
 func TestWebChannelBus_Close(t *testing.T) {

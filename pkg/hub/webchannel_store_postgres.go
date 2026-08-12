@@ -103,6 +103,20 @@ DO UPDATE SET
 	return nil
 }
 
+// GetLastChannel returns the last channel for (user, project, agent), or "" if no row exists.
+func (s *pgWebChatStore) GetLastChannel(ctx context.Context, userID, projectID, agentID string) (string, error) {
+	const query = `SELECT last_channel FROM webchat_conversation_context WHERE user_id = $1 AND project_id = $2 AND agent_id = $3`
+	var channel sql.NullString
+	err := s.db.QueryRowContext(ctx, query, userID, projectID, agentID).Scan(&channel)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("webchat store: get last channel: %w", err)
+	}
+	return channel.String, nil
+}
+
 // GetThreadPrefs returns the display preferences for the given (user, project, agent) triple.
 // Returns default prefs (visibility_mode = "conversation") if no row exists.
 func (s *pgWebChatStore) GetThreadPrefs(ctx context.Context, userID, projectID, agentID string) (ThreadPrefs, error) {

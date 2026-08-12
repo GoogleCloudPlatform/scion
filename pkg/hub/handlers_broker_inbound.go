@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -204,6 +205,62 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		"sender", req.Message.Sender,
 		"type", req.Message.Type,
 	)
+
+	// F5 fix (Phase 6): Persist the inbound message and publish an SSE event
+	// so that messages from external channels (Discord, Telegram) appear in
+	// the web chat — both live and after a refresh. This mirrors the
+	// persistence + SSE pattern used by handleAgentMessage.
+	now := time.Now()
+	storeMsg := &store.Message{
+		ID:            api.NewUUID(),
+		ProjectID:     agent.ProjectID,
+		Sender:        req.Message.Sender,
+		SenderID:      req.Message.SenderID,
+		Recipient:     "agent:" + agent.Slug,
+		RecipientID:   agent.ID,
+		Msg:           req.Message.Msg,
+		Type:          req.Message.Type,
+		Urgent:        req.Message.Urgent,
+		AgentID:       agent.ID,
+		Channel:       req.Message.Channel,
+		ThreadID:      req.Message.ThreadID,
+		Visibility:    req.Message.Visibility,
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     now,
+	}
+	if req.Message.Metadata != nil {
+		if gid, ok := req.Message.Metadata["group_id"]; ok {
+			storeMsg.GroupID = gid
+		}
+	}
+	if err := s.store.CreateMessage(r.Context(), storeMsg); err != nil {
+		log.Error("Failed to persist inbound broker message", "error", err)
+		// Non-fatal: the dispatch already succeeded, so the agent got the
+		// message. Failing the HTTP response here would mislead the caller
+		// into retrying — which would double-deliver.
+	} else {
+		s.events.PublishUserMessage(r.Context(), storeMsg)
+	}
+
+	// Record reply-affinity context so that the agent's next untagged reply
+	// can be routed back to the channel the user last spoke from (AC22).
+	// Only record for user-identity senders with a known channel.
+	if s.webChatStore != nil && req.Message.Channel != "" && strings.HasPrefix(req.Message.Sender, "user:") {
+		senderUserID := req.Message.SenderID
+		if senderUserID == "" {
+			// Try to resolve from the email we already validated above.
+			senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
+			if u, err := s.store.GetUserByEmail(r.Context(), senderEmail); err == nil {
+				senderUserID = u.ID
+			}
+		}
+		if senderUserID != "" {
+			if err := s.webChatStore.RecordChannel(r.Context(), senderUserID, agent.ProjectID, agent.ID, req.Message.Channel, now); err != nil {
+				log.Error("Failed to record conversation context for broker inbound",
+					"user_id", senderUserID, "agent_id", agent.ID, "channel", req.Message.Channel, "error", err)
+			}
+		}
+	}
 
 	// Log to dedicated message audit log
 	if s.dedicatedMessageLog != nil {
