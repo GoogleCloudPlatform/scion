@@ -26,7 +26,24 @@ import (
 // already has content. If not (first boot with namespacing), it copies legacy
 // un-namespaced GCS objects to the hub-scoped prefix and updates DB records.
 // This is non-destructive: legacy objects are preserved for other hubs.
+//
+// On multi-instance deployments (Postgres), an advisory lock prevents
+// concurrent replicas from racing this migration.
 func (s *Server) MigrateStorageOnFirstBoot(ctx context.Context) {
+	// Acquire advisory lock to prevent concurrent replicas from racing.
+	if locker, ok := s.store.(store.AdvisoryLocker); ok {
+		acquired, release, err := locker.TryAdvisoryLock(ctx, store.LockStorageMigration)
+		if err != nil {
+			s.resourceLog.Error("storage migration: failed to acquire advisory lock", "error", err)
+			return
+		}
+		defer func() { _ = release() }()
+		if !acquired {
+			s.resourceLog.Info("storage migration: lock held by another replica, skipping")
+			return
+		}
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		return

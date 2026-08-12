@@ -241,7 +241,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 10b. Initialize plugin manager
-	pluginMgr := initPluginManager(ctx, secretBackend)
+	pluginMgr := initPluginManager(ctx, secretBackend, s)
 	defer pluginMgr.Shutdown()
 
 	// 11. Start Hub
@@ -1159,6 +1159,34 @@ func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.C
 	return nil
 }
 
+// runWithAdvisoryLock runs fn under a TryAdvisoryLock if the store implements
+// AdvisoryLocker. On non-Postgres backends (SQLite) or when the store is nil,
+// fn runs unconditionally — single-writer backends don't need coordination.
+// This is the generic helper for boot-time migrations that must not race
+// across replicas (audit finding C6).
+func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryLockKey, label string, fn func()) {
+	if s == nil {
+		fn()
+		return
+	}
+	locker, ok := s.(store.AdvisoryLocker)
+	if !ok {
+		fn()
+		return
+	}
+	acquired, release, err := locker.TryAdvisoryLock(ctx, key)
+	if err != nil {
+		slog.Error("Failed to acquire advisory lock", "label", label, "error", err)
+		return
+	}
+	defer func() { _ = release() }()
+	if !acquired {
+		slog.Info("Advisory lock held by another replica, skipping", "label", label)
+		return
+	}
+	fn()
+}
+
 // maybeMigrateLegacySQLite detects a legacy raw-SQL hub.db at path and, unless
 // the operator opted out with --no-auto-migrate, upgrades it in-process to the
 // consolidated Ent schema (after taking an automatic backup). It is a no-op when
@@ -1635,14 +1663,17 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		// Hosted mode: bootstrap bundled resources directly into the Hub from
 		// the binary's embedded catalog. This removes the dependency on local
 		// ~/.scion directories and ensures every replica converges on the same
-		// DB + storage state.
-		if err := hubSrv.BootstrapBundledResources(ctx, hub.BootstrapOptions{
-			RepairStorage:   true,
-			OverwritePolicy: hub.OverwriteBuiltinManaged,
-			SkipIfAnyExist:  true,
-		}); err != nil {
-			log.Printf("Warning: bundled resource bootstrap failed: %v", err)
-		}
+		// DB + storage state. Advisory lock prevents concurrent replicas from
+		// racing this bootstrap (audit finding C6).
+		runWithAdvisoryLock(ctx, s, store.LockBundledResources, "bundled resource bootstrap", func() {
+			if err := hubSrv.BootstrapBundledResources(ctx, hub.BootstrapOptions{
+				RepairStorage:   true,
+				OverwritePolicy: hub.OverwriteBuiltinManaged,
+				SkipIfAnyExist:  true,
+			}); err != nil {
+				log.Printf("Warning: bundled resource bootstrap failed: %v", err)
+			}
+		})
 	} else {
 		// Workstation mode: import from local ~/.scion directories. These were
 		// refreshed from embeds earlier in the startup sequence.
@@ -2398,7 +2429,9 @@ func isObserverBroker(pluginMgr *scionplugin.Manager, name string) bool {
 // initPluginManager creates and loads a plugin manager from versioned settings.
 // The secretBackend parameter (may be nil) enables one-shot migration of inline
 // secrets to the backend before ResolvePluginConfig strips them.
-func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend) *scionplugin.Manager {
+// The dataStore parameter (may be nil) is used to acquire an advisory lock
+// around the inline secrets migration to prevent races across replicas.
+func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend, dataStore store.Store) *scionplugin.Manager {
 	logger := logging.Subsystem("plugin")
 	mgr := scionplugin.NewManager(logger)
 	mgr.NewGRPCBrokerAdapter = grpcbroker.NewAdapterFromEntry
@@ -2418,14 +2451,19 @@ func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend) 
 	pluginsCfg := scionplugin.PluginsConfig{
 		Broker: make(map[string]scionplugin.PluginEntry),
 	}
+	// Migrate inline secrets under advisory lock to prevent concurrent replicas
+	// from racing the one-shot migration (audit finding C6).
+	if secretBackend != nil {
+		runWithAdvisoryLock(ctx, dataStore, store.LockInlineSecretsMigration, "inline secrets migration", func() {
+			for name, entry := range vs.Server.Plugins.Broker {
+				if entry.Config != nil {
+					migrateInlineSecrets(ctx, secretBackend, name, entry.Config)
+				}
+			}
+		})
+	}
+
 	for name, entry := range vs.Server.Plugins.Broker {
-		// B1: Auto-migrate inline secrets to the secret backend before
-		// ResolvePluginConfig strips them. This ensures existing users
-		// with bot_token in settings.yaml don't lose their credentials
-		// on upgrade.
-		if secretBackend != nil && entry.Config != nil {
-			migrateInlineSecrets(ctx, secretBackend, name, entry.Config)
-		}
 
 		mergedConfig, mergeErr := config.ResolvePluginConfig(entry.ConfigFile, entry.Config)
 		if mergeErr != nil {
