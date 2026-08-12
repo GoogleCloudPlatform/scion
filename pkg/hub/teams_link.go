@@ -163,7 +163,11 @@ func (s *TeamsLinkService) GetStatusByTeamsUser(teamsUserID string) (status, use
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return db.GetStatusByUser(ctx, chatlinkcode.ProviderTeams, teamsUserID)
+		st, uid, email := db.GetStatusByUser(ctx, chatlinkcode.ProviderTeams, teamsUserID)
+		if st != "db_error" {
+			return st, uid, email
+		}
+		slog.Error("Teams link: DB GetStatusByUser failed, falling back to in-memory")
 	}
 
 	// In-memory fallback.

@@ -167,7 +167,11 @@ func (s *TelegramLinkService) GetStatusByTelegramUser(telegramUserID string) (st
 	if db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return db.GetStatusByUser(ctx, chatlinkcode.ProviderTelegram, telegramUserID)
+		st, uid, email := db.GetStatusByUser(ctx, chatlinkcode.ProviderTelegram, telegramUserID)
+		if st != "db_error" {
+			return st, uid, email
+		}
+		slog.Error("Telegram link: DB GetStatusByUser failed, falling back to in-memory")
 	}
 
 	// In-memory fallback.

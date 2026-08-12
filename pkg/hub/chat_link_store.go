@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -158,6 +159,7 @@ func (s *ChatLinkStore) VerifyCode(ctx context.Context, code string, provider ch
 
 // GetStatusByUser returns the linking status for a provider-specific user
 // identifier. Returns (status, scionUserID, scionUserEmail).
+// On genuine DB errors, returns ("db_error", "", "") so callers can fall back.
 func (s *ChatLinkStore) GetStatusByUser(ctx context.Context, provider chatlinkcode.Provider, userIdentifier string) (status, userID, userEmail string) {
 	row, err := s.client.ChatLinkCode.
 		Query().
@@ -167,7 +169,10 @@ func (s *ChatLinkStore) GetStatusByUser(ctx context.Context, provider chatlinkco
 		).
 		Only(ctx)
 	if err != nil {
-		return "not_found", "", ""
+		if ent.IsNotFound(err) {
+			return "not_found", "", ""
+		}
+		return "db_error", "", ""
 	}
 
 	if time.Now().After(row.ExpiresAt) {
@@ -187,13 +192,20 @@ func (s *ChatLinkStore) GetStatusByUser(ctx context.Context, provider chatlinkco
 
 // ConsumePending removes a confirmed entry so it isn't returned again.
 func (s *ChatLinkStore) ConsumePending(ctx context.Context, provider chatlinkcode.Provider, userIdentifier string) {
-	_, _ = s.client.ChatLinkCode.
+	_, err := s.client.ChatLinkCode.
 		Delete().
 		Where(
 			chatlinkcode.ProviderEQ(provider),
 			chatlinkcode.UserIdentifierEQ(userIdentifier),
 		).
 		Exec(ctx)
+	if err != nil {
+		slog.Error("chat link: ConsumePending failed",
+			"provider", string(provider),
+			"user_identifier", userIdentifier,
+			"error", err,
+		)
+	}
 }
 
 // PurgeExpired deletes all link codes where expires_at < now.
