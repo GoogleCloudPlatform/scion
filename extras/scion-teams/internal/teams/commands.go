@@ -105,6 +105,8 @@ func (h *CommandHandler) Handle(ctx context.Context, activity *Activity) (bool, 
 		return true, h.handleRegister(ctx, activity)
 	case "unregister":
 		return true, h.handleUnregister(ctx, activity)
+	case "default":
+		return true, h.handleDefault(ctx, activity, args)
 	case "help":
 		return true, h.handleHelp(ctx, activity)
 	default:
@@ -210,8 +212,8 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 		if p.Name != "" && p.Name != p.Slug {
 			displayName = fmt.Sprintf("%s (%s)", p.Name, p.Slug)
 		}
-		card.Actions = append(card.Actions, ActionSubmit{
-			Type:  "Action.Submit",
+		card.Actions = append(card.Actions, ActionExecute{
+			Type:  "Action.Execute",
 			Title: displayName,
 			Data: map[string]string{
 				"action":       "setup_confirm",
@@ -742,6 +744,51 @@ func (h *CommandHandler) handleUnregister(ctx context.Context, activity *Activit
 			existing.ScionUserID, existing.ScionEmail))
 }
 
+// handleDefault sets or shows the default agent for the current channel.
+func (h *CommandHandler) handleDefault(ctx context.Context, activity *Activity, args []string) error {
+	store := h.getStore()
+	if store == nil {
+		return h.sendReply(ctx, activity, "Store not initialized.")
+	}
+
+	// Resolve channel link.
+	link, err := h.resolveChannelLink(ctx, activity)
+	if err != nil {
+		return nil // resolveChannelLink already sent reply
+	}
+
+	if len(args) == 0 {
+		// Show current default.
+		if link.DefaultAgent == "" {
+			return h.sendReply(ctx, activity,
+				fmt.Sprintf("No default agent set for this channel (project: **%s**). Use `default <agent-slug>` to set one.", link.ProjectSlug))
+		}
+		return h.sendReply(ctx, activity,
+			fmt.Sprintf("Default agent for this channel: **%s** (project: **%s**). Use `default clear` to remove.", link.DefaultAgent, link.ProjectSlug))
+	}
+
+	agentSlug := args[0]
+
+	if agentSlug == "clear" || agentSlug == "none" || agentSlug == "remove" {
+		// Clear default.
+		link.DefaultAgent = ""
+		if err := store.UpdateChannelLink(ctx, link); err != nil {
+			h.log.Error("Failed to clear default agent", "error", err)
+			return h.sendReply(ctx, activity, "Failed to clear default agent.")
+		}
+		return h.sendReply(ctx, activity, "Default agent cleared for this channel.")
+	}
+
+	// Set default agent.
+	link.DefaultAgent = agentSlug
+	if err := store.UpdateChannelLink(ctx, link); err != nil {
+		h.log.Error("Failed to set default agent", "error", err)
+		return h.sendReply(ctx, activity, "Failed to set default agent.")
+	}
+	return h.sendReply(ctx, activity,
+		fmt.Sprintf("Default agent set to **%s** for this channel.", agentSlug))
+}
+
 // handleHelp sends a card listing all available commands.
 func (h *CommandHandler) handleHelp(ctx context.Context, activity *Activity) error {
 	card := NewAdaptiveCard()
@@ -760,6 +807,7 @@ func (h *CommandHandler) handleHelp(ctx context.Context, activity *Activity) err
 		{"unlink", "Unlink this conversation from its project"},
 		{"agents", "List agents in the linked project"},
 		{"status [agent]", "Show project or agent status"},
+		{"default [agent]", "Set or show the default agent for this channel"},
 		{"register", "Link your Teams account to Scion"},
 		{"unregister", "Unlink your Teams account from Scion"},
 		{"help", "Show this help message"},

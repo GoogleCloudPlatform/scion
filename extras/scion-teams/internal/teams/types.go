@@ -286,6 +286,20 @@ type ActionSubmit struct {
 
 func (ActionSubmit) cardAction() {}
 
+// ActionExecute is a button that sends an invoke activity to the bot.
+// Unlike Action.Submit (which sends a message activity), Action.Execute
+// sends an invoke with name "adaptiveCard/action", allowing the bot to
+// return an updated card.
+type ActionExecute struct {
+	Type  string      `json:"type"` // "Action.Execute"
+	Title string      `json:"title,omitempty"`
+	Verb  string      `json:"verb,omitempty"`
+	Data  interface{} `json:"data,omitempty"`
+	Style string      `json:"style,omitempty"`
+}
+
+func (ActionExecute) cardAction() {}
+
 // ActionOpenURL opens a URL when clicked.
 type ActionOpenURL struct {
 	Type  string `json:"type"` // "Action.OpenUrl"
