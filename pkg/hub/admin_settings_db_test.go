@@ -354,10 +354,11 @@ func TestPutServerConfigDB_MixedValid_Layer0Rejected_NothingWritten(t *testing.T
 	}
 }
 
-func TestPutServerConfigDB_UnclassifiedOnly_200WithIgnoredKeys(t *testing.T) {
+func TestPutServerConfigDB_UnclassifiedOnly_422Rejected(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 
 	// Payload containing only unclassified keys — not Layer-0, not Layer-1.
+	// These must be rejected with 422 (not silently accepted with 200).
 	body := `{
 		"schema_version": "2",
 		"runtimes": {"go": {"image": "golang:1.21"}},
@@ -368,8 +369,8 @@ func TestPutServerConfigDB_UnclassifiedOnly_200WithIgnoredKeys(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handlePutServerConfigDB(rr, req, ops)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
 	var resp map[string]interface{}
@@ -377,22 +378,22 @@ func TestPutServerConfigDB_UnclassifiedOnly_200WithIgnoredKeys(t *testing.T) {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
 
-	if resp["status"] != "saved" {
-		t.Errorf("expected status=saved, got %v", resp["status"])
+	if resp["error"] != "unclassified_keys_rejected" {
+		t.Errorf("expected error=unclassified_keys_rejected, got %v", resp["error"])
 	}
 
-	// ignored_keys should list the unclassified keys.
-	ignored, ok := resp["ignored_keys"].([]interface{})
-	if !ok || len(ignored) == 0 {
-		t.Fatal("expected non-empty ignored_keys in response")
+	// keys should list the rejected unclassified keys.
+	keys, ok := resp["keys"].([]interface{})
+	if !ok || len(keys) == 0 {
+		t.Fatal("expected non-empty keys in 422 response")
 	}
-	ignoredSet := make(map[string]bool)
-	for _, k := range ignored {
-		ignoredSet[k.(string)] = true
+	keySet := make(map[string]bool)
+	for _, k := range keys {
+		keySet[k.(string)] = true
 	}
 	for _, expected := range []string{"schema_version", "runtimes", "profiles"} {
-		if !ignoredSet[expected] {
-			t.Errorf("expected %q in ignored_keys, got %v", expected, ignored)
+		if !keySet[expected] {
+			t.Errorf("expected %q in rejected keys, got %v", expected, keys)
 		}
 	}
 
@@ -404,10 +405,11 @@ func TestPutServerConfigDB_UnclassifiedOnly_200WithIgnoredKeys(t *testing.T) {
 	}
 }
 
-func TestPutServerConfigDB_MixedLayer1AndUnclassified_AppliedAndIgnored(t *testing.T) {
+func TestPutServerConfigDB_MixedLayer1AndUnclassified_422Rejected(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 
 	// Mix of Layer-1 (admin_emails) and unclassified (runtimes, workspace_path).
+	// The whole request must be rejected when unclassified keys are present.
 	body := `{
 		"workspace_path": "/tmp/ws",
 		"server": {
@@ -420,8 +422,8 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_AppliedAndIgnored(t *testi
 	rr := httptest.NewRecorder()
 	srv.handlePutServerConfigDB(rr, req, ops)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
 	}
 
 	var resp map[string]interface{}
@@ -429,38 +431,31 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_AppliedAndIgnored(t *testi
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
 
-	if resp["status"] != "saved" {
-		t.Errorf("expected status=saved, got %v", resp["status"])
+	if resp["error"] != "unclassified_keys_rejected" {
+		t.Errorf("expected error=unclassified_keys_rejected, got %v", resp["error"])
 	}
 
-	// Layer-1 section was written.
+	// keys should list the rejected unclassified keys.
+	keys, ok := resp["keys"].([]interface{})
+	if !ok || len(keys) == 0 {
+		t.Fatal("expected non-empty keys in 422 response for mixed PUT")
+	}
+	keySet := make(map[string]bool)
+	for _, k := range keys {
+		keySet[k.(string)] = true
+	}
+	if !keySet["runtimes"] {
+		t.Error("expected 'runtimes' in rejected keys")
+	}
+	if !keySet["workspace_path"] {
+		t.Error("expected 'workspace_path' in rejected keys")
+	}
+
+	// Nothing written to store — the entire request was rejected.
 	fakeStore.mu.Lock()
-	_, accessOk := fakeStore.settings["access"]
-	fakeStore.mu.Unlock()
-	if !accessOk {
-		t.Error("expected 'access' section in store after mixed PUT")
-	}
-
-	// ignored_keys should list the unclassified keys.
-	ignored, ok := resp["ignored_keys"].([]interface{})
-	if !ok || len(ignored) == 0 {
-		t.Fatal("expected non-empty ignored_keys for mixed PUT")
-	}
-	ignoredSet := make(map[string]bool)
-	for _, k := range ignored {
-		ignoredSet[k.(string)] = true
-	}
-	if !ignoredSet["runtimes"] {
-		t.Error("expected 'runtimes' in ignored_keys")
-	}
-	if !ignoredSet["workspace_path"] {
-		t.Error("expected 'workspace_path' in ignored_keys")
-	}
-
-	// Verify the Layer-1 data was actually applied.
-	snap := ops.Snapshot()
-	if len(snap.AdminEmails) != 1 || snap.AdminEmails[0] != "admin@test.com" {
-		t.Errorf("expected [admin@test.com], got %v", snap.AdminEmails)
+	defer fakeStore.mu.Unlock()
+	if len(fakeStore.settings) > 0 {
+		t.Error("expected no sections written to store when unclassified keys are present")
 	}
 }
 
