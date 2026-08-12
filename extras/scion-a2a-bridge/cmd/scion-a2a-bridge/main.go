@@ -51,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/integration/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	brokerv1 "github.com/GoogleCloudPlatform/scion/proto/broker/v1"
 )
@@ -157,7 +158,14 @@ func main() {
 	}
 	adminAuth := identity.NewMintingAuth(minter, hubUserID, cfg.Hub.User, "admin", 15*time.Minute)
 
-	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithAuthenticator(adminAuth))
+	transportSrc, transportMode := resolveTransportAuth(log)
+
+	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
+	if transportSrc != nil {
+		hubOpts = append(hubOpts, hubclient.WithTransportAuth(transportSrc, transportMode))
+		log.Info("transport auth enabled for hub client", "mode", transportMode)
+	}
+	adminClient, err := hubclient.New(cfg.Hub.Endpoint, hubOpts...)
 	if err != nil {
 		log.Error("failed to create hub client", "error", err)
 		os.Exit(1)
@@ -169,8 +177,12 @@ func main() {
 
 	metrics := bridge.NewMetrics(prometheus.DefaultRegisterer)
 
-	// Create core bridge.
-	b := bridge.New(store, adminClient, minter, cfg, metrics, log.With("component", "bridge"))
+	// Create core bridge (pass transport auth so per-caller clients inherit it).
+	var bridgeOpts []bridge.BridgeOption
+	if transportSrc != nil {
+		bridgeOpts = append(bridgeOpts, bridge.WithTransportAuth(transportSrc, transportMode))
+	}
+	b := bridge.New(store, adminClient, minter, cfg, metrics, log.With("component", "bridge"), bridgeOpts...)
 
 	// Create broker server and wire the bridge as handler.
 	broker := bridge.NewBrokerServer(b.HandleBrokerMessage, log.With("component", "broker"), ctx)
@@ -413,7 +425,14 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	}
 	adminAuth := identity.NewMintingAuth(minter, hubUserID, cfg.Hub.User, "admin", 15*time.Minute)
 
-	hubClient, err := hubclient.New(cfg.Hub.Endpoint, hubclient.WithAuthenticator(adminAuth))
+	transportSrc, transportMode := resolveTransportAuth(log)
+
+	hubOpts := []hubclient.Option{hubclient.WithAuthenticator(adminAuth)}
+	if transportSrc != nil {
+		hubOpts = append(hubOpts, hubclient.WithTransportAuth(transportSrc, transportMode))
+		log.Info("transport auth enabled for hub client", "mode", transportMode)
+	}
+	hubClient, err := hubclient.New(cfg.Hub.Endpoint, hubOpts...)
 	if err != nil {
 		log.Error("failed to create hub client", "error", err)
 		os.Exit(1)
@@ -426,8 +445,12 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	baseCfg := *cfg
 	snapshot := bridge.NewSnapshotHolder(bridge.BuildSnapshot(*cfg))
 
-	// 8. Create core bridge.
-	b := bridge.New(store, hubClient, minter, cfg, metrics, log.With("component", "bridge"))
+	// 8. Create core bridge (pass transport auth so per-caller clients inherit it).
+	var bridgeOpts []bridge.BridgeOption
+	if transportSrc != nil {
+		bridgeOpts = append(bridgeOpts, bridge.WithTransportAuth(transportSrc, transportMode))
+	}
+	b := bridge.New(store, hubClient, minter, cfg, metrics, log.With("component", "bridge"), bridgeOpts...)
 
 	// Create and wire the NOTIFY accelerator for reduced latency on
 	// blocking SendMessage and SSE streaming. Purely additive — polling
@@ -572,6 +595,30 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	notifier.Stop()
 	b.Shutdown()
 	log.Info("scion-a2a-bridge stopped (standalone)")
+}
+
+// resolveTransportAuth resolves the transport-layer OIDC token source and
+// header mode from settings and environment variables. Returns (nil, 0) when
+// transport auth is not configured.
+func resolveTransportAuth(log *slog.Logger) (transportauth.TokenSource, transportauth.HeaderMode) {
+	src, mode, err := transportauth.FromSettings(
+		&transportauth.TransportSettings{
+			Mode:     os.Getenv("SCION_TRANSPORT_MODE"),
+			Audience: os.Getenv("SCION_TRANSPORT_AUDIENCE"),
+		},
+		nil,
+	)
+	if err != nil {
+		log.Warn("transport auth setup failed, proceeding without", "error", err)
+	}
+	if src == nil {
+		var envErr error
+		src, envErr = transportauth.FromEnv()
+		if envErr != nil {
+			log.Warn("transport auth env detection failed", "error", envErr)
+		}
+	}
+	return src, mode
 }
 
 // applyRuntimeConfig merges runtime config values into the bridge config.

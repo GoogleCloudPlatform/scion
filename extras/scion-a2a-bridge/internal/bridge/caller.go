@@ -14,16 +14,65 @@
 
 package bridge
 
-import "context"
+import (
+	"context"
+	"net/url"
+)
 
 // CallerIdentity holds the per-request caller identity extracted from a
 // validated hub credential. Absent for legacy apiKey/bearer/none modes.
 type CallerIdentity struct {
+	// --- Existing fields (user callers) ---
 	UserID    string
 	Email     string
 	Role      string
-	RawToken  string // The original bearer token for UAT passthrough
-	TokenType string // "uat" or "jwt"
+	RawToken  string // The original bearer token for passthrough
+	TokenType string // "uat", "jwt", or "federation"
+
+	// --- New fields (agent/federation callers) ---
+
+	// AgentID is the agent's UUID (from JWT `sub` claim).
+	// Non-empty only for agent callers (TokenType == "federation").
+	AgentID string
+
+	// IssuerURL is the OIDC issuer URL (from JWT `iss` claim).
+	// Identifies which hub signed the token.
+	IssuerURL string
+
+	// ProjectID is the agent's project (from `project_id` claim).
+	ProjectID string
+
+	// Ancestry is the agent's lineage chain (from `ancestry` claim).
+	Ancestry []string
+}
+
+// IsAgent returns true if this identity represents an agent caller
+// (federation auth, not a local user).
+func (c *CallerIdentity) IsAgent() bool {
+	return c.AgentID != ""
+}
+
+// SenderLabel returns the formatted sender string for Hub messages.
+// Agent callers use "agent:<id>", user callers use "user:<email>".
+func (c *CallerIdentity) SenderLabel() string {
+	if c.IsAgent() {
+		return "agent:" + c.AgentID
+	}
+	return "user:" + c.Email
+}
+
+// CallerKey returns a stable identifier for task-store isolation.
+// For user callers: UserID.
+// For agent callers: "agent:<issuer-host>:<agent-id>".
+func (c *CallerIdentity) CallerKey() string {
+	if c.IsAgent() {
+		u, err := url.Parse(c.IssuerURL)
+		if err != nil || u.Host == "" {
+			return "agent:" + c.AgentID
+		}
+		return "agent:" + u.Host + ":" + c.AgentID
+	}
+	return c.UserID
 }
 
 type callerContextKey struct{}

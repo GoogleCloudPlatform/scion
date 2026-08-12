@@ -27,11 +27,12 @@ import (
 
 // validAuthSchemes lists the recognized auth schemes for validation.
 var validAuthSchemes = map[string]bool{
-	"apiKey": true,
-	"bearer": true,
-	"none":   true,
-	"hubUAT": true,
-	"hubJWT": true,
+	"apiKey":     true,
+	"bearer":     true,
+	"none":       true,
+	"hubUAT":     true,
+	"hubJWT":     true,
+	"federation": true,
 }
 
 // AdminOverlay holds the parsed admin-managed config values.
