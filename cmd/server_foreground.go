@@ -604,6 +604,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 								Bus:       webSpoke,
 								Observer:  true,
 							})
+							hubSrv.SetWebChatStore(webStore)
 							log.Printf("Message broker spoke added: name=web channel_id=web observer=true")
 						}
 					}

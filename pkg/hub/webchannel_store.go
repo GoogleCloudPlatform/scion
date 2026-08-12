@@ -50,6 +50,18 @@ type WebChatStore interface {
 	// Records the last channel a message was seen on, so the hub can route
 	// untagged replies back to the channel the user last spoke from.
 	RecordChannel(ctx context.Context, userID, projectID, agentID, channel string, messageAt time.Time) error
+
+	// GetThreadPrefs returns the display preferences for a (user, project, agent) thread.
+	// Returns default prefs (visibility_mode = "conversation") if no row exists.
+	GetThreadPrefs(ctx context.Context, userID, projectID, agentID string) (ThreadPrefs, error)
+
+	// SetThreadPrefs upserts the display preferences for a (user, project, agent) thread.
+	SetThreadPrefs(ctx context.Context, userID, projectID, agentID string, prefs ThreadPrefs) error
+}
+
+// ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
+type ThreadPrefs struct {
+	VisibilityMode string `json:"visibility_mode"`
 }
 
 // NewWebChatStore creates a new WebChatStore backed by the given database.
@@ -144,6 +156,36 @@ DO UPDATE SET
 	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, channel, messageAt)
 	if err != nil {
 		return fmt.Errorf("webchat store: record channel: %w", err)
+	}
+	return nil
+}
+
+// GetThreadPrefs returns the display preferences for the given (user, project, agent) triple.
+// Returns default prefs (visibility_mode = "conversation") if no row exists.
+func (s *sqliteWebChatStore) GetThreadPrefs(ctx context.Context, userID, projectID, agentID string) (ThreadPrefs, error) {
+	const query = `SELECT visibility_mode FROM webchat_thread_prefs WHERE user_id = ? AND project_id = ? AND agent_id = ?`
+	var mode string
+	err := s.db.QueryRowContext(ctx, query, userID, projectID, agentID).Scan(&mode)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return ThreadPrefs{VisibilityMode: "conversation"}, nil
+		}
+		return ThreadPrefs{}, fmt.Errorf("webchat store: get thread prefs: %w", err)
+	}
+	return ThreadPrefs{VisibilityMode: mode}, nil
+}
+
+// SetThreadPrefs upserts the display preferences for the given (user, project, agent) triple.
+func (s *sqliteWebChatStore) SetThreadPrefs(ctx context.Context, userID, projectID, agentID string, prefs ThreadPrefs) error {
+	const query = `
+INSERT INTO webchat_thread_prefs (user_id, project_id, agent_id, visibility_mode)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (user_id, project_id, agent_id)
+DO UPDATE SET visibility_mode = excluded.visibility_mode
+`
+	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, prefs.VisibilityMode)
+	if err != nil {
+		return fmt.Errorf("webchat store: set thread prefs: %w", err)
 	}
 	return nil
 }

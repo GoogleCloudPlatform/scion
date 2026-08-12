@@ -41,9 +41,11 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
+import type { VisibilityMode, VisibilityChangeDetail } from './chat-visibility-toggle.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
+import './chat-visibility-toggle.js';
 
 /** Maximum messages kept in the buffer. */
 const MAX_BUFFER = 500;
@@ -75,7 +77,11 @@ export class ScionChatThread extends LitElement {
   canSend = false;
 
   @property()
-  visibilityMode: 'conversation' | 'verbose' | 'full' = 'conversation';
+  visibilityMode: VisibilityMode = 'conversation';
+
+  /** Whether the visibility toggle is shown in the header. */
+  @property({ type: Boolean })
+  showVisibilityToggle = false;
 
   @state() private messages: Message[] = [];
   @state() private messageMap = new Map<string, Message>();
@@ -93,6 +99,7 @@ export class ScionChatThread extends LitElement {
   private nextCursor: string | null = null;
   private lastKnownTimestamp: string | null = null;
   private hadError = false;
+  private fetchId = 0;
 
   static override styles = css`
     :host {
@@ -262,7 +269,84 @@ export class ScionChatThread extends LitElement {
   loadHistory(): void {
     if (this.loaded) return;
     this.loaded = true;
-    void this.initialLoad();
+    void this.loadPrefsAndHistory();
+  }
+
+  /** Load saved preferences first, then fetch history. */
+  private async loadPrefsAndHistory(): Promise<void> {
+    await this.loadPrefs();
+    await this.initialLoad();
+  }
+
+  /** Load the saved visibility mode pref from the server. */
+  private async loadPrefs(): Promise<void> {
+    if (!this.agentId) return;
+    try {
+      const res = await apiFetch(`/api/v1/chat/prefs?agentId=${encodeURIComponent(this.agentId)}`);
+      if (res.ok) {
+        const data = (await res.json()) as { visibility_mode?: string };
+        if (data.visibility_mode && ['conversation', 'verbose', 'full'].includes(data.visibility_mode)) {
+          this.visibilityMode = data.visibility_mode as VisibilityMode;
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to load chat prefs, using defaults', err);
+    }
+  }
+
+  /** Save the visibility mode pref to the server. */
+  private async savePrefs(mode: VisibilityMode): Promise<void> {
+    if (!this.agentId) return;
+    try {
+      const res = await apiFetch(`/api/v1/chat/prefs?agentId=${encodeURIComponent(this.agentId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visibility_mode: mode }),
+      });
+      if (!res.ok) {
+        console.warn('Failed to save chat prefs:', res.status, res.statusText);
+      }
+    } catch (err) {
+      console.warn('Failed to save chat prefs', err);
+    }
+  }
+
+  /** Handle visibility mode change from the toggle. */
+  private handleVisibilityChange(e: CustomEvent<VisibilityChangeDetail>): void {
+    const newMode = e.detail.mode;
+    if (newMode === this.visibilityMode) return;
+    this.visibilityMode = newMode;
+    void this.savePrefs(newMode);
+    // Clear and re-fetch with the new filter.
+    void this.refetchWithNewFilter();
+  }
+
+  /** Clear messages and re-fetch history with the current visibility filter. */
+  private async refetchWithNewFilter(): Promise<void> {
+    const currentId = ++this.fetchId;
+    this.messageMap.clear();
+    this.messages = [];
+    this.nextCursor = null;
+    this.lastKnownTimestamp = null;
+    this.hasOlderMessages = true;
+
+    // Stop the stream, re-fetch, and restart.
+    this.stopStream();
+    this.loading = true;
+    this.error = null;
+    try {
+      await this.fetchHistory();
+      if (currentId !== this.fetchId) return;
+      this.startStream();
+    } catch (err) {
+      if (currentId !== this.fetchId) return;
+      this.error = err instanceof Error ? err.message : 'Failed to load messages';
+    } finally {
+      if (currentId === this.fetchId) {
+        this.loading = false;
+        this.scrollToBottom();
+      }
+    }
   }
 
   /** Stop the SSE stream. Called on tab hide / disconnect. */
@@ -289,20 +373,52 @@ export class ScionChatThread extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
       this.loading = false;
-      // On initial load, scroll to bottom
       this.scrollToBottom();
     }
   }
 
+  /** Check whether a message should be shown given the current visibility mode. */
+  private shouldShowMessage(msg: Message): boolean {
+    const vis = msg.visibility || 'normal';
+    switch (this.visibilityMode) {
+      case 'conversation':
+        return vis === 'normal';
+      case 'verbose':
+        return vis === 'normal' || vis === 'verbose';
+      case 'full':
+        return true;
+    }
+  }
+
+  /** Build the visibility query params based on the current mode. */
+  private appendVisibilityParams(params: URLSearchParams): void {
+    switch (this.visibilityMode) {
+      case 'conversation':
+        params.append('visibility', 'normal');
+        break;
+      case 'verbose':
+        params.append('visibility', 'normal');
+        params.append('visibility', 'verbose');
+        break;
+      case 'full':
+        // No filter — show everything.
+        break;
+    }
+  }
+
   private async fetchHistory(cursor?: string): Promise<void> {
+    const currentId = this.fetchId;
     const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
     if (cursor) {
       params.set('cursor', cursor);
     }
+    this.appendVisibilityParams(params);
 
     const res = await apiFetch(
-      `/api/v1/agents/${this.agentId}/messages?${params.toString()}`
+      `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages?${params.toString()}`
     );
+
+    if (currentId !== this.fetchId) return;
 
     if (!res.ok) {
       throw new Error(await extractApiError(res, 'Failed to fetch messages'));
@@ -334,15 +450,18 @@ export class ScionChatThread extends LitElement {
     // during a single timeout gap, intermediate messages may be missed.
     if (!this.lastKnownTimestamp) return;
 
+    const currentId = this.fetchId;
     const params = new URLSearchParams({
       limit: String(HISTORY_PAGE_SIZE),
       before: new Date().toISOString(),
     });
+    this.appendVisibilityParams(params);
 
     const res = await apiFetch(
-      `/api/v1/agents/${this.agentId}/messages?${params.toString()}`
+      `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages?${params.toString()}`
     );
 
+    if (currentId !== this.fetchId) return;
     if (!res.ok) return;
 
     const data = (await res.json()) as { items?: Message[] };
@@ -385,7 +504,7 @@ export class ScionChatThread extends LitElement {
   private startStream(): void {
     if (!this.isConnected || this.eventSource || !this.agentId) return;
 
-    const url = `/api/v1/agents/${this.agentId}/messages/stream`;
+    const url = `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages/stream`;
     this.eventSource = new EventSource(url);
     this.streaming = true;
 
@@ -482,7 +601,7 @@ export class ScionChatThread extends LitElement {
     this.sendError = null;
 
     try {
-      const res = await apiFetch(`/api/v1/agents/${this.agentId}/message`, {
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(this.agentId)}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -528,13 +647,23 @@ export class ScionChatThread extends LitElement {
   }
 
   private renderStreamBar() {
-    if (!this.streaming) return nothing;
+    // Show the bar when streaming OR when the toggle is visible (they share the row).
+    if (!this.streaming && !this.showVisibilityToggle) return nothing;
     return html`
       <div class="stream-bar">
         <span class="stream-indicator">
-          <span class="stream-dot"></span>
-          Live
+          ${this.streaming
+            ? html`<span class="stream-dot"></span> Live`
+            : nothing}
         </span>
+        ${this.showVisibilityToggle
+          ? html`
+              <scion-chat-visibility-toggle
+                mode=${this.visibilityMode}
+                @visibility-change=${this.handleVisibilityChange}
+              ></scion-chat-visibility-toggle>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -632,7 +761,11 @@ export class ScionChatThread extends LitElement {
         continue;
       }
 
-      // Grouping: consecutive messages from same sender within GROUP_WINDOW_MS
+      // Visibility filter: skip messages that don't match the current mode.
+      // The message stays in the map so mode switches show it without re-fetch.
+      if (!this.shouldShowMessage(msg)) continue;
+
+      // Grouping: consecutive *visible* messages from same sender within GROUP_WINDOW_MS
       const msgTime = d.getTime();
       const sameSender = msg.sender === prevSender;
       const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
@@ -652,6 +785,10 @@ export class ScionChatThread extends LitElement {
           ?urgent=${msg.urgent ?? false}
           ?broadcasted=${msg.broadcasted ?? false}
           channel=${msg.channel || ''}
+          visibility=${msg.visibility || 'normal'}
+          messageType=${msg.type || ''}
+          dispatchState=${msg.dispatchState || ''}
+          dispatchFailureReason=${msg.dispatchFailureReason || ''}
           .attachments=${msg.attachments || []}
         ></scion-chat-message>
       `);
