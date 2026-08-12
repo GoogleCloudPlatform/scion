@@ -290,6 +290,7 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	limit := clampLimit(opts.Limit)
 	entities, err := query.
 		Order(message.ByCreated(entsql.OrderDesc())).
+		Order(message.ByID(entsql.OrderDesc())).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
