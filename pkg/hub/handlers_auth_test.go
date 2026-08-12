@@ -422,7 +422,7 @@ func TestCLIAuthProviders_ReturnsConfiguredProviders(t *testing.T) {
 				ClientSecret: "device-gh-secret",
 			},
 		},
-	})
+	}, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/auth/providers?clientType=device", nil)
 	rec := httptest.NewRecorder()

@@ -19,11 +19,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -106,20 +109,70 @@ func oauthProviderOrder() []string {
 	return hubclient.OAuthProviderOrder()
 }
 
+// oidcDiscoveryCache caches the OIDC discovery document with a TTL.
+// If the discovery fetch fails while a stale entry exists, the stale entry
+// is returned — this provides resilience against transient IdP outages.
+type oidcDiscoveryCache struct {
+	mu        sync.RWMutex
+	doc       *OIDCDiscoveryDoc
+	fetchedAt time.Time
+	ttl       time.Duration // default: 1 hour
+}
+
+// get returns the cached discovery document, fetching it if stale or absent.
+func (c *oidcDiscoveryCache) get(issuerURL string, client *http.Client) (*OIDCDiscoveryDoc, error) {
+	c.mu.RLock()
+	if c.doc != nil && time.Since(c.fetchedAt) < c.ttl {
+		doc := c.doc
+		c.mu.RUnlock()
+		return doc, nil
+	}
+	staleDoc := c.doc
+	c.mu.RUnlock()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double-check after acquiring write lock (another goroutine may have refreshed).
+	if c.doc != nil && time.Since(c.fetchedAt) < c.ttl {
+		return c.doc, nil
+	}
+
+	doc, err := discoverOIDCEndpoints(issuerURL, client)
+	if err != nil {
+		if staleDoc != nil {
+			slog.Warn("OIDC discovery refresh failed, using stale cache", "error", err)
+			return staleDoc, nil
+		}
+		return nil, err
+	}
+
+	c.doc = doc
+	c.fetchedAt = time.Now()
+	return doc, nil
+}
+
 // OAuthService handles OAuth operations for authentication.
 type OAuthService struct {
-	config     OAuthConfig
-	httpClient *http.Client
+	config          OAuthConfig
+	oidcLoginConfig *config.OIDCLoginConfig // nil when OIDC login is disabled
+	httpClient      *http.Client
+	oidcCache       *oidcDiscoveryCache // lazy-initialized when oidcLoginConfig != nil
 }
 
 // NewOAuthService creates a new OAuth service.
-func NewOAuthService(config OAuthConfig) *OAuthService {
-	return &OAuthService{
-		config: config,
+func NewOAuthService(cfg OAuthConfig, oidcLoginCfg *config.OIDCLoginConfig) *OAuthService {
+	svc := &OAuthService{
+		config:          cfg,
+		oidcLoginConfig: oidcLoginCfg,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}
+	if oidcLoginCfg != nil && oidcLoginCfg.Enabled {
+		svc.oidcCache = &oidcDiscoveryCache{ttl: 1 * time.Hour}
+	}
+	return svc
 }
 
 // getClientConfig returns the appropriate OAuth client config for the given client type.
@@ -139,6 +192,14 @@ func (s *OAuthService) getClientConfig(clientType OAuthClientType) OAuthClientCo
 // IsProviderConfiguredForClient returns true if the specified provider is configured
 // for the given client type.
 func (s *OAuthService) IsProviderConfiguredForClient(clientType OAuthClientType, provider string) bool {
+	if provider == hubclient.OAuthProviderOIDC {
+		// V1: OIDC login is web-only
+		return clientType == OAuthClientTypeWeb &&
+			s.oidcLoginConfig != nil &&
+			s.oidcLoginConfig.Enabled &&
+			s.oidcLoginConfig.ClientID != "" &&
+			s.oidcLoginConfig.IssuerURL != ""
+	}
 	cfg := s.getClientConfig(clientType)
 	return cfg.IsProviderConfigured(provider)
 }
@@ -212,6 +273,8 @@ func (s *OAuthService) GetAuthorizationURLForClient(clientType OAuthClientType, 
 		return s.getGoogleAuthURLWithConfig(cfg.Google, callbackURL, state)
 	case hubclient.OAuthProviderGitHub:
 		return s.getGitHubAuthURLWithConfig(cfg.GitHub, callbackURL, state)
+	case hubclient.OAuthProviderOIDC:
+		return s.getOIDCAuthURL(callbackURL, state)
 	default:
 		return "", fmt.Errorf("unsupported OAuth provider: %s", provider)
 	}
@@ -282,6 +345,8 @@ func (s *OAuthService) ExchangeCodeForClient(ctx context.Context, clientType OAu
 		return s.exchangeGoogleCodeWithConfig(ctx, cfg.Google, code, callbackURL)
 	case "github":
 		return s.exchangeGitHubCodeWithConfig(ctx, cfg.GitHub, code, callbackURL)
+	case hubclient.OAuthProviderOIDC:
+		return s.exchangeOIDCCode(ctx, code, callbackURL)
 	default:
 		return nil, fmt.Errorf("unsupported OAuth provider: %s", provider)
 	}
@@ -831,4 +896,169 @@ func (s *OAuthService) pollGitHubDeviceToken(ctx context.Context, cfg OAuthProvi
 	}
 
 	return nil, fmt.Errorf("device token poll failed: %s - %s", resp.Status, string(body))
+}
+
+// --- OIDC Login Methods ---
+
+// OIDCDisplayName returns the human-readable name for the OIDC login provider.
+// Falls back to "SSO" if no display name is configured.
+func (s *OAuthService) OIDCDisplayName() string {
+	if s.oidcLoginConfig != nil && s.oidcLoginConfig.DisplayName != "" {
+		return s.oidcLoginConfig.DisplayName
+	}
+	return "SSO"
+}
+
+// oidcUserInfoResponse represents the standard OIDC userinfo response.
+type oidcUserInfoResponse struct {
+	Sub               string `json:"sub"`
+	Email             string `json:"email"`
+	EmailVerified     bool   `json:"email_verified"`
+	Name              string `json:"name"`
+	PreferredUsername string `json:"preferred_username"`
+	Picture           string `json:"picture"`
+}
+
+// oidcScopes returns the configured scopes or the default OIDC scopes.
+func (s *OAuthService) oidcScopes() string {
+	if s.oidcLoginConfig != nil && len(s.oidcLoginConfig.Scopes) > 0 {
+		return strings.Join(s.oidcLoginConfig.Scopes, " ")
+	}
+	return "openid email profile"
+}
+
+// getOIDCAuthURL generates an authorization URL for the configured OIDC provider.
+func (s *OAuthService) getOIDCAuthURL(callbackURL, state string) (string, error) {
+	if s.oidcLoginConfig == nil || !s.oidcLoginConfig.Enabled {
+		return "", fmt.Errorf("OIDC login is not configured")
+	}
+
+	doc, err := s.oidcCache.get(s.oidcLoginConfig.IssuerURL, s.httpClient)
+	if err != nil {
+		return "", fmt.Errorf("OIDC discovery failed: %w", err)
+	}
+
+	u, err := url.Parse(doc.AuthorizationEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid authorization endpoint URL: %w", err)
+	}
+	q := u.Query()
+	q.Set("client_id", s.oidcLoginConfig.ClientID)
+	q.Set("redirect_uri", callbackURL)
+	q.Set("response_type", "code")
+	q.Set("scope", s.oidcScopes())
+	q.Set("state", state)
+	u.RawQuery = q.Encode()
+
+	return u.String(), nil
+}
+
+// exchangeOIDCCode exchanges an OIDC authorization code for user information.
+func (s *OAuthService) exchangeOIDCCode(ctx context.Context, code, callbackURL string) (*OAuthUserInfo, error) {
+	if s.oidcLoginConfig == nil || !s.oidcLoginConfig.Enabled {
+		return nil, fmt.Errorf("OIDC login is not configured")
+	}
+
+	doc, err := s.oidcCache.get(s.oidcLoginConfig.IssuerURL, s.httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("OIDC discovery failed: %w", err)
+	}
+
+	// Reuse the existing generic token exchange
+	tokenResp, err := s.exchangeCodeForToken(ctx, doc.TokenEndpoint,
+		s.oidcLoginConfig.ClientID, s.oidcLoginConfig.ClientSecret,
+		code, callbackURL)
+	if err != nil {
+		return nil, fmt.Errorf("OIDC token exchange failed: %w", err)
+	}
+
+	return s.getOIDCUserInfo(ctx, tokenResp.AccessToken, doc.UserinfoEndpoint)
+}
+
+// getOIDCUserInfo fetches user information from the OIDC userinfo endpoint.
+func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinfoURL string) (*OAuthUserInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", userinfoURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create userinfo request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch OIDC userinfo: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		// Limit error body to 1 KB to avoid OOM on malicious responses.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		return nil, fmt.Errorf("OIDC userinfo endpoint returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var userInfo oidcUserInfoResponse
+	// Limit userinfo response to 1 MB to prevent OOM from oversized payloads.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&userInfo); err != nil {
+		return nil, fmt.Errorf("failed to decode OIDC userinfo response: %w", err)
+	}
+
+	// The "sub" claim is the primary user identifier in OIDC; it must be present.
+	if userInfo.Sub == "" {
+		return nil, fmt.Errorf("OIDC provider did not return a 'sub' claim; the identity provider must include a subject identifier")
+	}
+
+	if userInfo.Email == "" {
+		return nil, fmt.Errorf("OIDC provider did not return an email claim; ensure the 'email' scope is requested and the user has an email address configured in the identity provider")
+	}
+
+	if !userInfo.EmailVerified {
+		return nil, fmt.Errorf("OIDC provider returned an unverified email address %q; "+
+			"the user must verify their email in the identity provider before logging in", userInfo.Email)
+	}
+
+	// Determine display name: prefer Name, fall back to PreferredUsername, then Email.
+	displayName := userInfo.Name
+	if displayName == "" {
+		displayName = userInfo.PreferredUsername
+	}
+	if displayName == "" {
+		displayName = userInfo.Email
+	}
+
+	return &OAuthUserInfo{
+		ID:          userInfo.Sub,
+		Email:       userInfo.Email,
+		DisplayName: displayName,
+		AvatarURL:   userInfo.Picture,
+		Provider:    hubclient.OAuthProviderOIDC,
+	}, nil
+}
+
+// validateOIDCLoginConfig validates the OIDC login configuration at startup.
+// It ensures all required fields are present and the IssuerURL is well-formed.
+func validateOIDCLoginConfig(cfg *config.OIDCLoginConfig) error {
+	if cfg.IssuerURL == "" {
+		return fmt.Errorf("issuerUrl is required when OIDC login is enabled")
+	}
+	parsed, err := url.Parse(cfg.IssuerURL)
+	if err != nil {
+		return fmt.Errorf("issuerUrl is not a valid URL: %w", err)
+	}
+	// Require https, but allow http for localhost/127.0.0.1 (local dev).
+	host := parsed.Hostname()
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && (host == "localhost" || host == "127.0.0.1")) {
+		return fmt.Errorf("issuerUrl must use https scheme (got %q)", parsed.Scheme)
+	}
+	if parsed.RawQuery != "" {
+		return fmt.Errorf("issuerUrl must not contain query parameters")
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("issuerUrl must not contain a fragment")
+	}
+	if cfg.ClientID == "" {
+		return fmt.Errorf("clientId is required when OIDC login is enabled")
+	}
+	if cfg.ClientSecret == "" {
+		return fmt.Errorf("clientSecret is required when OIDC login is enabled")
+	}
+	return nil
 }

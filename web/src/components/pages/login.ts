@@ -48,16 +48,10 @@ export class ScionLoginPage extends LitElement {
   returnTo = '/';
 
   /**
-   * Whether Google OAuth is configured (fetched from server)
+   * Available OAuth providers (fetched from server)
    */
   @state()
-  private googleEnabled = false;
-
-  /**
-   * Whether GitHub OAuth is configured (fetched from server)
-   */
-  @state()
-  private githubEnabled = false;
+  private _providers: OAuthProvider[] = [];
 
   /**
    * Whether the server is in proxy auth mode (e.g., behind IAP)
@@ -332,13 +326,36 @@ export class ScionLoginPage extends LitElement {
     try {
       const resp = await fetch('/auth/providers');
       if (resp.ok) {
-        const data = (await resp.json()) as Record<string, unknown>;
-        this.googleEnabled = !!data.google;
-        this.githubEnabled = !!data.github;
+        const data = (await resp.json()) as {
+          providers?: { id: string; name: string; enabled: boolean }[];
+          authMode?: string;
+          google?: boolean;
+          github?: boolean;
+        };
+
+        if (data.providers) {
+          // New-style response with provider list
+          this._providers = data.providers.map((p) => ({
+              id: p.id,
+              name: p.name,
+              icon: p.id,
+              available: p.enabled,
+            }));
+        } else {
+          // Legacy fallback (defensive — should not occur after deploy)
+          this._providers = [];
+          if (data.google) {
+            this._providers.push({ id: 'google', name: 'Google', icon: 'google', available: true });
+          }
+          if (data.github) {
+            this._providers.push({ id: 'github', name: 'GitHub', icon: 'github', available: true });
+          }
+        }
+
         this._proxyMode = data.authMode === 'proxy';
       }
     } catch {
-      // If the fetch fails, leave providers disabled
+      // If the fetch fails, leave providers empty
     } finally {
       this._providersLoading = false;
     }
@@ -429,20 +446,7 @@ export class ScionLoginPage extends LitElement {
   }
 
   private getProviders(): OAuthProvider[] {
-    return [
-      {
-        id: 'google',
-        name: 'Google',
-        icon: 'google',
-        available: this.googleEnabled,
-      },
-      {
-        id: 'github',
-        name: 'GitHub',
-        icon: 'github',
-        available: this.githubEnabled,
-      },
-    ];
+    return this._providers;
   }
 
   private renderProvider(provider: OAuthProvider) {

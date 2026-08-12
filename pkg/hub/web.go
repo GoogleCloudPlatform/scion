@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
@@ -1593,7 +1594,7 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate provider
-	if provider != "google" && provider != "github" {
+	if !hubclient.IsKnownOAuthProvider(provider) {
 		http.Error(w, "unsupported OAuth provider", http.StatusBadRequest)
 		return
 	}
@@ -1650,7 +1651,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	provider := strings.TrimPrefix(r.URL.Path, "/auth/callback/")
 	provider = strings.TrimSuffix(provider, "/")
 
-	if provider != "google" && provider != "github" {
+	if !hubclient.IsKnownOAuthProvider(provider) {
 		http.Error(w, "unsupported OAuth provider", http.StatusBadRequest)
 		return
 	}
@@ -1914,17 +1915,39 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 // handleAuthProviders returns which OAuth providers are enabled for web login.
 // Route: GET /auth/providers
 func (ws *WebServer) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]interface{}{
-		"google": false,
-		"github": false,
+	type providerInfo struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Enabled bool   `json:"enabled"`
 	}
+
+	resp := struct {
+		Providers []providerInfo `json:"providers"`
+		AuthMode  string         `json:"authMode,omitempty"`
+	}{}
+
 	// In proxy mode, no OAuth providers are active (auth is handled by the proxy).
 	if ws.config.AuthMode == "proxy" {
-		resp["authMode"] = "proxy"
+		resp.AuthMode = "proxy"
 	} else if ws.oauthService != nil {
-		resp["google"] = ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, "google")
-		resp["github"] = ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, "github")
+		for _, pid := range hubclient.OAuthProviderOrder() {
+			enabled := ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, pid)
+			if pid == hubclient.OAuthProviderOIDC && !enabled {
+				continue // Don't list OIDC if not configured
+			}
+			info := providerInfo{ID: pid, Enabled: enabled}
+			switch pid {
+			case hubclient.OAuthProviderGoogle:
+				info.Name = "Google"
+			case hubclient.OAuthProviderGitHub:
+				info.Name = "GitHub"
+			case hubclient.OAuthProviderOIDC:
+				info.Name = ws.oauthService.OIDCDisplayName()
+			}
+			resp.Providers = append(resp.Providers, info)
+		}
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
