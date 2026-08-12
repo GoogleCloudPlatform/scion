@@ -94,7 +94,7 @@ To prevent lateral privilege escalation, Scion implements a strict two-layer del
 - **Layer 2: GCP IAM (`actAs`)**: When `gcp_iam_check_mode` is set to `"enforce"`, the Hub performs an out-of-band call via Google's **Policy Troubleshooter v3 API** to verify that the caller's GCP principal possesses `iam.serviceAccounts.actAs` permission on the target service account.
 
 Key security attributes of the GCP IAM check include:
-- **Fail-Closed Design**: If the Policy Troubleshooter returns an indeterminate result (due to conditional bindings or insufficient Hub reviewer permissions), the check fails closed, and assignment is blocked. There is no fallback to insecure alternatives like `getIamPolicy`.
+- **Fail-Closed Design**: If the Policy Troubleshooter returns an indeterminate result (due to conditional bindings, or due to insufficient Hub reviewer permissions when configured to fail-closed), the check fails closed and assignment is blocked. There is no fallback to insecure alternatives like getIamPolicy.
 - **Asymmetric Caching**: Approved assignments are cached for **60 seconds**, and denials are cached for **10 seconds**. Indeterminate or error states are never cached.
 - **Auditing**: Every service account assignment check—both allowed and denied—generates a permanent audit log entry detailing the principal, target service account, and Policy Troubleshooter decision.
 - **Hub-Scoped SAs**: Real hub-scoped service accounts can be assigned across projects. However, to prevent privilege bypasses, hub-scoped assignments are immediately rejected if `gcp_iam_check_mode` is not set to `"enforce"`.
