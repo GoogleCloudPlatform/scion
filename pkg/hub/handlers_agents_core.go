@@ -305,6 +305,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "projectId is required", nil)
 		return
 	}
+
+	// Resolve project slug to UUID if needed (mirrors listAgents pattern).
+	if gouuid.Validate(req.ProjectID) != nil {
+		if project, err := s.store.GetProjectBySlug(ctx, req.ProjectID); err == nil && project != nil {
+			req.ProjectID = project.ID
+		}
+	}
+
 	if req.CleanupMode != "" && req.CleanupMode != "strict" && req.CleanupMode != "force" {
 		ValidationError(w, "cleanupMode must be 'strict' or 'force'", nil)
 		return
