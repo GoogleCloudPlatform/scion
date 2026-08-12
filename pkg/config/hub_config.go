@@ -102,10 +102,19 @@ func DefaultHubID() string {
 	return hex.EncodeToString(h[:6]) // 12 hex chars
 }
 
-// ResolveHubID returns the configured HubID if set, otherwise generates one from hostname.
+// ResolveHubID returns the configured HubID if set. On Cloud Run (K_SERVICE
+// env var present) it derives a stable ID from the service name instead of
+// the hostname, which changes per instance/revision. Falls back to the
+// hostname-based DefaultHubID for local/workstation use.
 func (c *HubServerConfig) ResolveHubID() string {
 	if c.HubID != "" {
 		return c.HubID
+	}
+	if kService := os.Getenv("K_SERVICE"); kService != "" {
+		slog.Warn("hub_id not explicitly configured on Cloud Run; deriving from K_SERVICE — set server.hub.hub_id in settings.yaml for stability",
+			"k_service", kService)
+		h := sha256.Sum256([]byte(kService))
+		return hex.EncodeToString(h[:6])
 	}
 	return DefaultHubID()
 }

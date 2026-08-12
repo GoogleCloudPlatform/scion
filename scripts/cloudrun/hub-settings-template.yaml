@@ -7,6 +7,7 @@ server:
   hub:
     port: 8080
     host: "0.0.0.0"
+    hub_id: "__HUB_ID__"
     public_url: "__SERVICE_URL__"
     gcp_project_id: "__PROJECT_ID__"
   database:
