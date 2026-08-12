@@ -175,12 +175,31 @@ interface V1TelemetryConfig {
   local?: V1TelemetryLocalConfig;
 }
 
+interface V1CloudRunConfig {
+  project?: string;
+  region?: string;
+}
+
 interface V1RuntimeConfig {
   type?: string;
   host?: string;
   context?: string;
   namespace?: string;
   sync?: string;
+  gke?: boolean;
+  list_all_namespaces?: boolean;
+  env?: Record<string, string>;
+  cloudrun?: V1CloudRunConfig;
+}
+
+interface V1ProfileConfig {
+  runtime?: string;
+  default_template?: string;
+  default_harness_config?: string;
+  image_registry?: string;
+  env?: Record<string, string>;
+  resources?: ResourceSpec;
+  [key: string]: unknown;
 }
 
 interface ResourceSpec {
@@ -370,6 +389,10 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'server.github_app.private_key_path': 'GitHub App Private Key Path',
   // notifications section
   'server.notification_channels': 'Notification Channels',
+  // runtimes / profiles / harness_configs section
+  runtimes: 'Runtimes',
+  profiles: 'Profiles',
+  harness_configs: 'Harness Configs',
 };
 
 const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
@@ -535,6 +558,11 @@ export class ScionPageAdminServerConfig extends LitElement {
     projects?: { project_id: string; project_name: string; minted: number }[];
   } | null = null;
 
+  // Runtimes, Profiles & Harness Configs
+  @state() private runtimes: Record<string, V1RuntimeConfig> = {};
+  @state() private profiles: Record<string, V1ProfileConfig> = {};
+  @state() private harnessConfigsMap: Record<string, unknown> = {};
+
   // Keep raw data for sections we don't fully edit
   private rawConfig: ServerConfigResponse | null = null;
 
@@ -628,6 +656,21 @@ export class ScionPageAdminServerConfig extends LitElement {
       margin: 0 0 1rem 0;
       padding-bottom: 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .runtime-card {
+      margin-bottom: 1rem;
+    }
+
+    .runtime-card::part(base) {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius-lg, 0.75rem);
+    }
+
+    .runtime-card::part(header) {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      background: rgba(0, 0, 0, 0.02);
     }
 
     .form-grid {
@@ -1473,7 +1516,14 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.autoExposePortsEnabled = aep.enabled || false;
     }
 
-    // Runtimes, harness_configs, profiles preserved via rawConfig
+    // Runtimes, profiles, harness_configs — deep-copy into editable state
+    this.runtimes = data.runtimes ? JSON.parse(JSON.stringify(data.runtimes)) : {};
+    this.profiles = data.profiles
+      ? (JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>)
+      : {};
+    this.harnessConfigsMap = data.harness_configs
+      ? (JSON.parse(JSON.stringify(data.harness_configs)) as Record<string, unknown>)
+      : {};
 
     // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
     this.settingsTier = data.settings_tier || 'file';
@@ -1703,10 +1753,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       };
     }
 
-    // Preserve runtimes, harness_configs, profiles from raw config
-    if (this.rawConfig?.runtimes) payload.runtimes = this.rawConfig.runtimes;
-    if (this.rawConfig?.harness_configs) payload.harness_configs = this.rawConfig.harness_configs;
-    if (this.rawConfig?.profiles) payload.profiles = this.rawConfig.profiles;
+    // Runtimes, profiles, harness_configs — send edited state
+    if (ok('runtimes') && Object.keys(this.runtimes).length > 0)
+      payload.runtimes = this.runtimes;
+    if (ok('harness_configs') && Object.keys(this.harnessConfigsMap).length > 0)
+      payload.harness_configs = this.harnessConfigsMap;
+    if (ok('profiles') && Object.keys(this.profiles).length > 0)
+      payload.profiles = this.profiles;
 
     return payload;
   }
@@ -1933,10 +1986,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       };
     }
 
-    // Preserve runtimes, harness_configs, profiles from raw config
-    if (this.rawConfig?.runtimes) payload.runtimes = this.rawConfig.runtimes;
-    if (this.rawConfig?.harness_configs) payload.harness_configs = this.rawConfig.harness_configs;
-    if (this.rawConfig?.profiles) payload.profiles = this.rawConfig.profiles;
+    // Runtimes, profiles, harness_configs — send edited state
+    if (ok('runtimes') && Object.keys(this.runtimes).length > 0)
+      payload.runtimes = this.runtimes;
+    if (ok('harness_configs') && Object.keys(this.harnessConfigsMap).length > 0)
+      payload.harness_configs = this.harnessConfigsMap;
+    if (ok('profiles') && Object.keys(this.profiles).length > 0)
+      payload.profiles = this.profiles;
 
     return payload;
   }
@@ -2450,6 +2506,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           >Runtime Broker</sl-tab
         >
         <sl-tab slot="nav" panel="data" ?active=${this.activeTab === 'data'}>Data & Storage</sl-tab>
+        <sl-tab slot="nav" panel="runtimes-profiles" ?active=${this.activeTab === 'runtimes-profiles'}
+          >Runtimes & Profiles</sl-tab
+        >
         <sl-tab slot="nav" panel="auth" ?active=${this.activeTab === 'auth'}>Authentication</sl-tab>
         <sl-tab slot="nav" panel="telemetry" ?active=${this.activeTab === 'telemetry'}
           >Telemetry</sl-tab
@@ -2465,6 +2524,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab-panel name="hub-server">${this.renderHubServerTab()}</sl-tab-panel>
         <sl-tab-panel name="broker">${this.renderBrokerTab()}</sl-tab-panel>
         <sl-tab-panel name="data">${this.renderDataTab()}</sl-tab-panel>
+        <sl-tab-panel name="runtimes-profiles">${this.renderRuntimesProfilesTab()}</sl-tab-panel>
         <sl-tab-panel name="auth">${this.renderAuthTab()}</sl-tab-panel>
         <sl-tab-panel name="telemetry">${this.renderTelemetryTab()}</sl-tab-panel>
         <sl-tab-panel name="github-app">${this.renderGitHubAppTab()}</sl-tab-panel>
@@ -3255,6 +3315,521 @@ export class ScionPageAdminServerConfig extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  // ── Runtimes & Profiles tab ──
+
+  private renderRuntimesProfilesTab() {
+    return html`
+      ${this.renderRuntimesSection()}
+      ${this.renderProfilesSection()}
+      ${this.renderHarnessConfigsSection()}
+    `;
+  }
+
+  // ── Runtimes section ──
+
+  private renderRuntimesSection() {
+    const runtimeNames = Object.keys(this.runtimes);
+    const runtimeReadOnly = this.readOnlyReason('runtimes');
+    return html`
+      <div class="section">
+        ${this.renderSectionHeader('Runtimes', 'runtimes')}
+        ${this.renderSectionMeta('runtimes')}
+        ${runtimeReadOnly
+          ? html`${this.renderReadOnlyBadge(runtimeReadOnly)}`
+          : nothing}
+        ${runtimeNames.length === 0
+          ? html`<p class="hint">No runtimes configured.</p>`
+          : runtimeNames.map((name) => this.renderRuntimeEntry(name, !!runtimeReadOnly))}
+        ${!runtimeReadOnly
+          ? html`
+              <sl-button
+                size="small"
+                variant="default"
+                @click=${() => this.addRuntime()}
+              >
+                <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                Add Runtime
+              </sl-button>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderRuntimeEntry(name: string, readOnly: boolean) {
+    const rt = this.runtimes[name];
+    if (!rt) return nothing;
+    const isCloudRun = rt.type === 'cloudrun' || rt.type === 'cloudrun-instances';
+    return html`
+      <sl-card class="runtime-card">
+        <div slot="header" style="display:flex;align-items:center;justify-content:space-between;">
+          <strong>${name}</strong>
+          ${!readOnly
+            ? html`<sl-button
+                size="small"
+                variant="danger"
+                @click=${() => this.removeRuntime(name)}
+              >
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Remove
+              </sl-button>`
+            : nothing}
+        </div>
+        <div class="form-grid">
+          <div class="form-field">
+            <label>Type</label>
+            <sl-select
+              value=${rt.type || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateRuntimeField(name, 'type', (e.target as HTMLSelectElement).value);
+              }}
+            >
+              <sl-option value="docker">docker</sl-option>
+              <sl-option value="podman">podman</sl-option>
+              <sl-option value="kubernetes">kubernetes</sl-option>
+              <sl-option value="cloudrun">cloudrun</sl-option>
+              <sl-option value="cloudrun-instances">cloudrun-instances</sl-option>
+            </sl-select>
+          </div>
+          <div class="form-field">
+            <label>Sync</label>
+            <sl-input
+              value=${rt.sync || ''}
+              placeholder="e.g. mutagen"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateRuntimeField(name, 'sync', (e.target as HTMLInputElement).value);
+              }}
+            ></sl-input>
+          </div>
+          ${!isCloudRun
+            ? html`
+                <div class="form-field">
+                  <label>Host</label>
+                  <sl-input
+                    value=${rt.host || ''}
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      this.updateRuntimeField(name, 'host', (e.target as HTMLInputElement).value);
+                    }}
+                  ></sl-input>
+                </div>
+                <div class="form-field">
+                  <label>Context</label>
+                  <sl-input
+                    value=${rt.context || ''}
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      this.updateRuntimeField(name, 'context', (e.target as HTMLInputElement).value);
+                    }}
+                  ></sl-input>
+                </div>
+                <div class="form-field">
+                  <label>Namespace</label>
+                  <sl-input
+                    value=${rt.namespace || ''}
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      this.updateRuntimeField(
+                        name,
+                        'namespace',
+                        (e.target as HTMLInputElement).value,
+                      );
+                    }}
+                  ></sl-input>
+                </div>
+              `
+            : html`
+                <div class="form-field">
+                  <label>GCP Project</label>
+                  <sl-input
+                    value=${rt.cloudrun?.project || ''}
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      this.updateRuntimeCloudRun(
+                        name,
+                        'project',
+                        (e.target as HTMLInputElement).value,
+                      );
+                    }}
+                  ></sl-input>
+                </div>
+                <div class="form-field">
+                  <label>GCP Region</label>
+                  <sl-input
+                    value=${rt.cloudrun?.region || ''}
+                    placeholder="e.g. us-central1"
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      this.updateRuntimeCloudRun(
+                        name,
+                        'region',
+                        (e.target as HTMLInputElement).value,
+                      );
+                    }}
+                  ></sl-input>
+                </div>
+              `}
+        </div>
+      </sl-card>
+    `;
+  }
+
+  private updateRuntimeField(
+    name: string,
+    field: keyof V1RuntimeConfig,
+    value: string,
+  ): void {
+    const updated = { ...this.runtimes };
+    updated[name] = { ...updated[name], [field]: value };
+    this.runtimes = updated;
+  }
+
+  private updateRuntimeCloudRun(name: string, field: 'project' | 'region', value: string): void {
+    const updated = { ...this.runtimes };
+    const rt = { ...updated[name] };
+    rt.cloudrun = { ...(rt.cloudrun || {}), [field]: value };
+    updated[name] = rt;
+    this.runtimes = updated;
+  }
+
+  private addRuntime(): void {
+    const baseName = 'new-runtime';
+    let name = baseName;
+    let i = 1;
+    while (this.runtimes[name]) {
+      name = `${baseName}-${i++}`;
+    }
+    this.runtimes = { ...this.runtimes, [name]: { type: 'docker' } };
+  }
+
+  private removeRuntime(name: string): void {
+    const updated = { ...this.runtimes };
+    delete updated[name];
+    this.runtimes = updated;
+  }
+
+  // ── Profiles section ──
+
+  private renderProfilesSection() {
+    const profileNames = Object.keys(this.profiles);
+    const profileReadOnly = this.readOnlyReason('profiles');
+    const runtimeNames = Object.keys(this.runtimes);
+    return html`
+      <div class="section">
+        ${this.renderSectionHeader('Profiles', 'profiles')}
+        ${this.renderSectionMeta('profiles')}
+        ${profileReadOnly
+          ? html`${this.renderReadOnlyBadge(profileReadOnly)}`
+          : nothing}
+        ${profileNames.length === 0
+          ? html`<p class="hint">No profiles configured.</p>`
+          : profileNames.map((name) =>
+              this.renderProfileEntry(name, runtimeNames, !!profileReadOnly),
+            )}
+        ${!profileReadOnly
+          ? html`
+              <sl-button
+                size="small"
+                variant="default"
+                @click=${() => this.addProfile()}
+              >
+                <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                Add Profile
+              </sl-button>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderProfileEntry(name: string, runtimeNames: string[], readOnly: boolean) {
+    const profile = this.profiles[name];
+    if (!profile) return nothing;
+    return html`
+      <sl-card class="runtime-card">
+        <div slot="header" style="display:flex;align-items:center;justify-content:space-between;">
+          <strong>${name}</strong>
+          ${!readOnly
+            ? html`<sl-button
+                size="small"
+                variant="danger"
+                @click=${() => this.removeProfile(name)}
+              >
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Remove
+              </sl-button>`
+            : nothing}
+        </div>
+        <div class="form-grid">
+          <div class="form-field">
+            <label>Runtime</label>
+            <span class="hint">Which named runtime this profile uses</span>
+            <sl-select
+              value=${profile.runtime || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateProfileField(name, 'runtime', (e.target as HTMLSelectElement).value);
+              }}
+            >
+              ${runtimeNames.map(
+                (rt) => html`<sl-option value=${rt}>${rt}</sl-option>`,
+              )}
+            </sl-select>
+          </div>
+          <div class="form-field">
+            <label>Image Registry</label>
+            <sl-input
+              value=${profile.image_registry || ''}
+              placeholder="Override image registry"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateProfileField(
+                  name,
+                  'image_registry',
+                  (e.target as HTMLInputElement).value,
+                );
+              }}
+            ></sl-input>
+          </div>
+          <div class="form-field">
+            <label>Default Template</label>
+            <sl-input
+              value=${profile.default_template || ''}
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateProfileField(
+                  name,
+                  'default_template',
+                  (e.target as HTMLInputElement).value,
+                );
+              }}
+            ></sl-input>
+          </div>
+          <div class="form-field">
+            <label>Default Harness Config</label>
+            <sl-input
+              value=${profile.default_harness_config || ''}
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateProfileField(
+                  name,
+                  'default_harness_config',
+                  (e.target as HTMLInputElement).value,
+                );
+              }}
+            ></sl-input>
+          </div>
+          <div class="form-field">
+            <label>CPU Request</label>
+            <sl-input
+              value=${profile.resources?.requests?.cpu || ''}
+              placeholder="e.g. 500m"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateProfileResource(name, 'requests', 'cpu', (e.target as HTMLInputElement).value);
+              }}
+            ></sl-input>
+          </div>
+          <div class="form-field">
+            <label>Memory Request</label>
+            <sl-input
+              value=${profile.resources?.requests?.memory || ''}
+              placeholder="e.g. 512Mi"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateProfileResource(name, 'requests', 'memory', (e.target as HTMLInputElement).value);
+              }}
+            ></sl-input>
+          </div>
+          <div class="form-field">
+            <label>CPU Limit</label>
+            <sl-input
+              value=${profile.resources?.limits?.cpu || ''}
+              placeholder="e.g. 2000m"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateProfileResource(name, 'limits', 'cpu', (e.target as HTMLInputElement).value);
+              }}
+            ></sl-input>
+          </div>
+          <div class="form-field">
+            <label>Memory Limit</label>
+            <sl-input
+              value=${profile.resources?.limits?.memory || ''}
+              placeholder="e.g. 4Gi"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateProfileResource(name, 'limits', 'memory', (e.target as HTMLInputElement).value);
+              }}
+            ></sl-input>
+          </div>
+          <div class="form-field">
+            <label>Disk</label>
+            <sl-input
+              value=${profile.resources?.disk || ''}
+              placeholder="e.g. 20Gi"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateProfileResource(name, 'disk', '', (e.target as HTMLInputElement).value);
+              }}
+            ></sl-input>
+          </div>
+        </div>
+      </sl-card>
+    `;
+  }
+
+  private updateProfileField(name: string, field: string, value: string): void {
+    const updated = { ...this.profiles };
+    updated[name] = { ...updated[name], [field]: value };
+    this.profiles = updated;
+  }
+
+  private updateProfileResource(
+    name: string,
+    tier: 'requests' | 'limits' | 'disk',
+    subField: string,
+    value: string,
+  ): void {
+    const updated = { ...this.profiles };
+    const profile = { ...updated[name] };
+    if (tier === 'disk') {
+      profile.resources = { ...(profile.resources || {}), disk: value || undefined };
+    } else {
+      const existing = profile.resources?.[tier] || {};
+      profile.resources = {
+        ...(profile.resources || {}),
+        [tier]: { ...existing, [subField]: value || undefined },
+      };
+    }
+    updated[name] = profile;
+    this.profiles = updated;
+  }
+
+  private addProfile(): void {
+    const baseName = 'new-profile';
+    let name = baseName;
+    let i = 1;
+    while (this.profiles[name]) {
+      name = `${baseName}-${i++}`;
+    }
+    const runtimeNames = Object.keys(this.runtimes);
+    this.profiles = {
+      ...this.profiles,
+      [name]: { runtime: runtimeNames[0] || '' },
+    };
+  }
+
+  private removeProfile(name: string): void {
+    const updated = { ...this.profiles };
+    delete updated[name];
+    this.profiles = updated;
+  }
+
+  // ── Harness Configs section ──
+
+  private renderHarnessConfigsSection() {
+    const configNames = Object.keys(this.harnessConfigsMap);
+    const hcReadOnly = this.readOnlyReason('harness_configs');
+    return html`
+      <div class="section">
+        ${this.renderSectionHeader('Harness Configs', 'harness_configs')}
+        ${this.renderSectionMeta('harness_configs')}
+        ${hcReadOnly
+          ? html`${this.renderReadOnlyBadge(hcReadOnly)}`
+          : nothing}
+        ${configNames.length === 0
+          ? html`<p class="hint">No harness configs configured.</p>`
+          : configNames.map((name) => this.renderHarnessConfigEntry(name, !!hcReadOnly))}
+        ${!hcReadOnly
+          ? html`
+              <sl-button
+                size="small"
+                variant="default"
+                @click=${() => this.addHarnessConfig()}
+              >
+                <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                Add Harness Config
+              </sl-button>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderHarnessConfigEntry(name: string, readOnly: boolean) {
+    const value = this.harnessConfigsMap[name];
+    let jsonStr: string;
+    try {
+      jsonStr = JSON.stringify(value, null, 2);
+    } catch {
+      jsonStr = String(value);
+    }
+    return html`
+      <sl-card class="runtime-card">
+        <div slot="header" style="display:flex;align-items:center;justify-content:space-between;">
+          <strong>${name}</strong>
+          ${!readOnly
+            ? html`<sl-button
+                size="small"
+                variant="danger"
+                @click=${() => this.removeHarnessConfig(name)}
+              >
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Remove
+              </sl-button>`
+            : nothing}
+        </div>
+        <div class="form-field full-width">
+          <label>Configuration (JSON)</label>
+          <sl-textarea
+            rows="8"
+            resize="auto"
+            value=${jsonStr}
+            ?disabled=${readOnly}
+            style="font-family: monospace; font-size: 0.8125rem;"
+            @sl-change=${(e: Event) => {
+              this.updateHarnessConfigJson(name, (e.target as HTMLTextAreaElement).value);
+            }}
+          ></sl-textarea>
+        </div>
+      </sl-card>
+    `;
+  }
+
+  private updateHarnessConfigJson(name: string, jsonStr: string): void {
+    try {
+      const parsed: unknown = JSON.parse(jsonStr);
+      const updated = { ...this.harnessConfigsMap };
+      updated[name] = parsed;
+      this.harnessConfigsMap = updated;
+    } catch {
+      // Invalid JSON — don't update state; leave the textarea as-is until
+      // the user fixes it. A save attempt will send the last valid parse.
+    }
+  }
+
+  private addHarnessConfig(): void {
+    const baseName = 'new-config';
+    let name = baseName;
+    let i = 1;
+    while (this.harnessConfigsMap[name]) {
+      name = `${baseName}-${i++}`;
+    }
+    this.harnessConfigsMap = {
+      ...this.harnessConfigsMap,
+      [name]: { harness: 'claude-code' },
+    };
+  }
+
+  private removeHarnessConfig(name: string): void {
+    const updated = { ...this.harnessConfigsMap };
+    delete updated[name];
+    this.harnessConfigsMap = updated;
   }
 
   private renderBrokerTab() {
