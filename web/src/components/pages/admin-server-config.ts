@@ -1540,6 +1540,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.harnessConfigsMap = data.harness_configs
       ? (JSON.parse(JSON.stringify(data.harness_configs)) as Record<string, unknown>)
       : {};
+    this.harnessConfigErrors = {};
 
     // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
     this.settingsTier = data.settings_tier || 'file';
@@ -3545,7 +3546,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     value: string,
   ): void {
     const updated = { ...this.runtimes };
-    updated[name] = { ...updated[name], [field]: value };
+    const rt = { ...updated[name] };
+    if (value) {
+      (rt as Record<string, unknown>)[field] = value;
+    } else {
+      delete (rt as Record<string, unknown>)[field];
+    }
+    updated[name] = rt;
     this.runtimes = updated;
   }
 
@@ -3562,7 +3569,17 @@ export class ScionPageAdminServerConfig extends LitElement {
   private updateRuntimeCloudRun(name: string, field: 'project' | 'region', value: string): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
-    rt.cloudrun = { ...(rt.cloudrun || {}), [field]: value };
+    const cr = { ...(rt.cloudrun || {}) };
+    if (value) {
+      cr[field] = value;
+    } else {
+      delete cr[field];
+    }
+    if (Object.keys(cr).length > 0) {
+      rt.cloudrun = cr;
+    } else {
+      delete rt.cloudrun;
+    }
     updated[name] = rt;
     this.runtimes = updated;
   }
@@ -3713,7 +3730,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               placeholder="e.g. 500m"
               ?disabled=${readOnly}
               @sl-input=${(e: Event) => {
-                this.updateProfileResource(name, 'requests', 'cpu', (e.target as HTMLInputElement).value);
+                this.updateProfileResourceTier(name, 'requests', 'cpu', (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
           </div>
@@ -3724,7 +3741,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               placeholder="e.g. 512Mi"
               ?disabled=${readOnly}
               @sl-input=${(e: Event) => {
-                this.updateProfileResource(name, 'requests', 'memory', (e.target as HTMLInputElement).value);
+                this.updateProfileResourceTier(name, 'requests', 'memory', (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
           </div>
@@ -3735,7 +3752,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               placeholder="e.g. 2000m"
               ?disabled=${readOnly}
               @sl-input=${(e: Event) => {
-                this.updateProfileResource(name, 'limits', 'cpu', (e.target as HTMLInputElement).value);
+                this.updateProfileResourceTier(name, 'limits', 'cpu', (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
           </div>
@@ -3746,7 +3763,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               placeholder="e.g. 4Gi"
               ?disabled=${readOnly}
               @sl-input=${(e: Event) => {
-                this.updateProfileResource(name, 'limits', 'memory', (e.target as HTMLInputElement).value);
+                this.updateProfileResourceTier(name, 'limits', 'memory', (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
           </div>
@@ -3757,7 +3774,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               placeholder="e.g. 20Gi"
               ?disabled=${readOnly}
               @sl-input=${(e: Event) => {
-                this.updateProfileResource(name, 'disk', '', (e.target as HTMLInputElement).value);
+                this.updateProfileDisk(name, (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
           </div>
@@ -3768,41 +3785,49 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private updateProfileField(name: string, field: string, value: string): void {
     const updated = { ...this.profiles };
-    updated[name] = { ...updated[name], [field]: value };
+    const profile = { ...updated[name] };
+    if (value) {
+      profile[field] = value;
+    } else {
+      delete profile[field];
+    }
+    updated[name] = profile;
     this.profiles = updated;
   }
 
-  private updateProfileResource(
+  /** Update a cpu or memory field within a profile's resource requests or limits. */
+  private updateProfileResourceTier(
     name: string,
-    tier: 'requests' | 'limits' | 'disk',
-    subField: 'cpu' | 'memory' | '',
+    tier: 'requests' | 'limits',
+    field: 'cpu' | 'memory',
     value: string,
   ): void {
     const updated = { ...this.profiles };
     const profile = { ...updated[name] };
-    if (tier === 'disk') {
-      const base: ResourceSpec = { ...(profile.resources || {}) };
-      if (value) {
-        base.disk = value;
-      } else {
-        delete base.disk;
-      }
-      profile.resources = base;
+    const existing: { cpu?: string; memory?: string } = {
+      ...(profile.resources?.[tier] || {}),
+    };
+    if (value) {
+      existing[field] = value;
     } else {
-      const key = subField as 'cpu' | 'memory';
-      const existing: { cpu?: string; memory?: string } = {
-        ...(profile.resources?.[tier] || {}),
-      };
-      if (value) {
-        existing[key] = value;
-      } else {
-        delete existing[key];
-      }
-      profile.resources = {
-        ...(profile.resources || {}),
-        [tier]: existing,
-      };
+      delete existing[field];
     }
+    profile.resources = { ...(profile.resources || {}), [tier]: existing };
+    updated[name] = profile;
+    this.profiles = updated;
+  }
+
+  /** Update a profile's disk resource field. */
+  private updateProfileDisk(name: string, value: string): void {
+    const updated = { ...this.profiles };
+    const profile = { ...updated[name] };
+    const base: ResourceSpec = { ...(profile.resources || {}) };
+    if (value) {
+      base.disk = value;
+    } else {
+      delete base.disk;
+    }
+    profile.resources = base;
     updated[name] = profile;
     this.profiles = updated;
   }
