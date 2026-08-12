@@ -45,8 +45,6 @@ export interface MentionAcceptDetail {
   slug: string;
   /** The start index of the `@` trigger in the textarea value. */
   triggerStart: number;
-  /** The end index of the query text (just past the last typed char). */
-  queryEnd: number;
 }
 
 @customElement('scion-mention-autocomplete')
@@ -336,7 +334,6 @@ export class ScionMentionAutocomplete extends LitElement {
         detail: {
           slug,
           triggerStart: this.triggerStart,
-          queryEnd: this.triggerStart + 1 + (slug.length > 0 ? slug.length : 0),
         },
         bubbles: true,
         composed: true,

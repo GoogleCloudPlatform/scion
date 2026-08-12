@@ -465,6 +465,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// Cap mentions to avoid oversized responses and wasted server resources (R1).
+	if len(req.Mentions) > messages.MaxMentionRecipients {
+		req.Mentions = req.Mentions[:messages.MaxMentionRecipients]
+	}
+
 	// Detect group[] recipient for multi-target fan-out.
 	if structuredMsg != nil && messages.IsGroupRecipient(structuredMsg.Recipient) {
 		s.handleGroupMessage(w, r, id, structuredMsg, plainMessage, req.Interrupt)
@@ -1225,11 +1230,24 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	// Resolve mentions using the shared package.
 	results := messages.ResolveMentions(mentionSlugs, agentInfos, primaryAgent.Slug)
 
+	// Aggregate timeout for all mention dispatches (O1): 30s total to avoid
+	// blocking the HTTP response for up to N × 10s in the worst case.
+	aggregateCtx, aggregateCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer aggregateCancel()
+
 	// Fan out mention messages for each delivered slug.
 	for i, r := range results {
 		if r.Status != "delivered" {
 			continue
 		}
+
+		// Check aggregate timeout before starting each dispatch.
+		if aggregateCtx.Err() != nil {
+			results[i].Status = "timeout"
+			results[i].Error = "aggregate mention dispatch timeout exceeded"
+			continue
+		}
+
 		mentionAgent, ok := agentBySlug[strings.ToLower(r.Slug)]
 		if !ok {
 			results[i].Status = "error"
@@ -1280,11 +1298,17 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			continue
 		}
 
-		dispatchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Per-dispatch timeout is the lesser of 10s or the remaining aggregate budget.
+		dispatchCtx, cancel := context.WithTimeout(aggregateCtx, 10*time.Second)
 		if dispatchErr := dispatchWithBrokerRetry(dispatchCtx, dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg); dispatchErr != nil {
 			cancel()
-			results[i].Status = "error"
-			results[i].Error = "dispatch failed: " + dispatchErr.Error()
+			if aggregateCtx.Err() != nil {
+				results[i].Status = "timeout"
+				results[i].Error = "aggregate mention dispatch timeout exceeded"
+			} else {
+				results[i].Status = "error"
+				results[i].Error = "dispatch failed: " + dispatchErr.Error()
+			}
 			if storeMsg.ID != "" {
 				if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
 					s.messageLog.Error("Failed to mark mention message as failed", "id", storeMsg.ID, "error", markErr)

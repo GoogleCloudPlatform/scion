@@ -105,8 +105,8 @@ export class ScionChatThread extends LitElement {
   @state() private loadingOlder = false;
   @state() private hasOlderMessages = true;
   @state() private loaded = false;
-  /** Mention results from the last sent message (for "also notified" footer). */
-  @state() private lastMentionResults: MentionResult[] = [];
+  /** Mention results keyed by message ID (for "also notified" footer per message). */
+  @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
@@ -624,7 +624,6 @@ export class ScionChatThread extends LitElement {
 
     this.sending = true;
     this.sendError = null;
-    this.lastMentionResults = [];
 
     try {
       // Build the POST body, including mentions when present.
@@ -646,10 +645,13 @@ export class ScionChatThread extends LitElement {
         this.sendError = await extractApiError(res, 'Failed to send message');
       } else {
         const data = (await res.json()) as {
+          message_id?: string;
           mention_results?: MentionResult[];
         };
-        if (data?.mention_results && data.mention_results.length > 0) {
-          this.lastMentionResults = data.mention_results;
+        if (data?.message_id && data?.mention_results && data.mention_results.length > 0) {
+          const updated = new Map(this.mentionResultsByMessageId);
+          updated.set(data.message_id, data.mention_results);
+          this.mentionResultsByMessageId = updated;
         }
         onSuccess();
       }
@@ -669,7 +671,6 @@ export class ScionChatThread extends LitElement {
       <div class="thread-container">
         ${this.renderStreamBar()}
         ${this.renderContent()}
-        ${this.renderMentionResults()}
         ${this.sendError
           ? html`<div class="send-error">${this.sendError}</div>`
           : nothing}
@@ -833,6 +834,25 @@ export class ScionChatThread extends LitElement {
         ></scion-chat-message>
       `);
 
+      // Render "also notified" footer under the specific message bubble (O3).
+      const msgMentionResults = this.mentionResultsByMessageId.get(msg.id);
+      if (msgMentionResults) {
+        const delivered = msgMentionResults.filter((r) => r.status === 'delivered');
+        if (delivered.length > 0) {
+          const slugs = delivered.map(
+            (r) => html`<span class="mention-slug">@${r.slug}</span>`
+          );
+          rows.push(html`
+            <div class="mention-results">
+              Also notified: ${slugs.reduce(
+                (acc, s, i) => (i === 0 ? [s] : [...acc, ', ', s]),
+                [] as unknown[]
+              )}
+            </div>
+          `);
+        }
+      }
+
       prevSender = msg.sender;
       prevTimestamp = msgTime;
     }
@@ -840,31 +860,6 @@ export class ScionChatThread extends LitElement {
     return rows;
   }
 
-  /**
-   * Render a subtle "also notified: @slug" footer after a sent message
-   * when mention_results are present.
-   */
-  private renderMentionResults() {
-    if (this.lastMentionResults.length === 0) return nothing;
-
-    const delivered = this.lastMentionResults.filter(
-      (r) => r.status === 'delivered'
-    );
-    if (delivered.length === 0) return nothing;
-
-    const slugs = delivered.map(
-      (r) => html`<span class="mention-slug">@${r.slug}</span>`
-    );
-
-    return html`
-      <div class="mention-results">
-        Also notified: ${slugs.reduce(
-          (acc, s, i) => (i === 0 ? [s] : [...acc, ', ', s]),
-          [] as unknown[]
-        )}
-      </div>
-    `;
-  }
 }
 
 declare global {
