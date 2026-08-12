@@ -17,6 +17,8 @@ package hub
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -53,6 +55,9 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	} else {
 		checks["database"] = "healthy"
 	}
+
+	// Check NFS workspace storage when configured
+	s.checkWorkspaceStorageHealth(checks)
 
 	// Get stats
 	stats := &HealthStats{}
@@ -92,6 +97,41 @@ func (h *HealthResponse) HealthStatus() string {
 	return h.Status
 }
 
+// checkWorkspaceStorageHealth verifies that the configured workspace storage
+// backend is accessible. For NFS and Cloud Run volume backends, it stats the
+// mount point to confirm it is present. For local storage, no check is needed.
+func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
+	wsCfg := s.config.WorkspaceStorageConfig
+	if wsCfg == nil || wsCfg.Backend == "" || wsCfg.Backend == "local" {
+		return // Local storage — no health check needed
+	}
+
+	var mountPath string
+	switch wsCfg.Backend {
+	case "nfs":
+		if wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
+			share := wsCfg.NFS.Shares[0]
+			mountPath = filepath.Join(wsCfg.NFS.MountRoot, share.ID)
+		}
+	case "cloudrun-volume":
+		if wsCfg.CloudRunVolume != nil && wsCfg.CloudRunVolume.VolumeName != "" {
+			mountPath = filepath.Join("/mnt", wsCfg.CloudRunVolume.VolumeName)
+		}
+	}
+
+	if mountPath == "" {
+		checks["workspace_storage"] = "unhealthy: mount path not configured"
+		return
+	}
+
+	if _, err := os.Stat(mountPath); err != nil {
+		checks["workspace_storage"] = "unhealthy: mount not available"
+		return
+	}
+
+	checks["workspace_storage"] = "healthy"
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
@@ -115,6 +155,20 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 			"reason": "database not available",
 		})
 		return
+	}
+
+	// Check workspace storage health for readiness
+	wsCfg := s.config.WorkspaceStorageConfig
+	if wsCfg != nil && wsCfg.Backend != "" && wsCfg.Backend != "local" {
+		checks := make(map[string]string)
+		s.checkWorkspaceStorageHealth(checks)
+		if status, ok := checks["workspace_storage"]; ok && status != "healthy" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "not_ready",
+				"reason": "workspace storage not available",
+			})
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{

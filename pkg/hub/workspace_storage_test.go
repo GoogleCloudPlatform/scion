@@ -327,6 +327,157 @@ func TestPackageLevelHubManagedProjectPath_AlwaysLocal(t *testing.T) {
 }
 
 // ============================================================================
+// Phase 3: Health Check Tests
+// ============================================================================
+
+func TestHealthCheck_NoWorkspaceStorage(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp HealthResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// No workspace_storage check when backend is local/unset
+	_, hasCheck := resp.Checks["workspace_storage"]
+	assert.False(t, hasCheck, "local backend should not have workspace_storage health check")
+}
+
+func TestHealthCheck_NFSHealthy(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Use a temp dir as the "NFS mount" so it actually exists
+	nfsMount := t.TempDir()
+	shareDir := filepath.Join(nfsMount, "test-share")
+	require.NoError(t, os.MkdirAll(shareDir, 0755))
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{
+			MountRoot: nfsMount,
+			Shares:    []config.V1NFSShare{{ID: "test-share", Server: "10.0.0.2", Export: "/scion"}},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp HealthResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "healthy", resp.Checks["workspace_storage"])
+}
+
+func TestHealthCheck_NFSUnhealthy(t *testing.T) {
+	srv, _ := testServer(t)
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{
+			MountRoot: "/nonexistent/nfs/mount",
+			Shares:    []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion"}},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp HealthResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Contains(t, resp.Checks["workspace_storage"], "unhealthy")
+	assert.Equal(t, "degraded", resp.Status)
+}
+
+func TestReadiness_NFSUnavailable(t *testing.T) {
+	srv, _ := testServer(t)
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{
+			MountRoot: "/nonexistent/nfs/mount",
+			Shares:    []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion"}},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/readyz", nil)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "not_ready", resp["status"])
+	assert.Contains(t, resp["reason"], "workspace storage")
+}
+
+func TestReadiness_NFSAvailable(t *testing.T) {
+	srv, _ := testServer(t)
+
+	nfsMount := t.TempDir()
+	shareDir := filepath.Join(nfsMount, "test-share")
+	require.NoError(t, os.MkdirAll(shareDir, 0755))
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{
+			MountRoot: nfsMount,
+			Shares:    []config.V1NFSShare{{ID: "test-share", Server: "10.0.0.2", Export: "/scion"}},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/readyz", nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// ============================================================================
+// Integration Test: Write → Verify → Simulated Restart
+// ============================================================================
+
+func TestWorkspaceStorage_WriteVerifySurvivesRestart(t *testing.T) {
+	// Simulate durable storage with a temp directory that represents
+	// an NFS mount. Writes should persist across "restarts" (new Server instances
+	// pointing at the same storage).
+	nfsMount := t.TempDir()
+	shareDir := filepath.Join(nfsMount, "test-share")
+	require.NoError(t, os.MkdirAll(shareDir, 0755))
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	wsCfg := &config.V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{
+			MountRoot: nfsMount,
+			Shares:    []config.V1NFSShare{{ID: "test-share", Server: "10.0.0.2", Export: "/scion"}},
+		},
+	}
+
+	// Verify path selection
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = wsCfg
+
+	slug := "restart-test"
+	path, err := srv.hubManagedProjectPath(slug)
+	require.NoError(t, err)
+
+	// Write a file to the "NFS" path
+	require.NoError(t, os.MkdirAll(path, 0755))
+	testContent := []byte("this data should survive a restart")
+	require.NoError(t, os.WriteFile(filepath.Join(path, "persistent.txt"), testContent, 0644))
+
+	// "Restart" — create a new server instance with the same config
+	srv2, _ := testServer(t)
+	srv2.config.WorkspaceStorageConfig = wsCfg
+
+	// Verify the file is still accessible from the new instance
+	path2, err := srv2.hubManagedProjectPath(slug)
+	require.NoError(t, err)
+	assert.Equal(t, path, path2, "path should be the same across restarts")
+
+	data, err := os.ReadFile(filepath.Join(path2, "persistent.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, testContent, data, "file content should survive simulated restart")
+}
+
+// ============================================================================
 // WebDAV Safety Gate Tests
 // ============================================================================
 
