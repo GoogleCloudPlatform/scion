@@ -68,7 +68,36 @@ func discoverOIDCEndpoints(issuerURL string, client *http.Client) (*OIDCDiscover
 		return nil, fmt.Errorf("oidc discovery: no userinfo_endpoint in response from %s", discoveryURL)
 	}
 
+	// Validate that all discovered endpoints use HTTPS (allow http for localhost/127.0.0.1).
+	for name, ep := range map[string]string{
+		"authorization_endpoint": doc.AuthorizationEndpoint,
+		"token_endpoint":         doc.TokenEndpoint,
+		"userinfo_endpoint":      doc.UserinfoEndpoint,
+	} {
+		if err := validateOIDCEndpointScheme(ep, name); err != nil {
+			return nil, err
+		}
+	}
+
 	return &doc, nil
+}
+
+// validateOIDCEndpointScheme ensures an OIDC endpoint URL uses the https scheme.
+// http is permitted only for localhost (127.0.0.1) to support local development.
+func validateOIDCEndpointScheme(endpoint, fieldName string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("oidc discovery: invalid %s URL %q: %w", fieldName, endpoint, err)
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	// Allow http for localhost / 127.0.0.1 (local dev/testing).
+	host := parsed.Hostname()
+	if parsed.Scheme == "http" && (host == "localhost" || host == "127.0.0.1") {
+		return nil
+	}
+	return fmt.Errorf("oidc discovery: %s %q must use HTTPS scheme", fieldName, endpoint)
 }
 
 // discoverJWKSURL fetches the OIDC discovery document from the issuer and

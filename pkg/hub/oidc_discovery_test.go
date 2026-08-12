@@ -347,3 +347,75 @@ func TestDiscoverOIDCEndpoints_NetworkError(t *testing.T) {
 		t.Errorf("expected 'failed to fetch' in error, got: %v", err)
 	}
 }
+
+// --- Tests for HTTPS endpoint scheme validation ---
+
+func TestDiscoverOIDCEndpoints_RejectsHTTPEndpoints(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"issuer": "https://example.com",
+			"authorization_endpoint": "http://evil.com/auth",
+			"token_endpoint": "https://example.com/token",
+			"userinfo_endpoint": "https://example.com/userinfo"
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	_, err := discoverOIDCEndpoints(srv.URL, client)
+	if err == nil {
+		t.Fatal("expected error for HTTP authorization_endpoint, got nil")
+	}
+	if !strings.Contains(err.Error(), "must use HTTPS") {
+		t.Errorf("expected 'must use HTTPS' in error, got: %v", err)
+	}
+}
+
+func TestDiscoverOIDCEndpoints_AllowsHTTPLocalhostEndpoints(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"issuer": "http://localhost",
+			"authorization_endpoint": "http://localhost:8080/auth",
+			"token_endpoint": "http://127.0.0.1:8080/token",
+			"userinfo_endpoint": "http://localhost:8080/userinfo"
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	doc, err := discoverOIDCEndpoints(srv.URL, client)
+	if err != nil {
+		t.Fatalf("expected success for localhost HTTP endpoints, got error: %v", err)
+	}
+	if doc.AuthorizationEndpoint != "http://localhost:8080/auth" {
+		t.Errorf("unexpected authorization_endpoint: %s", doc.AuthorizationEndpoint)
+	}
+}
+
+func TestValidateOIDCEndpointScheme(t *testing.T) {
+	tests := []struct {
+		name      string
+		endpoint  string
+		wantError bool
+	}{
+		{"https is valid", "https://idp.example.com/auth", false},
+		{"http is rejected", "http://idp.example.com/auth", true},
+		{"http localhost is allowed", "http://localhost:8080/auth", false},
+		{"http 127.0.0.1 is allowed", "http://127.0.0.1:9090/token", false},
+		{"ftp is rejected", "ftp://example.com/auth", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateOIDCEndpointScheme(tc.endpoint, "test_endpoint")
+			if tc.wantError && err == nil {
+				t.Errorf("expected error for %q, got nil", tc.endpoint)
+			}
+			if !tc.wantError && err != nil {
+				t.Errorf("expected no error for %q, got: %v", tc.endpoint, err)
+			}
+		})
+	}
+}

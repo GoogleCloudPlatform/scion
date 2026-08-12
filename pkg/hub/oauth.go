@@ -911,12 +911,12 @@ func (s *OAuthService) OIDCDisplayName() string {
 
 // oidcUserInfoResponse represents the standard OIDC userinfo response.
 type oidcUserInfoResponse struct {
-	Sub              string `json:"sub"`
-	Email            string `json:"email"`
-	EmailVerified    bool   `json:"email_verified"`
-	Name             string `json:"name"`
+	Sub               string `json:"sub"`
+	Email             string `json:"email"`
+	EmailVerified     bool   `json:"email_verified"`
+	Name              string `json:"name"`
 	PreferredUsername string `json:"preferred_username"`
-	Picture          string `json:"picture"`
+	Picture           string `json:"picture"`
 }
 
 // oidcScopes returns the configured scopes or the default OIDC scopes.
@@ -990,13 +990,20 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		// Limit error body to 1 KB to avoid OOM on malicious responses.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
 		return nil, fmt.Errorf("OIDC userinfo endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var userInfo oidcUserInfoResponse
-	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+	// Limit userinfo response to 1 MB to prevent OOM from oversized payloads.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&userInfo); err != nil {
 		return nil, fmt.Errorf("failed to decode OIDC userinfo response: %w", err)
+	}
+
+	// The "sub" claim is the primary user identifier in OIDC; it must be present.
+	if userInfo.Sub == "" {
+		return nil, fmt.Errorf("OIDC provider did not return a 'sub' claim; the identity provider must include a subject identifier")
 	}
 
 	if userInfo.Email == "" {
@@ -1008,10 +1015,13 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 			"the user must verify their email in the identity provider before logging in", userInfo.Email)
 	}
 
-	// Determine display name: prefer Name, fall back to PreferredUsername
+	// Determine display name: prefer Name, fall back to PreferredUsername, then Email.
 	displayName := userInfo.Name
 	if displayName == "" {
 		displayName = userInfo.PreferredUsername
+	}
+	if displayName == "" {
+		displayName = userInfo.Email
 	}
 
 	return &OAuthUserInfo{
@@ -1021,4 +1031,34 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 		AvatarURL:   userInfo.Picture,
 		Provider:    hubclient.OAuthProviderOIDC,
 	}, nil
+}
+
+// validateOIDCLoginConfig validates the OIDC login configuration at startup.
+// It ensures all required fields are present and the IssuerURL is well-formed.
+func validateOIDCLoginConfig(cfg *config.OIDCLoginConfig) error {
+	if cfg.IssuerURL == "" {
+		return fmt.Errorf("issuerUrl is required when OIDC login is enabled")
+	}
+	parsed, err := url.Parse(cfg.IssuerURL)
+	if err != nil {
+		return fmt.Errorf("issuerUrl is not a valid URL: %w", err)
+	}
+	// Require https, but allow http for localhost/127.0.0.1 (local dev).
+	host := parsed.Hostname()
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && (host == "localhost" || host == "127.0.0.1")) {
+		return fmt.Errorf("issuerUrl must use https scheme (got %q)", parsed.Scheme)
+	}
+	if parsed.RawQuery != "" {
+		return fmt.Errorf("issuerUrl must not contain query parameters")
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("issuerUrl must not contain a fragment")
+	}
+	if cfg.ClientID == "" {
+		return fmt.Errorf("clientId is required when OIDC login is enabled")
+	}
+	if cfg.ClientSecret == "" {
+		return fmt.Errorf("clientSecret is required when OIDC login is enabled")
+	}
+	return nil
 }

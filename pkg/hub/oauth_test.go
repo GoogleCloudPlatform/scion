@@ -960,3 +960,169 @@ func TestOAuthService_ConfiguredProvidersForClient_OIDC(t *testing.T) {
 		}
 	}
 }
+
+// --- Tests for G-1: sub claim validation and email fallback for display name ---
+
+func TestOAuthService_GetOIDCUserInfo_MissingSub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"email":          "user@example.com",
+			"email_verified": true,
+			"name":           "Test User",
+			// sub is missing
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	oidcCfg := &config.OIDCLoginConfig{Enabled: true}
+	service := NewOAuthService(OAuthConfig{}, oidcCfg)
+
+	_, err := service.getOIDCUserInfo(context.Background(), "test-token", srv.URL)
+	if err == nil {
+		t.Fatal("expected error for missing sub claim")
+	}
+	if !strings.Contains(err.Error(), "sub") {
+		t.Errorf("expected 'sub' in error, got: %v", err)
+	}
+}
+
+func TestOAuthService_GetOIDCUserInfo_FallbackToEmail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"sub":            "user-789",
+			"email":          "fallback@example.com",
+			"email_verified": true,
+			// name and preferred_username are missing — should fall back to email
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	oidcCfg := &config.OIDCLoginConfig{Enabled: true}
+	service := NewOAuthService(OAuthConfig{}, oidcCfg)
+
+	userInfo, err := service.getOIDCUserInfo(context.Background(), "test-token", srv.URL)
+	if err != nil {
+		t.Fatalf("getOIDCUserInfo() failed: %v", err)
+	}
+	if userInfo.DisplayName != "fallback@example.com" {
+		t.Errorf("expected DisplayName %q, got %q", "fallback@example.com", userInfo.DisplayName)
+	}
+}
+
+// --- Tests for G-3: validateOIDCLoginConfig ---
+
+func TestValidateOIDCLoginConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       config.OIDCLoginConfig
+		wantError string // empty means no error expected
+	}{
+		{
+			name: "valid config",
+			cfg: config.OIDCLoginConfig{
+				Enabled:      true,
+				IssuerURL:    "https://idp.example.com",
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+			},
+			wantError: "",
+		},
+		{
+			name: "valid localhost config",
+			cfg: config.OIDCLoginConfig{
+				Enabled:      true,
+				IssuerURL:    "http://localhost:8080",
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+			},
+			wantError: "",
+		},
+		{
+			name: "valid 127.0.0.1 config",
+			cfg: config.OIDCLoginConfig{
+				Enabled:      true,
+				IssuerURL:    "http://127.0.0.1:9090",
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+			},
+			wantError: "",
+		},
+		{
+			name: "missing issuer URL",
+			cfg: config.OIDCLoginConfig{
+				Enabled:      true,
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+			},
+			wantError: "issuerUrl is required",
+		},
+		{
+			name: "http scheme rejected",
+			cfg: config.OIDCLoginConfig{
+				Enabled:      true,
+				IssuerURL:    "http://idp.example.com",
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+			},
+			wantError: "must use https",
+		},
+		{
+			name: "issuer URL with query params",
+			cfg: config.OIDCLoginConfig{
+				Enabled:      true,
+				IssuerURL:    "https://idp.example.com?foo=bar",
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+			},
+			wantError: "query parameters",
+		},
+		{
+			name: "issuer URL with fragment",
+			cfg: config.OIDCLoginConfig{
+				Enabled:      true,
+				IssuerURL:    "https://idp.example.com#section",
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+			},
+			wantError: "fragment",
+		},
+		{
+			name: "missing client ID",
+			cfg: config.OIDCLoginConfig{
+				Enabled:      true,
+				IssuerURL:    "https://idp.example.com",
+				ClientSecret: "client-secret",
+			},
+			wantError: "clientId is required",
+		},
+		{
+			name: "missing client secret",
+			cfg: config.OIDCLoginConfig{
+				Enabled:   true,
+				IssuerURL: "https://idp.example.com",
+				ClientID:  "client-id",
+			},
+			wantError: "clientSecret is required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateOIDCLoginConfig(&tc.cfg)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantError)
+				}
+				if !strings.Contains(err.Error(), tc.wantError) {
+					t.Errorf("expected error containing %q, got: %v", tc.wantError, err)
+				}
+			}
+		})
+	}
+}

@@ -984,6 +984,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize Teams link service
 	srv.teamsLinkService = NewTeamsLinkService()
 
+	// Validate OIDC login configuration at startup (fail fast).
+	if cfg.OIDCLogin.Enabled {
+		if err := validateOIDCLoginConfig(&cfg.OIDCLogin); err != nil {
+			return nil, fmt.Errorf("invalid OIDC login configuration: %w", err)
+		}
+	}
+
 	// Initialize OAuth service if configured (traditional OAuth or OIDC login)
 	oidcLoginCfg := &cfg.OIDCLogin // may be zero-value (Enabled=false)
 	if cfg.OAuthConfig.IsConfigured() || cfg.OIDCLogin.Enabled {

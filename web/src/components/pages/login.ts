@@ -335,9 +335,7 @@ export class ScionLoginPage extends LitElement {
 
         if (data.providers) {
           // New-style response with provider list
-          this._providers = data.providers
-            .filter((p) => p.enabled)
-            .map((p) => ({
+          this._providers = data.providers.map((p) => ({
               id: p.id,
               name: p.name,
               icon: p.id,
