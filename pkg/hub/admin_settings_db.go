@@ -482,10 +482,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Reject unclassified keys (e.g. runtimes, profiles, harness_configs) with
-	// 422 — these cannot be persisted in database mode and previously were
-	// silently dropped with HTTP 200, misleading callers into thinking the
-	// save succeeded (audit finding C3, issue #938).
+	// BREAKING CHANGE (issue #938): Reject unclassified keys (e.g. runtimes,
+	// profiles, harness_configs) with 422 instead of silently accepting with
+	// 200 and dropping them. Previously callers (including the admin UI)
+	// believed the save succeeded when nothing was persisted. The admin UI
+	// frontend handles this via handleSaveError's default case, which
+	// displays body.message to the user.
 	if len(unclassifiedKeys) > 0 {
 		sort.Strings(unclassifiedKeys)
 		slog.Warn("PUT server-config: rejecting unclassified keys (not Layer-0, not Layer-1)",
