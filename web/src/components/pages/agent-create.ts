@@ -1031,7 +1031,8 @@ export class ScionPageAgentCreate extends LitElement {
         <sl-details
           summary="Additional Options"
           ?open=${this.advancedOpen}
-          @sl-show=${() => {
+          @sl-show=${(e: Event) => {
+            if (e.target !== e.currentTarget) return;
             this.advancedOpen = true;
             // Force the tab-group to show the General tab when disclosure opens.
             // sl-tab-group may not initialize correctly when hidden inside sl-details.
@@ -1042,7 +1043,10 @@ export class ScionPageAgentCreate extends LitElement {
               }
             });
           }}
-          @sl-hide=${() => { this.advancedOpen = false; }}
+          @sl-hide=${(e: Event) => {
+            if (e.target !== e.currentTarget) return;
+            this.advancedOpen = false;
+          }}
         >
           <sl-tab-group>
             <sl-tab slot="nav" panel="general" active>General</sl-tab>
