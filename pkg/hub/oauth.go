@@ -420,11 +420,16 @@ type tokenResponse struct {
 // exchangeCodeForToken exchanges an authorization code for an access token (Google).
 func (s *OAuthService) exchangeCodeForToken(ctx context.Context, tokenURL, clientID, clientSecret, code, callbackURL string) (*tokenResponse, error) {
 	data := url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {code},
-		"redirect_uri":  {callbackURL},
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
+		"grant_type":   {"authorization_code"},
+		"code":         {code},
+		"redirect_uri": {callbackURL},
+		"client_id":    {clientID},
+	}
+	// Only send client_secret when non-empty. Public OIDC clients (e.g.
+	// Keycloak public clients) have no client secret, and some providers
+	// reject requests that include an empty client_secret parameter.
+	if clientSecret != "" {
+		data.Set("client_secret", clientSecret)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
@@ -1057,8 +1062,7 @@ func validateOIDCLoginConfig(cfg *config.OIDCLoginConfig) error {
 	if cfg.ClientID == "" {
 		return fmt.Errorf("clientId is required when OIDC login is enabled")
 	}
-	if cfg.ClientSecret == "" {
-		return fmt.Errorf("clientSecret is required when OIDC login is enabled")
-	}
+	// clientSecret is intentionally not required: public OIDC clients (e.g.
+	// Keycloak public clients) legitimately have no client secret.
 	return nil
 }

@@ -1098,13 +1098,13 @@ func TestValidateOIDCLoginConfig(t *testing.T) {
 			wantError: "clientId is required",
 		},
 		{
-			name: "missing client secret",
+			name: "public client (no client secret)",
 			cfg: config.OIDCLoginConfig{
 				Enabled:   true,
 				IssuerURL: "https://idp.example.com",
 				ClientID:  "client-id",
 			},
-			wantError: "clientSecret is required",
+			wantError: "", // public OIDC clients legitimately have no secret
 		},
 	}
 
