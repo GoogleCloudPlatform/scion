@@ -205,7 +205,7 @@ Interact with the Teams bot using these `@-mention` commands:
 - **`@BotName unregister`**: Unlinks your Teams account from the Hub.
 - **`@BotName agents`**: Lists all running agents within the bound project.
 
-For step-by-step setup guides, App Manifest templates, and Azure AD registration details, see the [Microsoft Teams Plugin Guide](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-teams).
+For step-by-step setup guides, App Manifest templates, and Azure AD registration details, see the [Microsoft Teams Plugin Guide](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-teams/README.md).
 
 ## A2A Protocol Bridge
 
