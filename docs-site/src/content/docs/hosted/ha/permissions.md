@@ -104,6 +104,42 @@ The cache is automatically invalidated for a target service account when that se
 
 For Policy Troubleshooter to evaluate a caller's IAM permission across the organization, the Scion Hub's own GCP service account must be granted the **IAM Security Reviewer** role (`roles/iam.securityReviewer`) at either the Google Cloud project or organization level.
 
+### Hub-Scoped Service Accounts
+
+Hub-scoped service accounts are defined globally at the Hub level rather than being restricted to a single project. This allows Platform Ops to make shared service accounts available for selection across multiple project-level workspaces.
+
+To prevent unauthorized assignment of global resources, Scion applies specialized security logic:
+- **Enforcement Mode Dependency**: Assignment of a hub-scoped service account is **unconditionally denied** if `gcp_iam_check_mode` is set to `off`. Because "off" mode disables the GCP IAM validation layer, letting users assign global service accounts without an `actAs` check would create a massive security risk. Hub-scoped service accounts require `gcp_iam_check_mode: enforce` to be assigned.
+- **Dynamic Membership Checks**: Only current, active members of the Hub or project who possess `ActionAssign` on the resource and pass the Policy Troubleshooter `actAs` check can bind the service account.
+- **Former-Member Denial**: If a user is removed from a project or leaves the organization, they immediately lose the ability to assign those service accounts—even if they were the user who originally created or registered the service account record in Scion. Ownership-based bypasses do not apply to hub-scoped service accounts.
+
+### Passthrough Mode Security & PATCH Parity
+
+In **Passthrough Mode**, an agent bypasses explicit service account binding and directly assumes the GCP identity of its GKE/GCE broker host. To prevent unauthorized access to host-level authority:
+1. **Broker-Owner Restriction**: The caller must have permission to use that specific broker in passthrough mode.
+2. **Host SA check**: The caller's GCP principal is checked via Policy Troubleshooter to confirm they hold `iam.serviceAccounts.actAs` permission on the broker's underlying host service account.
+
+To enforce this boundary reliably, Scion implements strict **PATCH Parity** across its API:
+- Previously, the `actAs` check only ran on agent creation (`POST /api/v1/agents`).
+- Now, the exact same validation function gates the update path (`PATCH /api/v1/agents/{id}`). This prevents users from sneaking past the delegation gates by creating a low-privilege or no-auth agent and then PATCHing it to use passthrough mode.
+
+### Service Account Minting Permissions
+
+**Minting** is the process where Scion Hub automatically provisions a brand-new GCP service account in the Hub's own project and registers it to the database on behalf of the user. Because minting creates new GCP authority and project IAM bindings, it operates under a highly secure flow:
+
+- **Enforced Regardless of Mode**: Unlike assignment checks (which can be toggled via `gcp_iam_check_mode`), **minting checks are always active**. SAs cannot be minted unless the requester passes GCP IAM checks, even if `gcp_iam_check_mode` is set to `off`. Skipping mint checks would create an instant privilege-creation bypass.
+- **Required GCP Permissions**: To mint a service account, the requester's GCP principal must have:
+  - `iam.serviceAccounts.create` on the Hub's GCP project (to create the service account).
+  - `aiplatform.endpoints.predict` on the target project (to authorize the minted SA to access the GCP Vertex AI Platform).
+- **Fail-Closed Minting Flow**: A minted service account is stored as `Verified` in Scion only if all required downstream GCP IAM mutations succeed—specifically, granting the Hub SA `roles/iam.serviceAccountTokenCreator` on the minted SA, and granting the requester `roles/iam.serviceAccountUser` on the minted SA. If any mutation fails, the status is recorded as failed and the service account remains unverified.
+
+### Web UI Integration & Identity Cards
+
+To make the service account lifecycle transparent and auditable for users and administrators, the Web Dashboard includes the following enhancements:
+- **Tiered Role Badges**: The agents list and agent detail pages display visible role badges (`none`, `readonly`, `baseline`, or `full`) highlighting the active execution role of each running container.
+- **GCP Identity Card**: The agent detail view features an interactive **GCP Identity Card**. In all authentication modes, it displays the bound service account email, verification status (e.g. `verified` or `failed`), and the corresponding GCP project ID.
+- **Service Account Status Manager**: Within project settings, owners can view registered service accounts, check their live Policy Troubleshooter verification status, and manually trigger verification probes.
+
 ---
 
 ## Roles
