@@ -256,7 +256,9 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		resp.Federation = v1Server.Federation
 	}
 
-	// Runtimes / Profiles / HarnessConfigs — DB values override file values.
+	// Runtimes / Profiles / HarnessConfigs — snapshot values override file
+	// values. An empty map (len 0, non-nil) from the snapshot is intentional
+	// (admin cleared the section) and must replace the file-loaded defaults.
 	if snap.Runtimes != nil {
 		resp.Runtimes = snap.Runtimes
 	}
@@ -905,7 +907,8 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 // make them invisible.
 //
 // Only the clearable Layer-1 fields are checked here:
-// admin_emails, user_access_mode, notification_channels, public_url.
+// admin_emails, user_access_mode, notification_channels, public_url,
+// runtimes, profiles, harness_configs.
 func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
@@ -943,6 +946,17 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	// public_url: present in hub but empty → add the key.
 	if !keySet["server.hub.public_url"] && hubFP.has("public_url") {
 		keys = append(keys, "server.hub.public_url")
+	}
+
+	// Map-of-objects sections: present as null or {} → add the key to clear.
+	if !keySet["runtimes"] && fp.has("runtimes") {
+		keys = append(keys, "runtimes")
+	}
+	if !keySet["profiles"] && fp.has("profiles") {
+		keys = append(keys, "profiles")
+	}
+	if !keySet["harness_configs"] && fp.has("harness_configs") {
+		keys = append(keys, "harness_configs")
 	}
 
 	return keys
@@ -1131,6 +1145,9 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 	case "runtimes":
 		if req.Runtimes != nil {
 			doc = req.Runtimes
+		} else if fp.has("runtimes") {
+			// Explicitly sent as null or {} → clear to empty map.
+			doc = map[string]config.V1RuntimeConfig{}
 		} else {
 			return nil, nil
 		}
@@ -1138,6 +1155,9 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 	case "profiles":
 		if req.Profiles != nil {
 			doc = req.Profiles
+		} else if fp.has("profiles") {
+			// Explicitly sent as null or {} → clear to empty map.
+			doc = map[string]config.V1ProfileConfig{}
 		} else {
 			return nil, nil
 		}
@@ -1145,6 +1165,9 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 	case "harness_configs":
 		if req.HarnessConfigs != nil {
 			doc = req.HarnessConfigs
+		} else if fp.has("harness_configs") {
+			// Explicitly sent as null or {} → clear to empty map.
+			doc = map[string]config.HarnessConfigEntry{}
 		} else {
 			return nil, nil
 		}

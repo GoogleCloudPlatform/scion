@@ -291,6 +291,13 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 
 	snap := buildSnapshotFromKoanf(merged)
 
+	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
+	// directly from DB docs or bootstrap koanf rather than going through the
+	// merged koanf. The koanf round-trip loses empty-map semantics ({} → no
+	// keys → nil), which would cause an admin-cleared section to silently
+	// fall back to file values instead of returning the empty map.
+	o.populateMapSections(&snap, dbSections)
+
 	// Populate env overrides list.
 	overrides := make([]string, 0, len(o.envOverrides))
 	for key := range o.envOverrides {
@@ -306,6 +313,123 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	}
 
 	return snap
+}
+
+// populateMapSections fills the Runtimes, Profiles, and HarnessConfigs
+// snapshot fields. When a DB row exists for the section, the doc is
+// deserialized directly (preserving empty maps). When no DB row exists,
+// the bootstrap koanf is used as the file-based fallback.
+func (o *OperationalSettings) populateMapSections(snap *Layer1Snapshot, dbSections map[string]json.RawMessage) {
+	// Runtimes
+	if doc, ok := dbSections["runtimes"]; ok {
+		var v map[string]config.V1RuntimeConfig
+		if err := json.Unmarshal(doc, &v); err != nil {
+			slog.Warn("runtimes: failed to unmarshal DB doc for snapshot", "error", err)
+		} else {
+			if v == nil {
+				v = map[string]config.V1RuntimeConfig{}
+			}
+			snap.Runtimes = v
+		}
+	} else {
+		snap.Runtimes = extractRuntimesFromKoanf(o.bootstrapKoanf)
+	}
+
+	// Profiles
+	if doc, ok := dbSections["profiles"]; ok {
+		var v map[string]config.V1ProfileConfig
+		if err := json.Unmarshal(doc, &v); err != nil {
+			slog.Warn("profiles: failed to unmarshal DB doc for snapshot", "error", err)
+		} else {
+			if v == nil {
+				v = map[string]config.V1ProfileConfig{}
+			}
+			snap.Profiles = v
+		}
+	} else {
+		snap.Profiles = extractProfilesFromKoanf(o.bootstrapKoanf)
+	}
+
+	// HarnessConfigs
+	if doc, ok := dbSections["harness_configs"]; ok {
+		var v map[string]config.HarnessConfigEntry
+		if err := json.Unmarshal(doc, &v); err != nil {
+			slog.Warn("harness_configs: failed to unmarshal DB doc for snapshot", "error", err)
+		} else {
+			if v == nil {
+				v = map[string]config.HarnessConfigEntry{}
+			}
+			snap.HarnessConfigs = v
+		}
+	} else {
+		snap.HarnessConfigs = extractHarnessConfigsFromKoanf(o.bootstrapKoanf)
+	}
+}
+
+// extractRuntimesFromKoanf extracts runtimes from a koanf instance (file fallback).
+func extractRuntimesFromKoanf(k *koanf.Koanf) map[string]config.V1RuntimeConfig {
+	if k == nil || !k.Exists("runtimes") {
+		return nil
+	}
+	sub := k.Cut("runtimes")
+	if sub == nil || len(sub.Keys()) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(sub.Raw())
+	if err != nil {
+		slog.Warn("runtimes: failed to marshal from bootstrap koanf", "error", err)
+		return nil
+	}
+	var v map[string]config.V1RuntimeConfig
+	if err := json.Unmarshal(data, &v); err != nil {
+		slog.Warn("runtimes: failed to unmarshal from bootstrap koanf", "error", err)
+		return nil
+	}
+	return v
+}
+
+// extractProfilesFromKoanf extracts profiles from a koanf instance (file fallback).
+func extractProfilesFromKoanf(k *koanf.Koanf) map[string]config.V1ProfileConfig {
+	if k == nil || !k.Exists("profiles") {
+		return nil
+	}
+	sub := k.Cut("profiles")
+	if sub == nil || len(sub.Keys()) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(sub.Raw())
+	if err != nil {
+		slog.Warn("profiles: failed to marshal from bootstrap koanf", "error", err)
+		return nil
+	}
+	var v map[string]config.V1ProfileConfig
+	if err := json.Unmarshal(data, &v); err != nil {
+		slog.Warn("profiles: failed to unmarshal from bootstrap koanf", "error", err)
+		return nil
+	}
+	return v
+}
+
+// extractHarnessConfigsFromKoanf extracts harness_configs from a koanf instance (file fallback).
+func extractHarnessConfigsFromKoanf(k *koanf.Koanf) map[string]config.HarnessConfigEntry {
+	if k == nil || !k.Exists("harness_configs") {
+		return nil
+	}
+	sub := k.Cut("harness_configs")
+	if sub == nil || len(sub.Keys()) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(sub.Raw())
+	if err != nil {
+		slog.Warn("harness_configs: failed to marshal from bootstrap koanf", "error", err)
+		return nil
+	}
+	var v map[string]config.HarnessConfigEntry
+	if err := json.Unmarshal(data, &v); err != nil {
+		slog.Warn("harness_configs: failed to unmarshal from bootstrap koanf", "error", err)
+		return nil
+	}
+	return v
 }
 
 // maintenanceFromCache extracts maintenance settings from the DB section
@@ -686,59 +810,11 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.FederationConfig = &fedCfg
 	}
 
-	// Runtimes — extract map-of-objects from koanf subtree.
-	if k.Exists("runtimes") {
-		runtimesSub := k.Cut("runtimes")
-		if runtimesSub != nil && len(runtimesSub.Keys()) > 0 {
-			data, err := json.Marshal(runtimesSub.Raw())
-			if err != nil {
-				slog.Warn("runtimes: failed to marshal from koanf", "error", err)
-			} else {
-				var runtimes map[string]config.V1RuntimeConfig
-				if err := json.Unmarshal(data, &runtimes); err != nil {
-					slog.Warn("runtimes: failed to unmarshal snapshot", "error", err)
-				} else {
-					snap.Runtimes = runtimes
-				}
-			}
-		}
-	}
-
-	// Profiles
-	if k.Exists("profiles") {
-		profilesSub := k.Cut("profiles")
-		if profilesSub != nil && len(profilesSub.Keys()) > 0 {
-			data, err := json.Marshal(profilesSub.Raw())
-			if err != nil {
-				slog.Warn("profiles: failed to marshal from koanf", "error", err)
-			} else {
-				var profiles map[string]config.V1ProfileConfig
-				if err := json.Unmarshal(data, &profiles); err != nil {
-					slog.Warn("profiles: failed to unmarshal snapshot", "error", err)
-				} else {
-					snap.Profiles = profiles
-				}
-			}
-		}
-	}
-
-	// Harness configs
-	if k.Exists("harness_configs") {
-		hcSub := k.Cut("harness_configs")
-		if hcSub != nil && len(hcSub.Keys()) > 0 {
-			data, err := json.Marshal(hcSub.Raw())
-			if err != nil {
-				slog.Warn("harness_configs: failed to marshal from koanf", "error", err)
-			} else {
-				var harnessConfigs map[string]config.HarnessConfigEntry
-				if err := json.Unmarshal(data, &harnessConfigs); err != nil {
-					slog.Warn("harness_configs: failed to unmarshal snapshot", "error", err)
-				} else {
-					snap.HarnessConfigs = harnessConfigs
-				}
-			}
-		}
-	}
+	// NOTE: Runtimes, profiles, and harness_configs are NOT extracted from
+	// koanf here. Map-of-objects sections lose empty-map semantics in the
+	// koanf round-trip ({} → no keys → nil), so they are extracted directly
+	// from the DB docs (or bootstrap koanf) in Snapshot(). See the
+	// populateMapSections call in Snapshot().
 
 	return snap
 }
@@ -932,6 +1008,19 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			gcpBackend.SetHubName(snap.HubName)
 		}
 	}
+
+	// NOTE: Runtimes, Profiles, and HarnessConfigs are deliberately NOT
+	// applied here. The provisioning system reads these fresh from disk via
+	// config.LoadEffectiveSettings() on every provisioning request — it has
+	// no DB awareness. Making it consume DB values requires wiring the
+	// provisioning path to the DB layer (design doc OQ1: koanf overlay
+	// injection for co-located brokers, API-based fetch for standalone).
+	// Until that follow-up ships, the immediate value is admin persistence
+	// + GET/PUT correctness + cross-replica propagation of the GET response.
+	//
+	// TODO(#939): Wire runtimes/profiles/harness_configs into the
+	// provisioning path so that DB changes take effect without restart.
+	// See layer1-registration design doc, Open Question OQ1.
 
 	// NOTE: Maintenance state is deliberately NOT applied here.
 	// Maintenance is runtime/API-owned state. In file mode, reloadSettings

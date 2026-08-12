@@ -26,6 +26,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/v2"
 )
 
 // newTestDBServer creates a test Server configured in postgres mode with a
@@ -1814,6 +1816,131 @@ func TestPutServerConfigDB_ExplicitEmptyPublicURL_ClearsField(t *testing.T) {
 	}
 }
 
+// ---- Presence-aware clearing: map-of-objects sections ----
+
+func TestPutServerConfigDB_ExplicitNullRuntimes_ClearsSection(t *testing.T) {
+	// Explicitly sending "runtimes": null should clear the section to empty map.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Seed existing runtimes section.
+	fakeStore.seed("runtimes", json.RawMessage(`{"cloudrun":{"type":"cloudrun","project":"my-project"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	body := `{"runtimes": null}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify section doc is an empty map, not the old value.
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["runtimes"]
+	fakeStore.mu.Unlock()
+
+	var runtimes map[string]config.V1RuntimeConfig
+	if err := json.Unmarshal(row.Value, &runtimes); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(runtimes) != 0 {
+		t.Errorf("expected empty runtimes after explicit null, got %v", runtimes)
+	}
+}
+
+func TestPutServerConfigDB_ExplicitEmptyProfiles_ClearsSection(t *testing.T) {
+	// Explicitly sending "profiles": {} should clear the section to empty map.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("profiles", json.RawMessage(`{"dev":{"model":"gpt-4","max_turns":10}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	body := `{"profiles": {}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["profiles"]
+	fakeStore.mu.Unlock()
+
+	var profiles map[string]config.V1ProfileConfig
+	if err := json.Unmarshal(row.Value, &profiles); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(profiles) != 0 {
+		t.Errorf("expected empty profiles after explicit {}, got %v", profiles)
+	}
+}
+
+func TestPutServerConfigDB_ExplicitNullHarnessConfigs_ClearsSection(t *testing.T) {
+	// Explicitly sending "harness_configs": null should clear the section.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("harness_configs", json.RawMessage(`{"default":{"harness":"base"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	body := `{"harness_configs": null}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["harness_configs"]
+	fakeStore.mu.Unlock()
+
+	var hc map[string]config.HarnessConfigEntry
+	if err := json.Unmarshal(row.Value, &hc); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(hc) != 0 {
+		t.Errorf("expected empty harness_configs after explicit null, got %v", hc)
+	}
+}
+
+func TestPutServerConfigDB_OmittedRuntimes_PreservesExisting(t *testing.T) {
+	// Omitting runtimes from the PUT body should preserve existing DB values.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("runtimes", json.RawMessage(`{"cloudrun":{"type":"cloudrun","project":"my-project"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	// Update a different field — runtimes not mentioned.
+	body := `{"default_template": "new-template"}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify runtimes are still the original value.
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["runtimes"]
+	fakeStore.mu.Unlock()
+
+	var runtimes map[string]config.V1RuntimeConfig
+	if err := json.Unmarshal(row.Value, &runtimes); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if len(runtimes) != 1 {
+		t.Errorf("expected 1 runtime entry preserved, got %d", len(runtimes))
+	}
+	if _, ok := runtimes["cloudrun"]; !ok {
+		t.Errorf("expected 'cloudrun' runtime to be preserved")
+	}
+}
+
 // ---- N7: Maintenance message clearing ----
 
 func TestPutMaintenanceDB_ExplicitEmptyMessage_ClearsMessage(t *testing.T) {
@@ -2423,6 +2550,88 @@ func TestPropagation_ProfilesAndHarnessConfigsVisibleAfterRefresh(t *testing.T) 
 	}
 	if len(snap.HarnessConfigs) != 1 || snap.HarnessConfigs["claude-code"].Harness != "claude-code" {
 		t.Errorf("expected harness_configs.claude-code.harness=claude-code, got %+v", snap.HarnessConfigs)
+	}
+}
+
+// --- Empty map clearing: admin sets section to {} ---
+
+func TestGetServerConfigDB_EmptyRuntimes_ClearsFileFallback(t *testing.T) {
+	// When file has runtimes but DB has {}, the GET response must NOT show
+	// the file runtimes. The DB empty map takes precedence.
+	fakeStore := newFakeHubSettingStore()
+
+	// Bootstrap koanf with file runtimes.
+	fileK := koanf.New(".")
+	_ = fileK.Load(confmap.Provider(map[string]interface{}{
+		"runtimes.docker.type": "docker",
+	}, "."), nil)
+	envK := emptyKoanf()
+	ops := NewOperationalSettings(fakeStore, fileK, envK)
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	// DB has empty runtimes (admin cleared all entries).
+	fakeStore.seed("runtimes", json.RawMessage(`{}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	// Runtimes should NOT contain the file-loaded "docker" entry.
+	// The empty DB map clears it. (omitempty on the JSON tag means the
+	// response field is nil after deserialization, which is correct —
+	// the file values were cleared.)
+	if len(resp.Runtimes) > 0 {
+		t.Errorf("expected no runtimes entries (DB empty map clears file fallback), got %v", resp.Runtimes)
+	}
+
+	// Section metadata should show source=db.
+	if meta, ok := resp.SectionMeta["runtimes"]; ok {
+		if meta.Source != "db" {
+			t.Errorf("expected runtimes source=db, got %v", meta.Source)
+		}
+	}
+}
+
+func TestSnapshot_EmptyMapSections_PreservedNotNil(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	ops := NewOperationalSettings(fakeStore, fileK, envK)
+
+	// DB has empty docs for all three sections.
+	fakeStore.seed("runtimes", json.RawMessage(`{}`))
+	fakeStore.seed("profiles", json.RawMessage(`{}`))
+	fakeStore.seed("harness_configs", json.RawMessage(`{}`))
+	_, _ = ops.Refresh(context.Background())
+
+	snap := ops.Snapshot()
+
+	if snap.Runtimes == nil {
+		t.Error("expected empty map for runtimes, got nil")
+	}
+	if len(snap.Runtimes) != 0 {
+		t.Errorf("expected 0 runtimes, got %d", len(snap.Runtimes))
+	}
+	if snap.Profiles == nil {
+		t.Error("expected empty map for profiles, got nil")
+	}
+	if snap.HarnessConfigs == nil {
+		t.Error("expected empty map for harness_configs, got nil")
 	}
 }
 
