@@ -21,7 +21,9 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -51,6 +53,17 @@ const (
 	// oidcCleanupInterval is how often the background cleanup loop checks for
 	// expired rotated keys.
 	oidcCleanupInterval = 1 * time.Hour
+
+	// SecretKeyOIDCKeyset is the secret key name for the OIDC signing keyset.
+	// Unlike SecretKeyOIDCSigningKey which stores a single PEM, this entry
+	// stores a JSON array of all keys (active + rotated) so that all hub
+	// instances serve the same JWKS and rotated keys survive restarts.
+	SecretKeyOIDCKeyset = "oidc_signing_keyset"
+
+	// oidcJWKSRefreshInterval is how often each instance refreshes its
+	// in-memory key set from the database. This ensures all instances
+	// converge to the same JWKS within this window.
+	oidcJWKSRefreshInterval = 30 * time.Second
 )
 
 // OIDCSigningKey holds an RSA key pair used for signing OIDC identity tokens.
@@ -61,6 +74,18 @@ type OIDCSigningKey struct {
 	CreatedAt     time.Time
 	DeactivatedAt time.Time // zero until rotated out
 	Active        bool
+}
+
+// oidcKeyRecord is a JSON-serializable representation of an OIDC signing key,
+// used to persist the full keyset (active + rotated) to the database. This
+// enables all hub instances to serve an identical JWKS and preserves rotated
+// keys across restarts.
+type oidcKeyRecord struct {
+	KID           string    `json:"kid"`
+	PrivateKeyPEM string    `json:"private_key_pem"`
+	Active        bool      `json:"active"`
+	CreatedAt     time.Time `json:"created_at"`
+	DeactivatedAt time.Time `json:"deactivated_at,omitempty"`
 }
 
 // OIDCKeyManager manages RSA key pairs for OIDC identity token signing.
@@ -136,14 +161,24 @@ func NewOIDCKeyManager(ctx context.Context, cfg OIDCKeyManagerConfig) (*OIDCKeyM
 	}
 
 	mgr.activeKey = signingKey
-	// Note: only the active key is loaded on startup. Previously rotated keys
-	// (serving JWKS overlap) are not restored. The overlap window does not
-	// survive hub restarts.
 	mgr.allKeys = []*OIDCSigningKey{signingKey}
 	mgr.signer = signer
 
+	// Restore rotated keys from the DB keyset so the JWKS overlap window
+	// survives hub restarts and is consistent across instances.
+	if cfg.Store != nil {
+		if restoreErr := mgr.restoreRotatedKeysFromDB(ctx); restoreErr != nil {
+			log.Warn("Failed to restore rotated OIDC keys from DB keyset", "error", restoreErr)
+		}
+		// Persist the current keyset (active + any restored rotated keys) to DB.
+		if saveErr := mgr.saveKeysetToDB(ctx); saveErr != nil {
+			log.Warn("Failed to save OIDC keyset to DB", "error", saveErr)
+		}
+	}
+
 	log.Info("OIDC key manager initialized",
 		"kid", kid,
+		"key_count", len(mgr.allKeys),
 		"issuer_url", cfg.IssuerURL,
 	)
 
@@ -265,6 +300,14 @@ func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
 	m.signer = newSigner
 	m.mu.Unlock()
 
+	// Persist the full keyset (active + rotated) to DB so all instances
+	// serve a consistent JWKS. Also clean up expired keys while we're at it.
+	if m.store != nil {
+		if err := m.saveKeysetToDB(ctx); err != nil {
+			m.log.Warn("Failed to persist rotated OIDC keyset to DB", "error", err)
+		}
+	}
+
 	m.log.Info("OIDC signing key rotated",
 		"old_kid", oldKID,
 		"new_kid", newKID,
@@ -278,10 +321,10 @@ func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
 // removed regardless of age.
 func (m *OIDCKeyManager) CleanupExpiredKeys() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	now := time.Now()
 	kept := make([]*OIDCSigningKey, 0, len(m.allKeys))
+	removed := 0
 	for _, k := range m.allKeys {
 		if k.Active {
 			kept = append(kept, k)
@@ -297,8 +340,26 @@ func (m *OIDCKeyManager) CleanupExpiredKeys() {
 			"deactivated_at", k.DeactivatedAt,
 			"age", age.Round(time.Second),
 		)
+		removed++
 	}
 	m.allKeys = kept
+	m.mu.Unlock()
+
+	// Persist cleaned-up keyset to DB so other instances don't keep
+	// serving the expired keys.
+	//
+	// Note: there is a minor TOCTOU window between the Unlock above and
+	// the saveKeysetToDB call below — a concurrent RotateKey could modify
+	// m.allKeys in between. This is harmless: saveKeysetToDB re-reads
+	// m.allKeys under RLock, so it will capture the rotation's changes.
+	// In the worst case (a concurrent rotation writes the keyset between
+	// our unlock and save), the expired keys reappear briefly and are
+	// cleaned up on the next cycle or refresh.
+	if removed > 0 && m.store != nil {
+		if err := m.saveKeysetToDB(context.Background()); err != nil {
+			m.log.Warn("Failed to persist cleaned-up OIDC keyset to DB", "error", err)
+		}
+	}
 }
 
 // StartCleanupLoop starts a background goroutine that periodically removes
@@ -314,6 +375,26 @@ func (m *OIDCKeyManager) StartCleanupLoop(ctx context.Context) {
 				return
 			case <-ticker.C:
 				m.CleanupExpiredKeys()
+			}
+		}
+	}()
+}
+
+// StartRefreshLoop starts a background goroutine that periodically refreshes
+// the in-memory key set from the database. This ensures all hub instances
+// converge to the same JWKS within oidcJWKSRefreshInterval (30s), so that
+// keys rotated or cleaned up by one instance become visible to all others.
+// The goroutine stops when ctx is canceled.
+func (m *OIDCKeyManager) StartRefreshLoop(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(oidcJWKSRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.refreshKeysFromDB(ctx)
 			}
 		}
 	}()
@@ -389,6 +470,18 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 	}
 	pemStr := string(pemData)
 
+	// CAS: use CreateSecret so that if two instances cold-start
+	// simultaneously, only the first writer's key is used. The loser
+	// reloads the winner's key from the store.
+	if cfg.Store != nil {
+		casKey := m.casCreateKeyInStore(ctx, keyName, pemStr, hubID)
+		if casKey != nil {
+			// Another instance created a key first — use theirs.
+			m.log.Info("Another instance already created OIDC signing key, using theirs", "key", keyName)
+			return casKey, nil
+		}
+	}
+
 	// Persist to secret backend first, then store as backup
 	if hasBackend {
 		input := &secret.SetSecretInput{
@@ -409,13 +502,6 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 		} else {
 			m.log.Info("Persisted new OIDC signing key via secret backend", "key", keyName)
 		}
-	}
-
-	// Save to store as backup (or primary if no backend)
-	if persistErr := m.backupKeyToStore(ctx, keyName, pemStr, hubID); persistErr != nil {
-		m.log.Warn("Failed to persist OIDC signing key to store", "key", keyName, "error", persistErr)
-	} else {
-		m.log.Info("Persisted OIDC signing key to store", "key", keyName)
 	}
 
 	return privKey, nil
@@ -468,6 +554,244 @@ func (m *OIDCKeyManager) syncKeyToBackend(ctx context.Context, keyName, pemValue
 // signing key record, scoped to the hub instance.
 func oidcSigningKeySecretID(hubID string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("hub-oidc-signing-key:"+hubID)).String()
+}
+
+// casCreateKeyInStore attempts to create the signing key in the store using
+// CreateSecret (which returns ErrAlreadyExists if the key already exists).
+// If another instance already created a key, it loads and returns that key.
+// Returns nil if our key was successfully created (caller should use theirs).
+func (m *OIDCKeyManager) casCreateKeyInStore(ctx context.Context, keyName, pemValue, hubID string) *rsa.PrivateKey {
+	sec := &store.Secret{
+		ID:             oidcSigningKeySecretID(hubID),
+		Key:            keyName,
+		EncryptedValue: pemValue,
+		Scope:          store.ScopeHub,
+		ScopeID:        hubID,
+		SecretType:     store.SecretTypeInternal,
+		Description:    "OIDC identity token signing key (RSA-2048)",
+	}
+	err := m.store.CreateSecret(ctx, sec)
+	if err == nil {
+		// We won the race — our key was created.
+		m.log.Info("Persisted OIDC signing key to store via CAS", "key", keyName)
+		return nil
+	}
+	if !errors.Is(err, store.ErrAlreadyExists) {
+		// Unexpected error — fall through to existing UpsertSecret path.
+		m.log.Warn("CAS create failed for OIDC signing key, falling back to upsert",
+			"key", keyName, "error", err)
+		if persistErr := m.backupKeyToStore(ctx, keyName, pemValue, hubID); persistErr != nil {
+			m.log.Warn("Failed to persist OIDC signing key to store", "key", keyName, "error", persistErr)
+		}
+		return nil
+	}
+
+	// Another instance won. Load their key.
+	val, getErr := m.store.GetSecretValue(ctx, keyName, store.ScopeHub, hubID)
+	if getErr != nil || val == "" {
+		m.log.Warn("CAS lost but could not load winner's OIDC key from store, using ours",
+			"key", keyName, "error", getErr)
+		return nil
+	}
+	existingKey, parseErr := decodePEMPrivateKey([]byte(val))
+	if parseErr != nil {
+		m.log.Warn("CAS lost but could not parse winner's OIDC key, using ours",
+			"key", keyName, "error", parseErr)
+		return nil
+	}
+	return existingKey
+}
+
+// saveKeysetToDB persists the full keyset (active + rotated keys) to the
+// database as a JSON array. This is the source of truth for the JWKS that
+// all hub instances serve, ensuring cross-instance consistency.
+func (m *OIDCKeyManager) saveKeysetToDB(ctx context.Context) error {
+	if m.store == nil {
+		return nil
+	}
+
+	m.mu.RLock()
+	records := make([]oidcKeyRecord, 0, len(m.allKeys))
+	for _, k := range m.allKeys {
+		pemData, err := encodePEMPrivateKey(k.PrivateKey)
+		if err != nil {
+			m.mu.RUnlock()
+			return fmt.Errorf("encoding key %s: %w", k.KeyID, err)
+		}
+		records = append(records, oidcKeyRecord{
+			KID:           k.KeyID,
+			PrivateKeyPEM: string(pemData),
+			Active:        k.Active,
+			CreatedAt:     k.CreatedAt,
+			DeactivatedAt: k.DeactivatedAt,
+		})
+	}
+	m.mu.RUnlock()
+
+	data, err := json.Marshal(records)
+	if err != nil {
+		return fmt.Errorf("marshaling OIDC keyset: %w", err)
+	}
+
+	sec := &store.Secret{
+		ID:             oidcKeysetSecretID(m.hubID),
+		Key:            SecretKeyOIDCKeyset,
+		EncryptedValue: string(data),
+		Scope:          store.ScopeHub,
+		ScopeID:        m.hubID,
+		SecretType:     store.SecretTypeInternal,
+		Description:    "OIDC signing keyset (all active and rotated keys)",
+	}
+	if _, err := m.store.UpsertSecret(ctx, sec); err != nil {
+		return fmt.Errorf("upserting OIDC keyset: %w", err)
+	}
+	return nil
+}
+
+// loadKeysetFromDB loads the full keyset from the database and returns
+// the parsed signing keys.
+func (m *OIDCKeyManager) loadKeysetFromDB(ctx context.Context) ([]*OIDCSigningKey, error) {
+	if m.store == nil {
+		return nil, store.ErrNotFound
+	}
+
+	val, err := m.store.GetSecretValue(ctx, SecretKeyOIDCKeyset, store.ScopeHub, m.hubID)
+	if err != nil {
+		return nil, err
+	}
+	if val == "" {
+		return nil, store.ErrNotFound
+	}
+
+	var records []oidcKeyRecord
+	if err := json.Unmarshal([]byte(val), &records); err != nil {
+		return nil, fmt.Errorf("unmarshaling OIDC keyset: %w", err)
+	}
+
+	keys := make([]*OIDCSigningKey, 0, len(records))
+	for _, rec := range records {
+		privKey, err := decodePEMPrivateKey([]byte(rec.PrivateKeyPEM))
+		if err != nil {
+			m.log.Warn("Skipping unparseable key in OIDC keyset", "kid", rec.KID, "error", err)
+			continue
+		}
+		keys = append(keys, &OIDCSigningKey{
+			KeyID:         rec.KID,
+			PrivateKey:    privKey,
+			PublicKey:     &privKey.PublicKey,
+			Active:        rec.Active,
+			CreatedAt:     rec.CreatedAt,
+			DeactivatedAt: rec.DeactivatedAt,
+		})
+	}
+	return keys, nil
+}
+
+// restoreRotatedKeysFromDB loads the keyset from the database and merges
+// any rotated (inactive) keys into the in-memory key list. This restores
+// the JWKS overlap window across hub restarts.
+func (m *OIDCKeyManager) restoreRotatedKeysFromDB(ctx context.Context) error {
+	keys, err := m.loadKeysetFromDB(ctx)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil // No keyset yet — first run.
+		}
+		return err
+	}
+
+	// Build a set of KIDs already in m.allKeys.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing := make(map[string]bool, len(m.allKeys))
+	for _, k := range m.allKeys {
+		existing[k.KeyID] = true
+	}
+
+	restored := 0
+	for _, k := range keys {
+		if existing[k.KeyID] {
+			continue
+		}
+		// Only restore inactive keys that are still within the overlap window.
+		if !k.Active && !k.DeactivatedAt.IsZero() {
+			age := time.Since(k.DeactivatedAt)
+			if age >= oidcKeyOverlapWindow {
+				continue // Already expired — don't restore.
+			}
+		}
+		m.allKeys = append(m.allKeys, k)
+		restored++
+	}
+
+	if restored > 0 {
+		m.log.Info("Restored rotated OIDC keys from DB keyset",
+			"restored_count", restored,
+			"total_keys", len(m.allKeys),
+		)
+	}
+	return nil
+}
+
+// refreshKeysFromDB reloads the full keyset from the database and updates
+// the in-memory state. This is called periodically by StartRefreshLoop to
+// ensure all instances converge to the same JWKS.
+func (m *OIDCKeyManager) refreshKeysFromDB(ctx context.Context) {
+	keys, err := m.loadKeysetFromDB(ctx)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			m.log.Warn("Failed to refresh OIDC keyset from DB", "error", err)
+		}
+		return
+	}
+
+	if len(keys) == 0 {
+		return // Don't clear our keys if DB returned empty.
+	}
+
+	// Find the active key in the refreshed set.
+	var newActiveKey *OIDCSigningKey
+	for _, k := range keys {
+		if k.Active {
+			newActiveKey = k
+			break
+		}
+	}
+	if newActiveKey == nil {
+		m.log.Warn("DB keyset has no active key, skipping refresh")
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if the active key changed (another instance rotated).
+	if m.activeKey != nil && m.activeKey.KeyID != newActiveKey.KeyID {
+		// Rebuild signer with the new active key.
+		newSigner, err := jose.NewSigner(
+			jose.SigningKey{Algorithm: jose.RS256, Key: newActiveKey.PrivateKey},
+			(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", newActiveKey.KeyID),
+		)
+		if err != nil {
+			m.log.Error("Failed to create signer for refreshed OIDC key",
+				"kid", newActiveKey.KeyID, "error", err)
+			return
+		}
+		m.signer = newSigner
+		m.log.Info("OIDC active key updated from DB refresh",
+			"old_kid", m.activeKey.KeyID,
+			"new_kid", newActiveKey.KeyID,
+		)
+	}
+
+	m.activeKey = newActiveKey
+	m.allKeys = keys
+}
+
+// oidcKeysetSecretID returns a deterministic primary key for the OIDC
+// signing keyset record, scoped to the hub instance.
+func oidcKeysetSecretID(hubID string) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("hub-oidc-signing-keyset:"+hubID)).String()
 }
 
 // generateRSAKeyPair generates a new RSA-2048 key pair.

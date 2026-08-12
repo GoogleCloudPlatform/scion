@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -1036,6 +1037,367 @@ func TestOIDCKeyManager_RotateKey_PersistFailure(t *testing.T) {
 	mgr.mu.RLock()
 	assert.True(t, mgr.activeKey.Active, "Active key should still be marked active")
 	mgr.mu.RUnlock()
+}
+
+// --- DB-backed keyset tests (multi-instance JWKS sharing) ---
+
+func TestOIDCKeyManager_KeysetSaveAndLoad(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-keyset"
+
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	// The keyset should have been saved to DB on init.
+	keys, err := mgr.loadKeysetFromDB(ctx)
+	require.NoError(t, err)
+	require.Len(t, keys, 1, "Keyset in DB should contain the active key")
+	assert.Equal(t, mgr.JWKS().Keys[0].KeyID, keys[0].KeyID)
+	assert.True(t, keys[0].Active)
+}
+
+func TestOIDCKeyManager_KeysetSaveAndLoadAfterRotation(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-keyset-rotate"
+
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	originalKID := mgr.JWKS().Keys[0].KeyID
+
+	// Rotate the key.
+	err = mgr.RotateKey(ctx)
+	require.NoError(t, err)
+
+	// The keyset in DB should contain both keys.
+	keys, err := mgr.loadKeysetFromDB(ctx)
+	require.NoError(t, err)
+	require.Len(t, keys, 2, "Keyset in DB should contain active + rotated key")
+
+	kids := []string{keys[0].KeyID, keys[1].KeyID}
+	assert.Contains(t, kids, originalKID)
+
+	// Exactly one should be active.
+	activeCount := 0
+	for _, k := range keys {
+		if k.Active {
+			activeCount++
+		}
+	}
+	assert.Equal(t, 1, activeCount)
+}
+
+func TestOIDCKeyManager_RestoreRotatedKeysOnStartup(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-restore"
+
+	// First manager: create key and rotate.
+	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	originalKID := mgr1.JWKS().Keys[0].KeyID
+
+	err = mgr1.RotateKey(ctx)
+	require.NoError(t, err)
+	require.Len(t, mgr1.JWKS().Keys, 2, "After rotation, should have 2 keys")
+
+	newKID := mgr1.JWKS().Keys[0].KeyID
+
+	// Second manager: simulates a restart. Should restore the rotated key.
+	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	jwks2 := mgr2.JWKS()
+	require.Len(t, jwks2.Keys, 2, "Restarted manager should restore rotated key from DB")
+
+	kids := make([]string, len(jwks2.Keys))
+	for i, k := range jwks2.Keys {
+		kids[i] = k.KeyID
+	}
+	assert.Contains(t, kids, originalKID, "Original key should be restored")
+	assert.Contains(t, kids, newKID, "New key should be present")
+}
+
+func TestOIDCKeyManager_RestoreSkipsExpiredKeys(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-restore-expired"
+
+	// First manager: create key and rotate.
+	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	err = mgr1.RotateKey(ctx)
+	require.NoError(t, err)
+
+	// Artificially age the rotated key past the overlap window.
+	mgr1.mu.Lock()
+	for _, k := range mgr1.allKeys {
+		if !k.Active {
+			k.DeactivatedAt = time.Now().Add(-25 * time.Hour)
+		}
+	}
+	mgr1.mu.Unlock()
+
+	// Save the aged keyset to DB.
+	err = mgr1.saveKeysetToDB(ctx)
+	require.NoError(t, err)
+
+	// Second manager: should NOT restore the expired key.
+	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	jwks2 := mgr2.JWKS()
+	assert.Len(t, jwks2.Keys, 1, "Expired rotated key should not be restored")
+}
+
+func TestOIDCKeyManager_CASOnKeyGeneration(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-cas"
+
+	// First manager: generates and persists a key.
+	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+	kid1 := mgr1.JWKS().Keys[0].KeyID
+
+	// Second manager with the SAME store: should load the existing key,
+	// not generate a new one (the key already exists in the DB).
+	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+	kid2 := mgr2.JWKS().Keys[0].KeyID
+
+	assert.Equal(t, kid1, kid2,
+		"Second instance should load existing key, not generate a new one")
+
+	// Verify cross-validation: token from mgr1 verifiable with mgr2's JWKS.
+	claims := map[string]interface{}{"sub": "agent-cas-test"}
+	token, err := jwt.Signed(mgr1.Signer()).Claims(claims).Serialize()
+	require.NoError(t, err)
+
+	parsed, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.RS256})
+	require.NoError(t, err)
+
+	var result map[string]interface{}
+	err = parsed.Claims(mgr2.JWKS().Keys[0].Key, &result)
+	require.NoError(t, err)
+	assert.Equal(t, "agent-cas-test", result["sub"])
+}
+
+func TestOIDCKeyManager_CASCreateKeyInStore_Direct(t *testing.T) {
+	// Directly test the casCreateKeyInStore method to verify the
+	// ErrAlreadyExists code path is exercised (not just the store-load path).
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-cas-direct"
+
+	mgr := &OIDCKeyManager{
+		store: s,
+		hubID: hubID,
+		log:   slog.Default(),
+	}
+
+	// Generate two different keys.
+	key1, err := generateRSAKeyPair()
+	require.NoError(t, err)
+	pem1, err := encodePEMPrivateKey(key1)
+	require.NoError(t, err)
+
+	key2, err := generateRSAKeyPair()
+	require.NoError(t, err)
+	pem2, err := encodePEMPrivateKey(key2)
+	require.NoError(t, err)
+
+	t.Run("first writer wins", func(t *testing.T) {
+		// First call: should create successfully, return nil (caller uses theirs).
+		result := mgr.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(pem1), hubID)
+		assert.Nil(t, result, "First writer should win — nil means 'use your own key'")
+
+		// Verify the key was stored.
+		val, err := s.GetSecretValue(ctx, SecretKeyOIDCSigningKey, "hub", hubID)
+		require.NoError(t, err)
+		assert.Equal(t, string(pem1), val)
+	})
+
+	t.Run("second writer loses and loads winner key", func(t *testing.T) {
+		// Second call with a different key: should hit ErrAlreadyExists,
+		// load the first writer's key, and return it.
+		result := mgr.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(pem2), hubID)
+		require.NotNil(t, result, "Second writer should lose and return winner's key")
+
+		// The returned key should be the FIRST key, not the second.
+		kid1 := computeKeyID(&key1.PublicKey)
+		kidResult := computeKeyID(&result.PublicKey)
+		assert.Equal(t, kid1, kidResult,
+			"CAS loser should return the winner's key, not their own")
+	})
+}
+
+func TestOIDCKeyManager_RefreshKeysFromDB(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-refresh"
+
+	// Create two managers sharing the same DB.
+	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	// Verify both start with the same key.
+	assert.Equal(t, mgr1.JWKS().Keys[0].KeyID, mgr2.JWKS().Keys[0].KeyID)
+
+	// Rotate key on mgr1. mgr2 should not see it yet.
+	err = mgr1.RotateKey(ctx)
+	require.NoError(t, err)
+	require.Len(t, mgr1.JWKS().Keys, 2)
+	assert.Len(t, mgr2.JWKS().Keys, 1, "mgr2 should not see rotation yet")
+
+	// Refresh mgr2 from DB.
+	mgr2.refreshKeysFromDB(ctx)
+
+	// Now mgr2 should see both keys.
+	jwks2 := mgr2.JWKS()
+	assert.Len(t, jwks2.Keys, 2, "After refresh, mgr2 should see both keys")
+
+	// mgr2 should now sign with the new key.
+	newKID := mgr1.JWKS().Keys[0].KeyID
+	assert.Equal(t, newKID, mgr2.JWKS().Keys[0].KeyID,
+		"After refresh, mgr2 should use the new active key")
+}
+
+func TestOIDCKeyManager_CleanupPersistsToDB(t *testing.T) {
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-cleanup-persist"
+
+	mgr, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	// Rotate and age the old key.
+	err = mgr.RotateKey(ctx)
+	require.NoError(t, err)
+
+	mgr.mu.Lock()
+	for _, k := range mgr.allKeys {
+		if !k.Active {
+			k.DeactivatedAt = time.Now().Add(-25 * time.Hour)
+		}
+	}
+	mgr.mu.Unlock()
+
+	// Cleanup should remove the expired key and persist to DB.
+	mgr.CleanupExpiredKeys()
+	assert.Len(t, mgr.JWKS().Keys, 1)
+
+	// Verify DB was updated.
+	keys, err := mgr.loadKeysetFromDB(ctx)
+	require.NoError(t, err)
+	assert.Len(t, keys, 1, "DB keyset should also have expired key removed")
+}
+
+func TestOIDCKeyManager_CrossInstanceTokenVerification(t *testing.T) {
+	// Simulate two instances that share a DB. A token signed by one
+	// instance should be verifiable using the other instance's JWKS.
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-cross-instance"
+
+	mgr1, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	mgr2, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{
+		Store:     s,
+		HubID:     hubID,
+		IssuerURL: "https://hub.example.com",
+	})
+	require.NoError(t, err)
+
+	// Sign a token on instance 1.
+	claims := map[string]interface{}{
+		"sub": "agent-cross-instance",
+		"iss": "https://hub.example.com",
+	}
+	token, err := jwt.Signed(mgr1.Signer()).Claims(claims).Serialize()
+	require.NoError(t, err)
+
+	// Verify using instance 2's JWKS.
+	parsed, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.RS256})
+	require.NoError(t, err)
+
+	// Since both instances share the same DB and loaded the same key,
+	// the JWKS from instance 2 should contain the key to verify the token.
+	jwks2 := mgr2.JWKS()
+	require.Len(t, jwks2.Keys, 1)
+
+	var result map[string]interface{}
+	err = parsed.Claims(jwks2.Keys[0].Key, &result)
+	require.NoError(t, err)
+	assert.Equal(t, "agent-cross-instance", result["sub"])
+}
+
+func TestOIDCKeysetSecretID(t *testing.T) {
+	id1 := oidcKeysetSecretID("hub-1")
+	id2 := oidcKeysetSecretID("hub-2")
+
+	// Should be deterministic.
+	assert.Equal(t, id1, oidcKeysetSecretID("hub-1"))
+	// Different hubIDs should produce different IDs.
+	assert.NotEqual(t, id1, id2)
+	// Should be different from the signing key secret ID.
+	assert.NotEqual(t, id1, oidcSigningKeySecretID("hub-1"))
 }
 
 // createOIDCTestStore creates an in-memory SQLite store for OIDC tests.
