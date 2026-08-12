@@ -347,6 +347,14 @@ func (m *OIDCKeyManager) CleanupExpiredKeys() {
 
 	// Persist cleaned-up keyset to DB so other instances don't keep
 	// serving the expired keys.
+	//
+	// Note: there is a minor TOCTOU window between the Unlock above and
+	// the saveKeysetToDB call below — a concurrent RotateKey could modify
+	// m.allKeys in between. This is harmless: saveKeysetToDB re-reads
+	// m.allKeys under RLock, so it will capture the rotation's changes.
+	// In the worst case (a concurrent rotation writes the keyset between
+	// our unlock and save), the expired keys reappear briefly and are
+	// cleaned up on the next cycle or refresh.
 	if removed > 0 && m.store != nil {
 		if err := m.saveKeysetToDB(context.Background()); err != nil {
 			m.log.Warn("Failed to persist cleaned-up OIDC keyset to DB", "error", err)

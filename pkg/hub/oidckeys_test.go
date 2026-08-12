@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -1216,6 +1217,55 @@ func TestOIDCKeyManager_CASOnKeyGeneration(t *testing.T) {
 	err = parsed.Claims(mgr2.JWKS().Keys[0].Key, &result)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-cas-test", result["sub"])
+}
+
+func TestOIDCKeyManager_CASCreateKeyInStore_Direct(t *testing.T) {
+	// Directly test the casCreateKeyInStore method to verify the
+	// ErrAlreadyExists code path is exercised (not just the store-load path).
+	s := createOIDCTestStore(t)
+	ctx := context.Background()
+	hubID := "test-hub-cas-direct"
+
+	mgr := &OIDCKeyManager{
+		store: s,
+		hubID: hubID,
+		log:   slog.Default(),
+	}
+
+	// Generate two different keys.
+	key1, err := generateRSAKeyPair()
+	require.NoError(t, err)
+	pem1, err := encodePEMPrivateKey(key1)
+	require.NoError(t, err)
+
+	key2, err := generateRSAKeyPair()
+	require.NoError(t, err)
+	pem2, err := encodePEMPrivateKey(key2)
+	require.NoError(t, err)
+
+	t.Run("first writer wins", func(t *testing.T) {
+		// First call: should create successfully, return nil (caller uses theirs).
+		result := mgr.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(pem1), hubID)
+		assert.Nil(t, result, "First writer should win — nil means 'use your own key'")
+
+		// Verify the key was stored.
+		val, err := s.GetSecretValue(ctx, SecretKeyOIDCSigningKey, "hub", hubID)
+		require.NoError(t, err)
+		assert.Equal(t, string(pem1), val)
+	})
+
+	t.Run("second writer loses and loads winner key", func(t *testing.T) {
+		// Second call with a different key: should hit ErrAlreadyExists,
+		// load the first writer's key, and return it.
+		result := mgr.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(pem2), hubID)
+		require.NotNil(t, result, "Second writer should lose and return winner's key")
+
+		// The returned key should be the FIRST key, not the second.
+		kid1 := computeKeyID(&key1.PublicKey)
+		kidResult := computeKeyID(&result.PublicKey)
+		assert.Equal(t, kid1, kidResult,
+			"CAS loser should return the winner's key, not their own")
+	})
 }
 
 func TestOIDCKeyManager_RefreshKeysFromDB(t *testing.T) {
