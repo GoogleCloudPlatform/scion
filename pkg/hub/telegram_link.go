@@ -46,6 +46,13 @@ type telegramPendingLink struct {
 // TelegramLinkService manages pending Telegram account link codes.
 // When a ChatLinkStore is set, codes are persisted in the database so they
 // survive across Hub instances. Otherwise, an in-memory map is used (single-node only).
+//
+// NOTE: The DB-delegation + in-memory-fallback pattern is intentionally
+// duplicated across TelegramLinkService, DiscordLinkService, and
+// TeamsLinkService. Each service has provider-specific struct fields
+// (TelegramUserID vs DiscordUserID vs TeamsUserID), pending-link types,
+// and HTTP handler signatures that make a shared generic difficult without
+// sacrificing readability. The shared DB logic lives in ChatLinkStore.
 type TelegramLinkService struct {
 	mu      sync.Mutex
 	pending map[string]*telegramPendingLink // code → pending link (in-memory fallback)

@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 )
@@ -57,12 +59,15 @@ func (s *ChatLinkStore) RegisterCode(ctx context.Context, code, userIdentifier s
 		return fmt.Errorf("chat link register: begin tx: %w", err)
 	}
 
-	// Delete any previous pending code for this provider + user.
+	// Delete any previous non-confirmed code for this provider + user.
+	// Confirmed codes represent completed account links and must not be
+	// removed when the user requests a new link code.
 	if _, err := tx.ChatLinkCode.
 		Delete().
 		Where(
 			chatlinkcode.ProviderEQ(provider),
 			chatlinkcode.UserIdentifierEQ(userIdentifier),
+			chatlinkcode.StatusNEQ(chatlinkcode.StatusConfirmed),
 		).
 		Exec(ctx); err != nil {
 		_ = tx.Rollback()
@@ -160,6 +165,9 @@ func (s *ChatLinkStore) VerifyCode(ctx context.Context, code string, provider ch
 // GetStatusByUser returns the linking status for a provider-specific user
 // identifier. Returns (status, scionUserID, scionUserEmail).
 // On genuine DB errors, returns ("db_error", "", "") so callers can fall back.
+//
+// When multiple rows exist for the same provider+user (e.g. a confirmed code
+// and a new pending code), the most recently created entry is returned.
 func (s *ChatLinkStore) GetStatusByUser(ctx context.Context, provider chatlinkcode.Provider, userIdentifier string) (status, userID, userEmail string) {
 	row, err := s.client.ChatLinkCode.
 		Query().
@@ -167,7 +175,8 @@ func (s *ChatLinkStore) GetStatusByUser(ctx context.Context, provider chatlinkco
 			chatlinkcode.ProviderEQ(provider),
 			chatlinkcode.UserIdentifierEQ(userIdentifier),
 		).
-		Only(ctx)
+		Order(chatlinkcode.ByCreatedAt(entsql.OrderDesc())).
+		First(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
 			return "not_found", "", ""

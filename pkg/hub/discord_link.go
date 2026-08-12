@@ -41,6 +41,9 @@ type discordPendingLink struct {
 // DiscordLinkService manages pending Discord account link codes.
 // When a ChatLinkStore is set, codes are persisted in the database so they
 // survive across Hub instances. Otherwise, an in-memory map is used (single-node only).
+//
+// NOTE: See TelegramLinkService for why the DB-delegation + in-memory-fallback
+// pattern is intentionally duplicated across the three link services.
 type DiscordLinkService struct {
 	mu      sync.Mutex
 	pending map[string]*discordPendingLink // in-memory fallback

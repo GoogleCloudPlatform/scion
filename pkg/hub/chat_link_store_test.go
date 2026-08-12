@@ -198,6 +198,34 @@ func TestChatLinkStore_GetStatusByUser_Expired(t *testing.T) {
 	assert.Equal(t, "expired", status)
 }
 
+func TestChatLinkStore_RegisterDoesNotDeleteConfirmed(t *testing.T) {
+	store := newTestChatLinkStore(t)
+	ctx := context.Background()
+
+	// Register and confirm a code.
+	err := store.RegisterCode(ctx, "CONF01", "tg-user-1", chatlinkcode.ProviderTelegram, 15*time.Minute)
+	require.NoError(t, err)
+
+	uid, reason := store.VerifyCode(ctx, "CONF01", chatlinkcode.ProviderTelegram, "scion-user-1", "user@example.com")
+	assert.Empty(t, reason)
+	assert.Equal(t, "tg-user-1", uid)
+
+	// Register a new code for the same user. The confirmed code should NOT
+	// be deleted — confirmed codes represent completed account links.
+	err = store.RegisterCode(ctx, "CONF02", "tg-user-1", chatlinkcode.ProviderTelegram, 15*time.Minute)
+	require.NoError(t, err)
+
+	// GetStatusByUser returns the most recently created entry.
+	// The new pending code was created after the confirmed code.
+	status, _, _ := store.GetStatusByUser(ctx, chatlinkcode.ProviderTelegram, "tg-user-1")
+	assert.Equal(t, "pending", status, "most recent code (pending) should be returned")
+
+	// The confirmed code should still be verifiable — proving it was not deleted.
+	uid, reason = store.VerifyCode(ctx, "CONF01", chatlinkcode.ProviderTelegram, "scion-user-2", "user2@example.com")
+	assert.Empty(t, reason, "confirmed code should still exist")
+	assert.Equal(t, "tg-user-1", uid)
+}
+
 func TestChatLinkStore_ConsumePending(t *testing.T) {
 	store := newTestChatLinkStore(t)
 	ctx := context.Background()
