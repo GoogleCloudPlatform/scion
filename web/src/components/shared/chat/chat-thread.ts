@@ -285,7 +285,7 @@ export class ScionChatThread extends LitElement {
   private async loadPrefs(): Promise<void> {
     if (!this.agentId) return;
     try {
-      const res = await apiFetch(`/api/v1/chat/prefs?agentId=${this.agentId}`);
+      const res = await apiFetch(`/api/v1/chat/prefs?agentId=${encodeURIComponent(this.agentId)}`);
       if (res.ok) {
         const data = (await res.json()) as { visibility_mode?: string };
         if (data.visibility_mode && ['conversation', 'verbose', 'full'].includes(data.visibility_mode)) {
@@ -301,7 +301,7 @@ export class ScionChatThread extends LitElement {
   private async savePrefs(mode: VisibilityMode): Promise<void> {
     if (!this.agentId) return;
     try {
-      await apiFetch(`/api/v1/chat/prefs?agentId=${this.agentId}`, {
+      await apiFetch(`/api/v1/chat/prefs?agentId=${encodeURIComponent(this.agentId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ visibility_mode: mode }),
@@ -312,7 +312,7 @@ export class ScionChatThread extends LitElement {
   }
 
   /** Handle visibility mode change from the toggle. */
-  handleVisibilityChange(e: CustomEvent<VisibilityChangeDetail>): void {
+  private handleVisibilityChange(e: CustomEvent<VisibilityChangeDetail>): void {
     const newMode = e.detail.mode;
     if (newMode === this.visibilityMode) return;
     this.visibilityMode = newMode;
@@ -372,6 +372,19 @@ export class ScionChatThread extends LitElement {
     }
   }
 
+  /** Check whether a message should be shown given the current visibility mode. */
+  private shouldShowMessage(msg: Message): boolean {
+    const vis = msg.visibility || 'normal';
+    switch (this.visibilityMode) {
+      case 'conversation':
+        return vis === 'normal';
+      case 'verbose':
+        return vis === 'normal' || vis === 'verbose';
+      case 'full':
+        return true;
+    }
+  }
+
   /** Build the visibility query params based on the current mode. */
   private appendVisibilityParams(params: URLSearchParams): void {
     switch (this.visibilityMode) {
@@ -396,7 +409,7 @@ export class ScionChatThread extends LitElement {
     this.appendVisibilityParams(params);
 
     const res = await apiFetch(
-      `/api/v1/agents/${this.agentId}/messages?${params.toString()}`
+      `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages?${params.toString()}`
     );
 
     if (!res.ok) {
@@ -436,7 +449,7 @@ export class ScionChatThread extends LitElement {
     this.appendVisibilityParams(params);
 
     const res = await apiFetch(
-      `/api/v1/agents/${this.agentId}/messages?${params.toString()}`
+      `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages?${params.toString()}`
     );
 
     if (!res.ok) return;
@@ -481,7 +494,7 @@ export class ScionChatThread extends LitElement {
   private startStream(): void {
     if (!this.isConnected || this.eventSource || !this.agentId) return;
 
-    const url = `/api/v1/agents/${this.agentId}/messages/stream`;
+    const url = `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages/stream`;
     this.eventSource = new EventSource(url);
     this.streaming = true;
 
@@ -578,7 +591,7 @@ export class ScionChatThread extends LitElement {
     this.sendError = null;
 
     try {
-      const res = await apiFetch(`/api/v1/agents/${this.agentId}/message`, {
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(this.agentId)}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -738,7 +751,11 @@ export class ScionChatThread extends LitElement {
         continue;
       }
 
-      // Grouping: consecutive messages from same sender within GROUP_WINDOW_MS
+      // Visibility filter: skip messages that don't match the current mode.
+      // The message stays in the map so mode switches show it without re-fetch.
+      if (!this.shouldShowMessage(msg)) continue;
+
+      // Grouping: consecutive *visible* messages from same sender within GROUP_WINDOW_MS
       const msgTime = d.getTime();
       const sameSender = msg.sender === prevSender;
       const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
