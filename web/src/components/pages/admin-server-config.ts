@@ -3767,7 +3767,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   private updateProfileResource(
     name: string,
     tier: 'requests' | 'limits' | 'disk',
-    subField: string,
+    subField: 'cpu' | 'memory' | '',
     value: string,
   ): void {
     const updated = { ...this.profiles };
@@ -3781,16 +3781,18 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
       profile.resources = base;
     } else {
-      const existing = profile.resources?.[tier] || {};
-      const tierObj = { ...existing };
+      const key = subField as 'cpu' | 'memory';
+      const existing: { cpu?: string; memory?: string } = {
+        ...(profile.resources?.[tier] || {}),
+      };
       if (value) {
-        tierObj[subField] = value;
+        existing[key] = value;
       } else {
-        delete tierObj[subField];
+        delete existing[key];
       }
       profile.resources = {
         ...(profile.resources || {}),
-        [tier]: tierObj,
+        [tier]: existing,
       };
     }
     updated[name] = profile;
