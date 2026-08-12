@@ -653,6 +653,24 @@ export interface Message {
   read?: boolean;
   agentId: string;
   createdAt: string;
+  /** Channel the message was sent through (e.g. "web", "discord"). Phase 0 addition. */
+  channel?: string;
+  /** Thread identifier (e.g. "agent:<agentId>"). Phase 0 addition. */
+  threadId?: string;
+  /** Visibility level: "normal", "verbose", or "full". Phase 0 addition. */
+  visibility?: string;
+  /** Group identifier for related messages. */
+  groupId?: string;
+  /** Dispatch state: "pending", "dispatched", or "failed". */
+  dispatchState?: string;
+  /** Reason for dispatch failure, if any. */
+  dispatchFailureReason?: string;
+  /** Whether the message was sent with plain formatting. */
+  plain?: boolean;
+  /** File attachment paths. */
+  attachments?: string[];
+  /** Arbitrary metadata attached to the message. */
+  metadata?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------

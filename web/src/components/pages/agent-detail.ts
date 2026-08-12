@@ -56,6 +56,9 @@ import '../shared/agent-log-viewer.js';
 import type { ScionAgentLogViewer } from '../shared/agent-log-viewer.js';
 import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
+import '../shared/chat/chat-thread.js';
+import type { ScionChatThread } from '../shared/chat/chat-thread.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import { showToast } from '../../utils/toast.js';
@@ -142,6 +145,15 @@ export class ScionPageAgentDetail extends LitElement {
 
   @state()
   private quickMessageOpen = false;
+
+  /** Whether the Chat|Log toggle is in "chat" mode (vs "log" mode). */
+  @state()
+  private chatViewActive = true;
+
+  /** Whether the native chat feature flag is enabled. */
+  private get nativeChatEnabled(): boolean {
+    return isFeatureEnabled('web.native_chat');
+  }
 
   @state()
   private metricsSummary: AgentMetricsSummary | null = null;
@@ -935,10 +947,37 @@ export class ScionPageAgentDetail extends LitElement {
       viewer?.loadLogs();
     }
     if (e.detail.name === 'messages') {
-      const viewer = this.shadowRoot?.querySelector(
-        'scion-agent-message-viewer'
-      ) as ScionAgentMessageViewer | null;
-      viewer?.loadMessages();
+      if (this.nativeChatEnabled && this.chatViewActive) {
+        const chatThread = this.shadowRoot?.querySelector(
+          'scion-chat-thread'
+        ) as ScionChatThread | null;
+        chatThread?.loadHistory();
+      } else {
+        const viewer = this.shadowRoot?.querySelector(
+          'scion-agent-message-viewer'
+        ) as ScionAgentMessageViewer | null;
+        viewer?.loadMessages();
+      }
+    }
+  }
+
+  private handleMessageViewToggle(mode: 'chat' | 'log'): void {
+    this.chatViewActive = mode === 'chat';
+    // Trigger load for the newly active view
+    if (this.chatViewActive) {
+      this.updateComplete.then(() => {
+        const chatThread = this.shadowRoot?.querySelector(
+          'scion-chat-thread'
+        ) as ScionChatThread | null;
+        chatThread?.loadHistory();
+      });
+    } else {
+      this.updateComplete.then(() => {
+        const viewer = this.shadowRoot?.querySelector(
+          'scion-agent-message-viewer'
+        ) as ScionAgentMessageViewer | null;
+        viewer?.loadMessages();
+      });
     }
   }
 
@@ -996,12 +1035,7 @@ export class ScionPageAgentDetail extends LitElement {
           ></scion-agent-log-viewer>
         </sl-tab-panel>
         <sl-tab-panel name="messages">
-          <scion-agent-message-viewer
-            agentId=${this.agentId}
-            agentName=${this.agent.name || ''}
-            ?canSend=${can(this.agent._capabilities, 'message')}
-            ?cloudLogging=${this.agent.cloudLogging || false}
-          ></scion-agent-message-viewer>
+          ${this.renderMessagesPanel()}
         </sl-tab-panel>
         <sl-tab-panel name="configuration">${this.renderConfigurationTab()}</sl-tab-panel>
       </sl-tab-group>
@@ -1012,6 +1046,63 @@ export class ScionPageAgentDetail extends LitElement {
         ?open=${this.quickMessageOpen}
         @sl-request-close=${() => { this.quickMessageOpen = false; }}
       ></scion-quick-message-dialog>
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Messages Panel (Chat | Log toggle)
+  // ---------------------------------------------------------------------------
+
+  private renderMessagesPanel() {
+    const agent = this.agent!;
+
+    // When the feature flag is off, render exactly the existing message viewer
+    // (AC9 — byte-for-byte current Messages tab behaviour).
+    if (!this.nativeChatEnabled) {
+      return html`
+        <scion-agent-message-viewer
+          agentId=${this.agentId}
+          agentName=${agent.name || ''}
+          ?canSend=${can(agent._capabilities, 'message')}
+          ?cloudLogging=${agent.cloudLogging || false}
+        ></scion-agent-message-viewer>
+      `;
+    }
+
+    // Feature flag ON: show Chat|Log toggle, default to Chat
+    return html`
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+        <sl-radio-group
+          value=${this.chatViewActive ? 'chat' : 'log'}
+          size="small"
+          @sl-change=${(e: Event) => {
+            const value = (e.target as HTMLInputElement).value as 'chat' | 'log';
+            this.handleMessageViewToggle(value);
+          }}
+        >
+          <sl-radio-button value="chat">
+            <sl-icon slot="prefix" name="chat-dots" style="font-size: 0.875rem"></sl-icon>
+            Chat
+          </sl-radio-button>
+          <sl-radio-button value="log">
+            <sl-icon slot="prefix" name="list-ul" style="font-size: 0.875rem"></sl-icon>
+            Log
+          </sl-radio-button>
+        </sl-radio-group>
+      </div>
+      <scion-chat-thread
+        agentId=${this.agentId}
+        agentName=${agent.name || ''}
+        ?canSend=${can(agent._capabilities, 'message')}
+        style="display: ${this.chatViewActive ? '' : 'none'}"
+      ></scion-chat-thread>
+      <scion-agent-message-viewer
+        agentId=${this.agentId}
+        agentName=${agent.name || ''}
+        ?canSend=${can(agent._capabilities, 'message')}
+        ?cloudLogging=${agent.cloudLogging || false}
+        style="display: ${this.chatViewActive ? 'none' : ''}"
+      ></scion-agent-message-viewer>
     `;
   }
 

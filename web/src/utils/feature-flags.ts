@@ -1,0 +1,59 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * Feature flag utilities.
+ *
+ * Checks for feature flags in this order:
+ * 1. Server-injected `window.__SCION_FEATURES__` (set by the Go template)
+ * 2. localStorage override for development (key: `scion:feature:<name>`)
+ *
+ * Default is `false` (flag off) when not found in any source.
+ */
+
+declare global {
+  interface Window {
+    __SCION_FEATURES__?: Record<string, boolean>;
+  }
+}
+
+/**
+ * Check whether a feature flag is enabled.
+ *
+ * @param name - Dot-separated flag name (e.g. "web.native_chat")
+ * @returns true if the flag is enabled, false otherwise
+ */
+export function isFeatureEnabled(name: string): boolean {
+  // 1. Check server-injected features
+  if (typeof window !== 'undefined' && window.__SCION_FEATURES__) {
+    const value = window.__SCION_FEATURES__[name];
+    if (typeof value === 'boolean') return value;
+  }
+
+  // 2. Check localStorage override (dev convenience)
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const stored = localStorage.getItem(`scion:feature:${name}`);
+      if (stored === 'true') return true;
+      if (stored === 'false') return false;
+    } catch {
+      // localStorage not available (e.g. SSR)
+    }
+  }
+
+  // Default: off
+  return false;
+}
