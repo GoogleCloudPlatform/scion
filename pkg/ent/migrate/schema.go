@@ -724,6 +724,9 @@ var (
 		{Name: "dispatch_state", Type: field.TypeString, Default: "pending"},
 		{Name: "dispatch_failure_reason", Type: field.TypeString, Nullable: true},
 		{Name: "dispatched_at", Type: field.TypeTime, Nullable: true},
+		{Name: "channel", Type: field.TypeString, Nullable: true, Size: 64},
+		{Name: "thread_id", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "visibility", Type: field.TypeString, Nullable: true, Size: 16},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// MessagesTable holds the schema information for the "messages" table.
@@ -745,7 +748,7 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[16]},
+				Columns: []*schema.Column{MessagesColumns[19]},
 			},
 		},
 	}

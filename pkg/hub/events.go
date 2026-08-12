@@ -193,19 +193,27 @@ type BrokerStatusEvent struct {
 // UserMessageEvent is published when a message involving a human user is
 // persisted — either an agent→user reply or a user→agent instruction.
 type UserMessageEvent struct {
-	ID          string `json:"id"`
-	ProjectID   string `json:"projectId"`
-	GroveID     string `json:"groveId"`
-	Sender      string `json:"sender"`
-	SenderID    string `json:"senderId"`
-	Recipient   string `json:"recipient"`
-	RecipientID string `json:"recipientId"`
-	Msg         string `json:"msg"`
-	Type        string `json:"type"`
-	Urgent      bool   `json:"urgent,omitempty"`
-	Broadcasted bool   `json:"broadcasted,omitempty"`
-	AgentID     string `json:"agentId"`
-	CreatedAt   string `json:"createdAt"`
+	ID            string `json:"id"`
+	ProjectID     string `json:"projectId"`
+	GroveID       string `json:"groveId"`
+	Sender        string `json:"sender"`
+	SenderID      string `json:"senderId"`
+	Recipient     string `json:"recipient"`
+	RecipientID   string `json:"recipientId"`
+	Msg           string `json:"msg"`
+	Type          string `json:"type"`
+	Urgent        bool   `json:"urgent,omitempty"`
+	Broadcasted   bool   `json:"broadcasted,omitempty"`
+	AgentID       string `json:"agentId"`
+	CreatedAt     string `json:"createdAt"`
+	Channel       string `json:"channel,omitempty"`
+	ThreadID      string `json:"threadId,omitempty"`
+	Visibility    string `json:"visibility,omitempty"`
+	GroupID       string `json:"groupId,omitempty"`
+	Read          bool   `json:"read"`
+	DispatchState string `json:"dispatchState,omitempty"`
+	// Metadata on the SSE event is deferred to a later phase when metadata
+	// persistence is added to store.Message (F4 deliverable).
 }
 
 // NotificationCreatedEvent is published when a user notification is created.
@@ -596,19 +604,25 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 //     directions; subscribers filter by user participation themselves)
 func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message) {
 	evt := UserMessageEvent{
-		ID:          msg.ID,
-		ProjectID:   msg.ProjectID,
-		GroveID:     msg.ProjectID,
-		Sender:      msg.Sender,
-		SenderID:    msg.SenderID,
-		Recipient:   msg.Recipient,
-		RecipientID: msg.RecipientID,
-		Msg:         msg.Msg,
-		Type:        msg.Type,
-		Urgent:      msg.Urgent,
-		Broadcasted: msg.Broadcasted,
-		AgentID:     msg.AgentID,
-		CreatedAt:   msg.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+		ID:            msg.ID,
+		ProjectID:     msg.ProjectID,
+		GroveID:       msg.ProjectID,
+		Sender:        msg.Sender,
+		SenderID:      msg.SenderID,
+		Recipient:     msg.Recipient,
+		RecipientID:   msg.RecipientID,
+		Msg:           msg.Msg,
+		Type:          msg.Type,
+		Urgent:        msg.Urgent,
+		Broadcasted:   msg.Broadcasted,
+		AgentID:       msg.AgentID,
+		CreatedAt:     msg.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+		Channel:       msg.Channel,
+		ThreadID:      msg.ThreadID,
+		Visibility:    msg.Visibility,
+		GroupID:       msg.GroupID,
+		Read:          msg.Read,
+		DispatchState: msg.DispatchState,
 	}
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the

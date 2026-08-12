@@ -130,6 +130,21 @@ func DispatchedAt(v time.Time) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldDispatchedAt, v))
 }
 
+// Channel applies equality check predicate on the "channel" field. It's identical to ChannelEQ.
+func Channel(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldChannel, v))
+}
+
+// ThreadID applies equality check predicate on the "thread_id" field. It's identical to ThreadIDEQ.
+func ThreadID(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldThreadID, v))
+}
+
+// Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
+func Visibility(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldVisibility, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldCreated, v))
@@ -953,6 +968,231 @@ func DispatchedAtIsNil() predicate.Message {
 // DispatchedAtNotNil applies the NotNil predicate on the "dispatched_at" field.
 func DispatchedAtNotNil() predicate.Message {
 	return predicate.Message(sql.FieldNotNull(FieldDispatchedAt))
+}
+
+// ChannelEQ applies the EQ predicate on the "channel" field.
+func ChannelEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldChannel, v))
+}
+
+// ChannelNEQ applies the NEQ predicate on the "channel" field.
+func ChannelNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldChannel, v))
+}
+
+// ChannelIn applies the In predicate on the "channel" field.
+func ChannelIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldChannel, vs...))
+}
+
+// ChannelNotIn applies the NotIn predicate on the "channel" field.
+func ChannelNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldChannel, vs...))
+}
+
+// ChannelGT applies the GT predicate on the "channel" field.
+func ChannelGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldChannel, v))
+}
+
+// ChannelGTE applies the GTE predicate on the "channel" field.
+func ChannelGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldChannel, v))
+}
+
+// ChannelLT applies the LT predicate on the "channel" field.
+func ChannelLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldChannel, v))
+}
+
+// ChannelLTE applies the LTE predicate on the "channel" field.
+func ChannelLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldChannel, v))
+}
+
+// ChannelContains applies the Contains predicate on the "channel" field.
+func ChannelContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldChannel, v))
+}
+
+// ChannelHasPrefix applies the HasPrefix predicate on the "channel" field.
+func ChannelHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldChannel, v))
+}
+
+// ChannelHasSuffix applies the HasSuffix predicate on the "channel" field.
+func ChannelHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldChannel, v))
+}
+
+// ChannelIsNil applies the IsNil predicate on the "channel" field.
+func ChannelIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldChannel))
+}
+
+// ChannelNotNil applies the NotNil predicate on the "channel" field.
+func ChannelNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldChannel))
+}
+
+// ChannelEqualFold applies the EqualFold predicate on the "channel" field.
+func ChannelEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldChannel, v))
+}
+
+// ChannelContainsFold applies the ContainsFold predicate on the "channel" field.
+func ChannelContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldChannel, v))
+}
+
+// ThreadIDEQ applies the EQ predicate on the "thread_id" field.
+func ThreadIDEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldThreadID, v))
+}
+
+// ThreadIDNEQ applies the NEQ predicate on the "thread_id" field.
+func ThreadIDNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldThreadID, v))
+}
+
+// ThreadIDIn applies the In predicate on the "thread_id" field.
+func ThreadIDIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldThreadID, vs...))
+}
+
+// ThreadIDNotIn applies the NotIn predicate on the "thread_id" field.
+func ThreadIDNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldThreadID, vs...))
+}
+
+// ThreadIDGT applies the GT predicate on the "thread_id" field.
+func ThreadIDGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldThreadID, v))
+}
+
+// ThreadIDGTE applies the GTE predicate on the "thread_id" field.
+func ThreadIDGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldThreadID, v))
+}
+
+// ThreadIDLT applies the LT predicate on the "thread_id" field.
+func ThreadIDLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldThreadID, v))
+}
+
+// ThreadIDLTE applies the LTE predicate on the "thread_id" field.
+func ThreadIDLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldThreadID, v))
+}
+
+// ThreadIDContains applies the Contains predicate on the "thread_id" field.
+func ThreadIDContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldThreadID, v))
+}
+
+// ThreadIDHasPrefix applies the HasPrefix predicate on the "thread_id" field.
+func ThreadIDHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldThreadID, v))
+}
+
+// ThreadIDHasSuffix applies the HasSuffix predicate on the "thread_id" field.
+func ThreadIDHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldThreadID, v))
+}
+
+// ThreadIDIsNil applies the IsNil predicate on the "thread_id" field.
+func ThreadIDIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldThreadID))
+}
+
+// ThreadIDNotNil applies the NotNil predicate on the "thread_id" field.
+func ThreadIDNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldThreadID))
+}
+
+// ThreadIDEqualFold applies the EqualFold predicate on the "thread_id" field.
+func ThreadIDEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldThreadID, v))
+}
+
+// ThreadIDContainsFold applies the ContainsFold predicate on the "thread_id" field.
+func ThreadIDContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldThreadID, v))
+}
+
+// VisibilityEQ applies the EQ predicate on the "visibility" field.
+func VisibilityEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldVisibility, v))
+}
+
+// VisibilityNEQ applies the NEQ predicate on the "visibility" field.
+func VisibilityNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldVisibility, v))
+}
+
+// VisibilityIn applies the In predicate on the "visibility" field.
+func VisibilityIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldVisibility, vs...))
+}
+
+// VisibilityNotIn applies the NotIn predicate on the "visibility" field.
+func VisibilityNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldVisibility, vs...))
+}
+
+// VisibilityGT applies the GT predicate on the "visibility" field.
+func VisibilityGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldVisibility, v))
+}
+
+// VisibilityGTE applies the GTE predicate on the "visibility" field.
+func VisibilityGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldVisibility, v))
+}
+
+// VisibilityLT applies the LT predicate on the "visibility" field.
+func VisibilityLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldVisibility, v))
+}
+
+// VisibilityLTE applies the LTE predicate on the "visibility" field.
+func VisibilityLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldVisibility, v))
+}
+
+// VisibilityContains applies the Contains predicate on the "visibility" field.
+func VisibilityContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldVisibility, v))
+}
+
+// VisibilityHasPrefix applies the HasPrefix predicate on the "visibility" field.
+func VisibilityHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldVisibility, v))
+}
+
+// VisibilityHasSuffix applies the HasSuffix predicate on the "visibility" field.
+func VisibilityHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldVisibility, v))
+}
+
+// VisibilityIsNil applies the IsNil predicate on the "visibility" field.
+func VisibilityIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldVisibility))
+}
+
+// VisibilityNotNil applies the NotNil predicate on the "visibility" field.
+func VisibilityNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldVisibility))
+}
+
+// VisibilityEqualFold applies the EqualFold predicate on the "visibility" field.
+func VisibilityEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldVisibility, v))
+}
+
+// VisibilityContainsFold applies the ContainsFold predicate on the "visibility" field.
+func VisibilityContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldVisibility, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

@@ -44,6 +44,12 @@ const (
 	FieldDispatchFailureReason = "dispatch_failure_reason"
 	// FieldDispatchedAt holds the string denoting the dispatched_at field in the database.
 	FieldDispatchedAt = "dispatched_at"
+	// FieldChannel holds the string denoting the channel field in the database.
+	FieldChannel = "channel"
+	// FieldThreadID holds the string denoting the thread_id field in the database.
+	FieldThreadID = "thread_id"
+	// FieldVisibility holds the string denoting the visibility field in the database.
+	FieldVisibility = "visibility"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the message in the database.
@@ -68,6 +74,9 @@ var Columns = []string{
 	FieldDispatchState,
 	FieldDispatchFailureReason,
 	FieldDispatchedAt,
+	FieldChannel,
+	FieldThreadID,
+	FieldVisibility,
 	FieldCreated,
 }
 
@@ -98,6 +107,12 @@ var (
 	DefaultRead bool
 	// DefaultDispatchState holds the default value on creation for the "dispatch_state" field.
 	DefaultDispatchState string
+	// ChannelValidator is a validator for the "channel" field. It is called by the builders before save.
+	ChannelValidator func(string) error
+	// ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
+	ThreadIDValidator func(string) error
+	// VisibilityValidator is a validator for the "visibility" field. It is called by the builders before save.
+	VisibilityValidator func(string) error
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -185,6 +200,21 @@ func ByDispatchFailureReason(opts ...sql.OrderTermOption) OrderOption {
 // ByDispatchedAt orders the results by the dispatched_at field.
 func ByDispatchedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDispatchedAt, opts...).ToFunc()
+}
+
+// ByChannel orders the results by the channel field.
+func ByChannel(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldChannel, opts...).ToFunc()
+}
+
+// ByThreadID orders the results by the thread_id field.
+func ByThreadID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldThreadID, opts...).ToFunc()
+}
+
+// ByVisibility orders the results by the visibility field.
+func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.
