@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
@@ -22,6 +23,8 @@ import (
 	"sync"
 	"time"
 )
+
+const discordProvider = "discord"
 
 const discordLinkCodeTTL = 15 * time.Minute
 
@@ -35,14 +38,21 @@ type discordPendingLink struct {
 	UserEmail     string
 }
 
-// DiscordLinkService manages pending Discord account link codes using an
-// in-memory map (single-node only).
+// DiscordLinkService manages pending Discord account link codes.
+// When a ChatLinkStore is set, codes are persisted in the database so they
+// survive across Hub instances. Otherwise, an in-memory map is used (single-node only).
 type DiscordLinkService struct {
 	mu      sync.Mutex
-	pending map[string]*discordPendingLink
+	pending map[string]*discordPendingLink // in-memory fallback
 
+	// NOTE: verifyLimiters is per-instance. At min-instances=N the effective
+	// rate limit is N× the configured per-IP limit. This is acceptable as
+	// defense-in-depth; the primary protection is code entropy + expiration.
 	verifyMu       sync.Mutex
 	verifyLimiters map[string]*tokenBucket
+
+	// db is the optional DB-backed link code store.
+	db *ChatLinkStore
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -60,8 +70,31 @@ func NewDiscordLinkService() *DiscordLinkService {
 	return s
 }
 
+// SetStore sets the database-backed link code store. When set, all code
+// operations delegate to it instead of the in-memory map.
+func (s *DiscordLinkService) SetStore(store *ChatLinkStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.db = store
+}
+
 // RegisterCode stores a pending link code from the Discord plugin.
 func (s *DiscordLinkService) RegisterCode(code, discordUserID string) {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := db.RegisterCode(ctx, code, discordUserID, discordProvider, discordLinkCodeTTL); err != nil {
+			slog.Error("Discord link: DB RegisterCode failed, falling back to in-memory", "error", err)
+		} else {
+			return
+		}
+	}
+
+	// In-memory fallback.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -83,6 +116,20 @@ func (s *DiscordLinkService) RegisterCode(code, discordUserID string) {
 // VerifyCode attempts to confirm a pending link code with the given user.
 // Returns the discordUserID on success, or empty string with a reason.
 func (s *DiscordLinkService) VerifyCode(code, userID, userEmail string) (discordUserID string, err string) {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		uid, reason := db.VerifyCode(ctx, code, discordProvider, userID, userEmail)
+		if reason == "" || reason == "code_not_found" || reason == "code_expired" {
+			return uid, reason
+		}
+	}
+
+	// In-memory fallback.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -108,6 +155,17 @@ func (s *DiscordLinkService) VerifyCode(code, userID, userEmail string) (discord
 // GetStatusByDiscordUser returns the linking status for a given Discord user ID.
 func (s *DiscordLinkService) GetStatusByDiscordUser(discordUserID string) (status, userID, userEmail string) {
 	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return db.GetStatusByUser(ctx, discordProvider, discordUserID)
+	}
+
+	// In-memory fallback.
+	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, p := range s.pending {
@@ -123,6 +181,18 @@ func (s *DiscordLinkService) GetStatusByDiscordUser(discordUserID string) (statu
 
 // ConsumePending removes a confirmed entry so it isn't returned again.
 func (s *DiscordLinkService) ConsumePending(discordUserID string) {
+	s.mu.Lock()
+	db := s.db
+	s.mu.Unlock()
+
+	if db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		db.ConsumePending(ctx, discordProvider, discordUserID)
+		return
+	}
+
+	// In-memory fallback.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
