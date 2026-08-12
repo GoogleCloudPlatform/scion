@@ -30,20 +30,6 @@ import (
 // Callers on multi-instance deployments should wrap this call in an advisory
 // lock (store.LockStorageMigration) to prevent concurrent replicas from racing.
 func (s *Server) MigrateStorageOnFirstBoot(ctx context.Context) {
-	// Acquire advisory lock to prevent concurrent replicas from racing.
-	if locker, ok := s.store.(store.AdvisoryLocker); ok {
-		acquired, release, err := locker.TryAdvisoryLock(ctx, store.LockStorageMigration)
-		if err != nil {
-			s.resourceLog.Error("storage migration: failed to acquire advisory lock", "error", err)
-			return
-		}
-		defer func() { _ = release() }()
-		if !acquired {
-			s.resourceLog.Info("storage migration: lock held by another replica, skipping")
-			return
-		}
-	}
-
 	stor := s.GetStorage()
 	if stor == nil {
 		return
