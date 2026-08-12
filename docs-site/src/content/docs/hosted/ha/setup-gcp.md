@@ -386,7 +386,29 @@ gcloud iam service-accounts add-iam-policy-binding \
 
 Without this binding, template generation will fail with: `Permission 'iam.serviceAccounts.signBlob' denied on resource`.
 
-### 2e. Transport SA — IAP Access
+### 2e. Hub Runner SA — IAM Security Reviewer (Optional, for Policy Troubleshooter)
+
+When you enable GCP IAM check mode (`gcp_iam_check_mode: enforce`), Scion verifies that human and agent callers possess `iam.serviceAccounts.actAs` permission on assigned service accounts via the **GCP Policy Troubleshooter v3 API**.
+
+For Policy Troubleshooter to evaluate permissions across your project (or your entire organization if you assign SAs from multiple projects), the Hub Runner SA must be granted the **IAM Security Reviewer** role (`roles/iam.securityReviewer`):
+
+```bash
+# Grant Security Reviewer at the project level
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA_HUB" \
+  --role="roles/iam.securityReviewer" \
+  --quiet
+
+# (Optional) For multi-project or organization-wide SAs, grant at the org level instead:
+# export ORG_ID="your-gcp-organization-id"
+# gcloud organizations add-iam-policy-binding $ORG_ID \
+#   --member="serviceAccount:$SA_HUB" \
+#   --role="roles/iam.securityReviewer"
+```
+
+Without this permission, Policy Troubleshooter checks will fail with a `PermissionDenied` error, which results in a **fail-closed** denial of service account assignment in Scion.
+
+### 2f. Transport SA — IAP Access
 
 The transport SA's identity is used in the IAP token. IAP must allow this identity to access
 the Hub:
@@ -418,7 +440,7 @@ gcloud run services add-iam-policy-binding scion-hub \
 Make sure your deployer identity has `roles/run.admin` before running this, as it modifies service-level IAM.
 :::
 
-### 2f. Discord Runner SA — IAP Access
+### 2g. Discord Runner SA — IAP Access
 
 The Discord service calls Hub APIs through IAP (for registration, message routing, etc.):
 
@@ -438,7 +460,7 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
   --quiet
 ```
 
-### 2g. GKE Workload Identity — Agent Pod Secret Access
+### 2h. GKE Workload Identity — Agent Pod Secret Access
 
 Agent pods need Workload Identity (WI) bindings to access Secret Manager for CSI-mounted
 secrets:
@@ -506,6 +528,7 @@ gcloud projects get-iam-policy $PROJECT_ID \
 | `scion-hub-runner` | `roles/container.developer` | Project | GKE agent dispatch |
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On itself** | Generate GCS signed URLs |
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On `scion-transport` SA** | Mint IAP tokens for agents |
+| `scion-hub-runner` | `roles/iam.securityReviewer` | Project/Org | Policy Troubleshooter (Optional, for SA assignment gates) |
 | `scion-transport` | `roles/iap.httpsResourceAccessor` | Project | Allow IAP access to Hub |
 | `scion-transport` | `roles/run.invoker` | Hub service | Allow Cloud Run invocation |
 | `scion-discord-runner` | `roles/cloudsql.client` | Project | Cloud SQL connections |
