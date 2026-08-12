@@ -15,6 +15,7 @@
 package bridge
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -84,7 +85,7 @@ func (s *Server) handleOIDCDiscoveryProxy(w http.ResponseWriter, r *http.Request
 	hubEndpoint := strings.TrimRight(cfg.Hub.Endpoint, "/")
 	hubURL := hubEndpoint + "/.well-known/openid-configuration"
 
-	body, err := s.fetchCachedOIDC("openid-configuration", hubURL)
+	body, err := s.fetchCachedOIDC(r.Context(), "openid-configuration", hubURL)
 	if err != nil {
 		s.log.Error("failed to fetch OIDC discovery from hub", "error", err)
 		http.Error(w, "failed to fetch OIDC discovery from hub", http.StatusBadGateway)
@@ -101,7 +102,9 @@ func (s *Server) handleOIDCDiscoveryProxy(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	w.Write(rewritten)
+	if _, err := w.Write(rewritten); err != nil {
+		s.log.Debug("failed to write OIDC discovery response", "error", err)
+	}
 }
 
 // handleJWKSProxy proxies the hub's /.well-known/jwks.json endpoint publicly.
@@ -110,7 +113,7 @@ func (s *Server) handleJWKSProxy(w http.ResponseWriter, r *http.Request) {
 	hubEndpoint := strings.TrimRight(cfg.Hub.Endpoint, "/")
 	hubURL := hubEndpoint + "/.well-known/jwks.json"
 
-	body, err := s.fetchCachedOIDC("jwks", hubURL)
+	body, err := s.fetchCachedOIDC(r.Context(), "jwks", hubURL)
 	if err != nil {
 		s.log.Error("failed to fetch JWKS from hub", "error", err)
 		http.Error(w, "failed to fetch JWKS from hub", http.StatusBadGateway)
@@ -119,13 +122,15 @@ func (s *Server) handleJWKSProxy(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	w.Write(body)
+	if _, err := w.Write(body); err != nil {
+		s.log.Debug("failed to write JWKS response", "error", err)
+	}
 }
 
 // fetchCachedOIDC fetches an OIDC endpoint from the hub, using the cache
 // when available. The bridge's transport auth (IAP credentials) is applied
 // to reach hubs behind identity-aware proxies.
-func (s *Server) fetchCachedOIDC(cacheKey, hubURL string) ([]byte, error) {
+func (s *Server) fetchCachedOIDC(ctx context.Context, cacheKey, hubURL string) ([]byte, error) {
 	if s.bridge.oidcCache != nil {
 		if cached := s.bridge.oidcCache.get(cacheKey); cached != nil {
 			return cached, nil
@@ -134,7 +139,12 @@ func (s *Server) fetchCachedOIDC(cacheKey, hubURL string) ([]byte, error) {
 
 	client := s.bridge.oidcHTTPClient()
 
-	resp, err := client.Get(hubURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hubURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request for %s: %w", hubURL, err)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", hubURL, err)
 	}
