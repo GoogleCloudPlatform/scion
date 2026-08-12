@@ -146,6 +146,34 @@ func (_u *GCPServiceAccountUpdate) ClearVerifiedAt() *GCPServiceAccountUpdate {
 	return _u
 }
 
+// SetVerificationStatus sets the "verification_status" field.
+func (_u *GCPServiceAccountUpdate) SetVerificationStatus(v string) *GCPServiceAccountUpdate {
+	_u.mutation.SetVerificationStatus(v)
+	return _u
+}
+
+// SetNillableVerificationStatus sets the "verification_status" field if the given value is not nil.
+func (_u *GCPServiceAccountUpdate) SetNillableVerificationStatus(v *string) *GCPServiceAccountUpdate {
+	if v != nil {
+		_u.SetVerificationStatus(*v)
+	}
+	return _u
+}
+
+// SetVerificationError sets the "verification_error" field.
+func (_u *GCPServiceAccountUpdate) SetVerificationError(v string) *GCPServiceAccountUpdate {
+	_u.mutation.SetVerificationError(v)
+	return _u
+}
+
+// SetNillableVerificationError sets the "verification_error" field if the given value is not nil.
+func (_u *GCPServiceAccountUpdate) SetNillableVerificationError(v *string) *GCPServiceAccountUpdate {
+	if v != nil {
+		_u.SetVerificationError(*v)
+	}
+	return _u
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (_u *GCPServiceAccountUpdate) SetCreatedBy(v string) *GCPServiceAccountUpdate {
 	_u.mutation.SetCreatedBy(v)
@@ -283,6 +311,12 @@ func (_u *GCPServiceAccountUpdate) sqlSave(ctx context.Context) (_node int, err 
 	}
 	if _u.mutation.VerifiedAtCleared() {
 		_spec.ClearField(gcpserviceaccount.FieldVerifiedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.VerificationStatus(); ok {
+		_spec.SetField(gcpserviceaccount.FieldVerificationStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.VerificationError(); ok {
+		_spec.SetField(gcpserviceaccount.FieldVerificationError, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(gcpserviceaccount.FieldCreatedBy, field.TypeString, value)
@@ -428,6 +462,34 @@ func (_u *GCPServiceAccountUpdateOne) SetNillableVerifiedAt(v *time.Time) *GCPSe
 // ClearVerifiedAt clears the value of the "verified_at" field.
 func (_u *GCPServiceAccountUpdateOne) ClearVerifiedAt() *GCPServiceAccountUpdateOne {
 	_u.mutation.ClearVerifiedAt()
+	return _u
+}
+
+// SetVerificationStatus sets the "verification_status" field.
+func (_u *GCPServiceAccountUpdateOne) SetVerificationStatus(v string) *GCPServiceAccountUpdateOne {
+	_u.mutation.SetVerificationStatus(v)
+	return _u
+}
+
+// SetNillableVerificationStatus sets the "verification_status" field if the given value is not nil.
+func (_u *GCPServiceAccountUpdateOne) SetNillableVerificationStatus(v *string) *GCPServiceAccountUpdateOne {
+	if v != nil {
+		_u.SetVerificationStatus(*v)
+	}
+	return _u
+}
+
+// SetVerificationError sets the "verification_error" field.
+func (_u *GCPServiceAccountUpdateOne) SetVerificationError(v string) *GCPServiceAccountUpdateOne {
+	_u.mutation.SetVerificationError(v)
+	return _u
+}
+
+// SetNillableVerificationError sets the "verification_error" field if the given value is not nil.
+func (_u *GCPServiceAccountUpdateOne) SetNillableVerificationError(v *string) *GCPServiceAccountUpdateOne {
+	if v != nil {
+		_u.SetVerificationError(*v)
+	}
 	return _u
 }
 
@@ -598,6 +660,12 @@ func (_u *GCPServiceAccountUpdateOne) sqlSave(ctx context.Context) (_node *GCPSe
 	}
 	if _u.mutation.VerifiedAtCleared() {
 		_spec.ClearField(gcpserviceaccount.FieldVerifiedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.VerificationStatus(); ok {
+		_spec.SetField(gcpserviceaccount.FieldVerificationStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.VerificationError(); ok {
+		_spec.SetField(gcpserviceaccount.FieldVerificationError, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(gcpserviceaccount.FieldCreatedBy, field.TypeString, value)

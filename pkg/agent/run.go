@@ -1403,9 +1403,20 @@ func authFileKind(name, target string) string {
 
 // hasMetadataInterception checks if the agent env vars include metadata server
 // configuration that requires iptables interception (assign or block mode).
+//
+// The comparison is exact. It used to be strings.HasPrefix, which disagreed with
+// the broker's equality test on the same value: "SCION_METADATA_MODE=blocked"
+// enabled interception here while the broker rejected it, so the two layers
+// could reach opposite conclusions about the same env slice. Any suffix did it —
+// "blockade", "assignment" — and prefix matching buys nothing, because these are
+// whole "KEY=VALUE" entries with a closed set of legal values.
+//
+// Matching on any entry (rather than the last one) is deliberate and unchanged:
+// with a contradictory duplicate the result is interception enabled, which is
+// the restrictive direction.
 func hasMetadataInterception(env []string) bool {
 	for _, e := range env {
-		if strings.HasPrefix(e, "SCION_METADATA_MODE=assign") || strings.HasPrefix(e, "SCION_METADATA_MODE=block") {
+		if e == "SCION_METADATA_MODE=assign" || e == "SCION_METADATA_MODE=block" {
 			return true
 		}
 	}

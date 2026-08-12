@@ -46,14 +46,21 @@ func init() {
 func runMetadataStatus() int {
 	failed := false
 
+	// The redirect variables are only expected for the modes that install a
+	// redirect. Passthrough deliberately leaves the agent pointed at the real
+	// GCE metadata server, so demanding GCE_METADATA_HOST there reports a
+	// correctly configured agent as broken.
+	rawMode, modePresent := os.LookupEnv("SCION_METADATA_MODE")
+	redirectExpected := rawMode == "block" || rawMode == "assign"
+
 	// Environment variables
 	envVars := []struct {
 		name     string
 		required bool
 	}{
 		{"SCION_METADATA_MODE", true},
-		{"GCE_METADATA_HOST", true},
-		{"GCE_METADATA_ROOT", true},
+		{"GCE_METADATA_HOST", redirectExpected},
+		{"GCE_METADATA_ROOT", redirectExpected},
 		{"SCION_METADATA_PORT", false},
 		{"SCION_METADATA_SA_EMAIL", false},
 		{"SCION_METADATA_PROJECT_ID", false},
@@ -78,6 +85,18 @@ func runMetadataStatus() int {
 	fmt.Println("\n=== Configuration ===")
 	cfg := metadata.ConfigFromEnv()
 	if cfg == nil {
+		// ConfigFromEnv returns nil for two different reasons and they are not
+		// both failures. Passthrough deliberately runs no metadata server, so
+		// reporting it as "not set" would be wrong twice over — the variable is
+		// set, and the agent is configured correctly.
+		if modePresent && rawMode == "passthrough" {
+			fmt.Println("[ OK ] Mode: passthrough — no metadata server runs by design; " +
+				"the agent uses the host's GCE metadata server directly")
+			if failed {
+				return 1
+			}
+			return 0
+		}
 		fmt.Println("[FAIL] SCION_METADATA_MODE not set — metadata server is not configured")
 		return 1
 	}

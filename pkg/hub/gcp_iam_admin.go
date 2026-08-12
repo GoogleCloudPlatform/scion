@@ -17,6 +17,9 @@ package hub
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
+	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"google.golang.org/api/iam/v1"
@@ -30,6 +33,11 @@ type GCPServiceAccountAdmin interface {
 	// CreateServiceAccount creates a new service account in the given GCP project.
 	// Returns the SA email and unique ID.
 	CreateServiceAccount(ctx context.Context, projectID, accountID, displayName, description string) (email string, uniqueID string, err error)
+
+	// DeleteServiceAccount deletes a service account by email. Used for
+	// best-effort cleanup when a mint operation partially succeeds (SA
+	// created but a required IAM mutation fails).
+	DeleteServiceAccount(ctx context.Context, saEmail string) error
 
 	// SetIAMPolicy grants a role to a member on a service account.
 	// Used to grant roles/iam.serviceAccountTokenCreator to the Hub SA on minted SAs.
@@ -66,6 +74,15 @@ func (c *IAMAdminClient) CreateServiceAccount(ctx context.Context, projectID, ac
 	}
 
 	return sa.Email, sa.UniqueId, nil
+}
+
+func (c *IAMAdminClient) DeleteServiceAccount(ctx context.Context, saEmail string) error {
+	resource := "projects/-/serviceAccounts/" + saEmail
+	_, err := c.service.Projects.ServiceAccounts.Delete(resource).Context(ctx).Do()
+	if err != nil {
+		return fmt.Errorf("deleting service account %s: %w", saEmail, err)
+	}
+	return nil
 }
 
 func (c *IAMAdminClient) SetIAMPolicy(ctx context.Context, saEmail string, member string, role string) error {
@@ -110,6 +127,50 @@ func (c *IAMAdminClient) SetIAMPolicy(ctx context.Context, saEmail string, membe
 	}
 
 	return nil
+}
+
+// retryIAMGrant retries an IAM operation with exponential backoff to handle
+// GCP eventual consistency after SA creation. Retries only on "does not exist"
+// errors (400 badRequest), which indicate the SA has not propagated yet.
+func retryIAMGrant(ctx context.Context, op func() error) error {
+	delays := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+	var lastErr error
+	// Try once without delay first.
+	if err := op(); err == nil {
+		return nil
+	} else {
+		lastErr = err
+	}
+	for _, delay := range delays {
+		// Only retry on "does not exist" / badRequest errors.
+		if !isEventualConsistencyError(lastErr) {
+			return lastErr
+		}
+		slog.Warn("IAM grant hit eventual consistency delay, retrying",
+			"delay", delay, "error", lastErr)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if err := op(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// isEventualConsistencyError checks if the error is a GCP eventual consistency
+// error (400 badRequest with "does not exist" message).
+func isEventualConsistencyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "does not exist") &&
+		strings.Contains(errStr, "400")
 }
 
 // ResolveGCPProjectID returns the project ID from config or auto-detects it

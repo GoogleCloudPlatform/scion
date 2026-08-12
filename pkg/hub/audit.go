@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -202,7 +203,17 @@ type AuditLogger interface {
 	LogLifecycleHookExecutionEvent(ctx context.Context, event *LifecycleHookExecutionEvent) error
 	// LogAgentSecretReadEvent logs an agent secret read event.
 	LogAgentSecretReadEvent(ctx context.Context, event *AgentSecretReadEvent) error
+	// RecordSAAssignment logs a service-account assignment decision or binding
+	// (svc-accnt design §7). Named to match store.SAAssignmentAuditSink, which
+	// this method exists to satisfy: pkg/lifecyclehooks emits these too and
+	// cannot import pkg/hub.
+	RecordSAAssignment(ctx context.Context, event *store.SAAssignmentEvent) error
 }
+
+// Compile-time assertion that an AuditLogger is usable as the store-side sink.
+// If these drift, the lifecycle-hook surface silently loses its audit trail —
+// it would fall back to the nil-sink warning path rather than fail to build.
+var _ store.SAAssignmentAuditSink = AuditLogger(nil)
 
 // LogAuditLogger is a simple implementation that logs to the standard logger.
 type LogAuditLogger struct {
@@ -233,40 +244,85 @@ func (l *LogAuditLogger) logger() *slog.Logger {
 }
 
 // LogBrokerAuthEvent logs a broker authentication event to the standard logger.
+//
+// ⚠️ HISTORY, BECAUSE THE NO-OP THIS REPLACES WAS DELIBERATE. Commit 500efd1a
+// ("fix: remove broker auth audit log") deleted the body of this method and
+// left `return nil`. The commit message gives no rationale, but the cause is
+// legible from the call graph: AuditableBrokerAuthMiddleware calls this on
+// EVERY broker-authenticated request, and the deleted code logged success at
+// LevelInfo. A broker polls the Hub continuously, so that was an INFO line per
+// request — untenable, and worth fixing.
+//
+// The fix was over-broad. Nine event types route through this method, and only
+// ONE of them — auth_success — is per-request. The other eight (register,
+// deregister, join, rotate, revoke, link, unlink, and auth_FAILURE) are emitted
+// by explicit helper calls at administrative moments, are low-volume, and are
+// the security-relevant ones. Silencing the method silenced all nine to quiet
+// one. The result was that broker authentication FAILURES left no trace
+// anywhere, which is the single event here most worth having.
+//
+// So the volume problem is solved where it actually lives, at the level of the
+// one noisy event type, rather than by discarding the other eight:
+//
+//   - auth_success  -> Debug. Per-request. Available when investigating,
+//     absent from normal operation. This is the case 500efd1a was fixing.
+//   - any failure   -> Warn. Includes auth_failure. Never suppressed: a
+//     credential being rejected is the reason this event exists.
+//   - everything else -> Info. Administrative, low-volume, and each one
+//     changes who can talk to the Hub.
 func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAuthEvent) error {
 	if event == nil {
 		return nil
 	}
+
 	level := slog.LevelInfo
-	if !event.Success {
+	switch {
+	case !event.Success:
+		// Warn regardless of type. A failed rotate or a failed join is as
+		// interesting as a failed auth.
 		level = slog.LevelWarn
-	} else if event.EventType == BrokerAuthEventAuthSuccess {
+	case event.EventType == BrokerAuthEventAuthSuccess:
 		level = slog.LevelDebug
 	}
 
 	attrs := []slog.Attr{
 		slog.String("event_type", string(event.EventType)),
-		slog.String("broker_id", event.BrokerID),
 		slog.Bool("success", event.Success),
+		slog.String("broker_id", event.BrokerID),
+		slog.String("ip_address", event.IPAddress),
 	}
 
 	if event.BrokerName != "" {
 		attrs = append(attrs, slog.String("broker_name", event.BrokerName))
 	}
-	if event.ActorID != "" {
-		attrs = append(attrs, slog.String("actor_id", event.ActorID))
-	}
-	if event.ActorType != "" {
-		attrs = append(attrs, slog.String("actor_type", event.ActorType))
+	if event.UserAgent != "" {
+		attrs = append(attrs, slog.String("user_agent", event.UserAgent))
 	}
 	if event.FailReason != "" {
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
+	if event.ActorID != "" {
+		// Emitted as a pair: an actor id without its type is ambiguous between
+		// a user and a broker acting on its own behalf.
+		attrs = append(attrs, slog.String("actor_id", event.ActorID))
+		attrs = append(attrs, slog.String("actor_type", event.ActorType))
+	}
+
+	// Details is emitted unconditionally, NOT debug-gated as it was before
+	// 500efd1a. That gating was a defect the no-op hid: the only in-tree
+	// producers are LogLinkEvent and LogUnlinkEvent, and the only key they set
+	// is projectId. Debug-gating it means a link record says "broker B was
+	// linked" without saying to what — an event stripped of the one field that
+	// makes it mean anything.
+	//
+	// Security: Details is free-form and this method does not vet it. Callers
+	// must not put secret material in it — the same rule that governs
+	// LifecycleHookExecutionEvent.
 	for k, v := range event.Details {
 		attrs = append(attrs, slog.String(k, v))
 	}
 
-	l.logger().LogAttrs(ctx, level, "broker auth event", attrs...)
+	l.logger().LogAttrs(ctx, level, "Broker auth audit event", attrs...)
 
 	return nil
 }
@@ -323,6 +379,13 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		slog.String("agent_id", event.AgentID),
 		slog.String("project_id", event.ProjectID),
 		slog.String("sa_email", event.ServiceAccountEmail),
+		// sa_id is emitted unconditionally, like its siblings above. Every
+		// caller of LogGCPTokenGeneration already supplies it and it was
+		// populated on the struct all along — it was simply never written out,
+		// so the field existed in the schema and in memory but not in any log
+		// anyone could read. Emitting it only when non-empty would make the key
+		// come and go between records and defeat the point of a stable schema.
+		slog.String("sa_id", event.ServiceAccountID),
 	}
 
 	if event.FailReason != "" {
@@ -407,6 +470,70 @@ func (l *LogAuditLogger) LogAgentSecretReadEvent(ctx context.Context, event *Age
 	}
 
 	l.logger().LogAttrs(ctx, level, "agent secret read event", attrs...)
+
+	return nil
+}
+
+// RecordSAAssignment logs a service-account assignment record (design §7).
+//
+// Both record kinds come through here and they are NOT the same event, so the
+// attributes differ rather than being padded to a common shape:
+//
+//   - A DECISION record carries the permission that was checked and the verdict.
+//   - A BINDING record carries neither, because neither exists. Nothing was
+//     checked and nothing was decided — the account came from project settings,
+//     not from the caller. Emitting decision="indeterminate" to fill the slot
+//     would be a fabricated verdict, and worse, ActAsIndeterminate DENIES, so
+//     anyone later driving enforcement from these records would break routine
+//     agent creation. The absence of the attribute is the honest encoding.
+//
+// The nil-receiver case is safe: nothing here dereferences l.
+func (l *LogAuditLogger) RecordSAAssignment(ctx context.Context, event *store.SAAssignmentEvent) error {
+	if event == nil {
+		return nil
+	}
+
+	// Denials and indeterminates are warnings; allows and plain bindings are
+	// informational. A binding has no decision and is never a warning — nothing
+	// was refused.
+	level := slog.LevelInfo
+	if event.Decision != nil && *event.Decision != store.ActAsAllowed {
+		level = slog.LevelWarn
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", string(event.Type)),
+		slog.String("surface", event.Surface),
+		slog.String("caller_kind", event.Caller.Kind.String()),
+		slog.String("caller_id", event.Caller.ID),
+		slog.String("target_sa_id", event.TargetSAID),
+		slog.String("target_sa_email", event.TargetSAEmail),
+		slog.String("mechanism", event.Mechanism),
+	}
+
+	// The caller's own GCP principal, when it has one. This is what an IAM
+	// binding would have to name, so it is the field that makes a denial
+	// actionable.
+	if principal := event.Caller.GCPPrincipalID(); principal != "" {
+		attrs = append(attrs, slog.String("caller_gcp_principal", principal))
+	}
+	if event.Permission != "" {
+		attrs = append(attrs, slog.String("permission", event.Permission))
+	}
+	if event.Decision != nil {
+		attrs = append(attrs, slog.String("decision", event.Decision.String()))
+	}
+	if event.Reason != "" {
+		attrs = append(attrs, slog.String("reason", event.Reason))
+	}
+	// ⚠️ Omitted entirely when nil. Not serialised as null and not coerced to
+	// false: false asserts that a cache was consulted and missed, which would
+	// be a fabricated live IAM call. See store.SAAssignmentEvent.CacheHit.
+	if event.CacheHit != nil {
+		attrs = append(attrs, slog.Bool("cache_hit", *event.CacheHit))
+	}
+
+	slog.LogAttrs(ctx, level, "SA assignment audit event", attrs...)
 
 	return nil
 }

@@ -167,12 +167,10 @@ func normalizeHarnessConfigSourceURL(raw string) string {
 func installToHub(hubCtx *HubContext, name, localPath, harnessType string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
-	scope := "project"
+	scope := templateScopeFromGlobalFlag()
 	scopeID := ""
 
-	if globalMode {
-		scope = "global"
-	} else {
+	if !globalMode {
 		projectID, err := GetProjectID(hubCtx)
 		if err != nil {
 			return fmt.Errorf("failed to resolve project for Hub install: %w", err)

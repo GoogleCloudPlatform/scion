@@ -44,7 +44,7 @@ func iapMiddleware(expectedToken string, next http.Handler) http.Handler {
 		if auth != "Bearer "+expectedToken {
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusFound)
-			fmt.Fprint(w, "<html><body>Sign in with Google</body></html>")
+			_, _ = fmt.Fprint(w, "<html><body>Sign in with Google</body></html>")
 			return
 		}
 		next.ServeHTTP(w, r)

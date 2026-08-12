@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -135,12 +136,63 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		sa.DeletedAt = *a.DeletedAt
 	}
 	if a.AppliedConfig != "" {
-		var cfg store.AgentAppliedConfig
-		if err := json.Unmarshal([]byte(a.AppliedConfig), &cfg); err == nil {
-			sa.AppliedConfig = &cfg
+		cfg, err := parseAppliedConfig(a.AppliedConfig)
+		if err != nil {
+			// Logged rather than returned: entAgentToStore has no error path and
+			// is called from list queries, so failing here would make one corrupt
+			// row break the listing for every agent beside it. The sanitised
+			// config is still used; the error says what was dropped.
+			slog.Error("agent store: applied_config could not be used as stored",
+				"agent_id", sa.ID, "error", err)
 		}
+		sa.AppliedConfig = cfg
 	}
 	return sa
+}
+
+// validGCPMetadataMode reports whether mode is one the layers below the Hub
+// know how to act on.
+func validGCPMetadataMode(mode string) bool {
+	switch mode {
+	case store.GCPMetadataModeAssign, store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough:
+		return true
+	default:
+		return false
+	}
+}
+
+// parseAppliedConfig decodes a stored applied_config and strips anything the
+// rest of the system cannot safely act on. It returns the config to use — which
+// may be nil, or non-nil with a field removed — together with an error
+// describing what was discarded, so the caller can log it.
+//
+// Both failure modes used to be silent. The unmarshal error was dropped by an
+// `err == nil` guard, so a corrupt row became a nil AppliedConfig that is
+// indistinguishable from an agent that never had one. And a config that parsed
+// but carried an unusable GCPIdentity.MetadataMode was passed through verbatim.
+//
+// The mode check exists because an empty MetadataMode on a non-nil GCPIdentity
+// is worse than no GCPIdentity at all: it asserts that a GCP identity decision
+// was made while naming no decision, and there is no safe default to read from
+// it. Dropping just that field lets the agent fall back to the secure "block"
+// default the broker applies when no mode is supplied, while keeping the rest of
+// the applied config — image, template, harness — which is unrelated and
+// probably fine. Discarding the whole config over one bad field would turn a
+// metadata-mode problem into an agent-wide one.
+func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
+	var cfg store.AgentAppliedConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return nil, fmt.Errorf("applied_config is not valid JSON, ignoring it entirely: %w", err)
+	}
+	if cfg.GCPIdentity != nil && !validGCPMetadataMode(cfg.GCPIdentity.MetadataMode) {
+		bad := cfg.GCPIdentity.MetadataMode
+		cfg.GCPIdentity = nil
+		return &cfg, fmt.Errorf(
+			"applied_config has GCP metadata mode %q, which is not one of %q/%q/%q; "+
+				"dropping the GCP identity so the agent falls back to the secure default",
+			bad, store.GCPMetadataModeAssign, store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough)
+	}
+	return &cfg, nil
 }
 
 // CreateAgent creates a new agent record.

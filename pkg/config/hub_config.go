@@ -76,6 +76,23 @@ type HubServerConfig struct {
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string `json:"gcpProjectId,omitempty" yaml:"gcpProjectId,omitempty" koanf:"gcpProjectId"`
 
+	// GCPIAMCheckMode controls whether IAM actAs permission is checked when
+	// binding a GCP service account to an agent.
+	//
+	// "off"     — no check; any member who can see the SA can assign it (default)
+	// "enforce" — Policy Troubleshooter checks actAs; denials are enforced
+	//
+	// Default is "off" per Q1. When set to "enforce", the Hub SA must have
+	// roles/iam.securityReviewer on the org or project containing any SA
+	// that will be assigned. See the release notes for group-binding limitations.
+	GCPIAMCheckMode string `json:"gcpIamCheckMode,omitempty" yaml:"gcpIamCheckMode,omitempty" koanf:"gcpIamCheckMode"`
+
+	// GCPIAMDenyUnknownPolicy controls behavior when the Policy Troubleshooter
+	// cannot evaluate deny policies (e.g., Hub SA lacks org-level permissions).
+	// "fail-open" (default): if allow is granted and deny is unknown, treat as
+	// allowed. "fail-closed": treat as indeterminate (denied).
+	GCPIAMDenyUnknownPolicy string `json:"gcpIamDenyUnknownPolicy,omitempty" yaml:"gcpIamDenyUnknownPolicy,omitempty" koanf:"gcpIamDenyUnknownPolicy"`
+
 	// AutoSuspendStalled controls whether stalled agents are automatically
 	// suspended (container stopped, phase set to "suspended"). Default: false.
 	AutoSuspendStalled bool `json:"autoSuspendStalled" yaml:"autoSuspendStalled" koanf:"autoSuspendStalled"`
@@ -841,18 +858,20 @@ var snakeCaseFields = map[string]string{
 	"useraccessmode":        "user_access_mode",
 	"webhooksenabled":       "webhooks_enabled",
 	// Layer-0 compound segments (from layer0Prefixes)
-	"adminmode":        "admin_mode",
-	"devmode":          "dev_mode",
-	"devtoken":         "dev_token",
-	"devtokenfile":     "dev_token_file",
-	"gcpprojectid":     "gcp_project_id",
-	"hubid":            "hub_id",
-	"logformat":        "log_format",
-	"loglevel":         "log_level",
-	"messagebroker":    "message_broker",
-	"readtimeout":      "read_timeout",
-	"workspacestorage": "workspace_storage",
-	"writetimeout":     "write_timeout",
+	"adminmode":               "admin_mode",
+	"devmode":                 "dev_mode",
+	"devtoken":                "dev_token",
+	"devtokenfile":            "dev_token_file",
+	"gcpiamdenyunknownpolicy": "gcp_iam_deny_unknown_policy",
+	"gcpiamcheckmode":         "gcp_iam_check_mode",
+	"gcpprojectid":            "gcp_project_id",
+	"hubid":                   "hub_id",
+	"logformat":               "log_format",
+	"loglevel":                "log_level",
+	"messagebroker":           "message_broker",
+	"readtimeout":             "read_timeout",
+	"workspacestorage":        "workspace_storage",
+	"writetimeout":            "write_timeout",
 	// Maintenance (runtime-only, no yaml, but env detection still needs it)
 	"maintenancemessage": "maintenance_message",
 }
@@ -883,6 +902,8 @@ var camelCaseFields = map[string]string{
 	"disablelegacystoragefallback":  "disableLegacyStorageFallback",
 	"displayname":                   "displayName",
 	"gcpcredentials":                "gcpCredentials",
+	"gcpiamdenyunknownpolicy":       "gcpIamDenyUnknownPolicy",
+	"gcpiamcheckmode":               "gcpIamCheckMode",
 	"gcpprojectid":                  "gcpProjectId",
 	"githubapp":                     "githubApp",
 	"hubendpoint":                   "hubEndpoint",

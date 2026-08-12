@@ -55,6 +55,7 @@ Controls the central Hub API server.
 | `host` | string | `"0.0.0.0"` | Network interface to bind to. |
 | `public_url` | string | | The externally accessible URL of the Hub (used for callbacks). |
 | `gcp_project_id` | string | | GCP project ID used for minting GCP Service Accounts. Auto-detected if running on GCE/Cloud Run. |
+| `gcp_iam_check_mode` | string | `"off"` | Controls IAM `actAs` permission checking for SA assignment: `"off"` (no check) or `"enforce"` (Policy Troubleshooter checks). See [GCP IAM Check Mode](#gcp-iam-check-mode). |
 | `read_timeout` | duration | `"30s"` | HTTP read timeout. |
 | `write_timeout` | duration | `"60s"` | HTTP write timeout. |
 | `admin_emails` | list | `[]` | List of emails granted super-admin access. |
@@ -548,3 +549,78 @@ Due to Go's `omitempty` JSON behavior, boolean `false` is indistinguishable from
 
 When these fields are explicitly set to `false` in the DB, they are correctly applied via the snapshot. However, the raw JSON representation may omit them. The admin API handles this correctly via the presence-aware clearing mechanism.
 :::
+
+## GCP IAM Check Mode
+
+The `gcp_iam_check_mode` setting controls whether the Hub verifies that a caller holds the `iam.serviceAccounts.actAs` IAM permission on a GCP service account before allowing it to be assigned to an agent. This uses the [GCP Policy Troubleshooter v3 API](https://cloud.google.com/policy-intelligence/docs/troubleshoot-access).
+
+### Values
+
+| Value | Behaviour |
+| :--- | :--- |
+| `"off"` (default) | No IAM check. Any member who can see a service account can assign it. Assignment is gated by Hub policy only. |
+| `"enforce"` | The Hub calls Policy Troubleshooter to verify the caller has `actAs`. Denials are enforced. |
+
+### Configuration
+
+```yaml
+# settings.yaml
+server:
+  hub:
+    gcp_iam_check_mode: "off"   # or "enforce"
+```
+
+Or via environment variable:
+
+```bash
+export SCION_SERVER_HUB_GCPIAMCHECKMODE=enforce
+```
+
+### Enablement Checklist
+
+Before setting `gcp_iam_check_mode: enforce`:
+
+1. **Enable the Policy Troubleshooter API** on the Hub's GCP project:
+   ```bash
+   gcloud services enable policytroubleshooter.googleapis.com
+   ```
+
+2. **Grant the Hub SA `roles/iam.securityReviewer`**:
+   - On the Hub's own GCP project (minimum; covers Hub-minted SAs).
+   - On each org or project containing BYOSA service accounts, if applicable.
+
+3. **(Recommended)** Grant `roles/iam.denyReviewer` and `roles/browser` at the org level for full deny-policy and resource hierarchy evaluation.
+
+4. **(Optional)** Configure domain-wide delegation with Workspace `groups.read` for group-binding resolution. Without this, group-granted `serviceAccountUser` bindings produce an indeterminate result (denied by default).
+
+5. **Test with a known-good SA assignment** before enabling in production.
+
+### Group-Binding Limitation
+
+When `roles/iam.serviceAccountUser` is granted to a Google Workspace **group**, the Hub SA must have domain-wide delegation with the `groups.read` privilege to resolve the membership. Without it, Policy Troubleshooter returns `MEMBERSHIP_UNKNOWN_INFO`, which under fail-closed rules is treated as a denial.
+
+This denies legitimately authorized users whose `actAs` grant arrives via a group binding, even when the PT API is fully available and functioning correctly.
+
+| Mitigation | Cost | Resolves groups? |
+| :--- | :--- | :--- |
+| Grant Hub SA domain-wide delegation + `groups.read` | High (org-admin consent per Workspace) | Yes |
+| Grant `actAs` directly to users, not via groups | Low (per-SA IAM binding) | Avoided |
+| Leave `gcp_iam_check_mode: "off"` | Zero | N/A (check disabled) |
+
+### BYOSA Cross-Org Access
+
+For BYOSA service accounts (accounts in a customer's org, not the Hub's), the Hub SA needs `roles/iam.securityReviewer` in the customer's organisation or at minimum on the project containing the SA. Some customers may refuse this grant. Their options are:
+
+1. Leave `gcp_iam_check_mode: "off"` (the default).
+2. Grant `securityReviewer` on the specific project (not org-wide).
+3. Accept that BYOSA assignments will fail closed until the grant is made.
+
+### Required IAM Permissions Summary
+
+| Role / Permission | Scope | Purpose | Required? |
+| :--- | :--- | :--- | :--- |
+| `roles/iam.securityReviewer` | Org or project containing the target SA | Read allow policies, role bindings, and role definitions | **Yes** |
+| `roles/iam.denyReviewer` | Org or folder | Read IAM Deny policies | Recommended |
+| `roles/browser` | Org | Read project/folder hierarchy for policy inheritance | Recommended |
+| Workspace Admin `groups.read` (via domain-wide delegation) | Google Workspace domain | Resolve group memberships in IAM bindings | Only if group-granted actAs must be resolved |
+| PT API enabled on Hub's GCP project | Hub's GCP project | `policytroubleshooter.googleapis.com` | **Yes** |

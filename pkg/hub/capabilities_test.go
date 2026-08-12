@@ -289,6 +289,51 @@ func TestWithCapabilities_OmitsWhenNil(t *testing.T) {
 	assert.False(t, exists, "_capabilities should be omitted when nil")
 }
 
+// TestResourceActions_GCPServiceAccountDeclaresAssign pins the declaration of
+// the "assign" action on the GCP service account resource. Nothing enforces it
+// yet — the assignment call sites still check ActionRead — but the constant and
+// the ResourceActions entry are the insertion point for that gate, and a policy
+// author can write against it today.
+func TestResourceActions_GCPServiceAccountDeclaresAssign(t *testing.T) {
+	assert.Contains(t, ResourceActions["gcp_service_account"], ActionAssign)
+	assert.NotContains(t, ScopeActions["gcp_service_account"], ActionAssign,
+		"assign is an item-level action; it must not appear in ScopeActions")
+}
+
+func TestComputeCapabilities_GCPServiceAccount_AdminSeesAssign(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+
+	admin := NewAuthenticatedUser("admin-sa-assign", "admin-sa@example.com", "Admin", "admin", "api")
+	resource := Resource{Type: "gcp_service_account", ID: "sa-1"}
+
+	caps := srv.authzService.ComputeCapabilities(ctx, admin, resource)
+	assert.Equal(t, []string{"read", "delete", "verify", "assign"}, caps.Actions)
+}
+
+// A policy granting only "read" must not confer "assign" — the two are distinct
+// permissions, which is the whole point of declaring the action separately.
+func TestComputeCapabilities_GCPServiceAccount_ReadPolicyDoesNotGrantAssign(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("user-sa-reader"), Email: "sa-reader@test.com", DisplayName: "SA Reader",
+		Role: "member", Status: "active",
+	}))
+	require.NoError(t, s.CreatePolicy(ctx, &store.Policy{
+		ID: tid("policy-sa-read"), Name: "SA Read Only", ScopeType: "hub",
+		ResourceType: "gcp_service_account", Actions: []string{"read"}, Effect: "allow",
+	}))
+	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
+		PolicyID: tid("policy-sa-read"), PrincipalType: "user", PrincipalID: tid("user-sa-reader"),
+	}))
+
+	user := NewAuthenticatedUser(tid("user-sa-reader"), "sa-reader@test.com", "SA Reader", "member", "api")
+	caps := srv.authzService.ComputeCapabilities(ctx, user, Resource{Type: "gcp_service_account", ID: "sa-2"})
+	assert.Equal(t, []string{"read"}, caps.Actions)
+}
+
 func TestComputeCapabilities_UnknownResourceType(t *testing.T) {
 	srv, _ := testServer(t)
 	ctx := context.Background()
@@ -369,6 +414,41 @@ func TestResourceBuilders(t *testing.T) {
 		r := userResource(u)
 		assert.Equal(t, "user", r.Type)
 		assert.Equal(t, "u1", r.ID)
+	})
+
+	t.Run("gcpServiceAccountResource project-scoped", func(t *testing.T) {
+		sa := &store.GCPServiceAccount{ID: "sa1", CreatedBy: "u1", Scope: store.ScopeProject, ScopeID: tid("p1")}
+		r := gcpServiceAccountResource(sa)
+		assert.Equal(t, "gcp_service_account", r.Type)
+		assert.Equal(t, "sa1", r.ID)
+		assert.Equal(t, "u1", r.OwnerID)
+		assert.Equal(t, "project", r.ParentType)
+		assert.Equal(t, tid("p1"), r.ParentID)
+	})
+
+	t.Run("gcpServiceAccountResource hub-scoped has no parent", func(t *testing.T) {
+		sa := &store.GCPServiceAccount{ID: "sa2", CreatedBy: "u1", Scope: store.ScopeHub, ScopeID: "hub-instance-1"}
+		r := gcpServiceAccountResource(sa)
+		assert.Equal(t, "gcp_service_account", r.Type)
+		assert.Empty(t, r.ParentType, "hub-scoped SA must not claim a project parent")
+		assert.Empty(t, r.ParentID)
+	})
+
+	t.Run("gcpServiceAccountResource user-scoped has no parent", func(t *testing.T) {
+		sa := &store.GCPServiceAccount{ID: "sa3", CreatedBy: "u1", Scope: store.ScopeUser, ScopeID: "u1"}
+		r := gcpServiceAccountResource(sa)
+		assert.Empty(t, r.ParentType, "user-scoped SA must not claim a project parent")
+		assert.Empty(t, r.ParentID)
+	})
+
+	t.Run("gcpServiceAccountResource project-scoped with empty scope ID", func(t *testing.T) {
+		sa := &store.GCPServiceAccount{ID: "sa4", CreatedBy: "u1", Scope: store.ScopeProject}
+		r := gcpServiceAccountResource(sa)
+		assert.Empty(t, r.ParentType, "an empty ScopeID must not become a parent ID")
+	})
+
+	t.Run("gcpServiceAccountResource nil", func(t *testing.T) {
+		assert.Equal(t, Resource{}, gcpServiceAccountResource(nil))
 	})
 
 	t.Run("policyResource", func(t *testing.T) {

@@ -1166,6 +1166,28 @@ type GCPServiceAccountFilter struct {
 	ScopeID string // Filter by scope ID
 	Email   string // Filter by SA email
 	Managed *bool  // Filter by managed status (nil = no filter)
+
+	// IncludeHubScoped widens the Scope/ScopeID terms from AND to OR against
+	// hub scope: the result is everything the scope terms select, plus every
+	// hub-scoped account. Other terms (Email, Managed) still apply to the whole
+	// result. It is a no-op when no scope terms are set, since an unscoped list
+	// already returns hub-scoped accounts.
+	//
+	// This exists so that "this project's accounts, plus the hub-wide ones it
+	// may use" is a single query. The obvious alternative — list the project,
+	// list the hub, concatenate — is wrong in ways that only show up later: the
+	// two halves are read at different times, and any pagination or ordering
+	// applied afterwards is applied to a set the database never saw as one.
+	// Expressing it as one predicate makes the invariant structural rather than
+	// a rule each caller has to remember.
+	//
+	// The hub arm matches on Scope alone and never on ScopeID. That is a
+	// project-wide invariant, not a local shortcut: on a hub-scoped record
+	// ScopeID is provenance -- which hub instance registered it -- and is never
+	// a predicate. The hub ID is derived from config or a hostname hash, so
+	// filtering on it would orphan every hub-scoped record the first time a
+	// hostname changed, silently, as an empty result.
+	IncludeHubScoped bool
 }
 
 // =============================================================================

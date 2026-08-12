@@ -17,8 +17,24 @@
 /**
  * GCP Service Account List Component
  *
- * CRUD component for managing GCP service accounts at the project level.
- * Follows the same patterns as scion-secret-list.
+ * CRUD component for managing GCP service accounts in a scope: a Scion project,
+ * or the hub. Follows the same patterns as scion-secret-list.
+ *
+ * IT USED TO BE PINNED TO A PROJECT (a single `projectId` property, nested URLs
+ * hard-coded at five call sites). Hub-scoped accounts are parentless, so that
+ * shape could not render them at all without borrowing an unrelated project's
+ * id. Every URL now comes from ../../shared/gcp-service-account-urls.js, which
+ * is the only place in the web client that decides which address an account
+ * has.
+ *
+ * WHAT DOES NOT CHANGE WITH SCOPE: which buttons appear. Delete and re-verify
+ * are rendered from each row's `_capabilities`, computed per account by the
+ * Hub, and never from the row being visible. That distinction is load-bearing
+ * for hub-scoped accounts specifically, because EVERY logged-in user can see
+ * them (hub-member-read-all grants read on "*" at hub scope) while almost none
+ * can delete them -- so "visible" and "manageable" are the same set for project
+ * accounts and wildly different sets here. A list that rendered Delete from
+ * existence would give most of the hub a button that 403s.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -26,6 +42,15 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { GCPServiceAccount, GCPVerificationStatus, Capabilities, GCPMintQuotaInfo } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
+import type { GCPSAListScope } from '../../shared/gcp-service-account-urls.js';
+import {
+  saCreateUrl,
+  saDetailPath,
+  saListUrl,
+  saMintUrl,
+  saRef,
+  saVerifyUrl,
+} from '../../shared/gcp-service-account-urls.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
@@ -33,7 +58,12 @@ import { showConfirm } from './confirm-dialog.js';
 
 @customElement('scion-gcp-service-account-list')
 export class ScionGCPServiceAccountList extends LitElement {
-  @property() projectId = '';
+  /** 'project' for a Scion project's own accounts, 'hub' for hub-scoped ones. */
+  @property() scope: GCPSAListScope = 'project';
+
+  /** The Scion project id at project scope. Unused, and refused, at hub scope. */
+  @property() scopeId = '';
+
   @property({ type: Boolean }) compact = false;
 
   @state() private accounts: GCPServiceAccount[] = [];
@@ -60,6 +90,7 @@ export class ScionGCPServiceAccountList extends LitElement {
   @state() private mintDescription = '';
   @state() private mintDialogLoading = false;
   @state() private mintDialogError: string | null = null;
+  @state() private mintAllowSelfActAs = true;
 
   // Quota info
   @state() private mintQuota: GCPMintQuotaInfo | null = null;
@@ -145,9 +176,77 @@ export class ScionGCPServiceAccountList extends LitElement {
     `,
   ];
 
-  override connectedCallback(): void {
-    super.connectedCallback();
+  /** The scope the currently displayed rows were loaded for. */
+  private loadedKey: string | null = null;
+
+  /**
+   * THE LOAD IS KEYED ON THE SCOPE, NOT ON A LIFECYCLE MOMENT.
+   *
+   * This component used to load once from connectedCallback, which was
+   * sufficient while it was pinned to one project for its whole life. A
+   * component that can be re-pointed -- another project, or the hub -- must
+   * re-load when that happens, and the failure if it does not is the bad kind:
+   * the previous scope's accounts stay on screen and look like an answer.
+   *
+   * Keying on scope rather than reacting to the changed-properties map also
+   * makes the FIRST update free: Lit reports every initially-set property as
+   * changed, so a naive `changed.has('scope')` fires a second, identical
+   * request on mount.
+   *
+   * THE KEY CHECK IS NOT AN OPTIMISATION. Measured by deleting it: loadAccounts
+   * sets @state, @state schedules an update, updated() calls this again --
+   * unbounded, and the test run hangs rather than failing. Anything that
+   * re-enters this method must keep an early return that does not depend on
+   * loadAccounts having finished.
+   */
+  private maybeLoad(): void {
+    const key = `${this.scope}:${this.scopeId}`;
+    if (key === this.loadedKey) return;
+    this.loadedKey = key;
     void this.loadAccounts();
+  }
+
+  override firstUpdated(): void {
+    this.maybeLoad();
+  }
+
+  override updated(): void {
+    this.maybeLoad();
+  }
+
+  /**
+   * THERE IS NO CREATE AFFORDANCE AT HUB SCOPE, AND THAT IS NOT A CAPABILITY
+   * DECISION.
+   *
+   * The Hub refuses hub-scoped registration outright: POST to the flat
+   * collection with scope=hub answers 400 invalid_request, and it does so
+   * before consulting any policy, because the enabling change is held (#19).
+   * So a hub admin's `create` capability at hub scope is TRUE and the operation
+   * still fails -- capability answers "may you", not "is it implemented".
+   *
+   * Rendering the button from the capability alone would therefore produce the
+   * one thing this feature is under instruction to avoid: an affordance that
+   * cannot work. It is suppressed here rather than in the template so the rule
+   * has a name and a single place to be deleted from when the hold lifts.
+   *
+   * WHAT MUST NOT HAPPEN when it does lift: this returning true while
+   * saCreateUrl still points somewhere that succeeds by registering the wrong
+   * thing. The URL is already correct -- it addresses the refusal -- which is
+   * why the two live apart.
+   */
+  private canCreateHere(): boolean {
+    if (this.scope === 'hub') return false;
+    return can(this.listCapabilities, 'create');
+  }
+
+  /**
+   * Mint is a per-project operation against the Hub's own GCP project, with a
+   * per-project quota; the flat route has no mint endpoint at all. At hub scope
+   * there is nowhere to send it, which saMintUrl says by returning null.
+   */
+  private canMintHere(): boolean {
+    if (this.scope !== 'project') return false;
+    return can(this.listCapabilities, 'mint');
   }
 
   private async loadAccounts(): Promise<void> {
@@ -155,7 +254,7 @@ export class ScionGCPServiceAccountList extends LitElement {
     this.error = null;
 
     try {
-      const response = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts`);
+      const response = await apiFetch(saListUrl(this.scope, this.scopeId));
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
@@ -188,6 +287,7 @@ export class ScionGCPServiceAccountList extends LitElement {
     this.mintAccountId = '';
     this.mintDisplayName = '';
     this.mintDescription = '';
+    this.mintAllowSelfActAs = true;
     this.mintDialogError = null;
     this.mintDialogOpen = true;
   }
@@ -207,9 +307,18 @@ export class ScionGCPServiceAccountList extends LitElement {
       if (this.mintAccountId.trim()) body.account_id = this.mintAccountId.trim();
       if (this.mintDisplayName.trim()) body.display_name = this.mintDisplayName.trim();
       if (this.mintDescription.trim()) body.description = this.mintDescription.trim();
+      if (!this.mintAllowSelfActAs) body.allow_self_act_as = false;
+
+      // Non-null asserted through a guard rather than a `!`: openMintDialog is
+      // unreachable at hub scope (renderMintAffordance returns nothing there),
+      // and mint has no hub address to fall back on.
+      const url = saMintUrl(this.scope, this.scopeId);
+      if (!url) {
+        throw new Error('Minting is only available for a project');
+      }
 
       const response = await apiFetch(
-        `/api/v1/projects/${this.projectId}/gcp-service-accounts/mint`,
+        url,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -276,7 +385,11 @@ export class ScionGCPServiceAccountList extends LitElement {
         body.displayName = this.dialogDisplayName.trim();
       }
 
-      const response = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts`, {
+      // saCreateUrl at hub scope addresses the Hub's own refusal, not some
+      // project's collection. No affordance reaches this line at hub scope
+      // today; if one ever does, it must fail the way the server says it
+      // fails rather than quietly registering a project-scoped account.
+      const response = await apiFetch(saCreateUrl(this.scope, this.scopeId), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -312,10 +425,7 @@ export class ScionGCPServiceAccountList extends LitElement {
     this.verifyingId = account.id;
 
     try {
-      const response = await apiFetch(
-        `/api/v1/projects/${this.projectId}/gcp-service-accounts/${account.id}/verify`,
-        { method: 'POST' }
-      );
+      const response = await apiFetch(saVerifyUrl(account), { method: 'POST' });
 
       if (!response.ok) {
         const errorData = (await response.json().catch(() => ({}))) as {
@@ -366,10 +476,7 @@ export class ScionGCPServiceAccountList extends LitElement {
     this.deletingId = account.id;
 
     try {
-      const response = await apiFetch(
-        `/api/v1/projects/${this.projectId}/gcp-service-accounts/${account.id}`,
-        { method: 'DELETE' }
-      );
+      const response = await apiFetch(saRef(account), { method: 'DELETE' });
 
       if (!response.ok && response.status !== 204) {
         throw new Error(await extractApiError(response, `Failed to delete (HTTP ${response.status})`));
@@ -449,8 +556,8 @@ export class ScionGCPServiceAccountList extends LitElement {
       `;
     }
 
-    const canCreate = can(this.listCapabilities, 'create');
-    const canMint = can(this.listCapabilities, 'mint');
+    const canCreate = this.canCreateHere();
+    const canMint = this.canMintHere();
     const showHeader = canCreate || canMint;
 
     return html`
@@ -490,7 +597,7 @@ export class ScionGCPServiceAccountList extends LitElement {
             <h2>GCP Service Accounts</h2>
             <p>Manage GCP service accounts for agent identity assignment in this project.</p>
           </div>
-          ${can(this.listCapabilities, 'create')
+          ${this.canCreateHere()
             ? html`
                 <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -498,7 +605,7 @@ export class ScionGCPServiceAccountList extends LitElement {
                 </sl-button>
               `
             : ''}
-          ${can(this.listCapabilities, 'mint')
+          ${this.canMintHere()
             ? html`
                 <sl-button
                   variant="default"
@@ -541,7 +648,7 @@ export class ScionGCPServiceAccountList extends LitElement {
           <thead>
             <tr>
               <th>Email</th>
-              <th class="hide-mobile">Project</th>
+              <th class="hide-mobile">GCP Project</th>
               <th class="hide-mobile">Name</th>
               <th>Status</th>
               <th class="actions-cell"></th>
@@ -581,7 +688,7 @@ export class ScionGCPServiceAccountList extends LitElement {
             >
               <sl-icon name="shield-lock"></sl-icon>
             </div>
-            ${account.email}
+            ${this.renderEmail(account)}
             ${account.managed ? html`<span class="managed-badge">Hub-minted</span>` : ''}
             <sl-tooltip content=${this.copiedEmail === account.email ? 'Copied!' : 'Copy email'}>
               <sl-icon-button
@@ -614,6 +721,18 @@ export class ScionGCPServiceAccountList extends LitElement {
         </td>
       </tr>
     `;
+  }
+
+  /**
+   * The email links to a detail page only where one exists. saDetailPath
+   * returns null for project-scoped accounts, which are managed from their
+   * project's settings tab -- so this renders a link for exactly the accounts
+   * that have somewhere to go, rather than for every row with a dead
+   * destination for most of them.
+   */
+  private renderEmail(account: GCPServiceAccount) {
+    const href = saDetailPath(account);
+    return href ? html`<a href=${href}>${account.email}</a>` : html`${account.email}`;
   }
 
   private renderStatus(account: GCPServiceAccount, isVerifying: boolean, isDeleting: boolean) {
@@ -665,7 +784,7 @@ export class ScionGCPServiceAccountList extends LitElement {
         <sl-icon name="shield-lock"></sl-icon>
         <h3>No GCP Service Accounts</h3>
         <p>Register an existing GCP service account, or mint a new one in the Hub's project.</p>
-        ${can(this.listCapabilities, 'create')
+        ${this.canCreateHere()
           ? html`
               <sl-button variant="primary" size="small" @click=${this.openAddDialog}>
                 <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -673,7 +792,7 @@ export class ScionGCPServiceAccountList extends LitElement {
               </sl-button>
             `
           : ''}
-        ${can(this.listCapabilities, 'mint')
+        ${this.canMintHere()
           ? html`
               <sl-button
                 variant="default"
@@ -817,10 +936,23 @@ export class ScionGCPServiceAccountList extends LitElement {
             }}
           ></sl-input>
 
+          <sl-checkbox
+            ?checked=${this.mintAllowSelfActAs}
+            @sl-change=${(e: Event) => {
+              this.mintAllowSelfActAs = (e.target as HTMLInputElement).checked;
+            }}
+          >
+            Allow this service account to act as itself
+            <div slot="help-text">
+              Enables using this SA as a project default, allowing agents to create
+              sub-agents that run as this same identity. Recommended for most use cases.
+            </div>
+          </sl-checkbox>
+
           <div class="dialog-hint">
             <sl-icon name="info-circle"></sl-icon>
-            The Hub will create a new service account in its own GCP project. The SA starts with
-            no IAM permissions and is automatically verified for impersonation.
+            The Hub will create a new service account in its own GCP project. The SA is
+            automatically verified for impersonation by the Hub.
           </div>
 
           ${this.mintDialogError ? html`<div class="dialog-error">${this.mintDialogError}</div>` : nothing}

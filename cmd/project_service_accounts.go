@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
 )
 
@@ -184,12 +185,14 @@ func runSAAdd(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	req := &hubclient.CreateGCPServiceAccountRequest{
+		Scope:       store.ScopeProject,
+		ScopeID:     projectID,
 		Email:       email,
 		ProjectID:   saProjectID,
 		DisplayName: saDisplayName,
 	}
 
-	sa, err := client.GCPServiceAccounts(projectID).Create(ctx, req)
+	sa, err := client.GCPServiceAccounts().Create(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to register service account: %w", err)
 	}
@@ -220,7 +223,15 @@ func runSAList(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sas, err := client.GCPServiceAccounts(projectID).List(ctx)
+	// ListForProject, not the hub-inclusive variant, because this command
+	// answers "what is registered to this project" -- and hub-scoped accounts
+	// are registered to the hub, not here.
+	//
+	// The other set, the ASSIGNABLE one, belongs to a picker: omitting hub scope
+	// there would silently hide accounts the user may assign. This command is
+	// not that, and the root-level `scion service-accounts list --global`
+	// command is where hub-scoped accounts are listed.
+	sas, err := client.GCPServiceAccounts().List(ctx, hubclient.ListForProject(projectID))
 	if err != nil {
 		return fmt.Errorf("failed to list service accounts: %w", err)
 	}
@@ -237,8 +248,11 @@ func runSAList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// GCP PROJECT, not the Scion project: sa.ProjectID is where the service
+	// account lives in GCP. Every row here is registered to the Scion project
+	// this command was run in, so printing that would print one repeated value.
 	fmt.Printf("GCP Service Accounts (%d):\n", len(sas))
-	fmt.Printf("%-36s  %-45s  %-20s  %s\n", "ID", "EMAIL", "PROJECT", "VERIFIED")
+	fmt.Printf("%-36s  %-45s  %-20s  %s\n", "ID", "EMAIL", "GCP PROJECT", "VERIFIED")
 	fmt.Printf("%-36s  %-45s  %-20s  %s\n",
 		"------------------------------------",
 		"---------------------------------------------",
@@ -270,7 +284,8 @@ func runSARemove(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := client.GCPServiceAccounts(projectID).Delete(ctx, saID); err != nil {
+	ref := hubclient.ProjectScopedRef(projectID, saID)
+	if err := client.GCPServiceAccounts().Delete(ctx, ref); err != nil {
 		return fmt.Errorf("failed to remove service account: %w", err)
 	}
 
@@ -292,7 +307,7 @@ func runSAMint(cmd *cobra.Command, args []string) error {
 		DisplayName: saDisplayName,
 	}
 
-	sa, err := client.GCPServiceAccounts(projectID).Mint(ctx, req)
+	sa, err := client.GCPServiceAccounts().Mint(ctx, projectID, req)
 	if err != nil {
 		return fmt.Errorf("failed to mint service account: %w", err)
 	}
@@ -326,7 +341,7 @@ func runSAVerify(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sa, err := client.GCPServiceAccounts(projectID).Verify(ctx, saID)
+	sa, err := client.GCPServiceAccounts().Verify(ctx, hubclient.ProjectScopedRef(projectID, saID))
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}

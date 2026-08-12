@@ -1070,20 +1070,72 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	}
 }
 
-// canDispatchToBroker checks whether the current user has dispatch permission on a broker
-// without writing an HTTP response. Returns true if allowed (or if no user identity is present).
-// Auto-provide brokers are dispatchable by any authenticated user since they are
-// shared infrastructure (e.g. a combo hub-broker server's default broker).
+// brokerServesProject reports whether the broker is linked to the project as one
+// of its providers.
+//
+// This is the "same project" test for agent-initiated dispatch. A broker is not
+// owned by a project — the association is the project_providers link — so an
+// agent's project can only be compared against a broker via this lookup. It is a
+// shared helper rather than an inlined query so that canDispatchToBroker and
+// checkBrokerDispatchAccess (handlers_runtime_brokers.go) cannot drift on it.
+func (s *Server) brokerServesProject(ctx context.Context, brokerID, projectID string) bool {
+	if brokerID == "" || projectID == "" {
+		return false
+	}
+	provider, err := s.store.GetProjectProvider(ctx, projectID, brokerID)
+	return err == nil && provider != nil
+}
+
+// canDispatchToBroker reports whether the caller may have an agent dispatched to
+// this broker. It writes no HTTP response.
+//
+// Dispatch here is not a standalone permission: it is the broker-selection step
+// inside agent creation, reached only after authorizeAgentCreate has already
+// authorized the create itself. So agents may dispatch only to brokers that serve
+// their own project, and only when their template granted ScopeAgentCreate —
+// re-asserting the create gate rather than widening the Part 2 read-class baseline
+// to ActionDispatch.
+//
+// Auto-provide brokers are shared infrastructure (e.g. a combo hub-broker server's
+// default broker) and stay dispatchable by any authenticated caller. That check is
+// deliberately kept ahead of the identity switch: it is a property of the broker,
+// not of the caller.
+//
+// Broker-typed callers reach default: and are denied. CheckAccess already answered
+// them with "unknown identity type"; the nil branch this replaced was the only
+// thing admitting them, and it admitted everyone (#591).
+//
+// This function and checkBrokerDispatchAccess (handlers_runtime_brokers.go) are one
+// decision written twice and must stay structurally identical.
 func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeBroker) bool {
-	userIdent := GetUserIdentityFromContext(ctx)
-	if userIdent == nil {
-		return true
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		// Unauthenticated. Note this branch is inverted from allow to deny, not
+		// deleted: GetIdentityFromContext returns a literal nil interface, which
+		// panics CheckAccess on identity.Type().
+		return false
 	}
 	if broker.AutoProvide {
 		return true
 	}
-	decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionDispatch)
-	return decision.Allowed
+	switch identity.Type() {
+	case "user", "dev":
+		user, ok := identity.(UserIdentity)
+		if !ok {
+			return false
+		}
+		decision := s.authzService.CheckAccess(ctx, user, brokerResource(broker), ActionDispatch)
+		return decision.Allowed
+	case "agent":
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok {
+			return false
+		}
+		return agentIdent.HasScope(ScopeAgentCreate) &&
+			s.brokerServesProject(ctx, broker.ID, agentIdent.ProjectID())
+	default:
+		return false
+	}
 }
 
 // getAvailableBrokersForProject returns online runtime brokers that are providers to the project.

@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
@@ -222,6 +223,10 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
+		if !s.validateDefaultGCPIdentity(w, ctx, project.ID, &req) {
+			return
+		}
+
 		applyProjectSettingsToAnnotations(project, &req)
 
 		if err := s.store.UpdateProject(ctx, project); err != nil {
@@ -235,6 +240,71 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 	default:
 		MethodNotAllowed(w)
 	}
+}
+
+// validateDefaultGCPIdentity rejects a default GCP identity that agent creation
+// would later refuse to apply. It writes the error response itself and returns
+// false when the caller must stop.
+//
+// Without this, the PUT stored the service account ID unvalidated and returned
+// 200, while createAgentInProject silently fell back to metadataMode=block for
+// every agent created afterwards. The operator saw a saved setting that did
+// nothing, with no error at any layer. The three checks below are exactly the
+// three conditions that path tests, so a 200 here means the setting will apply.
+//
+// Verified is checked at write time and can go stale afterwards: the service
+// account may later be deleted or un-verified, which puts a validly-saved
+// default back into the silent-block path. That residue is deliberately not
+// handled here — it is tracked separately against the consumption site, because
+// no amount of write-time validation can subsume it.
+func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, projectID string, req *hubclient.ProjectSettings) bool {
+	// mode=assign with no service account is the same defect wearing different
+	// clothes: the consumption path falls straight through to block.
+	if req.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && req.DefaultGCPIdentityServiceAccountID == "" {
+		BadRequest(w, "default GCP identity mode 'assign' requires a service account; set defaultGCPIdentityServiceAccountID or choose another mode")
+		return false
+	}
+
+	// Empty means clear. Clearing must always be permitted — it is the
+	// operator's only escape from a value that has since gone bad.
+	if req.DefaultGCPIdentityServiceAccountID == "" {
+		return true
+	}
+
+	// Deliberately identical to the not-reachable message below. Distinguishing
+	// them would make this endpoint an existence oracle: a project owner could
+	// enumerate other projects' service account IDs by watching which ones fail
+	// differently. "Does not exist" and "exists but is not yours" are one answer.
+	//
+	// The literal moved to msgSANotAvailableInProject — same string, no wire
+	// change here — because the agent create and PATCH paths had NOT followed
+	// this rule and now do. Three copies of a string whose entire value is that
+	// they match is three chances to stop matching.
+	const notAvailable = msgSANotAvailableInProject
+
+	sa, err := s.store.GetGCPServiceAccount(ctx, req.DefaultGCPIdentityServiceAccountID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			BadRequest(w, notAvailable)
+			return false
+		}
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+
+	if !sa.ReachableFromProject(projectID) {
+		BadRequest(w, notAvailable)
+		return false
+	}
+
+	// Safe to be specific: this service account is already readable by this
+	// caller, so naming its state discloses nothing they cannot already see.
+	if !sa.Verified {
+		BadRequest(w, "GCP service account is not verified; verify it before setting it as the project default")
+		return false
+	}
+
+	return true
 }
 
 // projectSettingsFromAnnotations reads project settings from the project's annotations map.

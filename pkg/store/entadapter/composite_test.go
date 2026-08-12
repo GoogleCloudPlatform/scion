@@ -262,3 +262,35 @@ func TestCompositeStore_CreateGroup_MultipleGroupsPerProject(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, projectID, members.ProjectID)
 }
+
+// TestCompositeStore_MigrateRunsVerificationBackfill pins the wiring, not the
+// rule (that is covered in external_store_test.go). Migrate is where the
+// backfill has to live: it runs under the Postgres schema-migration advisory
+// lock, so co-booting replicas cannot race it.
+func TestCompositeStore_MigrateRunsVerificationBackfill(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	projectID := uuid.NewString()
+	sa := &store.GCPServiceAccount{
+		ID:         uuid.NewString(),
+		Scope:      store.ScopeProject,
+		ScopeID:    projectID,
+		Email:      "legacy@proj.iam.gserviceaccount.com",
+		ProjectID:  projectID,
+		Verified:   true,
+		VerifiedAt: time.Now(),
+		CreatedBy:  "tester",
+	}
+	require.NoError(t, cs.CreateGCPServiceAccount(ctx, sa))
+
+	// Put the row back into the shape ADD COLUMN leaves behind.
+	require.NoError(t, cs.client.GCPServiceAccount.UpdateOneID(uuid.MustParse(sa.ID)).
+		SetVerificationStatus(store.GCPVerificationUnverified).Exec(ctx))
+
+	require.NoError(t, cs.Migrate(ctx))
+
+	got, err := cs.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus)
+}

@@ -2147,6 +2147,8 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 			}
 		}
 
+		_ = harnessType // used only for cascade resolution; final value intentionally unused
+
 		// Profile harness_overrides can override auth type
 		if profileName != "" && settings != nil {
 			if profile, ok := settings.Profiles[profileName]; ok {

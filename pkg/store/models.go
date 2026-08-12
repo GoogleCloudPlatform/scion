@@ -416,6 +416,13 @@ type RuntimeBroker struct {
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 
+	// GCP host identity — the GCP service account that runs on this broker's
+	// host machine. Set by the operator at registration/update time so the Hub
+	// can gate passthrough mode on an actAs check against this identity.
+	// Optional: brokers that never serve passthrough agents need not set them.
+	GCPHostServiceAccountEmail string `json:"gcp_host_service_account_email,omitempty"`
+	GCPHostProjectID           string `json:"gcp_host_project_id,omitempty"`
+
 	// Ownership - tracks who registered this broker
 	CreatedBy     string `json:"createdBy,omitempty"`
 	CreatedByName string `json:"createdByName,omitempty"` // Enriched: resolved from CreatedBy
@@ -1564,6 +1571,50 @@ type GCPServiceAccount struct {
 	ManagedBy          string    `json:"managedBy,omitempty"` // Hub instance ID that minted this SA
 }
 
+// ReachableFromProject reports whether the service account may be addressed
+// from within the given project.
+//
+// A project-scoped account is reachable only from the project it belongs to. A
+// hub-scoped account is reachable from every project: that is what hub scope
+// means, and an agent in any project may be assigned one. Every other scope --
+// user scope today -- is not reachable from a project at all, which is the
+// fail-closed default rather than an omission.
+//
+// This lives on the type because it is a statement about the type: the answer
+// is a function of Scope and ScopeID and nothing else, with no request, store,
+// or caller involved. It is a method for the same reason. Every place that
+// needs to decide whether an account is usable from a project is asking this
+// one question, and the question has exactly one correct answer, so there
+// should be exactly one place it is written down. It was previously an
+// unexported helper in the hub package, where packages that cannot import hub
+// could not reach it and would have had to reimplement it -- which is the
+// failure this placement removes rather than the reason for it.
+//
+// Note what it does NOT do. It answers reachability, not permission: an
+// account that is reachable from a project must still pass the authorization
+// check appropriate to its scope, and a hub-scoped account reachable from
+// everywhere is precisely the case where those two answers differ. Keeping
+// them separate is what stops "visible from this project" from silently
+// becoming "manageable by this project's owner".
+//
+// It also deliberately does not compare ScopeID against a hub ID in the hub
+// case. On a hub-scoped account ScopeID records which hub instance registered
+// it and is provenance, never a predicate; the hub ID derives from config or a
+// hostname hash and is not stable across a redeploy.
+func (sa *GCPServiceAccount) ReachableFromProject(projectID string) bool {
+	if sa == nil {
+		return false
+	}
+	switch sa.Scope {
+	case ScopeHub:
+		return true
+	case ScopeProject:
+		return sa.ScopeID == projectID
+	default:
+		return false
+	}
+}
+
 // GCPIdentityConfig holds the GCP identity assignment for an agent.
 type GCPIdentityConfig struct {
 	MetadataMode        string `json:"metadataMode"`                  // "block", "passthrough", "assign"
@@ -1571,6 +1622,17 @@ type GCPIdentityConfig struct {
 	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"` // Denormalized for runtime use
 	ProjectID           string `json:"projectId,omitempty"`           // Denormalized
 }
+
+// GCPVerificationStatus constants describe the outcome of the Hub's last
+// impersonation check against a service account. The Verified bool cannot
+// distinguish "never checked" from "checked and rejected", so the status is
+// persisted alongside it. Mirrors the GCPVerificationStatus union in
+// web/src/shared/types.ts.
+const (
+	GCPVerificationUnverified = "unverified"
+	GCPVerificationVerified   = "verified"
+	GCPVerificationFailed     = "failed"
+)
 
 // GCPIdentity metadata mode constants.
 const (

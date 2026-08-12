@@ -115,14 +115,12 @@ func (m *mockHubClient) Subscriptions() hubclient.SubscriptionService           
 func (m *mockHubClient) SubscriptionTemplates() hubclient.SubscriptionTemplateService     { return nil }
 func (m *mockHubClient) ScheduledEvents(projectID string) hubclient.ScheduledEventService { return nil }
 func (m *mockHubClient) Schedules(projectID string) hubclient.ScheduleService             { return nil }
-func (m *mockHubClient) GCPServiceAccounts(projectID string) hubclient.GCPServiceAccountService {
-	return nil
-}
-func (m *mockHubClient) Messages() hubclient.MessageService              { return nil }
-func (m *mockHubClient) AllowList() hubclient.AllowListService           { return nil }
-func (m *mockHubClient) Invites() hubclient.InviteService                { return nil }
-func (m *mockHubClient) Skills() hubclient.SkillService                  { return nil }
-func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService { return nil }
+func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService           { return nil }
+func (m *mockHubClient) Messages() hubclient.MessageService                               { return nil }
+func (m *mockHubClient) AllowList() hubclient.AllowListService                            { return nil }
+func (m *mockHubClient) Invites() hubclient.InviteService                                 { return nil }
+func (m *mockHubClient) Skills() hubclient.SkillService                                   { return nil }
+func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService                  { return nil }
 func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.InjectedSkillsService {
 	return nil
 }

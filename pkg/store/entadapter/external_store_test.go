@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -222,4 +223,249 @@ func TestExternalStore_UserAccessToken(t *testing.T) {
 	_, err = s.GetUserAccessToken(ctx, token.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	assert.ErrorIs(t, s.RevokeUserAccessToken(ctx, token.ID), store.ErrNotFound)
+}
+
+// =============================================================================
+// verification_status / verification_error persistence (P0.1)
+// =============================================================================
+
+// newTestExternalStoreWithClient is newTestExternalStore plus the raw Ent client,
+// which the backfill tests need to force rows into the pre-migration shape the
+// store's own write path will no longer produce.
+func newTestExternalStoreWithClient(t *testing.T) (*ExternalStore, *ent.Client) {
+	t.Helper()
+	client := enttest.NewClient(t)
+	return NewExternalStore(client), client
+}
+
+func newTestSA(projectID string) *store.GCPServiceAccount {
+	return &store.GCPServiceAccount{
+		ID:        uuid.NewString(),
+		Scope:     store.ScopeProject,
+		ScopeID:   projectID,
+		Email:     "sa-" + uuid.NewString()[:8] + "@proj.iam.gserviceaccount.com",
+		ProjectID: projectID,
+		CreatedBy: "tester",
+	}
+}
+
+// The defect P0.1 fixes: a failed verification was reported once in the HTTP
+// response and then lost, because status was recomputed from the bool on read.
+func TestExternalStore_GCPServiceAccount_FailedVerificationSurvivesRead(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	sa := newTestSA(uuid.NewString())
+	sa.Verified = false
+	sa.VerificationStatus = store.GCPVerificationFailed
+	sa.VerificationError = "caller does not have permission to impersonate"
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	got, err := s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationFailed, got.VerificationStatus)
+	assert.Equal(t, "caller does not have permission to impersonate", got.VerificationError)
+
+	// ...and through a list, which reads via the same converter.
+	list, err := s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{ScopeID: sa.ScopeID})
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, store.GCPVerificationFailed, list[0].VerificationStatus)
+	assert.Equal(t, "caller does not have permission to impersonate", list[0].VerificationError)
+}
+
+// The verify handler's sequence: register, fail, then succeed on retry.
+func TestExternalStore_GCPServiceAccount_UpdatePersistsVerificationTransitions(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	sa := newTestSA(uuid.NewString())
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	got, err := s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationUnverified, got.VerificationStatus,
+		"a freshly registered account has not been checked yet")
+	assert.Empty(t, got.VerificationError)
+
+	got.Verified = false
+	got.VerificationStatus = store.GCPVerificationFailed
+	got.VerificationError = "IAM policy missing tokenCreator"
+	require.NoError(t, s.UpdateGCPServiceAccount(ctx, got))
+
+	got, err = s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationFailed, got.VerificationStatus)
+	assert.Equal(t, "IAM policy missing tokenCreator", got.VerificationError)
+
+	got.Verified = true
+	got.VerifiedAt = time.Now()
+	got.VerificationStatus = store.GCPVerificationVerified
+	got.VerificationError = ""
+	require.NoError(t, s.UpdateGCPServiceAccount(ctx, got))
+
+	got, err = s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus)
+	assert.Empty(t, got.VerificationError, "a successful re-verify must clear the stale error")
+}
+
+// Callers that set only the bool must still produce a coherent row, and the
+// struct they hold must match what was written.
+func TestExternalStore_GCPServiceAccount_NormalizesUnsetStatus(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	verified := newTestSA(uuid.NewString())
+	verified.Verified = true
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, verified))
+	assert.Equal(t, store.GCPVerificationVerified, verified.VerificationStatus,
+		"create should write the resolved status back into the caller's struct")
+
+	got, err := s.GetGCPServiceAccount(ctx, verified.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus)
+
+	unverified := newTestSA(uuid.NewString())
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, unverified))
+	got, err = s.GetGCPServiceAccount(ctx, unverified.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationUnverified, got.VerificationStatus)
+}
+
+// R-1: a caller that re-verifies successfully but only flips the bool — the
+// read-modify-write shape, where Verified is carried over from the row rather
+// than set deliberately alongside the status. Without the coherence invariant
+// the row keeps status "failed" and a stale error beside Verified=true, and it
+// never heals: both backfill rules require the row to still be at "unverified".
+func TestExternalStore_GCPServiceAccount_SuccessfulReverifyHealsFailedRow(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	sa := newTestSA(uuid.NewString())
+	sa.Verified = false
+	sa.VerificationStatus = store.GCPVerificationFailed
+	sa.VerificationError = "IAM policy missing tokenCreator"
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	got, err := s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.GCPVerificationFailed, got.VerificationStatus)
+
+	// The whole point: status and error are left exactly as they were read.
+	got.Verified = true
+	got.VerifiedAt = time.Now()
+	require.NoError(t, s.UpdateGCPServiceAccount(ctx, got))
+
+	assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus,
+		"the caller's struct is returned in the HTTP response, so it must be healed too")
+	assert.Empty(t, got.VerificationError)
+
+	got, err = s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus)
+	assert.Empty(t, got.VerificationError, "the stale failure message must not outlive the failure")
+}
+
+// The other half of the invariant: Verified=false must not be normalised into
+// anything. A live failure keeps its status and its message.
+func TestExternalStore_GCPServiceAccount_UnverifiedRowsLeftAlone(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	sa := newTestSA(uuid.NewString())
+	sa.Verified = false
+	sa.VerificationStatus = store.GCPVerificationFailed
+	sa.VerificationError = "caller does not have permission to impersonate"
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	got, err := s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+
+	// A no-op update — an unrelated field changes, verification does not.
+	got.DisplayName = "renamed"
+	require.NoError(t, s.UpdateGCPServiceAccount(ctx, got))
+
+	got, err = s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Verified)
+	assert.Equal(t, store.GCPVerificationFailed, got.VerificationStatus)
+	assert.Equal(t, "caller does not have permission to impersonate", got.VerificationError)
+}
+
+func TestExternalStore_BackfillGCPVerificationStatus(t *testing.T) {
+	ctx := context.Background()
+	s, client := newTestExternalStoreWithClient(t)
+
+	// Build the four row shapes, then force verification_status back to the
+	// column default to simulate rows that predate the column. Going through
+	// the store first keeps the rest of each row realistic.
+	type seed struct {
+		name       string
+		verified   bool
+		verifiedAt time.Time
+		want       string
+	}
+	seeds := []seed{
+		{"verified", true, time.Now(), store.GCPVerificationVerified},
+		{"regressed", false, time.Now(), store.GCPVerificationFailed},
+		{"never checked", false, time.Time{}, store.GCPVerificationUnverified},
+	}
+
+	ids := make([]uuid.UUID, len(seeds))
+	for i, sd := range seeds {
+		sa := newTestSA(uuid.NewString())
+		sa.Verified = sd.verified
+		sa.VerifiedAt = sd.verifiedAt
+		require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+		id := uuid.MustParse(sa.ID)
+		ids[i] = id
+		require.NoError(t, client.GCPServiceAccount.UpdateOneID(id).
+			SetVerificationStatus(store.GCPVerificationUnverified).Exec(ctx))
+	}
+
+	require.NoError(t, s.BackfillGCPVerificationStatus(ctx))
+
+	for i, sd := range seeds {
+		got, err := s.GetGCPServiceAccount(ctx, ids[i].String())
+		require.NoError(t, err)
+		assert.Equal(t, sd.want, got.VerificationStatus, "seed %q", sd.name)
+		assert.Empty(t, got.VerificationError,
+			"seed %q: the error text is not recoverable and must not be invented", sd.name)
+	}
+
+	// Idempotent.
+	require.NoError(t, s.BackfillGCPVerificationStatus(ctx))
+	for i, sd := range seeds {
+		got, err := s.GetGCPServiceAccount(ctx, ids[i].String())
+		require.NoError(t, err)
+		assert.Equal(t, sd.want, got.VerificationStatus, "seed %q after second run", sd.name)
+	}
+}
+
+// A first-time verification failure leaves verified=false with verified_at NULL
+// — the same shape as an account nobody ever checked. The backfill must not
+// treat that as a row to relabel, or every boot would erase a real failure.
+func TestExternalStore_BackfillGCPVerificationStatus_DoesNotClobberLiveFailures(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	sa := newTestSA(uuid.NewString())
+	sa.Verified = false
+	sa.VerificationStatus = store.GCPVerificationFailed
+	sa.VerificationError = "no such service account"
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	require.NoError(t, s.BackfillGCPVerificationStatus(ctx))
+
+	got, err := s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationFailed, got.VerificationStatus)
+	assert.Equal(t, "no such service account", got.VerificationError)
+}
+
+func TestExternalStore_BackfillGCPVerificationStatus_EmptyTable(t *testing.T) {
+	s := newTestExternalStore(t)
+	assert.NoError(t, s.BackfillGCPVerificationStatus(context.Background()))
 }

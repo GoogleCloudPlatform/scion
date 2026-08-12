@@ -46,6 +46,11 @@ const (
 	ActionStopAll      Action = "stop_all"
 	ActionVerify       Action = "verify"
 	ActionMint         Action = "mint"
+	// ActionAssign covers binding a resource to a principal that will act with
+	// it — currently attaching a GCP service account to an agent. Declared here
+	// so policies can be written against it; the assignment call sites still
+	// check ActionRead and are converted separately.
+	ActionAssign Action = "assign"
 )
 
 // Resource represents the target of an authorization check.
@@ -127,11 +132,27 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 	}
 
 	// 2. Owner bypass
+	//
+	// ⚠️ D7 exception: the OwnerID lever must NOT confer assignment of a
+	// hub-scoped service account. A former hub member who created the SA must
+	// not be able to assign it solely via OwnerID; current hub membership is
+	// required (step 2.7). The owner bypass is suppressed for ActionAssign on
+	// parentless gcp_service_account resources (parentless == hub-scoped,
+	// because gcpServiceAccountResource sets ParentType/ParentID only for
+	// project-scoped SAs).
+	//
+	// Other actions (read, delete, verify) on owned resources are unaffected:
+	// the creator keeps those rights. Only assignment requires the additional
+	// hub membership check. Admin bypass (step 1) is not affected.
 	if resource.OwnerID != "" && resource.OwnerID == user.ID() {
-		return Decision{
-			Allowed: true,
-			Reason:  "resource owner",
+		if action != ActionAssign || resource.Type != "gcp_service_account" ||
+			resource.ParentType != "" || resource.ParentID != "" {
+			return Decision{
+				Allowed: true,
+				Reason:  "resource owner",
+			}
 		}
+		// Fall through to step 2.7, which checks current hub membership.
 	}
 
 	// 2.5. Ancestry-based transitive access
@@ -151,6 +172,40 @@ func (a *AuthzService) checkAccessForUser(ctx context.Context, user UserIdentity
 			return Decision{
 				Allowed: true,
 				Reason:  "project owner/admin",
+			}
+		}
+	}
+
+	// 2.7. Hub-scoped service-account assign baseline (D5).
+	//
+	// Current hub members may assign hub-scoped SAs. This is the Option B
+	// code baseline ruled by ptone: a narrow code path for current hub members,
+	// not a seed policy, because the policy engine has no hub-scope resource arm
+	// and a hub-scoped policy would over-match.
+	//
+	// Four properties are load-bearing:
+	//
+	//   1. Position. This runs AFTER the owner and project-owner baselines
+	//      (which already allowed the creator and project admins) and BEFORE
+	//      policy evaluation. It is therefore revocable by an explicit deny
+	//      policy, and it does not shadow any baseline that already applied.
+	//   2. The parentless guard. gcpServiceAccountResource gives a project
+	//      parent only to project-scoped SAs; hub-scoped SAs are parentless.
+	//      This arm fires only for parentless resources, which means it cannot
+	//      match project-scoped SAs — they have a parent and are handled by
+	//      the per-project assign policy in seed.go.
+	//   3. Current hub membership. The user must be a current member of the
+	//      hub-members group. OwnerID (CreatedBy) alone is NOT sufficient:
+	//      a former hub member who created the SA loses assign when removed
+	//      from the group. This is D7's OwnerID lever constraint.
+	//   4. Action + type. Only ActionAssign on gcp_service_account.
+	if action == ActionAssign && resource.Type == "gcp_service_account" &&
+		resource.ParentType == "" && resource.ParentID == "" {
+		if a.isCurrentHubMember(ctx, user.ID()) {
+			return Decision{
+				Allowed: true,
+				Reason:  "hub member hub-scoped assign baseline",
+				Scope:   "hub",
 			}
 		}
 	}
@@ -213,8 +268,126 @@ func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdent
 		return decision
 	}
 
-	// 3. Delegation fallback: check policies with delegation conditions
+	// 3. Project-scoped read baseline.
+	//
+	// An agent may perform read-class actions on resources in its own project.
+	// This codifies the project-isolation gate these paths already relied on
+	// before #591; it grants nothing that was not already reachable — it
+	// consolidates the hand-rolled per-handler isolation checks into one
+	// enforced location.
+	//
+	// Four properties are load-bearing; do not change them casually:
+	//
+	//   1. Position. This runs *after* policy evaluation, which returns any
+	//      matched policy — allow or deny — before we get here. That makes the
+	//      baseline revocable: an admin can bind an explicit deny policy to the
+	//      project's implicit "project:<slug>:agents" group and it wins. Moving
+	//      this block earlier would make the baseline unconditional.
+	//   2. The pid != "" guard. Resources with no project (broker, template,
+	//      the GitHub App config, hub-scoped resources) yield "" from
+	//      projectIDForResource. Without the guard, "" would equal an agent's
+	//      empty ProjectID and the baseline would allow everything.
+	//   3. Read-class is ActionRead and ActionList only. Deliberately not
+	//      ActionAttach (PTY/exec/message mutate a running agent), not
+	//      ActionCreate (gated by token scope in authorizeAgentCreate), and no
+	//      mutating action.
+	//   4. It grants nothing new relative to pre-#591 behaviour.
+	if isReadClassAction(action) {
+		if pid := projectIDForResource(resource); pid != "" && pid == agent.ProjectID() {
+			return Decision{
+				Allowed: true,
+				Reason:  "agent project read baseline",
+				Scope:   "project",
+			}
+		}
+	}
+
+	// 3b. Project-scoped service-account assign baseline.
+	//
+	// An agent may assign a GCP service account that lives in its own project.
+	// Today the assignment gate checks ActionRead, which step 3 above already
+	// allows for exactly this set of service accounts. svc-accnt P3 converts
+	// that check to ActionAssign so the IAM actAs gate has a resource-shaped
+	// place to hang. Without this arm the conversion would deny every agent
+	// caller hub-wide, because checkAccessForAgent has no admin or owner
+	// bypass and no seeded policy grants assign. The security in that change
+	// comes from the GCP actAs check, not from narrowing the Hub policy layer.
+	//
+	// It is a separate arm rather than an addition to isReadClassAction on
+	// purpose: read-class is deliberately narrow, and widening it would grant
+	// assign on every resource type instead of this one.
+	//
+	// The four properties documented on step 3 apply here unchanged — in
+	// particular the position after policy evaluation, which keeps this
+	// revocable by an explicit deny bound to the project's implicit
+	// "project:<slug>:agents" group, and the pid != "" guard. A fifth is
+	// specific to this arm:
+	//
+	//   5. It preserves the step 3 project-baseline path exactly, and only
+	//      that path. Under ActionRead an agent could also reach :483 via a
+	//      hand-authored read policy (step 2) or a delegation condition
+	//      (step 4), and this arm deliberately does not preserve either,
+	//      because a grant to read a service account is not a grant to assign
+	//      one — reproducing them would over-grant on the very surface this
+	//      change exists to gate. Both are empty for agents on
+	//      gcp_service_account in default configuration, so nothing breaks out
+	//      of the box; an operator who wrote one loses agent assign and must
+	//      grant assign explicitly. Do not cite this arm as
+	//      "reachability-preserving" without that qualification.
+	//
+	// ⚠️ WHAT CONFINES THIS ARM, and read the next paragraph before citing
+	// anything else. The confinement is `pid != ""` in the predicate
+	// immediately below, combined with gcpServiceAccountResource giving a
+	// project parent only to project-scoped accounts. A hub-scoped account is
+	// parentless, so projectIDForResource yields "" and this arm cannot fire
+	// for it. That is a property of the authorization engine and of the
+	// resource builder. It does not depend on any handler.
+	//
+	// Do NOT justify this arm by the scope check in createAgentInProject. An
+	// earlier version of this comment did exactly that, naming the
+	// `sa.ScopeID != projectID` equality as an enforcing mechanism. That check
+	// was replaced by sa.ReachableFromProject in a44b2950, which admits
+	// hub-scoped accounts from every project — so the stated justification
+	// became false while the arm it justified stayed correct for a reason the
+	// comment had not recorded. A confinement argument that names a call site
+	// can be invalidated by a commit to that call site, silently. Name engine
+	// properties only.
+	//
+	// The human half of this baseline is the per-project assign policy in
+	// seed.go (projectAssignPolicyName), confined by the SAME engine property
+	// read the other way: this arm by `pid != ""` here, that policy by
+	// `pid == ""` in matchesResource, which refuses to match a project-scoped
+	// policy against a parentless resource (#595). One discipline in two
+	// places, not two unrelated accidents. Neither side needs a code-side
+	// revocation to stay confined, and neither should grow one.
+	//
+	// Goal 2 makes hub-scoped accounts assignable across projects. That does
+	// not breach this arm — a hub-scoped account stays parentless, so this arm
+	// still cannot fire for it, which is the fail-closed outcome §8.2 rules
+	// correct: hub-scoped accounts are assignable by hub admins and the
+	// account's creator and nobody else. If you are here to make hub-scoped
+	// accounts broadly assignable, that is task #19 and this arm is NOT the
+	// place to do it; widening `pid != ""` would grant every agent every
+	// service account on the hub.
+	if action == ActionAssign && resource.Type == "gcp_service_account" {
+		if pid := projectIDForResource(resource); pid != "" && pid == agent.ProjectID() {
+			return Decision{
+				Allowed: true,
+				Reason:  "agent project service-account assign baseline",
+				Scope:   "project",
+			}
+		}
+	}
+
+	// 4. Delegation fallback: check policies with delegation conditions
 	return a.checkDelegation(ctx, agent, resource, action, policies)
+}
+
+// isReadClassAction reports whether an action is read-class for the purposes of
+// the agent project baseline. Read-class is deliberately narrow: read and list
+// only. See checkAccessForAgent for why.
+func isReadClassAction(a Action) bool {
+	return a == ActionRead || a == ActionList
 }
 
 // checkDelegation handles the delegation fallback for agents.
@@ -369,8 +542,15 @@ func matchesResource(policy store.Policy, resource Resource) bool {
 	// Scope matching
 	switch policy.ScopeType {
 	case "project":
-		// Policy scoped to a project — resource must be in that project
-		if policy.ScopeID != "" && resource.ParentType == "project" && resource.ParentID != policy.ScopeID {
+		// A project-scoped policy applies only to resources that resolve to
+		// that project. Parentless / hub-scoped resources resolve to "" and
+		// must NOT match — fail closed rather than falling through (#595).
+		//
+		// There is deliberately no outer `policy.ScopeID != ""` guard: a
+		// project-scoped policy with an empty ScopeID must match nothing, not
+		// everything. pid == "" is already rejected, and a non-empty pid can
+		// never equal an empty ScopeID, so the two clauses cover it.
+		if pid := projectIDForResource(resource); pid == "" || pid != policy.ScopeID {
 			return false
 		}
 	case "resource":
@@ -479,6 +659,30 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		}
 	}
 	return false
+}
+
+// hubMembersSlug is the slug of the seeded hub-members group. It is the same
+// value seed.go uses when creating the group; kept as a constant so tests and
+// production code agree on the lookup key.
+const hubMembersSlug = "hub-members"
+
+// isCurrentHubMember reports whether the user is a current member of the
+// hub-members group. "Current" means an active membership record exists; a
+// former member who was removed returns false regardless of OwnerID on any
+// resource they created. This is the D7 OwnerID lever constraint: the SA
+// creator is not sufficient to assign, only current hub membership is.
+func (a *AuthzService) isCurrentHubMember(ctx context.Context, userID string) bool {
+	if userID == "" {
+		return false
+	}
+	group, err := a.store.GetGroupBySlug(ctx, hubMembersSlug)
+	if err != nil {
+		// Group does not exist or lookup failed: not a member.
+		return false
+	}
+	_, err = a.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	// Any role (member, admin, owner) counts as current membership.
+	return err == nil
 }
 
 // evaluateTimeConditions checks time-based conditions.

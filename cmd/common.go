@@ -79,6 +79,7 @@ var (
 	modelFlag             string
 	thinkingLevelFlag     int = -1
 	agentRoleFlag         string
+	serviceAccountFlag    string
 )
 
 func parseLabels(raw []string) (map[string]string, error) {
@@ -706,6 +707,17 @@ func waitForTmuxSession(rt runtime.Runtime, agentName string) error {
 	}
 }
 
+// applyServiceAccountFlag wires the --service-account CLI flag into a
+// CreateAgentRequest's GCP identity assignment.
+func applyServiceAccountFlag(req *hubclient.CreateAgentRequest, saFlag string) {
+	if saFlag != "" {
+		req.GCPIdentity = &hubclient.GCPIdentityConfig{
+			MetadataMode:     "assign",
+			ServiceAccountID: saFlag,
+		}
+	}
+}
+
 func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
@@ -786,6 +798,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		Notify:          !startNoNotify,
 		AgentRole:       agentRoleFlag,
 	}
+
+	// Wire --service-account flag into the GCP identity assignment.
+	applyServiceAccountFlag(req, serviceAccountFlag)
 
 	// Thread inline config from --config flag into the Hub request.
 	// The inline config is the base; CLI flags override specific fields.

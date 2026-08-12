@@ -172,7 +172,7 @@ func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid skill URI: %w", err)
 	}
 	if normalized != skillURI {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Note: URI transformed → %s\n", normalized)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Note: URI transformed → %s\n", normalized)
 	}
 	skillURI = normalized
 

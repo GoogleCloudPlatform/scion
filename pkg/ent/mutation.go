@@ -10759,25 +10759,27 @@ func (m *EnvVarMutation) ResetEdge(name string) error {
 // GCPServiceAccountMutation represents an operation that mutates the GCPServiceAccount nodes in the graph.
 type GCPServiceAccountMutation struct {
 	config
-	op             Op
-	typ            string
-	id             *uuid.UUID
-	scope          *string
-	scope_id       *string
-	email          *string
-	project_id     *string
-	display_name   *string
-	default_scopes *string
-	verified       *bool
-	verified_at    *time.Time
-	created_by     *string
-	managed        *bool
-	managed_by     *string
-	created        *time.Time
-	clearedFields  map[string]struct{}
-	done           bool
-	oldValue       func(context.Context) (*GCPServiceAccount, error)
-	predicates     []predicate.GCPServiceAccount
+	op                  Op
+	typ                 string
+	id                  *uuid.UUID
+	scope               *string
+	scope_id            *string
+	email               *string
+	project_id          *string
+	display_name        *string
+	default_scopes      *string
+	verified            *bool
+	verified_at         *time.Time
+	verification_status *string
+	verification_error  *string
+	created_by          *string
+	managed             *bool
+	managed_by          *string
+	created             *time.Time
+	clearedFields       map[string]struct{}
+	done                bool
+	oldValue            func(context.Context) (*GCPServiceAccount, error)
+	predicates          []predicate.GCPServiceAccount
 }
 
 var _ ent.Mutation = (*GCPServiceAccountMutation)(nil)
@@ -11185,6 +11187,78 @@ func (m *GCPServiceAccountMutation) ResetVerifiedAt() {
 	delete(m.clearedFields, gcpserviceaccount.FieldVerifiedAt)
 }
 
+// SetVerificationStatus sets the "verification_status" field.
+func (m *GCPServiceAccountMutation) SetVerificationStatus(s string) {
+	m.verification_status = &s
+}
+
+// VerificationStatus returns the value of the "verification_status" field in the mutation.
+func (m *GCPServiceAccountMutation) VerificationStatus() (r string, exists bool) {
+	v := m.verification_status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVerificationStatus returns the old "verification_status" field's value of the GCPServiceAccount entity.
+// If the GCPServiceAccount object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GCPServiceAccountMutation) OldVerificationStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVerificationStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVerificationStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVerificationStatus: %w", err)
+	}
+	return oldValue.VerificationStatus, nil
+}
+
+// ResetVerificationStatus resets all changes to the "verification_status" field.
+func (m *GCPServiceAccountMutation) ResetVerificationStatus() {
+	m.verification_status = nil
+}
+
+// SetVerificationError sets the "verification_error" field.
+func (m *GCPServiceAccountMutation) SetVerificationError(s string) {
+	m.verification_error = &s
+}
+
+// VerificationError returns the value of the "verification_error" field in the mutation.
+func (m *GCPServiceAccountMutation) VerificationError() (r string, exists bool) {
+	v := m.verification_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVerificationError returns the old "verification_error" field's value of the GCPServiceAccount entity.
+// If the GCPServiceAccount object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GCPServiceAccountMutation) OldVerificationError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVerificationError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVerificationError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVerificationError: %w", err)
+	}
+	return oldValue.VerificationError, nil
+}
+
+// ResetVerificationError resets all changes to the "verification_error" field.
+func (m *GCPServiceAccountMutation) ResetVerificationError() {
+	m.verification_error = nil
+}
+
 // SetCreatedBy sets the "created_by" field.
 func (m *GCPServiceAccountMutation) SetCreatedBy(s string) {
 	m.created_by = &s
@@ -11363,7 +11437,7 @@ func (m *GCPServiceAccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GCPServiceAccountMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 14)
 	if m.scope != nil {
 		fields = append(fields, gcpserviceaccount.FieldScope)
 	}
@@ -11387,6 +11461,12 @@ func (m *GCPServiceAccountMutation) Fields() []string {
 	}
 	if m.verified_at != nil {
 		fields = append(fields, gcpserviceaccount.FieldVerifiedAt)
+	}
+	if m.verification_status != nil {
+		fields = append(fields, gcpserviceaccount.FieldVerificationStatus)
+	}
+	if m.verification_error != nil {
+		fields = append(fields, gcpserviceaccount.FieldVerificationError)
 	}
 	if m.created_by != nil {
 		fields = append(fields, gcpserviceaccount.FieldCreatedBy)
@@ -11424,6 +11504,10 @@ func (m *GCPServiceAccountMutation) Field(name string) (ent.Value, bool) {
 		return m.Verified()
 	case gcpserviceaccount.FieldVerifiedAt:
 		return m.VerifiedAt()
+	case gcpserviceaccount.FieldVerificationStatus:
+		return m.VerificationStatus()
+	case gcpserviceaccount.FieldVerificationError:
+		return m.VerificationError()
 	case gcpserviceaccount.FieldCreatedBy:
 		return m.CreatedBy()
 	case gcpserviceaccount.FieldManaged:
@@ -11457,6 +11541,10 @@ func (m *GCPServiceAccountMutation) OldField(ctx context.Context, name string) (
 		return m.OldVerified(ctx)
 	case gcpserviceaccount.FieldVerifiedAt:
 		return m.OldVerifiedAt(ctx)
+	case gcpserviceaccount.FieldVerificationStatus:
+		return m.OldVerificationStatus(ctx)
+	case gcpserviceaccount.FieldVerificationError:
+		return m.OldVerificationError(ctx)
 	case gcpserviceaccount.FieldCreatedBy:
 		return m.OldCreatedBy(ctx)
 	case gcpserviceaccount.FieldManaged:
@@ -11529,6 +11617,20 @@ func (m *GCPServiceAccountMutation) SetField(name string, value ent.Value) error
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetVerifiedAt(v)
+		return nil
+	case gcpserviceaccount.FieldVerificationStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVerificationStatus(v)
+		return nil
+	case gcpserviceaccount.FieldVerificationError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVerificationError(v)
 		return nil
 	case gcpserviceaccount.FieldCreatedBy:
 		v, ok := value.(string)
@@ -11639,6 +11741,12 @@ func (m *GCPServiceAccountMutation) ResetField(name string) error {
 		return nil
 	case gcpserviceaccount.FieldVerifiedAt:
 		m.ResetVerifiedAt()
+		return nil
+	case gcpserviceaccount.FieldVerificationStatus:
+		m.ResetVerificationStatus()
+		return nil
+	case gcpserviceaccount.FieldVerificationError:
+		m.ResetVerificationError()
 		return nil
 	case gcpserviceaccount.FieldCreatedBy:
 		m.ResetCreatedBy()
@@ -31200,36 +31308,38 @@ func (m *ProjectSyncStateMutation) ResetEdge(name string) error {
 // RuntimeBrokerMutation represents an operation that mutates the RuntimeBroker nodes in the graph.
 type RuntimeBrokerMutation struct {
 	config
-	op                   Op
-	typ                  string
-	id                   *uuid.UUID
-	name                 *string
-	slug                 *string
-	mode                 *string
-	version              *string
-	lock_version         *int64
-	addlock_version      *int64
-	status               *string
-	connection_state     *string
-	last_heartbeat       *time.Time
-	capabilities         *string
-	supported_harnesses  *string
-	resources            *string
-	runtimes             *string
-	labels               *string
-	annotations          *string
-	endpoint             *string
-	created_by           *string
-	auto_provide         *bool
-	connected_hub_id     *string
-	connected_session_id *string
-	connected_at         *time.Time
-	created              *time.Time
-	updated              *time.Time
-	clearedFields        map[string]struct{}
-	done                 bool
-	oldValue             func(context.Context) (*RuntimeBroker, error)
-	predicates           []predicate.RuntimeBroker
+	op                             Op
+	typ                            string
+	id                             *uuid.UUID
+	name                           *string
+	slug                           *string
+	mode                           *string
+	version                        *string
+	lock_version                   *int64
+	addlock_version                *int64
+	status                         *string
+	connection_state               *string
+	last_heartbeat                 *time.Time
+	capabilities                   *string
+	supported_harnesses            *string
+	resources                      *string
+	runtimes                       *string
+	labels                         *string
+	annotations                    *string
+	endpoint                       *string
+	created_by                     *string
+	auto_provide                   *bool
+	gcp_host_service_account_email *string
+	gcp_host_project_id            *string
+	connected_hub_id               *string
+	connected_session_id           *string
+	connected_at                   *time.Time
+	created                        *time.Time
+	updated                        *time.Time
+	clearedFields                  map[string]struct{}
+	done                           bool
+	oldValue                       func(context.Context) (*RuntimeBroker, error)
+	predicates                     []predicate.RuntimeBroker
 }
 
 var _ ent.Mutation = (*RuntimeBrokerMutation)(nil)
@@ -32098,6 +32208,104 @@ func (m *RuntimeBrokerMutation) ResetAutoProvide() {
 	m.auto_provide = nil
 }
 
+// SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
+func (m *RuntimeBrokerMutation) SetGcpHostServiceAccountEmail(s string) {
+	m.gcp_host_service_account_email = &s
+}
+
+// GcpHostServiceAccountEmail returns the value of the "gcp_host_service_account_email" field in the mutation.
+func (m *RuntimeBrokerMutation) GcpHostServiceAccountEmail() (r string, exists bool) {
+	v := m.gcp_host_service_account_email
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGcpHostServiceAccountEmail returns the old "gcp_host_service_account_email" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldGcpHostServiceAccountEmail(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGcpHostServiceAccountEmail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGcpHostServiceAccountEmail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGcpHostServiceAccountEmail: %w", err)
+	}
+	return oldValue.GcpHostServiceAccountEmail, nil
+}
+
+// ClearGcpHostServiceAccountEmail clears the value of the "gcp_host_service_account_email" field.
+func (m *RuntimeBrokerMutation) ClearGcpHostServiceAccountEmail() {
+	m.gcp_host_service_account_email = nil
+	m.clearedFields[runtimebroker.FieldGcpHostServiceAccountEmail] = struct{}{}
+}
+
+// GcpHostServiceAccountEmailCleared returns if the "gcp_host_service_account_email" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) GcpHostServiceAccountEmailCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldGcpHostServiceAccountEmail]
+	return ok
+}
+
+// ResetGcpHostServiceAccountEmail resets all changes to the "gcp_host_service_account_email" field.
+func (m *RuntimeBrokerMutation) ResetGcpHostServiceAccountEmail() {
+	m.gcp_host_service_account_email = nil
+	delete(m.clearedFields, runtimebroker.FieldGcpHostServiceAccountEmail)
+}
+
+// SetGcpHostProjectID sets the "gcp_host_project_id" field.
+func (m *RuntimeBrokerMutation) SetGcpHostProjectID(s string) {
+	m.gcp_host_project_id = &s
+}
+
+// GcpHostProjectID returns the value of the "gcp_host_project_id" field in the mutation.
+func (m *RuntimeBrokerMutation) GcpHostProjectID() (r string, exists bool) {
+	v := m.gcp_host_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGcpHostProjectID returns the old "gcp_host_project_id" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldGcpHostProjectID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGcpHostProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGcpHostProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGcpHostProjectID: %w", err)
+	}
+	return oldValue.GcpHostProjectID, nil
+}
+
+// ClearGcpHostProjectID clears the value of the "gcp_host_project_id" field.
+func (m *RuntimeBrokerMutation) ClearGcpHostProjectID() {
+	m.gcp_host_project_id = nil
+	m.clearedFields[runtimebroker.FieldGcpHostProjectID] = struct{}{}
+}
+
+// GcpHostProjectIDCleared returns if the "gcp_host_project_id" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) GcpHostProjectIDCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldGcpHostProjectID]
+	return ok
+}
+
+// ResetGcpHostProjectID resets all changes to the "gcp_host_project_id" field.
+func (m *RuntimeBrokerMutation) ResetGcpHostProjectID() {
+	m.gcp_host_project_id = nil
+	delete(m.clearedFields, runtimebroker.FieldGcpHostProjectID)
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (m *RuntimeBrokerMutation) SetConnectedHubID(s string) {
 	m.connected_hub_id = &s
@@ -32351,7 +32559,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 22)
+	fields := make([]string, 0, 24)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -32402,6 +32610,12 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.auto_provide != nil {
 		fields = append(fields, runtimebroker.FieldAutoProvide)
+	}
+	if m.gcp_host_service_account_email != nil {
+		fields = append(fields, runtimebroker.FieldGcpHostServiceAccountEmail)
+	}
+	if m.gcp_host_project_id != nil {
+		fields = append(fields, runtimebroker.FieldGcpHostProjectID)
 	}
 	if m.connected_hub_id != nil {
 		fields = append(fields, runtimebroker.FieldConnectedHubID)
@@ -32460,6 +32674,10 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedBy()
 	case runtimebroker.FieldAutoProvide:
 		return m.AutoProvide()
+	case runtimebroker.FieldGcpHostServiceAccountEmail:
+		return m.GcpHostServiceAccountEmail()
+	case runtimebroker.FieldGcpHostProjectID:
+		return m.GcpHostProjectID()
 	case runtimebroker.FieldConnectedHubID:
 		return m.ConnectedHubID()
 	case runtimebroker.FieldConnectedSessionID:
@@ -32513,6 +32731,10 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldCreatedBy(ctx)
 	case runtimebroker.FieldAutoProvide:
 		return m.OldAutoProvide(ctx)
+	case runtimebroker.FieldGcpHostServiceAccountEmail:
+		return m.OldGcpHostServiceAccountEmail(ctx)
+	case runtimebroker.FieldGcpHostProjectID:
+		return m.OldGcpHostProjectID(ctx)
 	case runtimebroker.FieldConnectedHubID:
 		return m.OldConnectedHubID(ctx)
 	case runtimebroker.FieldConnectedSessionID:
@@ -32651,6 +32873,20 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetAutoProvide(v)
 		return nil
+	case runtimebroker.FieldGcpHostServiceAccountEmail:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGcpHostServiceAccountEmail(v)
+		return nil
+	case runtimebroker.FieldGcpHostProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGcpHostProjectID(v)
+		return nil
 	case runtimebroker.FieldConnectedHubID:
 		v, ok := value.(string)
 		if !ok {
@@ -32761,6 +32997,12 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldCreatedBy) {
 		fields = append(fields, runtimebroker.FieldCreatedBy)
 	}
+	if m.FieldCleared(runtimebroker.FieldGcpHostServiceAccountEmail) {
+		fields = append(fields, runtimebroker.FieldGcpHostServiceAccountEmail)
+	}
+	if m.FieldCleared(runtimebroker.FieldGcpHostProjectID) {
+		fields = append(fields, runtimebroker.FieldGcpHostProjectID)
+	}
 	if m.FieldCleared(runtimebroker.FieldConnectedHubID) {
 		fields = append(fields, runtimebroker.FieldConnectedHubID)
 	}
@@ -32813,6 +33055,12 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldCreatedBy:
 		m.ClearCreatedBy()
+		return nil
+	case runtimebroker.FieldGcpHostServiceAccountEmail:
+		m.ClearGcpHostServiceAccountEmail()
+		return nil
+	case runtimebroker.FieldGcpHostProjectID:
+		m.ClearGcpHostProjectID()
 		return nil
 	case runtimebroker.FieldConnectedHubID:
 		m.ClearConnectedHubID()
@@ -32881,6 +33129,12 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldAutoProvide:
 		m.ResetAutoProvide()
+		return nil
+	case runtimebroker.FieldGcpHostServiceAccountEmail:
+		m.ResetGcpHostServiceAccountEmail()
+		return nil
+	case runtimebroker.FieldGcpHostProjectID:
+		m.ResetGcpHostProjectID()
 		return nil
 	case runtimebroker.FieldConnectedHubID:
 		m.ResetConnectedHubID()

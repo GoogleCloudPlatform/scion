@@ -2147,7 +2147,8 @@ export class ScionPageProjectSettings extends LitElement {
 
           <sl-tab-panel name="gcp-sa">
             <scion-gcp-service-account-list
-              projectId=${this.projectId}
+              scope="project"
+              scopeId=${this.projectId}
             ></scion-gcp-service-account-list>
           </sl-tab-panel>
 

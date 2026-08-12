@@ -51,6 +51,8 @@ interface V1ServerHubConfig {
   soft_delete_retain_files?: boolean;
   auto_suspend_stalled?: boolean;
   stalled_threshold?: string;
+  gcp_iam_check_mode?: string;
+  gcp_iam_deny_unknown_policy?: string;
 }
 
 interface V1BrokerConfig {
@@ -327,6 +329,9 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'server.hub.stalled_threshold': 'Stalled Threshold',
   'server.hub.soft_delete_retention': 'Soft Delete Retention',
   'server.hub.soft_delete_retain_files': 'Retain Files on Soft Delete',
+  // gcp iam section
+  'server.hub.gcp_iam_check_mode': 'IAM Check Mode',
+  'server.hub.gcp_iam_deny_unknown_policy': 'Deny Policy Fallback',
   // auto_expose_ports section
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
   // telemetry section
@@ -446,6 +451,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubSoftDeleteRetainFiles = false;
   @state() private hubAutoSuspendStalled = false;
   @state() private hubStalledThreshold = '';
+  @state() private hubGcpIamCheckMode = 'off';
+  @state() private hubGcpIamDenyUnknownPolicy = 'fail-open';
 
   // Runtime Broker
   @state() private brokerEnabled = false;
@@ -1387,6 +1394,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.hubSoftDeleteRetainFiles = srv.hub.soft_delete_retain_files || false;
         this.hubAutoSuspendStalled = srv.hub.auto_suspend_stalled || false;
         this.hubStalledThreshold = srv.hub.stalled_threshold || '';
+        this.hubGcpIamCheckMode = srv.hub.gcp_iam_check_mode || 'off';
+        this.hubGcpIamDenyUnknownPolicy = srv.hub.gcp_iam_deny_unknown_policy || 'fail-open';
       }
 
       // Broker
@@ -1622,6 +1631,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold'))
       hub.stalled_threshold = this.hubStalledThreshold;
+    if (ok('server.hub.gcp_iam_check_mode'))
+      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
+    if (ok('server.hub.gcp_iam_deny_unknown_policy'))
+      hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -1792,6 +1805,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold'))
       hub.stalled_threshold = this.hubStalledThreshold;
+    if (ok('server.hub.gcp_iam_check_mode'))
+      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
+    if (ok('server.hub.gcp_iam_deny_unknown_policy'))
+      hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     server.hub = hub;
 
     // Broker
@@ -3819,6 +3836,50 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private renderGCPIdentityTab() {
     return html`
+      <div class="section">
+        <h3 class="section-title">IAM Permission Checking</h3>
+        <div class="form-grid">
+          <div class="form-field">
+            <label>IAM Check Mode</label>
+            <sl-select
+              value=${this.hubGcpIamCheckMode}
+              @sl-change=${(e: Event) => {
+                this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
+              }}
+            >
+              <sl-option value="off">Off (policy-only gating)</sl-option>
+              <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
+            </sl-select>
+            <div class="help-text">
+              Controls whether GCP IAM actAs permission is verified when assigning
+              a service account to an agent. When "off", assignment is gated by
+              Hub policy only. When "enforce", the caller must also have
+              iam.serviceAccounts.actAs on the target service account.
+            </div>
+          </div>
+          <div class="form-field">
+            <label>Deny Policy Fallback</label>
+            <sl-select
+              value=${this.hubGcpIamDenyUnknownPolicy}
+              @sl-change=${(e: Event) => {
+                this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;
+              }}
+            >
+              <sl-option value="fail-open">Fail Open (recommended)</sl-option>
+              <sl-option value="fail-closed">Fail Closed</sl-option>
+            </sl-select>
+            <div class="help-text">
+              Controls behavior when IAM deny policies cannot be fully evaluated
+              (e.g., the Hub service account lacks org-level permissions to read
+              deny policies). "Fail open" treats allow-granted results as allowed
+              even when deny evaluation is inconclusive. "Fail closed" denies
+              access when deny policies cannot be verified. Only applies when
+              IAM Check Mode is "enforce".
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="section">
         <h3 class="section-title">GCP Service Account Minting</h3>
         ${this.gcpQuotaLoading

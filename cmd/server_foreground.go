@@ -34,7 +34,9 @@ import (
 	"sync"
 	"time"
 
+	policytroubleshooteriam "cloud.google.com/go/policytroubleshooter/iam/apiv3"
 	"github.com/google/uuid"
+	"google.golang.org/api/option"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -1475,9 +1477,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 				},
 			},
 		},
-		MaintenanceConfig: resolveMaintenanceConfig(cfg),
-		SecretBackend:     secretBackend,
-		GCPProjectID:      cfg.Hub.GCPProjectID,
+		MaintenanceConfig:       resolveMaintenanceConfig(cfg),
+		SecretBackend:           secretBackend,
+		GCPIAMCheckMode:         cfg.Hub.GCPIAMCheckMode,
+		GCPIAMDenyUnknownPolicy: cfg.Hub.GCPIAMDenyUnknownPolicy,
+		GCPProjectID:            cfg.Hub.GCPProjectID,
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived
@@ -1645,6 +1649,37 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			hubSrv.SetGCPServiceAccountAdmin(gcpAdmin)
 			hubSrv.SetGCPProjectID(projectID)
 			log.Printf("GCP service account minting configured (project: %s)", projectID)
+		}
+	}
+
+	// Initialize Policy Troubleshooter checker for actAs checks.
+	// Non-fatal if the PT API is not available — the existing disabled checker
+	// remains in place and denies when mode is "enforce" (fail-closed by
+	// construction). Requires a GCP project ID for quota/billing context and
+	// the GCP token generator for diagnostic messages.
+	ptProjectID, ptProjErr := hub.ResolveGCPProjectID(cfg.Hub.GCPProjectID)
+	if ptProjErr != nil {
+		log.Printf("Policy Troubleshooter: no GCP project ID available (actAs check will be unavailable): %v", ptProjErr)
+	} else {
+		ptClient, ptErr := policytroubleshooteriam.NewPolicyTroubleshooterClient(ctx,
+			option.WithQuotaProject(ptProjectID),
+		)
+		if ptErr != nil {
+			log.Printf("Policy Troubleshooter not available (actAs check will be unavailable; ensure Policy Troubleshooter API is enabled and Hub SA has serviceUsage.serviceUsageConsumer role): %v", ptErr)
+		} else {
+			hubSAEmail := ""
+			if gcpErr == nil {
+				hubSAEmail = gcpGen.ServiceAccountEmail()
+			}
+			checker := hub.NewPolicyTroubleshooterChecker(ptClient, hubSAEmail, hubSrv.DenyUnknownFailOpen())
+			cached := hub.NewCachedCallerPermissionChecker(checker,
+				60*time.Second, // allowTTL
+				10*time.Second, // denyTTL
+			)
+			hubSrv.SetSAAssignChecker(cached)
+			hubSrv.SetHookIdentityChecker(cached)
+			// Both surfaces share one checker instance and one cache.
+			log.Printf("Policy Troubleshooter checker configured for actAs checks (quota project: %s)", ptProjectID)
 		}
 	}
 

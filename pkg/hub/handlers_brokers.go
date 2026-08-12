@@ -62,6 +62,17 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Validate GCP host SA email format if provided.
+	if req.GCPHostServiceAccountEmail != "" {
+		if !isValidServiceAccountEmail(req.GCPHostServiceAccountEmail) {
+			ValidationError(w, "gcpHostServiceAccountEmail must be a valid GCP service account email "+
+				"(name@project.iam.gserviceaccount.com)", map[string]interface{}{
+				"field": "gcpHostServiceAccountEmail",
+			})
+			return
+		}
+	}
+
 	// Create the broker registration
 	resp, err := s.brokerAuthService.CreateBrokerRegistration(r.Context(), req, user.ID())
 	if err != nil {

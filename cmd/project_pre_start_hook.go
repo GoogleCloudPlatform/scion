@@ -183,7 +183,7 @@ func readScriptContent(path string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("open script file: %w", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		r = f
 	}
 	// Read at most scriptMaxBytes+1 so we can detect over-limit files without
@@ -259,10 +259,10 @@ func runProjectHookList(cmd *cobra.Command, args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tSLUG\tNAME\tSTATUS\tCREATED")
+	_, _ = fmt.Fprintln(tw, "ID\tSLUG\tNAME\tSTATUS\tCREATED")
 	for _, h := range list.Hooks {
 		created := h.Created.Format("2006-01-02")
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", h.ID, h.Slug, h.Name, h.Status, created)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", h.ID, h.Slug, h.Name, h.Status, created)
 	}
 	return tw.Flush()
 }

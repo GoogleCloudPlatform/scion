@@ -140,6 +140,16 @@ func AutoProvide(v bool) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldAutoProvide, v))
 }
 
+// GcpHostServiceAccountEmail applies equality check predicate on the "gcp_host_service_account_email" field. It's identical to GcpHostServiceAccountEmailEQ.
+func GcpHostServiceAccountEmail(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostProjectID applies equality check predicate on the "gcp_host_project_id" field. It's identical to GcpHostProjectIDEQ.
+func GcpHostProjectID(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostProjectID, v))
+}
+
 // ConnectedHubID applies equality check predicate on the "connected_hub_id" field. It's identical to ConnectedHubIDEQ.
 func ConnectedHubID(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedHubID, v))
@@ -1263,6 +1273,156 @@ func AutoProvideEQ(v bool) predicate.RuntimeBroker {
 // AutoProvideNEQ applies the NEQ predicate on the "auto_provide" field.
 func AutoProvideNEQ(v bool) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldNEQ(FieldAutoProvide, v))
+}
+
+// GcpHostServiceAccountEmailEQ applies the EQ predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailNEQ applies the NEQ predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailIn applies the In predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldGcpHostServiceAccountEmail, vs...))
+}
+
+// GcpHostServiceAccountEmailNotIn applies the NotIn predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldGcpHostServiceAccountEmail, vs...))
+}
+
+// GcpHostServiceAccountEmailGT applies the GT predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailGTE applies the GTE predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailLT applies the LT predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailLTE applies the LTE predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailContains applies the Contains predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailHasPrefix applies the HasPrefix predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailHasSuffix applies the HasSuffix predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailIsNil applies the IsNil predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldGcpHostServiceAccountEmail))
+}
+
+// GcpHostServiceAccountEmailNotNil applies the NotNil predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldGcpHostServiceAccountEmail))
+}
+
+// GcpHostServiceAccountEmailEqualFold applies the EqualFold predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostServiceAccountEmailContainsFold applies the ContainsFold predicate on the "gcp_host_service_account_email" field.
+func GcpHostServiceAccountEmailContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldGcpHostServiceAccountEmail, v))
+}
+
+// GcpHostProjectIDEQ applies the EQ predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDNEQ applies the NEQ predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDIn applies the In predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldGcpHostProjectID, vs...))
+}
+
+// GcpHostProjectIDNotIn applies the NotIn predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldGcpHostProjectID, vs...))
+}
+
+// GcpHostProjectIDGT applies the GT predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDGTE applies the GTE predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDLT applies the LT predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDLTE applies the LTE predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDContains applies the Contains predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDHasPrefix applies the HasPrefix predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDHasSuffix applies the HasSuffix predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDIsNil applies the IsNil predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldGcpHostProjectID))
+}
+
+// GcpHostProjectIDNotNil applies the NotNil predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldGcpHostProjectID))
+}
+
+// GcpHostProjectIDEqualFold applies the EqualFold predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldGcpHostProjectID, v))
+}
+
+// GcpHostProjectIDContainsFold applies the ContainsFold predicate on the "gcp_host_project_id" field.
+func GcpHostProjectIDContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldGcpHostProjectID, v))
 }
 
 // ConnectedHubIDEQ applies the EQ predicate on the "connected_hub_id" field.

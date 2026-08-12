@@ -270,7 +270,12 @@ func TestUnifiedAuthMiddleware_BrokerAuthPassthrough(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	t.Run("request with X-Scion-Broker-ID passes through", func(t *testing.T) {
+	// Deferring to BrokerAuthMiddleware is only safe when that middleware is
+	// installed, which requires a broker auth service (Server.applyMiddleware).
+	// With no service — as in this AuthConfig — the request must be rejected
+	// rather than passed through unauthenticated. See #591 and the fuller
+	// coverage in auth_broker_header_test.go.
+	t.Run("request with X-Scion-Broker-ID is rejected when broker auth is unavailable", func(t *testing.T) {
 		passedThrough = false
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/test-host/heartbeat", nil)
 		req.Header.Set("X-Scion-Broker-ID", "test-host-id")
@@ -281,11 +286,11 @@ func TestUnifiedAuthMiddleware_BrokerAuthPassthrough(t *testing.T) {
 
 		handler.ServeHTTP(rec, req)
 
-		if !passedThrough {
-			t.Error("expected request with X-Scion-Broker-ID to pass through to next handler")
+		if passedThrough {
+			t.Error("expected request with X-Scion-Broker-ID to be rejected when broker auth is unavailable")
 		}
-		if rec.Code != http.StatusOK {
-			t.Errorf("expected status 200, got %d", rec.Code)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected status 401, got %d", rec.Code)
 		}
 	})
 

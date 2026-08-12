@@ -310,3 +310,115 @@ func TestUpdateProject_CreatorOwnerAllowed(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &out)
 	}
 }
+
+// =============================================================================
+// GCP service account scope → parent mapping (P0.2)
+//
+// gcpServiceAccountResource sets ParentType="project" only for project-scoped
+// accounts. These tests pin the consequence: the project owner/admin bypass in
+// checkAccessForUser reaches project-scoped accounts and nothing else.
+// =============================================================================
+
+func TestAuthz_GCPServiceAccount_ProjectScoped_OwnerBypassApplies(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	// Bob owns the SA; alice owns the project it is scoped to.
+	sa := &store.GCPServiceAccount{
+		ID:        tid("sa-project-scoped"),
+		Scope:     store.ScopeProject,
+		ScopeID:   project.ID,
+		Email:     "sa-proj@example.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		CreatedBy: tid("user-bob"),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	user := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, "member", "api")
+	decision := srv.authzService.CheckAccess(ctx, user, gcpServiceAccountResource(sa), ActionDelete)
+	assert.True(t, decision.Allowed,
+		"project owner should reach a project-scoped SA via the bypass; reason=%q", decision.Reason)
+	assert.Equal(t, "project owner/admin", decision.Reason)
+}
+
+// The regression this task exists to prevent. Goal 2 introduces hub-scoped SAs,
+// whose ScopeID is a hub instance ID drawn from a different namespace than
+// project IDs. Under the previous unconditional ParentType="project" the two
+// namespaces were conflated, so whoever owned the project that happened to
+// share an ID with the hub would inherit full access to a hub-wide credential.
+// The test forces the collision directly rather than hoping it never happens.
+func TestAuthz_GCPServiceAccount_HubScoped_NoProjectOwnerBypass(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	sa := &store.GCPServiceAccount{
+		ID:      tid("sa-hub-scoped"),
+		Scope:   store.ScopeHub,
+		ScopeID: project.ID, // deliberate collision: a hub ID equal to a project ID
+		Email:   "sa-hub@example.iam.gserviceaccount.com",
+		// CreatedBy is deliberately not alice: the owner short-circuit would
+		// otherwise mask whether the parent bypass fired.
+		ProjectID: "gcp-proj",
+		CreatedBy: tid("user-bob"),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	resource := gcpServiceAccountResource(sa)
+	require.Empty(t, resource.ParentType, "hub-scoped SA must not carry a project parent")
+
+	user := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, "member", "api")
+	decision := srv.authzService.CheckAccess(ctx, user, resource, ActionDelete)
+	assert.False(t, decision.Allowed,
+		"project owner must NOT reach a hub-scoped SA whose ScopeID collides with their project ID; reason=%q",
+		decision.Reason)
+	assert.NotEqual(t, "project owner/admin", decision.Reason)
+}
+
+// ⚠️ SECURITY-RELEVANT (P9 update): This test is modified by P9 to reflect
+// the D5 hub member baseline. Alice is a current hub member, so the baseline
+// now grants ActionAssign on hub-scoped SAs. The project-owner bypass still
+// does NOT fire for hub-scoped SAs (the engine property that confines it is
+// unchanged), but the hub member baseline adds assign to the allowed set.
+//
+// The assertion for hub-scoped SAs changes from ["read"] to ["read", "assign"]
+// because alice is a hub member and the D5 baseline applies. The project-scoped
+// control is unchanged.
+func TestCapabilities_GCPServiceAccount_HubScoped_NoProjectOwnerBypass(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	sa := &store.GCPServiceAccount{
+		ID:        tid("sa-hub-scoped-caps"),
+		Scope:     store.ScopeHub,
+		ScopeID:   project.ID,
+		Email:     "sa-hub-caps@example.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		CreatedBy: tid("user-bob"),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	// A project-scoped sibling, identical but for Scope, is the control.
+	saProject := &store.GCPServiceAccount{
+		ID:        tid("sa-project-scoped-caps"),
+		Scope:     store.ScopeProject,
+		ScopeID:   project.ID,
+		Email:     "sa-proj-caps@example.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		CreatedBy: tid("user-bob"),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, saProject))
+
+	user := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, "member", "api")
+
+	// P9: "read" still comes from hub-member-read-all. "assign" now comes
+	// from the D5 hub member baseline for hub-scoped SAs (alice is a current
+	// hub member). The project-owner bypass still does NOT fire for hub-scoped
+	// SAs — that engine property is unchanged.
+	hubCaps := srv.authzService.ComputeCapabilities(ctx, user, gcpServiceAccountResource(sa))
+	assert.Equal(t, []string{"read", "assign"}, hubCaps.Actions,
+		"hub member should see read (hub-member-read-all) + assign (D5 baseline) on hub-scoped SA")
+
+	projectCaps := srv.authzService.ComputeCapabilities(ctx, user, gcpServiceAccountResource(saProject))
+	assert.Equal(t, []string{"read", "delete", "verify", "assign"}, projectCaps.Actions,
+		"the project-scoped control should still get the full bypass")
+}

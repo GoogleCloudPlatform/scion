@@ -27,6 +27,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
 import '../shared/env-var-list.js';
+import '../shared/gcp-service-account-list.js';
 import '../shared/secret-list.js';
 import '../shared/resource-list.js';
 import '../shared/resource-import.js';
@@ -164,6 +165,12 @@ export class ScionPageSettings extends LitElement {
             ?active=${this.activeTab === 'pre-start-hooks'}
             >Pre-Start Hooks</sl-tab
           >
+          <sl-tab
+            slot="nav"
+            panel="service-accounts"
+            ?active=${this.activeTab === 'service-accounts'}
+            >Service Accounts</sl-tab
+          >
           <sl-tab slot="nav" panel="skills" ?active=${this.activeTab === 'skills'}
             >Skills</sl-tab
           >
@@ -228,6 +235,29 @@ export class ScionPageSettings extends LitElement {
               apiBasePath="/api/v1"
               ?readonly=${!this.isAdmin}
             ></scion-pre-start-hook-list>
+          </sl-tab-panel>
+
+          <!--
+            THE COPY HERE STATES WHAT IS TRUE TODAY, NOT WHAT THE SCOPE IMPLIES.
+            An earlier draft said these accounts "are usable from every project".
+            The Hub does accept a hub-scoped account at agent creation, but no
+            agent-creation picker offers one yet, so that sentence promised a
+            capability a user cannot reach and would have read as a bug rather
+            than as unfinished work. Both gaps below are part of step 5's
+            definition of done; when the picker lands, this paragraph shrinks.
+          -->
+          <sl-tab-panel name="service-accounts">
+            <p class="tab-intro">
+              GCP service accounts registered at hub scope. They belong to the hub rather
+              than to any one project, which is why they are managed here.
+            </p>
+            <p class="tab-intro">
+              Two things are not available yet. Registering a hub-scoped account — use a
+              project's settings to register an account for that project. And selecting a
+              hub-scoped account when creating an agent, so an account listed here is not
+              yet offered on any project's agent form.
+            </p>
+            <scion-gcp-service-account-list scope="hub"></scion-gcp-service-account-list>
           </sl-tab-panel>
 
           <sl-tab-panel name="skills">

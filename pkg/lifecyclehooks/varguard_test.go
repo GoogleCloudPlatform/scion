@@ -774,7 +774,7 @@ func TestValidateHook_CookieAuthHeaders(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateHook(context.Background(), tc.hook, defaultResolver())
+			err := ValidateHook(context.Background(), tc.hook, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.errMsg)
@@ -1125,7 +1125,7 @@ func TestEndToEnd_RegisterHookValidateAndRender(t *testing.T) {
 	}
 
 	// Step 1: validate
-	err := ValidateHook(context.Background(), hook, defaultResolver())
+	err := ValidateHook(context.Background(), hook, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 	if err != nil {
 		t.Fatalf("hook validation failed: %v", err)
 	}

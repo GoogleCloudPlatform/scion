@@ -96,6 +96,28 @@ func setupImageStatusTest(t *testing.T) (*Server, store.Store) {
 	return srv, db
 }
 
+// imageStatusRequest builds a request carrying an authenticated admin identity.
+//
+// These handlers filter the broker list through canDispatchToBroker, which now
+// denies a caller with no identity at all where it previously allowed one
+// (#591). These tests invoke the handler directly, bypassing the auth
+// middleware, so before this helper they ran with an empty context — and every
+// broker was filtered out, leaving the aggregation under test nothing to
+// aggregate.
+//
+// That they broke is not a reason to soften the deny: it is evidence that the
+// fail-open was load-bearing at this call site, which is the finding, not a side
+// effect. Nor is it a production behaviour change — in production the auth
+// middleware guarantees an identity is present by the time these handlers run.
+// Supplying the identity the middleware would have supplied is the repair; the
+// alternative, relaxing canDispatchToBroker so unauthenticated callers keep
+// seeing brokers, is the bug.
+func imageStatusRequest(method, path string) *http.Request {
+	req := httptest.NewRequest(method, path, nil)
+	return req.WithContext(contextWithIdentity(req.Context(),
+		NewAuthenticatedUser(tid("image-status-admin"), "admin@example.com", "Admin", "admin", "cli")))
+}
+
 func createTestBroker(t *testing.T, db store.Store, id, name, endpoint string, profiles []store.BrokerProfile, labels map[string]string) {
 	t.Helper()
 	broker := &store.RuntimeBroker{
@@ -150,7 +172,7 @@ func TestImageStatusHandler_SingleReachableBroker(t *testing.T) {
 		httpClient:     transport,
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status", nil)
+	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
 	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
 
@@ -186,7 +208,7 @@ func TestImageStatusHandler_UnreachableBroker(t *testing.T) {
 		httpClient:     transport,
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status", nil)
+	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
 	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
 
@@ -222,7 +244,7 @@ func TestImageStatusHandler_OldBroker404(t *testing.T) {
 		httpClient:     transport,
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status", nil)
+	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
 	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
 
@@ -259,7 +281,7 @@ func TestImageStatusHandler_NoNodeBoundBrokers(t *testing.T) {
 		httpClient:     transport,
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status", nil)
+	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
 	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
 
@@ -307,7 +329,7 @@ func TestImageStatusHandler_ProxyBrokersWithLocalImageManager(t *testing.T) {
 	srv.imageManager = mgr
 	srv.imageChecker.SetLocal(mgr)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status", nil)
+	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
 	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
 
@@ -351,7 +373,7 @@ func TestImageStatusHandler_BareImageCheck(t *testing.T) {
 		httpClient:     transport,
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/check-image", nil)
+	req := imageStatusRequest(http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/check-image")
 	rr := httptest.NewRecorder()
 	srv.handleHarnessConfigCheckImage(rr, req, hc.ID)
 
@@ -392,7 +414,7 @@ func TestImageStatusHandler_MultipleBrokersMixed(t *testing.T) {
 		httpClient:     transport,
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status", nil)
+	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
 	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
 

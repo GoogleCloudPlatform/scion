@@ -333,6 +333,46 @@ func (_u *RuntimeBrokerUpdate) SetNillableAutoProvide(v *bool) *RuntimeBrokerUpd
 	return _u
 }
 
+// SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
+func (_u *RuntimeBrokerUpdate) SetGcpHostServiceAccountEmail(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetGcpHostServiceAccountEmail(v)
+	return _u
+}
+
+// SetNillableGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableGcpHostServiceAccountEmail(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetGcpHostServiceAccountEmail(*v)
+	}
+	return _u
+}
+
+// ClearGcpHostServiceAccountEmail clears the value of the "gcp_host_service_account_email" field.
+func (_u *RuntimeBrokerUpdate) ClearGcpHostServiceAccountEmail() *RuntimeBrokerUpdate {
+	_u.mutation.ClearGcpHostServiceAccountEmail()
+	return _u
+}
+
+// SetGcpHostProjectID sets the "gcp_host_project_id" field.
+func (_u *RuntimeBrokerUpdate) SetGcpHostProjectID(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetGcpHostProjectID(v)
+	return _u
+}
+
+// SetNillableGcpHostProjectID sets the "gcp_host_project_id" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableGcpHostProjectID(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetGcpHostProjectID(*v)
+	}
+	return _u
+}
+
+// ClearGcpHostProjectID clears the value of the "gcp_host_project_id" field.
+func (_u *RuntimeBrokerUpdate) ClearGcpHostProjectID() *RuntimeBrokerUpdate {
+	_u.mutation.ClearGcpHostProjectID()
+	return _u
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_u *RuntimeBrokerUpdate) SetConnectedHubID(v string) *RuntimeBrokerUpdate {
 	_u.mutation.SetConnectedHubID(v)
@@ -550,6 +590,18 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if value, ok := _u.mutation.AutoProvide(); ok {
 		_spec.SetField(runtimebroker.FieldAutoProvide, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.GcpHostServiceAccountEmail(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostServiceAccountEmail, field.TypeString, value)
+	}
+	if _u.mutation.GcpHostServiceAccountEmailCleared() {
+		_spec.ClearField(runtimebroker.FieldGcpHostServiceAccountEmail, field.TypeString)
+	}
+	if value, ok := _u.mutation.GcpHostProjectID(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostProjectID, field.TypeString, value)
+	}
+	if _u.mutation.GcpHostProjectIDCleared() {
+		_spec.ClearField(runtimebroker.FieldGcpHostProjectID, field.TypeString)
 	}
 	if value, ok := _u.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
@@ -897,6 +949,46 @@ func (_u *RuntimeBrokerUpdateOne) SetNillableAutoProvide(v *bool) *RuntimeBroker
 	return _u
 }
 
+// SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
+func (_u *RuntimeBrokerUpdateOne) SetGcpHostServiceAccountEmail(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetGcpHostServiceAccountEmail(v)
+	return _u
+}
+
+// SetNillableGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableGcpHostServiceAccountEmail(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetGcpHostServiceAccountEmail(*v)
+	}
+	return _u
+}
+
+// ClearGcpHostServiceAccountEmail clears the value of the "gcp_host_service_account_email" field.
+func (_u *RuntimeBrokerUpdateOne) ClearGcpHostServiceAccountEmail() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearGcpHostServiceAccountEmail()
+	return _u
+}
+
+// SetGcpHostProjectID sets the "gcp_host_project_id" field.
+func (_u *RuntimeBrokerUpdateOne) SetGcpHostProjectID(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetGcpHostProjectID(v)
+	return _u
+}
+
+// SetNillableGcpHostProjectID sets the "gcp_host_project_id" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableGcpHostProjectID(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetGcpHostProjectID(*v)
+	}
+	return _u
+}
+
+// ClearGcpHostProjectID clears the value of the "gcp_host_project_id" field.
+func (_u *RuntimeBrokerUpdateOne) ClearGcpHostProjectID() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearGcpHostProjectID()
+	return _u
+}
+
 // SetConnectedHubID sets the "connected_hub_id" field.
 func (_u *RuntimeBrokerUpdateOne) SetConnectedHubID(v string) *RuntimeBrokerUpdateOne {
 	_u.mutation.SetConnectedHubID(v)
@@ -1144,6 +1236,18 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if value, ok := _u.mutation.AutoProvide(); ok {
 		_spec.SetField(runtimebroker.FieldAutoProvide, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.GcpHostServiceAccountEmail(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostServiceAccountEmail, field.TypeString, value)
+	}
+	if _u.mutation.GcpHostServiceAccountEmailCleared() {
+		_spec.ClearField(runtimebroker.FieldGcpHostServiceAccountEmail, field.TypeString)
+	}
+	if value, ok := _u.mutation.GcpHostProjectID(); ok {
+		_spec.SetField(runtimebroker.FieldGcpHostProjectID, field.TypeString, value)
+	}
+	if _u.mutation.GcpHostProjectIDCleared() {
+		_spec.ClearField(runtimebroker.FieldGcpHostProjectID, field.TypeString)
 	}
 	if value, ok := _u.mutation.ConnectedHubID(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)

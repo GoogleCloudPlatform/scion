@@ -348,8 +348,10 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	var updates struct {
-		Name   string            `json:"name,omitempty"`
-		Labels map[string]string `json:"labels,omitempty"`
+		Name                       string            `json:"name,omitempty"`
+		Labels                     map[string]string `json:"labels,omitempty"`
+		GCPHostServiceAccountEmail *string           `json:"gcpHostServiceAccountEmail,omitempty"`
+		GCPHostProjectID           *string           `json:"gcpHostProjectId,omitempty"`
 	}
 
 	if err := readJSON(r, &updates); err != nil {
@@ -362,6 +364,20 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	}
 	if updates.Labels != nil {
 		broker.Labels = updates.Labels
+	}
+	if updates.GCPHostServiceAccountEmail != nil {
+		email := strings.ToLower(*updates.GCPHostServiceAccountEmail)
+		if email != "" && !isValidServiceAccountEmail(email) {
+			ValidationError(w, "gcpHostServiceAccountEmail must be a valid GCP service account email "+
+				"(name@project.iam.gserviceaccount.com)", map[string]interface{}{
+				"field": "gcpHostServiceAccountEmail",
+			})
+			return
+		}
+		broker.GCPHostServiceAccountEmail = email
+	}
+	if updates.GCPHostProjectID != nil {
+		broker.GCPHostProjectID = *updates.GCPHostProjectID
 	}
 
 	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {

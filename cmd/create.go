@@ -235,6 +235,9 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		ProvisionOnly:   true,
 	}
 
+	// Wire --service-account flag into the GCP identity assignment.
+	applyServiceAccountFlag(req, serviceAccountFlag)
+
 	if agentImage != "" {
 		req.Config = &api.ScionConfig{
 			Image: agentImage,
@@ -339,4 +342,7 @@ func init() {
 
 	// Label flags
 	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
+
+	// GCP service account assignment flag
+	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
 }

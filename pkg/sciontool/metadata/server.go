@@ -74,8 +74,9 @@ type Config struct {
 }
 
 const (
-	modeBlock  = "block"
-	modeAssign = "assign"
+	modeBlock       = "block"
+	modeAssign      = "assign"
+	modePassthrough = "passthrough"
 
 	maxRestarts         = 3
 	healthCheckInterval = 30 * time.Second
@@ -84,11 +85,55 @@ const (
 )
 
 // ConfigFromEnv reads metadata server configuration from environment variables.
-// Returns nil if SCION_METADATA_MODE is not set.
+// Returns nil when no metadata server should run.
+//
+// The mode is resolved against an explicit allow-list rather than tested for
+// emptiness, because "the variable is absent" and "the variable holds something
+// we do not recognise" call for opposite responses and the old os.Getenv form
+// could not tell them apart:
+//
+//   - absent: no metadata server. Nothing configured one.
+//   - passthrough: no metadata server, as a recognised decision. The agent is
+//     meant to reach the real GCE metadata server, and the way to arrange that
+//     is to not start a sidecar that would redirect away from it.
+//   - block / assign: run, as before.
+//   - anything else, including present-but-empty: run in block mode and log
+//     loudly. An unrecognised mode is corruption, and the safe reading of
+//     corruption on this particular control is "deny", not "do nothing" —
+//     doing nothing leaves the container on the host's compute identity.
+//
+// Passthrough has to be named here rather than left to the default arm. The hub
+// injects SCION_METADATA_MODE verbatim into resolvedEnv on the start/restart
+// path (httpdispatcher.go), so unlike the create path the variable really does
+// arrive holding "passthrough" — and treating that as corruption would put a
+// passthrough agent into block mode on its first restart, severing the metadata
+// access it is supposed to have.
 func ConfigFromEnv() *Config {
-	mode := os.Getenv("SCION_METADATA_MODE")
-	if mode == "" {
+	rawMode, present := os.LookupEnv("SCION_METADATA_MODE")
+	if !present {
 		return nil
+	}
+
+	var mode string
+	switch rawMode {
+	case modeBlock, modeAssign:
+		mode = rawMode
+	case modePassthrough:
+		return nil
+	default:
+		// This arm delivers most of block, but not all of it, and the gap is
+		// worth knowing about. It is only reachable when something other than
+		// the broker populated the environment — the broker now rejects unknown
+		// modes upstream with a 400 — and in that case
+		// agent.hasMetadataInterception is false, so the container gets no
+		// NET_ADMIN and setupIPTablesRedirect fails (non-fatally). The SA
+		// endpoints below still return 403, so no credential leaks; but traffic
+		// to 169.254.169.254 is not intercepted. Treat this as damage control
+		// for a malformed environment, not as a hard block guarantee.
+		log.Error("metadata: unrecognised SCION_METADATA_MODE %q — falling back to %q. "+
+			"Valid modes are %q, %q, %q.",
+			rawMode, modeBlock, modeBlock, modeAssign, modePassthrough)
+		mode = modeBlock
 	}
 
 	port := 18380
@@ -329,7 +374,13 @@ func (s *Server) configureMetadataInterception(uid int) {
 		s.iptablesConfigured = true
 	}
 
-	if s.config.Mode != modeBlock {
+	// Allow-list: assign is the only mode that legitimately wants the metadata
+	// IP left reachable at the filter level, because its REDIRECT above is
+	// already sending that traffic here. Every other mode that reaches a
+	// running server — block, or anything ConfigFromEnv had to coerce — gets
+	// the defence-in-depth block. Testing `!= modeBlock` instead meant an
+	// unrecognised mode skipped the hardening.
+	if s.config.Mode == modeAssign {
 		return
 	}
 
@@ -628,7 +679,11 @@ func isRecursive(r *http.Request) bool {
 }
 
 func (s *Server) handleServiceAccountList(w http.ResponseWriter, r *http.Request) {
-	if s.config.Mode == modeBlock {
+	// Allow-list: assign is the only mode that has a service account to serve.
+	// The previous `== modeBlock` test denied one known value and served
+	// everything else, so an unrecognised mode returned SA metadata built from
+	// an unpopulated config.
+	if s.config.Mode != modeAssign {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -676,7 +731,10 @@ func (s *Server) handleServiceAccount(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 
-	if s.config.Mode == modeBlock {
+	// Allow-list — see handleServiceAccountList. This endpoint additionally
+	// vends tokens, so serving on an unrecognised mode was the more serious
+	// half of the same defect.
+	if s.config.Mode != modeAssign {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}

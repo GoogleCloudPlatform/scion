@@ -688,6 +688,11 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		s.projectsLogger().Warn("failed to bind project member policy",
 			"project_id", project.ID, "policy", policyName, "error", err.Error())
 	}
+
+	// Create the project-level service-account assign policy alongside it.
+	// See projectAssignPolicyName in seed.go for why it is project-scoped and
+	// what reach it preserves.
+	ensureProjectAssignPolicy(ctx, s.store, project, membersGroup.ID)
 }
 
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
@@ -1836,7 +1841,16 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// Resolve caller identity for creator tracking
+	// Authorization for every caller kind. This route had no gate at all before
+	// #591: any agent token could create an agent in any project, and it is the
+	// route the CLI uses for create/start/sync. The URL project implies no
+	// isolation by itself.
+	if !s.authorizeAgentCreate(w, r, projectID) {
+		return
+	}
+
+	// Resolve caller identity for creator tracking (attribution only — the
+	// authorization decision is made above).
 	var createdBy string
 	var creatorName string
 	var ancestry []string
@@ -2071,27 +2085,13 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// For interactive actions, enforce policy-based authorization (owner or admin only)
+	// For interactive actions, enforce lifecycle authorization for every caller
+	// kind: users via policy, agents via ScopeAgentLifecycle within their own
+	// project, everything else denied. authorizeAgentLifecycle logs the denial.
 	switch action {
 	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionMessage, api.AgentActionExec:
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionAttach)
-			if !decision.Allowed {
-				s.projectsLogger().Warn("agent authz check failed",
-					"agent_id", agent.ID,
-					"agent_slug", agent.Slug,
-					"agent_owner_id", agent.OwnerID,
-					"agent_created_by", agent.CreatedBy,
-					"user_id", userIdent.ID(),
-					"user_email", userIdent.Email(),
-					"user_role", userIdent.Role(),
-					"action", action,
-					"decision_reason", decision.Reason,
-				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"Only the agent's creator can interact with it", nil)
-				return
-			}
+		if !s.authorizeAgentLifecycle(w, r, agent) {
+			return
 		}
 	}
 
@@ -2199,13 +2199,8 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionUpdate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You do not have permission to update this project", nil)
-			return
-		}
+	if !s.authorize(w, r, projectResource(project), ActionUpdate) {
+		return
 	}
 
 	var updates struct {
@@ -2372,13 +2367,8 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionDelete)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You do not have permission to delete this project", nil)
-			return
-		}
+	if !s.authorize(w, r, projectResource(project), ActionDelete) {
+		return
 	}
 
 	// Dispatch agent deletions to runtime brokers so containers are stopped

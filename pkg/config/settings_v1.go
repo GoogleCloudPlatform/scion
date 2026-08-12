@@ -501,6 +501,13 @@ type V1ServerHubConfig struct {
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles *bool `json:"soft_delete_retain_files,omitempty" yaml:"soft_delete_retain_files,omitempty" koanf:"soft_delete_retain_files"`
+	// GCPIAMCheckMode controls whether IAM actAs permission is checked when
+	// binding a GCP service account to an agent.
+	// "off" (default) or "enforce".
+	GCPIAMCheckMode string `json:"gcp_iam_check_mode,omitempty" yaml:"gcp_iam_check_mode,omitempty" koanf:"gcp_iam_check_mode"`
+	// GCPIAMDenyUnknownPolicy controls behavior when deny policies cannot be
+	// evaluated. "fail-open" (default) or "fail-closed".
+	GCPIAMDenyUnknownPolicy string `json:"gcp_iam_deny_unknown_policy,omitempty" yaml:"gcp_iam_deny_unknown_policy,omitempty" koanf:"gcp_iam_deny_unknown_policy"`
 	// AutoSuspendStalled controls whether stalled agents are automatically suspended.
 	AutoSuspendStalled *bool `json:"auto_suspend_stalled,omitempty" yaml:"auto_suspend_stalled,omitempty" koanf:"auto_suspend_stalled"`
 	// StalledThreshold is how long before an agent is marked stalled (e.g., "5m", "10m").
@@ -1397,6 +1404,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Hub.SoftDeleteRetainFiles != nil {
 			gc.Hub.SoftDeleteRetainFiles = *v1.Hub.SoftDeleteRetainFiles
+		}
+		if v1.Hub.GCPIAMCheckMode != "" {
+			gc.Hub.GCPIAMCheckMode = v1.Hub.GCPIAMCheckMode
+		}
+		if v1.Hub.GCPIAMDenyUnknownPolicy != "" {
+			gc.Hub.GCPIAMDenyUnknownPolicy = v1.Hub.GCPIAMDenyUnknownPolicy
 		}
 		if v1.Hub.AutoSuspendStalled != nil {
 			gc.Hub.AutoSuspendStalled = *v1.Hub.AutoSuspendStalled

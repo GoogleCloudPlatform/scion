@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -50,20 +51,19 @@ func NewExternalStore(client *ent.Client) *ExternalStore {
 // entGCPToStore converts an Ent GCPServiceAccount to the store model.
 func entGCPToStore(e *ent.GCPServiceAccount) *store.GCPServiceAccount {
 	sa := &store.GCPServiceAccount{
-		ID:          e.ID.String(),
-		Scope:       e.Scope,
-		ScopeID:     e.ScopeID,
-		Email:       e.Email,
-		ProjectID:   e.ProjectID,
-		DisplayName: e.DisplayName,
-		Verified:    e.Verified,
-		CreatedBy:   e.CreatedBy,
-		CreatedAt:   e.Created,
-		Managed:     e.Managed,
-		ManagedBy:   e.ManagedBy,
-	}
-	if e.Verified {
-		sa.VerificationStatus = "verified"
+		ID:                 e.ID.String(),
+		Scope:              e.Scope,
+		ScopeID:            e.ScopeID,
+		Email:              e.Email,
+		ProjectID:          e.ProjectID,
+		DisplayName:        e.DisplayName,
+		Verified:           e.Verified,
+		VerificationStatus: e.VerificationStatus,
+		VerificationError:  e.VerificationError,
+		CreatedBy:          e.CreatedBy,
+		CreatedAt:          e.Created,
+		Managed:            e.Managed,
+		ManagedBy:          e.ManagedBy,
 	}
 	// default_scopes is stored as a CSV string for parity with the SQLite store.
 	if e.DefaultScopes != "" {
@@ -75,6 +75,41 @@ func entGCPToStore(e *ent.GCPServiceAccount) *store.GCPServiceAccount {
 	return sa
 }
 
+// normalizeGCPVerification makes the (Verified, VerificationStatus,
+// VerificationError) triple coherent before it is persisted. The empty status
+// string is not one of the three valid states, so callers that populate only
+// the Verified bool still have to end up with a coherent row. Resolving it
+// here — once, on write — is what lets reads return the stored value verbatim
+// instead of re-deriving it every time.
+//
+// Verified == true forces "verified" and clears any error. On a well-formed row
+// this is a no-op; on a malformed one it is a repair. The case that needs it is
+// a read-modify-write of a row already sitting at "failed": flipping Verified to
+// true without this would leave status "failed" beside a stale error message,
+// and nothing would ever heal it, because both backfill rules require the row to
+// still be at "unverified".
+//
+// Verified == false only fills in a blank status and otherwise leaves the row
+// alone, which preserves the verified=false + "failed" + error combination the
+// live verification path writes.
+//
+// The backfill (BackfillGCPVerificationStatus) deliberately does not apply this
+// same coherence pass, and the asymmetry is not that the write path is better
+// informed in general — for Verified == true both have the same information.
+// It is that verified=false with verified_at NULL is irreducibly ambiguous from
+// stored state alone: never-checked and failed-its-first-check look identical.
+// Only a caller performing the write can tell those apart, so the backfill has
+// to leave every verified=false row where it found it.
+func normalizeGCPVerification(sa *store.GCPServiceAccount) {
+	switch {
+	case sa.Verified:
+		sa.VerificationStatus = store.GCPVerificationVerified
+		sa.VerificationError = ""
+	case sa.VerificationStatus == "":
+		sa.VerificationStatus = store.GCPVerificationUnverified
+	}
+}
+
 // CreateGCPServiceAccount registers a new GCP service account.
 func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.GCPServiceAccount) error {
 	id, err := parseUUID(sa.ID)
@@ -84,6 +119,9 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 	if sa.CreatedAt.IsZero() {
 		sa.CreatedAt = time.Now()
 	}
+	// Normalise in place so the caller's struct — which handlers return directly
+	// in the HTTP response — matches the persisted row.
+	normalizeGCPVerification(sa)
 
 	create := s.client.GCPServiceAccount.Create().
 		SetID(id).
@@ -94,6 +132,8 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 		SetDisplayName(sa.DisplayName).
 		SetDefaultScopes(strings.Join(sa.DefaultScopes, ",")).
 		SetVerified(sa.Verified).
+		SetVerificationStatus(sa.VerificationStatus).
+		SetVerificationError(sa.VerificationError).
 		SetCreatedBy(sa.CreatedBy).
 		SetManaged(sa.Managed).
 		SetManagedBy(sa.ManagedBy).
@@ -123,17 +163,56 @@ func (s *ExternalStore) GetGCPServiceAccount(ctx context.Context, id string) (*s
 }
 
 // UpdateGCPServiceAccount updates a GCP service account record.
+//
+// THE INVARIANT, WHICH IS WHAT TO TEST FOR AND WHAT SURVIVES A REWRITE OF THIS
+// FUNCTION: no request may change which principal owns a service account, or
+// which scope it lives in. CreatedBy, Scope and ScopeID are AUTHORIZATION
+// INPUTS, not record data, and this function is a write path reachable from
+// ordinary handlers. Created is immutable for the ordinary reason.
+//
+// FOUR FIELDS ARE ABSENT FROM THE BUILDER BELOW ON PURPOSE: CreatedBy, Scope,
+// ScopeID, Created. Their absence is the only thing enforcing the invariant.
+// There is no validation, no schema immutability and no test that fails if you
+// add them -- so if you are here to add a setter, this comment is the entire
+// control, and you have just reached it.
+//
+// WHY THOSE THREE ARE AUTHORIZATION INPUTS, in this repo, today:
+//   - CreatedBy feeds Resource.OwnerID for a service account. The owner bypass
+//     in checkAccessForUser returns Allowed on an OwnerID match before any
+//     membership or policy is consulted. Writable CreatedBy is therefore a
+//     writable authorization bypass.
+//   - Scope selects which arm of gcpServiceAccountVerdict runs, and the user
+//     arm is a bare CreatedBy equality with no admin bypass.
+//   - ScopeID is the project an account is confined to, and is what
+//     ReachableFromProject compares.
+//
+// THE NATURAL REPAIR IS THE VIOLATION, which is why this is written as a
+// warning and not a note. The obvious tidy-up is to make Update symmetric with
+// Create. That reads as consistency work, it produces a small diff, and one of
+// its lines would make the owner bypass writable through any handler that
+// round-trips an account through Update -- including the verify path, so no new
+// route is needed. This exact edit shape has already been performed on this
+// function pair: 45c2a1c0 changed Create and Update together to make them
+// match. It was correct. The next one may not be.
+//
+// If a caller genuinely needs to move an account between scopes or owners, that
+// is a separate, separately authorized operation with its own name. It is not
+// a field added here.
 func (s *ExternalStore) UpdateGCPServiceAccount(ctx context.Context, sa *store.GCPServiceAccount) error {
 	id, err := parseUUID(sa.ID)
 	if err != nil {
 		return err
 	}
+	normalizeGCPVerification(sa)
+
 	update := s.client.GCPServiceAccount.UpdateOneID(id).
 		SetEmail(sa.Email).
 		SetProjectID(sa.ProjectID).
 		SetDisplayName(sa.DisplayName).
 		SetDefaultScopes(strings.Join(sa.DefaultScopes, ",")).
 		SetVerified(sa.Verified).
+		SetVerificationStatus(sa.VerificationStatus).
+		SetVerificationError(sa.VerificationError).
 		SetManaged(sa.Managed).
 		SetManagedBy(sa.ManagedBy)
 
@@ -161,15 +240,91 @@ func (s *ExternalStore) DeleteGCPServiceAccount(ctx context.Context, id string) 
 	return nil
 }
 
+// BackfillGCPVerificationStatus derives verification_status for rows written
+// before that column existed. Ent's ADD COLUMN fills them with the column
+// default, "unverified", which is wrong for any account the Hub had actually
+// checked.
+//
+// Two rules, both upgrades from the default:
+//
+//   - verified = true → "verified".
+//   - verified = false and verified_at IS NOT NULL → "failed". verified_at is
+//     only ever set together with verified = true, and UpdateGCPServiceAccount
+//     clears it when the timestamp is zero, so a surviving timestamp means the
+//     account was verified once and no longer is. That is a failure, not an
+//     account nobody ever checked.
+//
+// The second rule is a weak signal — it cannot recover the error text, which is
+// gone, and it misses accounts that failed their very first check (those never
+// had a verified_at to keep). It is still the right label: "unverified" reads as
+// "never set up" and would hide a broken integration, whereas "failed" invites a
+// re-verify, which repopulates the real error. Under-detailed beats wrong.
+//
+// Idempotent, and safe to run on every boot: both rules require the row to still
+// be at the default, so a "failed" status written by the live code path is never
+// overwritten — including the first-check-failure case, where verified_at is
+// NULL and the else-branch of a naive three-way backfill would clobber it back
+// to "unverified".
+//
+// Deliberately not on store.GCPServiceAccountStore. This is a one-off migration
+// concern with a single caller (CompositeStore.Migrate, which reaches it through
+// the embedded *ExternalStore); putting it on the domain interface would oblige
+// every future store implementation to carry it forever.
+func (s *ExternalStore) BackfillGCPVerificationStatus(ctx context.Context) error {
+	if _, err := s.client.GCPServiceAccount.Update().
+		Where(
+			gcpserviceaccount.VerificationStatusEQ(store.GCPVerificationUnverified),
+			gcpserviceaccount.VerifiedEQ(true),
+		).
+		SetVerificationStatus(store.GCPVerificationVerified).
+		Save(ctx); err != nil {
+		return fmt.Errorf("backfill gcp verification status (verified): %w", err)
+	}
+
+	if _, err := s.client.GCPServiceAccount.Update().
+		Where(
+			gcpserviceaccount.VerificationStatusEQ(store.GCPVerificationUnverified),
+			gcpserviceaccount.VerifiedEQ(false),
+			gcpserviceaccount.VerifiedAtNotNil(),
+		).
+		SetVerificationStatus(store.GCPVerificationFailed).
+		Save(ctx); err != nil {
+		return fmt.Errorf("backfill gcp verification status (failed): %w", err)
+	}
+
+	return nil
+}
+
 // gcpFilterPredicates builds the Ent predicates for a GCPServiceAccountFilter.
 func gcpFilterPredicates(filter store.GCPServiceAccountFilter) []predicate.GCPServiceAccount {
 	var preds []predicate.GCPServiceAccount
+
+	// Scope and ScopeID are collected separately from the other terms because
+	// IncludeHubScoped rewrites their combination rather than adding to it.
+	var scopePreds []predicate.GCPServiceAccount
 	if filter.Scope != "" {
-		preds = append(preds, gcpserviceaccount.ScopeEQ(filter.Scope))
+		scopePreds = append(scopePreds, gcpserviceaccount.ScopeEQ(filter.Scope))
 	}
 	if filter.ScopeID != "" {
-		preds = append(preds, gcpserviceaccount.ScopeIDEQ(filter.ScopeID))
+		scopePreds = append(scopePreds, gcpserviceaccount.ScopeIDEQ(filter.ScopeID))
 	}
+
+	switch {
+	case !filter.IncludeHubScoped, len(scopePreds) == 0:
+		// No widening requested, or nothing to widen: with no scope terms the
+		// query already spans every scope, and OR-ing hub scope onto it would
+		// be a no-op that reads like a restriction.
+		preds = append(preds, scopePreds...)
+	default:
+		// (scope terms) OR (scope = hub), as one predicate, so the union is a
+		// single SQL statement and Email/Managed below still AND across the
+		// whole of it.
+		preds = append(preds, gcpserviceaccount.Or(
+			gcpserviceaccount.And(scopePreds...),
+			gcpserviceaccount.ScopeEQ(store.ScopeHub),
+		))
+	}
+
 	if filter.Email != "" {
 		preds = append(preds, gcpserviceaccount.EmailEQ(filter.Email))
 	}

@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -87,6 +88,174 @@ type createGCPServiceAccountRequest struct {
 type verificationFailedDetails struct {
 	HubServiceAccountEmail string `json:"hubServiceAccountEmail"`
 	TargetEmail            string `json:"targetEmail"`
+}
+
+// The reachability predicate these handlers use is
+// (*store.GCPServiceAccount).ReachableFromProject. It lives on the store type
+// rather than here because the same question is asked outside this package --
+// see pkg/lifecyclehooks/validate.go -- and packages that cannot import hub
+// would otherwise have to reimplement it. Read its doc comment before changing
+// any caller: it answers visibility only, and the authorization that must
+// follow it for a hub-scoped account is authorizeGCPServiceAccount below.
+
+// gcpSAVerdict is the answer to the POLICY question about a service account:
+// may this caller perform this action on it. It carries no HTTP status,
+// because the status is not a property of the verdict.
+//
+// See gcpServiceAccountVerdict for why the two are separated.
+type gcpSAVerdict struct {
+	allowed bool
+
+	// reason is the refusal, phrased for a 403 body. Empty when allowed, and
+	// empty when noIdentity is set -- an unauthenticated caller is told
+	// nothing.
+	reason string
+
+	// noIdentity distinguishes "no user on this request" from a scope arm's
+	// denial, so a renderer can answer it generically instead of leaking which
+	// arm it would have hit.
+	noIdentity bool
+}
+
+// gcpServiceAccountVerdict decides whether the caller may perform action on sa,
+// and WRITES NOTHING.
+//
+// THE SPLIT IS THE POINT, AND IT IS sa-arch'S FINDING. This function used to
+// decide and write in one step. That fused two questions that are genuinely
+// different:
+//
+//   - POLICY: may this caller do this? Answered here, once, for every route.
+//   - DISCLOSURE: should a refusal read as 403 or 404? That depends on whether
+//     the caller could have established the account's existence some other
+//     way, which is a property OF THE ROUTE and not of the policy.
+//
+// While the two were fused, a route that needed a different disclosure answer
+// had no way to get one except by re-deriving the policy test ahead of the
+// call -- which is exactly the second, drifting description of who-may-do-what
+// that the single function existed to prevent. The flat by-id route needs 404
+// for user scope, so the split is what lets it have that without owning a
+// second copy of the creator test.
+//
+// The scope split inside is the older substance and is unchanged. While every
+// SA was project-scoped, a project-level ActionManage check was a complete
+// statement of authority over one. A hub-scoped SA is reachable from every
+// project, so that same check would let any project's owner delete a credential
+// the whole hub depends on. Hub-scoped SAs are therefore checked against the SA
+// resource itself, which gcpServiceAccountResource leaves parentless for
+// non-project scopes (P0.2) so that only a hub-scoped policy can match it. That
+// containment relies on matchesResource treating a parentless resource as
+// outside every project-scoped policy's reach — the #595 fix, without which a
+// project-scoped policy would match a hub-scoped SA and this branch would not
+// hold.
+func (s *Server) gcpServiceAccountVerdict(ctx context.Context, sa *store.GCPServiceAccount, action Action) (gcpSAVerdict, error) {
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		return gcpSAVerdict{noIdentity: true}, nil
+	}
+
+	switch sa.Scope {
+	case store.ScopeHub:
+		decision := s.authzService.CheckAccess(ctx, user, gcpServiceAccountResource(sa), action)
+		if !decision.Allowed {
+			return gcpSAVerdict{
+				reason: "You don't have permission to manage hub-scoped GCP service accounts",
+			}, nil
+		}
+
+	case store.ScopeProject:
+		// Unchanged from the pre-Goal-2 behaviour, deliberately: this phase adds
+		// hub scope, it does not retune who may manage a project's own SAs.
+		project, err := s.store.GetProject(ctx, sa.ScopeID)
+		if err != nil {
+			return gcpSAVerdict{}, err
+		}
+		decision := s.authzService.CheckAccess(ctx, user, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, ActionManage)
+		if !decision.Allowed {
+			return gcpSAVerdict{
+				reason: "You don't have permission to manage GCP service accounts in this project",
+			}, nil
+		}
+
+	case store.ScopeUser:
+		// THE ONLY CREATOR TEST FOR USER-SCOPED ACCOUNTS. No admin bypass:
+		// every caller but the creator is denied, admins included. Both routes
+		// reach this line; neither has a copy of it.
+		if sa.CreatedBy != user.ID() {
+			return gcpSAVerdict{
+				reason: "You don't have permission to manage another user's GCP service account",
+			}, nil
+		}
+
+	default:
+		return gcpSAVerdict{
+			reason: "Management is not supported for this service account scope",
+		}, nil
+	}
+
+	return gcpSAVerdict{allowed: true}, nil
+}
+
+// authorizeGCPServiceAccount renders a verdict for the PROJECT-NESTED routes:
+// an IDENTIFIED caller's refusal is a 403, exactly as before the
+// verdict/renderer split. An identity-less caller gets 404, the same as the
+// flat route.
+//
+// Unchanged behaviour is the requirement for the identified arms, not an
+// accident of the refactor. To reach a nested by-id route a caller has already
+// named the project the account lives in, so a 403 discloses nothing they did
+// not supply themselves. The flat route's renderer is
+// authorizeGCPServiceAccountFlat.
+//
+// THE noIdentity ARM IS THE EXCEPTION, AND IT IS #45, found by sa-arch running
+// the #42 invariant against the arm the #42 commit PINNED. Same sentence, one
+// route over:
+//
+//	AN IDENTITY-LESS CALLER MUST NOT BE ABLE TO TELL TWO SCOPES APART BY
+//	STATUS CODE.
+//
+// The rest of this comment is the cause. The "403 discloses nothing they did
+// not supply themselves" justification above is TRUE, and it is about the
+// PROJECT. What a 403 here discloses is the ACCOUNT: that the id exists, and
+// -- because ReachableFromProject returns true unconditionally for hub scope
+// (store/models.go, ScopeHub arm) while project scope requires ScopeID ==
+// projectID -- which scope it has. Right sentence, wrong noun. Before this
+// arm, nested DELETE answered an identity-less caller naming project P:
+//
+//	id does not exist           -> 404
+//	project-scoped SA in Q != P -> 404 (unreachable)
+//	project-scoped SA in P      -> 403
+//	hub-scoped SA               -> 403, from EVERY P
+//
+// so the status separated existence from non-existence, hub scope from project
+// scope, and -- by iterating P -- named the owning project of a project-scoped
+// account. All three refusals now read 404, which is also what the
+// unreachable and the nonexistent cases already read.
+//
+// CHANGING THIS ARM CANNOT ALTER ANY IDENTIFIED CALLER'S EXPERIENCE, which is
+// why it does not breach the unchanged-behaviour requirement above:
+// gcpServiceAccountVerdict sets noIdentity exactly when
+// GetUserIdentityFromContext returns nil, so anyone with a user identity
+// leaves through the scope arms below with their reason string intact. The
+// callers inside this arm are agents, which authenticate but carry no user.
+func (s *Server) authorizeGCPServiceAccount(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, action Action) bool {
+	verdict, err := s.gcpServiceAccountVerdict(r.Context(), sa, action)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if verdict.allowed {
+		return true
+	}
+	if verdict.noIdentity {
+		NotFound(w, "GCP Service Account")
+		return false
+	}
+	writeError(w, http.StatusForbidden, ErrCodeForbidden, verdict.reason, nil)
+	return false
 }
 
 type createGCPServiceAccountResponse struct {
@@ -187,7 +356,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	if s.gcpTokenGenerator != nil {
 		if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
 			sa.Verified = false
-			sa.VerificationStatus = "failed"
+			sa.VerificationStatus = store.GCPVerificationFailed
 			sa.VerificationError = err.Error()
 			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
 			resp.GCPServiceAccount = *sa
@@ -199,7 +368,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		} else {
 			sa.Verified = true
 			sa.VerifiedAt = time.Now()
-			sa.VerificationStatus = "verified"
+			sa.VerificationStatus = store.GCPVerificationVerified
 			sa.VerificationError = ""
 			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
 			resp.GCPServiceAccount = *sa
@@ -232,9 +401,24 @@ type ListGCPServiceAccountsResponse struct {
 
 func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
+
+	// This one route serves two callers with opposite needs. The assign picker
+	// wants the project's accounts plus the hub-wide ones, because either can
+	// be given to an agent. The project settings management view wants only the
+	// project's, because listing hub-scoped accounts there offers the user rows
+	// the view cannot edit. Neither is more correct, so the caller says which
+	// it wants and the default stays project-only: every existing client keeps
+	// its current response byte for byte.
+	//
+	// Unlike the top-level route there is no scope parameter to validate
+	// against here -- the route is project-scoped by construction -- so the
+	// flag is accepted unconditionally.
+	includeHubScoped := r.URL.Query().Get("includeHubScoped") == "true"
+
 	sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
+		Scope:            store.ScopeProject,
+		ScopeID:          projectID,
+		IncludeHubScoped: includeHubScoped,
 	})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -271,6 +455,11 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 	var mintQuota *GCPMintQuotaInfo
 	if s.gcpIAMAdmin != nil && s.config.GCPProjectID != "" {
 		managed := true
+		// Deliberately not widened by includeHubScoped. This counts against
+		// GCPMintCapPerProject, so it must stay a count of what this project
+		// minted; hub-scoped accounts are not charged to any one project and
+		// including them would shrink every project's remaining quota by the
+		// hub-wide total.
 		projectCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 			Scope:   store.ScopeProject,
 			ScopeID: projectID,
@@ -305,21 +494,41 @@ func (s *Server) getGCPServiceAccount(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	if sa.ScopeID != projectID {
+	if !sa.ReachableFromProject(projectID) {
 		NotFound(w, "GCP Service Account")
 		return
+	}
+
+	// Hub-scoped SAs get a read check. Project-scoped reads are left exactly as
+	// they were — this handler has never had an authorization call, and adding
+	// one here would deny ordinary project members who can read their project's
+	// SAs today. That pre-existing gap is the route-authz manifest's problem
+	// (#598), not this phase's.
+	//
+	// ⚠️ WHAT THIS CHECK ACTUALLY DENIES: not much, and knowing that is the
+	// point. hub-member-read-all is ResourceType "*" with ScopeType "hub"
+	// (seed.go, seedDefaultPoliciesAndGroups), and ScopeType "hub" matches
+	// neither arm of the matchesResource scope switch (authz.go), so no scope
+	// filter applies and it grants read on hub-scoped accounts to EVERY
+	// logged-in user. The only callers this check refuses are identity-less
+	// ones. Treat it as an authenticated-caller check, not as a restriction,
+	// and do not add a hub-scoped WRITE gate on ActionRead or ActionList
+	// expecting it to hold — it would be inert on arrival.
+	//
+	// #46, sa-arch's wording; the earlier text here claimed this check kept a
+	// hub-wide credential from inheriting the gap above, which the wildcard
+	// removes. WHO may read hub-scoped accounts is an open policy question with
+	// ptone and is deliberately not changed here.
+	if sa.Scope == store.ScopeHub {
+		if !s.authorizeGCPServiceAccount(w, r, sa, ActionRead) {
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, sa)
 }
 
 func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request, projectID, saID string) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
-		Forbidden(w)
-		return
-	}
-
 	sa, err := s.store.GetGCPServiceAccount(r.Context(), saID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -330,25 +539,12 @@ func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if sa.ScopeID != projectID {
+	if !sa.ReachableFromProject(projectID) {
 		NotFound(w, "GCP Service Account")
 		return
 	}
 
-	// Authorization: project owners and admins can manage GCP service accounts
-	project, err := s.store.GetProject(r.Context(), projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	decision := s.authzService.CheckAccess(r.Context(), user, Resource{
-		Type:    "project",
-		ID:      project.ID,
-		OwnerID: project.OwnerID,
-	}, ActionManage)
-	if !decision.Allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"You don't have permission to manage GCP service accounts in this project", nil)
+	if !s.authorizeGCPServiceAccount(w, r, sa, ActionDelete) {
 		return
 	}
 
@@ -357,16 +553,14 @@ func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Invalidate cached actAs decisions for the deleted SA so that any
+	// subsequent check against this email goes to the inner checker.
+	s.invalidateActAsCache(sa.Email)
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request, projectID, saID string) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
-		Forbidden(w)
-		return
-	}
-
 	sa, err := s.store.GetGCPServiceAccount(r.Context(), saID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -377,28 +571,30 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if sa.ScopeID != projectID {
+	if !sa.ReachableFromProject(projectID) {
 		NotFound(w, "GCP Service Account")
 		return
 	}
 
-	// Authorization: project owners and admins can manage GCP service accounts
-	project, err := s.store.GetProject(r.Context(), projectID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	decision := s.authzService.CheckAccess(r.Context(), user, Resource{
-		Type:    "project",
-		ID:      project.ID,
-		OwnerID: project.OwnerID,
-	}, ActionManage)
-	if !decision.Allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"You don't have permission to manage GCP service accounts in this project", nil)
+	if !s.authorizeGCPServiceAccount(w, r, sa, ActionVerify) {
 		return
 	}
 
+	s.runGCPServiceAccountVerification(w, r, sa)
+}
+
+// runGCPServiceAccountVerification performs the impersonation check and
+// persists its outcome. It assumes the caller has already located the account
+// and authorized ActionVerify on it.
+//
+// Extracted so that the nested route and the flat by-id route share one body.
+// The two differ only in how they find the account -- a project path versus a
+// parentless one -- and everything after that point is the same operation. Two
+// copies would drift, and the direction they would drift in is the bad one:
+// this body writes verification state that the assign gate later trusts, so a
+// copy that forgot to persist a FAILURE would leave an account reading as
+// verified after a verification that did not pass.
+func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount) {
 	// Fail-closed: if no token generator is configured, we cannot verify.
 	if s.gcpTokenGenerator == nil {
 		writeError(w, http.StatusServiceUnavailable, "gcp_not_configured",
@@ -410,7 +606,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
 		// Persist the failure status
 		sa.Verified = false
-		sa.VerificationStatus = "failed"
+		sa.VerificationStatus = store.GCPVerificationFailed
 		sa.VerificationError = err.Error()
 		_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
 
@@ -425,7 +621,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 
 	sa.Verified = true
 	sa.VerifiedAt = time.Now()
-	sa.VerificationStatus = "verified"
+	sa.VerificationStatus = store.GCPVerificationVerified
 	sa.VerificationError = ""
 
 	if err := s.store.UpdateGCPServiceAccount(r.Context(), sa); err != nil {
@@ -438,9 +634,10 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 
 // mintGCPServiceAccountRequest is the request body for POST .../gcp-service-accounts/mint.
 type mintGCPServiceAccountRequest struct {
-	AccountID   string `json:"account_id"`   // Optional custom SA account ID (will be prefixed with scion-)
-	DisplayName string `json:"display_name"` // Optional display name
-	Description string `json:"description"`  // Optional description
+	AccountID      string `json:"account_id"`                  // Optional custom SA account ID (will be prefixed with scion-)
+	DisplayName    string `json:"display_name"`                // Optional display name
+	Description    string `json:"description"`                 // Optional description
+	AllowSelfActAs *bool  `json:"allow_self_act_as,omitempty"` // nil = default true; grant SA serviceAccountUser on itself
 }
 
 // gcpSAAccountIDRegexp validates GCP SA account IDs: 6-30 chars, [a-z][a-z0-9-]*[a-z0-9].
@@ -630,21 +827,80 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	// Grant token creator role to Hub SA on the new SA
-	if s.gcpTokenGenerator != nil {
-		hubEmail := s.gcpTokenGenerator.ServiceAccountEmail()
-		if hubEmail != "" {
-			member := "serviceAccount:" + hubEmail
-			if err := s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, member, "roles/iam.serviceAccountTokenCreator"); err != nil {
-				slog.Error("GCP SA mint: failed to set IAM policy",
-					"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail, "error", err)
-				// SA was created but policy failed — still store it but log the issue
-				// The user can verify later
-			}
+	// ================================================================
+	// IAM mutations — all are REQUIRED. If any fails, the mint is a
+	// failure: do NOT store Verified=true, best-effort delete the SA.
+	// ================================================================
+
+	// Helper to clean up on any required IAM mutation failure.
+	cleanupAndFail := func(mutation string, mutErr error) {
+		slog.Error("GCP SA mint: required IAM mutation failed",
+			"mutation", mutation, "project_id", projectID,
+			"sa_email", saEmail, "error", mutErr)
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint: best-effort cleanup of orphaned SA failed",
+				"sa_email", saEmail, "error", delErr)
 		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but required IAM grants failed; the account is not usable. Contact your administrator.", nil)
 	}
 
-	// Store the SA record
+	// 1. Token generator must be configured.
+	if s.gcpTokenGenerator == nil {
+		slog.Error("GCP SA mint: token generator not configured, cannot grant tokenCreator",
+			"project_id", projectID, "sa_email", saEmail)
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint: best-effort cleanup failed after missing token generator",
+				"sa_email", saEmail, "error", delErr)
+		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but the Hub has no token generator configured; the account is not usable and has been removed", nil)
+		return
+	}
+
+	hubEmail := s.gcpTokenGenerator.ServiceAccountEmail()
+	if hubEmail == "" {
+		slog.Error("GCP SA mint: hub service account email is empty, cannot grant tokenCreator",
+			"project_id", projectID, "sa_email", saEmail)
+		if delErr := s.gcpIAMAdmin.DeleteServiceAccount(r.Context(), saEmail); delErr != nil {
+			slog.Error("GCP SA mint: best-effort cleanup failed after empty hub email",
+				"sa_email", saEmail, "error", delErr)
+		}
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+			"service account was created but the Hub service account email is not configured; the account is not usable and has been removed", nil)
+		return
+	}
+
+	// Grant Hub SA tokenCreator on the minted SA.
+	hubMember := "serviceAccount:" + hubEmail
+	if err := retryIAMGrant(r.Context(), func() error {
+		return s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, hubMember, "roles/iam.serviceAccountTokenCreator")
+	}); err != nil {
+		cleanupAndFail("tokenCreator grant on minted SA", err)
+		return
+	}
+
+	// Optionally grant the minted SA serviceAccountUser on itself so it
+	// can be used as a project-default SA where agents create sub-agents
+	// running as the same identity.
+	allowSelfActAs := req.AllowSelfActAs == nil || *req.AllowSelfActAs
+	if allowSelfActAs {
+		saMember := "serviceAccount:" + saEmail
+		if err := retryIAMGrant(r.Context(), func() error {
+			return s.gcpIAMAdmin.SetIAMPolicy(r.Context(), saEmail, saMember, "roles/iam.serviceAccountUser")
+		}); err != nil {
+			cleanupAndFail("self serviceAccountUser grant on minted SA", err)
+			return
+		}
+		slog.Info("GCP SA mint: self-actAs grant succeeded",
+			"project_id", projectID, "sa_email", saEmail)
+	}
+
+	slog.Info("GCP SA mint: SA created and IAM grants succeeded",
+		"project_id", projectID, "sa_email", saEmail, "hub_email", hubEmail,
+		"self_act_as", allowSelfActAs)
+
+	// Store the SA record — only reached when ALL required IAM mutations succeeded.
 	sa := &store.GCPServiceAccount{
 		ID:                 uuid.New().String(),
 		Scope:              store.ScopeProject,
@@ -655,7 +911,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		DefaultScopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
 		Verified:           true,
 		VerifiedAt:         time.Now(),
-		VerificationStatus: "verified",
+		VerificationStatus: store.GCPVerificationVerified,
 		CreatedBy:          user.ID(),
 		CreatedAt:          time.Now(),
 		Managed:            true,
@@ -678,7 +934,8 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 
 	slog.Info("GCP SA minted",
 		"project_id", projectID, "sa_id", sa.ID, "email", saEmail,
-		"account_id", accountID, "project", projectID, "user", user.ID())
+		"account_id", accountID, "project", projectID, "user", user.ID(),
+		"self_act_as", allowSelfActAs)
 
 	writeJSON(w, http.StatusCreated, sa)
 }

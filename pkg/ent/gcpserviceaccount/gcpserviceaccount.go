@@ -30,6 +30,10 @@ const (
 	FieldVerified = "verified"
 	// FieldVerifiedAt holds the string denoting the verified_at field in the database.
 	FieldVerifiedAt = "verified_at"
+	// FieldVerificationStatus holds the string denoting the verification_status field in the database.
+	FieldVerificationStatus = "verification_status"
+	// FieldVerificationError holds the string denoting the verification_error field in the database.
+	FieldVerificationError = "verification_error"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
 	FieldCreatedBy = "created_by"
 	// FieldManaged holds the string denoting the managed field in the database.
@@ -53,6 +57,8 @@ var Columns = []string{
 	FieldDefaultScopes,
 	FieldVerified,
 	FieldVerifiedAt,
+	FieldVerificationStatus,
+	FieldVerificationError,
 	FieldCreatedBy,
 	FieldManaged,
 	FieldManagedBy,
@@ -84,6 +90,10 @@ var (
 	DefaultDefaultScopes string
 	// DefaultVerified holds the default value on creation for the "verified" field.
 	DefaultVerified bool
+	// DefaultVerificationStatus holds the default value on creation for the "verification_status" field.
+	DefaultVerificationStatus string
+	// DefaultVerificationError holds the default value on creation for the "verification_error" field.
+	DefaultVerificationError string
 	// DefaultCreatedBy holds the default value on creation for the "created_by" field.
 	DefaultCreatedBy string
 	// DefaultManaged holds the default value on creation for the "managed" field.
@@ -142,6 +152,16 @@ func ByVerified(opts ...sql.OrderTermOption) OrderOption {
 // ByVerifiedAt orders the results by the verified_at field.
 func ByVerifiedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldVerifiedAt, opts...).ToFunc()
+}
+
+// ByVerificationStatus orders the results by the verification_status field.
+func ByVerificationStatus(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldVerificationStatus, opts...).ToFunc()
+}
+
+// ByVerificationError orders the results by the verification_error field.
+func ByVerificationError(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldVerificationError, opts...).ToFunc()
 }
 
 // ByCreatedBy orders the results by the created_by field.

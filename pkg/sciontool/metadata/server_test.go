@@ -242,6 +242,121 @@ func TestMetadataServer_BlockMode(t *testing.T) {
 	}
 }
 
+// TestMetadataServer_UnknownModeDeniesSAEndpoints covers the fail-open half of
+// the old deny-list. The SA endpoints tested `== modeBlock` and served
+// everything else, so a mode the sidecar did not recognise got service-account
+// metadata and tokens built from an unpopulated config — the opposite of what an
+// unparseable mode should produce.
+//
+// Constructing Config directly bypasses ConfigFromEnv on purpose: this is the
+// second layer, and it has to hold even if a bad mode reaches a running server
+// some other way.
+// TestConfigFromEnv_ModeAllowList pins the distinction the old os.Getenv form
+// could not express: "the variable is absent" and "the variable holds something
+// unrecognised" are different conditions and need opposite responses.
+//
+// Absent and passthrough both yield no sidecar, but for different reasons —
+// nothing asked for one, versus something deliberately asked for direct access.
+// An unrecognised value is corruption, and on this control the safe reading of
+// corruption is block, not the no-sidecar-at-all that emptiness used to produce.
+func TestConfigFromEnv_ModeAllowList(t *testing.T) {
+	tests := []struct {
+		name     string
+		set      bool
+		raw      string
+		wantNil  bool
+		wantMode string
+	}{
+		{name: "absent", set: false, wantNil: true},
+		{name: "block", set: true, raw: "block", wantMode: modeBlock},
+		{name: "assign", set: true, raw: "assign", wantMode: modeAssign},
+		// Recognised, and the recognised answer is "do not run". Reaching this
+		// via the default arm would put a passthrough agent into block mode on
+		// its first restart, because the hub injects the mode verbatim into
+		// resolvedEnv on the start path.
+		{name: "passthrough yields no sidecar", set: true, raw: "passthrough", wantNil: true},
+		// Present-but-empty is corruption, not absence. This is the case the
+		// old `mode == ""` test folded into "nobody configured a sidecar".
+		{name: "present but empty falls back to block", set: true, raw: "", wantMode: modeBlock},
+		{name: "typo falls back to block", set: true, raw: "blocked", wantMode: modeBlock},
+		{name: "wrong case falls back to block", set: true, raw: "Block", wantMode: modeBlock},
+		{name: "unknown value falls back to block", set: true, raw: "sandbox", wantMode: modeBlock},
+		{name: "whitespace falls back to block", set: true, raw: " block", wantMode: modeBlock},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.set {
+				t.Setenv("SCION_METADATA_MODE", tt.raw)
+			} else {
+				if err := os.Unsetenv("SCION_METADATA_MODE"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			cfg := ConfigFromEnv()
+
+			if tt.wantNil {
+				if cfg != nil {
+					t.Fatalf("expected nil config for %q, got mode %q", tt.raw, cfg.Mode)
+				}
+				return
+			}
+			if cfg == nil {
+				t.Fatalf("expected a config for %q, got nil — an unrecognised mode must not silently disable the sidecar", tt.raw)
+			}
+			if cfg.Mode != tt.wantMode {
+				t.Errorf("expected mode %q for input %q, got %q", tt.wantMode, tt.raw, cfg.Mode)
+			}
+		})
+	}
+}
+
+func TestMetadataServer_UnknownModeDeniesSAEndpoints(t *testing.T) {
+	for _, mode := range []string{"", "passthrough", "blocked", "Assign", "sandbox"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			port := freePort(t)
+			srv := New(Config{
+				Mode:      mode,
+				Port:      port,
+				ProjectID: "test-project",
+				SAEmail:   "should-not-be-served@example.iam.gserviceaccount.com",
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			if err := srv.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			defer srv.Stop()
+			time.Sleep(50 * time.Millisecond)
+
+			for _, path := range []string{
+				"/computeMetadata/v1/instance/service-accounts/",
+				"/computeMetadata/v1/instance/service-accounts/default/email",
+				"/computeMetadata/v1/instance/service-accounts/default/token",
+				"/computeMetadata/v1/instance/service-accounts/default/identity?audience=x",
+			} {
+				resp, body := metadataGet(t, port, path)
+				if resp.StatusCode != http.StatusForbidden {
+					t.Errorf("expected 403 for %s in mode %q, got %d (body %q)", path, mode, resp.StatusCode, body)
+				}
+				if strings.Contains(body, "should-not-be-served") {
+					t.Errorf("%s leaked the SA email in mode %q: %q", path, mode, body)
+				}
+			}
+
+			// Non-identity metadata is unaffected — the allow-list narrows the
+			// service-account surface, not the whole server.
+			resp, body := metadataGet(t, port, "/computeMetadata/v1/project/project-id")
+			if resp.StatusCode != http.StatusOK || body != "test-project" {
+				t.Errorf("expected project-id to still serve in mode %q, got %d %q", mode, resp.StatusCode, body)
+			}
+		})
+	}
+}
+
 func TestMetadataServer_AssignMode_SAEndpoints(t *testing.T) {
 	// Create a mock Hub that returns tokens
 	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

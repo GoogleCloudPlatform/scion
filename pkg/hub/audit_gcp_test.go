@@ -17,12 +17,20 @@ package hub
 import (
 	"context"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // mockAuditLogger captures audit events for testing.
 type mockAuditLogger struct {
 	brokerEvents []*BrokerAuthEvent
 	gcpEvents    []*GCPTokenEvent
+	saEvents     []*store.SAAssignmentEvent
+}
+
+func (m *mockAuditLogger) RecordSAAssignment(_ context.Context, event *store.SAAssignmentEvent) error {
+	m.saEvents = append(m.saEvents, event)
+	return nil
 }
 
 func (m *mockAuditLogger) LogBrokerAuthEvent(_ context.Context, event *BrokerAuthEvent) error {

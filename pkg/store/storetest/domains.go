@@ -256,6 +256,11 @@ func GCPServiceAccountDomain() Domain[store.GCPServiceAccount] {
 		VerifyMutated: func(t *testing.T, got *store.GCPServiceAccount) {
 			assert.Contains(t, got.DisplayName, "Renamed ")
 			assert.True(t, got.Verified)
+			// Mutate flips only the bool, so this pins the coherence invariant
+			// as a cross-store contract: no implementation may persist
+			// Verified=true beside a status that says otherwise.
+			assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus)
+			assert.Empty(t, got.VerificationError)
 		},
 		Delete: func(ctx context.Context, s store.Store, id string) error {
 			return s.DeleteGCPServiceAccount(ctx, id)
@@ -282,8 +287,81 @@ func GCPServiceAccountDomain() Domain[store.GCPServiceAccount] {
 				},
 				WantCount: 1,
 			},
+			// The next three pin IncludeHubScoped as one query with OR
+			// semantics, at the store boundary where every implementation has
+			// to honour it. Each seeds the same three accounts -- one in the
+			// target project, one in a different project, one hub-scoped --
+			// and differs only in the filter, so the counts describe the
+			// predicate rather than the fixture.
+			{
+				Name: "ByProjectScope_ExcludesHubByDefault",
+				Seed: seedGCPScopeMix,
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.GCPServiceAccount], error) {
+					return listFrom(s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+						Scope: store.ScopeProject, ScopeID: gcpScopeMixProjectID,
+					}))
+				},
+				// Only the target project's account. The default must stay
+				// project-only: management views list what they can edit, and
+				// widening it silently would change a live endpoint.
+				WantCount: 1,
+			},
+			{
+				Name: "IncludeHubScoped_UnionsHubWithProject",
+				Seed: seedGCPScopeMix,
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.GCPServiceAccount], error) {
+					return listFrom(s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+						Scope: store.ScopeProject, ScopeID: gcpScopeMixProjectID,
+						IncludeHubScoped: true,
+					}))
+				},
+				// Target project + hub. Two, not three: the union must not
+				// reach the other project's account. A filter that degraded
+				// into "ignore the scope terms" would return three here, which
+				// is the failure this count is chosen to catch.
+				WantCount: 2,
+			},
+			{
+				Name: "IncludeHubScoped_StillAndsOtherTerms",
+				Seed: seedGCPScopeMix,
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.GCPServiceAccount], error) {
+					managed := true
+					return listFrom(s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+						Scope: store.ScopeProject, ScopeID: gcpScopeMixProjectID,
+						IncludeHubScoped: true, Managed: &managed,
+					}))
+				},
+				// Only the hub account is managed in the fixture, so the OR
+				// widening has to sit *inside* the AND with Managed. Building
+				// it as a top-level OR alongside the other predicates would
+				// return every hub account regardless of Managed, and this
+				// case would see two.
+				WantCount: 1,
+			},
 		},
 	}
+}
+
+// gcpScopeMixProjectID is the project the scope-union filter cases target. It
+// is a fixed value rather than a fresh UUID so the Seed and List halves of a
+// FilterCase, which do not share a scope, can agree on it.
+const gcpScopeMixProjectID = "proj-scope-mix-target"
+
+// seedGCPScopeMix creates one SA in the target project, one in a different
+// project, and one hub-scoped. The middle one is the discriminator: it is what
+// separates a correct union from a filter that has stopped filtering.
+func seedGCPScopeMix(t *testing.T, ctx context.Context, s store.Store) {
+	t.Helper()
+	mk := func(scope, scopeID, prefix string, managed bool) {
+		require.NoError(t, s.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+			ID: uuid.NewString(), Scope: scope, ScopeID: scopeID,
+			Email:     prefix + "-" + uuid.NewString()[:8] + "@p.iam.gserviceaccount.com",
+			ProjectID: uuid.NewString(), Managed: managed, CreatedBy: "t",
+		}))
+	}
+	mk(store.ScopeProject, gcpScopeMixProjectID, "in-target", false)
+	mk(store.ScopeProject, "proj-scope-mix-other", "in-other", false)
+	mk(store.ScopeHub, "hub-instance-scope-mix", "hub-wide", true)
 }
 
 // SubscriptionTemplateDomain describes the subscription template entity for the

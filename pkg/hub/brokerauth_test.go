@@ -1353,3 +1353,85 @@ func TestBrokerAuthMiddleware_OnBehalfOf_InvalidFormat(t *testing.T) {
 		})
 	}
 }
+
+// MEDIUM-3: GCP SA emails are case-insensitive. The broker host SA email must
+// be normalized to lowercase on registration so that actAs comparisons against
+// it are reliable regardless of the casing the operator supplied.
+func TestBrokerRegistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	req := CreateBrokerRegistrationRequest{
+		Name:                       "mixed-case-host",
+		GCPHostServiceAccountEmail: "Broker-SA@My-Project.iam.gserviceaccount.com",
+	}
+
+	resp, err := svc.CreateBrokerRegistration(ctx, req, "admin")
+	if err != nil {
+		t.Fatalf("CreateBrokerRegistration failed: %v", err)
+	}
+
+	broker, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+
+	want := "broker-sa@my-project.iam.gserviceaccount.com"
+	if broker.GCPHostServiceAccountEmail != want {
+		t.Errorf("host SA email should be lowercased on registration:\n  got:  %q\n  want: %q",
+			broker.GCPHostServiceAccountEmail, want)
+	}
+}
+
+// MEDIUM-3 (re-registration path): When an existing broker is re-registered
+// with a mixed-case host SA email, the stored value must still be lowercase.
+func TestBrokerReregistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	// First registration with lowercase email.
+	req := CreateBrokerRegistrationRequest{
+		Name:                       "rereg-host",
+		GCPHostServiceAccountEmail: "lowercase@proj.iam.gserviceaccount.com",
+	}
+	resp1, err := svc.CreateBrokerRegistration(ctx, req, "admin")
+	if err != nil {
+		t.Fatalf("First registration failed: %v", err)
+	}
+
+	// Complete the first join so the join token is consumed and
+	// re-registration can issue a new one.
+	_, err = svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{
+		BrokerID:  resp1.BrokerID,
+		JoinToken: resp1.JoinToken,
+		Hostname:  "test-hostname",
+		Version:   "1.0.0",
+	}, "http://localhost:9810")
+	if err != nil {
+		t.Fatalf("CompleteBrokerJoin failed: %v", err)
+	}
+
+	// Re-register with mixed-case email.
+	req2 := CreateBrokerRegistrationRequest{
+		Name:                       "rereg-host",
+		GCPHostServiceAccountEmail: "MixedCase@Proj.iam.gserviceaccount.com",
+	}
+	resp2, err := svc.CreateBrokerRegistration(ctx, req2, "admin")
+	if err != nil {
+		t.Fatalf("Re-registration failed: %v", err)
+	}
+	if resp2.BrokerID != resp1.BrokerID {
+		t.Fatalf("re-registration should reuse broker ID")
+	}
+
+	broker, err := s.GetRuntimeBroker(ctx, resp2.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+
+	want := "mixedcase@proj.iam.gserviceaccount.com"
+	if broker.GCPHostServiceAccountEmail != want {
+		t.Errorf("host SA email should be lowercased on re-registration:\n  got:  %q\n  want: %q",
+			broker.GCPHostServiceAccountEmail, want)
+	}
+}

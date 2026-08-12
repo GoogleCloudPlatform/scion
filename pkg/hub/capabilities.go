@@ -37,7 +37,7 @@ var ResourceActions = map[string][]Action{
 	"user":                {ActionRead, ActionUpdate},
 	"policy":              {ActionRead, ActionUpdate, ActionDelete},
 	"broker":              {ActionRead, ActionUpdate, ActionDelete, ActionDispatch},
-	"gcp_service_account": {ActionRead, ActionDelete, ActionVerify},
+	"gcp_service_account": {ActionRead, ActionDelete, ActionVerify, ActionAssign},
 }
 
 // ScopeActions maps resource types to scope-level actions (e.g., create, list).
@@ -78,11 +78,29 @@ func projectResource(g *store.Project) Resource {
 
 // templateResource constructs a Resource from a store.Template for capability computation.
 func templateResource(t *store.Template) Resource {
-	return Resource{
+	r := Resource{
 		Type:    "template",
 		ID:      t.ID,
 		OwnerID: t.OwnerID,
 	}
+	// Project-scoped templates are children of their project (mirrors
+	// harnessConfigResource and policyResource). Without this the resource is
+	// parentless, and since #595 made project-scoped policy matching an
+	// allow-list, a parentless resource matches no project-scoped policy at
+	// all — so project-scoped template policies would match nothing.
+	//
+	// ScopeID is the authoritative field. Deliberately no fallback to the
+	// deprecated t.ProjectID (store/models.go): a deprecated field must not
+	// become load-bearing in the authz engine. Legacy ProjectID-only rows are
+	// handled by backfill, not here.
+	//
+	// Global- and user-scoped templates stay parentless, which is correct:
+	// they do not belong to a project.
+	if t.Scope == store.TemplateScopeProject && t.ScopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = t.ScopeID
+	}
+	return r
 }
 
 // harnessConfigResource constructs a Resource from a store.HarnessConfig for capability computation.
@@ -155,13 +173,24 @@ func brokerResource(b *store.RuntimeBroker) Resource {
 
 // gcpServiceAccountResource constructs a Resource from a store.GCPServiceAccount for capability computation.
 func gcpServiceAccountResource(sa *store.GCPServiceAccount) Resource {
-	return Resource{
-		Type:       "gcp_service_account",
-		ID:         sa.ID,
-		OwnerID:    sa.CreatedBy,
-		ParentType: "project",
-		ParentID:   sa.ScopeID,
+	if sa == nil {
+		return Resource{}
 	}
+	r := Resource{
+		Type:    "gcp_service_account",
+		ID:      sa.ID,
+		OwnerID: sa.CreatedBy,
+	}
+	// Only project-scoped service accounts are children of a project, so the
+	// project owner/admin bypass applies to them alone (mirrors
+	// harnessConfigResource). For hub- and user-scoped accounts ScopeID is a hub
+	// or user ID, not a project ID: claiming a project parent there would hand
+	// the bypass to the owner of whatever project happened to share that ID.
+	if sa.Scope == store.ScopeProject && sa.ScopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = sa.ScopeID
+	}
+	return r
 }
 
 // ComputeCapabilities evaluates which actions the identity can perform on a single resource.
