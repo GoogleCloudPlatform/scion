@@ -72,6 +72,37 @@ export SCION_SERVER_OAUTH_CLI_GITHUB_CLIENTID="your-client-id"
 export SCION_SERVER_OAUTH_CLI_GITHUB_CLIENTSECRET="your-client-secret"
 ```
 
+### External OIDC Login Provider Support
+
+For enterprise SSO setups, Scion supports authenticating Web UI users via an external OpenID Connect (OIDC) identity provider (such as Okta, Keycloak, or Ping Identity) as an alternative to standard Google/GitHub OAuth.
+
+#### How It Works
+- **OIDC Discovery**: The Hub automatically discovers authorization and token endpoints by fetching the provider's standard metadata configuration from `{issuer_url}/.well-known/openid-configuration` with a **1-hour TTL discovery cache** to ensure high performance and zero-downtime key rotation.
+- **Dynamic Login Button**: When enabled, the Web Dashboard dynamically renders a custom login button using your configured `display_name` alongside any active Google or GitHub OAuth buttons.
+- **Public Client Support**: For OIDC public clients (like Keycloak public clients), the Hub allows the `client_secret` to be left empty or omitted, removing client secret validation from the token exchange workflow.
+
+#### Configuration
+
+To enable the external OIDC login provider, add the `oidc_login` section to your Hub's static `settings.yaml` bootstrap file:
+
+```yaml
+oidc_login:
+  enabled: true
+  display_name: "Corporate SSO"                         # Text shown on the login button
+  issuer_url: "https://sso.example.com/auth/realms/main" # Base OIDC issuer URL
+  client_id: "scion-client"                              # Client ID registered with the provider
+  client_secret: "secret-value"                          # Client secret (can be empty for public clients)
+  scopes: ["openid", "email", "profile"]                 # Custom scopes (defaults to openid, email, profile)
+```
+
+Alternatively, you can configure these settings via environment variables at startup:
+- `SCION_SERVER_OIDC_LOGIN_ENABLED="true"`
+- `SCION_SERVER_OIDC_LOGIN_DISPLAY_NAME="Corporate SSO"`
+- `SCION_SERVER_OIDC_LOGIN_ISSUER_URL="https://sso.example.com/auth/realms/main"`
+- `SCION_SERVER_OIDC_LOGIN_CLIENT_ID="scion-client"`
+- `SCION_SERVER_OIDC_LOGIN_CLIENT_SECRET="secret-value"`
+- `SCION_SERVER_OIDC_LOGIN_SCOPES="openid,email,profile"`
+
 ## Domain Authorization
 
 You can restrict authentication to specific email domains using the `SCION_AUTHORIZED_DOMAINS` setting. This provides an additional layer of access control beyond OAuth authentication.

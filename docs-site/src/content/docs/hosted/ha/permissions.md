@@ -113,6 +113,12 @@ To prevent unauthorized assignment of global resources, Scion applies specialize
 - **Dynamic Membership Checks**: Only current, active members of the Hub or project who possess `ActionAssign` on the resource and pass the Policy Troubleshooter `actAs` check can bind the service account.
 - **Former-Member Denial**: If a user is removed from a project or leaves the organization, they immediately lose the ability to assign those service accounts—even if they were the user who originally created or registered the service account record in Scion. Ownership-based bypasses do not apply to hub-scoped service accounts.
 
+### Project-Default Service Accounts
+
+To streamline the agent creation workflow, project administrators can configure a project-default GCP service account that is automatically applied to newly created agents. However, to prevent privilege-escalation bypasses, this assignment is strictly gated:
+- **Enforced at Creation and Selection**: The Policy Troubleshooter `actAs` evaluation is automatically triggered whenever an agent is created using the project's default service account, or when a user selects the default service account option.
+- **Unauthorized Bypass Prevention**: If a user does not possess `iam.serviceAccounts.actAs` permission on the project's default service account, they are barred from creating agents under that project with the default identity, even if they have full project access.
+
 ### Passthrough Mode Security & PATCH Parity
 
 In **Passthrough Mode**, an agent bypasses explicit service account binding and directly assumes the GCP identity of its GKE/GCE broker host. To prevent unauthorized access to host-level authority:

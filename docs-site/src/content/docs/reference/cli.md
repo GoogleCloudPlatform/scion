@@ -128,7 +128,7 @@ Sends a message to a running agent's harness by enqueuing it into its input stre
     - `--at <time>`: Schedule message delivery at an absolute time (ISO 8601, e.g., `2026-02-28T14:00:00Z`). *(Requires Hub mode)*
     - `--plain`: Mark for plain-text delivery (the message still flows as structured JSON internally).
     - `--raw`: Send literal bytes via tmux send-keys with no trailing Enter (supports control keys like arrows and Escape). Cannot be combined with `--attach`.
-    - `--channel <channel>`: Target a specific message channel (e.g., `telegram`, `gchat`, `web`).
+    - `--channel <channel>`: Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
     - `--thread-id <id>`: Target a specific thread ID within the channel.
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
