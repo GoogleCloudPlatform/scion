@@ -562,6 +562,10 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private runtimes: Record<string, V1RuntimeConfig> = {};
   @state() private profiles: Record<string, V1ProfileConfig> = {};
   @state() private harnessConfigsMap: Record<string, unknown> = {};
+  @state() private newRuntimeName = '';
+  @state() private newProfileName = '';
+  @state() private newHarnessConfigName = '';
+  @state() private harnessConfigErrors: Record<string, string> = {};
 
   // Keep raw data for sections we don't fully edit
   private rawConfig: ServerConfigResponse | null = null;
@@ -671,6 +675,18 @@ export class ScionPageAdminServerConfig extends LitElement {
       padding: 0.75rem 1rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       background: rgba(0, 0, 0, 0.02);
+    }
+
+    .add-entry-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      margin-top: 0.5rem;
+    }
+
+    .add-entry-row sl-input {
+      flex: 1;
+      max-width: 20rem;
     }
 
     .form-grid {
@@ -1753,13 +1769,11 @@ export class ScionPageAdminServerConfig extends LitElement {
       };
     }
 
-    // Runtimes, profiles, harness_configs — send edited state
-    if (ok('runtimes') && Object.keys(this.runtimes).length > 0)
-      payload.runtimes = this.runtimes;
-    if (ok('harness_configs') && Object.keys(this.harnessConfigsMap).length > 0)
-      payload.harness_configs = this.harnessConfigsMap;
-    if (ok('profiles') && Object.keys(this.profiles).length > 0)
-      payload.profiles = this.profiles;
+    // Runtimes, profiles, harness_configs — always send edited state (including
+    // empty objects) so the backend can distinguish "no change" from "cleared".
+    if (ok('runtimes')) payload.runtimes = this.runtimes;
+    if (ok('harness_configs')) payload.harness_configs = this.harnessConfigsMap;
+    if (ok('profiles')) payload.profiles = this.profiles;
 
     return payload;
   }
@@ -1986,13 +2000,11 @@ export class ScionPageAdminServerConfig extends LitElement {
       };
     }
 
-    // Runtimes, profiles, harness_configs — send edited state
-    if (ok('runtimes') && Object.keys(this.runtimes).length > 0)
-      payload.runtimes = this.runtimes;
-    if (ok('harness_configs') && Object.keys(this.harnessConfigsMap).length > 0)
-      payload.harness_configs = this.harnessConfigsMap;
-    if (ok('profiles') && Object.keys(this.profiles).length > 0)
-      payload.profiles = this.profiles;
+    // Runtimes, profiles, harness_configs — always send edited state (including
+    // empty objects) so the backend can distinguish "no change" from "cleared".
+    if (ok('runtimes')) payload.runtimes = this.runtimes;
+    if (ok('harness_configs')) payload.harness_configs = this.harnessConfigsMap;
+    if (ok('profiles')) payload.profiles = this.profiles;
 
     return payload;
   }
@@ -3344,14 +3356,29 @@ export class ScionPageAdminServerConfig extends LitElement {
           : runtimeNames.map((name) => this.renderRuntimeEntry(name, !!runtimeReadOnly))}
         ${!runtimeReadOnly
           ? html`
-              <sl-button
-                size="small"
-                variant="default"
-                @click=${() => this.addRuntime()}
-              >
-                <sl-icon slot="prefix" name="plus-circle"></sl-icon>
-                Add Runtime
-              </sl-button>
+              <div class="add-entry-row">
+                <sl-input
+                  size="small"
+                  placeholder="Runtime name (e.g. docker, cloudrun-prod)"
+                  value=${this.newRuntimeName}
+                  @sl-input=${(e: Event) => {
+                    this.newRuntimeName = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>
+                <sl-button
+                  size="small"
+                  variant="default"
+                  ?disabled=${!this.newRuntimeName.trim() ||
+                    !!this.runtimes[this.newRuntimeName.trim()]}
+                  @click=${() => this.addRuntime()}
+                >
+                  <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                  Add Runtime
+                </sl-button>
+              </div>
+              ${this.runtimes[this.newRuntimeName.trim()]
+                ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A runtime named "${this.newRuntimeName.trim()}" already exists.</small>`
+                : nothing}
             `
           : nothing}
       </div>
@@ -3441,6 +3468,32 @@ export class ScionPageAdminServerConfig extends LitElement {
                     }}
                   ></sl-input>
                 </div>
+                <div class="form-field">
+                  <sl-switch
+                    ?checked=${rt.gke || false}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      this.updateRuntimeBool(name, 'gke', (e.target as HTMLInputElement).checked);
+                    }}
+                    >GKE cluster</sl-switch
+                  >
+                  <span class="hint">Enable GKE-specific features</span>
+                </div>
+                <div class="form-field">
+                  <sl-switch
+                    ?checked=${rt.list_all_namespaces || false}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      this.updateRuntimeBool(
+                        name,
+                        'list_all_namespaces',
+                        (e.target as HTMLInputElement).checked,
+                      );
+                    }}
+                    >List all namespaces</sl-switch
+                  >
+                  <span class="hint">List agents across all namespaces</span>
+                </div>
               `
             : html`
                 <div class="form-field">
@@ -3488,6 +3541,16 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.runtimes = updated;
   }
 
+  private updateRuntimeBool(
+    name: string,
+    field: 'gke' | 'list_all_namespaces',
+    value: boolean,
+  ): void {
+    const updated = { ...this.runtimes };
+    updated[name] = { ...updated[name], [field]: value };
+    this.runtimes = updated;
+  }
+
   private updateRuntimeCloudRun(name: string, field: 'project' | 'region', value: string): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
@@ -3497,13 +3560,10 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private addRuntime(): void {
-    const baseName = 'new-runtime';
-    let name = baseName;
-    let i = 1;
-    while (this.runtimes[name]) {
-      name = `${baseName}-${i++}`;
-    }
+    const name = this.newRuntimeName.trim();
+    if (!name || this.runtimes[name]) return;
     this.runtimes = { ...this.runtimes, [name]: { type: 'docker' } };
+    this.newRuntimeName = '';
   }
 
   private removeRuntime(name: string): void {
@@ -3532,14 +3592,29 @@ export class ScionPageAdminServerConfig extends LitElement {
             )}
         ${!profileReadOnly
           ? html`
-              <sl-button
-                size="small"
-                variant="default"
-                @click=${() => this.addProfile()}
-              >
-                <sl-icon slot="prefix" name="plus-circle"></sl-icon>
-                Add Profile
-              </sl-button>
+              <div class="add-entry-row">
+                <sl-input
+                  size="small"
+                  placeholder="Profile name (e.g. default, production)"
+                  value=${this.newProfileName}
+                  @sl-input=${(e: Event) => {
+                    this.newProfileName = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>
+                <sl-button
+                  size="small"
+                  variant="default"
+                  ?disabled=${!this.newProfileName.trim() ||
+                    !!this.profiles[this.newProfileName.trim()]}
+                  @click=${() => this.addProfile()}
+                >
+                  <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                  Add Profile
+                </sl-button>
+              </div>
+              ${this.profiles[this.newProfileName.trim()]
+                ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A profile named "${this.newProfileName.trim()}" already exists.</small>`
+                : nothing}
             `
           : nothing}
       </div>
@@ -3698,12 +3773,24 @@ export class ScionPageAdminServerConfig extends LitElement {
     const updated = { ...this.profiles };
     const profile = { ...updated[name] };
     if (tier === 'disk') {
-      profile.resources = { ...(profile.resources || {}), disk: value || undefined };
+      const base: ResourceSpec = { ...(profile.resources || {}) };
+      if (value) {
+        base.disk = value;
+      } else {
+        delete base.disk;
+      }
+      profile.resources = base;
     } else {
       const existing = profile.resources?.[tier] || {};
+      const tierObj = { ...existing };
+      if (value) {
+        tierObj[subField] = value;
+      } else {
+        delete tierObj[subField];
+      }
       profile.resources = {
         ...(profile.resources || {}),
-        [tier]: { ...existing, [subField]: value || undefined },
+        [tier]: tierObj,
       };
     }
     updated[name] = profile;
@@ -3711,17 +3798,14 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private addProfile(): void {
-    const baseName = 'new-profile';
-    let name = baseName;
-    let i = 1;
-    while (this.profiles[name]) {
-      name = `${baseName}-${i++}`;
-    }
+    const name = this.newProfileName.trim();
+    if (!name || this.profiles[name]) return;
     const runtimeNames = Object.keys(this.runtimes);
     this.profiles = {
       ...this.profiles,
       [name]: { runtime: runtimeNames[0] || '' },
     };
+    this.newProfileName = '';
   }
 
   private removeProfile(name: string): void {
@@ -3747,14 +3831,29 @@ export class ScionPageAdminServerConfig extends LitElement {
           : configNames.map((name) => this.renderHarnessConfigEntry(name, !!hcReadOnly))}
         ${!hcReadOnly
           ? html`
-              <sl-button
-                size="small"
-                variant="default"
-                @click=${() => this.addHarnessConfig()}
-              >
-                <sl-icon slot="prefix" name="plus-circle"></sl-icon>
-                Add Harness Config
-              </sl-button>
+              <div class="add-entry-row">
+                <sl-input
+                  size="small"
+                  placeholder="Config name (e.g. claude-code, aider)"
+                  value=${this.newHarnessConfigName}
+                  @sl-input=${(e: Event) => {
+                    this.newHarnessConfigName = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>
+                <sl-button
+                  size="small"
+                  variant="default"
+                  ?disabled=${!this.newHarnessConfigName.trim() ||
+                    !!this.harnessConfigsMap[this.newHarnessConfigName.trim()]}
+                  @click=${() => this.addHarnessConfig()}
+                >
+                  <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                  Add Harness Config
+                </sl-button>
+              </div>
+              ${this.harnessConfigsMap[this.newHarnessConfigName.trim()]
+                ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A config named "${this.newHarnessConfigName.trim()}" already exists.</small>`
+                : nothing}
             `
           : nothing}
       </div>
@@ -3769,6 +3868,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     } catch {
       jsonStr = String(value);
     }
+    const jsonError = this.harnessConfigErrors[name];
     return html`
       <sl-card class="runtime-card">
         <div slot="header" style="display:flex;align-items:center;justify-content:space-between;">
@@ -3791,11 +3891,14 @@ export class ScionPageAdminServerConfig extends LitElement {
             resize="auto"
             value=${jsonStr}
             ?disabled=${readOnly}
-            style="font-family: monospace; font-size: 0.8125rem;"
+            style="font-family: monospace; font-size: 0.8125rem;${jsonError ? ' --sl-input-border-color: var(--sl-color-danger-600);' : ''}"
             @sl-change=${(e: Event) => {
               this.updateHarnessConfigJson(name, (e.target as HTMLTextAreaElement).value);
             }}
           ></sl-textarea>
+          ${jsonError
+            ? html`<small class="hint" style="color:var(--sl-color-danger-600);">Invalid JSON: ${jsonError}</small>`
+            : nothing}
         </div>
       </sl-card>
     `;
@@ -3807,23 +3910,27 @@ export class ScionPageAdminServerConfig extends LitElement {
       const updated = { ...this.harnessConfigsMap };
       updated[name] = parsed;
       this.harnessConfigsMap = updated;
-    } catch {
-      // Invalid JSON — don't update state; leave the textarea as-is until
-      // the user fixes it. A save attempt will send the last valid parse.
+      // Clear any previous error
+      const errors = { ...this.harnessConfigErrors };
+      delete errors[name];
+      this.harnessConfigErrors = errors;
+    } catch (e) {
+      // Store the error for display
+      this.harnessConfigErrors = {
+        ...this.harnessConfigErrors,
+        [name]: e instanceof Error ? e.message : 'Invalid JSON',
+      };
     }
   }
 
   private addHarnessConfig(): void {
-    const baseName = 'new-config';
-    let name = baseName;
-    let i = 1;
-    while (this.harnessConfigsMap[name]) {
-      name = `${baseName}-${i++}`;
-    }
+    const name = this.newHarnessConfigName.trim();
+    if (!name || this.harnessConfigsMap[name]) return;
     this.harnessConfigsMap = {
       ...this.harnessConfigsMap,
       [name]: { harness: 'claude-code' },
     };
+    this.newHarnessConfigName = '';
   }
 
   private removeHarnessConfig(name: string): void {
