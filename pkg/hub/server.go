@@ -1097,6 +1097,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			srv.oidcKeyManager = oidcMgr
 			srv.oidcIssuerURL = oidcIssuerURL
 
+			// Start background loops for key cleanup and cross-instance refresh.
+			oidcMgr.StartCleanupLoop(ctx)
+			oidcMgr.StartRefreshLoop(ctx)
+
 			// OIDC identity token lifetime: use config if set, else default 15m
 			srv.oidcTokenLifetime = 15 * time.Minute
 			if cfg.OIDCConfig.TokenLifetime > 0 {
