@@ -337,28 +337,28 @@ func (c *HubClient) RegisterTeamsLink(ctx context.Context, teamsUserID string) (
 
 // CheckTeamsLinkStatus polls the hub for the status of a pending identity link.
 // GET /api/v1/teams/link/status?teams_user_id=...
-func (c *HubClient) CheckTeamsLinkStatus(ctx context.Context, teamsUserID string) (string, string, error) {
+func (c *HubClient) CheckTeamsLinkStatus(ctx context.Context, teamsUserID string) (status string, userID string, email string, err error) {
 	u := fmt.Sprintf("%s/api/v1/teams/link/status?teams_user_id=%s",
 		c.hubURL, url.QueryEscape(teamsUserID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("create link status request: %w", err)
+		return "", "", "", fmt.Errorf("create link status request: %w", err)
 	}
 
 	if err := c.signRequest(req); err != nil {
-		return "", "", fmt.Errorf("sign request: %w", err)
+		return "", "", "", fmt.Errorf("sign request: %w", err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("link status request failed: %w", err)
+		return "", "", "", fmt.Errorf("link status request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return "", "", fmt.Errorf("link status returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", "", "", fmt.Errorf("link status returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result struct {
@@ -369,15 +369,17 @@ func (c *HubClient) CheckTeamsLinkStatus(ctx context.Context, teamsUserID string
 		} `json:"user,omitempty"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", "", fmt.Errorf("decode link status response: %w", err)
+		return "", "", "", fmt.Errorf("decode link status response: %w", err)
 	}
 
-	userID := ""
+	uid := ""
+	em := ""
 	if result.User != nil {
-		userID = result.User.ID
+		uid = result.User.ID
+		em = result.User.Email
 	}
 
-	return result.Status, userID, nil
+	return result.Status, uid, em, nil
 }
 
 // generateLinkCode produces a 6-character uppercase alphanumeric code using

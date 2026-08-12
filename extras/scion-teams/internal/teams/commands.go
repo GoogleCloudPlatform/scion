@@ -21,21 +21,47 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
+// pendingTeamsLink tracks an in-progress identity linking registration that is
+// polling the hub for confirmation.
+type pendingTeamsLink struct {
+	Code        string
+	TeamsUserID string
+	Activity    *Activity // original activity, used for sending replies
+	Cancel      context.CancelFunc
+	ExpiresAt   time.Time
+}
+
 // CommandHandler processes bot commands from incoming message activities.
 type CommandHandler struct {
-	broker *TeamsBroker
-	log    *slog.Logger
+	broker       *TeamsBroker
+	log          *slog.Logger
+	pendingMu    sync.Mutex
+	pendingLinks map[string]*pendingTeamsLink // keyed by teamsUserID
 }
 
 // NewCommandHandler creates a new CommandHandler.
 func NewCommandHandler(broker *TeamsBroker, log *slog.Logger) *CommandHandler {
 	return &CommandHandler{
-		broker: broker,
-		log:    log,
+		broker:       broker,
+		log:          log,
+		pendingLinks: make(map[string]*pendingTeamsLink),
 	}
+}
+
+// Close cancels all pending polling goroutines.
+func (h *CommandHandler) Close() {
+	h.pendingMu.Lock()
+	defer h.pendingMu.Unlock()
+	for _, link := range h.pendingLinks {
+		if link.Cancel != nil {
+			link.Cancel()
+		}
+	}
+	h.pendingLinks = make(map[string]*pendingTeamsLink)
 }
 
 // Handle checks if the activity text starts with a known command and dispatches it.
@@ -560,7 +586,100 @@ func (h *CommandHandler) handleRegister(ctx context.Context, activity *Activity)
 		URL:   linkURL,
 	})
 
-	return h.sendCardReply(ctx, activity, card)
+	if err := h.sendCardReply(ctx, activity, card); err != nil {
+		return err
+	}
+
+	// Cancel any existing pending link for this user before starting a new one.
+	h.pendingMu.Lock()
+	if old, ok := h.pendingLinks[teamsUserID]; ok && old.Cancel != nil {
+		old.Cancel()
+	}
+
+	pollCtx, pollCancel := context.WithCancel(context.Background())
+	h.pendingLinks[teamsUserID] = &pendingTeamsLink{
+		Code:        code,
+		TeamsUserID: teamsUserID,
+		Activity:    activity,
+		Cancel:      pollCancel,
+		ExpiresAt:   time.Now().Add(15 * time.Minute),
+	}
+	h.pendingMu.Unlock()
+
+	go h.pollForConfirmation(pollCtx, activity, teamsUserID, code, pollCancel)
+
+	return nil
+}
+
+// pollForConfirmation polls the hub in the background until the identity link
+// is confirmed or the code expires (15 minutes). On confirmation it saves the
+// user mapping and sends a reply to the conversation.
+func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Activity, teamsUserID, code string, cancel context.CancelFunc) {
+	defer cancel()
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	deadline := time.Now().Add(15 * time.Minute)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-ticker.C:
+			if t.After(deadline) {
+				// Clean up expired pending link.
+				h.pendingMu.Lock()
+				if cur, ok := h.pendingLinks[teamsUserID]; ok && cur.Code == code {
+					delete(h.pendingLinks, teamsUserID)
+				}
+				h.pendingMu.Unlock()
+				return
+			}
+
+			checkCtx, checkCancel := context.WithTimeout(ctx, 10*time.Second)
+			status, userID, email, err := h.broker.hubClient.CheckTeamsLinkStatus(checkCtx, teamsUserID)
+			checkCancel()
+
+			if err != nil {
+				h.log.Debug("Poll check failed", "error", err, "teams_user_id", teamsUserID)
+				continue
+			}
+
+			if status == "confirmed" && userID != "" {
+				// Save user mapping.
+				h.broker.mu.Lock()
+				store := h.broker.store
+				h.broker.mu.Unlock()
+
+				if store != nil {
+					mapping := &TeamsUserMapping{
+						TeamsUserID:      teamsUserID,
+						TeamsDisplayName: activity.From.Name,
+						ScionUserID:      userID,
+						ScionEmail:       email,
+						LinkedAt:         time.Now(),
+					}
+					if err := store.CreateUserMapping(ctx, mapping); err != nil {
+						h.log.Error("Failed to save user mapping", "error", err)
+					}
+				}
+
+				// Send confirmation reply.
+				replyCtx, replyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = h.sendReply(replyCtx, activity, fmt.Sprintf("Linked! Your Teams account is now connected to Scion user **%s**.", email))
+				replyCancel()
+
+				// Clean up pending link.
+				h.pendingMu.Lock()
+				if cur, ok := h.pendingLinks[teamsUserID]; ok && cur.Code == code {
+					delete(h.pendingLinks, teamsUserID)
+				}
+				h.pendingMu.Unlock()
+				return
+			}
+		}
+	}
 }
 
 // handleUnregister removes the user's Teams-to-Scion identity link.

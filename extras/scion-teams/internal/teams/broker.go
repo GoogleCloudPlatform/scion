@@ -545,8 +545,14 @@ func (b *TeamsBroker) Close() error {
 	serverRunning := b.serverRunning
 	store := b.store
 	publishLock := b.publishLock
+	commandHandler := b.commandHandler
 	b.serverRunning = false
 	b.mu.Unlock()
+
+	// Cancel pending polling goroutines in the command handler.
+	if commandHandler != nil {
+		commandHandler.Close()
+	}
 
 	// Release advisory lock first (orderly, no OnLost).
 	if publishLock != nil {
@@ -759,7 +765,54 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		return nil
 	}
 
-	topic := "teams.message"
+	// Resolve the channel link so we can build the canonical topic.
+	// Thread-based channels append ";messageid=..." to the conversation ID;
+	// strip that suffix so we match the channel-level link stored during setup.
+	convID := stripThreadSuffix(activity.Conversation.ID)
+
+	b.mu.Lock()
+	store := b.store
+	b.mu.Unlock()
+
+	var link *ChannelLink
+	if store != nil {
+		var err error
+		link, err = store.GetChannelLink(ctx, convID)
+		if err != nil {
+			b.log.Warn("Error looking up channel link for topic routing", "error", err)
+		}
+	}
+
+	if link == nil {
+		b.log.Warn("No channel link found, cannot route message to hub",
+			"conversation_id", activity.Conversation.ID,
+		)
+		return nil
+	}
+
+	// Determine the target agent slug: prefer mention-routed recipient, then
+	// the channel's default agent.
+	agentSlug := link.DefaultAgent
+	if msg.Recipient != "" {
+		slug := msg.Recipient
+		if strings.HasPrefix(slug, "agent:") {
+			slug = strings.TrimPrefix(slug, "agent:")
+		}
+		agentSlug = slug
+	}
+
+	if agentSlug == "" {
+		b.log.Warn("No agent slug resolved for message, cannot build topic",
+			"conversation_id", activity.Conversation.ID,
+			"project_id", link.ProjectID,
+		)
+		return nil
+	}
+
+	// Populate Channel on the structured message so the hub can correlate.
+	msg.Channel = link.ProjectID
+
+	topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", link.ProjectID, agentSlug)
 	if err := b.hubClient.DeliverInbound(ctx, topic, msg); err != nil {
 		b.log.Error("Failed to deliver message to hub",
 			"error", err,
@@ -773,6 +826,16 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		"sender", msg.Sender,
 	)
 	return nil
+}
+
+// stripThreadSuffix removes the ";messageid=..." suffix that Teams appends to
+// conversation IDs for thread-based replies. This lets us match the
+// channel-level conversation ID stored during setup.
+func stripThreadSuffix(conversationID string) string {
+	if idx := strings.Index(conversationID, ";messageid="); idx != -1 {
+		return conversationID[:idx]
+	}
+	return conversationID
 }
 
 // extractMentionTarget extracts an agent name from the beginning of

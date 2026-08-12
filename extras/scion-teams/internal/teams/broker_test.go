@@ -745,3 +745,158 @@ func TestBroker_Publish_ThreadIDRouting(t *testing.T) {
 
 	assert.Contains(t, receivedPath, "thread-123")
 }
+
+func TestBroker_HandleMessage_CanonicalTopic(t *testing.T) {
+	// Verify that inbound messages are delivered with the canonical topic
+	// format: scion.project.<projectId>.agent.<agentSlug>.messages
+
+	var receivedTopic string
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload inboundPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		receivedTopic = payload.Topic
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hubServer.Close()
+
+	broker := NewBroker(slog.Default())
+	broker.Configure(map[string]string{
+		"app_id":     "bot-id",
+		"app_secret": "secret",
+		"tenant_id":  "tenant",
+		"hub_url":    hubServer.URL,
+		"hmac_key":   "dGVzdC1rZXk=",
+		"broker_id":  "teams-broker-1",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
+	})
+	t.Cleanup(func() { broker.Close() })
+
+	ctx := context.Background()
+
+	// Create a channel link with a default agent.
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID: "conv-topic",
+		ProjectID:      "proj-42",
+		ProjectSlug:    "my-project",
+		DefaultAgent:   "my-agent",
+		LinkedAt:       time.Now(),
+		Active:         true,
+	}))
+
+	activity := &Activity{
+		Type: "message",
+		ID:   "act-topic",
+		Text: "Hello there!",
+		From: ChannelAccount{ID: "user-1", Name: "User", AadObjectID: "aad-1"},
+		Conversation: ConversationAccount{
+			ID: "conv-topic",
+		},
+		ServiceURL: "https://smba.trafficmanager.net/test/",
+	}
+
+	_, err := broker.HandleActivity(ctx, activity)
+	require.NoError(t, err)
+
+	assert.Equal(t, "scion.project.proj-42.agent.my-agent.messages", receivedTopic)
+}
+
+func TestBroker_HandleMessage_ThreadSuffix(t *testing.T) {
+	// Verify that thread-based conversation IDs (with ;messageid= suffix) are
+	// correctly matched to channel links stored by the base conversation ID.
+
+	var receivedTopic string
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload inboundPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		receivedTopic = payload.Topic
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hubServer.Close()
+
+	broker := NewBroker(slog.Default())
+	broker.Configure(map[string]string{
+		"app_id":     "bot-id",
+		"app_secret": "secret",
+		"tenant_id":  "tenant",
+		"hub_url":    hubServer.URL,
+		"hmac_key":   "dGVzdC1rZXk=",
+		"broker_id":  "teams-broker-1",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
+	})
+	t.Cleanup(func() { broker.Close() })
+
+	ctx := context.Background()
+
+	// Channel link stored by base conversation ID (no thread suffix).
+	baseConvID := "19:e4e1805b28e142ce9ee9be354816a319@thread.tacv2"
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID: baseConvID,
+		ProjectID:      "proj-thread",
+		ProjectSlug:    "thread-project",
+		DefaultAgent:   "thread-agent",
+		LinkedAt:       time.Now(),
+		Active:         true,
+	}))
+
+	// Inbound activity with thread suffix on conversation ID.
+	activity := &Activity{
+		Type: "message",
+		ID:   "act-thread",
+		Text: "A reply in the thread.",
+		From: ChannelAccount{ID: "user-2", Name: "User2", AadObjectID: "aad-2"},
+		Conversation: ConversationAccount{
+			ID: baseConvID + ";messageid=1786491412694",
+		},
+		ServiceURL: "https://smba.trafficmanager.net/test/",
+	}
+
+	_, err := broker.HandleActivity(ctx, activity)
+	require.NoError(t, err)
+
+	assert.Equal(t, "scion.project.proj-thread.agent.thread-agent.messages", receivedTopic)
+}
+
+func TestBroker_HandleMessage_NoChannelLink(t *testing.T) {
+	// Verify that messages without a channel link are dropped with a warning,
+	// not delivered with a wrong topic.
+
+	hubCalled := false
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hubServer.Close()
+
+	broker := NewBroker(slog.Default())
+	broker.Configure(map[string]string{
+		"app_id":     "bot-id",
+		"app_secret": "secret",
+		"tenant_id":  "tenant",
+		"hub_url":    hubServer.URL,
+		"hmac_key":   "dGVzdC1rZXk=",
+		"broker_id":  "teams-broker-1",
+		"db_path":    filepath.Join(t.TempDir(), "test.db"),
+	})
+	t.Cleanup(func() { broker.Close() })
+
+	activity := &Activity{
+		Type: "message",
+		ID:   "act-nolink",
+		Text: "orphan message",
+		From: ChannelAccount{ID: "user-3", Name: "User3"},
+		Conversation: ConversationAccount{
+			ID: "conv-unknown",
+		},
+		ServiceURL: "https://smba.trafficmanager.net/test/",
+	}
+
+	_, err := broker.HandleActivity(context.Background(), activity)
+	require.NoError(t, err)
+	assert.False(t, hubCalled, "hub should not be called when no channel link exists")
+}
