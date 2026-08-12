@@ -710,16 +710,16 @@ type Server struct {
 	// statelessEmbeddedBroker is true when the embedded broker identity is a
 	// replica-independent API adapter rather than a process-owned control channel.
 	statelessEmbeddedBroker bool
-	runtimeReloadFunc       func() bool        // Callback to reload the co-located broker runtime; returns true if swapped
-	workstation             bool               // True when running in workstation (non-production) mode
+	runtimeReloadFunc       func() bool // Callback to reload the co-located broker runtime; returns true if swapped
+	workstation             bool        // True when running in workstation (non-production) mode
 	// webdavLocks stores per-project WebDAV lock systems keyed by project ID.
 	// This replaces the per-request webdav.NewMemLS() so that locks survive
 	// across HTTP requests within a single instance.
-	webdavLocks sync.Map // map[string]webdav.LockSystem
-	scheduler               *Scheduler         // Unified scheduler for recurring tasks
-	cleanupOnce             sync.Once          // Ensures CleanupResources runs only once
-	ctx                     context.Context    // Server-lifetime context; cancelled on Shutdown
-	ctxCancel               context.CancelFunc // Cancels ctx
+	webdavLocks sync.Map           // map[string]webdav.LockSystem
+	scheduler   *Scheduler         // Unified scheduler for recurring tasks
+	cleanupOnce sync.Once          // Ensures CleanupResources runs only once
+	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
+	ctxCancel   context.CancelFunc // Cancels ctx
 
 	logQueryService  *LogQueryService         // Cloud Logging query service (nil = disabled)
 	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)

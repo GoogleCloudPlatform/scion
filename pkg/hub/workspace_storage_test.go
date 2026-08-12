@@ -487,7 +487,7 @@ func TestWebDAVSafetyGate_WriteMethodsBlocked(t *testing.T) {
 
 	project, _ := createTestHubManagedProject(t, srv, "WebDAV Gate Test")
 
-	blockedMethods := []string{"PUT", "DELETE", "MKCOL", "MOVE"}
+	blockedMethods := []string{"PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH"}
 	for _, method := range blockedMethods {
 		t.Run(method, func(t *testing.T) {
 			rec := doRequest(t, srv, method,

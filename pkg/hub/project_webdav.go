@@ -89,9 +89,9 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	// Phase 0 safety gate: reject write operations on Cloud Run without durable storage.
 	if s.workspaceWriteBlocked() {
 		switch r.Method {
-		case "PUT", "DELETE", "MKCOL", "MOVE", "PROPPATCH":
+		case "PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH":
 			writeError(w, http.StatusServiceUnavailable, "workspace_writes_unavailable",
-				"Workspace writes are not available in this deployment configuration. Configure durable workspace storage (NFS) to enable file editing.", nil)
+				errWorkspaceWritesUnavailable, nil)
 			return
 		}
 	}
@@ -99,7 +99,13 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	// Look up or create a per-project lock store so that WebDAV locks
 	// survive across HTTP requests within a single instance. Previously,
 	// NewMemLS() was called per-request, making locks completely ephemeral.
-	lockStore, _ := s.webdavLocks.LoadOrStore(projectID, webdav.NewMemLS())
+	// Use Load first to avoid allocating a new MemLS on every request.
+	var lockStore interface{}
+	if ls, ok := s.webdavLocks.Load(projectID); ok {
+		lockStore = ls
+	} else {
+		lockStore, _ = s.webdavLocks.LoadOrStore(projectID, webdav.NewMemLS())
+	}
 
 	handler := &webdav.Handler{
 		Prefix:     prefix,
@@ -196,7 +202,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 
 	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
 	// The client should trigger a cache/refresh to populate it.
-	if !hasProjectCache(project.Slug) {
+	if !s.hasProjectCache(project.Slug) {
 		slog.Debug("linked project cache not yet populated",
 			"project_id", project.ID, "slug", project.Slug)
 	}

@@ -296,8 +296,9 @@ func TestProjectCacheRefresh_MethodNotAllowed(t *testing.T) {
 // ============================================================================
 
 func TestHasProjectCache(t *testing.T) {
+	srv, _ := testServer(t)
 	// Non-existent slug should return false
-	assert.False(t, hasProjectCache("non-existent-slug-12345"))
+	assert.False(t, srv.hasProjectCache("non-existent-slug-12345"))
 }
 
 // ============================================================================

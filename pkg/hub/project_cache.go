@@ -458,8 +458,10 @@ func (s *Server) findConnectedProvider(ctx context.Context, project *store.Proje
 }
 
 // hasProjectCache returns true if the hub has a cached copy of the project workspace.
-func hasProjectCache(slug string) bool {
-	cachePath, err := hubManagedProjectPath(slug)
+// This is a Server method so it uses the workspace-storage-aware path resolution,
+// avoiding false "cache not populated" warnings when NFS is configured.
+func (s *Server) hasProjectCache(slug string) bool {
+	cachePath, err := s.hubManagedProjectPath(slug)
 	if err != nil {
 		return false
 	}
