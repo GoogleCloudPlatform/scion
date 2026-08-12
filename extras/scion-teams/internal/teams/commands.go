@@ -225,7 +225,7 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 
 // completeSetup finishes the setup process by creating the channel link.
 func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, projectSlug string) error {
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		return h.sendReply(ctx, activity, "Setup failed: store not initialized.")
 	}
@@ -302,7 +302,7 @@ func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, 
 // handleUnlink removes the channel link for the current conversation.
 // Only the user who created the link is allowed to unlink it.
 func (h *CommandHandler) handleUnlink(ctx context.Context, activity *Activity) error {
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		return h.sendReply(ctx, activity, "Unlink failed: store not initialized.")
 	}
@@ -364,7 +364,7 @@ func (h *CommandHandler) handleAgents(ctx context.Context, activity *Activity) e
 	}
 
 	// Cache agent slugs in store.
-	store := h.broker.store
+	store := h.getStore()
 	if store != nil {
 		slugs := make([]string, len(agents))
 		for i, a := range agents {
@@ -551,7 +551,7 @@ func (h *CommandHandler) handleRegister(ctx context.Context, activity *Activity)
 	}
 
 	// Check if already linked.
-	store := h.broker.store
+	store := h.getStore()
 	if store != nil {
 		existing, err := store.GetUserMapping(ctx, teamsUserID)
 		if err != nil {
@@ -676,9 +676,7 @@ func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Acti
 
 			if status == "confirmed" && userID != "" {
 				// Save user mapping.
-				h.broker.mu.Lock()
-				store := h.broker.store
-				h.broker.mu.Unlock()
+				store := h.getStore()
 
 				if store != nil {
 					mapping := &TeamsUserMapping{
@@ -720,7 +718,7 @@ func (h *CommandHandler) handleUnregister(ctx context.Context, activity *Activit
 		return h.sendReply(ctx, activity, "Could not determine your Teams user ID. Please try again.")
 	}
 
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		return h.sendReply(ctx, activity, "Store not initialized. Cannot unregister.")
 	}
@@ -791,7 +789,7 @@ func (h *CommandHandler) getStore() Store {
 // resolveChannelLink looks up the channel link for the current conversation.
 // Returns an error (with a reply sent to the user) if not linked.
 func (h *CommandHandler) resolveChannelLink(ctx context.Context, activity *Activity) (*ChannelLink, error) {
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		_ = h.sendReply(ctx, activity, "Store not initialized.")
 		return nil, fmt.Errorf("store not initialized")

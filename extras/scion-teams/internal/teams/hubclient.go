@@ -260,7 +260,7 @@ func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
 // ListProjectsForUser returns projects owned by or associated with a specific user.
 // GET /api/v1/projects?ownerId=<ownerID>
 func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
-	u := c.hubURL + "/api/v1/projects?ownerId=" + ownerID
+	u := c.hubURL + "/api/v1/projects?ownerId=" + url.QueryEscape(ownerID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
