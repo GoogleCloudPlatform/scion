@@ -736,6 +736,9 @@ type Server struct {
 	// Plugin manager for broker integration admin API (nil = no integrations)
 	pluginManager IntegrationManager
 
+	// Web chat store for webchat_* tables (thread prefs, etc.) — nil = disabled.
+	webChatStore WebChatStore
+
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -1864,6 +1867,13 @@ func (s *Server) GetMessageBrokerProxy() *MessageBrokerProxy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.messageBrokerProxy
+}
+
+// SetWebChatStore sets the webchat store for thread prefs and related state.
+func (s *Server) SetWebChatStore(store WebChatStore) {
+	s.mu.Lock()
+	s.webChatStore = store
+	s.mu.Unlock()
 }
 
 // SetPluginManager sets the plugin manager for broker integration admin API.
@@ -3426,6 +3436,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/messages", s.handleMessages)
 	s.mux.HandleFunc("/api/v1/messages/", s.handleMessageRoutes)
 	s.mux.HandleFunc("/api/v1/message-channels", s.handleMessageChannels)
+
+	// Chat thread prefs (Phase 3 — visibility mode persistence)
+	s.mux.HandleFunc("/api/v1/chat/prefs", s.handleChatPrefs)
 
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect)

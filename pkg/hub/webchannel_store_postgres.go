@@ -102,3 +102,33 @@ DO UPDATE SET
 	}
 	return nil
 }
+
+// GetThreadPrefs returns the display preferences for the given (user, project, agent) triple.
+// Returns default prefs (visibility_mode = "conversation") if no row exists.
+func (s *pgWebChatStore) GetThreadPrefs(ctx context.Context, userID, projectID, agentID string) (ThreadPrefs, error) {
+	const query = `SELECT visibility_mode FROM webchat_thread_prefs WHERE user_id = $1 AND project_id = $2 AND agent_id = $3`
+	var mode string
+	err := s.db.QueryRowContext(ctx, query, userID, projectID, agentID).Scan(&mode)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return ThreadPrefs{VisibilityMode: "conversation"}, nil
+		}
+		return ThreadPrefs{}, fmt.Errorf("webchat store: get thread prefs: %w", err)
+	}
+	return ThreadPrefs{VisibilityMode: mode}, nil
+}
+
+// SetThreadPrefs upserts the display preferences for the given (user, project, agent) triple.
+func (s *pgWebChatStore) SetThreadPrefs(ctx context.Context, userID, projectID, agentID string, prefs ThreadPrefs) error {
+	const query = `
+INSERT INTO webchat_thread_prefs (user_id, project_id, agent_id, visibility_mode)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (user_id, project_id, agent_id)
+DO UPDATE SET visibility_mode = EXCLUDED.visibility_mode
+`
+	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, prefs.VisibilityMode)
+	if err != nil {
+		return fmt.Errorf("webchat store: set thread prefs: %w", err)
+	}
+	return nil
+}

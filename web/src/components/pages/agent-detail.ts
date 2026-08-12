@@ -1094,6 +1094,7 @@ export class ScionPageAgentDetail extends LitElement {
         agentId=${this.agentId}
         agentName=${agent.name || ''}
         ?canSend=${can(agent._capabilities, 'message')}
+        ?showVisibilityToggle=${true}
         style="display: ${this.chatViewActive ? '' : 'none'}"
       ></scion-chat-thread>
       <scion-agent-message-viewer

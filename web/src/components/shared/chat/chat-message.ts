@@ -72,6 +72,22 @@ export class ScionChatMessage extends LitElement {
   @property()
   channel = '';
 
+  /** Visibility level: "normal", "verbose", or "full". */
+  @property()
+  visibility = 'normal';
+
+  /** Message type (e.g. "assistant-reply", "state-change"). */
+  @property()
+  messageType = '';
+
+  /** Dispatch state: "pending", "dispatched", or "failed". */
+  @property()
+  dispatchState = '';
+
+  /** Reason for dispatch failure. */
+  @property()
+  dispatchFailureReason = '';
+
   /** File attachment paths. */
   @property({ type: Array })
   attachments: string[] = [];
@@ -357,6 +373,101 @@ export class ScionChatMessage extends LitElement {
     .attachment-chip sl-icon {
       font-size: 0.75rem;
     }
+
+    /* Verbose (recessed) rendering — no bubble, muted text, small label */
+    .message-wrapper.verbose .bubble-content {
+      background: none;
+      padding: 0.25rem 0.75rem;
+      border-radius: 0;
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.8125rem;
+      font-style: italic;
+    }
+
+    .verbose-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.625rem;
+      font-weight: 500;
+      color: var(--scion-text-muted, #94a3b8);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.125rem;
+    }
+
+    .verbose-label sl-icon {
+      font-size: 0.6875rem;
+    }
+
+    /* Full/trace rendering — collapsed details block */
+    .trace-block {
+      padding: 0.125rem 1rem;
+    }
+
+    .trace-block details {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
+      background: var(--scion-bg-subtle, #f8fafc);
+      max-width: min(80%, 700px);
+    }
+
+    .trace-block summary {
+      padding: 0.375rem 0.75rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+    }
+
+    .trace-block summary sl-icon {
+      font-size: 0.75rem;
+    }
+
+    .trace-content {
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      white-space: pre-wrap;
+      font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    /* Delivery state indicators */
+    .delivery-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      margin-top: 0.125rem;
+      font-size: 0.625rem;
+      color: var(--scion-text-muted, #94a3b8);
+    }
+
+    .delivery-state sl-icon {
+      font-size: 0.6875rem;
+    }
+
+    .delivery-state.pending sl-icon {
+      color: var(--scion-text-muted, #94a3b8);
+    }
+
+    .delivery-state.dispatched sl-icon {
+      color: var(--scion-success-500, #22c55e);
+    }
+
+    .delivery-state.failed {
+      color: var(--scion-danger-600, #dc2626);
+    }
+
+    .delivery-state.failed sl-icon {
+      color: var(--scion-danger-600, #dc2626);
+    }
   `;
 
   override connectedCallback(): void {
@@ -410,17 +521,31 @@ export class ScionChatMessage extends LitElement {
   }
 
   override render() {
+    // Full/trace messages render as a collapsed details block.
+    if (this.visibility === 'full') {
+      return this.renderTraceBlock();
+    }
+
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
+    const visClass = this.visibility === 'verbose' ? ' verbose' : '';
 
     return html`
-      <div class="message-wrapper ${dirClass}">
+      <div class="message-wrapper ${dirClass}${visClass}">
         ${this.showHeader && this.fromAgent
           ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">${this.getInitials()}</div>`
           : this.fromAgent
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
         <div class="bubble">
-          ${this.showHeader
+          ${this.visibility === 'verbose'
+            ? html`
+                <span class="verbose-label">
+                  <sl-icon name="arrow-return-right"></sl-icon>
+                  assistant reply
+                </span>
+              `
+            : nothing}
+          ${this.showHeader && this.visibility !== 'verbose'
             ? html`
                 <div class="bubble-header">
                   <span class="sender-name">${this.sender}</span>
@@ -431,11 +556,61 @@ export class ScionChatMessage extends LitElement {
           <div class="bubble-content">
             ${this.renderBody()}
           </div>
+          ${this.renderDeliveryState()}
           ${this.renderBadges()}
           ${this.renderAttachments()}
         </div>
       </div>
     `;
+  }
+
+  /** Render a collapsed trace block for full-visibility messages. */
+  private renderTraceBlock() {
+    return html`
+      <div class="trace-block">
+        <details>
+          <summary>
+            <sl-icon name="code-slash"></sl-icon>
+            Trace — ${this.sender} at ${this.formatTime()}
+          </summary>
+          <div class="trace-content">${this.body}</div>
+        </details>
+      </div>
+    `;
+  }
+
+  /** Render delivery state indicator for outbound (user-sent) messages. */
+  private renderDeliveryState() {
+    // Only show on user-sent messages with a dispatch state.
+    if (this.fromAgent || !this.dispatchState) return nothing;
+
+    switch (this.dispatchState) {
+      case 'pending':
+        return html`
+          <div class="delivery-state pending">
+            <sl-icon name="clock"></sl-icon>
+            Sending
+          </div>
+        `;
+      case 'dispatched':
+        return html`
+          <div class="delivery-state dispatched">
+            <sl-icon name="check2"></sl-icon>
+            Delivered
+          </div>
+        `;
+      case 'failed':
+        return html`
+          <sl-tooltip content=${this.dispatchFailureReason || 'Delivery failed'} hoist>
+            <div class="delivery-state failed">
+              <sl-icon name="exclamation-triangle"></sl-icon>
+              Failed
+            </div>
+          </sl-tooltip>
+        `;
+      default:
+        return nothing;
+    }
   }
 
   private renderBody() {
