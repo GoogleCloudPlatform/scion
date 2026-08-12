@@ -60,7 +60,7 @@ func NewWebChannelBus(log *slog.Logger, store WebChatStore) eventbus.EventBus {
 // the canonical message row or emit the core SSE frame (deliverToUser
 // handles both on the inprocess path).
 func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	if msg == nil {
+	if msg == nil || msg.ObserverOnly {
 		return nil
 	}
 
@@ -137,8 +137,15 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 		}
 	case projectcompat.TopicKindAgent:
 		// User → agent message: topic has the agent slug, recipient is the agent.
+		// NOTE(O1): agentID here is the slug from the topic, whereas for
+		// TopicKindUser above it is msg.SenderID (a UUID). This inconsistency
+		// must be normalized to a single identifier form before Phase 6 to
+		// avoid duplicate webchat_thread rows for the same conversation. See
+		// review nc-p1-rev-2 O1.
 		agentID = parsed.Actor
-		userID = msg.SenderID
+		if strings.HasPrefix(msg.Sender, "user:") {
+			userID = msg.SenderID
+		}
 	default:
 		// Broadcast or other — not conversation-scoped.
 		return "", "", "", false
