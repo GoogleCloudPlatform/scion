@@ -2798,6 +2798,94 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 	}
 }
 
+// TestAgentCreate_ProjectSlugResolution verifies that createAgent resolves a
+// project slug to its UUID, allowing clients to pass a project slug in the
+// projectId field instead of a UUID.
+func TestAgentCreate_ProjectSlugResolution(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a runtime broker
+	broker := &store.RuntimeBroker{
+		ID:     tid("host_slug_res"),
+		Slug:   "slug-res-host",
+		Name:   "Slug Res Host",
+		Status: store.BrokerStatusOnline,
+	}
+	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	// Create a project with a known slug
+	project := &store.Project{
+		ID:                     tid("project_slug_res"),
+		Slug:                   "my-cool-project",
+		Name:                   "My Cool Project",
+		GitRemote:              "github.com/test/slug-res-repo",
+		DefaultRuntimeBrokerID: broker.ID,
+		Created:                time.Now(),
+		Updated:                time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Register broker as provider
+	provider := &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}
+	if err := s.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	// Create agent using project SLUG instead of UUID
+	body := map[string]interface{}{
+		"name":      "Slug Resolved Agent",
+		"projectId": "my-cool-project", // slug, not UUID
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp CreateAgentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Agent == nil {
+		t.Fatal("expected agent in response")
+	}
+
+	// The agent should be created in the correct project (resolved from slug)
+	if resp.Agent.ProjectID != project.ID {
+		t.Errorf("expected agent.ProjectID to be %q (UUID), got %q", project.ID, resp.Agent.ProjectID)
+	}
+}
+
+// TestAgentCreate_ProjectSlugNotFound verifies that createAgent returns 404
+// when the projectId field contains a slug that does not match any project.
+func TestAgentCreate_ProjectSlugNotFound(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create agent using a non-existent project slug
+	body := map[string]interface{}{
+		"name":      "Ghost Agent",
+		"projectId": "non-existent-project", // slug that doesn't exist
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestEnrichAgents_ResolvesTemplateSlug verifies that enrichAgents populates
 // the Template field with the slug from TemplateID for agents that were created
 // before this fix (with UUIDs stored in Template).
