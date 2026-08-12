@@ -121,6 +121,15 @@ type Layer1Snapshot struct {
 	// Federation
 	FederationConfig *config.FederationConfig // nil when federation section not present
 
+	// Runtimes — map of named runtime configs (DB > bootstrap fallback)
+	Runtimes map[string]config.V1RuntimeConfig
+
+	// Profiles — map of named profile configs (DB > bootstrap fallback)
+	Profiles map[string]config.V1ProfileConfig
+
+	// HarnessConfigs — map of named harness configurations (DB > bootstrap fallback)
+	HarnessConfigs map[string]config.HarnessConfigEntry
+
 	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
 	// on this node — used for drift warnings.
 	EnvOverrides []string
@@ -675,6 +684,48 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 			}
 		}
 		snap.FederationConfig = &fedCfg
+	}
+
+	// Runtimes — extract map-of-objects from koanf subtree.
+	if k.Exists("runtimes") {
+		runtimesSub := k.Cut("runtimes")
+		if runtimesSub != nil && len(runtimesSub.Keys()) > 0 {
+			data, err := json.Marshal(runtimesSub.Raw())
+			if err == nil {
+				var runtimes map[string]config.V1RuntimeConfig
+				if json.Unmarshal(data, &runtimes) == nil {
+					snap.Runtimes = runtimes
+				}
+			}
+		}
+	}
+
+	// Profiles
+	if k.Exists("profiles") {
+		profilesSub := k.Cut("profiles")
+		if profilesSub != nil && len(profilesSub.Keys()) > 0 {
+			data, err := json.Marshal(profilesSub.Raw())
+			if err == nil {
+				var profiles map[string]config.V1ProfileConfig
+				if json.Unmarshal(data, &profiles) == nil {
+					snap.Profiles = profiles
+				}
+			}
+		}
+	}
+
+	// Harness configs
+	if k.Exists("harness_configs") {
+		hcSub := k.Cut("harness_configs")
+		if hcSub != nil && len(hcSub.Keys()) > 0 {
+			data, err := json.Marshal(hcSub.Raw())
+			if err == nil {
+				var harnessConfigs map[string]config.HarnessConfigEntry
+				if json.Unmarshal(data, &harnessConfigs) == nil {
+					snap.HarnessConfigs = harnessConfigs
+				}
+			}
+		}
 	}
 
 	return snap

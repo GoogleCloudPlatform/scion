@@ -2343,3 +2343,159 @@ func TestResetSection_RequiresAdmin(t *testing.T) {
 		t.Errorf("expected 403, got %d", rr.Code)
 	}
 }
+
+// --- GET after PUT: runtimes/profiles/harness_configs ---
+
+func TestGetServerConfigDB_RuntimesFromDB(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Seed runtimes into the DB.
+	fakeStore.seed("runtimes", json.RawMessage(`{"docker": {"type": "docker"}, "cloudrun": {"type": "cloudrun-instances"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	// Runtimes should be the DB values.
+	if len(resp.Runtimes) != 2 {
+		t.Fatalf("expected 2 runtimes, got %d", len(resp.Runtimes))
+	}
+	if resp.Runtimes["docker"].Type != "docker" {
+		t.Errorf("expected docker.type=docker, got %v", resp.Runtimes["docker"].Type)
+	}
+	if resp.Runtimes["cloudrun"].Type != "cloudrun-instances" {
+		t.Errorf("expected cloudrun.type=cloudrun-instances, got %v", resp.Runtimes["cloudrun"].Type)
+	}
+
+	// Section metadata should show source=db for runtimes.
+	if meta, ok := resp.SectionMeta["runtimes"]; ok {
+		if meta.Source != "db" {
+			t.Errorf("expected runtimes source=db, got %v", meta.Source)
+		}
+	} else {
+		t.Error("expected runtimes in section_metadata")
+	}
+}
+
+func TestGetServerConfigDB_ProfilesAndHarnessConfigsFromDB(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("profiles", json.RawMessage(`{"default": {"runtime": "cloudrun"}}`))
+	fakeStore.seed("harness_configs", json.RawMessage(`{"claude-code": {"harness": "claude-code", "image": "test:latest"}}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	if len(resp.Profiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(resp.Profiles))
+	}
+	if resp.Profiles["default"].Runtime != "cloudrun" {
+		t.Errorf("expected default.runtime=cloudrun, got %v", resp.Profiles["default"].Runtime)
+	}
+
+	if len(resp.HarnessConfigs) != 1 {
+		t.Fatalf("expected 1 harness config, got %d", len(resp.HarnessConfigs))
+	}
+	if resp.HarnessConfigs["claude-code"].Harness != "claude-code" {
+		t.Errorf("expected claude-code.harness=claude-code, got %v", resp.HarnessConfigs["claude-code"].Harness)
+	}
+}
+
+func TestGetServerConfigDB_MapSections_FileFallback(t *testing.T) {
+	// When no DB rows exist for runtimes/profiles/harness_configs, the file
+	// values should be served (loaded from settings.yaml via Layer-0 fallback).
+	srv, _, ops := newTestDBServer(t)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	// No DB rows — section metadata should show "default" (no bootstrap values either).
+	for _, sec := range []string{"runtimes", "profiles", "harness_configs"} {
+		if meta, ok := resp.SectionMeta[sec]; ok {
+			if meta.Source != "default" {
+				t.Errorf("expected %s source=default (no DB, no file), got %v", sec, meta.Source)
+			}
+		} else {
+			t.Errorf("expected %s in section_metadata", sec)
+		}
+	}
+}
+
+func TestPutThenGetServerConfigDB_RuntimesRoundTrip(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	// PUT runtimes.
+	putBody := `{
+		"runtimes": {"k8s": {"type": "kubernetes", "namespace": "agents"}}
+	}`
+	putReq := adminRequest(http.MethodPut, "/api/v1/admin/server-config", putBody)
+	putRR := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(putRR, putReq, ops)
+
+	if putRR.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", putRR.Code, putRR.Body.String())
+	}
+
+	// GET and verify the DB values are returned.
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET expected 200, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	if len(resp.Runtimes) != 1 {
+		t.Fatalf("expected 1 runtime, got %d", len(resp.Runtimes))
+	}
+	if resp.Runtimes["k8s"].Type != "kubernetes" {
+		t.Errorf("expected k8s.type=kubernetes, got %v", resp.Runtimes["k8s"].Type)
+	}
+	if resp.Runtimes["k8s"].Namespace != "agents" {
+		t.Errorf("expected k8s.namespace=agents, got %v", resp.Runtimes["k8s"].Namespace)
+	}
+
+	// Section metadata should show source=db after PUT.
+	if meta, ok := resp.SectionMeta["runtimes"]; ok {
+		if meta.Source != "db" {
+			t.Errorf("expected runtimes source=db after PUT, got %v", meta.Source)
+		}
+		if meta.Origin != "managed" {
+			t.Errorf("expected runtimes origin=managed after PUT, got %v", meta.Origin)
+		}
+	} else {
+		t.Error("expected runtimes in section_metadata")
+	}
+}

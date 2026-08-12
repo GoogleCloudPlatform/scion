@@ -255,6 +255,17 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
 		resp.Federation = v1Server.Federation
 	}
+
+	// Runtimes / Profiles / HarnessConfigs — DB values override file values.
+	if snap.Runtimes != nil {
+		resp.Runtimes = snap.Runtimes
+	}
+	if snap.Profiles != nil {
+		resp.Profiles = snap.Profiles
+	}
+	if snap.HarnessConfigs != nil {
+		resp.HarnessConfigs = snap.HarnessConfigs
+	}
 }
 
 // buildSectionMetadata reads the OperationalSettings cache to determine
