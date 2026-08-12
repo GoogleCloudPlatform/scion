@@ -31,9 +31,10 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData } from '../../shared/types.js';
+import type { PageData, Capabilities } from '../../shared/types.js';
+import { can } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/chat/chat-thread.js';
 
@@ -62,6 +63,16 @@ export class ScionPageChat extends LitElement {
   @state() private loadingThreads = false;
   @state() private selectedAgentId = '';
   @state() private selectedAgentName = '';
+  @state() private selectedAgentCanSend = false;
+
+  /** Cached agent capabilities keyed by agentId, fetched when a thread is selected. */
+  private agentCapabilities = new Map<string, Capabilities | undefined>();
+
+  /** Bound listener for SSE message events — used to refresh the thread rail. */
+  private _onUserMessage = this.handleUserMessage.bind(this);
+
+  /** Debounce timer for rail refresh to avoid rapid-fire reloads. */
+  private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   static override styles = css`
     :host {
@@ -252,12 +263,38 @@ export class ScionPageChat extends LitElement {
     super.connectedCallback();
     this.parseRoute();
     void this.loadThreads();
+
+    // Subscribe to SSE message events to refresh the thread rail (O5).
+    stateManager.addEventListener('user-message-created', this._onUserMessage);
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    stateManager.removeEventListener('user-message-created', this._onUserMessage);
+    if (this._refreshTimer) {
+      clearTimeout(this._refreshTimer);
+      this._refreshTimer = null;
+    }
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('pageData') && this.pageData) {
       this.parseRoute();
     }
+  }
+
+  /**
+   * Handle SSE user-message events — debounce and reload the thread rail.
+   * Uses a 2-second debounce to avoid rapid-fire reloads during bursts.
+   */
+  private handleUserMessage(): void {
+    if (this._refreshTimer) {
+      clearTimeout(this._refreshTimer);
+    }
+    this._refreshTimer = setTimeout(() => {
+      this._refreshTimer = null;
+      void this.loadThreads();
+    }, 2000);
   }
 
   /** Parse the current path to determine selected agent. */
@@ -271,8 +308,11 @@ export class ScionPageChat extends LitElement {
       // Update class for responsive layout
       if (newAgentId) {
         this.classList.add('thread-open');
+        // Fetch capabilities to gate the compose box (O3).
+        void this.fetchAgentCapabilities(newAgentId);
       } else {
         this.classList.remove('thread-open');
+        this.selectedAgentCanSend = false;
       }
     }
   }
@@ -345,6 +385,27 @@ export class ScionPageChat extends LitElement {
     }
   }
 
+  /** Fetch and cache agent capabilities to determine canSend. */
+  private async fetchAgentCapabilities(agentId: string): Promise<void> {
+    // Return cached value if available.
+    if (this.agentCapabilities.has(agentId)) {
+      this.selectedAgentCanSend = can(this.agentCapabilities.get(agentId), 'message');
+      return;
+    }
+
+    try {
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}`);
+      if (res.ok) {
+        const agent = (await res.json()) as { _capabilities?: Capabilities };
+        this.agentCapabilities.set(agentId, agent._capabilities);
+        this.selectedAgentCanSend = can(agent._capabilities, 'message');
+      }
+    } catch {
+      // On failure, fail-closed: disable send.
+      this.selectedAgentCanSend = false;
+    }
+  }
+
   /** Mark a thread as read when opened. */
   private async markThreadRead(agentId: string): Promise<void> {
     const projectId = await this.resolveProjectId();
@@ -373,6 +434,9 @@ export class ScionPageChat extends LitElement {
     this.selectedAgentName = thread.agentName || thread.agentSlug || thread.agentId;
     this.classList.add('thread-open');
     dispatchPageTitle(this, this.selectedAgentName, 'Chat');
+
+    // Fetch capabilities to gate the compose box (O3).
+    void this.fetchAgentCapabilities(thread.agentId);
 
     // Mark as read (AC19b — server-side watermark)
     void this.markThreadRead(thread.agentId);
@@ -449,7 +513,7 @@ export class ScionPageChat extends LitElement {
       <scion-chat-thread
         agentId=${this.selectedAgentId}
         agentName=${this.selectedAgentName}
-        ?canSend=${true}
+        ?canSend=${this.selectedAgentCanSend}
       ></scion-chat-thread>
     `;
   }

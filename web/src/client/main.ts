@@ -28,6 +28,7 @@ import type { PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
+import { isFeatureEnabled } from '../utils/feature-flags.js';
 
 /**
  * Strip the Vite base path prefix from a URL pathname so the client-side
@@ -426,6 +427,12 @@ async function renderRoute(path: string): Promise<void> {
     return;
   }
 
+  // Block /chat routes when the native_chat feature flag is disabled (O2).
+  if (CHAT_ROUTES.has(tag) && !isFeatureEnabled('web.native_chat')) {
+    navigateTo('/');
+    return;
+  }
+
   const shellType = getShellType(tag);
 
   // Lazy-load the page component module (and profile/chat shell if needed).
@@ -481,7 +488,13 @@ async function renderRoute(path: string): Promise<void> {
   } else {
     // Create the shell for the first time — clear any SSR-rendered content
     appContainer.innerHTML = '';
-    const shellTag = shellType === 'chat' ? 'scion-chat-shell' : shellType === 'profile' ? 'scion-profile-shell' : 'scion-app';
+    const SHELL_TAGS: Record<ShellType, string> = {
+      standalone: '', // handled above — standalone pages render without a shell
+      chat: 'scion-chat-shell',
+      profile: 'scion-profile-shell',
+      app: 'scion-app',
+    };
+    const shellTag = SHELL_TAGS[shellType] ?? 'scion-app';
     const shell = document.createElement(shellTag) as HTMLElement & {
       currentPath: string;
       user: User | null;

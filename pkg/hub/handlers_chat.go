@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // handleChatThreads handles GET /api/v1/chat/threads.
@@ -63,7 +65,7 @@ func (s *Server) handleChatThreads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Batch-fetch the last messages by ID.
+	// Batch-fetch the last messages by ID (design Section 5.3).
 	messageIDs := make([]string, 0, len(threads))
 	for _, t := range threads {
 		if t.LastMessageID != "" {
@@ -71,12 +73,13 @@ func (s *Server) handleChatThreads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	messageMap := make(map[string]lastMessageInfo, len(messageIDs))
-	for _, id := range messageIDs {
-		msg, err := s.store.GetMessage(r.Context(), id)
-		if err != nil || msg == nil {
-			continue
-		}
+	rawMessages, err := s.store.GetMessagesByIDs(r.Context(), messageIDs)
+	if err != nil {
+		rawMessages = nil // degrade gracefully — previews will be empty
+	}
+
+	messageMap := make(map[string]lastMessageInfo, len(rawMessages))
+	for id, msg := range rawMessages {
 		messageMap[id] = lastMessageInfo{
 			Msg:       truncatePreview(msg.Msg, 120),
 			Sender:    msg.Sender,
@@ -85,22 +88,51 @@ func (s *Server) handleChatThreads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build response entries, joining with agent info from the store.
+	// Batch-fetch agents by ID. Collect all agent IDs from threads, then
+	// look them up in a single query instead of N individual GetAgent calls.
+	agentIDs := make([]string, 0, len(threads))
+	for _, t := range threads {
+		agentIDs = append(agentIDs, t.AgentID)
+	}
+
+	agentMap, err := s.store.GetAgentsByIDs(r.Context(), agentIDs)
+	if err != nil {
+		agentMap = nil // degrade gracefully — names will be empty
+	}
+
+	// For agents not found by ID (may be stored as slugs), try slug lookup.
+	// Collect missing IDs and batch-query by slug using GetAgentBySlug.
+	// This path handles the case where webchat_thread stores slugs instead
+	// of UUIDs (see webchannel.go O1 comment).
+	slugLookups := make([]string, 0)
+	for _, t := range threads {
+		if _, ok := agentMap[t.AgentID]; !ok {
+			slugLookups = append(slugLookups, t.AgentID)
+		}
+	}
+	slugAgentMap := make(map[string]*store.Agent)
+	for _, slug := range slugLookups {
+		agent, err := s.store.GetAgentBySlug(r.Context(), projectID, slug)
+		if err == nil && agent != nil {
+			slugAgentMap[slug] = agent
+		}
+	}
+
+	// Build response entries, joining with pre-fetched data.
 	entries := make([]chatThreadEntry, 0, len(threads))
 	for _, t := range threads {
 		entry := chatThreadEntry{
 			AgentID: t.AgentID,
 		}
 
-		// Try to enrich with agent metadata from the store.
-		// The agentID in webchat_thread may be a slug or UUID depending on
-		// how the thread was created (see webchannel.go O1 comment).
-		agent, err := s.store.GetAgent(r.Context(), t.AgentID)
-		if err != nil {
-			// Try by slug within the project
-			agent, err = s.store.GetAgentBySlug(r.Context(), projectID, t.AgentID)
-		}
-		if err == nil && agent != nil {
+		// Enrich with agent metadata from the batch-fetched maps.
+		if agent, ok := agentMap[t.AgentID]; ok {
+			entry.AgentID = agent.ID
+			entry.AgentSlug = agent.Slug
+			entry.AgentName = agent.Name
+			entry.Phase = agent.Phase
+			entry.Activity = agent.Activity
+		} else if agent, ok := slugAgentMap[t.AgentID]; ok {
 			entry.AgentID = agent.ID
 			entry.AgentSlug = agent.Slug
 			entry.AgentName = agent.Name

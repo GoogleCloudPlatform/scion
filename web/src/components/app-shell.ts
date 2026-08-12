@@ -33,6 +33,7 @@ import './shared/debug-panel.js';
 import type { User } from '../shared/types.js';
 import type { AccessDeniedDetail } from '../client/api.js';
 import { showToast } from '../utils/toast.js';
+import { performLogout } from '../utils/auth.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
 
@@ -397,20 +398,10 @@ export class ScionApp extends LitElement {
 
   /**
    * Handle logout action.
-   * Uses the Vite BASE_URL to construct correct paths behind a reverse proxy.
+   * Delegates to shared performLogout() utility (design doc Section 4.1).
    */
   private handleLogout(): void {
-    const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
-    fetch(`${base}/auth/logout`, {
-      method: 'POST',
-      credentials: 'include',
-    })
-      .then(() => {
-        window.location.href = `${base}/auth/login`;
-      })
-      .catch((error) => {
-        console.error('Logout failed:', error);
-      });
+    performLogout();
   }
 }
 
