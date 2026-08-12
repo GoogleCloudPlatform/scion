@@ -194,6 +194,14 @@ scion start --harness claude my-agent
 **Hub Setup:**
 For Hub mode, the recommended approach is to assign a GCP Service Account to the agent at creation time.
 
+:::note[IAM-Gated Service Account Assignment]
+Binding a GCP Service Account to an agent on a Hub requires satisfying two authorization gates:
+1. **Hub Authorization**: The caller must have `ActionAssign` on the service account resource inside Scion.
+2. **GCP IAM Authorization**: If the Hub is configured with `gcp_iam_check_mode: enforce`, binding requires the caller to have Google Cloud's `iam.serviceAccounts.actAs` permission on the target service account. The Hub queries Google's **Policy Troubleshooter API v3** to evaluate this.
+   - If Policy Troubleshooter is unable to reach a decision (due to unknown conditions, or missing Hub reviewer permissions), the check **fails closed** and assignment is denied.
+   - Results are cached (60s TTL for allows, 10s TTL for denies) to optimize performance.
+:::
+
 Alternatively, to use an ADC file secret:
 ```bash
 # 1. Upload the ADC credential file (written to ~/.config/gcloud/application_default_credentials.json in container)
