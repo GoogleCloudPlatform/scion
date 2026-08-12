@@ -221,7 +221,7 @@ SELECT agent_id, COALESCE(last_message_id, ''), COALESCE(last_activity_at, ''), 
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: get threads: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var threads []WebChatThread
 	for rows.Next() {
