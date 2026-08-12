@@ -259,7 +259,11 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 	convID := stripThreadSuffix(activity.Conversation.ID)
 
 	// Check if already linked.
-	existing, _ := store.GetChannelLink(ctx, convID)
+	existing, err := store.GetChannelLink(ctx, convID)
+	if err != nil {
+		h.log.Error("Failed to check existing channel link", "error", err)
+		return h.respondWithUpdatedCard(activity, "An error occurred while checking existing link."), nil
+	}
 	if existing != nil {
 		return h.respondWithUpdatedCard(activity,
 			fmt.Sprintf("This conversation is already linked to project **%s**.", existing.ProjectSlug)), nil
