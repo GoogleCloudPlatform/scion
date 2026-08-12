@@ -207,6 +207,41 @@ func TestStripBotMentionByEntity(t *testing.T) {
 	assert.Equal(t, "<at>Alice</at> hello", result)
 }
 
+func TestMatchesBotID(t *testing.T) {
+	tests := []struct {
+		name     string
+		entityID string
+		botID    string
+		expected bool
+	}{
+		{"exact match", "bot-1", "bot-1", true},
+		{"28 prefix", "28:bot-1", "bot-1", true},
+		{"other prefix", "29:bot-1", "bot-1", true},
+		{"no match", "other-bot", "bot-1", false},
+		{"partial match not suffix", "bot-1-extra", "bot-1", false},
+		{"empty entity", "", "bot-1", false},
+		{"empty bot", "28:bot-1", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, matchesBotID(tt.entityID, tt.botID))
+		})
+	}
+}
+
+func TestStripBotMentionByEntity_PrefixedID(t *testing.T) {
+	entities := []Entity{
+		{
+			Type:      "mention",
+			Mentioned: ChannelAccount{ID: "28:bot-1", Name: "ScionBot"},
+			Text:      "<at>ScionBot</at>",
+		},
+	}
+	text := "<at>ScionBot</at> setup"
+	result := stripBotMentionByEntity(text, "bot-1", entities)
+	assert.Equal(t, "setup", result)
+}
+
 func TestExtractMentionTarget(t *testing.T) {
 	tests := []struct {
 		name     string
