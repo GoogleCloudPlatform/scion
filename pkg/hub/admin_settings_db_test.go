@@ -2344,6 +2344,88 @@ func TestResetSection_RequiresAdmin(t *testing.T) {
 	}
 }
 
+// --- Phase 5: Propagation verification ---
+
+func TestPropagation_RuntimesVisibleAfterRefresh(t *testing.T) {
+	// Simulate two instances sharing the same store.
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	ops1 := NewOperationalSettings(fakeStore, fileK, envK)
+	ops2 := NewOperationalSettings(fakeStore, fileK, envK)
+
+	// ops1 writes a runtimes section.
+	runtimesDoc := json.RawMessage(`{"docker": {"type": "docker"}, "cloudrun": {"type": "cloudrun-instances"}}`)
+	_, err := ops1.Update(context.Background(), "runtimes", runtimesDoc, "admin@test.com", -1, "managed")
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	// ops2 refreshes and should see the new runtimes.
+	changed, err := ops2.Refresh(context.Background())
+	if err != nil {
+		t.Fatalf("Refresh failed: %v", err)
+	}
+
+	found := false
+	for _, c := range changed {
+		if c == "runtimes" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'runtimes' in changed sections, got %v", changed)
+	}
+
+	// Build snapshot from ops2 and verify runtimes are present.
+	snap := ops2.Snapshot()
+	if len(snap.Runtimes) != 2 {
+		t.Fatalf("expected 2 runtimes in snapshot, got %d", len(snap.Runtimes))
+	}
+	if snap.Runtimes["docker"].Type != "docker" {
+		t.Errorf("expected docker.type=docker, got %v", snap.Runtimes["docker"].Type)
+	}
+	if snap.Runtimes["cloudrun"].Type != "cloudrun-instances" {
+		t.Errorf("expected cloudrun.type=cloudrun-instances, got %v", snap.Runtimes["cloudrun"].Type)
+	}
+}
+
+func TestPropagation_ProfilesAndHarnessConfigsVisibleAfterRefresh(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	ops1 := NewOperationalSettings(fakeStore, fileK, envK)
+	ops2 := NewOperationalSettings(fakeStore, fileK, envK)
+
+	// ops1 writes profiles and harness_configs.
+	_, err := ops1.Update(context.Background(), "profiles",
+		json.RawMessage(`{"default": {"runtime": "cloudrun"}}`), "admin@test.com", -1, "managed")
+	if err != nil {
+		t.Fatalf("Update profiles failed: %v", err)
+	}
+	_, err = ops1.Update(context.Background(), "harness_configs",
+		json.RawMessage(`{"claude-code": {"harness": "claude-code"}}`), "admin@test.com", -1, "managed")
+	if err != nil {
+		t.Fatalf("Update harness_configs failed: %v", err)
+	}
+
+	// ops2 refreshes.
+	_, err = ops2.Refresh(context.Background())
+	if err != nil {
+		t.Fatalf("Refresh failed: %v", err)
+	}
+
+	snap := ops2.Snapshot()
+	if len(snap.Profiles) != 1 || snap.Profiles["default"].Runtime != "cloudrun" {
+		t.Errorf("expected profiles.default.runtime=cloudrun, got %+v", snap.Profiles)
+	}
+	if len(snap.HarnessConfigs) != 1 || snap.HarnessConfigs["claude-code"].Harness != "claude-code" {
+		t.Errorf("expected harness_configs.claude-code.harness=claude-code, got %+v", snap.HarnessConfigs)
+	}
+}
+
 // --- GET after PUT: runtimes/profiles/harness_configs ---
 
 func TestGetServerConfigDB_RuntimesFromDB(t *testing.T) {
