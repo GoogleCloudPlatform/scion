@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -60,9 +62,10 @@ func (s *NonceCacheStore) CheckAndStore(ctx context.Context, nonce string, ttl t
 		DoNothing().
 		Exec(ctx)
 	if err != nil {
-		// ent returns a NotFoundError when DoNothing causes zero rows to be
-		// returned (conflict occurred — nonce already exists).
-		if ent.IsNotFound(err) {
+		// When DoNothing fires (conflict — nonce already exists), the driver
+		// returns zero affected rows. Ent surfaces this as NotFoundError on
+		// Postgres and as sql.ErrNoRows on SQLite. Both indicate a replay.
+		if ent.IsNotFound(err) || errors.Is(err, sql.ErrNoRows) {
 			return false, nil // replay detected
 		}
 		return false, err

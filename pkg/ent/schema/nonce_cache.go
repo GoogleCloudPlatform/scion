@@ -55,7 +55,6 @@ func (NonceCache) Fields() []ent.Field {
 // Indexes of the NonceCache.
 func (NonceCache) Indexes() []ent.Index {
 	return []ent.Index{
-		index.Fields("nonce").Unique(),
 		index.Fields("expires_at"), // for efficient TTL eviction
 	}
 }

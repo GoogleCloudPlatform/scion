@@ -768,11 +768,6 @@ var (
 		PrimaryKey: []*schema.Column{NonceCacheColumns[0]},
 		Indexes: []*schema.Index{
 			{
-				Name:    "noncecache_nonce",
-				Unique:  true,
-				Columns: []*schema.Column{NonceCacheColumns[1]},
-			},
-			{
 				Name:    "noncecache_expires_at",
 				Unique:  false,
 				Columns: []*schema.Column{NonceCacheColumns[2]},

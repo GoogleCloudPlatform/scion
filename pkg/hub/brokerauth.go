@@ -76,8 +76,8 @@ type OnBehalfOfResolver interface {
 type BrokerAuthService struct {
 	config             BrokerAuthConfig
 	store              store.Store
-	nonces             *NonceCache          // in-memory fallback (used when DB is unavailable)
-	nonceStore         *NonceCacheStore     // DB-backed nonce cache (used in multi-instance mode)
+	nonces             *NonceCache      // in-memory fallback (used when DB is unavailable)
+	nonceStore         *NonceCacheStore // DB-backed nonce cache (used in multi-instance mode)
 	onBehalfOfResolver OnBehalfOfResolver
 }
 
@@ -531,8 +531,9 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, fmt.Errorf("timestamp outside acceptable range (skew: %v)", clockSkew)
 	}
 
-	// Validate nonce if enabled — prefer DB-backed store for multi-instance
-	// replay protection; fall back to in-memory cache when DB is unavailable.
+	// Validate nonce if enabled — use DB-backed store for multi-instance
+	// replay protection when configured; otherwise use in-memory cache.
+	// DB errors are fail-closed (request is rejected, not silently passed).
 	if nonce != "" && s.config.EnableNonceCache {
 		if s.nonceStore != nil {
 			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
@@ -803,8 +804,9 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		return nil, errors.New("invalid signature")
 	}
 
-	// Only add nonce to cache after successful validation — prefer DB-backed
-	// store for multi-instance replay protection; fall back to in-memory cache.
+	// Only add nonce to cache after successful validation — use DB-backed
+	// store for multi-instance replay protection when configured; otherwise
+	// use in-memory cache. DB errors are fail-closed.
 	if nonce != "" && s.config.EnableNonceCache {
 		if s.nonceStore != nil {
 			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
