@@ -44,7 +44,13 @@ func (s *Server) handleChatPrefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.webChatStore == nil {
+	// Read webChatStore under a read lock to avoid a data race with
+	// SetWebChatStore, which writes under a write lock.
+	s.mu.RLock()
+	webChatStore := s.webChatStore
+	s.mu.RUnlock()
+
+	if webChatStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat preferences not available", nil)
 		return
 	}
@@ -73,7 +79,7 @@ func (s *Server) handleChatPrefs(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		prefs, err := s.webChatStore.GetThreadPrefs(ctx, user.ID(), agent.ProjectID, agentID)
+		prefs, err := webChatStore.GetThreadPrefs(ctx, user.ID(), agent.ProjectID, agentID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "Failed to read preferences", nil)
 			return
@@ -81,6 +87,9 @@ func (s *Server) handleChatPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, prefs)
 
 	case http.MethodPut:
+		// Limit request body size to prevent DoS via oversized payloads.
+		r.Body = http.MaxBytesReader(w, r.Body, 1048576) // 1MB limit
+
 		var body struct {
 			VisibilityMode string `json:"visibility_mode"`
 		}
@@ -94,7 +103,7 @@ func (s *Server) handleChatPrefs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		prefs := ThreadPrefs{VisibilityMode: body.VisibilityMode}
-		if err := s.webChatStore.SetThreadPrefs(ctx, user.ID(), agent.ProjectID, agentID, prefs); err != nil {
+		if err := webChatStore.SetThreadPrefs(ctx, user.ID(), agent.ProjectID, agentID, prefs); err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "Failed to save preferences", nil)
 			return
 		}

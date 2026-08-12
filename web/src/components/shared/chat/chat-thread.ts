@@ -99,6 +99,7 @@ export class ScionChatThread extends LitElement {
   private nextCursor: string | null = null;
   private lastKnownTimestamp: string | null = null;
   private hadError = false;
+  private fetchId = 0;
 
   static override styles = css`
     :host {
@@ -297,11 +298,14 @@ export class ScionChatThread extends LitElement {
   private async savePrefs(mode: VisibilityMode): Promise<void> {
     if (!this.agentId) return;
     try {
-      await apiFetch(`/api/v1/chat/prefs?agentId=${encodeURIComponent(this.agentId)}`, {
+      const res = await apiFetch(`/api/v1/chat/prefs?agentId=${encodeURIComponent(this.agentId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ visibility_mode: mode }),
       });
+      if (!res.ok) {
+        console.warn('Failed to save chat prefs:', res.status, res.statusText);
+      }
     } catch (err) {
       console.warn('Failed to save chat prefs', err);
     }
@@ -319,6 +323,7 @@ export class ScionChatThread extends LitElement {
 
   /** Clear messages and re-fetch history with the current visibility filter. */
   private async refetchWithNewFilter(): Promise<void> {
+    const currentId = ++this.fetchId;
     this.messageMap.clear();
     this.messages = [];
     this.nextCursor = null;
@@ -331,12 +336,16 @@ export class ScionChatThread extends LitElement {
     this.error = null;
     try {
       await this.fetchHistory();
+      if (currentId !== this.fetchId) return;
       this.startStream();
     } catch (err) {
+      if (currentId !== this.fetchId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
-      this.loading = false;
-      this.scrollToBottom();
+      if (currentId === this.fetchId) {
+        this.loading = false;
+        this.scrollToBottom();
+      }
     }
   }
 
@@ -398,6 +407,7 @@ export class ScionChatThread extends LitElement {
   }
 
   private async fetchHistory(cursor?: string): Promise<void> {
+    const currentId = this.fetchId;
     const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
     if (cursor) {
       params.set('cursor', cursor);
@@ -407,6 +417,8 @@ export class ScionChatThread extends LitElement {
     const res = await apiFetch(
       `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages?${params.toString()}`
     );
+
+    if (currentId !== this.fetchId) return;
 
     if (!res.ok) {
       throw new Error(await extractApiError(res, 'Failed to fetch messages'));
@@ -438,6 +450,7 @@ export class ScionChatThread extends LitElement {
     // during a single timeout gap, intermediate messages may be missed.
     if (!this.lastKnownTimestamp) return;
 
+    const currentId = this.fetchId;
     const params = new URLSearchParams({
       limit: String(HISTORY_PAGE_SIZE),
       before: new Date().toISOString(),
@@ -448,6 +461,7 @@ export class ScionChatThread extends LitElement {
       `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages?${params.toString()}`
     );
 
+    if (currentId !== this.fetchId) return;
     if (!res.ok) return;
 
     const data = (await res.json()) as { items?: Message[] };
