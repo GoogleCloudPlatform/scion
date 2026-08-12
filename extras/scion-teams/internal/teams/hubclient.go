@@ -222,9 +222,9 @@ func (c *HubClient) ListAgents(ctx context.Context, projectID string) ([]AgentIn
 }
 
 // ListProjects returns all projects visible to the broker.
-// GET /api/v1/projects
+// GET /api/v1/broker/projects
 func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
-	u := c.hubURL + "/api/v1/projects"
+	u := c.hubURL + "/api/v1/broker/projects"
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -248,6 +248,42 @@ func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
 	var result hubProjectsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode list projects response: %w", err)
+	}
+
+	projects := make([]ProjectOption, len(result.Projects))
+	for i, p := range result.Projects {
+		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
+	}
+	return projects, nil
+}
+
+// ListProjectsForUser returns projects owned by or associated with a specific user.
+// GET /api/v1/projects?ownerId=<ownerID>
+func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
+	u := c.hubURL + "/api/v1/projects?ownerId=" + url.QueryEscape(ownerID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create list user projects request: %w", err)
+	}
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list user projects request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, fmt.Errorf("list user projects returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result hubProjectsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode list user projects response: %w", err)
 	}
 
 	projects := make([]ProjectOption, len(result.Projects))

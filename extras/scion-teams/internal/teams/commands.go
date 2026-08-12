@@ -118,7 +118,7 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 	conversationID := activity.Conversation.ID
 
 	// Check if already linked.
-	store := h.broker.store
+	store := h.getStore()
 	if store != nil {
 		existing, err := store.GetChannelLink(ctx, conversationID)
 		if err != nil {
@@ -130,13 +130,54 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 		}
 	}
 
+	// Check if user is registered.
+	teamsUserID := activity.From.AadObjectID
+	if teamsUserID == "" {
+		teamsUserID = activity.From.ID
+	}
+	var mapping *TeamsUserMapping
+	if store != nil {
+		var err error
+		mapping, err = store.GetUserMapping(ctx, teamsUserID)
+		if err != nil {
+			h.log.Warn("Error checking user mapping", "error", err)
+		}
+	}
+	if mapping == nil {
+		return h.sendReply(ctx, activity, "Please link your Teams account first with the `register` command.")
+	}
+
 	if len(args) > 0 {
 		// Direct setup with project slug.
 		projectSlug := args[0]
 		return h.completeSetup(ctx, activity, projectSlug)
 	}
 
-	// No project specified — send a card asking for the project slug.
+	// Get projects - try user-scoped first, then fall back to broker endpoint.
+	hubClient := h.broker.hubClient
+	var projects []ProjectOption
+	if hubClient != nil {
+		if mapping.ScionUserID != "" {
+			var err error
+			projects, err = hubClient.ListProjectsForUser(ctx, mapping.ScionUserID)
+			if err != nil {
+				h.log.Warn("Failed to list user projects", "error", err, "user_id", mapping.ScionUserID)
+			}
+		}
+		if len(projects) == 0 {
+			var err error
+			projects, err = hubClient.ListProjects(ctx)
+			if err != nil {
+				h.log.Warn("Failed to list projects from hub", "error", err)
+			}
+		}
+	}
+
+	if len(projects) == 0 {
+		return h.sendReply(ctx, activity, "No projects found. Create a project in the hub first.")
+	}
+
+	// Build Adaptive Card with project buttons.
 	card := NewAdaptiveCard()
 	card.Body = append(card.Body,
 		TextBlock{
@@ -147,57 +188,44 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 		},
 		TextBlock{
 			Type:     "TextBlock",
-			Text:     "Enter the project slug or name to link this conversation.",
+			Text:     "Select a project to link this conversation.",
 			Wrap:     true,
+			IsSubtle: true,
+		},
+		TextBlock{
+			Type:     "TextBlock",
+			Text:     "Available projects:",
+			Weight:   "Bolder",
 			IsSubtle: true,
 		},
 	)
 
-	// If hub client is available, try to list projects.
-	hubClient := h.broker.hubClient
-	if hubClient != nil {
-		projects, err := hubClient.ListProjects(ctx)
-		if err != nil {
-			h.log.Warn("Failed to list projects from hub", "error", err)
-		} else if len(projects) > 0 {
-			card.Body = append(card.Body, TextBlock{
-				Type:     "TextBlock",
-				Text:     "Available projects:",
-				Weight:   "Bolder",
-				IsSubtle: true,
-			})
-
-			// Add submit buttons for each project (up to 6 to keep card manageable).
-			maxProjects := 6
-			if len(projects) < maxProjects {
-				maxProjects = len(projects)
-			}
-			for _, p := range projects[:maxProjects] {
-				displayName := p.Slug
-				if p.Name != "" && p.Name != p.Slug {
-					displayName = fmt.Sprintf("%s (%s)", p.Name, p.Slug)
-				}
-				card.Actions = append(card.Actions, ActionSubmit{
-					Type:  "Action.Submit",
-					Title: displayName,
-					Data: map[string]string{
-						"action":       "setup_confirm",
-						"project_slug": p.Slug,
-						"project_id":   p.ID,
-					},
-				})
-			}
-			return h.sendCardReply(ctx, activity, card)
-		}
+	// Add submit buttons for each project (up to 6 to keep card manageable).
+	maxProjects := 6
+	if len(projects) < maxProjects {
+		maxProjects = len(projects)
 	}
-
-	// Fallback: prompt user to type the project slug.
-	return h.sendReply(ctx, activity, "Please run `setup <project-slug>` with the project slug you want to link.")
+	for _, p := range projects[:maxProjects] {
+		displayName := p.Slug
+		if p.Name != "" && p.Name != p.Slug {
+			displayName = fmt.Sprintf("%s (%s)", p.Name, p.Slug)
+		}
+		card.Actions = append(card.Actions, ActionSubmit{
+			Type:  "Action.Submit",
+			Title: displayName,
+			Data: map[string]string{
+				"action":       "setup_confirm",
+				"project_slug": p.Slug,
+				"project_id":   p.ID,
+			},
+		})
+	}
+	return h.sendCardReply(ctx, activity, card)
 }
 
 // completeSetup finishes the setup process by creating the channel link.
 func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, projectSlug string) error {
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		return h.sendReply(ctx, activity, "Setup failed: store not initialized.")
 	}
@@ -274,7 +302,7 @@ func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, 
 // handleUnlink removes the channel link for the current conversation.
 // Only the user who created the link is allowed to unlink it.
 func (h *CommandHandler) handleUnlink(ctx context.Context, activity *Activity) error {
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		return h.sendReply(ctx, activity, "Unlink failed: store not initialized.")
 	}
@@ -336,7 +364,7 @@ func (h *CommandHandler) handleAgents(ctx context.Context, activity *Activity) e
 	}
 
 	// Cache agent slugs in store.
-	store := h.broker.store
+	store := h.getStore()
 	if store != nil {
 		slugs := make([]string, len(agents))
 		for i, a := range agents {
@@ -523,7 +551,7 @@ func (h *CommandHandler) handleRegister(ctx context.Context, activity *Activity)
 	}
 
 	// Check if already linked.
-	store := h.broker.store
+	store := h.getStore()
 	if store != nil {
 		existing, err := store.GetUserMapping(ctx, teamsUserID)
 		if err != nil {
@@ -648,9 +676,7 @@ func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Acti
 
 			if status == "confirmed" && userID != "" {
 				// Save user mapping.
-				h.broker.mu.Lock()
-				store := h.broker.store
-				h.broker.mu.Unlock()
+				store := h.getStore()
 
 				if store != nil {
 					mapping := &TeamsUserMapping{
@@ -692,7 +718,7 @@ func (h *CommandHandler) handleUnregister(ctx context.Context, activity *Activit
 		return h.sendReply(ctx, activity, "Could not determine your Teams user ID. Please try again.")
 	}
 
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		return h.sendReply(ctx, activity, "Store not initialized. Cannot unregister.")
 	}
@@ -750,12 +776,20 @@ func (h *CommandHandler) handleHelp(ctx context.Context, activity *Activity) err
 	return h.sendCardReply(ctx, activity, card)
 }
 
+// getStore returns the broker's store under the broker mutex.
+func (h *CommandHandler) getStore() Store {
+	h.broker.mu.Lock()
+	store := h.broker.store
+	h.broker.mu.Unlock()
+	return store
+}
+
 // --- Helpers ---
 
 // resolveChannelLink looks up the channel link for the current conversation.
 // Returns an error (with a reply sent to the user) if not linked.
 func (h *CommandHandler) resolveChannelLink(ctx context.Context, activity *Activity) (*ChannelLink, error) {
-	store := h.broker.store
+	store := h.getStore()
 	if store == nil {
 		_ = h.sendReply(ctx, activity, "Store not initialized.")
 		return nil, fmt.Errorf("store not initialized")

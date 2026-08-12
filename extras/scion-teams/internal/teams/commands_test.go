@@ -210,10 +210,10 @@ func TestCommandDispatch_StripsBotMention(t *testing.T) {
 }
 
 func TestSetupCommand_WithProjectSlug(t *testing.T) {
-	// Mock hub that returns projects.
+	// Mock hub that returns projects via the broker endpoint.
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/api/v1/projects":
+		case r.URL.Path == "/api/v1/broker/projects":
 			json.NewEncoder(w).Encode(hubProjectsResponse{
 				Projects: []hubProject{
 					{ID: "proj-1", Name: "My Project", Slug: "my-project"},
@@ -227,14 +227,24 @@ func TestSetupCommand_WithProjectSlug(t *testing.T) {
 	broker, ms := testBrokerWithStore(t, hubHandler)
 	handler := broker.commandHandler
 
+	// Pre-create a user mapping (registration required before setup).
+	err := broker.store.CreateUserMapping(context.Background(), &TeamsUserMapping{
+		TeamsUserID:      "aad-user-1",
+		TeamsDisplayName: "Test User",
+		ScionUserID:      "scion-1",
+		ScionEmail:       "user@example.com",
+		LinkedAt:         time.Now(),
+	})
+	require.NoError(t, err)
+
 	activity := testActivity("setup my-project")
-	handled, err := handler.Handle(context.Background(), activity)
+	handled, cmdErr := handler.Handle(context.Background(), activity)
 	assert.True(t, handled)
-	assert.NoError(t, err)
+	assert.NoError(t, cmdErr)
 
 	// Verify channel link was created.
-	link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
-	require.NoError(t, err)
+	link, lookupErr := broker.store.GetChannelLink(context.Background(), "conv-1")
+	require.NoError(t, lookupErr)
 	require.NotNil(t, link)
 	assert.Equal(t, "my-project", link.ProjectSlug)
 	assert.Equal(t, "proj-1", link.ProjectID)
@@ -269,6 +279,44 @@ func TestSetupCommand_AlreadyLinked(t *testing.T) {
 }
 
 func TestSetupCommand_NoSlug(t *testing.T) {
+	// Mock hub that returns projects via the broker endpoint.
+	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/broker/projects":
+			json.NewEncoder(w).Encode(hubProjectsResponse{
+				Projects: []hubProject{
+					{ID: "proj-1", Name: "My Project", Slug: "my-project"},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	broker, ms := testBrokerWithStore(t, hubHandler)
+	handler := broker.commandHandler
+
+	// Pre-create a user mapping (registration required before setup).
+	err := broker.store.CreateUserMapping(context.Background(), &TeamsUserMapping{
+		TeamsUserID:      "aad-user-1",
+		TeamsDisplayName: "Test User",
+		ScionUserID:      "scion-1",
+		ScionEmail:       "user@example.com",
+		LinkedAt:         time.Now(),
+	})
+	require.NoError(t, err)
+
+	activity := testActivity("setup")
+	handled, cmdErr := handler.Handle(context.Background(), activity)
+	assert.True(t, handled)
+	assert.NoError(t, cmdErr)
+
+	// Should send a card with project buttons.
+	require.NotEmpty(t, ms.sent)
+	assert.NotEmpty(t, ms.sent[0].Attachments, "expected an Adaptive Card reply with project buttons")
+}
+
+func TestSetupCommand_NotRegistered(t *testing.T) {
 	broker, ms := testBrokerWithStore(t, nil)
 	handler := broker.commandHandler
 
@@ -277,8 +325,9 @@ func TestSetupCommand_NoSlug(t *testing.T) {
 	assert.True(t, handled)
 	assert.NoError(t, err)
 
-	// Should send a reply (either card with projects or plain text prompt).
-	assert.NotEmpty(t, ms.sent)
+	// Should tell user to register first.
+	require.NotEmpty(t, ms.sent)
+	assert.Contains(t, ms.sent[0].Text, "register")
 }
 
 func TestUnlinkCommand(t *testing.T) {
