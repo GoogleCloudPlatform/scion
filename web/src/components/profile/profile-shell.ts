@@ -211,13 +211,18 @@ export class ScionProfileShell extends LitElement {
     this._drawerOpen = false;
   }
 
+  /**
+   * Handle logout action.
+   * Uses the Vite BASE_URL to construct correct paths behind a reverse proxy.
+   */
   private handleLogout(): void {
-    fetch('/auth/logout', {
+    const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+    fetch(`${base}/auth/logout`, {
       method: 'POST',
       credentials: 'include',
     })
       .then(() => {
-        window.location.href = '/auth/login';
+        window.location.href = `${base}/auth/login`;
       })
       .catch((error) => {
         console.error('Logout failed:', error);

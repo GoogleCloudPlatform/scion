@@ -396,17 +396,17 @@ export class ScionApp extends LitElement {
   }
 
   /**
-   * Handle logout action
+   * Handle logout action.
+   * Uses the Vite BASE_URL to construct correct paths behind a reverse proxy.
    */
   private handleLogout(): void {
-    // POST to logout endpoint
-    fetch('/auth/logout', {
+    const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+    fetch(`${base}/auth/logout`, {
       method: 'POST',
       credentials: 'include',
     })
       .then(() => {
-        // Redirect to login page
-        window.location.href = '/auth/login';
+        window.location.href = `${base}/auth/login`;
       })
       .catch((error) => {
         console.error('Logout failed:', error);
