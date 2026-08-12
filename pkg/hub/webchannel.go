@@ -50,6 +50,12 @@ type webChannelBus struct {
 
 // NewWebChannelBus creates a web channel spoke backed by the given store.
 func NewWebChannelBus(log *slog.Logger, store WebChatStore) eventbus.EventBus {
+	if log == nil {
+		log = slog.Default()
+	}
+	if store == nil {
+		panic("webchannel: store cannot be nil")
+	}
 	return &webChannelBus{
 		log:   log,
 		store: store,
@@ -70,7 +76,7 @@ func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 
 	// 1. Thread watermark — this is what makes the Phase 5 rail endpoint
 	//    a single indexed read instead of an aggregate query.
@@ -118,6 +124,9 @@ func (webNoopSubscription) Unsubscribe() error { return nil }
 // topic and message. Returns false if the message is not a conversation-
 // scoped user message (e.g., broadcasts, global messages).
 func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, projectID, agentID string, ok bool) {
+	if msg == nil {
+		return "", "", "", false
+	}
 	parsed, err := projectcompat.ParseTopic(topic)
 	if err != nil {
 		return "", "", "", false
