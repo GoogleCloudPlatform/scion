@@ -13,6 +13,7 @@ import (
 func validHostedHAConfig() *config.GlobalConfig {
 	cfg := config.DefaultGlobalConfig()
 	cfg.Mode = "hosted"
+	cfg.Hub.HubID = "scion-hub"
 	cfg.Database.Driver = "postgres"
 	cfg.Database.URL = "postgres://scion:secret@localhost/scionhub"
 	cfg.Storage.Provider = "gcs"
@@ -53,6 +54,13 @@ func TestValidateHostedHAPreflightRejectsUnsafeBackends(t *testing.T) {
 		mutate  func(*config.GlobalConfig)
 		wantErr string
 	}{
+		{
+			name: "missing hub_id",
+			mutate: func(cfg *config.GlobalConfig) {
+				cfg.Hub.HubID = ""
+			},
+			wantErr: "requires an explicit server.hub.hub_id",
+		},
 		{
 			name: "sqlite",
 			mutate: func(cfg *config.GlobalConfig) {

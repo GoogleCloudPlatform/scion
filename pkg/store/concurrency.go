@@ -87,6 +87,20 @@ const (
 	// running (stopped, deleted, etc.).
 	LockExposedPortsSweep AdvisoryLockKey = 0x5C10000C
 
+	// LockStorageMigration guards MigrateStorageOnFirstBoot so only one
+	// replica copies legacy un-namespaced GCS objects to the hub-scoped
+	// prefix at boot time.
+	LockStorageMigration AdvisoryLockKey = 0x5C10000F
+
+	// LockBundledResources guards BootstrapBundledResources so only one
+	// replica seeds embedded templates/harness-configs/skills into DB+GCS
+	// at boot time.
+	LockBundledResources AdvisoryLockKey = 0x5C100010
+
+	// LockInlineSecretsMigration guards the one-shot migration of inline
+	// plugin secrets from settings.yaml to the secret backend at boot time.
+	LockInlineSecretsMigration AdvisoryLockKey = 0x5C100011
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant

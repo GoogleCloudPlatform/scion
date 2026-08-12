@@ -117,6 +117,7 @@ urlencode() {
 render_settings() {
   local service_url="$1"
   sed \
+    -e "s|__HUB_ID__|$(sed_escape "$SERVICE_NAME")|" \
     -e "s|__IMAGE_REGISTRY__|$(sed_escape "$IMAGE_REGISTRY")|" \
     -e "s|__SERVICE_URL__|$(sed_escape "$service_url")|" \
     -e "s|__PROJECT_ID__|$(sed_escape "$PROJECT")|" \

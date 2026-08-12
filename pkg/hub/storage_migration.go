@@ -26,6 +26,9 @@ import (
 // already has content. If not (first boot with namespacing), it copies legacy
 // un-namespaced GCS objects to the hub-scoped prefix and updates DB records.
 // This is non-destructive: legacy objects are preserved for other hubs.
+//
+// Callers on multi-instance deployments should wrap this call in an advisory
+// lock (store.LockStorageMigration) to prevent concurrent replicas from racing.
 func (s *Server) MigrateStorageOnFirstBoot(ctx context.Context) {
 	stor := s.GetStorage()
 	if stor == nil {

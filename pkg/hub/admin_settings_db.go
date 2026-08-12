@@ -482,15 +482,24 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Warn about unclassified keys — accepted for shape compatibility with
-	// file mode but not written to DB. Clients can see what was skipped via
-	// the ignored_keys field in the response.
+	// BREAKING CHANGE (issue #938): Reject unclassified keys (e.g. runtimes,
+	// profiles, harness_configs) with 422 instead of silently accepting with
+	// 200 and dropping them. Previously callers (including the admin UI)
+	// believed the save succeeded when nothing was persisted. The admin UI
+	// frontend handles this via handleSaveError's default case, which
+	// displays body.message to the user.
 	if len(unclassifiedKeys) > 0 {
 		sort.Strings(unclassifiedKeys)
-		slog.Warn("PUT server-config: ignoring unclassified keys (not Layer-0, not Layer-1)",
+		slog.Warn("PUT server-config: rejecting unclassified keys (not Layer-0, not Layer-1)",
 			"keys", unclassifiedKeys,
 			"user", updatedBy,
 		)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+			"error":   "unclassified_keys_rejected",
+			"message": "These settings cannot be persisted in database mode. They must be configured via settings.yaml / deployment tooling.",
+			"keys":    unclassifiedKeys,
+		})
+		return
 	}
 
 	// Build per-section documents from the request.
@@ -624,11 +633,6 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"applied":          appliedKeys,
 			"requires_restart": []string{},
 		},
-	}
-
-	// Report ignored unclassified keys so clients/UI can see what was skipped.
-	if len(unclassifiedKeys) > 0 {
-		resp["ignored_keys"] = unclassifiedKeys
 	}
 
 	writeJSON(w, http.StatusOK, resp)
