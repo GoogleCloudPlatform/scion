@@ -395,6 +395,10 @@ type MessageRequest struct {
 
 	// Wake resumes a suspended agent before delivering the message.
 	Wake bool `json:"wake,omitempty"`
+
+	// Mentions lists agent slugs to receive mention notifications (max 10).
+	// The primary recipient is automatically excluded from mention fan-out.
+	Mentions []string `json:"mentions,omitempty"`
 }
 
 func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id string) {
@@ -655,13 +659,20 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		})
 		s.events.PublishAgentStatus(ctx, agent)
 
+		// Process @mentions for managed agents too.
+		var managedMentionResults []messages.MentionResult
+		if len(req.Mentions) > 0 && structuredMsg != nil {
+			managedMentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-			MessageID:  persistedMsgID,
-			Status:     "delivered",
-			Agent:      agent.Slug,
-			AgentPhase: agent.Phase,
+			MessageID:      persistedMsgID,
+			Status:         "delivered",
+			Agent:          agent.Slug,
+			AgentPhase:     agent.Phase,
+			MentionResults: managedMentionResults,
 		})
 		return
 	}
@@ -729,22 +740,30 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 	}
 
+	// Process @mentions: validate slugs, fan out mention messages to resolved agents.
+	var mentionResults []messages.MentionResult
+	if len(req.Mentions) > 0 && structuredMsg != nil {
+		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-		MessageID:  persistedMsgID,
-		Status:     "delivered",
-		Agent:      agent.Slug,
-		AgentPhase: agent.Phase,
+		MessageID:      persistedMsgID,
+		Status:         "delivered",
+		Agent:          agent.Slug,
+		AgentPhase:     agent.Phase,
+		MentionResults: mentionResults,
 	})
 }
 
 // MessageDeliveryResponse is the JSON response for a successful agent message delivery.
 type MessageDeliveryResponse struct {
-	MessageID  string `json:"message_id"`
-	Status     string `json:"status"`
-	Agent      string `json:"agent"`
-	AgentPhase string `json:"agent_phase"`
+	MessageID      string                   `json:"message_id"`
+	Status         string                   `json:"status"`
+	Agent          string                   `json:"agent"`
+	AgentPhase     string                   `json:"agent_phase"`
+	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.
@@ -1177,4 +1196,104 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 		s.messageLog.Error("Failed to dispatch broadcast DELIVERY_FAILED notification",
 			"sender_id", msg.SenderID, "target_agent", targetAgent.Slug, "error", err)
 	}
+}
+
+// processMentions validates mention slugs against project agents, fans out
+// NewMention messages to each valid recipient, and returns per-slug results.
+// The primary recipient (the agent the message was sent to) is excluded.
+func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, primaryAgent *store.Agent, originalMsg *messages.StructuredMessage) []messages.MentionResult {
+	if len(mentionSlugs) == 0 {
+		return nil
+	}
+
+	// List project agents for resolution.
+	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: primaryAgent.ProjectID}, store.ListOptions{Limit: 200})
+	if err != nil {
+		s.messageLog.Error("Failed to list project agents for mention resolution", "error", err)
+		return nil
+	}
+
+	// Build the AgentInfo slice and a slug-to-agent map for dispatch.
+	agentInfos := make([]messages.AgentInfo, 0, len(agentList.Items))
+	agentBySlug := make(map[string]*store.Agent, len(agentList.Items))
+	for i := range agentList.Items {
+		a := &agentList.Items[i]
+		agentInfos = append(agentInfos, messages.AgentInfo{Slug: a.Slug, Name: a.Name})
+		agentBySlug[strings.ToLower(a.Slug)] = a
+	}
+
+	// Resolve mentions using the shared package.
+	results := messages.ResolveMentions(mentionSlugs, agentInfos, primaryAgent.Slug)
+
+	// Fan out mention messages for each delivered slug.
+	for i, r := range results {
+		if r.Status != "delivered" {
+			continue
+		}
+		mentionAgent, ok := agentBySlug[strings.ToLower(r.Slug)]
+		if !ok {
+			results[i].Status = "error"
+			results[i].Error = "agent resolved but not found for dispatch"
+			continue
+		}
+
+		mentionMsg := messages.NewMention(originalMsg.Sender, "agent:"+r.Slug, originalMsg.Msg, originalMsg.Recipient)
+		mentionMsg.SenderID = originalMsg.SenderID
+		mentionMsg.RecipientID = mentionAgent.ID
+		mentionMsg.Channel = originalMsg.Channel
+		mentionMsg.ThreadID = originalMsg.ThreadID
+
+		// Persist the mention message.
+		storeMsg := &store.Message{
+			ID:            api.NewUUID(),
+			ProjectID:     primaryAgent.ProjectID,
+			Sender:        mentionMsg.Sender,
+			SenderID:      mentionMsg.SenderID,
+			Recipient:     mentionMsg.Recipient,
+			RecipientID:   mentionMsg.RecipientID,
+			Msg:           mentionMsg.Msg,
+			Type:          mentionMsg.Type,
+			AgentID:       mentionAgent.ID,
+			Channel:       mentionMsg.Channel,
+			ThreadID:      mentionMsg.ThreadID,
+			DispatchState: store.MessageDispatchDispatched,
+			CreatedAt:     time.Now(),
+		}
+		if mentionMsg.Metadata != nil {
+			storeMsg.GroupID = mentionMsg.Metadata["group_id"]
+		}
+		if createErr := s.store.CreateMessage(ctx, storeMsg); createErr != nil {
+			s.messageLog.Error("Failed to persist mention message", "slug", r.Slug, "error", createErr)
+		}
+		s.events.PublishUserMessage(ctx, storeMsg)
+
+		// Dispatch to the mentioned agent's runtime.
+		dispatcher := s.GetDispatcher()
+		if dispatcher == nil {
+			results[i].Status = "error"
+			results[i].Error = "dispatch not available"
+			continue
+		}
+		if mentionAgent.RuntimeBrokerID == "" {
+			results[i].Status = "error"
+			results[i].Error = "agent has no runtime broker"
+			continue
+		}
+
+		dispatchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if dispatchErr := dispatchWithBrokerRetry(dispatchCtx, dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg); dispatchErr != nil {
+			cancel()
+			results[i].Status = "error"
+			results[i].Error = "dispatch failed: " + dispatchErr.Error()
+			if storeMsg.ID != "" {
+				if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
+					s.messageLog.Error("Failed to mark mention message as failed", "id", storeMsg.ID, "error", markErr)
+				}
+			}
+			continue
+		}
+		cancel()
+	}
+
+	return results
 }
