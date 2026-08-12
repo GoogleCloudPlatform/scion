@@ -3552,6 +3552,22 @@ export class ScionPageAdminServerConfig extends LitElement {
     } else {
       delete (rt as Record<string, unknown>)[field];
     }
+    // When switching type, clear fields that belong to the other type group
+    // so stale values don't persist in the payload.
+    if (field === 'type') {
+      const isCloudRun = value === 'cloudrun' || value === 'cloudrun-instances';
+      if (isCloudRun) {
+        // Switching to Cloud Run — clear container/k8s fields
+        delete rt.host;
+        delete rt.context;
+        delete rt.namespace;
+        delete rt.gke;
+        delete rt.list_all_namespaces;
+      } else {
+        // Switching away from Cloud Run — clear cloudrun sub-object
+        delete rt.cloudrun;
+      }
+    }
     updated[name] = rt;
     this.runtimes = updated;
   }
@@ -3812,22 +3828,40 @@ export class ScionPageAdminServerConfig extends LitElement {
     } else {
       delete existing[field];
     }
-    profile.resources = { ...(profile.resources || {}), [tier]: existing };
-    updated[name] = profile;
-    this.profiles = updated;
+    const res: ResourceSpec = { ...(profile.resources || {}) };
+    if (Object.keys(existing).length > 0) {
+      res[tier] = existing;
+    } else {
+      delete res[tier];
+    }
+    this.setProfileResources(updated, profile, name, res);
   }
 
   /** Update a profile's disk resource field. */
   private updateProfileDisk(name: string, value: string): void {
     const updated = { ...this.profiles };
     const profile = { ...updated[name] };
-    const base: ResourceSpec = { ...(profile.resources || {}) };
+    const res: ResourceSpec = { ...(profile.resources || {}) };
     if (value) {
-      base.disk = value;
+      res.disk = value;
     } else {
-      delete base.disk;
+      delete res.disk;
     }
-    profile.resources = base;
+    this.setProfileResources(updated, profile, name, res);
+  }
+
+  /** Assign resources to a profile, deleting the key if the object is empty. */
+  private setProfileResources(
+    updated: Record<string, V1ProfileConfig>,
+    profile: V1ProfileConfig,
+    name: string,
+    res: ResourceSpec,
+  ): void {
+    if (Object.keys(res).length > 0) {
+      profile.resources = res;
+    } else {
+      delete profile.resources;
+    }
     updated[name] = profile;
     this.profiles = updated;
   }
