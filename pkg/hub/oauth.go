@@ -938,15 +938,19 @@ func (s *OAuthService) getOIDCAuthURL(callbackURL, state string) (string, error)
 		return "", fmt.Errorf("OIDC discovery failed: %w", err)
 	}
 
-	params := url.Values{
-		"client_id":     {s.oidcLoginConfig.ClientID},
-		"redirect_uri":  {callbackURL},
-		"response_type": {"code"},
-		"scope":         {s.oidcScopes()},
-		"state":         {state},
+	u, err := url.Parse(doc.AuthorizationEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid authorization endpoint URL: %w", err)
 	}
+	q := u.Query()
+	q.Set("client_id", s.oidcLoginConfig.ClientID)
+	q.Set("redirect_uri", callbackURL)
+	q.Set("response_type", "code")
+	q.Set("scope", s.oidcScopes())
+	q.Set("state", state)
+	u.RawQuery = q.Encode()
 
-	return doc.AuthorizationEndpoint + "?" + params.Encode(), nil
+	return u.String(), nil
 }
 
 // exchangeOIDCCode exchanges an OIDC authorization code for user information.
@@ -997,6 +1001,11 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 
 	if userInfo.Email == "" {
 		return nil, fmt.Errorf("OIDC provider did not return an email claim; ensure the 'email' scope is requested and the user has an email address configured in the identity provider")
+	}
+
+	if !userInfo.EmailVerified {
+		return nil, fmt.Errorf("OIDC provider returned an unverified email address %q; "+
+			"the user must verify their email in the identity provider before logging in", userInfo.Email)
 	}
 
 	// Determine display name: prefer Name, fall back to PreferredUsername

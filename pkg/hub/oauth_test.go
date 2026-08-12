@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -780,6 +781,49 @@ func TestOAuthService_GetOIDCAuthURL(t *testing.T) {
 	}
 }
 
+func TestOAuthService_GetOIDCAuthURL_EndpointWithQueryParams(t *testing.T) {
+	// Simulate an OIDC provider whose authorization_endpoint already has query params
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		base := "http://" + r.Host
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"issuer":                 base,
+			"authorization_endpoint": base + "/auth?tenant=abc",
+			"token_endpoint":         base + "/token",
+			"userinfo_endpoint":      base + "/userinfo",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	oidcCfg := &config.OIDCLoginConfig{
+		Enabled:   true,
+		IssuerURL: srv.URL,
+		ClientID:  "test-client",
+	}
+	service := NewOAuthService(OAuthConfig{}, oidcCfg)
+
+	authURL, err := service.getOIDCAuthURL("https://hub.example.com/callback", "s1")
+	if err != nil {
+		t.Fatalf("getOIDCAuthURL() failed: %v", err)
+	}
+
+	// The URL should properly merge params, not produce a double-? URL
+	parsed, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatalf("auth URL is not parseable: %v", err)
+	}
+	q := parsed.Query()
+	if q.Get("tenant") != "abc" {
+		t.Errorf("expected existing query param 'tenant=abc' preserved, got: %s", authURL)
+	}
+	if q.Get("client_id") != "test-client" {
+		t.Errorf("expected client_id in merged URL, got: %s", authURL)
+	}
+	if strings.Count(authURL, "?") != 1 {
+		t.Errorf("expected exactly one '?' in URL, got: %s", authURL)
+	}
+}
+
 func TestOAuthService_ExchangeOIDCCode(t *testing.T) {
 	srv := newTestOIDCServer(t)
 
@@ -836,12 +880,37 @@ func TestOAuthService_GetOIDCUserInfo_MissingEmail(t *testing.T) {
 	}
 }
 
+func TestOAuthService_GetOIDCUserInfo_UnverifiedEmail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"sub":            "user-789",
+			"email":          "unverified@example.com",
+			"email_verified": false,
+			"name":           "Test User",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	oidcCfg := &config.OIDCLoginConfig{Enabled: true}
+	service := NewOAuthService(OAuthConfig{}, oidcCfg)
+
+	_, err := service.getOIDCUserInfo(context.Background(), "test-token", srv.URL)
+	if err == nil {
+		t.Fatal("expected error for unverified email")
+	}
+	if !strings.Contains(err.Error(), "unverified email") {
+		t.Errorf("expected 'unverified email' in error, got: %v", err)
+	}
+}
+
 func TestOAuthService_GetOIDCUserInfo_FallbackToPreferredUsername(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"sub":                "user-456",
 			"email":              "user@example.com",
+			"email_verified":     true,
 			"preferred_username": "jsmith",
 			// name is missing — should fall back to preferred_username
 		})
