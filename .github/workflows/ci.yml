@@ -91,6 +91,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -101,5 +103,4 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          # Only run on changes in PRs to avoid noise from existing issues
-          only-new-issues: true
+          args: '--new-from-merge-base=origin/main'
