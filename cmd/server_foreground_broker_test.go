@@ -120,6 +120,34 @@ func TestCloudRunLogicalBrokerIDIsDeterministic(t *testing.T) {
 	assert.Equal(t, id1, id2)
 }
 
+func TestCloudRunLogicalBrokerIDWorksForCloudRunInstances(t *testing.T) {
+	settings := &config.VersionedSettings{
+		ActiveProfile: "default",
+		Profiles: map[string]config.V1ProfileConfig{
+			"default": {Runtime: "cr"},
+		},
+		Runtimes: map[string]config.V1RuntimeConfig{
+			"cr": {
+				Type: "cloudrun-instances",
+				CloudRunInstances: &config.V1CloudRunInstancesConfig{
+					ProjectID: "instances-project",
+					Region:    "us-central1",
+				},
+			},
+		},
+	}
+	rt := &scionruntime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
+
+	id, err := deriveCloudRunLogicalBrokerID(settings, rt)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, id)
+
+	// Verify deterministic: same config → same ID
+	id2, err2 := deriveCloudRunLogicalBrokerID(settings, rt)
+	assert.NoError(t, err2)
+	assert.Equal(t, id, id2)
+}
+
 func TestResolveBrokerIDPrefersConfiguredIDOverDefault(t *testing.T) {
 	cfg := &config.GlobalConfig{}
 	settings := &config.Settings{

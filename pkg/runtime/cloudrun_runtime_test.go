@@ -62,6 +62,33 @@ func TestCloudRunRuntime_NewWithNilConfig(t *testing.T) {
 	}
 }
 
+func TestCloudRunRuntime_NewFromInstances(t *testing.T) {
+	cfg := &config.V1CloudRunInstancesConfig{
+		ProjectID: "instances-project",
+		Region:    "us-west1",
+	}
+	rt := NewCloudRunRuntimeFromInstances(cfg)
+	if rt.Project != "instances-project" {
+		t.Errorf("Project = %q, want %q", rt.Project, "instances-project")
+	}
+	if rt.Region != "us-west1" {
+		t.Errorf("Region = %q, want %q", rt.Region, "us-west1")
+	}
+	if rt.Name() != "cloudrun" {
+		t.Errorf("Name() = %q, want %q", rt.Name(), "cloudrun")
+	}
+}
+
+func TestCloudRunRuntime_NewFromInstancesNil(t *testing.T) {
+	rt := NewCloudRunRuntimeFromInstances(nil)
+	if rt.Project != "" {
+		t.Errorf("Project = %q, want empty", rt.Project)
+	}
+	if rt.Region != "" {
+		t.Errorf("Region = %q, want empty", rt.Region)
+	}
+}
+
 func TestCloudRunRuntime_LifecycleMethodsReturnNotImplemented(t *testing.T) {
 	rt := NewCloudRunRuntime(nil)
 	ctx := context.Background()

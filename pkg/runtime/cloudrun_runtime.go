@@ -56,6 +56,18 @@ func NewCloudRunRuntime(cfg *config.V1CloudRunConfig) *CloudRunRuntime {
 	return rt
 }
 
+// NewCloudRunRuntimeFromInstances returns a new CloudRunRuntime from the
+// Cloud Run Instances configuration. The instances variant uses ProjectID
+// rather than Project, but the underlying runtime is the same.
+func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) *CloudRunRuntime {
+	rt := &CloudRunRuntime{}
+	if cfg != nil {
+		rt.Project = cfg.ProjectID
+		rt.Region = cfg.Region
+	}
+	return rt
+}
+
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 
 func (r *CloudRunRuntime) ExecUser() string { return "scion" }
