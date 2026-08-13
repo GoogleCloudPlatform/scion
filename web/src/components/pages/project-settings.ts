@@ -46,6 +46,7 @@ import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
 import '../shared/group-member-editor.js';
 import '../shared/gcp-service-account-list.js';
+import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';
 import '../shared/scheduled-event-list.js';
 import '../shared/subscription-manager.js';
 import '../shared/schedule-list.js';
@@ -1176,13 +1177,15 @@ export class ScionPageProjectSettings extends LitElement {
    * Account" dropdown so it reflects additions, verifications, and deletions
    * without requiring a full page reload.
    */
-  private handleSAListChanged(
-    e: CustomEvent<{ action: string; account: GCPServiceAccount }>
-  ): void {
+  private handleSAListChanged(e: CustomEvent<SAListChangedDetail>): void {
     const { action, account } = e.detail;
 
     if (action === 'deleted') {
       this.gcpServiceAccounts = this.gcpServiceAccounts.filter((sa) => sa.id !== account.id);
+      // Clear the default SA selection if the deleted account was selected.
+      if (this.configDefaultGCPIdentitySAID === account.id) {
+        this.configDefaultGCPIdentitySAID = '';
+      }
       return;
     }
 
