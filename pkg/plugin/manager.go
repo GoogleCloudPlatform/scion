@@ -515,24 +515,32 @@ func (m *Manager) ConfigureBroker(name string, extra map[string]string) error {
 func (m *Manager) RestartBrokerPlugin(name string, cfg map[string]string) error {
 	key := PluginTypeBroker + ":" + name
 
-	m.mu.RLock()
+	m.mu.Lock()
 	dp, ok := m.configs[key]
 	adapter, isGRPC := m.grpcAdapters[key]
-	m.mu.RUnlock()
-
 	if isGRPC {
+		m.mu.Unlock()
 		return adapter.Configure(cfg)
 	}
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("broker plugin not loaded: %s", name)
 	}
+
+	// Kill the old process first to avoid port/database/resource conflicts
+	// when the new process starts up and runs its Configure phase.
+	if client, hasClient := m.clients[key]; hasClient {
+		if !m.selfManaged[key] {
+			client.Kill()
+		}
+		delete(m.clients, key)
+		delete(m.dispensed, key)
+	}
+	m.mu.Unlock()
 
 	// Update the stored config so the new process starts with it.
 	dp.Config = cfg
 
-	// Kill the old process (or reconnect for self-managed) and start a new one
-	// with updated config. loadPlugin handles killing the existing client,
-	// caching the new one, and storing the config on success.
 	return m.loadPlugin(dp)
 }
 
