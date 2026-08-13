@@ -353,6 +353,59 @@ export class ScionChatThread extends LitElement {
     }
   `;
 
+  /** Auto-trigger loadHistory when the component first renders in v2 mode. */
+  override firstUpdated(): void {
+    if (this.isV2) {
+      this.loadHistory();
+    }
+  }
+
+  /**
+   * Detect conversationKey changes for v2 mode.
+   * When the user switches threads/DMs, the same component instance gets a
+   * new conversationKey — we must tear down old state and reload.
+   */
+  override updated(changedProperties: Map<string, unknown>): void {
+    if (
+      changedProperties.has('conversationKey') &&
+      changedProperties.get('conversationKey') !== undefined
+    ) {
+      const oldKey = changedProperties.get('conversationKey') as string;
+      if (oldKey !== this.conversationKey && this.isV2) {
+        this.resetV2State();
+        this.loadHistory();
+      }
+    }
+  }
+
+  /** Tear down v2 state so a fresh load can happen. */
+  private resetV2State(): void {
+    // Stop any active SSE listener
+    stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
+    this.streaming = false;
+
+    // Clear message state
+    this.messageMap.clear();
+    this.messages = [];
+    this.nextCursor = null;
+    this.lastKnownTimestamp = null;
+    this.hasOlderMessages = true;
+    this.loaded = false;
+    this.error = null;
+    this.sendError = null;
+    this.pinnedToBottom = true;
+    this.loadingOlder = false;
+
+    // Clear read tracking timer
+    if (this._readDebounceTimer) {
+      clearTimeout(this._readDebounceTimer);
+      this._readDebounceTimer = null;
+    }
+
+    // Increment fetchId to invalidate any in-flight requests
+    this.fetchId++;
+  }
+
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopStream();
@@ -739,10 +792,19 @@ export class ScionChatThread extends LitElement {
     this.streaming = true;
   }
 
-  /** Handle v2 SSE chat message events. Backfill from REST to get the actual message. */
-  private handleV2ChatMessage(): void {
-    // The stateManager event doesn't include the full message payload for a specific
-    // conversation, so we backfill from REST to pick up new messages.
+  /** Handle v2 SSE chat message events. Only backfill if the event is for this conversation. */
+  private handleV2ChatMessage(e: Event): void {
+    const detail = (e as CustomEvent).detail as {
+      data?: { threadId?: string; conversationKey?: string; topicId?: string };
+    };
+    const eventData = detail?.data;
+    if (eventData) {
+      // Filter: only process events for this conversation
+      const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
+      if (eventKey && eventKey !== this.conversationKey) {
+        return; // Not for this conversation
+      }
+    }
     void this.backfillV2();
   }
 

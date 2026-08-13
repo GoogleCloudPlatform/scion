@@ -110,6 +110,7 @@ export class ScionPageChat extends LitElement {
   @state() private v2SpaceRailLoaded = false;
   private _onChatMessage = this.handleChatMessage.bind(this);
   private _onChatTopic = this.handleChatTopic.bind(this);
+  private _onRailLoaded = this.handleRailLoaded.bind(this);
 
   static override styles = css`
     :host {
@@ -369,6 +370,12 @@ export class ScionPageChat extends LitElement {
     if (this.isV2) {
       void this.initV2();
     } else {
+      // Guard: redirect v2 routes to /chat when v2 flag is OFF (O3)
+      const path = window.location.pathname;
+      if (path.startsWith('/chat/space/') || path.startsWith('/chat/dm/')) {
+        navigateTo('/chat');
+        return;
+      }
       this.parseRoute();
       void this.loadThreads();
       stateManager.addEventListener('user-message-created', this._onUserMessage);
@@ -380,6 +387,7 @@ export class ScionPageChat extends LitElement {
     if (this.isV2) {
       stateManager.removeEventListener('chat-message-received', this._onChatMessage);
       stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
+      this.removeEventListener('rail-loaded', this._onRailLoaded);
     } else {
       stateManager.removeEventListener('user-message-created', this._onUserMessage);
     }
@@ -557,6 +565,22 @@ export class ScionPageChat extends LitElement {
     // Subscribe to SSE events
     stateManager.addEventListener('chat-message-received', this._onChatMessage);
     stateManager.addEventListener('chat-topic-updated', this._onChatTopic);
+
+    // Listen for rail-loaded to set up the SSE scope with space IDs
+    this.addEventListener('rail-loaded', this._onRailLoaded);
+  }
+
+  /** Called when the space rail finishes loading its data. Sets up the SSE scope. */
+  private handleRailLoaded(e: Event): void {
+    const detail = (e as CustomEvent).detail as { spaceIds: string[] };
+    const userId = this.pageData?.user?.id || '';
+    if (detail.spaceIds.length > 0 && userId) {
+      stateManager.setScope({
+        type: 'chat',
+        spaceIds: detail.spaceIds,
+        userId,
+      });
+    }
   }
 
   private parseV2Route(): void {

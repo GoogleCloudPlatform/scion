@@ -242,7 +242,7 @@ export class StateManager extends EventTarget {
 
     // User-scoped chat events: user.{userId}.chat.dm
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
-      this.notify('chat-message-received');
+      this.notifyWithData('chat-message-received', data);
       return;
     }
 
@@ -286,10 +286,12 @@ export class StateManager extends EventTarget {
       // Chat events: project.{projectId}.chat.{eventType}
       if (parts[2] === 'chat' && parts.length >= 4) {
         const chatEventType = parts[3];
+        // Include projectId and the SSE payload so consumers can filter by conversation
+        const chatDetail = { projectId, ...(data as Record<string, unknown>) };
         if (chatEventType === 'message') {
-          this.notify('chat-message-received');
+          this.notifyWithData('chat-message-received', chatDetail);
         } else if (chatEventType === 'topic') {
-          this.notify('chat-topic-updated');
+          this.notifyWithData('chat-topic-updated', chatDetail);
         }
         // Also dispatch the legacy user-message-created for v1 compat
         this.notify('user-message-created');
@@ -431,6 +433,11 @@ export class StateManager extends EventTarget {
 
   private notify(event: StateEventType): void {
     this.dispatchEvent(new CustomEvent(event, { detail: this.state }));
+  }
+
+  /** Dispatch an event with additional SSE payload data for consumer filtering. */
+  private notifyWithData(event: StateEventType, data: unknown): void {
+    this.dispatchEvent(new CustomEvent(event, { detail: { state: this.state, data } }));
   }
 
   /**

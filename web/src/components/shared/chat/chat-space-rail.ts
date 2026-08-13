@@ -465,6 +465,14 @@ export class ScionChatSpaceRail extends LitElement {
       await Promise.all([this.loadSpaces(), this.loadDMs(), this.loadPrefs()]);
     } finally {
       this.loading = false;
+      // Notify parent that rail data is ready (for SSE scope setup)
+      this.dispatchEvent(
+        new CustomEvent('rail-loaded', {
+          detail: { spaceIds: this.getSpaceIds() },
+          bubbles: true,
+          composed: true,
+        })
+      );
     }
   }
 
