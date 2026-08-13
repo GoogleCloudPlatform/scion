@@ -651,6 +651,14 @@ export class ScionPageChat extends LitElement {
       // Start presence heartbeat
       this._presenceProjectIds = detail.spaceIds;
       this.startPresenceHeartbeat();
+
+      // When in the global /chat view (no conversation selected), the hub
+      // members were loaded from /api/v1/users which doesn't include presence
+      // state. Now that we have space IDs, fetch presence data from the first
+      // space's members endpoint and merge it into the existing list.
+      if (!this.v2Conversation) {
+        void this.refreshHubMemberPresence(detail.spaceIds[0]);
+      }
     }
   }
 
@@ -1207,6 +1215,43 @@ export class ScionPageChat extends LitElement {
       ];
     } catch {
       // Non-critical — sidebar will show empty state
+    }
+  }
+
+  /**
+   * Fetch presence data from a space's members endpoint and merge it into the
+   * hub-level human members list.  Called from handleRailLoaded when the user
+   * is in the global /chat view so that presence indicators render on first load.
+   */
+  private async refreshHubMemberPresence(projectId: string): Promise<void> {
+    if (!projectId) return;
+    try {
+      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`);
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        humans?: Array<{ id: string; presenceState?: 'active' | 'idle' | '' }>;
+      };
+      if (!data.humans?.length) return;
+
+      // Build a lookup of userId → presenceState
+      const presenceMap = new Map<string, 'active' | 'idle' | ''>();
+      for (const h of data.humans) {
+        if (h.presenceState) {
+          presenceMap.set(h.id, h.presenceState);
+        }
+      }
+
+      // Merge presence into existing hub members
+      const updated = this.v2HumanMembers.map((m) => {
+        const ps = presenceMap.get(m.id);
+        return ps ? { ...m, presenceState: ps } : m;
+      });
+
+      if (updated.some((m, i) => m.presenceState !== this.v2HumanMembers[i].presenceState)) {
+        this.v2HumanMembers = updated;
+      }
+    } catch {
+      // Non-critical — presence will still update via SSE events
     }
   }
 

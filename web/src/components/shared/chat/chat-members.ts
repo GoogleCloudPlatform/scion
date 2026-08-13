@@ -210,7 +210,10 @@ export class ScionChatMembers extends LitElement {
   }
 
   private renderHumans() {
-    const sorted = [...this.humans].sort((a, b) => {
+    // Filter out the current user so they don't appear in their own
+    // members sidebar.
+    const visible = this.humans.filter((m) => m.id !== this.currentUserId);
+    const sorted = [...visible].sort((a, b) => {
       // Active users first, then alphabetical
       const aActive = a.presenceState === 'active' ? 0 : 1;
       const bActive = b.presenceState === 'active' ? 0 : 1;
