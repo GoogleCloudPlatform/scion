@@ -102,8 +102,10 @@ type WebChatStore interface {
 	TouchTopicActivity(ctx context.Context, topicID, messageID string) error
 
 	// EnsureGeneralTopic idempotently creates the #general topic for a project.
-	// Returns the topic ID (existing or new).
-	EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, error)
+	// Returns the topic ID (existing or new) and a boolean indicating
+	// whether a new topic was actually created (false when the topic
+	// already existed and the INSERT was a no-op).
+	EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, bool, error)
 
 	// --- Wave-2 Read-state methods ---
 
@@ -598,7 +600,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 
 	// Lazy #general creation for pre-existing projects.
 	if !hasGeneral {
-		generalID, err := s.EnsureGeneralTopic(ctx, projectID, "system")
+		generalID, _, err := s.EnsureGeneralTopic(ctx, projectID, "system")
 		if err != nil {
 			slog.Warn("webchat store: lazy #general creation failed", "project_id", projectID, "error", err)
 		} else {
@@ -685,8 +687,8 @@ func (s *sqliteWebChatStore) TouchTopicActivity(ctx context.Context, topicID, me
 }
 
 // EnsureGeneralTopic idempotently creates the #general topic for a project.
-// Returns the topic ID (existing or new).
-func (s *sqliteWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, error) {
+// Returns the topic ID (existing or new) and whether a new row was inserted.
+func (s *sqliteWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, bool, error) {
 	newID := uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
@@ -697,17 +699,19 @@ ON CONFLICT DO NOTHING
 `
 	_, err := s.db.ExecContext(ctx, insert, newID, projectID, createdBy, now)
 	if err != nil {
-		return "", fmt.Errorf("webchat store: ensure general topic: %w", err)
+		return "", false, fmt.Errorf("webchat store: ensure general topic: %w", err)
 	}
 
 	// Return the ID of the existing or newly created #general topic.
+	// If the returned ID matches the one we tried to insert, we created
+	// a new row; otherwise, the topic already existed.
 	const lookup = `SELECT id FROM webchat_topic WHERE project_id = ? AND is_general = 1 AND deleted_at IS NULL`
 	var id string
 	err = s.db.QueryRowContext(ctx, lookup, projectID).Scan(&id)
 	if err != nil {
-		return "", fmt.Errorf("webchat store: ensure general topic lookup: %w", err)
+		return "", false, fmt.Errorf("webchat store: ensure general topic lookup: %w", err)
 	}
-	return id, nil
+	return id, id == newID, nil
 }
 
 // ---------------------------------------------------------------------------

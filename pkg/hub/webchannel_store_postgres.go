@@ -365,7 +365,7 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 
 	// Lazy #general creation for pre-existing projects.
 	if !hasGeneral {
-		generalID, err := s.EnsureGeneralTopic(ctx, projectID, "system")
+		generalID, _, err := s.EnsureGeneralTopic(ctx, projectID, "system")
 		if err != nil {
 			slog.Warn("webchat store: lazy #general creation failed", "project_id", projectID, "error", err)
 		} else {
@@ -436,12 +436,21 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 }
 
 // TouchTopicActivity updates last_message_id and last_activity_at.
+// TouchTopicActivity updates last_activity_at and, when messageID is
+// non-empty, also updates last_message_id. An empty messageID is accepted
+// gracefully — this happens when the spoke receives a StructuredMessage
+// (which has no ID) rather than a store.Message.
 func (s *pgWebChatStore) TouchTopicActivity(ctx context.Context, topicID, messageID string) error {
-	const query = `
-UPDATE webchat_topic SET last_message_id = $1, last_activity_at = NOW()
- WHERE id = $2
-`
-	_, err := s.db.ExecContext(ctx, query, messageID, topicID)
+	if messageID != "" {
+		const q = `UPDATE webchat_topic SET last_message_id = $1, last_activity_at = NOW() WHERE id = $2`
+		_, err := s.db.ExecContext(ctx, q, messageID, topicID)
+		if err != nil {
+			return fmt.Errorf("webchat store: touch topic activity: %w", err)
+		}
+		return nil
+	}
+	const q = `UPDATE webchat_topic SET last_activity_at = NOW() WHERE id = $1`
+	_, err := s.db.ExecContext(ctx, q, topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: touch topic activity: %w", err)
 	}
@@ -449,7 +458,8 @@ UPDATE webchat_topic SET last_message_id = $1, last_activity_at = NOW()
 }
 
 // EnsureGeneralTopic idempotently creates the #general topic for a project.
-func (s *pgWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, error) {
+// Returns the topic ID (existing or new) and whether a new row was inserted.
+func (s *pgWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, bool, error) {
 	newID := uuid.New().String()
 
 	const insert = `
@@ -459,16 +469,16 @@ ON CONFLICT DO NOTHING
 `
 	_, err := s.db.ExecContext(ctx, insert, newID, projectID, createdBy)
 	if err != nil {
-		return "", fmt.Errorf("webchat store: ensure general topic: %w", err)
+		return "", false, fmt.Errorf("webchat store: ensure general topic: %w", err)
 	}
 
 	const lookup = `SELECT id FROM webchat_topic WHERE project_id = $1 AND is_general = TRUE AND deleted_at IS NULL`
 	var id string
 	err = s.db.QueryRowContext(ctx, lookup, projectID).Scan(&id)
 	if err != nil {
-		return "", fmt.Errorf("webchat store: ensure general topic lookup: %w", err)
+		return "", false, fmt.Errorf("webchat store: ensure general topic lookup: %w", err)
 	}
-	return id, nil
+	return id, id == newID, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -704,12 +714,19 @@ SELECT conversation_key, participant_id, peer_id, peer_kind,
 }
 
 // TouchDMActivity updates watermarks for a DM conversation (all participant rows).
+// TouchDMActivity updates watermarks for a DM conversation (all participant
+// rows). When messageID is empty, only last_activity_at is updated.
 func (s *pgWebChatStore) TouchDMActivity(ctx context.Context, conversationKey, messageID string) error {
-	const query = `
-UPDATE webchat_dm SET last_message_id = $1, last_activity_at = NOW()
- WHERE conversation_key = $2
-`
-	_, err := s.db.ExecContext(ctx, query, messageID, conversationKey)
+	if messageID != "" {
+		const q = `UPDATE webchat_dm SET last_message_id = $1, last_activity_at = NOW() WHERE conversation_key = $2`
+		_, err := s.db.ExecContext(ctx, q, messageID, conversationKey)
+		if err != nil {
+			return fmt.Errorf("webchat store: touch dm activity: %w", err)
+		}
+		return nil
+	}
+	const q = `UPDATE webchat_dm SET last_activity_at = NOW() WHERE conversation_key = $1`
+	_, err := s.db.ExecContext(ctx, q, conversationKey)
 	if err != nil {
 		return fmt.Errorf("webchat store: touch dm activity: %w", err)
 	}

@@ -27,18 +27,48 @@ import (
 
 // --- authorizeSSESubjects unit tests ---
 
-func TestAuthorizeSSESubjects_NoAuthzService(t *testing.T) {
+func TestAuthorizeSSESubjects_NoAuthzService_DeniesAll(t *testing.T) {
 	ws := &WebServer{} // no authzService
 	req := httptest.NewRequest("GET", "/events", nil)
-	// Set a web session user in context.
 	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
-	denied := ws.authorizeSSESubjects(req, []string{
+	subjects := []string{
 		"project.proj-1.chat.message",
 		"user.other-user.chat.dm",
-	})
-	assert.Nil(t, denied, "nil authzService should allow all subjects")
+	}
+	denied := ws.authorizeSSESubjects(req, subjects)
+	assert.Equal(t, subjects, denied, "nil authzService must deny all (fail closed)")
+}
+
+func TestAuthorizeSSESubjects_WildcardRootDenied(t *testing.T) {
+	ws := &WebServer{
+		authzService: NewAuthzService(&mockAuthzStore{}, nil),
+	}
+	tests := []struct {
+		name    string
+		subject string
+	}{
+		{"bare >", ">"},
+		{"bare *", "*"},
+		{"*.>", "*.>"},
+		{"*.*.chat.>", "*.*.chat.>"},
+		{"* as root with children", "*.project.something"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/events", nil)
+			// Admin user — would pass project/user checks, but wildcard
+			// root must be rejected regardless.
+			user := &webSessionUser{UserID: "admin-1", Email: "a@b.com", Role: "admin"}
+			req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
+
+			subjects := []string{tt.subject}
+			denied := ws.authorizeSSESubjects(req, subjects)
+			assert.Equal(t, subjects, denied,
+				"wildcard root %q must be denied even for admin", tt.subject)
+		})
+	}
 }
 
 func TestAuthorizeSSESubjects_NoSessionUser(t *testing.T) {
@@ -205,6 +235,27 @@ func TestValidateSSESubjects_ChatPatterns(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			errMsg := validateSSESubjects([]string{tt.subject})
 			assert.Empty(t, errMsg, "subject %q should pass syntax validation", tt.subject)
+		})
+	}
+}
+
+// --- validateSSESubjects: wildcard root rejection (belt-and-suspenders for F1) ---
+
+func TestValidateSSESubjects_WildcardRootRejected(t *testing.T) {
+	tests := []struct {
+		name    string
+		subject string
+	}{
+		{"bare >", ">"},
+		{"bare *", "*"},
+		{"*.>", "*.>"},
+		{"*.*.chat.>", "*.*.chat.>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errMsg := validateSSESubjects([]string{tt.subject})
+			assert.NotEmpty(t, errMsg, "wildcard root %q must fail syntax validation", tt.subject)
+			assert.Contains(t, errMsg, "first token must not be a wildcard")
 		})
 	}
 }

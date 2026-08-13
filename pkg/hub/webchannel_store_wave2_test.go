@@ -309,9 +309,10 @@ func TestWave2_EnsureGeneralTopic(t *testing.T) {
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	id1, err := store.EnsureGeneralTopic(ctx, "proj-1", "user-1")
+	id1, created, err := store.EnsureGeneralTopic(ctx, "proj-1", "user-1")
 	require.NoError(t, err)
 	require.NotEmpty(t, id1)
+	require.True(t, created, "first call should report created=true")
 
 	// Verify the topic exists.
 	got, err := store.GetTopic(ctx, id1)
@@ -327,13 +328,15 @@ func TestWave2_EnsureGeneralTopic_Idempotent(t *testing.T) {
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	id1, err := store.EnsureGeneralTopic(ctx, "proj-1", "user-1")
+	id1, created1, err := store.EnsureGeneralTopic(ctx, "proj-1", "user-1")
 	require.NoError(t, err)
+	require.True(t, created1, "first call should report created=true")
 
-	// Second call should return the same ID.
-	id2, err := store.EnsureGeneralTopic(ctx, "proj-1", "user-2")
+	// Second call should return the same ID and created=false.
+	id2, created2, err := store.EnsureGeneralTopic(ctx, "proj-1", "user-2")
 	require.NoError(t, err)
 	require.Equal(t, id1, id2)
+	require.False(t, created2, "second call should report created=false (topic already exists)")
 
 	// Only one row should exist.
 	var count int

@@ -1170,6 +1170,12 @@ func validateSSESubjects(subjects []string) string {
 			return fmt.Sprintf("subject pattern too long: %d characters (max 256)", len(sub))
 		}
 		tokens := strings.Split(sub, ".")
+		// Belt-and-suspenders: reject subjects whose first token is a
+		// wildcard — a bare ">" or "*" would match all events across all
+		// projects and users, bypassing subject-level authorization.
+		if len(tokens) > 0 && (tokens[0] == "*" || tokens[0] == ">") {
+			return fmt.Sprintf("invalid subject %q: first token must not be a wildcard", sub)
+		}
 		for i, token := range tokens {
 			if token == "" {
 				return fmt.Sprintf("invalid subject %q: empty token", sub)
@@ -1201,8 +1207,22 @@ func validateSSESubjects(subjects []string) string {
 // broker, etc.) pass through without additional checks.
 func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []string {
 	if ws.authzService == nil {
-		// No authz service configured (e.g., tests); allow all.
-		return nil
+		// No authz service configured — fail closed. Callers that need
+		// SSE must wire an AuthzService; allowing all subjects when authz
+		// is absent would be a privilege-escalation hole.
+		return subjects
+	}
+
+	// Reject subjects whose first token is a wildcard (* or >). A bare
+	// ">" matches ALL events via NATS-style pattern matching, bypassing
+	// project/user authorization entirely. validateSSESubjects also
+	// rejects these as belt-and-suspenders, but this check is the
+	// authoritative security gate.
+	for _, sub := range subjects {
+		tokens := strings.Split(sub, ".")
+		if len(tokens) > 0 && (tokens[0] == "*" || tokens[0] == ">") {
+			return subjects // deny all, fail closed
+		}
 	}
 
 	// Build the caller identity from the web session.
