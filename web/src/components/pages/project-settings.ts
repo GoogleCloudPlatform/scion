@@ -1170,6 +1170,36 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
+  /**
+   * Handles `sa-list-changed` events from `<scion-gcp-service-account-list>`.
+   * Updates the local `gcpServiceAccounts` state used by the "Default Service
+   * Account" dropdown so it reflects additions, verifications, and deletions
+   * without requiring a full page reload.
+   */
+  private handleSAListChanged(
+    e: CustomEvent<{ action: string; account: GCPServiceAccount }>
+  ): void {
+    const { action, account } = e.detail;
+
+    if (action === 'deleted') {
+      this.gcpServiceAccounts = this.gcpServiceAccounts.filter((sa) => sa.id !== account.id);
+      return;
+    }
+
+    // Only add verified accounts to the dropdown
+    if (!account.verified) return;
+
+    // Dedupe by id — replace if exists, append if new
+    const exists = this.gcpServiceAccounts.some((sa) => sa.id === account.id);
+    if (exists) {
+      this.gcpServiceAccounts = this.gcpServiceAccounts.map((sa) =>
+        sa.id === account.id ? account : sa
+      );
+    } else {
+      this.gcpServiceAccounts = [...this.gcpServiceAccounts, account];
+    }
+  }
+
   private async handleSaveConfig(): Promise<void> {
     this.settingsSaving = true;
     this.settingsError = null;
@@ -2420,6 +2450,7 @@ export class ScionPageProjectSettings extends LitElement {
             <scion-gcp-service-account-list
               scope="project"
               scopeId=${this.projectId}
+              @sa-list-changed=${this.handleSAListChanged}
             ></scion-gcp-service-account-list>
           </sl-tab-panel>
 
