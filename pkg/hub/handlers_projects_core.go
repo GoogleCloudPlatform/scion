@@ -388,6 +388,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	// Create project members group and policy (best-effort)
 	s.createProjectMembersGroupAndPolicy(ctx, project)
 
+	// Ensure the #general chat topic exists for this project (best-effort).
+	s.ensureProjectGeneralTopic(ctx, project)
+
 	// For git projects, try to auto-associate a GitHub App installation so that
 	// clone/pull operations can mint tokens. This covers the case where the app
 	// was installed before the project was created (webhook already fired).
@@ -510,6 +513,23 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 					"project_id", project.ID, "slug", agentsSlug, "error", updateErr.Error())
 			}
 		}
+	}
+}
+
+// ensureProjectGeneralTopic creates the #general chat topic for a project if
+// the webchat store is configured. Best-effort: failures are logged but do not
+// block project creation.
+func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.Project) {
+	if s.webChatStore == nil {
+		return
+	}
+	createdBy := project.CreatedBy
+	if createdBy == "" {
+		createdBy = "system"
+	}
+	if _, err := s.webChatStore.EnsureGeneralTopic(ctx, project.ID, createdBy); err != nil {
+		s.projectsLogger().Warn("failed to create #general topic for project",
+			"project_id", project.ID, "error", err)
 	}
 }
 
@@ -1190,6 +1210,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		// Create project members group and policy (best-effort)
 		s.createProjectMembersGroupAndPolicy(ctx, project)
+
+		// Ensure the #general chat topic exists for this project (best-effort).
+		s.ensureProjectGeneralTopic(ctx, project)
 
 		// Auto-link brokers that have auto_provide enabled
 		s.autoLinkProviders(ctx, project)

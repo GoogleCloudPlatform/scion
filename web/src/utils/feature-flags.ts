@@ -65,3 +65,10 @@ export function isFeatureEnabled(name: string): boolean {
   // Default: on for flags in DEFAULT_ON_FLAGS, off otherwise
   return DEFAULT_ON_FLAGS.has(name);
 }
+
+/**
+ * Wave-2 native chat feature flag.
+ * Default OFF — not in DEFAULT_ON_FLAGS.
+ * Enable via server injection or localStorage: scion:feature:web.native_chat_v2
+ */
+export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
