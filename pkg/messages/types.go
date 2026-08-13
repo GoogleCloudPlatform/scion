@@ -57,6 +57,26 @@ const (
 	TypeGroupSet       = "group-set"
 	TypeMention        = "mention"
 	TypeSystem         = "system"
+
+	// TypeChat is used for human-to-human messages in shared threads and DMs.
+	// These messages are persisted with recipient "thread:<topicUUID>" or
+	// "user:<email>" and are never dispatched to an agent.
+	//
+	// type:chat audit (W2 checklist):
+	//   (a) Dispatch path: the broker inbound handler (handlers_broker_inbound.go)
+	//       routes by topic (project+agent slug), not by type. deliverToAgent and
+	//       deliverToUser in messagebroker.go pass type through without switching
+	//       on it. Human-to-human messages use recipient prefix "thread:" or
+	//       "user:", never "agent:", so they never enter the agent dispatch path.
+	//   (b) Visibility backfill: the frontend shouldShowMessage (chat-thread.ts)
+	//       defaults empty visibility to "normal" (msg.visibility || 'normal').
+	//       type:chat messages have empty visibility, so they correctly display
+	//       as normal. No backend visibility filter switches on type.
+	//   (c) Plugin Publish/Validate: broker plugins (broker_plugin.go) relay
+	//       StructuredMessage via RPC without checking the Type field. The only
+	//       type validation is in StructuredMessage.Validate(), and chat is now
+	//       in validTypes. No plugin Publish or Validate method rejects unknown types.
+	TypeChat = "chat"
 )
 
 // System message category constants identify the origin of a system message.
@@ -95,6 +115,7 @@ var validTypes = map[string]bool{
 	TypeGroupSet:       true,
 	TypeMention:        true,
 	TypeSystem:         true,
+	TypeChat:           true,
 }
 
 // StructuredMessage represents a formatted Scion message.

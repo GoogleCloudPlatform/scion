@@ -435,7 +435,6 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 	return nil
 }
 
-// TouchTopicActivity updates last_message_id and last_activity_at.
 // TouchTopicActivity updates last_activity_at and, when messageID is
 // non-empty, also updates last_message_id. An empty messageID is accepted
 // gracefully — this happens when the spoke receives a StructuredMessage
@@ -713,7 +712,6 @@ SELECT conversation_key, participant_id, peer_id, peer_kind,
 	return dms, rows.Err()
 }
 
-// TouchDMActivity updates watermarks for a DM conversation (all participant rows).
 // TouchDMActivity updates watermarks for a DM conversation (all participant
 // rows). When messageID is empty, only last_activity_at is updated.
 func (s *pgWebChatStore) TouchDMActivity(ctx context.Context, conversationKey, messageID string) error {

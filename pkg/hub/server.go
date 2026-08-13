@@ -3447,9 +3447,19 @@ func (s *Server) registerRoutes() {
 	// Chat thread prefs (Phase 3 — visibility mode persistence)
 	s.mux.HandleFunc("/api/v1/chat/prefs", s.handleChatPrefs)
 
-	// Chat thread endpoints (Phase 5 — thread rail)
+	// Chat thread endpoints (Phase 5 — thread rail, legacy)
 	s.mux.HandleFunc("/api/v1/chat/threads", s.handleChatThreads)
 	s.mux.HandleFunc("/api/v1/chat/threads/", s.handleChatThreadRoutes)
+
+	// Wave-2 chat endpoints (conversation REST API)
+	s.mux.HandleFunc("/api/v1/chat/spaces", s.handleChatSpaces)
+	s.mux.HandleFunc("/api/v1/chat/spaces/", s.handleChatSpaceRoutes)
+	s.mux.HandleFunc("/api/v1/chat/conversations/", s.handleChatConversationRoutes)
+	s.mux.HandleFunc("/api/v1/chat/topics/", s.handleChatTopicRoutes)
+	s.mux.HandleFunc("/api/v1/chat/dms", s.handleChatDMs)
+	s.mux.HandleFunc("/api/v1/chat/user-prefs", s.handleChatUserPrefs)
+	s.mux.HandleFunc("/api/v1/chat/presence", s.handleChatPresence)
+	s.mux.HandleFunc("/api/v1/chat/search", s.handleChatSearch)
 
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect)

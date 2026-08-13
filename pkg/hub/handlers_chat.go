@@ -52,6 +52,16 @@ func (s *Server) handleChatThreads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Verify the caller has read access to the project (security fix — wave-2 §4.2).
+	project, err := s.store.GetProject(r.Context(), projectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
 	limit := 50 // default
 	if limitStr := q.Get("limit"); limitStr != "" {
 		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 && n <= 200 {
