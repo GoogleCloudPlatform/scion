@@ -15,6 +15,7 @@
 package config
 
 import (
+	"encoding/json"
 	"sync"
 )
 
@@ -115,30 +116,31 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	}
 }
 
+// deepCloneJSON performs a deep copy of src into dst via JSON round-trip.
+// This is intentionally generic so that new fields added to V1RuntimeConfig,
+// V1ProfileConfig, or HarnessConfigEntry are automatically deep-copied
+// without needing per-field clone logic. The types are JSON-serializable
+// by design (they carry json struct tags for API/storage).
+func deepCloneJSON[T any](src T) T {
+	data, err := json.Marshal(src)
+	if err != nil {
+		// All settings types are JSON-serializable; a marshal failure
+		// here indicates a programming error, not a runtime condition.
+		panic("settings_overlay: json.Marshal failed: " + err.Error())
+	}
+	var dst T
+	if err := json.Unmarshal(data, &dst); err != nil {
+		panic("settings_overlay: json.Unmarshal failed: " + err.Error())
+	}
+	return dst
+}
+
 // cloneRuntimes returns a deep copy of a runtimes map.
 func cloneRuntimes(src map[string]V1RuntimeConfig) map[string]V1RuntimeConfig {
 	if src == nil {
 		return nil
 	}
-	dst := make(map[string]V1RuntimeConfig, len(src))
-	for k, v := range src {
-		// V1RuntimeConfig contains only value types and a pointer to
-		// CloudRunInstancesConfig. Deep-copy the pointer field.
-		cp := v
-		if v.CloudRun != nil {
-			cr := *v.CloudRun
-			cp.CloudRun = &cr
-		}
-		if v.Env != nil {
-			env := make(map[string]string, len(v.Env))
-			for ek, ev := range v.Env {
-				env[ek] = ev
-			}
-			cp.Env = env
-		}
-		dst[k] = cp
-	}
-	return dst
+	return deepCloneJSON(src)
 }
 
 // cloneProfiles returns a deep copy of a profiles map.
@@ -146,23 +148,7 @@ func cloneProfiles(src map[string]V1ProfileConfig) map[string]V1ProfileConfig {
 	if src == nil {
 		return nil
 	}
-	dst := make(map[string]V1ProfileConfig, len(src))
-	for k, v := range src {
-		cp := v
-		if v.Env != nil {
-			env := make(map[string]string, len(v.Env))
-			for ek, ev := range v.Env {
-				env[ek] = ev
-			}
-			cp.Env = env
-		}
-		if v.Resources != nil {
-			rs := *v.Resources
-			cp.Resources = &rs
-		}
-		dst[k] = cp
-	}
-	return dst
+	return deepCloneJSON(src)
 }
 
 // cloneHarnessConfigs returns a deep copy of a harness configs map.
@@ -170,9 +156,5 @@ func cloneHarnessConfigs(src map[string]HarnessConfigEntry) map[string]HarnessCo
 	if src == nil {
 		return nil
 	}
-	dst := make(map[string]HarnessConfigEntry, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
+	return deepCloneJSON(src)
 }
