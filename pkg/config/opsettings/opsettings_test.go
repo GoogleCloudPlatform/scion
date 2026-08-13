@@ -1237,10 +1237,10 @@ func TestRuntimesKoanfRoundTrip(t *testing.T) {
 func TestRuntimesCloudRunInstancesKoanfRoundTrip(t *testing.T) {
 	k := koanf.New(".")
 	err := k.Load(confmap.Provider(map[string]interface{}{
-		"runtimes.docker.type":                             "docker",
-		"runtimes.cr.type":                                 "cloudrun-instances",
-		"runtimes.cr.cloudrun_instances.project_id":        "my-gcp-project",
-		"runtimes.cr.cloudrun_instances.region":             "us-central1",
+		"runtimes.docker.type":                      "docker",
+		"runtimes.cr.type":                          "cloudrun-instances",
+		"runtimes.cr.cloudrun_instances.project_id": "my-gcp-project",
+		"runtimes.cr.cloudrun_instances.region":     "us-central1",
 	}, "."), nil)
 	if err != nil {
 		t.Fatalf("load koanf: %v", err)

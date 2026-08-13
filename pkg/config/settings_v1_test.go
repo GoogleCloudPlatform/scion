@@ -1479,10 +1479,10 @@ func TestCloudRunInstancesConfig_KoanfUnmarshalFromConfmap(t *testing.T) {
 	// correctly populate the CloudRunInstances nested struct.
 	k := koanf.New(".")
 	require.NoError(t, k.Load(confmap.Provider(map[string]interface{}{
-		"runtimes.cr.type":                            "cloudrun-instances",
-		"runtimes.cr.cloudrun_instances.project_id":   "my-gcp-project",
-		"runtimes.cr.cloudrun_instances.region":        "us-central1",
-		"runtimes.docker.type":                        "docker",
+		"runtimes.cr.type":                          "cloudrun-instances",
+		"runtimes.cr.cloudrun_instances.project_id": "my-gcp-project",
+		"runtimes.cr.cloudrun_instances.region":     "us-central1",
+		"runtimes.docker.type":                      "docker",
 	}, "."), nil))
 
 	settings := &VersionedSettings{
@@ -1566,12 +1566,12 @@ func TestCloudRunInstancesConfig_CoexistsWithCloudRun(t *testing.T) {
 	// as separate runtime entries without interference.
 	k := koanf.New(".")
 	require.NoError(t, k.Load(confmap.Provider(map[string]interface{}{
-		"runtimes.cr-service.type":                          "cloudrun",
-		"runtimes.cr-service.cloudrun.project":              "service-project",
-		"runtimes.cr-service.cloudrun.region":               "us-east1",
-		"runtimes.cr-instances.type":                        "cloudrun-instances",
+		"runtimes.cr-service.type":                            "cloudrun",
+		"runtimes.cr-service.cloudrun.project":                "service-project",
+		"runtimes.cr-service.cloudrun.region":                 "us-east1",
+		"runtimes.cr-instances.type":                          "cloudrun-instances",
 		"runtimes.cr-instances.cloudrun_instances.project_id": "instances-project",
-		"runtimes.cr-instances.cloudrun_instances.region":    "us-west1",
+		"runtimes.cr-instances.cloudrun_instances.region":     "us-west1",
 	}, "."), nil))
 
 	settings := &VersionedSettings{
