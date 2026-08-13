@@ -736,30 +736,6 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		"conversation_id", activity.Conversation.ID,
 	)
 
-	// Update conversation context for routing replies back.
-	if msg.SenderID != "" && msg.Recipient != "" {
-		agentSlug := msg.Recipient
-		if strings.HasPrefix(agentSlug, "agent:") {
-			agentSlug = strings.TrimPrefix(agentSlug, "agent:")
-		}
-		projectID := msg.Channel
-		if projectID == "" && msg.Metadata != nil {
-			projectID = msg.Metadata["project_id"]
-		}
-		if projectID != "" {
-			// Fire-and-forget: error is logged inside SetConversationContext;
-			// a failure here should not block inbound message processing.
-			_ = b.SetConversationContext(&ConversationContext{
-				TeamsUserID:        msg.SenderID,
-				ProjectID:          projectID,
-				AgentSlug:          agentSlug,
-				LastConversationID: activity.Conversation.ID,
-				LastActivityID:     activity.ID,
-				LastMessageAt:      time.Now(),
-			})
-		}
-	}
-
 	if b.hubClient == nil {
 		b.log.Warn("Hub client not configured, message not delivered")
 		return nil
@@ -809,8 +785,36 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		return nil
 	}
 
+	// Ensure Recipient is set when routing via the channel's default agent
+	// (no explicit @-mention).  This matches Discord's "agent:" + agentSlug.
+	if msg.Recipient == "" && agentSlug != "" {
+		msg.Recipient = "agent:" + agentSlug
+	}
+
+	// Update conversation context for routing replies back.
+	// Placed here (after link resolution) so link.ProjectID is available.
+	if msg.SenderID != "" {
+		ccSlug := agentSlug
+		_ = b.SetConversationContext(&ConversationContext{
+			TeamsUserID:        msg.SenderID,
+			ProjectID:          link.ProjectID,
+			AgentSlug:          ccSlug,
+			LastConversationID: activity.Conversation.ID,
+			LastActivityID:     activity.ID,
+			LastMessageAt:      time.Now(),
+		})
+	}
+
 	// Populate Channel on the structured message so the hub can correlate.
-	msg.Channel = link.ProjectID
+	msg.Channel = "teams"
+
+	// Ensure ThreadID is set so the hub can route replies back to the
+	// correct Teams conversation.  resolveThreadID only sets it for
+	// thread replies (replyToId); for top-level messages we fall back to
+	// the normalized conversation ID, matching Discord's pattern.
+	if msg.ThreadID == "" {
+		msg.ThreadID = convID
+	}
 
 	topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", link.ProjectID, agentSlug)
 	if err := b.hubClient.DeliverInbound(ctx, topic, msg); err != nil {

@@ -52,7 +52,7 @@ func TestActivityToStructuredMessage_BasicFields(t *testing.T) {
 	assert.Equal(t, "Alice", msg.Sender)
 	assert.Equal(t, "aad-obj-123", msg.SenderID)
 	assert.Equal(t, "Hello from Teams!", msg.Msg)
-	assert.Equal(t, "chat", msg.Type)
+	assert.Equal(t, messages.TypeInstruction, msg.Type)
 
 	// Metadata checks.
 	assert.Equal(t, "conv-abc", msg.Metadata["teams_conversation_id"])
