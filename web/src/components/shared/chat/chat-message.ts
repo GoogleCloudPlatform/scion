@@ -341,6 +341,15 @@ export class ScionChatMessage extends LitElement {
       margin-bottom: 0;
     }
 
+    /* @mention pills */
+    .md-content .mention {
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+      padding: 0 4px;
+      border-radius: 3px;
+      font-weight: 500;
+    }
+
     .md-content table {
       border-collapse: collapse;
       width: 100%;
@@ -617,11 +626,22 @@ export class ScionChatMessage extends LitElement {
     try {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
-      this.renderedHtml = renderer.render(this.body);
+      this.renderedHtml = this.styleMentions(renderer.render(this.body));
     } catch {
       if (taskId !== this.renderTaskId) return;
       this.renderedHtml = '';
     }
+  }
+
+  /**
+   * Post-process rendered HTML to wrap @mentions in styled spans.
+   * Only processes text content between HTML tags to avoid mangling attributes.
+   */
+  private styleMentions(htmlStr: string): string {
+    return htmlStr.replace(/>([^<]+)</g, (_match, text: string) => {
+      const styled = text.replace(/@([\w.-]+)/g, '<span class="mention">@$1</span>');
+      return `>${styled}<`;
+    });
   }
 
   override render() {

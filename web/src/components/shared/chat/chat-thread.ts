@@ -1388,6 +1388,26 @@ export class ScionChatThread extends LitElement {
     this.scrollToBottom();
   }
 
+  /** Focus the composer textarea when clicking the message area background. */
+  private handleMessageAreaClick(e: MouseEvent): void {
+    const target = e.target as HTMLElement;
+    // Don't steal focus from interactive elements or message content
+    if (
+      target.closest(
+        'a, button, input, textarea, sl-menu-item, sl-dropdown, scion-chat-message, scion-chat-system-line, scion-chat-interagent-marker'
+      )
+    ) {
+      return;
+    }
+    const composer = this.shadowRoot?.querySelector('scion-chat-composer');
+    if (composer) {
+      const slTextarea = (composer as LitElement).shadowRoot?.querySelector('sl-textarea');
+      if (slTextarea) {
+        (slTextarea as HTMLElement).focus();
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Send message
   // ---------------------------------------------------------------------------
@@ -1592,7 +1612,7 @@ export class ScionChatThread extends LitElement {
     }
 
     return html`
-      <div class="messages-scroll" @scroll=${this.handleScroll}>
+      <div class="messages-scroll" @scroll=${this.handleScroll} @click=${this.handleMessageAreaClick}>
         <div class="messages-list">
           ${this.loadingOlder
             ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
