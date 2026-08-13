@@ -86,14 +86,17 @@ func NewCloudRunRuntime(cfg *config.CloudRunInstancesConfig) (*CloudRunRuntime, 
 
 // NewCloudRunRuntimeFromInstances returns a new CloudRunRuntime from the
 // Cloud Run Instances configuration. The instances variant uses ProjectID
-// rather than Project, but the underlying runtime is the same.
+// and Region from V1CloudRunInstancesConfig, mapping Region to Location.
 func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) *CloudRunRuntime {
-	rt := &CloudRunRuntime{}
-	if cfg != nil {
-		rt.Project = cfg.ProjectID
-		rt.Region = cfg.Region
+	if cfg == nil {
+		return &CloudRunRuntime{}
 	}
-	return rt
+	return &CloudRunRuntime{
+		config: &config.CloudRunInstancesConfig{
+			ProjectID: cfg.ProjectID,
+			Location:  cfg.Region,
+		},
+	}
 }
 
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }

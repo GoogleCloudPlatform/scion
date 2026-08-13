@@ -176,9 +176,6 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		return rt
 	case "cloudrun-instances":
 		rt := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
-		if vs != nil && vs.Server != nil {
-			rt.WorkspaceStorage = vs.Server.WorkspaceStorage
-		}
 		return rt
 	}
 
