@@ -609,7 +609,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 							// W7: Initialize local-disk attachment store.
 							globalDir, err := config.GetGlobalDir()
-							if err == nil {
+							if err != nil {
+								log.Printf("Warning: could not determine global dir, attachments disabled: %v", err)
+							} else {
 								attachDir := filepath.Join(globalDir, "attachments")
 								attachStore, err := hub.NewLocalDiskAttachmentStore(attachDir)
 								if err != nil {

@@ -91,6 +91,7 @@ type PresenceManager struct {
 	typing  map[string]map[string]*typingEntry // conversationKey -> userID -> typing
 	events  EventPublisher
 	store   store.Store
+	log     *slog.Logger
 	stopCh  chan struct{}
 	stopped chan struct{}
 }
@@ -103,6 +104,7 @@ func NewPresenceManager(events EventPublisher, st store.Store) *PresenceManager 
 		typing:  make(map[string]map[string]*typingEntry),
 		events:  events,
 		store:   st,
+		log:     slog.Default().With("component", "presence"),
 		stopCh:  make(chan struct{}),
 		stopped: make(chan struct{}),
 	}
@@ -152,7 +154,7 @@ func (pm *PresenceManager) Heartbeat(ctx context.Context, userID, displayName st
 	// Durable fallback: touch User.last_seen (throttled).
 	if shouldPersist && pm.store != nil {
 		if err := pm.store.UpdateUserLastSeen(ctx, userID, now); err != nil {
-			slog.Warn("failed to persist user last_seen",
+			pm.log.Warn("failed to persist user last_seen",
 				"user_id", userID,
 				"error", err)
 		}
@@ -302,7 +304,7 @@ func (pm *PresenceManager) publishTransition(userID, displayName string, state P
 func (pm *PresenceManager) SeedFromStore(ctx context.Context, st store.Store) {
 	users, err := st.ListUsers(ctx, store.UserFilter{}, store.ListOptions{Limit: 1000})
 	if err != nil {
-		slog.Warn("failed to seed presence from store", "error", err)
+		pm.log.Warn("failed to seed presence from store", "error", err)
 		return
 	}
 

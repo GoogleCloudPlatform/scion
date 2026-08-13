@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,9 +57,9 @@ type AttachmentStore interface {
 	// Save stores file content and returns metadata including the generated ID.
 	Save(ctx context.Context, projectID, filename string, content io.Reader, size int64, mime string) (AttachmentMeta, error)
 	// Get returns a reader for the file content and its metadata.
-	Get(ctx context.Context, id string) (io.ReadCloser, AttachmentMeta, error)
+	Get(ctx context.Context, projectID, id string) (io.ReadCloser, AttachmentMeta, error)
 	// Delete removes the file from storage.
-	Delete(ctx context.Context, id string) error
+	Delete(ctx context.Context, projectID, id string) error
 }
 
 // ---------------------------------------------------------------------------
@@ -208,17 +209,8 @@ func (s *LocalDiskAttachmentStore) Save(_ context.Context, projectID, filename s
 }
 
 // Get opens the file for reading and returns its metadata.
-func (s *LocalDiskAttachmentStore) Get(_ context.Context, id string) (io.ReadCloser, AttachmentMeta, error) {
-	// We need to find the file in <baseDir>/*/<id>/*
-	// Since we know the structure is <baseDir>/<projectID>/<id>/<filename>,
-	// we scan for the id directory.
-	pattern := filepath.Join(s.baseDir, "*", id)
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) == 0 {
-		return nil, AttachmentMeta{}, fmt.Errorf("attachment not found: %s", id)
-	}
-
-	dir := matches[0]
+func (s *LocalDiskAttachmentStore) Get(_ context.Context, projectID, id string) (io.ReadCloser, AttachmentMeta, error) {
+	dir := filepath.Join(s.baseDir, projectID, id)
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) == 0 {
 		return nil, AttachmentMeta{}, fmt.Errorf("attachment not found: %s", id)
@@ -242,14 +234,13 @@ func (s *LocalDiskAttachmentStore) Get(_ context.Context, id string) (io.ReadClo
 		return nil, AttachmentMeta{}, fmt.Errorf("attachment open: %w", err)
 	}
 
-	// Extract projectID from the path.
-	projectID := filepath.Base(filepath.Dir(dir))
-
 	meta := AttachmentMeta{
 		ID:        id,
 		ProjectID: projectID,
 		Filename:  filename,
+		MimeType:  mime.TypeByExtension(filepath.Ext(filename)), // best-effort from extension
 		Size:      info.Size(),
+		// UploadedBy not available from filesystem; callers needing it should use the DB store.
 		CreatedAt: info.ModTime(),
 	}
 
@@ -257,13 +248,12 @@ func (s *LocalDiskAttachmentStore) Get(_ context.Context, id string) (io.ReadClo
 }
 
 // Delete removes the attachment directory and all its contents.
-func (s *LocalDiskAttachmentStore) Delete(_ context.Context, id string) error {
-	pattern := filepath.Join(s.baseDir, "*", id)
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) == 0 {
-		return nil // Already deleted or not found — idempotent.
+func (s *LocalDiskAttachmentStore) Delete(_ context.Context, projectID, id string) error {
+	dir := filepath.Join(s.baseDir, projectID, id)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return nil // Already deleted — idempotent.
 	}
-	return os.RemoveAll(matches[0])
+	return os.RemoveAll(dir)
 }
 
 // FilePath returns the on-disk path for an attachment file, used when

@@ -590,25 +590,7 @@ func (cn *ChatNotifier) NotifyMention(ctx context.Context, mentionedUserID, send
 
 	message := formatChatNotification(ChatNotificationMention, senderName, conversationName, messagePreview)
 
-	// Use nil UUIDs for SubscriptionID and AgentID since chat notifications
-	// are not tied to an agent subscription — they are direct triggers.
-	nilUUID := uuid.Nil.String()
-	effectiveProjectID := projectID
-	if effectiveProjectID == "" {
-		effectiveProjectID = nilUUID
-	}
-
-	notif := &store.Notification{
-		ID:             api.NewUUID(),
-		SubscriptionID: nilUUID,
-		AgentID:        nilUUID,
-		ProjectID:      effectiveProjectID,
-		SubscriberType: store.SubscriberTypeUser,
-		SubscriberID:   mentionedUserID,
-		Status:         ChatNotificationMention,
-		Message:        message,
-		CreatedAt:      time.Now(),
-	}
+	notif := cn.buildChatNotification(mentionedUserID, ChatNotificationMention, message, projectID)
 
 	if err := cn.store.CreateNotification(ctx, notif); err != nil {
 		cn.log.Error("Failed to create mention notification",
@@ -660,25 +642,7 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID, s
 
 	message := formatChatNotification(ChatNotificationDMReceived, senderName, "", messagePreview)
 
-	// Use nil UUIDs for SubscriptionID and AgentID since chat notifications
-	// are not tied to an agent subscription — they are direct triggers.
-	nilUUID := uuid.Nil.String()
-	effectiveProjectID := projectID
-	if effectiveProjectID == "" {
-		effectiveProjectID = nilUUID
-	}
-
-	notif := &store.Notification{
-		ID:             api.NewUUID(),
-		SubscriptionID: nilUUID,
-		AgentID:        nilUUID,
-		ProjectID:      effectiveProjectID,
-		SubscriberType: store.SubscriberTypeUser,
-		SubscriberID:   recipientUserID,
-		Status:         ChatNotificationDMReceived,
-		Message:        message,
-		CreatedAt:      time.Now(),
-	}
+	notif := cn.buildChatNotification(recipientUserID, ChatNotificationDMReceived, message, projectID)
 
 	if err := cn.store.CreateNotification(ctx, notif); err != nil {
 		cn.log.Error("Failed to create DM notification",
@@ -690,6 +654,28 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID, s
 	cn.log.Info("DM notification created",
 		"notificationID", notif.ID, "recipient", recipientUserID,
 		"sender", senderName, "conversationKey", conversationKey)
+}
+
+// buildChatNotification creates a store.Notification for chat events.
+func (cn *ChatNotifier) buildChatNotification(
+	subscriberID, status, message, projectID string,
+) *store.Notification {
+	nilUUID := uuid.Nil.String()
+	effectiveProjectID := projectID
+	if effectiveProjectID == "" {
+		effectiveProjectID = nilUUID
+	}
+	return &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: nilUUID,
+		AgentID:        nilUUID,
+		ProjectID:      effectiveProjectID,
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   subscriberID,
+		Status:         status,
+		Message:        message,
+		CreatedAt:      time.Now(),
+	}
 }
 
 // formatChatNotification formats a notification message for chat triggers.

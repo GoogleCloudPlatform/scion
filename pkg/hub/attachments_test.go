@@ -128,7 +128,7 @@ func TestLocalDiskAttachmentStore_SaveAndGet(t *testing.T) {
 	require.NoError(t, err)
 
 	// Get the file back.
-	reader, getMeta, err := store.Get(ctx, meta.ID)
+	reader, getMeta, err := store.Get(ctx, "proj-1", meta.ID)
 	require.NoError(t, err)
 	defer func() { _ = reader.Close() }()
 
@@ -152,11 +152,11 @@ func TestLocalDiskAttachmentStore_Delete(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete.
-	err = store.Delete(ctx, meta.ID)
+	err = store.Delete(ctx, "proj-1", meta.ID)
 	require.NoError(t, err)
 
 	// Verify the file is gone.
-	_, _, err = store.Get(ctx, meta.ID)
+	_, _, err = store.Get(ctx, "proj-1", meta.ID)
 	require.Error(t, err)
 }
 
@@ -396,7 +396,7 @@ func TestLocalDiskAttachmentStore_GetRejectsSymlink(t *testing.T) {
 	require.NoError(t, os.Symlink("/etc/hostname", realPath))
 
 	// Get should refuse to open the symlink.
-	_, _, err = store.Get(ctx, meta.ID)
+	_, _, err = store.Get(ctx, "proj-1", meta.ID)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a regular file")
 }

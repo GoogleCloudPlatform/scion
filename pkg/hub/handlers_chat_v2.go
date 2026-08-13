@@ -2418,7 +2418,7 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	}
 
 	// Get file from storage.
-	reader, fileMeta, err := as.Get(ctx, id)
+	reader, fileMeta, err := as.Get(ctx, meta.ProjectID, id)
 	if err != nil {
 		NotFound(w, "Attachment file")
 		return
