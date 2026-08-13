@@ -742,6 +742,10 @@ type Server struct {
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier
 
+	// Presence manager for in-memory user presence tracking (nil = disabled).
+	// Single-node only; see design §4.5 HA limitation.
+	presenceManager *PresenceManager
+
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -1887,6 +1891,27 @@ func (s *Server) getChatNotifier() *ChatNotifier {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.chatNotifier
+}
+
+// InitPresenceManager creates and starts the presence manager for real-time
+// user presence tracking. It seeds the in-memory map from User.last_seen.
+// Call this after the event publisher is wired.
+func (s *Server) InitPresenceManager() {
+	pm := NewPresenceManager(s.events, s.store)
+	pm.SeedFromStore(s.ctx, s.store)
+	s.mu.Lock()
+	s.presenceManager = pm
+	s.mu.Unlock()
+}
+
+// StopPresenceManager shuts down the presence manager's background goroutine.
+func (s *Server) StopPresenceManager() {
+	s.mu.RLock()
+	pm := s.presenceManager
+	s.mu.RUnlock()
+	if pm != nil {
+		pm.Stop()
+	}
 }
 
 // SetPluginManager sets the plugin manager for broker integration admin API.

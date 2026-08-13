@@ -1257,6 +1257,11 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	// --- Read presence manager ---
+	s.mu.RLock()
+	pm := s.presenceManager
+	s.mu.RUnlock()
+
 	// --- Humans: look up the project members group ---
 	var humans []chatMemberEntry
 	membersSlug := "project:" + project.Slug + ":members"
@@ -1272,14 +1277,18 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 				if err != nil {
 					continue
 				}
-				humans = append(humans, chatMemberEntry{
+				entry := chatMemberEntry{
 					ID:          u.ID,
 					Kind:        "user",
 					DisplayName: u.DisplayName,
 					Email:       u.Email,
 					AvatarURL:   u.AvatarURL,
 					Role:        m.Role,
-				})
+				}
+				if pm != nil {
+					entry.PresenceState = string(pm.GetState(u.ID))
+				}
+				humans = append(humans, entry)
 			}
 		}
 	}
@@ -1400,11 +1409,12 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// Typing & Presence stubs (W5)
+// Typing & Presence (W5)
 // ---------------------------------------------------------------------------
 
 // handleConversationTyping handles POST /api/v1/chat/conversations/{key}/typing.
-// Stub for W5 — publishes an ephemeral typing event.
+// Publishes an ephemeral typing event after authorizing conversation access
+// and applying server-side throttling (one event per 4s per user per conversation).
 func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -1417,13 +1427,78 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Publish ephemeral typing event on the project subject.
-	// For now just accept and acknowledge — full implementation in W5.
+	ctx := r.Context()
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	pm := s.presenceManager
+	s.mu.RUnlock()
+
+	// --- Authorize conversation access (W2 O3 deferred finding) ---
+	isDM := strings.HasPrefix(key, "dm:")
+	var projectID string
+	if isDM {
+		if !validDMKey(key) {
+			BadRequest(w, "invalid DM key format")
+			return
+		}
+		if !isDMParticipant(key, user.ID()) {
+			Forbidden(w)
+			return
+		}
+		// Resolve project from DM key for SSE fan-out.
+		projectID = resolveProjectFromDMKey(ctx, s, key)
+	} else {
+		// Topic key: look up topic to get project ID and check access.
+		if wcs == nil {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
+		topic, err := wcs.GetTopic(ctx, key)
+		if err != nil || topic == nil {
+			NotFound(w, "Thread")
+			return
+		}
+		projectID = topic.ProjectID
+		project, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			NotFound(w, "Project")
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionRead) {
+			return
+		}
+	}
+
+	// --- Server-side throttle: ignore if last typing from same user < 4s ---
+	if pm != nil {
+		if !pm.RecordTyping(key, user.ID()) {
+			// Throttled — accept silently.
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
+	}
+
+	// --- Publish ephemeral typing event ---
+	if projectID != "" {
+		displayName := user.DisplayName()
+		if displayName == "" {
+			displayName = user.Email()
+		}
+		evt := TypingEvent{
+			ThreadID:    key,
+			UserID:      user.ID(),
+			DisplayName: displayName,
+		}
+		s.events.PublishRaw("project."+projectID+".chat.typing", evt)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // handleChatPresence handles POST /api/v1/chat/presence.
-// Stub for W5 — heartbeat endpoint.
+// Processes a heartbeat from the client, updating the in-memory presence map
+// and publishing state transitions via SSE. Design §4.5.
 func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -1436,7 +1511,32 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Full presence implementation in W5.
+	s.mu.RLock()
+	pm := s.presenceManager
+	s.mu.RUnlock()
+
+	if pm == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	// Parse optional projectIds from the body so we know which project
+	// subjects to fan the presence transition out on.
+	var body struct {
+		ProjectIDs []string `json:"projectIds"`
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, 65536)
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+
+	displayName := user.DisplayName()
+	if displayName == "" {
+		displayName = user.Email()
+	}
+
+	pm.Heartbeat(r.Context(), user.ID(), displayName, body.ProjectIDs)
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -1787,13 +1887,14 @@ type chatMembersResponse struct {
 }
 
 type chatMemberEntry struct {
-	ID          string `json:"id"`
-	Kind        string `json:"kind"`
-	DisplayName string `json:"displayName"`
-	Email       string `json:"email,omitempty"`
-	AvatarURL   string `json:"avatarUrl,omitempty"`
-	Slug        string `json:"slug,omitempty"`
-	Role        string `json:"role,omitempty"`
-	Phase       string `json:"phase,omitempty"`
-	Activity    string `json:"activity,omitempty"`
+	ID            string `json:"id"`
+	Kind          string `json:"kind"`
+	DisplayName   string `json:"displayName"`
+	Email         string `json:"email,omitempty"`
+	AvatarURL     string `json:"avatarUrl,omitempty"`
+	Slug          string `json:"slug,omitempty"`
+	Role          string `json:"role,omitempty"`
+	Phase         string `json:"phase,omitempty"`
+	Activity      string `json:"activity,omitempty"`
+	PresenceState string `json:"presenceState,omitempty"`
 }

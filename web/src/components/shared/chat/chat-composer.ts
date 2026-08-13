@@ -347,6 +347,11 @@ export class ScionChatComposer extends LitElement {
     this.text = target.value;
     this.runeCount = countRunes(this.text);
 
+    // Dispatch typing event so the parent can send a typing indicator
+    if (this.text.length > 0) {
+      this.dispatchEvent(new CustomEvent('chat-typing', { bubbles: true, composed: true }));
+    }
+
     // Update live mention override for destination chip
     this.updateLiveMentionOverride();
 

@@ -65,7 +65,9 @@ export type StateEventType =
   | 'notification-created'
   | 'user-message-created'
   | 'chat-message-received'
-  | 'chat-topic-updated';
+  | 'chat-topic-updated'
+  | 'chat-presence-updated'
+  | 'chat-typing-received';
 
 export class StateManager extends EventTarget {
   private state: AppState = {
@@ -292,9 +294,15 @@ export class StateManager extends EventTarget {
           this.notifyWithData('chat-message-received', chatDetail);
         } else if (chatEventType === 'topic') {
           this.notifyWithData('chat-topic-updated', chatDetail);
+        } else if (chatEventType === 'presence') {
+          this.notifyWithData('chat-presence-updated', chatDetail);
+        } else if (chatEventType === 'typing') {
+          this.notifyWithData('chat-typing-received', chatDetail);
         }
         // Also dispatch the legacy user-message-created for v1 compat
-        this.notify('user-message-created');
+        if (chatEventType === 'message') {
+          this.notify('user-message-created');
+        }
         return;
       }
 

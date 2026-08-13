@@ -622,6 +622,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 
 		hubSrv.StartNotificationDispatcher()
+		hubSrv.InitPresenceManager()
 	}
 
 	// 15. Print startup banner

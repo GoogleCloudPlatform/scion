@@ -29,6 +29,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { hashColor, getInitials } from './chat-avatar.js';
 
 @customElement('scion-chat-message')
 export class ScionChatMessage extends LitElement {
@@ -675,30 +676,14 @@ export class ScionChatMessage extends LitElement {
     }
   }
 
-  /** Simple deterministic colour from the agent slug. */
+  /** Deterministic colour from the agent slug or sender name. */
   private getAvatarColor(): string {
-    const colors = [
-      '#3b82f6',
-      '#8b5cf6',
-      '#06b6d4',
-      '#10b981',
-      '#f59e0b',
-      '#ef4444',
-      '#ec4899',
-      '#6366f1',
-    ];
-    let hash = 0;
-    const s = this.agentSlug || this.sender || '';
-    for (let i = 0; i < s.length; i++) {
-      hash = s.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    return colors[Math.abs(hash) % colors.length];
+    return hashColor(this.agentSlug || this.sender || '');
   }
 
-  /** First two characters of the agent slug or sender name. */
+  /** Initials derived from the agent slug or sender name. */
   private getInitials(): string {
-    const s = this.agentSlug || this.sender || '';
-    return s.substring(0, 2);
+    return getInitials(this.agentSlug || this.sender || '');
   }
 
   /** Extract the file basename from a path. */

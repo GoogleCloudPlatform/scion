@@ -73,6 +73,12 @@ const GROUP_WINDOW_MS = 5 * 60 * 1000;
 /** System/state-change message types. */
 const SYSTEM_MESSAGE_TYPES = new Set(['state-change', 'system']);
 
+/** Typing indicator expiry in ms. */
+const TYPING_EXPIRY_MS = 6000;
+
+/** Typing send throttle in ms. */
+const TYPING_SEND_THROTTLE_MS = 4000;
+
 @customElement('scion-chat-thread')
 export class ScionChatThread extends LitElement {
   @property()
@@ -161,6 +167,23 @@ export class ScionChatThread extends LitElement {
 
   /** Bound listener for v2 SSE chat-message events via stateManager. */
   private _v2MessageHandler = this.handleV2ChatMessage.bind(this);
+
+  /** Bound listener for v2 SSE typing events via stateManager. */
+  private _v2TypingHandler = this.handleV2TypingEvent.bind(this);
+
+  // ---- Typing indicator state ----
+
+  /** Map of userId -> { displayName, timer } for active typing indicators. */
+  @state() private typingUsers = new Map<
+    string,
+    { displayName: string; timer: ReturnType<typeof setTimeout> }
+  >();
+
+  /** Last time we sent a typing event (for client-side throttle). */
+  private _lastTypingSent = 0;
+
+  /** Current user ID (derived from stateManager scope). */
+  private _currentUserId = '';
 
   /** Read tracking: debounce timer for advancing watermark. */
   private _readDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -351,6 +374,52 @@ export class ScionChatThread extends LitElement {
     .mention-results .mention-slug {
       font-weight: 600;
     }
+
+    /* Typing indicator */
+    .typing-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 16px;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      min-height: 20px;
+    }
+
+    .typing-dots {
+      display: inline-flex;
+      gap: 2px;
+      align-items: center;
+    }
+
+    .typing-dots span {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--scion-text-muted, #64748b);
+      animation: typing-bounce 1.4s ease-in-out infinite;
+    }
+
+    .typing-dots span:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+
+    .typing-dots span:nth-child(3) {
+      animation-delay: 0.4s;
+    }
+
+    @keyframes typing-bounce {
+      0%,
+      60%,
+      100% {
+        transform: translateY(0);
+        opacity: 0.4;
+      }
+      30% {
+        transform: translateY(-3px);
+        opacity: 1;
+      }
+    }
   `;
 
   /** Auto-trigger loadHistory when the component first renders in v2 mode. */
@@ -382,6 +451,7 @@ export class ScionChatThread extends LitElement {
   private resetV2State(): void {
     // Stop any active SSE listener
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
+    stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     this.streaming = false;
 
     // Clear message state
@@ -396,6 +466,12 @@ export class ScionChatThread extends LitElement {
     this.pinnedToBottom = true;
     this.loadingOlder = false;
 
+    // Clear typing state
+    for (const entry of this.typingUsers.values()) {
+      clearTimeout(entry.timer);
+    }
+    this.typingUsers = new Map();
+
     // Clear read tracking timer
     if (this._readDebounceTimer) {
       clearTimeout(this._readDebounceTimer);
@@ -409,8 +485,13 @@ export class ScionChatThread extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopStream();
-    // Clean up v2 SSE listener
+    // Clean up v2 SSE listeners
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
+    stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
+    // Clean up typing timers
+    for (const entry of this.typingUsers.values()) {
+      clearTimeout(entry.timer);
+    }
     // Clean up read tracking
     window.removeEventListener('focus', this._focusHandler);
     window.removeEventListener('blur', this._blurHandler);
@@ -538,9 +619,10 @@ export class ScionChatThread extends LitElement {
       this.eventSource.close();
       this.eventSource = null;
     }
-    // Also clean up v2 SSE listener
+    // Also clean up v2 SSE listeners
     if (this.isV2) {
       stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
+      stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     }
     this.streaming = false;
   }
@@ -789,6 +871,12 @@ export class ScionChatThread extends LitElement {
   /** Start listening for v2 messages via stateManager instead of per-thread EventSource. */
   private startStreamV2(): void {
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
+    stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
+    // Capture current user ID from the stateManager scope for typing self-filter.
+    const scope = stateManager.currentScope;
+    if (scope && scope.type === 'chat') {
+      this._currentUserId = scope.userId;
+    }
     this.streaming = true;
   }
 
@@ -806,6 +894,56 @@ export class ScionChatThread extends LitElement {
       }
     }
     void this.backfillV2();
+  }
+
+  /** Handle v2 SSE typing events. Only show for this conversation, and skip self. */
+  private handleV2TypingEvent(e: Event): void {
+    const detail = (e as CustomEvent).detail as {
+      data?: { threadId?: string; userId?: string; displayName?: string };
+    };
+    const eventData = detail?.data || (detail as Record<string, unknown>);
+    const threadId = (eventData as Record<string, unknown>).threadId as string | undefined;
+    const userId = (eventData as Record<string, unknown>).userId as string | undefined;
+    const displayName = (eventData as Record<string, unknown>).displayName as string | undefined;
+
+    if (!threadId || !userId || !displayName) return;
+
+    // Only show for this conversation
+    if (threadId !== this.conversationKey) return;
+
+    // Don't show own typing indicator
+    if (userId === this._currentUserId) return;
+
+    // Clear existing timer for this user if any
+    const existing = this.typingUsers.get(userId);
+    if (existing) {
+      clearTimeout(existing.timer);
+    }
+
+    // Set a new timer to expire the typing indicator
+    const timer = setTimeout(() => {
+      const updated = new Map(this.typingUsers);
+      updated.delete(userId);
+      this.typingUsers = updated;
+    }, TYPING_EXPIRY_MS);
+
+    const updated = new Map(this.typingUsers);
+    updated.set(userId, { displayName, timer });
+    this.typingUsers = updated;
+  }
+
+  /** Send a typing event to the server (client-throttled to once per 4s). */
+  private sendTypingEvent(): void {
+    if (!this.isV2 || !this.conversationKey) return;
+
+    const now = Date.now();
+    if (now - this._lastTypingSent < TYPING_SEND_THROTTLE_MS) return;
+    this._lastTypingSent = now;
+
+    // Fire and forget — typing is ephemeral, errors are acceptable
+    void apiFetch(`/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/typing`, {
+      method: 'POST',
+    });
   }
 
   private async backfillV2(): Promise<void> {
@@ -1104,7 +1242,7 @@ export class ScionChatThread extends LitElement {
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderStreamBar()} ${this.renderContent()}
+        ${this.renderStreamBar()} ${this.renderContent()} ${this.renderTypingIndicator()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         <scion-chat-composer
           ?disabled=${this.sending}
@@ -1114,7 +1252,30 @@ export class ScionChatThread extends LitElement {
           .conversationMode=${this.isDM ? 'dm' : 'thread'}
           .peerName=${this.peerName}
           @chat-send=${this.handleChatSendV2}
+          @chat-typing=${() => this.sendTypingEvent()}
         ></scion-chat-composer>
+      </div>
+    `;
+  }
+
+  /** Render the typing indicator below messages, above the composer. */
+  private renderTypingIndicator() {
+    if (this.typingUsers.size === 0) return nothing;
+
+    const names = Array.from(this.typingUsers.values()).map((v) => v.displayName);
+    let text: string;
+    if (names.length === 1) {
+      text = `${names[0]} is typing...`;
+    } else if (names.length === 2) {
+      text = `${names[0]} and ${names[1]} are typing...`;
+    } else {
+      text = `${names[0]} and ${names.length - 1} others are typing...`;
+    }
+
+    return html`
+      <div class="typing-indicator">
+        <span class="typing-dots"> <span></span><span></span><span></span> </span>
+        <span class="typing-text">${text}</span>
       </div>
     `;
   }

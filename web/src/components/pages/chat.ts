@@ -40,10 +40,13 @@ import { apiFetch } from '../../client/api.js';
 import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
+import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
 import '../shared/chat/chat-thread.js';
 
 // Lazy-load the space rail only when v2 is active
 const loadSpaceRail = () => import('../shared/chat/chat-space-rail.js');
+// Lazy-load the members sidebar only when v2 is active
+const loadChatMembers = () => import('../shared/chat/chat-members.js');
 
 // ---- V1 types ----
 
@@ -108,9 +111,18 @@ export class ScionPageChat extends LitElement {
   @state() private v2Members: SpaceMember[] = [];
   @state() private v2MembersExpanded = false;
   @state() private v2SpaceRailLoaded = false;
+  /** Human members for the members sidebar (from the members endpoint). */
+  @state() private v2HumanMembers: import('../shared/chat/chat-members.js').ChatHumanMember[] = [];
+  /** Agent members for the members sidebar. */
+  @state() private v2AgentMembers: import('../shared/chat/chat-members.js').ChatAgentMember[] = [];
   private _onChatMessage = this.handleChatMessage.bind(this);
   private _onChatTopic = this.handleChatTopic.bind(this);
+  private _onPresenceUpdated = this.handlePresenceUpdated.bind(this);
   private _onRailLoaded = this.handleRailLoaded.bind(this);
+  /** Presence heartbeat interval timer. */
+  private _presenceInterval: ReturnType<typeof setInterval> | null = null;
+  /** Tracked project IDs for presence heartbeat. */
+  private _presenceProjectIds: string[] = [];
 
   static override styles = css`
     :host {
@@ -387,7 +399,9 @@ export class ScionPageChat extends LitElement {
     if (this.isV2) {
       stateManager.removeEventListener('chat-message-received', this._onChatMessage);
       stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
+      stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
+      this.stopPresenceHeartbeat();
     } else {
       stateManager.removeEventListener('user-message-created', this._onUserMessage);
     }
@@ -555,8 +569,8 @@ export class ScionPageChat extends LitElement {
   // =========================================================================
 
   private async initV2(): Promise<void> {
-    // Lazy-load the space rail component
-    await loadSpaceRail();
+    // Lazy-load the space rail and members components
+    await Promise.all([loadSpaceRail(), loadChatMembers()]);
     this.v2SpaceRailLoaded = true;
 
     // Parse initial route
@@ -565,6 +579,7 @@ export class ScionPageChat extends LitElement {
     // Subscribe to SSE events
     stateManager.addEventListener('chat-message-received', this._onChatMessage);
     stateManager.addEventListener('chat-topic-updated', this._onChatTopic);
+    stateManager.addEventListener('chat-presence-updated', this._onPresenceUpdated);
 
     // Listen for rail-loaded to set up the SSE scope with space IDs
     this.addEventListener('rail-loaded', this._onRailLoaded);
@@ -580,6 +595,9 @@ export class ScionPageChat extends LitElement {
         spaceIds: detail.spaceIds,
         userId,
       });
+      // Start presence heartbeat
+      this._presenceProjectIds = detail.spaceIds;
+      this.startPresenceHeartbeat();
     }
   }
 
@@ -752,12 +770,162 @@ export class ScionPageChat extends LitElement {
     try {
       const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`);
       if (res.ok) {
-        const data = (await res.json()) as { members?: SpaceMember[] };
-        this.v2Members = data.members || [];
+        const data = (await res.json()) as {
+          humans?: Array<{
+            id: string;
+            kind: 'user';
+            displayName: string;
+            email?: string;
+            avatarUrl?: string;
+            role?: string;
+            presenceState?: 'active' | 'idle' | '';
+          }>;
+          agents?: Array<{
+            id: string;
+            kind: 'agent';
+            displayName: string;
+            slug?: string;
+            phase?: string;
+            activity?: string;
+          }>;
+          members?: SpaceMember[];
+        };
+        // Populate the sidebar member arrays
+        this.v2HumanMembers = (data.humans || []).map((h) => ({
+          id: h.id,
+          kind: 'user' as const,
+          displayName: h.displayName,
+          email: h.email || '',
+          avatarUrl: h.avatarUrl || '',
+          role: h.role || '',
+          presenceState: h.presenceState || '',
+        }));
+        this.v2AgentMembers = (data.agents || []).map((a) => ({
+          id: a.id,
+          kind: 'agent' as const,
+          displayName: a.displayName,
+          slug: a.slug || '',
+          phase: a.phase || '',
+          activity: a.activity || '',
+        }));
+        // Also populate the legacy v2Members for the thread component
+        this.v2Members = [
+          ...(data.humans || []).map((h) => ({
+            id: h.id,
+            name: h.displayName,
+            email: h.email || '',
+            avatarUrl: h.avatarUrl || '',
+            kind: 'user' as const,
+          })),
+          ...(data.agents || []).map((a) => ({
+            id: a.id,
+            name: a.displayName,
+            email: '',
+            slug: a.slug || '',
+            kind: 'agent' as const,
+          })),
+          ...(data.members || []),
+        ];
       }
     } catch {
       // Non-critical
     }
+  }
+
+  /** Handle presence SSE events to update member presence in real-time. */
+  private handlePresenceUpdated(e: Event): void {
+    const detail = (e as CustomEvent).detail as {
+      data?: { userId?: string; state?: string; displayName?: string };
+      userId?: string;
+      state?: string;
+    };
+    const eventData = detail?.data || detail;
+    const userId = (eventData as Record<string, unknown>).userId as string | undefined;
+    const state = (eventData as Record<string, unknown>).state as string | undefined;
+
+    if (!userId || !state) return;
+
+    // Update the human member's presence state
+    const updatedHumans = this.v2HumanMembers.map((h) => {
+      if (h.id === userId) {
+        return { ...h, presenceState: state as 'active' | 'idle' };
+      }
+      return h;
+    });
+
+    // Only trigger re-render if something actually changed
+    const changed = updatedHumans.some(
+      (h, i) => h.presenceState !== this.v2HumanMembers[i].presenceState
+    );
+    if (changed) {
+      this.v2HumanMembers = updatedHumans;
+    }
+  }
+
+  /** Start sending presence heartbeats every 60s while the tab is focused. */
+  private startPresenceHeartbeat(): void {
+    // Stop any existing heartbeat
+    this.stopPresenceHeartbeat();
+
+    // Send initial heartbeat
+    this.sendPresenceHeartbeat();
+
+    // Send heartbeat every 60 seconds
+    this._presenceInterval = setInterval(() => {
+      if (document.hasFocus()) {
+        this.sendPresenceHeartbeat();
+      }
+    }, 60000);
+
+    // Send heartbeat on focus regain
+    window.addEventListener('focus', this._onFocusPresence);
+  }
+
+  /** Stop the presence heartbeat interval. */
+  private stopPresenceHeartbeat(): void {
+    if (this._presenceInterval) {
+      clearInterval(this._presenceInterval);
+      this._presenceInterval = null;
+    }
+    window.removeEventListener('focus', this._onFocusPresence);
+  }
+
+  /** Focus handler for presence heartbeat. */
+  private _onFocusPresence = (): void => {
+    this.sendPresenceHeartbeat();
+  };
+
+  /** Send a presence heartbeat to the server. */
+  private sendPresenceHeartbeat(): void {
+    void apiFetch('/api/v1/chat/presence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectIds: this._presenceProjectIds }),
+    });
+  }
+
+  /** Handle member click from the members sidebar to open a DM. */
+  private handleMemberClick(e: CustomEvent): void {
+    const detail = e.detail as {
+      memberId: string;
+      memberKind: 'user' | 'agent';
+      displayName: string;
+    };
+    if (!detail) return;
+
+    const userId = this.pageData?.user?.id || '';
+    let dmKey: string;
+
+    if (detail.memberKind === 'agent') {
+      dmKey = `dm:agent:${detail.memberId}:user:${userId}`;
+    } else {
+      // Sort UUIDs lexically for consistent DM keys
+      const ids = [detail.memberId, userId].sort();
+      dmKey = `dm:user:${ids[0]}:user:${ids[1]}`;
+    }
+
+    // Navigate to the DM
+    navigateTo(`/chat/dm/${encodeURIComponent(dmKey)}`);
   }
 
   // =========================================================================
@@ -818,8 +986,8 @@ export class ScionPageChat extends LitElement {
     const isSelected =
       thread.agentId === this.selectedAgentId || thread.agentSlug === this.selectedAgentId;
     const displayName = thread.agentName || thread.agentSlug || thread.agentId;
-    const avatarColor = this.hashColor(thread.agentSlug || thread.agentId);
-    const initials = this.getInitials(displayName);
+    const avatarColor = hashColor(thread.agentSlug || thread.agentId);
+    const initials = getInitials(displayName);
     const timeStr = thread.lastMessage?.createdAt
       ? this.formatRelativeTime(thread.lastMessage.createdAt)
       : '';
@@ -894,7 +1062,12 @@ export class ScionPageChat extends LitElement {
             }}
           ></sl-icon-button>
         </div>
-        <div class="v2-members-body">Members sidebar (W5)</div>
+        <scion-chat-members
+          .humans=${this.v2HumanMembers}
+          .agents=${this.v2AgentMembers}
+          current-user-id="${this.pageData?.user?.id || ''}"
+          @member-click=${this.handleMemberClick}
+        ></scion-chat-members>
       </div>
     `;
   }
@@ -970,23 +1143,6 @@ export class ScionPageChat extends LitElement {
   }
 
   // ---- Shared utilities ----
-
-  private hashColor(str: string): string {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      hash = str.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    const hue = ((hash % 360) + 360) % 360;
-    return `hsl(${hue}, 55%, 48%)`;
-  }
-
-  private getInitials(name: string): string {
-    const parts = name.split(/[-_\s]+/).filter(Boolean);
-    if (parts.length >= 2) {
-      return (parts[0][0] + parts[1][0]).toUpperCase();
-    }
-    return (name.slice(0, 2) || '?').toUpperCase();
-  }
 
   private formatRelativeTime(iso: string): string {
     const d = new Date(iso);

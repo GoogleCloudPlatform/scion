@@ -35,6 +35,8 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
+import { hashColor, getInitials } from './chat-avatar.js';
+import './chat-avatar.js';
 
 /** A space (project) in the rail. */
 export interface ChatSpace {
@@ -819,23 +821,6 @@ export class ScionChatSpaceRail extends LitElement {
   // Utility
   // ---------------------------------------------------------------------------
 
-  private hashColor(str: string): string {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      hash = str.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    const hue = ((hash % 360) + 360) % 360;
-    return `hsl(${hue}, 55%, 48%)`;
-  }
-
-  private getInitials(name: string): string {
-    const parts = name.split(/[-_\s]+/).filter(Boolean);
-    if (parts.length >= 2) {
-      return (parts[0][0] + parts[1][0]).toUpperCase();
-    }
-    return (name.slice(0, 2) || '?').toUpperCase();
-  }
-
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
@@ -1018,8 +1003,8 @@ export class ScionChatSpaceRail extends LitElement {
 
   private renderDM(dm: ChatDM) {
     const isSelected = dm.conversationKey === this.selectedKey;
-    const avatarColor = this.hashColor(dm.peerId);
-    const initials = this.getInitials(dm.peerName);
+    const avatarColor = hashColor(dm.peerId);
+    const initials = getInitials(dm.peerName);
     const icon = dm.peerKind === 'agent' ? 'cpu' : 'person';
 
     return html`
