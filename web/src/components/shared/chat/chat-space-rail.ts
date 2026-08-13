@@ -939,7 +939,7 @@ export class ScionChatSpaceRail extends LitElement {
         >
           <sl-icon name="chevron-down" class="chevron ${isCollapsed ? 'collapsed' : ''}"></sl-icon>
           <span class="space-name">${space.projectName}</span>
-          <div class="space-actions">
+          <div class="space-actions" @click=${(e: Event) => e.stopPropagation()}>
             ${space.hasUnreadMention
               ? html`<span class="mention-badge">@</span>`
               : space.unreadCount > 0
@@ -950,9 +950,6 @@ export class ScionChatSpaceRail extends LitElement {
                 slot="trigger"
                 name="three-dots-vertical"
                 label="Space actions"
-                @click=${(e: Event) => {
-                  e.stopPropagation();
-                }}
               ></sl-icon-button>
               <sl-menu
                 @sl-select=${(e: Event) => {

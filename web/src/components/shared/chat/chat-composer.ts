@@ -20,12 +20,12 @@
  * Textarea with:
  * - Character counter (rune-aware via Intl.Segmenter where available)
  * - 2000 character limit with visual feedback (AC10)
- * - Defaults to plain: false (design section 4.7)
+ * - Always sends formatted (plain: false)
  * - Sends via `chat-send` custom event: {text, plain, interrupt, mentions}
  * - @-mention autocomplete integration (Phase 4)
  * - The composer knows nothing about the network
  * - Send on Enter (Shift+Enter for newline)
- * - Interrupt toggle
+ * - Right-click send button for "Send with interruption"
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -115,9 +115,10 @@ export class ScionChatComposer extends LitElement {
   projectId = '';
 
   @state() private text = '';
-  @state() private plain = false;
-  @state() private interrupt = false;
   @state() private runeCount = 0;
+
+  /** Whether the right-click send context menu is visible. */
+  @state() private showSendContextMenu = false;
 
   /** Live mention override for the destination chip. */
   @state() private liveMentionOverride = '';
@@ -172,8 +173,48 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
+    .send-container {
+      position: relative;
+      flex-shrink: 0;
+    }
+
     .send-btn {
       flex-shrink: 0;
+    }
+
+    .send-context-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 99;
+    }
+
+    .send-context-menu {
+      position: absolute;
+      bottom: 100%;
+      right: 0;
+      margin-bottom: 0.25rem;
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+      min-width: 180px;
+      padding: 0.25rem 0;
+      z-index: 100;
+    }
+
+    .send-context-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.375rem 0.75rem;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      color: var(--scion-text, #1e293b);
+      white-space: nowrap;
+    }
+
+    .send-context-item:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
     }
 
     .footer-row {
@@ -384,36 +425,35 @@ export class ScionChatComposer extends LitElement {
               @mention-accept=${this.handleMentionAccept}
             ></scion-mention-autocomplete>
           </div>
-          <sl-button
-            class="send-btn"
-            size="small"
-            variant="primary"
-            ?disabled=${!canSend}
-            @click=${this.handleSend}
-          >
-            <sl-icon slot="prefix" name="send"></sl-icon>
-            Send
-          </sl-button>
+          <div class="send-container">
+            <sl-button
+              class="send-btn"
+              size="small"
+              variant="primary"
+              ?disabled=${!canSend}
+              @click=${this.handleSend}
+              @contextmenu=${this.handleSendContextMenu}
+            >
+              <sl-icon slot="prefix" name="send"></sl-icon>
+              Send
+            </sl-button>
+            ${this.showSendContextMenu
+              ? html`
+                  <div
+                    class="send-context-overlay"
+                    @click=${this.closeSendContextMenu}
+                  ></div>
+                  <div class="send-context-menu">
+                    <div class="send-context-item" @click=${this.handleSendWithInterrupt}>
+                      <sl-icon name="lightning-charge"></sl-icon>
+                      Send with interruption
+                    </div>
+                  </div>
+                `
+              : nothing}
+          </div>
         </div>
         <div class="footer-row">
-          <div class="options">
-            <label>
-              <sl-checkbox
-                size="small"
-                ?checked=${this.plain}
-                @sl-change=${this.handlePlainToggle}
-              ></sl-checkbox>
-              Plain
-            </label>
-            <label>
-              <sl-checkbox
-                size="small"
-                ?checked=${this.interrupt}
-                @sl-change=${this.handleInterruptToggle}
-              ></sl-checkbox>
-              Interrupt
-            </label>
-          </div>
           ${this.runeCount > 0 || isNearLimit
             ? html`
                 <span class="char-counter ${counterClass}">
@@ -474,7 +514,7 @@ export class ScionChatComposer extends LitElement {
       <sl-dropdown>
         <div class="destination-chip clickable" slot="trigger">
           <span class="arrow">&rarr;</span>
-          <span class="hint">no agent &mdash; visible to space members</span>
+          <span class="hint">no agent</span>
           ${hasAgents
             ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
             : nothing}
@@ -500,7 +540,7 @@ export class ScionChatComposer extends LitElement {
         <sl-divider></sl-divider>
         <sl-menu-item value="__clear__" ?checked=${!this.defaultAgent}>
           <sl-icon slot="prefix" name="x-circle"></sl-icon>
-          No agent (visible to space)
+          No agent
         </sl-menu-item>
       </sl-menu>
     `;
@@ -711,15 +751,12 @@ export class ScionChatComposer extends LitElement {
     this.pendingFiles = this.pendingFiles.filter((_, i) => i !== index);
   }
 
-  private handlePlainToggle(e: Event): void {
-    this.plain = (e.target as HTMLInputElement).checked;
-  }
-
-  private handleInterruptToggle(e: Event): void {
-    this.interrupt = (e.target as HTMLInputElement).checked;
-  }
-
   private handleSend(): void {
+    this.doSend(false);
+  }
+
+  /** Send the current message with the given interrupt flag. */
+  private doSend(interrupt: boolean): void {
     const trimmed = this.text.trim();
     const hasAttachments = this.pendingFiles.length > 0;
     if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
@@ -735,8 +772,8 @@ export class ScionChatComposer extends LitElement {
       new CustomEvent<ChatSendDetail>('chat-send', {
         detail: {
           text: trimmed,
-          plain: this.plain,
-          interrupt: this.interrupt,
+          plain: false,
+          interrupt,
           mentions,
           attachmentIds,
           onSuccess: () => {
@@ -750,6 +787,27 @@ export class ScionChatComposer extends LitElement {
         composed: true,
       })
     );
+  }
+
+  /** Show the right-click send context menu. */
+  private handleSendContextMenu(e: MouseEvent): void {
+    e.preventDefault();
+    const trimmed = this.text.trim();
+    const hasAttachments = this.pendingFiles.length > 0;
+    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
+      return;
+    this.showSendContextMenu = true;
+  }
+
+  /** Send the message with interruption from the context menu. */
+  private handleSendWithInterrupt(): void {
+    this.showSendContextMenu = false;
+    this.doSend(true);
+  }
+
+  /** Close the send context menu. */
+  private closeSendContextMenu(): void {
+    this.showSendContextMenu = false;
   }
 
   /**
