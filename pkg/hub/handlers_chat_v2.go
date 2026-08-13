@@ -976,17 +976,18 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	}
 
 	storeMsg := &store.Message{
-		ID:          api.NewUUID(),
-		ProjectID:   msgProjectID,
-		Sender:      "user:" + senderLabel,
-		SenderID:    user.ID(),
-		Recipient:   recipient,
-		RecipientID: recipientID,
-		Msg:         content,
-		Type:        messages.TypeChat,
-		Channel:     "web",
-		ThreadID:    key,
-		CreatedAt:   now,
+		ID:            api.NewUUID(),
+		ProjectID:     msgProjectID,
+		Sender:        "user:" + senderLabel,
+		SenderID:      user.ID(),
+		Recipient:     recipient,
+		RecipientID:   recipientID,
+		Msg:           content,
+		Type:          messages.TypeChat,
+		Channel:       "web",
+		ThreadID:      key,
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     now,
 	}
 
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
