@@ -12,6 +12,40 @@ In the Web Dashboard, the **Inbox Tray** provides a centralized view of all mess
 - **Mark as Read:** You can mark individual messages or all messages as read, helping you keep track of what needs your attention.
 - **Contextual Links:** Messages in the tray often link directly to the agent that sent them, allowing you to quickly jump in and provide the requested input or review the agent's work.
 
+## Native Web Chat
+
+Scion features an interactive, top-level **Native Web Chat** interface in the Web Dashboard (enabled via the `web.native_chat` feature flag). Rather than being isolated inside a single tab, chat is promoted to a top-level workspace view (a fourth `ShellType` in the SPA) that provides a cohesive environment for real-time collaboration with all agents in your project.
+
+### Core Layout & Navigation
+
+- **The Thread Rail**: A left-hand navigation sidebar that lists all active chat threads. Unread badges ("unread dots") update in real-time as messages arrive, instantly alerting you to agents requiring attention.
+- **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
+- **Zero-Reload Navigation**: Move between threads, project views, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
+
+### Three-State Visibility Filtering
+
+To prevent notification noise from overwhelming your conversation, the chat thread supports three distinct visibility filters:
+
+1. **Conversation**: The cleanest view. Displays only direct human instructions and agent replies.
+2. **Verbose**: Adds CCs, explicit `@-mentions`, and user-directed warnings.
+3. **Full**: Displays every message, including background agent-to-agent operations, state-change notifications, and system warnings.
+
+The visibility filter is processed **server-side** for efficiency, and your filter preferences are persisted **per-agent** so your preferred density level is remembered when you return to a thread. Dispatched messages feature real-time delivery state indicators, showing a success checkmark or a failure icon with a detailed tooltip (e.g. for delivery-failed notices).
+
+### Interactive @-Mentions & Autocomplete
+
+When writing instructions, you can easily pull other agents into the thread:
+- **Autocomplete Popup**: Typing `@` in the chat input opens a dropdown list of active agents in the project. The list supports fuzzy-matching as you type, and full keyboard navigation (arrow keys to select, `Enter` to insert).
+- **Code-Fence Guard**: The mention autocomplete is smart — it automatically disables itself when typing inside Markdown code fences (e.g., ` ``` ` blocks) so code snippets don't trigger unwanted dropdowns.
+- **Fan-Out Restrictions**: For platform stability, a single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
+
+### Cross-Channel Coherence
+
+If you use external messaging systems alongside the Web Dashboard, Scion ensures that conversations remain coherent across all channels:
+- **Broker Inbound Persistence**: Inbound messages received from external message brokers (such as Discord or Teams) are persisted in the Hub's main database, making them instantly visible in the Web Chat.
+- **Reply Affinity**: Scion tracks user, project, and agent reply affinity so that replies are routed back to the initiating channel.
+- **TouchThread & Broadcast Propagation**: Messages and read states propagate smoothly across surfaces via `TouchThread` and `Broadcasted` events, ensuring that reading or replying to a thread on Discord or Teams instantly syncs the unread badges in your Web Dashboard.
+
 ## CLI Message Management
 
 You can also interact with the messaging system directly from the CLI using the `scion messages` command (aliases: `msgs`, `inbox`).

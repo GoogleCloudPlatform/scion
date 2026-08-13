@@ -22,7 +22,7 @@ Settings are classified into two layers:
 | Layer | Examples | Behavior |
 |-------|----------|----------|
 | **Layer-0** (bootstrap) | `server.mode`, `server.database.*`, `server.storage.*`, `server.secrets.*`, `server.hub.port`, `server.auth.dev_mode` | Always resolved from bootstrap configuration. Cannot be changed via the admin UI in database mode. |
-| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `telemetry.*`, `agent_defaults.*`, `server.github_app.*`, `server.notification_channels`, `server.federation.*` | In database mode, stored in the database and editable via the admin UI. Bootstrap values serve as initial defaults. |
+| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `telemetry.*`, `agent_defaults.*`, `server.github_app.*`, `server.notification_channels`, `server.federation.*`, `runtimes`, `profiles`, `harness_configs` | In database mode, stored in the database and editable via the admin UI. Bootstrap values serve as initial defaults. |
 
 ### Database Mode
 
@@ -168,6 +168,19 @@ To streamline management of complex environments, the **General** settings tab i
    - Introduces **Default Model** (`default_model`), **Default Thinking Level** (`default_thinking_level`), and **Default Agent Role** (`default_agent_role`) fields directly into the agent default pipeline (with the default agent role updated from `baseline` to `full` for usability).
    - Houses the **Telemetry Toggle**, which has been moved to this card to keep telemetry configuration closely aligned with operational defaults.
 3. **Project Default Settings Card**: Configures platform-level default annotations and behaviors for newly created projects.
+
+### Runtimes & Profiles Tab
+
+To support complete infrastructure configuration directly from the Web Dashboard, the admin page features a dedicated **Runtimes & Profiles** tab. This tab provides full CRUD (Create, Read, Update, Delete) editors for core execution settings:
+
+- **Runtimes Editor**: Type-aware input fields tailored to specific runtime types:
+  - **Docker & Podman**: Fields for daemon sockets, host networks, and storage paths.
+  - **Kubernetes (GKE)**: Fields for cluster endpoints, namespace scoping, service account bindings, and PVC volumes.
+  - **Cloud Run**: Fields for service endpoints, memory limits, and CPU allocation.
+- **Profiles Editor**: Configures resource constraints (limits), target container image registries, and specific template overrides. Supports a native Runtime Profile Selector when launching or configuring agents.
+- **Harness Configs Editor**: Features a rich JSON textarea for writing and editing raw harness properties directly, making it easy to tune model parameters or customize env environments.
+
+In highly available (HA) Postgres deployments, all configurations edited through this tab are stored in the database's `hub_settings` table as whole-map JSONB documents. This ensures edits propagate immediately to all replicas, support optimistic locking (CAS), and are never silently dropped or ignored on server PUT actions.
 
 #### Navigation Updates
 

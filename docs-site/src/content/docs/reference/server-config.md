@@ -197,6 +197,33 @@ Backend for managing encrypted secrets. The `local` backend is read-only and rej
 | `gcp_project_id` | string | | GCP Project ID for Secret Manager. Required when `backend` is `gcpsm`. |
 | `gcp_credentials` | string | | Path to GCP service account JSON or the JSON content itself. Optional if using Application Default Credentials. |
 
+### Workspace Storage (`server.workspace_storage`)
+
+Configures the backend and mount settings for storing and managing agent workspaces. This is a critical setting for high-availability deployments where multiple Hub and Broker replicas need shared, durable access to project workspaces.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `backend` | string | `"local"` | Storage backend pivot: `"local"` (node-local directories), `"nfs"` (Network File System mounts), `"cloudrun-volume"` (Cloud Run platform-managed volume mounts), or `"gke-shared-volume"` (GKE shared CSI-backed PVC mounts). |
+| `nfs.mount_root` | string | | The host base directory under which NFS exports are mounted. |
+| `nfs.mount_options` | string | `"vers=3,hard,nconnect=4,_netdev"` | Standard mount options passed to the `mount.nfs` utility. |
+| `nfs.uid` | integer | `1000` | Node-independent owner UID for NFS-backed workspace trees to ensure consistent container write permissions. |
+| `nfs.gid` | integer | `1000` | Node-independent owner GID for NFS-backed workspace trees. |
+| `nfs.storage_class` | string | | The Kubernetes StorageClass name used to dynamically allocate volumes on GKE. |
+| `nfs.subpath_root` | string | `"projects"` | The default base folder name within the share for project workspaces. |
+| `nfs.shares` | list of objects | `[]` | List of NFS share objects. Each share requires: `id` (stable ID), `server` (IP address or hostname), `export` (exported path, e.g., `/scion-workspaces`), and optional `pv_name` (for GKE). |
+| `cloudrun_volume.volume_name` | string | | The name of the platform volume declared in the Cloud Run service specification. |
+| `cloudrun_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the Cloud Run volume. |
+| `gke_shared_volume.volume_name` | string | | The K8s volume name referencing the persistent volume claim (PVC). |
+| `gke_shared_volume.pv_claim_name` | string | | The name of the GKE-managed PVC bound to the shared storage backend (e.g. Filestore). |
+| `gke_shared_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the GKE volume. |
+
+#### Ephemeral Storage & 503 Safety Gate
+
+To protect deployments from silent data loss, the Hub implements a strict **503 Safety Gate**:
+* If the Hub is deployed on serverless environments like Google Cloud Run with the `local` backend selected, its local workspace paths map to ephemeral, non-durable container storage.
+* The Hub detects this non-durable state and automatically intercepts all file write and modification endpoints (including WebDAV, inline file editing, and git cloning).
+* Affected endpoints will return `503 Service Unavailable` with a descriptive message rather than allowing writes to persist ephemerally on the container's scratch space, enforcing the transition to a durable backend (`nfs`, `cloudrun-volume`, or `gke-shared-volume`) for production.
+
 ### Scheduler (`server.scheduler`)
 
 Controls the background task scheduler in the Hub. This regulates the tick interval and concurrency of recurring maintenance tasks (such as telemetry aggregation, session cleanups, and heartbeats) to match database capacity.
@@ -547,7 +574,7 @@ Because env overrides on Layer-1 keys reintroduce per-node drift, the system war
 
 ### Admin API Behavior Notes
 
-**PUT partitioning**: The request body is partitioned by the section registry. Layer-1 fields are written to DB sections. Layer-0 fields trigger a `422` rejection. Unclassified fields (e.g. `runtimes`, `profiles`) are ignored and reported in `ignored_keys`.
+**PUT partitioning**: The request body is partitioned by the section registry. Layer-1 fields (including `runtimes`, `profiles`, and `harness_configs`) are written to DB sections in the `hub_settings` table as whole-map JSONB documents. Layer-0 fields trigger a `422` rejection. Unclassified fields (non-registered settings) are ignored and reported in `ignored_keys`.
 
 **Revision CAS**: The request body may include `expected_revisions` — a map of section name to expected revision number. On mismatch, the response is `409 Conflict` with the conflicting sections and their current revisions. Omitted sections use last-writer-wins semantics. Sections are written in alphabetical order for deterministic partial-apply behavior.
 

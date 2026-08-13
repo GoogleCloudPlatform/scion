@@ -18,6 +18,14 @@ The dashboard features an integrated notification framework with real-time SSE d
 - **Notification Tray**: Provides agent-scoped filtering for status events, accessible directly from the top navigation.
 - **Browser Push Notifications**: Opt-in native browser push notifications ensure you receive alerts even when the dashboard is in the background. Default triggers include `stalled` and `error` states, as well as requests for user input.
 
+### Native Web Chat
+When enabled via the `web.native_chat` feature flag, the dashboard includes a top-level **Native Web Chat** workspace (a fourth ShellType in the SPA). It offers a rich interface for direct communication and coordination with your running agents.
+- **Thread Rail & Unread dots**: Access all active agent conversations from a persistent left-hand sidebar, complete with unread dots indicating new activity.
+- **Chat/Log Switcher**: Instantly toggle between standard conversational chat with the agent and a real-time stream of the agent's raw execution logs inside the same view.
+- **@-Mentions & Autocomplete**: Call other agents into the thread by typing `@` to trigger a fuzzy-matching, keyboard-navigable agent dropdown. Protected by code-fence guards to prevent triggering inside Markdown code snippets.
+- **Visibility Density Filters**: Choose from three filter levels—**Conversation** (pure dialogue), **Verbose** (adds mentions/CCs), or **Full** (adds state updates and background processes)—with preferences saved individually per agent.
+- **Coherence Sync**: Real-time sync ensures actions taken on external channels (e.g. Discord or Teams) propagate instantly to the Web UI, with delivery state tooltips indicating whether messages succeeded.
+
 ### Projects
 View and manage your registered projects.
 - **Create/Register Project**: Create a Hub-Managed workspace directly on the Hub, or connect a new remote Git repository. Includes a confirmation dialog when creating a project for an existing git repository.

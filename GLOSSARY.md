@@ -241,6 +241,10 @@ _See also_: Hub
 
 ## Messaging
 
+**Native Web Chat**:
+The built-in interactive messaging interface in the Web Dashboard (enabled via the `web.native_chat` feature flag) that promotes chat to a top-level fourth ShellType (alongside standalone, profile, and app). It features a dedicated thread rail, unread indicators, three-state visibility filtering (Conversation/Verbose/Full), @-mention autocomplete, and cross-channel reply coherence.
+_Avoid_: chat plugin, external chat, messages tab (only for the old tab)
+
 **Message Group**:
 A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project.
 _Avoid_: group, set, group chat, room, thread
