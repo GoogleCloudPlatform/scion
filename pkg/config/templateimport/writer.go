@@ -110,7 +110,17 @@ func updateScionAgentConfig(templateDir string, agent *ImportedAgent) error {
 		cfg.Model = agent.Model
 	}
 	if agent.Harness != "" {
-		cfg.DefaultHarnessConfig = agent.Harness
+		// Map config-file dialect names to harness identifiers. The dialect names
+		// ("claude", "gemini") are on-disk path conventions (.claude/, .gemini/) and
+		// must not be renamed. The harness identifiers are the runtime names under
+		// harnesses/ that DefaultHarnessConfig expects.
+		harnessID := agent.Harness
+		switch agent.Harness {
+		case "gemini":
+			harnessID = "gemini-cli"
+			// "claude" maps to "claude" — no translation needed.
+		}
+		cfg.DefaultHarnessConfig = harnessID
 	}
 
 	out, err := yaml.Marshal(&cfg)

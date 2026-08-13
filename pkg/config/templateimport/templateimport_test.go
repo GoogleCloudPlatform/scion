@@ -474,7 +474,7 @@ func TestWriteTemplate_Gemini(t *testing.T) {
 	require.NoError(t, err)
 	var cfg api.ScionConfig
 	require.NoError(t, yaml.Unmarshal(data, &cfg))
-	assert.Equal(t, "gemini", cfg.DefaultHarnessConfig)
+	assert.Equal(t, "gemini-cli", cfg.DefaultHarnessConfig)
 	assert.Empty(t, cfg.Harness, "agnostic templates should not have harness field")
 	assert.Equal(t, "gemini-2.5-pro", cfg.Model)
 

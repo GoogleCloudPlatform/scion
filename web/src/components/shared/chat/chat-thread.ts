@@ -130,6 +130,10 @@ export class ScionChatThread extends LitElement {
   @property({ type: Boolean })
   isDM = false;
 
+  /** Current user ID for own-message detection (v2 mode). */
+  @property()
+  currentUserId = '';
+
   /** DM peer name (v2 mode). */
   @property()
   peerName = '';
@@ -881,6 +885,10 @@ export class ScionChatThread extends LitElement {
     const scope = stateManager.currentScope;
     if (scope && scope.type === 'chat') {
       this._currentUserId = scope.userId;
+      // Also populate currentUserId if not set from the parent.
+      if (!this.currentUserId && scope.userId) {
+        this.currentUserId = scope.userId;
+      }
     }
   }
 
@@ -1471,8 +1479,14 @@ export class ScionChatThread extends LitElement {
       const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
       const showHeader = !sameSender || !withinWindow;
 
-      // In v2 mode, determine if from agent by checking sender against known members
-      const isFromAgent = this.isV2 ? this.isSenderAgent(msg) : msg.senderId === this.agentId;
+      // In v2 mode, use currentUserId to determine own vs. others' messages.
+      // Own messages (fromAgent=false): right-aligned, no header/avatar.
+      // Others' messages — both users and agents (fromAgent=true): left-aligned with header/avatar.
+      const isFromAgent = this.isV2
+        ? this.currentUserId
+          ? msg.senderId !== this.currentUserId
+          : this.isSenderAgent(msg)
+        : msg.senderId === this.agentId;
       const senderDisplayName = this.isV2
         ? this.getSenderDisplayName(msg)
         : isFromAgent

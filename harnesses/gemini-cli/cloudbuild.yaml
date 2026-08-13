@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Per-bundle Cloud Build configuration for the Gemini CLI harness image.
-# Builds scion-gemini on top of scion-base:<_TAG>.
+# Builds scion-gemini-cli on top of scion-base:<_TAG>.
 steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'setup-buildx'
@@ -28,7 +28,7 @@ steps:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-gemini'
+    id: 'build-scion-gemini-cli'
     args:
       - 'buildx'
       - 'build'
@@ -37,9 +37,9 @@ steps:
       - '--build-arg'
       - 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG'
       - '-t'
-      - '$_REGISTRY/scion-gemini:$_SHORT_SHA'
+      - '$_REGISTRY/scion-gemini-cli:$_SHORT_SHA'
       - '-t'
-      - '$_REGISTRY/scion-gemini:$_TAG'
+      - '$_REGISTRY/scion-gemini-cli:$_TAG'
       - '-f'
       - 'Dockerfile'
       - '--pull'

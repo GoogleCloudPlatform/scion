@@ -643,7 +643,7 @@ export class ScionChatMessage extends LitElement {
                 </span>
               `
             : nothing}
-          ${this.showHeader && this.visibility !== 'verbose'
+          ${this.showHeader && this.fromAgent && this.visibility !== 'verbose'
             ? html`
                 <div class="bubble-header">
                   <span class="sender-name">${this.sender}</span>

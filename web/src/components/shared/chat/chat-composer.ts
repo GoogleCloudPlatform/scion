@@ -781,12 +781,17 @@ export class ScionChatComposer extends LitElement {
             this.runeCount = 0;
             this.acceptedMentions.clear();
             this.pendingFiles = [];
-            // Re-focus the textarea so the user can immediately type the next message.
+            // Restore focus to the textarea after send.
+            // Use requestAnimationFrame to ensure the Lit render cycle
+            // and Shoelace's internal DOM update have completed.
             void this.updateComplete.then(() => {
-              const ta = this.getTextareaElement();
-              if (ta) {
-                ta.focus();
-              }
+              requestAnimationFrame(() => {
+                const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+                if (slTextarea) {
+                  // Shoelace components expose their own .focus() method.
+                  (slTextarea as HTMLElement).focus();
+                }
+              });
             });
           },
         },
