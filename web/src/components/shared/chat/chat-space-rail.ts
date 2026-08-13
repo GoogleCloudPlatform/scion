@@ -316,6 +316,21 @@ export class ScionChatSpaceRail extends LitElement {
     .create-thread sl-input::part(base) {
       font-size: 0.8125rem;
       min-height: 1.75rem;
+      background: var(--scion-surface-raised, #ffffff);
+      border-color: var(--scion-border, #e2e8f0);
+    }
+
+    .create-thread sl-input::part(input) {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .rename-input::part(input) {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .rename-input::part(base) {
+      background: var(--scion-surface-raised, #ffffff);
+      border-color: var(--scion-border, #e2e8f0);
     }
 
     /* DM section */
@@ -826,7 +841,7 @@ export class ScionChatSpaceRail extends LitElement {
       return;
     }
     try {
-      await apiFetch(`/api/v1/chat/threads/${encodeURIComponent(this.renamingThread)}`, {
+      await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(this.renamingThread)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: this.renameValue.trim() }),
@@ -843,7 +858,7 @@ export class ScionChatSpaceRail extends LitElement {
     if (thread.isGeneral) return;
     if (!confirm(`Delete #${thread.name}? This cannot be undone.`)) return;
     try {
-      await apiFetch(`/api/v1/chat/threads/${encodeURIComponent(thread.id)}`, {
+      await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(thread.id)}`, {
         method: 'DELETE',
       });
       // Remove locally
@@ -1036,14 +1051,30 @@ export class ScionChatSpaceRail extends LitElement {
               : space.unreadCount > 0
                 ? html`<span class="unread-badge">${space.unreadCount}</span>`
                 : nothing}
-            <sl-icon-button
-              name="plus-lg"
-              label="Create thread"
-              @click=${(e: Event) => {
-                e.stopPropagation();
-                this.startCreateThread(space.projectId);
-              }}
-            ></sl-icon-button>
+            <sl-dropdown>
+              <sl-icon-button
+                slot="trigger"
+                name="three-dots-vertical"
+                label="Space actions"
+                @click=${(e: Event) => {
+                  e.stopPropagation();
+                }}
+              ></sl-icon-button>
+              <sl-menu
+                @sl-select=${(e: Event) => {
+                  const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+                  const value = detail?.item?.getAttribute('value');
+                  if (value === 'new-thread') {
+                    this.startCreateThread(space.projectId);
+                  }
+                }}
+              >
+                <sl-menu-item value="new-thread">
+                  <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                  New thread
+                </sl-menu-item>
+              </sl-menu>
+            </sl-dropdown>
           </div>
         </div>
         ${!isCollapsed

@@ -1075,12 +1075,12 @@ export class ScionChatThread extends LitElement {
     try {
       const body: Record<string, unknown> = {};
       if (arg === 'clear') {
-        body.default_agent = null;
+        body.defaultAgent = null;
       } else {
-        body.default_agent = arg;
+        body.defaultAgent = arg;
       }
       const res = await apiFetch(
-        `/api/v1/chat/threads/${encodeURIComponent(this.conversationKey)}`,
+        `/api/v1/chat/topics/${encodeURIComponent(this.conversationKey)}`,
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -1109,10 +1109,10 @@ export class ScionChatThread extends LitElement {
 
     try {
       const body: Record<string, unknown> = {
-        default_agent: newDefault || null,
+        defaultAgent: newDefault || null,
       };
       const res = await apiFetch(
-        `/api/v1/chat/threads/${encodeURIComponent(this.conversationKey)}`,
+        `/api/v1/chat/topics/${encodeURIComponent(this.conversationKey)}`,
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
