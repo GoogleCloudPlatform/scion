@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -615,7 +617,8 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// --- Validate body ---
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 	var body struct {
-		Content string `json:"content"`
+		Content     string   `json:"content"`
+		Attachments []string `json:"attachments,omitempty"` // W7: attachment IDs
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
@@ -623,13 +626,40 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	}
 
 	content := strings.TrimSpace(body.Content)
-	if content == "" {
-		ValidationError(w, "content is required", nil)
+	if content == "" && len(body.Attachments) == 0 {
+		ValidationError(w, "content or attachments required", nil)
 		return
 	}
 	if utf8.RuneCountInString(content) > messages.MaxMessageLength {
 		ValidationError(w, fmt.Sprintf("message exceeds %d character limit", messages.MaxMessageLength), nil)
 		return
+	}
+	if len(body.Attachments) > MaxAttachmentsPerMessage {
+		ValidationError(w, fmt.Sprintf("too many attachments: %d (max %d)", len(body.Attachments), MaxAttachmentsPerMessage), nil)
+		return
+	}
+
+	// W7: Validate attachment IDs and collect metadata.
+	var attachmentRefs []AttachmentRef
+	if len(body.Attachments) > 0 && wcs != nil {
+		for _, aid := range body.Attachments {
+			meta, err := wcs.GetAttachment(ctx, aid)
+			if err != nil || meta == nil {
+				ValidationError(w, fmt.Sprintf("attachment %q not found", aid), nil)
+				return
+			}
+			// Verify the attachment belongs to the correct project.
+			if projectID != "" && meta.ProjectID != projectID {
+				ValidationError(w, fmt.Sprintf("attachment %q does not belong to this project", aid), nil)
+				return
+			}
+			attachmentRefs = append(attachmentRefs, AttachmentRef{
+				ID:       meta.ID,
+				Name:     meta.Filename,
+				MimeType: meta.MimeType,
+				Size:     meta.Size,
+			})
+		}
 	}
 
 	// --- Resolve routing per design §3 ---
@@ -677,7 +707,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// Step 3: Determine routing.
 	if len(mentionedAgents) > 0 {
 		// --- Agent-routed: explicit mentions ---
-		s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, mentionedAgents, mentionNames, mentionResults, now)
+		s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, mentionedAgents, mentionNames, mentionResults, attachmentRefs, now)
 		// Ensure DM registry rows exist so the DM appears in the rail.
 		if isDM {
 			s.ensureDMRegistered(ctx, key, user.ID())
@@ -693,7 +723,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		if agentID := parseAgentDMKey(key); agentID != "" {
 			dmAgent, err := s.store.GetAgent(ctx, agentID)
 			if err == nil && dmAgent != nil {
-				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, mentionNames, nil, now)
+				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, mentionNames, nil, attachmentRefs, now)
 				// Ensure DM registry rows exist so the DM appears in the rail.
 				s.ensureDMRegistered(ctx, key, user.ID())
 				return
@@ -706,19 +736,20 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			// Resolve the default agent.
 			defaultAgent, err := s.store.GetAgent(ctx, topic.DefaultAgent)
 			if err == nil && defaultAgent != nil {
-				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, now)
+				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, attachmentRefs, now)
 				return
 			}
 		}
 	}
 
 	// --- Human-to-human message ---
-	s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, mentionNames, now)
+	s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, mentionNames, attachmentRefs, now)
 }
 
 // sendAgentRouted sends a message through the existing agent dispatch path.
 func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
-	content, senderLabel string, agents []*store.Agent, mentionNames []string, mentionResults []messages.MentionResult, now time.Time) {
+	content, senderLabel string, agents []*store.Agent, mentionNames []string, mentionResults []messages.MentionResult,
+	attachmentRefs []AttachmentRef, now time.Time) {
 
 	ctx := r.Context()
 
@@ -743,6 +774,27 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		ThreadID:    key,
 	}
 
+	// W7: Add attachment metadata and file paths for agent dispatch.
+	if len(attachmentRefs) > 0 {
+		// Embed attachment metadata in StructuredMessage.Metadata for SSE consumers.
+		if msg.Metadata == nil {
+			msg.Metadata = make(map[string]string)
+		}
+		refsJSON, _ := json.Marshal(attachmentRefs)
+		msg.Metadata["attachments"] = string(refsJSON)
+
+		// For agent dispatch: pass container-visible file paths in Attachments
+		// (same pattern as Discord plugin — agents receive []string of paths).
+		s.mu.RLock()
+		as := s.attachmentStore
+		s.mu.RUnlock()
+		if localAS, ok := as.(*LocalDiskAttachmentStore); ok {
+			for _, ref := range attachmentRefs {
+				msg.Attachments = append(msg.Attachments, localAS.FilePath(projectID, ref.ID, ref.Name))
+			}
+		}
+	}
+
 	// Persist the instruction message.
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
@@ -764,6 +816,19 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil)
 		return
 	}
+
+	// W7: Link attachments to the persisted message.
+	s.mu.RLock()
+	linkWcs := s.webChatStore
+	s.mu.RUnlock()
+	if linkWcs != nil && len(attachmentRefs) > 0 {
+		for _, ref := range attachmentRefs {
+			if err := linkWcs.LinkAttachmentToMessage(ctx, storeMsg.ID, ref.ID); err != nil {
+				s.messageLog.Error("Failed to link attachment to message", "attachment", ref.ID, "error", err)
+			}
+		}
+	}
+
 	s.events.PublishUserMessage(ctx, storeMsg)
 
 	// Dispatch to the primary agent.
@@ -785,6 +850,9 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			mentionMsg.RecipientID = mentionAgent.ID
 			mentionMsg.Channel = "web"
 			mentionMsg.ThreadID = key
+			// W7: Copy attachment paths and metadata to mention messages.
+			mentionMsg.Attachments = msg.Attachments
+			mentionMsg.Metadata = msg.Metadata
 
 			mentionStoreMsg := &store.Message{
 				ID:            api.NewUUID(),
@@ -828,19 +896,20 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 
 	writeJSON(w, http.StatusCreated, chatMessageResponse{
-		ID:        storeMsg.ID,
-		Content:   content,
-		Sender:    storeMsg.Sender,
-		SenderID:  storeMsg.SenderID,
-		Type:      storeMsg.Type,
-		CreatedAt: now,
-		Mentions:  mentionResults,
+		ID:          storeMsg.ID,
+		Content:     content,
+		Sender:      storeMsg.Sender,
+		SenderID:    storeMsg.SenderID,
+		Type:        storeMsg.Type,
+		CreatedAt:   now,
+		Mentions:    mentionResults,
+		Attachments: attachmentRefs,
 	})
 }
 
 // sendHumanToHuman persists a type:chat message for human-to-human communication.
 func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
-	content, senderLabel string, isDM bool, mentionNames []string, now time.Time) {
+	content, senderLabel string, isDM bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time) {
 
 	ctx := r.Context()
 
@@ -895,6 +964,15 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		return
 	}
 
+	// W7: Link attachments to the persisted message.
+	if wcs != nil && len(attachmentRefs) > 0 {
+		for _, ref := range attachmentRefs {
+			if err := wcs.LinkAttachmentToMessage(ctx, storeMsg.ID, ref.ID); err != nil {
+				slog.Error("Failed to link attachment to message", "attachment", ref.ID, "error", err)
+			}
+		}
+	}
+
 	// Publish SSE event.
 	s.events.PublishUserMessage(ctx, storeMsg)
 
@@ -921,12 +999,13 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	}
 
 	writeJSON(w, http.StatusCreated, chatMessageResponse{
-		ID:        storeMsg.ID,
-		Content:   content,
-		Sender:    storeMsg.Sender,
-		SenderID:  storeMsg.SenderID,
-		Type:      storeMsg.Type,
-		CreatedAt: now,
+		ID:          storeMsg.ID,
+		Content:     content,
+		Sender:      storeMsg.Sender,
+		SenderID:    storeMsg.SenderID,
+		Type:        storeMsg.Type,
+		CreatedAt:   now,
+		Attachments: attachmentRefs,
 	})
 }
 
@@ -1012,10 +1091,32 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		result.Items = []store.Message{}
 	}
 
+	// W7: Enrich messages with attachment metadata.
+	var messageAttachments map[string][]AttachmentRef
+	if wcs != nil && len(result.Items) > 0 {
+		messageAttachments = make(map[string][]AttachmentRef)
+		for _, msg := range result.Items {
+			attachments, err := wcs.GetAttachmentsByMessage(ctx, msg.ID)
+			if err == nil && len(attachments) > 0 {
+				refs := make([]AttachmentRef, 0, len(attachments))
+				for _, a := range attachments {
+					refs = append(refs, AttachmentRef{
+						ID:       a.ID,
+						Name:     a.Filename,
+						MimeType: a.MimeType,
+						Size:     a.Size,
+					})
+				}
+				messageAttachments[msg.ID] = refs
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, chatHistoryResponse{
-		Messages:   result.Items,
-		NextCursor: result.NextCursor,
-		TotalCount: result.TotalCount,
+		Messages:           result.Items,
+		NextCursor:         result.NextCursor,
+		TotalCount:         result.TotalCount,
+		MessageAttachments: messageAttachments,
 	})
 }
 
@@ -2027,19 +2128,21 @@ type chatTopicEntry struct {
 }
 
 type chatMessageResponse struct {
-	ID        string                   `json:"id"`
-	Content   string                   `json:"content"`
-	Sender    string                   `json:"sender"`
-	SenderID  string                   `json:"senderId"`
-	Type      string                   `json:"type"`
-	CreatedAt time.Time                `json:"createdAt"`
-	Mentions  []messages.MentionResult `json:"mentions,omitempty"`
+	ID          string                   `json:"id"`
+	Content     string                   `json:"content"`
+	Sender      string                   `json:"sender"`
+	SenderID    string                   `json:"senderId"`
+	Type        string                   `json:"type"`
+	CreatedAt   time.Time                `json:"createdAt"`
+	Mentions    []messages.MentionResult `json:"mentions,omitempty"`
+	Attachments []AttachmentRef          `json:"attachments,omitempty"` // W7
 }
 
 type chatHistoryResponse struct {
-	Messages   []store.Message `json:"messages"`
-	NextCursor string          `json:"nextCursor,omitempty"`
-	TotalCount int             `json:"totalCount"`
+	Messages           []store.Message            `json:"messages"`
+	NextCursor         string                     `json:"nextCursor,omitempty"`
+	TotalCount         int                        `json:"totalCount"`
+	MessageAttachments map[string][]AttachmentRef `json:"messageAttachments,omitempty"` // W7: keyed by message ID
 }
 
 type chatDMListResponse struct {
@@ -2083,4 +2186,234 @@ type chatMemberEntry struct {
 	Phase         string `json:"phase,omitempty"`
 	Activity      string `json:"activity,omitempty"`
 	PresenceState string `json:"presenceState,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// W7: Attachment upload / download handlers
+// ---------------------------------------------------------------------------
+
+// handleChatAttachments dispatches /api/v1/chat/attachments.
+// POST = upload, GET with /{id} = download.
+func (s *Server) handleChatAttachments(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleAttachmentUpload(w, r)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// handleChatAttachmentByID dispatches /api/v1/chat/attachments/{id}.
+func (s *Server) handleChatAttachmentByID(w http.ResponseWriter, r *http.Request) {
+	// Extract attachment ID from path: /api/v1/chat/attachments/{id}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/attachments/")
+	id := strings.TrimRight(path, "/")
+	if id == "" {
+		NotFound(w, "Attachment")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.handleAttachmentDownload(w, r, id)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// handleAttachmentUpload handles POST /api/v1/chat/attachments (multipart form).
+func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	as := s.attachmentStore
+	s.mu.RUnlock()
+
+	if wcs == nil || as == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Attachments not available", nil)
+		return
+	}
+
+	// Require project_id parameter for authz.
+	projectID := r.FormValue("project_id")
+	if projectID == "" {
+		// Try multipart form value.
+		if err := r.ParseMultipartForm(MaxAttachmentSize * MaxAttachmentsPerMessage); err == nil {
+			projectID = r.FormValue("project_id")
+		}
+	}
+	if projectID == "" {
+		ValidationError(w, "project_id is required", nil)
+		return
+	}
+
+	// Authorize: user must have read access to the project (same as sending messages).
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	// Parse multipart form (limit total to MaxAttachmentSize * MaxAttachmentsPerMessage).
+	r.Body = http.MaxBytesReader(w, r.Body, int64(MaxAttachmentSize*MaxAttachmentsPerMessage)+1024*1024)
+	if err := r.ParseMultipartForm(MaxAttachmentSize * MaxAttachmentsPerMessage); err != nil {
+		BadRequest(w, "invalid multipart form or request too large")
+		return
+	}
+
+	files := r.MultipartForm.File["files"]
+	if len(files) == 0 {
+		ValidationError(w, "no files uploaded", nil)
+		return
+	}
+	if len(files) > MaxAttachmentsPerMessage {
+		ValidationError(w, fmt.Sprintf("too many files: %d (max %d)", len(files), MaxAttachmentsPerMessage), nil)
+		return
+	}
+
+	var results []attachmentUploadResult
+	for _, fh := range files {
+		// Validate size.
+		if fh.Size > MaxAttachmentSize {
+			ValidationError(w, fmt.Sprintf("file %q exceeds maximum size of %d bytes", fh.Filename, MaxAttachmentSize), nil)
+			return
+		}
+
+		// Sanitize filename.
+		safeName, err := SanitizeFilename(fh.Filename)
+		if err != nil {
+			ValidationError(w, fmt.Sprintf("invalid filename %q: %v", fh.Filename, err), nil)
+			return
+		}
+
+		// Validate MIME type.
+		mime := fh.Header.Get("Content-Type")
+		// Normalize: strip parameters (e.g. "text/plain; charset=utf-8" -> "text/plain").
+		if idx := strings.Index(mime, ";"); idx >= 0 {
+			mime = strings.TrimSpace(mime[:idx])
+		}
+		if !AllowedMimeTypes[mime] {
+			ValidationError(w, fmt.Sprintf("file type %q not allowed", mime), nil)
+			return
+		}
+
+		// Open the file.
+		file, err := fh.Open()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to read uploaded file", nil)
+			return
+		}
+
+		// Save to storage.
+		meta, err := as.Save(ctx, projectID, safeName, file, fh.Size, mime)
+		file.Close()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", fmt.Sprintf("failed to save file: %v", err), nil)
+			return
+		}
+
+		// Set the uploader.
+		meta.UploadedBy = user.ID()
+
+		// Persist metadata in DB.
+		if err := wcs.CreateAttachment(ctx, meta); err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save attachment metadata", nil)
+			return
+		}
+
+		results = append(results, attachmentUploadResult{
+			ID:       meta.ID,
+			Name:     meta.Filename,
+			MimeType: meta.MimeType,
+			Size:     meta.Size,
+			URL:      "/api/v1/chat/attachments/" + meta.ID,
+		})
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"attachments": results,
+	})
+}
+
+// handleAttachmentDownload handles GET /api/v1/chat/attachments/{id}.
+func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request, id string) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	as := s.attachmentStore
+	s.mu.RUnlock()
+
+	if wcs == nil || as == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Attachments not available", nil)
+		return
+	}
+
+	// Look up metadata from DB.
+	meta, err := wcs.GetAttachment(ctx, id)
+	if err != nil || meta == nil {
+		NotFound(w, "Attachment")
+		return
+	}
+
+	// Authorize: user must have read access to the project.
+	project, err := s.store.GetProject(ctx, meta.ProjectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	// Get file from storage.
+	reader, fileMeta, err := as.Get(ctx, id)
+	if err != nil {
+		NotFound(w, "Attachment file")
+		return
+	}
+	defer reader.Close()
+
+	// Set headers.
+	mimeType := meta.MimeType
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", mimeType)
+
+	// Content-Disposition: inline for images, attachment for everything else.
+	disposition := "attachment"
+	if IsImageMime(mimeType) {
+		disposition = "inline"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, meta.Filename))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", fileMeta.Size))
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+
+	w.WriteHeader(http.StatusOK)
+	io.Copy(w, reader)
+}
+
+type attachmentUploadResult struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	MimeType string `json:"mime"`
+	Size     int64  `json:"size"`
+	URL      string `json:"url"`
 }

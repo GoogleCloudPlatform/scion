@@ -159,6 +159,9 @@ export class ScionChatThread extends LitElement {
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
+  /** W7: Attachment refs keyed by message ID (from history endpoint + send response). */
+  private v2AttachmentMap = new Map<string, import('./chat-message.js').AttachmentRefInfo[]>();
+
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
   private lastKnownTimestamp: string | null = null;
@@ -592,6 +595,13 @@ export class ScionChatThread extends LitElement {
     }
   }
 
+  /** W7: Get attachment refs for a message (from history or send response). */
+  private getMessageAttachmentRefs(
+    messageId: string
+  ): import('./chat-message.js').AttachmentRefInfo[] {
+    return this.v2AttachmentMap.get(messageId) ?? [];
+  }
+
   /** Check if a message sender is an agent (v2 multi-sender). */
   private isSenderAgent(msg: Message): boolean {
     // Agent messages have sender like "agent:slug" or recipient patterns
@@ -852,10 +862,22 @@ export class ScionChatThread extends LitElement {
 
     const data = (await res.json()) as {
       items?: Message[];
+      messages?: Message[];
       nextCursor?: string;
+      messageAttachments?: Record<
+        string,
+        import('./chat-message.js').AttachmentRefInfo[]
+      >;
     };
 
-    const items = data?.items ?? [];
+    const items = data?.items ?? data?.messages ?? [];
+
+    // W7: Merge attachment refs from history response.
+    if (data?.messageAttachments) {
+      for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
+        this.v2AttachmentMap.set(msgId, refs);
+      }
+    }
 
     if (items.length < HISTORY_PAGE_SIZE) {
       this.hasOlderMessages = false;
@@ -960,8 +982,23 @@ export class ScionChatThread extends LitElement {
     if (currentId !== this.fetchId) return;
     if (!res.ok) return;
 
-    const data = (await res.json()) as { items?: Message[] };
-    const items = data?.items ?? [];
+    const data = (await res.json()) as {
+      items?: Message[];
+      messages?: Message[];
+      messageAttachments?: Record<
+        string,
+        import('./chat-message.js').AttachmentRefInfo[]
+      >;
+    };
+    const items = data?.items ?? data?.messages ?? [];
+
+    // W7: Merge attachment refs from history response.
+    if (data?.messageAttachments) {
+      for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
+        this.v2AttachmentMap.set(msgId, refs);
+      }
+    }
+
     const wasPinned = this.pinnedToBottom;
     this.mergeMessages(items);
     if (wasPinned) {
@@ -973,8 +1010,9 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, plain, mentions, onSuccess } = e.detail;
-    if (!text || this.sending) return;
+    const { text, mentions, attachmentIds, onSuccess } = e.detail;
+    const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
+    if (!hasContent || this.sending) return;
 
     // Check for /default slash command
     if (text.startsWith('/default ')) {
@@ -988,10 +1026,14 @@ export class ScionChatThread extends LitElement {
 
     try {
       const body: Record<string, unknown> = {
-        structured_message: { msg: text, plain },
+        content: text,
       };
       if (mentions && mentions.length > 0) {
         body.mentions = mentions;
+      }
+      // W7: Include attachment IDs.
+      if (attachmentIds && attachmentIds.length > 0) {
+        body.attachments = attachmentIds;
       }
 
       const res = await apiFetch(
@@ -1006,6 +1048,14 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) {
         this.sendError = await extractApiError(res, 'Failed to send message');
       } else {
+        // W7: Parse attachment refs from the send response.
+        const resData = (await res.json().catch(() => null)) as {
+          id?: string;
+          attachments?: import('./chat-message.js').AttachmentRefInfo[];
+        } | null;
+        if (resData?.id && resData?.attachments && resData.attachments.length > 0) {
+          this.v2AttachmentMap.set(resData.id, resData.attachments);
+        }
         onSuccess();
         // Backfill to pick up the message immediately
         void this.backfillV2();
@@ -1251,6 +1301,7 @@ export class ScionChatThread extends LitElement {
           .defaultAgent=${this.defaultAgent}
           .conversationMode=${this.isDM ? 'dm' : 'thread'}
           .peerName=${this.peerName}
+          .projectId=${this.projectId}
           @chat-send=${this.handleChatSendV2}
           @chat-typing=${() => this.sendTypingEvent()}
         ></scion-chat-composer>
@@ -1435,6 +1486,7 @@ export class ScionChatThread extends LitElement {
           dispatchState=${msg.dispatchState || ''}
           dispatchFailureReason=${msg.dispatchFailureReason || ''}
           .attachments=${msg.attachments || []}
+          .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
         ></scion-chat-message>
       `);
 

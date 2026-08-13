@@ -742,6 +742,10 @@ type Server struct {
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier
 
+	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
+	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.
+	attachmentStore AttachmentStore
+
 	// Presence manager for in-memory user presence tracking (nil = disabled).
 	// Single-node only; see design §4.5 HA limitation.
 	presenceManager *PresenceManager
@@ -1887,6 +1891,13 @@ func (s *Server) SetWebChatStore(wcs WebChatStore) {
 	if s.messageBrokerProxy != nil {
 		s.messageBrokerProxy.chatNotifier = s.chatNotifier
 	}
+	s.mu.Unlock()
+}
+
+// SetAttachmentStore sets the attachment file store for upload/download (W7).
+func (s *Server) SetAttachmentStore(as AttachmentStore) {
+	s.mu.Lock()
+	s.attachmentStore = as
 	s.mu.Unlock()
 }
 
@@ -3512,6 +3523,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/chat/user-prefs", s.handleChatUserPrefs)
 	s.mux.HandleFunc("/api/v1/chat/presence", s.handleChatPresence)
 	s.mux.HandleFunc("/api/v1/chat/search", s.handleChatSearch)
+	s.mux.HandleFunc("/api/v1/chat/attachments", s.handleChatAttachments)
+	s.mux.HandleFunc("/api/v1/chat/attachments/", s.handleChatAttachmentByID)
 
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect)

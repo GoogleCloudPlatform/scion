@@ -606,6 +606,19 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 							})
 							hubSrv.SetWebChatStore(webStore)
 							log.Printf("Message broker spoke added: name=web channel_id=web observer=true")
+
+							// W7: Initialize local-disk attachment store.
+							globalDir, err := config.GetGlobalDir()
+							if err == nil {
+								attachDir := filepath.Join(globalDir, "attachments")
+								attachStore, err := hub.NewLocalDiskAttachmentStore(attachDir)
+								if err != nil {
+									log.Printf("Warning: failed to initialize attachment store: %v", err)
+								} else {
+									hubSrv.SetAttachmentStore(attachStore)
+									log.Printf("Attachment store initialized: dir=%s", attachDir)
+								}
+							}
 						}
 					}
 				}

@@ -116,6 +116,30 @@ CREATE TABLE IF NOT EXISTS webchat_migrations (
     name         TEXT PRIMARY KEY,
     completed_at TIMESTAMPTZ
 );
+
+-- Wave-2 W7: attachment metadata
+CREATE TABLE IF NOT EXISTS webchat_attachment (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    mime_type   TEXT NOT NULL,
+    size        BIGINT NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_attachment_project
+    ON webchat_attachment (project_id);
+
+-- Wave-2 W7: message-attachment linkage
+CREATE TABLE IF NOT EXISTS webchat_message_attachment (
+    message_id    TEXT NOT NULL,
+    attachment_id TEXT NOT NULL,
+    PRIMARY KEY (message_id, attachment_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_message
+    ON webchat_message_attachment (message_id);
 `
 	_, err := s.db.Exec(ddl)
 	if err != nil {
@@ -1010,4 +1034,88 @@ ON CONFLICT (user_id, conversation_key) DO UPDATE SET muted = EXCLUDED.muted
 	}
 
 	return s.markMigrationCompleted("wave1_seed")
+}
+
+// ---------------------------------------------------------------------------
+// W7: Attachment metadata CRUD (Postgres)
+// ---------------------------------------------------------------------------
+
+// CreateAttachment inserts a new attachment metadata row.
+func (s *pgWebChatStore) CreateAttachment(ctx context.Context, meta AttachmentMeta) error {
+	const query = `
+INSERT INTO webchat_attachment (id, project_id, filename, mime_type, size, uploaded_by, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+`
+	_, err := s.db.ExecContext(ctx, query, meta.ID, meta.ProjectID, meta.Filename, meta.MimeType, meta.Size, meta.UploadedBy, meta.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("webchat store: create attachment: %w", err)
+	}
+	return nil
+}
+
+// GetAttachment returns attachment metadata by ID.
+func (s *pgWebChatStore) GetAttachment(ctx context.Context, id string) (*AttachmentMeta, error) {
+	const query = `
+SELECT id, project_id, filename, mime_type, size, uploaded_by, created_at
+FROM webchat_attachment WHERE id = $1
+`
+	var meta AttachmentMeta
+	err := s.db.QueryRowContext(ctx, query, id).Scan(
+		&meta.ID, &meta.ProjectID, &meta.Filename, &meta.MimeType,
+		&meta.Size, &meta.UploadedBy, &meta.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: get attachment: %w", err)
+	}
+	return &meta, nil
+}
+
+// DeleteAttachment removes attachment metadata by ID.
+func (s *pgWebChatStore) DeleteAttachment(ctx context.Context, id string) error {
+	const query = `DELETE FROM webchat_attachment WHERE id = $1`
+	_, err := s.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete attachment: %w", err)
+	}
+	return nil
+}
+
+// LinkAttachmentToMessage associates an attachment with a message.
+func (s *pgWebChatStore) LinkAttachmentToMessage(ctx context.Context, messageID, attachmentID string) error {
+	const query = `
+INSERT INTO webchat_message_attachment (message_id, attachment_id)
+VALUES ($1, $2)
+ON CONFLICT (message_id, attachment_id) DO NOTHING
+`
+	_, err := s.db.ExecContext(ctx, query, messageID, attachmentID)
+	if err != nil {
+		return fmt.Errorf("webchat store: link attachment: %w", err)
+	}
+	return nil
+}
+
+// GetAttachmentsByMessage returns all attachments linked to a message.
+func (s *pgWebChatStore) GetAttachmentsByMessage(ctx context.Context, messageID string) ([]AttachmentMeta, error) {
+	const query = `
+SELECT a.id, a.project_id, a.filename, a.mime_type, a.size, a.uploaded_by, a.created_at
+FROM webchat_attachment a
+JOIN webchat_message_attachment ma ON ma.attachment_id = a.id
+WHERE ma.message_id = $1
+`
+	rows, err := s.db.QueryContext(ctx, query, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: get message attachments: %w", err)
+	}
+	defer rows.Close()
+
+	var result []AttachmentMeta
+	for rows.Next() {
+		var meta AttachmentMeta
+		if err := rows.Scan(&meta.ID, &meta.ProjectID, &meta.Filename, &meta.MimeType,
+			&meta.Size, &meta.UploadedBy, &meta.CreatedAt); err != nil {
+			return nil, fmt.Errorf("webchat store: scan attachment: %w", err)
+		}
+		result = append(result, meta)
+	}
+	return result, rows.Err()
 }

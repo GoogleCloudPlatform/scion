@@ -159,6 +159,23 @@ type WebChatStore interface {
 	// web-channel messages. Results are ordered by created_at DESC with
 	// keyset pagination via (created_at, id) cursor.
 	SearchChatMessages(ctx context.Context, filter ChatSearchFilter) ([]ChatSearchResult, string, error)
+
+	// --- Wave-2 Attachment methods (W7) ---
+
+	// CreateAttachment inserts attachment metadata.
+	CreateAttachment(ctx context.Context, meta AttachmentMeta) error
+
+	// GetAttachment returns attachment metadata by ID.
+	GetAttachment(ctx context.Context, id string) (*AttachmentMeta, error)
+
+	// DeleteAttachment removes attachment metadata by ID.
+	DeleteAttachment(ctx context.Context, id string) error
+
+	// GetAttachmentsByMessage returns all attachments linked to a message.
+	GetAttachmentsByMessage(ctx context.Context, messageID string) ([]AttachmentMeta, error)
+
+	// LinkAttachmentToMessage associates an attachment with a message.
+	LinkAttachmentToMessage(ctx context.Context, messageID, attachmentID string) error
 }
 
 // ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
@@ -364,6 +381,30 @@ CREATE TABLE IF NOT EXISTS webchat_migrations (
     name         TEXT PRIMARY KEY,
     completed_at TEXT
 );
+
+-- Wave-2 W7: attachment metadata
+CREATE TABLE IF NOT EXISTS webchat_attachment (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    mime_type   TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_attachment_project
+    ON webchat_attachment (project_id);
+
+-- Wave-2 W7: message-attachment linkage
+CREATE TABLE IF NOT EXISTS webchat_message_attachment (
+    message_id    TEXT NOT NULL,
+    attachment_id TEXT NOT NULL,
+    PRIMARY KEY (message_id, attachment_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_message
+    ON webchat_message_attachment (message_id);
 `
 	_, err := s.db.Exec(ddl)
 	if err != nil {
@@ -1285,6 +1326,93 @@ WHERE (user_id, conversation_key) IN (
 	}
 
 	return s.markMigrationCompleted("wave1_seed")
+}
+
+// ---------------------------------------------------------------------------
+// W7: Attachment metadata CRUD (SQLite)
+// ---------------------------------------------------------------------------
+
+// CreateAttachment inserts a new attachment metadata row.
+func (s *sqliteWebChatStore) CreateAttachment(ctx context.Context, meta AttachmentMeta) error {
+	const query = `
+INSERT INTO webchat_attachment (id, project_id, filename, mime_type, size, uploaded_by, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+`
+	_, err := s.db.ExecContext(ctx, query, meta.ID, meta.ProjectID, meta.Filename, meta.MimeType, meta.Size, meta.UploadedBy, meta.CreatedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("webchat store: create attachment: %w", err)
+	}
+	return nil
+}
+
+// GetAttachment returns attachment metadata by ID.
+func (s *sqliteWebChatStore) GetAttachment(ctx context.Context, id string) (*AttachmentMeta, error) {
+	const query = `
+SELECT id, project_id, filename, mime_type, size, uploaded_by, created_at
+FROM webchat_attachment WHERE id = ?
+`
+	var meta AttachmentMeta
+	var createdAt string
+	err := s.db.QueryRowContext(ctx, query, id).Scan(
+		&meta.ID, &meta.ProjectID, &meta.Filename, &meta.MimeType,
+		&meta.Size, &meta.UploadedBy, &createdAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: get attachment: %w", err)
+	}
+	meta.CreatedAt = parseSQLiteTime(createdAt)
+	return &meta, nil
+}
+
+// DeleteAttachment removes attachment metadata by ID.
+func (s *sqliteWebChatStore) DeleteAttachment(ctx context.Context, id string) error {
+	const query = `DELETE FROM webchat_attachment WHERE id = ?`
+	_, err := s.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete attachment: %w", err)
+	}
+	return nil
+}
+
+// LinkAttachmentToMessage associates an attachment with a message.
+func (s *sqliteWebChatStore) LinkAttachmentToMessage(ctx context.Context, messageID, attachmentID string) error {
+	const query = `
+INSERT OR IGNORE INTO webchat_message_attachment (message_id, attachment_id)
+VALUES (?, ?)
+`
+	_, err := s.db.ExecContext(ctx, query, messageID, attachmentID)
+	if err != nil {
+		return fmt.Errorf("webchat store: link attachment: %w", err)
+	}
+	return nil
+}
+
+// GetAttachmentsByMessage returns all attachments linked to a message.
+func (s *sqliteWebChatStore) GetAttachmentsByMessage(ctx context.Context, messageID string) ([]AttachmentMeta, error) {
+	const query = `
+SELECT a.id, a.project_id, a.filename, a.mime_type, a.size, a.uploaded_by, a.created_at
+FROM webchat_attachment a
+JOIN webchat_message_attachment ma ON ma.attachment_id = a.id
+WHERE ma.message_id = ?
+`
+	rows, err := s.db.QueryContext(ctx, query, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: get message attachments: %w", err)
+	}
+	defer rows.Close()
+
+	var result []AttachmentMeta
+	for rows.Next() {
+		var meta AttachmentMeta
+		var createdAt string
+		if err := rows.Scan(&meta.ID, &meta.ProjectID, &meta.Filename, &meta.MimeType,
+			&meta.Size, &meta.UploadedBy, &createdAt); err != nil {
+			return nil, fmt.Errorf("webchat store: scan attachment: %w", err)
+		}
+		meta.CreatedAt = parseSQLiteTime(createdAt)
+		result = append(result, meta)
+	}
+	return result, rows.Err()
 }
 
 // ---------------------------------------------------------------------------
