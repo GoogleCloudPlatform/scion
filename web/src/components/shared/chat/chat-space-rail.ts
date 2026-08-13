@@ -484,6 +484,8 @@ export class ScionChatSpaceRail extends LitElement {
       if (res.ok) {
         const data = (await res.json()) as { spaces?: ChatSpace[] };
         this.spaces = data.spaces || [];
+        // Collapse all spaces by default — user expands explicitly
+        this.collapsedSpaces = new Set(this.spaces.map((s) => s.projectId));
         // Load threads for each space
         await Promise.all(this.spaces.map((s) => this.loadThreads(s.projectId)));
       }

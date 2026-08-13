@@ -130,7 +130,7 @@ export class ScionPageChat extends LitElement {
   // ---- V2 state ----
   @state() private v2Conversation: V2ConversationState | null = null;
   @state() private v2Members: SpaceMember[] = [];
-  @state() private v2MembersExpanded = false;
+  @state() private v2MembersExpanded = true;
   @state() private v2SpaceRailLoaded = false;
   /** Human members for the members sidebar (from the members endpoint). */
   @state() private v2HumanMembers: import('../shared/chat/chat-members.js').ChatHumanMember[] = [];
@@ -346,6 +346,7 @@ export class ScionPageChat extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       font-size: 0.8125rem;
       font-weight: 600;
+      color: var(--scion-text, #1e293b);
     }
 
     .v2-members-body {

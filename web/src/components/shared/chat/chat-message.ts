@@ -268,7 +268,7 @@ export class ScionChatMessage extends LitElement {
     .md-content code {
       font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
       font-size: 0.8125em;
-      background: var(--scion-surface, #ffffff);
+      background: var(--scion-bg-subtle, #f1f5f9);
       padding: 0.1em 0.3em;
       border-radius: 0.25rem;
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -276,7 +276,7 @@ export class ScionChatMessage extends LitElement {
 
     .md-content pre {
       position: relative;
-      background: var(--scion-surface, #ffffff);
+      background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.375rem;
       padding: 0.75rem;
@@ -348,7 +348,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .md-content th {
-      background: var(--scion-bg-subtle, #f8fafc);
+      background: var(--scion-bg-subtle, #f1f5f9);
       font-weight: 600;
     }
 
@@ -425,7 +425,7 @@ export class ScionChatMessage extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       cursor: pointer;
       object-fit: contain;
-      background: var(--scion-bg-subtle, #f8fafc);
+      background: var(--scion-bg-subtle, #f1f5f9);
       transition: opacity 0.2s ease;
     }
 

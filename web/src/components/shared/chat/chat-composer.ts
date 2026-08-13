@@ -159,10 +159,17 @@ export class ScionChatComposer extends LitElement {
     sl-textarea::part(base) {
       font-size: 0.875rem;
       border-radius: 0.75rem;
+      background: var(--scion-surface-raised, #ffffff);
+      border-color: var(--scion-border, #e2e8f0);
     }
 
     sl-textarea::part(textarea) {
       resize: none;
+      color: var(--scion-text, #1e293b);
+    }
+
+    sl-textarea::part(form-control) {
+      color: var(--scion-text, #1e293b);
     }
 
     .send-btn {
