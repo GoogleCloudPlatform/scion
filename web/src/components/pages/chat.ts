@@ -726,6 +726,23 @@ export class ScionPageChat extends LitElement {
     const dmMatch = path.match(/\/chat\/dm\/(.+)$/);
     if (dmMatch) {
       const segment = decodeURIComponent(dmMatch[1]);
+
+      // Guard: already viewing this exact DM — skip to avoid overwriting
+      // peer metadata that was populated by handleMemberClick or resolveDMByPeerId.
+      if (this.v2Conversation?.isDM && this.v2Conversation.conversationKey === segment) {
+        return;
+      }
+
+      // Guard: don't overwrite a valid DM key with a malformed one.
+      const dmKeyRegex = /^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$/;
+      if (
+        this.v2Conversation?.isDM &&
+        dmKeyRegex.test(this.v2Conversation.conversationKey) &&
+        !dmKeyRegex.test(segment)
+      ) {
+        return;
+      }
+
       this.classList.add('thread-open');
       dispatchPageTitle(this, 'DM', 'Chat');
 
@@ -745,33 +762,25 @@ export class ScionPageChat extends LitElement {
         void this.resolveDMPeerInfo(segment);
       } else {
         // Peer ID format (/chat/dm/<peerId>) — reconstruct the full
-        // composite DM key synchronously so the thread component can
-        // start loading immediately, avoiding "invalid DM key format"
-        // errors from the backend receiving a bare UUID.
-        const userId = this.pageData?.user?.id || '';
-        if (userId) {
-          const isAgent = this.v2AgentMembers.some((a) => a.id === segment);
-          let dmKey: string;
-          let peerKind: 'user' | 'agent';
-          let peerName = '';
+        // composite DM key using buildDMKey (returns null if user ID
+        // is not yet available, preventing broken keys).
+        const isAgent = this.v2AgentMembers.some((a) => a.id === segment);
+        const peerKind: 'user' | 'agent' = isAgent ? 'agent' : 'user';
+        const dmKey = this.buildDMKey(segment, peerKind);
 
+        if (dmKey) {
+          // If we already have the correct DM conversation open, skip.
+          if (this.v2Conversation?.conversationKey === dmKey) {
+            return;
+          }
+
+          let peerName = '';
           if (isAgent) {
-            peerKind = 'agent';
-            dmKey = `dm:agent:${segment}:user:${userId}`;
             const agent = this.v2AgentMembers.find((a) => a.id === segment);
             peerName = agent?.displayName || '';
           } else {
-            peerKind = 'user';
-            const ids = [segment, userId].sort();
-            dmKey = `dm:user:${ids[0]}:user:${ids[1]}`;
             const human = this.v2HumanMembers.find((h) => h.id === segment);
             peerName = human?.displayName || '';
-          }
-
-          // If we already have the correct DM conversation open, skip
-          // re-setting state to avoid unnecessary thread reloads.
-          if (this.v2Conversation?.conversationKey === dmKey) {
-            return;
           }
 
           this.v2Conversation = {
@@ -788,16 +797,9 @@ export class ScionPageChat extends LitElement {
           if (peerName) {
             dispatchPageTitle(this, peerName, 'Chat');
           }
-
-          // If the member lists were empty (cold load), the peer kind
-          // guess may be wrong. Verify via the DM list API and correct
-          // the key if needed.
-          if (this.v2AgentMembers.length === 0 && this.v2HumanMembers.length === 0) {
-            void this.resolveDMByPeerId(segment);
-          }
         } else {
-          // No current user ID yet — fall back to async API resolution
-          void this.resolveDMByPeerId(segment);
+          // User ID not available — resolve via API
+          void this.resolveDMByPeerId(segment, peerKind);
         }
       }
       return;
@@ -1136,9 +1138,13 @@ export class ScionPageChat extends LitElement {
    * Fetches the DM list to find a matching DM, or determines the peer kind
    * from the agents/users API to construct the DM key.
    */
-  private async resolveDMByPeerId(peerId: string): Promise<void> {
+  private async resolveDMByPeerId(
+    peerId: string,
+    peerKind: 'user' | 'agent' = 'user',
+    displayName = ''
+  ): Promise<void> {
+    // 1. Try to find an existing DM via the DM list API (no user ID needed).
     try {
-      // First, check the existing DM list for a matching peer
       const res = await apiFetch('/api/v1/chat/dms');
       if (res.ok) {
         const data = (await res.json()) as {
@@ -1153,7 +1159,7 @@ export class ScionPageChat extends LitElement {
         };
         const dm = data.dms?.find((d) => d.peerId === peerId);
         if (dm) {
-          const peerName = dm.peerName || dm.peerSlug || dm.peerEmail || dm.peerId;
+          const peerName = dm.peerName || dm.peerSlug || dm.peerEmail || displayName || dm.peerId;
           this.v2Conversation = {
             conversationKey: dm.conversationKey,
             projectId: '',
@@ -1165,60 +1171,58 @@ export class ScionPageChat extends LitElement {
             peerId: dm.peerId,
             peerKind: dm.peerKind,
           };
+          this.classList.add('thread-open');
           dispatchPageTitle(this, peerName, 'Chat');
           return;
         }
       }
+    } catch {
+      // continue to fallback
+    }
 
-      // DM not found — construct the key by determining peer kind.
-      // Check if the peer is an agent.
-      const userId = this.pageData?.user?.id || '';
-      const agentRes = await apiFetch(`/api/v1/agents/${encodeURIComponent(peerId)}`);
-      let dmKey: string;
-      let peerKind: 'user' | 'agent';
-      let peerName = '';
-
-      if (agentRes.ok) {
-        peerKind = 'agent';
-        dmKey = `dm:agent:${peerId}:user:${userId}`;
-        const agentData = (await agentRes.json()) as { name?: string; slug?: string };
-        peerName = agentData.name || agentData.slug || peerId;
-      } else {
-        peerKind = 'user';
-        const ids = [peerId, userId].sort();
-        dmKey = `dm:user:${ids[0]}:user:${ids[1]}`;
+    // 2. Try fetching user ID from /api/v1/auth/me (handles token-based auth).
+    if (!this.pageData?.user?.id) {
+      try {
+        const authRes = await apiFetch('/api/v1/auth/me');
+        if (authRes.ok) {
+          const authData = (await authRes.json()) as { id?: string };
+          if (authData.id && this.pageData) {
+            if (this.pageData.user) {
+              this.pageData.user.id = authData.id;
+            } else {
+              this.pageData = {
+                ...this.pageData,
+                user: { id: authData.id, email: '', name: '' },
+              };
+            }
+          }
+        }
+      } catch {
+        // continue
       }
+    }
 
+    // 3. Retry key construction with the potentially-refreshed user ID.
+    const key = this.buildDMKey(peerId, peerKind);
+    if (key) {
       this.v2Conversation = {
-        conversationKey: dmKey,
+        conversationKey: key,
         projectId: '',
         projectSlug: '',
         threadName: '',
         defaultAgent: '',
         isDM: true,
-        peerName,
+        peerName: displayName,
         peerId,
         peerKind,
       };
-      if (peerName) {
-        dispatchPageTitle(this, peerName, 'Chat');
-      }
-    } catch {
-      // Non-critical — set a basic conversation state so the thread can attempt to load
-      const userId = this.pageData?.user?.id || '';
-      const ids = [peerId, userId].sort();
-      this.v2Conversation = {
-        conversationKey: `dm:user:${ids[0]}:user:${ids[1]}`,
-        projectId: '',
-        projectSlug: '',
-        threadName: '',
-        defaultAgent: '',
-        isDM: true,
-        peerName: '',
-        peerId,
-        peerKind: 'user',
-      };
+      this.classList.add('thread-open');
+      dispatchPageTitle(this, displayName || 'DM', 'Chat');
+      return;
     }
+
+    // 4. Unable to resolve — log error.
+    console.error('Unable to open DM — user identity not available. Please refresh the page.');
   }
 
   /**
@@ -1517,40 +1521,48 @@ export class ScionPageChat extends LitElement {
     };
     if (!detail) return;
 
-    const userId = this.pageData?.user?.id || '';
-    let dmKey: string;
+    const dmKey = this.buildDMKey(detail.memberId, detail.memberKind);
+    if (dmKey) {
+      this.v2Conversation = {
+        conversationKey: dmKey,
+        projectId: '',
+        projectSlug: '',
+        threadName: '',
+        defaultAgent: '',
+        isDM: true,
+        peerName: detail.displayName,
+        peerId: detail.memberId,
+        peerKind: detail.memberKind,
+      };
+      this.classList.add('thread-open');
 
-    if (detail.memberKind === 'agent') {
-      dmKey = `dm:agent:${detail.memberId}:user:${userId}`;
-    } else {
-      // Sort UUIDs lexically for consistent DM keys
-      const ids = [detail.memberId, userId].sort();
-      dmKey = `dm:user:${ids[0]}:user:${ids[1]}`;
+      // Update the URL with the full DM key so parseV2Route can use it directly.
+      const dmPath = `/chat/dm/${encodeURIComponent(dmKey)}`;
+      const base = import.meta.env.BASE_URL;
+      const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + dmPath : dmPath;
+      window.history.pushState({}, '', browserPath);
+
+      dispatchPageTitle(this, detail.displayName, 'Chat');
+      return;
     }
 
-    // Set up conversation state directly on this element (avoid page recreation
-    // that would lose state — navigateTo destroys and recreates the page element).
-    this.v2Conversation = {
-      conversationKey: dmKey,
-      projectId: '',
-      projectSlug: '',
-      threadName: '',
-      defaultAgent: '',
-      isDM: true,
-      peerName: detail.displayName,
-      peerId: detail.memberId,
-      peerKind: detail.memberKind,
-    };
-    this.classList.add('thread-open');
+    // User ID not available — resolve via API
+    void this.resolveDMByPeerId(detail.memberId, detail.memberKind, detail.displayName);
+  }
 
-    // Update the URL with a clean peer-ID format (no double-encoded DM key).
-    // Use pushState directly to avoid page recreation.
-    const dmPath = `/chat/dm/${encodeURIComponent(detail.memberId)}`;
-    const base = import.meta.env.BASE_URL;
-    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + dmPath : dmPath;
-    window.history.pushState({}, '', browserPath);
+  /**
+   * Safely construct a DM conversation key. Returns null if the current user
+   * ID is not available, preventing broken keys with empty segments.
+   */
+  private buildDMKey(peerId: string, peerKind: 'user' | 'agent'): string | null {
+    const userId = this.pageData?.user?.id;
+    if (!userId) return null;
 
-    dispatchPageTitle(this, detail.displayName, 'Chat');
+    if (peerKind === 'agent') {
+      return `dm:agent:${peerId}:user:${userId}`;
+    }
+    const ids = [peerId, userId].sort();
+    return `dm:user:${ids[0]}:user:${ids[1]}`;
   }
 
   // =========================================================================
