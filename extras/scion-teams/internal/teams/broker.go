@@ -809,8 +809,22 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		return nil
 	}
 
+	// Ensure Recipient is set when routing via the channel's default agent
+	// (no explicit @-mention).  This matches Discord's "agent:" + agentSlug.
+	if msg.Recipient == "" && agentSlug != "" {
+		msg.Recipient = "agent:" + agentSlug
+	}
+
 	// Populate Channel on the structured message so the hub can correlate.
-	msg.Channel = link.ProjectID
+	msg.Channel = "teams"
+
+	// Ensure ThreadID is set so the hub can route replies back to the
+	// correct Teams conversation.  resolveThreadID only sets it for
+	// thread replies (replyToId); for top-level messages we fall back to
+	// the normalized conversation ID, matching Discord's pattern.
+	if msg.ThreadID == "" {
+		msg.ThreadID = convID
+	}
 
 	topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", link.ProjectID, agentSlug)
 	if err := b.hubClient.DeliverInbound(ctx, topic, msg); err != nil {

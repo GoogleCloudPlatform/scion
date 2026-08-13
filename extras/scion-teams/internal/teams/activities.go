@@ -80,7 +80,7 @@ func activityToStructuredMessage(activity *Activity, botID string) *messages.Str
 		Sender:    activity.From.Name,
 		SenderID:  senderID,
 		Msg:       text,
-		Type:      "chat",
+		Type:      messages.TypeInstruction,
 		Channel:   "", // Resolved later via channel links (Phase 3).
 		ThreadID:  resolveThreadID(activity),
 		Metadata:  metadata,
