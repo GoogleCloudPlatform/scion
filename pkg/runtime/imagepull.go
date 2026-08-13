@@ -21,8 +21,10 @@ import (
 
 var harnessImageMap = map[string]string{
 	"claude":      "scion-claude:latest",
-	"gemini":      "scion-gemini:latest",
+	"gemini-cli":  "scion-gemini-cli:latest",
 	"codex":       "scion-codex:latest",
+	"copilot":     "scion-copilot:latest",
+	"hermes":      "scion-hermes:latest",
 	"opencode":    "scion-opencode:latest",
 	"antigravity": "scion-antigravity:latest",
 }
