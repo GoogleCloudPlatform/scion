@@ -229,7 +229,7 @@ func buildTeamsManifest(appID string) teamsManifest {
 	return teamsManifest{
 		Schema:          "https://developer.microsoft.com/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
 		ManifestVersion: "1.16",
-		Version:         "1.0.0",
+		Version:         "1.1.0",
 		ID:              appID,
 		Developer: teamsDevInfo{
 			Name:          "Scion",
