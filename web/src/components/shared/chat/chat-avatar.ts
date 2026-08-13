@@ -39,14 +39,43 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
-/** Hash a string to a consistent HSL colour. */
+/**
+ * Fixed palette of 16 visually distinct avatar colours.
+ * Guarantees that up to 16 agents in the same view have
+ * distinguishable backgrounds, even with very short names.
+ */
+const AVATAR_PALETTE = [
+  'hsl(0, 55%, 48%)',   // red
+  'hsl(24, 55%, 48%)',  // orange-red
+  'hsl(48, 55%, 44%)',  // amber
+  'hsl(120, 40%, 42%)', // green
+  'hsl(160, 45%, 42%)', // teal
+  'hsl(195, 55%, 44%)', // cyan
+  'hsl(220, 55%, 50%)', // blue
+  'hsl(255, 45%, 52%)', // indigo
+  'hsl(280, 45%, 50%)', // purple
+  'hsl(310, 45%, 48%)', // magenta
+  'hsl(340, 55%, 48%)', // pink
+  'hsl(80, 40%, 42%)',  // lime
+  'hsl(30, 60%, 44%)',  // orange
+  'hsl(180, 45%, 40%)', // dark-cyan
+  'hsl(200, 50%, 42%)', // steel-blue
+  'hsl(270, 50%, 48%)', // violet
+];
+
+/**
+ * Hash a string to a consistent avatar colour.
+ * Uses FNV-1a (32-bit) for much better distribution than djb2
+ * on short, similar names (e.g. "C1" vs "C2"), then indexes
+ * into a fixed palette of visually distinct colours.
+ */
 export function hashColor(str: string): string {
-  let hash = 0;
+  let hash = 0x811c9dc5; // FNV offset basis
   for (let i = 0; i < str.length; i++) {
-    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193); // FNV prime
   }
-  const hue = ((hash % 360) + 360) % 360;
-  return `hsl(${hue}, 55%, 48%)`;
+  return AVATAR_PALETTE[(hash >>> 0) % AVATAR_PALETTE.length];
 }
 
 /** Extract initials from a display name. */

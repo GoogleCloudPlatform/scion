@@ -675,7 +675,11 @@ export class ScionPageChat extends LitElement {
   }
 
   private parseV2Route(): void {
-    const path = this.pageData?.path || window.location.pathname;
+    // Always use the browser URL as the source of truth. pushState
+    // navigations (handleThreadSelect, handleMemberClick) update the
+    // browser URL without updating pageData, so pageData.path can be
+    // stale when this is called from handleRailLoaded after a reload.
+    const path = window.location.pathname;
 
     // Match legacy /chat/space/{projectId}/thread/{topicId} (backward compat)
     const legacyThreadMatch = path.match(/\/chat\/space\/([^/]+)\/thread\/([^/]+)/);
@@ -1719,7 +1723,7 @@ export class ScionPageChat extends LitElement {
               conversationKey=${conv.conversationKey}
               projectId=${conv.projectId}
               threadName=${conv.threadName}
-              defaultAgent=${conv.defaultAgent}
+              .defaultAgent=${conv.defaultAgent}
               ?isDM=${conv.isDM}
               peerName=${conv.peerName}
               currentUserId=${this.pageData?.user?.id || ''}

@@ -1062,7 +1062,7 @@ export class ScionChatThread extends LitElement {
     try {
       const body: Record<string, unknown> = {};
       if (arg === 'clear') {
-        body.defaultAgent = null;
+        body.defaultAgent = '';
       } else {
         body.defaultAgent = arg;
       }
@@ -1096,7 +1096,7 @@ export class ScionChatThread extends LitElement {
 
     try {
       const body: Record<string, unknown> = {
-        defaultAgent: newDefault || null,
+        defaultAgent: newDefault,
       };
       const res = await apiFetch(
         `/api/v1/chat/topics/${encodeURIComponent(this.conversationKey)}`,
