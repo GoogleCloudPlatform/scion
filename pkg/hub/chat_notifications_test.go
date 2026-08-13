@@ -348,12 +348,12 @@ func TestAgentMentions_DoNotCreateUserNotifications(t *testing.T) {
 	// The helper should resolve "scout" against project members, NOT find
 	// it as a human, and skip it.
 	srv.fireHumanMentionNotifications(ctx,
-		[]string{"scout"},         // mentionNames — agent slug, not a human
-		proj.ID,                   // projectID
-		topicID,                   // conversationKey
-		senderID,                  // senderUserID
-		"Bob",                     // senderName
-		"Hey @scout check this",   // messageContent
+		[]string{"scout"},       // mentionNames — agent slug, not a human
+		proj.ID,                 // projectID
+		topicID,                 // conversationKey
+		senderID,                // senderUserID
+		"Bob",                   // senderName
+		"Hey @scout check this", // messageContent
 	)
 
 	// Verify: no notification was created for the agent UUID.
@@ -368,7 +368,7 @@ func TestAgentMentions_DoNotCreateUserNotifications(t *testing.T) {
 
 	// Now mention the human by display name — she SHOULD get a notification.
 	srv.fireHumanMentionNotifications(ctx,
-		[]string{"Alice"},         // mentionNames — human display name
+		[]string{"Alice"}, // mentionNames — human display name
 		proj.ID,
 		topicID,
 		senderID,

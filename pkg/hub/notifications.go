@@ -538,11 +538,11 @@ func (NoOpPresenceChecker) IsUserActive(_ string) bool { return false }
 // store). It is wired into the Server at startup and called from the
 // send path in handlers_chat_v2.go.
 type ChatNotifier struct {
-	store         store.Store
-	events        EventPublisher
-	webChatStore  WebChatStore
-	presence      PresenceChecker
-	log           *slog.Logger
+	store        store.Store
+	events       EventPublisher
+	webChatStore WebChatStore
+	presence     PresenceChecker
+	log          *slog.Logger
 }
 
 // NewChatNotifier creates a ChatNotifier. If presence is nil, a

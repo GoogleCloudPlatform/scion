@@ -86,13 +86,13 @@ type typingEntry struct {
 // provides server-side typing throttling. It is single-node only (see design
 // §4.5 HA limitation).
 type PresenceManager struct {
-	mu       sync.RWMutex
-	users    map[string]*presenceEntry                // userID -> presence
-	typing   map[string]map[string]*typingEntry       // conversationKey -> userID -> typing
-	events   EventPublisher
-	store    store.Store
-	stopCh   chan struct{}
-	stopped  chan struct{}
+	mu      sync.RWMutex
+	users   map[string]*presenceEntry          // userID -> presence
+	typing  map[string]map[string]*typingEntry // conversationKey -> userID -> typing
+	events  EventPublisher
+	store   store.Store
+	stopCh  chan struct{}
+	stopped chan struct{}
 }
 
 // NewPresenceManager creates a new PresenceManager and starts the background
