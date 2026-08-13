@@ -504,6 +504,46 @@ func (m *Manager) ConfigureBroker(name string, extra map[string]string) error {
 	return rpcClient.Configure(merged)
 }
 
+// RestartBrokerPlugin kills a running hub-managed broker plugin process and
+// relaunches it with the given config. This ensures a fresh go-plugin handshake
+// and new MuxBroker connections for host callbacks, fixing stale callback issues
+// that arise when a plugin was initially started with incomplete config (e.g.
+// first-time install before the user configures required fields like bot_token).
+//
+// For self-managed plugins, this performs a reconnect instead (the hub does not
+// own their process). For gRPC/HA adapters, it pushes the config directly.
+func (m *Manager) RestartBrokerPlugin(name string, cfg map[string]string) error {
+	key := PluginTypeBroker + ":" + name
+
+	m.mu.RLock()
+	dp, ok := m.configs[key]
+	isSelf := m.selfManaged[key]
+	adapter, isGRPC := m.grpcAdapters[key]
+	m.mu.RUnlock()
+
+	if isGRPC {
+		return adapter.Configure(cfg)
+	}
+	if !ok {
+		return fmt.Errorf("broker plugin not loaded: %s", name)
+	}
+
+	// Update the stored config so the new process starts with it.
+	dp.Config = cfg
+
+	if isSelf {
+		// Can't kill a self-managed process — update stored config and reconnect.
+		m.mu.Lock()
+		m.configs[key] = dp
+		m.mu.Unlock()
+		return m.loadPlugin(dp)
+	}
+
+	// Kill the old process and start a new one with updated config.
+	// loadPlugin handles killing the existing client and caching the new one.
+	return m.loadPlugin(dp)
+}
+
 // ReplaceBrokerConfig updates the stored config for a broker plugin and pushes
 // the exact cfg to the running plugin, with no underlay from boot-time config.
 func (m *Manager) ReplaceBrokerConfig(name string, cfg map[string]string) error {

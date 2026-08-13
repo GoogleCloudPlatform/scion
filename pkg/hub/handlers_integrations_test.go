@@ -142,6 +142,15 @@ func (m *mockIntegrationManager) ReplaceBrokerConfig(name string, cfg map[string
 	return m.replaceConfigErr
 }
 
+func (m *mockIntegrationManager) RestartBrokerPlugin(name string, cfg map[string]string) error {
+	m.replaceConfigCalls = append(m.replaceConfigCalls, name)
+	m.lastReplacedConfig = make(map[string]string, len(cfg))
+	for k, v := range cfg {
+		m.lastReplacedConfig[k] = v
+	}
+	return m.replaceConfigErr
+}
+
 func (m *mockIntegrationManager) Reconnect(pluginType, name string) error {
 	m.reconnectCalls = append(m.reconnectCalls, name)
 	return m.reconnectErr
