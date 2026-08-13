@@ -452,7 +452,13 @@ const ROUTES: RouteConfig[] = [
     tag: 'scion-page-chat',
     load: () => import('../components/pages/chat.js'),
   },
-  // Wave-1 agent-based route (preserved for v1 flag compat)
+  // Readable deep-link: /chat/<project-slug>/<thread-id>
+  {
+    pattern: /^\/chat\/[^/]+\/[^/]+$/,
+    tag: 'scion-page-chat',
+    load: () => import('../components/pages/chat.js'),
+  },
+  // Wave-1 agent-based route OR project-slug space link (resolved in chat.ts)
   {
     pattern: /^\/chat\/[^/]+$/,
     tag: 'scion-page-chat',
