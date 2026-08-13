@@ -42,6 +42,7 @@ import './chat-avatar.js';
 export interface ChatSpace {
   projectId: string;
   projectName: string;
+  projectSlug: string;
   unreadCount: number;
   hasUnreadMention: boolean;
 }
@@ -82,6 +83,7 @@ interface RailPrefs {
 export interface ThreadSelectDetail {
   conversationKey: string;
   projectId: string;
+  projectSlug: string;
   threadName: string;
   defaultAgent: string;
 }
@@ -470,7 +472,14 @@ export class ScionChatSpaceRail extends LitElement {
       // Notify parent that rail data is ready (for SSE scope setup)
       this.dispatchEvent(
         new CustomEvent('rail-loaded', {
-          detail: { spaceIds: this.getSpaceIds() },
+          detail: {
+            spaceIds: this.getSpaceIds(),
+            spaces: this.spaces.map((s) => ({
+              projectId: s.projectId,
+              projectSlug: s.projectSlug,
+              projectName: s.projectName,
+            })),
+          },
           bubbles: true,
           composed: true,
         })
@@ -635,11 +644,13 @@ export class ScionChatSpaceRail extends LitElement {
   // ---------------------------------------------------------------------------
 
   private handleThreadClick(thread: ChatSpaceThread, projectId: string): void {
+    const space = this.spaces.find((s) => s.projectId === projectId);
     this.dispatchEvent(
       new CustomEvent<ThreadSelectDetail>('thread-select', {
         detail: {
           conversationKey: thread.id,
           projectId,
+          projectSlug: space?.projectSlug || '',
           threadName: thread.name,
           defaultAgent: thread.defaultAgent || '',
         },

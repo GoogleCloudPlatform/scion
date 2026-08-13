@@ -92,6 +92,7 @@ interface ChatThread {
 interface V2ConversationState {
   conversationKey: string;
   projectId: string;
+  projectSlug: string;
   threadName: string;
   defaultAgent: string;
   isDM: boolean;
@@ -140,6 +141,10 @@ export class ScionPageChat extends LitElement {
   private _onChatTopic = this.handleChatTopic.bind(this);
   private _onPresenceUpdated = this.handlePresenceUpdated.bind(this);
   private _onRailLoaded = this.handleRailLoaded.bind(this);
+  /** Map from project slug → project ID for deep-link resolution. */
+  private _slugToProjectId = new Map<string, string>();
+  /** Map from project ID → project slug for URL generation. */
+  private _projectIdToSlug = new Map<string, string>();
   /** Whether the search panel is visible. */
   @state() private v2SearchActive = false;
   /** Whether the search component has been lazy-loaded. */
@@ -613,7 +618,23 @@ export class ScionPageChat extends LitElement {
 
   /** Called when the space rail finishes loading its data. Sets up the SSE scope. */
   private handleRailLoaded(e: Event): void {
-    const detail = (e as CustomEvent).detail as { spaceIds: string[] };
+    const detail = (e as CustomEvent).detail as {
+      spaceIds: string[];
+      spaces?: Array<{ projectId: string; projectSlug: string; projectName: string }>;
+    };
+
+    // Populate slug ↔ projectId maps for deep-link resolution
+    if (detail.spaces) {
+      for (const s of detail.spaces) {
+        if (s.projectSlug) {
+          this._slugToProjectId.set(s.projectSlug, s.projectId);
+          this._projectIdToSlug.set(s.projectId, s.projectSlug);
+        }
+      }
+      // Re-resolve the route now that slug data is available (handles deep-link on first load)
+      this.parseV2Route();
+    }
+
     const userId = this.pageData?.user?.id || '';
     if (detail.spaceIds.length > 0 && userId) {
       stateManager.setScope({
@@ -630,15 +651,22 @@ export class ScionPageChat extends LitElement {
   private parseV2Route(): void {
     const path = this.pageData?.path || window.location.pathname;
 
-    // Match /chat/space/{projectId}/thread/{topicId}
-    const threadMatch = path.match(/\/chat\/space\/([^/]+)\/thread\/([^/]+)/);
-    if (threadMatch) {
-      const projectId = decodeURIComponent(threadMatch[1]);
-      const topicId = decodeURIComponent(threadMatch[2]);
+    // Match legacy /chat/space/{projectId}/thread/{topicId} (backward compat)
+    const legacyThreadMatch = path.match(/\/chat\/space\/([^/]+)\/thread\/([^/]+)/);
+    if (legacyThreadMatch) {
+      const projectId = decodeURIComponent(legacyThreadMatch[1]);
+      const topicId = decodeURIComponent(legacyThreadMatch[2]);
+      // Redirect to the readable URL if we know the slug
+      const slug = this._projectIdToSlug.get(projectId);
+      if (slug) {
+        navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topicId)}`);
+        return;
+      }
       this.v2Conversation = {
         conversationKey: topicId,
         projectId,
-        threadName: '', // Will be resolved from rail data
+        projectSlug: '',
+        threadName: '',
         defaultAgent: '',
         isDM: false,
         peerName: '',
@@ -651,10 +679,15 @@ export class ScionPageChat extends LitElement {
       return;
     }
 
-    // Match /chat/space/{projectId} — open #general
-    const spaceMatch = path.match(/\/chat\/space\/([^/]+)$/);
-    if (spaceMatch) {
-      // Space selected but no specific thread — will be resolved when rail loads
+    // Match legacy /chat/space/{projectId} (backward compat)
+    const legacySpaceMatch = path.match(/\/chat\/space\/([^/]+)$/);
+    if (legacySpaceMatch) {
+      const projectId = decodeURIComponent(legacySpaceMatch[1]);
+      const slug = this._projectIdToSlug.get(projectId);
+      if (slug) {
+        navigateTo(`/chat/${encodeURIComponent(slug)}`);
+        return;
+      }
       this.classList.add('thread-open');
       return;
     }
@@ -666,6 +699,7 @@ export class ScionPageChat extends LitElement {
       this.v2Conversation = {
         conversationKey: key,
         projectId: '',
+        projectSlug: '',
         threadName: '',
         defaultAgent: '',
         isDM: true,
@@ -680,9 +714,195 @@ export class ScionPageChat extends LitElement {
       return;
     }
 
+    // Match readable /chat/<slug>/<thread-id>
+    const readableThreadMatch = path.match(/\/chat\/([^/]+)\/([^/]+)$/);
+    if (readableThreadMatch) {
+      const segment1 = decodeURIComponent(readableThreadMatch[1]);
+      const threadId = decodeURIComponent(readableThreadMatch[2]);
+
+      // Resolve slug → projectId (may need async API call on cold load)
+      const projectId = this._slugToProjectId.get(segment1);
+      if (projectId) {
+        this.v2Conversation = {
+          conversationKey: threadId,
+          projectId,
+          projectSlug: segment1,
+          threadName: '',
+          defaultAgent: '',
+          isDM: false,
+          peerName: '',
+          peerId: '',
+          peerKind: 'user',
+        };
+        this.classList.add('thread-open');
+        void this.loadV2Members(projectId);
+        dispatchPageTitle(this, 'Thread', 'Chat');
+      } else {
+        // Slug not yet in cache — resolve via API (deep-link cold load)
+        void this.resolveSlugAndOpenThread(segment1, threadId);
+      }
+      return;
+    }
+
+    // Match readable /chat/<slug-or-agent> (single segment)
+    const singleMatch = path.match(/\/chat\/([^/]+)$/);
+    if (singleMatch) {
+      const segment = decodeURIComponent(singleMatch[1]);
+
+      // Check if it's a known project slug
+      const projectId = this._slugToProjectId.get(segment);
+      if (projectId) {
+        // It's a space — select it (the rail will open #general)
+        this.classList.add('thread-open');
+        void this.selectSpaceBySlug(segment, projectId);
+        return;
+      }
+
+      // If slug map isn't populated yet (cold load), try resolving via API.
+      // If it turns out not to be a project slug, resolveSlugAndOpenSpace is a no-op
+      // and the URL stays as-is for V1 agent compat.
+      if (this._slugToProjectId.size === 0) {
+        void this.resolveSlugAndOpenSpace(segment);
+        return;
+      }
+
+      // Not a project slug — fall through to clear conversation state.
+      // (V1 agent slugs are not handled in V2 mode.)
+    }
+
     // /chat — no conversation selected
     this.v2Conversation = null;
     this.classList.remove('thread-open');
+  }
+
+  /**
+   * Resolve a project slug to a project ID via the API, then open the
+   * specified thread. Used for deep-link cold loads before the rail populates.
+   */
+  private async resolveSlugAndOpenThread(slug: string, threadId: string): Promise<void> {
+    const projectId = await this.resolveProjectBySlug(slug);
+    if (!projectId) return;
+
+    this.v2Conversation = {
+      conversationKey: threadId,
+      projectId,
+      projectSlug: slug,
+      threadName: '',
+      defaultAgent: '',
+      isDM: false,
+      peerName: '',
+      peerId: '',
+      peerKind: 'user',
+    };
+    this.classList.add('thread-open');
+    void this.loadV2Members(projectId);
+    dispatchPageTitle(this, 'Thread', 'Chat');
+  }
+
+  /**
+   * Resolve a project slug to a project ID via the API, then open the space
+   * (selecting #general). Used for deep-link cold loads before the rail populates.
+   */
+  private async resolveSlugAndOpenSpace(slug: string): Promise<void> {
+    const projectId = await this.resolveProjectBySlug(slug);
+    if (projectId) {
+      this.classList.add('thread-open');
+      void this.selectSpaceBySlug(slug, projectId);
+    }
+    // If resolution fails, leave the URL in place — the V1 parseRoute() may
+    // handle it as an agent slug when v2 flag is off (or it's just a 404 space).
+  }
+
+  /**
+   * Look up a project by slug via the projects API.
+   * Populates the slug cache on success.
+   */
+  private async resolveProjectBySlug(slug: string): Promise<string> {
+    // Check cache first
+    const cached = this._slugToProjectId.get(slug);
+    if (cached) return cached;
+
+    try {
+      const res = await apiFetch(`/api/v1/projects?slug=${encodeURIComponent(slug)}&limit=1`);
+      if (res.ok) {
+        const data = (await res.json()) as {
+          items?: Array<{ id: string; slug: string; name: string }>;
+        };
+        if (data.items && data.items.length > 0) {
+          const project = data.items[0];
+          this._slugToProjectId.set(project.slug, project.id);
+          this._projectIdToSlug.set(project.id, project.slug);
+          return project.id;
+        }
+      }
+    } catch {
+      // Resolution failed — non-critical
+    }
+    return '';
+  }
+
+  /**
+   * Select a space by slug: wait for the rail to be available, then
+   * ask it to open #general for the given project.
+   */
+  private async selectSpaceBySlug(slug: string, projectId: string): Promise<void> {
+    // The rail may not have loaded yet; wait for it
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+
+    if (!rail) {
+      // Rail not mounted yet — the rail-loaded handler will re-parse the route
+      return;
+    }
+
+    // Find #general thread for this space from the rail
+    const threads = await this.loadSpaceThreads(projectId);
+    const general = threads.find((t: { isGeneral: boolean }) => t.isGeneral);
+    if (general) {
+      this.v2Conversation = {
+        conversationKey: general.id,
+        projectId,
+        projectSlug: slug,
+        threadName: general.name,
+        defaultAgent: general.defaultAgent || '',
+        isDM: false,
+        peerName: '',
+        peerId: '',
+        peerKind: 'user',
+      };
+      void this.loadV2Members(projectId);
+      dispatchPageTitle(this, `#${general.name}`, 'Chat');
+      // Update URL to include the thread
+      navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(general.id)}`);
+    }
+  }
+
+  /**
+   * Fetch threads for a space from the API.
+   */
+  private async loadSpaceThreads(
+    projectId: string
+  ): Promise<Array<{ id: string; name: string; isGeneral: boolean; defaultAgent?: string }>> {
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`
+      );
+      if (res.ok) {
+        const data = (await res.json()) as {
+          threads?: Array<{
+            id: string;
+            name: string;
+            isGeneral: boolean;
+            defaultAgent?: string;
+          }>;
+        };
+        return data.threads || [];
+      }
+    } catch {
+      // Non-critical
+    }
+    return [];
   }
 
   private handleChatMessage(): void {
@@ -709,15 +929,38 @@ export class ScionPageChat extends LitElement {
     const detail = e.detail as {
       conversationKey: string;
       projectId: string;
+      projectSlug?: string;
       threadName: string;
       defaultAgent?: string;
     };
-    navigateTo(
-      `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`
-    );
+
+    // Determine the slug for the readable URL
+    const slug =
+      detail.projectSlug ||
+      this._projectIdToSlug.get(detail.projectId) ||
+      '';
+
+    // Cache the mapping if we received a slug
+    if (slug && detail.projectId) {
+      this._slugToProjectId.set(slug, detail.projectId);
+      this._projectIdToSlug.set(detail.projectId, slug);
+    }
+
+    // Use readable URL when slug is available, fall back to legacy format
+    if (slug) {
+      navigateTo(
+        `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(detail.conversationKey)}`
+      );
+    } else {
+      navigateTo(
+        `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`
+      );
+    }
+
     this.v2Conversation = {
       conversationKey: detail.conversationKey,
       projectId: detail.projectId,
+      projectSlug: slug,
       threadName: detail.threadName,
       defaultAgent: detail.defaultAgent || '',
       isDM: false,
@@ -741,6 +984,7 @@ export class ScionPageChat extends LitElement {
     this.v2Conversation = {
       conversationKey: detail.conversationKey,
       projectId: '',
+      projectSlug: '',
       threadName: '',
       defaultAgent: '',
       isDM: true,
@@ -1215,9 +1459,16 @@ export class ScionPageChat extends LitElement {
       if (isDM) {
         navigateTo(`/chat/dm/${encodeURIComponent(detail.conversationKey)}`);
       } else if (detail.projectId) {
-        navigateTo(
-          `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`
-        );
+        const slug = this._projectIdToSlug.get(detail.projectId);
+        if (slug) {
+          navigateTo(
+            `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(detail.conversationKey)}`
+          );
+        } else {
+          navigateTo(
+            `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`
+          );
+        }
       }
     }
     // TODO: scroll to the specific messageId within the conversation
