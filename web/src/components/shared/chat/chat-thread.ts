@@ -47,12 +47,22 @@ import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
 import './chat-visibility-toggle.js';
+import './chat-interagent-marker.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
   slug: string;
   status: string;
   error?: string;
+}
+
+/** A grouped exchange of inter-agent messages with a single peer agent. */
+interface InteragentExchange {
+  peerAgent: string;
+  peerAgentId: string;
+  messageCount: number;
+  firstMessageAt: string;
+  lastMessageAt: string;
 }
 
 /** Maximum messages kept in the buffer. */
@@ -165,6 +175,12 @@ export class ScionChatThread extends LitElement {
   @state() private loaded = false;
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
+
+  /** Inter-agent exchanges to render as inline markers in agent DMs. */
+  @state() private interagentExchanges: InteragentExchange[] = [];
+
+  /** Global expand/collapse state for all inter-agent markers. */
+  @state() private interagentExpandAll = false;
 
   /** W7: Attachment refs keyed by message ID (from history endpoint + send response). */
   private v2AttachmentMap = new Map<string, import('./chat-message.js').AttachmentRefInfo[]>();
@@ -367,6 +383,38 @@ export class ScionChatThread extends LitElement {
       font-weight: 600;
     }
 
+    /* Inter-agent toggle bar */
+    .interagent-toggle-bar {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding: 0.25rem 1rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .interagent-toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.125rem 0.5rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.25rem;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.6875rem;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .interagent-toggle-btn:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
+    }
+
+    .interagent-toggle-btn sl-icon {
+      font-size: 0.75rem;
+    }
+
     /* Typing indicator */
     .typing-indicator {
       display: flex;
@@ -457,6 +505,10 @@ export class ScionChatThread extends LitElement {
     this.sendError = null;
     this.pinnedToBottom = true;
     this.loadingOlder = false;
+
+    // Clear inter-agent state
+    this.interagentExchanges = [];
+    this.interagentExpandAll = false;
 
     // Clear typing state
     for (const entry of this.typingUsers.values()) {
@@ -825,6 +877,10 @@ export class ScionChatThread extends LitElement {
       // Set up read tracking
       window.addEventListener('focus', this._focusHandler);
       window.addEventListener('blur', this._blurHandler);
+      // Fetch inter-agent exchanges for agent DMs (non-blocking).
+      if (this.isAgentDM) {
+        void this.fetchInteragentExchanges();
+      }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
@@ -993,6 +1049,113 @@ export class ScionChatThread extends LitElement {
     }
     // Advance read watermark if applicable
     this.maybeAdvanceReadWatermark();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Inter-agent exchange loading
+  // ---------------------------------------------------------------------------
+
+  /** Whether this conversation is an agent DM (eligible for inter-agent markers). */
+  private get isAgentDM(): boolean {
+    return this.isDM && this.conversationKey.startsWith('dm:agent:');
+  }
+
+  /** Fetch inter-agent messages and group them into exchanges. */
+  private async fetchInteragentExchanges(): Promise<void> {
+    if (!this.isAgentDM || this.messages.length === 0) return;
+
+    const oldest = this.messages[0];
+    const newest = this.messages[this.messages.length - 1];
+
+    const params = new URLSearchParams({ limit: '200' });
+    if (oldest) params.set('after', oldest.createdAt);
+    if (newest) params.set('before', new Date(new Date(newest.createdAt).getTime() + 60000).toISOString());
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`
+      );
+      if (!res.ok) return;
+
+      const data = (await res.json()) as { messages?: Message[] };
+      const msgs = data?.messages ?? [];
+      this.interagentExchanges = this.groupIntoExchanges(msgs);
+    } catch {
+      // Non-critical
+    }
+  }
+
+  /**
+   * Group a flat list of inter-agent messages into exchanges.
+   * Consecutive messages with the same peer agent are grouped together.
+   * The "peer agent" is whichever participant is NOT the DM agent.
+   */
+  private groupIntoExchanges(msgs: Message[]): InteragentExchange[] {
+    if (msgs.length === 0) return [];
+
+    // Extract the DM agent ID from the conversation key.
+    const parts = this.conversationKey.split(':');
+    const dmAgentId = parts.length >= 3 ? parts[2] : '';
+
+    // Sort by createdAt ascending.
+    const sorted = [...msgs].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+
+    const exchanges: InteragentExchange[] = [];
+    let currentPeerId = '';
+    let currentPeerName = '';
+    let currentCount = 0;
+    let currentFirst = '';
+    let currentLast = '';
+
+    for (const m of sorted) {
+      // Determine the peer (the agent that is NOT the DM agent).
+      let peerId: string;
+      let peerName: string;
+      if (m.senderId === dmAgentId) {
+        peerId = m.recipientId;
+        peerName = m.recipient.startsWith('agent:') ? m.recipient.slice(6) : m.recipient;
+      } else {
+        peerId = m.senderId;
+        peerName = m.sender.startsWith('agent:') ? m.sender.slice(6) : m.sender;
+      }
+
+      if (peerId === currentPeerId) {
+        // Same peer — extend the current exchange.
+        currentCount++;
+        currentLast = m.createdAt;
+      } else {
+        // New peer — flush the previous exchange if any.
+        if (currentCount > 0) {
+          exchanges.push({
+            peerAgent: currentPeerName,
+            peerAgentId: currentPeerId,
+            messageCount: currentCount,
+            firstMessageAt: currentFirst,
+            lastMessageAt: currentLast,
+          });
+        }
+        currentPeerId = peerId;
+        currentPeerName = peerName;
+        currentCount = 1;
+        currentFirst = m.createdAt;
+        currentLast = m.createdAt;
+      }
+    }
+
+    // Flush the last exchange.
+    if (currentCount > 0) {
+      exchanges.push({
+        peerAgent: currentPeerName,
+        peerAgentId: currentPeerId,
+        messageCount: currentCount,
+        firstMessageAt: currentFirst,
+        lastMessageAt: currentLast,
+      });
+    }
+
+    return exchanges;
   }
 
   /** Send a message in v2 mode. */
@@ -1312,7 +1475,9 @@ export class ScionChatThread extends LitElement {
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderStreamBar()} ${this.renderContent()} ${this.renderTypingIndicator()}
+        ${this.renderStreamBar()}
+        ${this.renderInteragentToggle()}
+        ${this.renderContent()} ${this.renderTypingIndicator()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         <scion-chat-composer
           ?disabled=${this.sending}
@@ -1328,6 +1493,25 @@ export class ScionChatThread extends LitElement {
         ></scion-chat-composer>
       </div>
     `;
+  }
+
+  /** Render the global expand/collapse toggle for inter-agent markers. */
+  private renderInteragentToggle() {
+    if (!this.isAgentDM || this.interagentExchanges.length === 0) return nothing;
+
+    return html`
+      <div class="interagent-toggle-bar">
+        <button class="interagent-toggle-btn" @click=${this.toggleAllInteragent}>
+          <sl-icon name=${this.interagentExpandAll ? 'arrows-collapse' : 'arrows-expand'}></sl-icon>
+          ${this.interagentExpandAll ? 'Collapse' : 'Expand'} agent messages
+        </button>
+      </div>
+    `;
+  }
+
+  /** Toggle all inter-agent markers expanded/collapsed. */
+  private toggleAllInteragent(): void {
+    this.interagentExpandAll = !this.interagentExpandAll;
   }
 
   /** Render the typing indicator below messages, above the composer. */
@@ -1435,13 +1619,44 @@ export class ScionChatThread extends LitElement {
     let prevSender = '';
     let prevTimestamp = 0;
 
-    for (const msg of this.messages) {
+    // Track which inter-agent exchanges have been inserted (by index).
+    let nextExchangeIdx = 0;
+    const hasExchanges = this.isAgentDM && this.interagentExchanges.length > 0;
+
+    for (let mi = 0; mi < this.messages.length; mi++) {
+      const msg = this.messages[mi];
       const d = new Date(msg.createdAt);
       const dateStr = d.toLocaleDateString('en', {
         year: 'numeric',
         month: 'short',
         day: 'numeric',
       });
+
+      // Insert any inter-agent exchange markers that fall before this message.
+      if (hasExchanges) {
+        const msgTime = d.getTime();
+        while (
+          nextExchangeIdx < this.interagentExchanges.length &&
+          new Date(this.interagentExchanges[nextExchangeIdx].firstMessageAt).getTime() < msgTime
+        ) {
+          const ex = this.interagentExchanges[nextExchangeIdx];
+          rows.push(html`
+            <scion-chat-interagent-marker
+              peerAgent=${ex.peerAgent}
+              peerAgentId=${ex.peerAgentId}
+              .messageCount=${ex.messageCount}
+              conversationKey=${this.conversationKey}
+              timeStart=${ex.firstMessageAt}
+              timeEnd=${ex.lastMessageAt}
+              ?global-expanded=${this.interagentExpandAll}
+            ></scion-chat-interagent-marker>
+          `);
+          nextExchangeIdx++;
+          // Reset grouping after a marker so the next message shows its header.
+          prevSender = '';
+          prevTimestamp = 0;
+        }
+      }
 
       // Date divider
       if (dateStr !== lastDate) {
@@ -1533,6 +1748,25 @@ export class ScionChatThread extends LitElement {
 
       prevSender = msg.sender;
       prevTimestamp = msgTime;
+    }
+
+    // Append any remaining exchanges that come after all DM messages.
+    if (hasExchanges) {
+      while (nextExchangeIdx < this.interagentExchanges.length) {
+        const ex = this.interagentExchanges[nextExchangeIdx];
+        rows.push(html`
+          <scion-chat-interagent-marker
+            peerAgent=${ex.peerAgent}
+            peerAgentId=${ex.peerAgentId}
+            .messageCount=${ex.messageCount}
+            conversationKey=${this.conversationKey}
+            timeStart=${ex.firstMessageAt}
+            timeEnd=${ex.lastMessageAt}
+            ?global-expanded=${this.interagentExpandAll}
+          ></scion-chat-interagent-marker>
+        `);
+        nextExchangeIdx++;
+      }
     }
 
     return rows;

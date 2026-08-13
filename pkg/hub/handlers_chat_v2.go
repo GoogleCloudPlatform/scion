@@ -226,6 +226,8 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		s.handleConversationRead(w, r, key)
 	case "typing":
 		s.handleConversationTyping(w, r, key)
+	case "interagent":
+		s.handleConversationInteragent(w, r, key)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1176,6 +1178,102 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		TotalCount:         result.TotalCount,
 		MessageAttachments: messageAttachments,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Inter-Agent Messages
+// ---------------------------------------------------------------------------
+
+// handleConversationInteragent handles GET /api/v1/chat/conversations/{key}/interagent.
+// Returns inter-agent messages exchanged by the DM agent with other agents,
+// optionally scoped to a time range. Only valid for agent DMs.
+func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	// Only agent DMs are supported.
+	if !strings.HasPrefix(key, "dm:agent:") {
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []store.Message{}})
+		return
+	}
+	if !validDMKey(key) {
+		BadRequest(w, "invalid DM key format")
+		return
+	}
+	if !isDMParticipant(key, user.ID()) {
+		Forbidden(w)
+		return
+	}
+
+	// Extract the agent UUID from the DM key.
+	agentID := parseAgentDMKey(key)
+	if agentID == "" {
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []store.Message{}})
+		return
+	}
+
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Parse optional time-range bounds.
+	var after, before time.Time
+	if v := q.Get("after"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			after = t
+		}
+	}
+	if v := q.Get("before"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			before = t
+		}
+	}
+
+	limit := 200
+	if l := q.Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+
+	// Query messages where the DM agent is a participant.
+	filter := store.MessageFilter{
+		ParticipantID: agentID,
+		Before:        before,
+		After:         after,
+	}
+	opts := store.ListOptions{
+		Limit: limit,
+	}
+
+	result, err := s.store.ListMessages(ctx, filter, opts)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch inter-agent messages", nil)
+		return
+	}
+
+	// Filter to keep only agent-to-agent messages (both sender and recipient
+	// are agents). This excludes user↔agent messages from the DM itself.
+	filtered := make([]store.Message, 0, len(result.Items))
+	for _, m := range result.Items {
+		if strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:") {
+			filtered = append(filtered, m)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, interagentResponse{Messages: filtered})
+}
+
+// interagentResponse is the response for the interagent endpoint.
+type interagentResponse struct {
+	Messages []store.Message `json:"messages"`
 }
 
 // ---------------------------------------------------------------------------

@@ -329,6 +329,9 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	if !filter.Before.IsZero() {
 		query.Where(message.CreatedLT(filter.Before))
 	}
+	if !filter.After.IsZero() {
+		query.Where(message.CreatedGT(filter.After))
+	}
 
 	// totalCount represents the total number of messages matching the base
 	// filter (before cursor pagination is applied). Clone and count before

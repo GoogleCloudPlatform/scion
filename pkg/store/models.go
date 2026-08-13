@@ -1734,6 +1734,7 @@ type MessageFilter struct {
 	ThreadID      string    // Filter by thread_id (wave-2 conversation key)
 	Visibility    []string  // Filter to listed visibility levels
 	Before        time.Time // Upper bound for created_at (exclusive)
+	After         time.Time // Lower bound for created_at (exclusive)
 }
 
 // =============================================================================
