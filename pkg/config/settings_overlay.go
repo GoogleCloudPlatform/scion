@@ -16,6 +16,7 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"sync"
 )
 
@@ -111,7 +112,7 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	if o.harnessConfigs != nil {
 		vs.HarnessConfigs = cloneHarnessConfigs(o.harnessConfigs)
 	}
-	if o.imageRegistry != "" {
+	if o.imageRegistry != "" && os.Getenv("SCION_IMAGE_REGISTRY") == "" {
 		vs.ImageRegistry = o.imageRegistry
 	}
 }

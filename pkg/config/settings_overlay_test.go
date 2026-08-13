@@ -186,6 +186,42 @@ func TestSettingsOverlay_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestSettingsOverlay_ImageRegistryEnvVarWins(t *testing.T) {
+	// When SCION_IMAGE_REGISTRY env var is set, the overlay must NOT overwrite
+	// ImageRegistry — the env var takes precedence over DB values.
+	t.Setenv("SCION_IMAGE_REGISTRY", "env-registry.io")
+
+	o := NewSettingsOverlay()
+	o.Update(nil, nil, nil, "db-registry.io")
+
+	vs := &VersionedSettings{
+		ImageRegistry: "env-registry.io", // as LoadEffectiveSettings would set it
+	}
+	o.Apply(vs)
+
+	if vs.ImageRegistry != "env-registry.io" {
+		t.Errorf("env var should win over DB overlay: expected %q, got %q",
+			"env-registry.io", vs.ImageRegistry)
+	}
+}
+
+func TestSettingsOverlay_ImageRegistryDBWinsWhenNoEnvVar(t *testing.T) {
+	// When SCION_IMAGE_REGISTRY env var is NOT set, the overlay's DB value
+	// should be applied.
+	// t.Setenv is not called — SCION_IMAGE_REGISTRY is unset.
+
+	o := NewSettingsOverlay()
+	o.Update(nil, nil, nil, "db-registry.io")
+
+	vs := &VersionedSettings{}
+	o.Apply(vs)
+
+	if vs.ImageRegistry != "db-registry.io" {
+		t.Errorf("DB overlay should win when no env var: expected %q, got %q",
+			"db-registry.io", vs.ImageRegistry)
+	}
+}
+
 func TestSettingsOverlay_GlobalOverlay(t *testing.T) {
 	// Clean state.
 	old := GetGlobalSettingsOverlay()
