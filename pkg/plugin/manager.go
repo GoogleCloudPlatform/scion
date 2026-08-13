@@ -517,7 +517,6 @@ func (m *Manager) RestartBrokerPlugin(name string, cfg map[string]string) error 
 
 	m.mu.RLock()
 	dp, ok := m.configs[key]
-	isSelf := m.selfManaged[key]
 	adapter, isGRPC := m.grpcAdapters[key]
 	m.mu.RUnlock()
 
@@ -531,16 +530,9 @@ func (m *Manager) RestartBrokerPlugin(name string, cfg map[string]string) error 
 	// Update the stored config so the new process starts with it.
 	dp.Config = cfg
 
-	if isSelf {
-		// Can't kill a self-managed process — update stored config and reconnect.
-		m.mu.Lock()
-		m.configs[key] = dp
-		m.mu.Unlock()
-		return m.loadPlugin(dp)
-	}
-
-	// Kill the old process and start a new one with updated config.
-	// loadPlugin handles killing the existing client and caching the new one.
+	// Kill the old process (or reconnect for self-managed) and start a new one
+	// with updated config. loadPlugin handles killing the existing client,
+	// caching the new one, and storing the config on success.
 	return m.loadPlugin(dp)
 }
 
