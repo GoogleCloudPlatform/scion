@@ -312,6 +312,15 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 // threadNameRegexp validates thread names: no special characters.
 var threadNameRegexp = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9 _\-]*$`)
 
+// dmKeyRegexp validates DM conversation keys.
+// Format: dm:(user|agent):<uuid>:(user|agent):<uuid>
+var dmKeyRegexp = regexp.MustCompile(`^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$`)
+
+// validDMKey returns true if the key matches the expected DM key format.
+func validDMKey(key string) bool {
+	return dmKeyRegexp.MatchString(key)
+}
+
 // handleCreateThread creates a new thread in a space.
 func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, projectID string) {
 	user := GetUserIdentityFromContext(r.Context())
@@ -573,6 +582,11 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	var projectID string
 	isDM := strings.HasPrefix(key, "dm:")
 	if isDM {
+		// Validate DM key format before any further processing.
+		if !validDMKey(key) {
+			BadRequest(w, "invalid DM key format")
+			return
+		}
 		// DM key: verify the caller is one of the two participants.
 		if !isDMParticipant(key, user.ID()) {
 			Forbidden(w)
@@ -729,6 +743,8 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil)
+		return
 	}
 	s.events.PublishUserMessage(ctx, storeMsg)
 
@@ -739,9 +755,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		defer cancel()
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, content, false, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
-			if storeMsg.ID != "" {
-				_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
-			}
+			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
 		}
 	}
 
@@ -892,6 +906,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
 	if isDM {
+		if !validDMKey(key) {
+			BadRequest(w, "invalid DM key format")
+			return
+		}
 		if !isDMParticipant(key, user.ID()) {
 			Forbidden(w)
 			return
@@ -987,6 +1005,10 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
 	if isDM {
+		if !validDMKey(key) {
+			BadRequest(w, "invalid DM key format")
+			return
+		}
 		if !isDMParticipant(key, user.ID()) {
 			Forbidden(w)
 			return
@@ -1399,12 +1421,16 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 // isDMParticipant checks whether the given userID is one of the two
-// participants encoded in a DM conversation key.
+// participants encoded in a DM conversation key by parsing tokens exactly.
 func isDMParticipant(key, userID string) bool {
 	// DM key formats:
 	//   dm:agent:<agentUUID>:user:<userUUID>
 	//   dm:user:<uuidA>:user:<uuidB>
-	return strings.Contains(key, ":"+userID)
+	parts := strings.Split(key, ":")
+	if len(parts) < 5 {
+		return false
+	}
+	return parts[2] == userID || parts[4] == userID
 }
 
 // resolveDMPeer extracts the peer's ID from a DM key given the caller's ID.
@@ -1603,4 +1629,3 @@ type chatMemberEntry struct {
 	Phase       string `json:"phase,omitempty"`
 	Activity    string `json:"activity,omitempty"`
 }
-

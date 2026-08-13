@@ -21,7 +21,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -30,17 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	_ "github.com/mattn/go-sqlite3"
 )
-
-// ---------------------------------------------------------------------------
-// Helper: create a minimal Server with WebChatStore for unit tests that
-// don't need the full testServer() (Ent + dev auth + policies).
-// ---------------------------------------------------------------------------
-
-func chatV2TestUser(id, email, name string) *http.Request {
-	user := NewAuthenticatedUser(id, email, name, "member", "web")
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	return req.WithContext(contextWithIdentity(req.Context(), user))
-}
 
 // ---------------------------------------------------------------------------
 // isDMParticipant tests
@@ -127,7 +115,7 @@ func TestTypeChat_NotDispatchedToAgent(t *testing.T) {
 
 func TestWave2_ReadState_SetAndGet(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -171,7 +159,7 @@ func TestWave2_ReadState_SetAndGet(t *testing.T) {
 
 func TestWave2_UserPrefs_DefaultsAndOverride(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -214,7 +202,7 @@ func TestWave2_UserPrefs_DefaultsAndOverride(t *testing.T) {
 
 func TestChatV2_DM_UpsertAndList(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -266,7 +254,7 @@ func TestChatV2_DM_UpsertAndList(t *testing.T) {
 
 func TestChatV2_TouchTopicActivity(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -310,7 +298,7 @@ func TestChatV2_TouchTopicActivity(t *testing.T) {
 
 func TestWave2_DeleteTopic_GeneralGuard(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -357,7 +345,7 @@ func TestWave2_DeleteTopic_GeneralGuard(t *testing.T) {
 
 func TestWave2_TopicNameUniqueness(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -397,7 +385,7 @@ func TestWave2_TopicNameUniqueness(t *testing.T) {
 
 func TestWave2_TouchDMActivity(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -440,7 +428,7 @@ func TestWave2_TouchDMActivity(t *testing.T) {
 
 func TestWave2_GetReadStates_Batch(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 
@@ -519,7 +507,7 @@ func TestChatV2_CreateThread_AndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -583,9 +571,11 @@ func TestChatV2_CreateThread_Validation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	// Empty name.
@@ -615,9 +605,11 @@ func TestChatV2_PatchThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	// Create a topic.
@@ -660,9 +652,11 @@ func TestChatV2_PatchThread_GeneralGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	genID, _, err := wcs.EnsureGeneralTopic(ctx, proj.ID, "dev")
@@ -691,9 +685,11 @@ func TestChatV2_DeleteThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
@@ -733,9 +729,11 @@ func TestChatV2_DeleteThread_GeneralGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	genID, _, _ := wcs.EnsureGeneralTopic(ctx, proj.ID, "dev")
@@ -758,9 +756,11 @@ func TestChatV2_ConversationRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
@@ -787,9 +787,11 @@ func TestChatV2_DMs_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
@@ -813,9 +815,11 @@ func TestChatV2_UserPrefs_GetDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/user-prefs", nil)
@@ -839,9 +843,11 @@ func TestChatV2_UserPrefs_PutAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	// PUT.
@@ -902,9 +908,11 @@ func TestChatV2_LegacyThreads_AuthzFix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/threads?projectId="+proj.ID, nil)
@@ -932,9 +940,11 @@ func TestChatV2_SpaceRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	wcs := NewWebChatStore(db, "sqlite3")
-	wcs.Init()
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	srv.SetWebChatStore(wcs)
 
 	// Create a topic with a message.
@@ -981,6 +991,313 @@ func TestChatV2_Members(t *testing.T) {
 		t.Error("agents should be non-nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DM key validation tests
+// ---------------------------------------------------------------------------
+
+func TestValidDMKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		// Valid keys.
+		{"dm:user:be67fbc9-c869-5d43-b15d-c28ca3e8d355:user:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", true},
+		{"dm:agent:be67fbc9-c869-5d43-b15d-c28ca3e8d355:user:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", true},
+		{"dm:user:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:agent:be67fbc9-c869-5d43-b15d-c28ca3e8d355", true},
+
+		// Invalid keys.
+		{"dm:user:short:user:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", false},
+		{"dm:user:ZZZZZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZZZZZZZZZ:user:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", false},  // uppercase
+		{"dm:robot:be67fbc9-c869-5d43-b15d-c28ca3e8d355:user:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", false}, // bad kind
+		{"dm:user:be67fbc9-c869-5d43-b15d-c28ca3e8d355", false},                                            // truncated
+		{"not-a-dm-key", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := validDMKey(tt.key); got != tt.want {
+			t.Errorf("validDMKey(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Send path tests (R4)
+// ---------------------------------------------------------------------------
+
+// setupSendTest creates a project, webchat store, and a topic for send path testing.
+func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project) {
+	t.Helper()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("send-test"), Name: "send-test", Slug: "send-test", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	return srv, s, wcs, proj
+}
+
+func TestChatV2_Send_NoAgent_TypeChat(t *testing.T) {
+	srv, _, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create a topic with no default_agent.
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        tid("topic-send-1"),
+		ProjectID: proj.ID,
+		Name:      "chat-only",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	body := map[string]string{"content": "hello world"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-send-1")+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Type != messages.TypeChat {
+		t.Errorf("expected type %q, got %q", messages.TypeChat, resp.Type)
+	}
+	if resp.Content != "hello world" {
+		t.Errorf("content = %q, want %q", resp.Content, "hello world")
+	}
+}
+
+func TestChatV2_Send_DefaultAgent_Dispatched(t *testing.T) {
+	srv, s, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create an agent.
+	agent := &store.Agent{
+		ID:        tid("agent-default"),
+		ProjectID: proj.ID,
+		Name:      "Helper Bot",
+		Slug:      "helper-bot",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Create a topic with default_agent set.
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           tid("topic-default-agent"),
+		ProjectID:    proj.ID,
+		Name:         "agent-thread",
+		CreatedBy:    "dev",
+		CreatedAt:    time.Now().UTC(),
+		DefaultAgent: agent.ID,
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	body := map[string]string{"content": "please help"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-default-agent")+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Agent-routed messages get type "instruction", not "chat".
+	if resp.Type != messages.TypeInstruction {
+		t.Errorf("expected type %q (agent-routed), got %q", messages.TypeInstruction, resp.Type)
+	}
+}
+
+func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
+	srv, s, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create an agent.
+	agent := &store.Agent{
+		ID:        tid("agent-mention"),
+		ProjectID: proj.ID,
+		Name:      "Reviewer",
+		Slug:      "reviewer",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Topic without default_agent.
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        tid("topic-mention"),
+		ProjectID: proj.ID,
+		Name:      "mention-thread",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Send with @reviewer mention.
+	body := map[string]string{"content": "@reviewer please check this"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-mention")+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// With a resolved mention, message should be type "instruction" (agent-routed).
+	if resp.Type != messages.TypeInstruction {
+		t.Errorf("expected type %q (mention-routed), got %q", messages.TypeInstruction, resp.Type)
+	}
+	// Mentions should be populated.
+	if len(resp.Mentions) == 0 {
+		t.Error("expected non-empty mentions list")
+	}
+}
+
+func TestChatV2_Send_DM_TypeChat(t *testing.T) {
+	srv, s, _, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create an agent so resolveProjectFromDMKey can find the project.
+	agent := &store.Agent{
+		ID:        tid("dm-agent"),
+		ProjectID: proj.ID,
+		Name:      "DM Bot",
+		Slug:      "dm-bot",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Build a valid DM key: agent DM so project can be resolved.
+	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+
+	body := map[string]string{"content": "hi there"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Agent DM without mentions or default_agent on topic goes through
+	// human-to-human path (since DMs skip the default_agent check).
+	if resp.Type != messages.TypeChat {
+		t.Errorf("DM expected type %q, got %q", messages.TypeChat, resp.Type)
+	}
+	// Sender should include the dev user label.
+	if resp.SenderID != DevUserID {
+		t.Errorf("senderID = %q, want %q", resp.SenderID, DevUserID)
+	}
+}
+
+func TestChatV2_Send_HumanToHuman_NoDispatch(t *testing.T) {
+	srv, _, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create a topic with no default_agent.
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        tid("topic-h2h"),
+		ProjectID: proj.ID,
+		Name:      "human-only",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	body := map[string]string{"content": "just chatting"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-h2h")+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Must be type:chat (never dispatched to an agent).
+	if resp.Type != messages.TypeChat {
+		t.Errorf("human-to-human expected type %q, got %q — agent dispatch may have occurred", messages.TypeChat, resp.Type)
+	}
+	// No dispatcher set on test server, so if this were agent-routed it would
+	// still succeed but with type "instruction". The type check above covers this.
+}
+
+func TestChatV2_Send_MaxLength_Rejected(t *testing.T) {
+	srv, _, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        tid("topic-maxlen"),
+		ProjectID: proj.ID,
+		Name:      "maxlen-thread",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	longContent := strings.Repeat("x", messages.MaxMessageLength+1)
+	body := map[string]string{"content": longContent}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-maxlen")+"/messages", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for oversized message, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Exactly at limit should succeed.
+	exactContent := strings.Repeat("y", messages.MaxMessageLength)
+	body = map[string]string{"content": exactContent}
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+tid("topic-maxlen")+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("expected 201 for exact-limit message, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatV2_Send_InvalidDMKey_Rejected(t *testing.T) {
+	srv, _, _, _ := setupSendTest(t)
+
+	// Malformed DM key.
+	body := map[string]string{"content": "hello"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/dm:garbage:key/messages", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("malformed DM key: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Method not allowed tests
+// ---------------------------------------------------------------------------
 
 func TestChatV2_MethodNotAllowed(t *testing.T) {
 	srv, _ := testServer(t)
