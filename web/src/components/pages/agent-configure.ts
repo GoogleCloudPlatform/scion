@@ -673,8 +673,7 @@ export class ScionPageAgentConfigure extends LitElement {
       }
 
       // Navigate to agent detail
-      window.history.pushState({}, '', `/agents/${this.agentId}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo(`/agents/${this.agentId}`);
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to start agent';
     } finally {
@@ -695,8 +694,7 @@ export class ScionPageAgentConfigure extends LitElement {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
 
-      window.history.pushState({}, '', '/agents');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/agents');
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to delete agent';
     }
@@ -724,8 +722,7 @@ export class ScionPageAgentConfigure extends LitElement {
             <span>${this.error || 'Agent not found'}</span>
           </div>
           <sl-button variant="default" @click=${() => {
-            window.history.pushState({}, '', '/agents');
-            window.dispatchEvent(new PopStateEvent('popstate'));
+            navigateTo('/agents');
           }}>
             Back to Agents
           </sl-button>
