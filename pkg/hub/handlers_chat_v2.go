@@ -681,7 +681,19 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if !isDM && projectID != "" {
+	if isDM {
+		// Agent DM implicit routing: when the key is dm:agent:<uuid>:user:<uuid>,
+		// the agent is the implicit recipient (equivalent to default_agent for
+		// topics). An explicit @mention of a different agent takes precedence
+		// (handled above). Design §3, §4.3.
+		if agentID := parseAgentDMKey(key); agentID != "" {
+			dmAgent, err := s.store.GetAgent(ctx, agentID)
+			if err == nil && dmAgent != nil {
+				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, nil, now)
+				return
+			}
+		}
+	} else if projectID != "" {
 		// Check if topic has a default_agent.
 		topic, err := wcs.GetTopic(ctx, key)
 		if err == nil && topic != nil && topic.DefaultAgent != "" {
@@ -843,9 +855,17 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		recipientID = key
 	}
 
+	// The Ent messages schema requires a non-empty project_id (UUID).
+	// User-to-user DMs are global (not project-scoped), so use the nil UUID
+	// as a sentinel when no project context is available.
+	msgProjectID := projectID
+	if msgProjectID == "" {
+		msgProjectID = uuid.Nil.String()
+	}
+
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
-		ProjectID:   projectID,
+		ProjectID:   msgProjectID,
 		Sender:      "user:" + senderLabel,
 		SenderID:    user.ID(),
 		Recipient:   recipient,
@@ -1450,6 +1470,17 @@ func resolveDMPeer(key, callerID string) (peerEmail, peerID string) {
 		return "", id2
 	}
 	return "", id1
+}
+
+// parseAgentDMKey extracts the agent UUID from an agent-DM conversation key.
+// Returns "" if the key is not an agent DM. Agent DM keys have the form
+// dm:agent:<agentUUID>:user:<userUUID>.
+func parseAgentDMKey(key string) string {
+	parts := strings.Split(key, ":")
+	if len(parts) >= 3 && parts[1] == "agent" {
+		return parts[2]
+	}
+	return ""
 }
 
 // resolveProjectFromDMKey attempts to derive a project ID from a DM key.

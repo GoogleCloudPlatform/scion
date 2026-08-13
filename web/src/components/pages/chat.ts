@@ -625,12 +625,14 @@ export class ScionPageChat extends LitElement {
         threadName: '',
         defaultAgent: '',
         isDM: true,
-        peerName: '', // Will be resolved from DM data
+        peerName: '',
         peerId: '',
         peerKind: 'user',
       };
       this.classList.add('thread-open');
       dispatchPageTitle(this, 'DM', 'Chat');
+      // Resolve peer metadata from the DM list (handles page refresh).
+      void this.resolveDMPeerInfo(key);
       return;
     }
 
@@ -708,6 +710,41 @@ export class ScionPageChat extends LitElement {
 
   private handleNavigateApp(): void {
     navigateTo('/');
+  }
+
+  /**
+   * Resolve DM peer info from the DM list endpoint. This handles the case
+   * where the user navigates directly to /chat/dm/{key} (e.g., page refresh)
+   * and the peer metadata is not populated from the rail click event.
+   */
+  private async resolveDMPeerInfo(key: string): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/chat/dms');
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        dms?: Array<{
+          conversationKey: string;
+          peerName?: string;
+          peerEmail?: string;
+          peerId: string;
+          peerKind: 'user' | 'agent';
+          peerSlug?: string;
+        }>;
+      };
+      const dm = data.dms?.find((d) => d.conversationKey === key);
+      if (dm && this.v2Conversation?.conversationKey === key) {
+        const peerName = dm.peerName || dm.peerSlug || dm.peerEmail || dm.peerId;
+        this.v2Conversation = {
+          ...this.v2Conversation,
+          peerName,
+          peerId: dm.peerId,
+          peerKind: dm.peerKind,
+        };
+        dispatchPageTitle(this, peerName, 'Chat');
+      }
+    } catch {
+      // Non-critical — the DM will still work, just without a resolved peer name.
+    }
   }
 
   private async loadV2Members(projectId: string): Promise<void> {
@@ -867,32 +904,42 @@ export class ScionPageChat extends LitElement {
     const conv = this.v2Conversation;
 
     return html`
-      ${conv.threadName
+      ${conv.isDM && conv.peerName
         ? html`
             <div class="v2-thread-header">
-              <span class="hash">#</span>
-              <span>${conv.threadName}</span>
-              ${conv.defaultAgent
-                ? html`
-                    <sl-tooltip content="Default agent: ${conv.defaultAgent}">
-                      <sl-icon
-                        name="cpu"
-                        style="font-size: 0.75rem; color: var(--scion-text-muted)"
-                      ></sl-icon>
-                    </sl-tooltip>
-                  `
-                : nothing}
-              <sl-icon-button
-                class="members-btn"
-                name="people"
-                label="Toggle members"
-                @click=${() => {
-                  this.v2MembersExpanded = !this.v2MembersExpanded;
-                }}
-              ></sl-icon-button>
+              <sl-icon
+                name=${conv.peerKind === 'agent' ? 'cpu' : 'person'}
+                style="font-size: 0.875rem; color: var(--scion-text-muted)"
+              ></sl-icon>
+              <span>${conv.peerName}</span>
             </div>
           `
-        : nothing}
+        : conv.threadName
+          ? html`
+              <div class="v2-thread-header">
+                <span class="hash">#</span>
+                <span>${conv.threadName}</span>
+                ${conv.defaultAgent
+                  ? html`
+                      <sl-tooltip content="Default agent: ${conv.defaultAgent}">
+                        <sl-icon
+                          name="cpu"
+                          style="font-size: 0.75rem; color: var(--scion-text-muted)"
+                        ></sl-icon>
+                      </sl-tooltip>
+                    `
+                  : nothing}
+                <sl-icon-button
+                  class="members-btn"
+                  name="people"
+                  label="Toggle members"
+                  @click=${() => {
+                    this.v2MembersExpanded = !this.v2MembersExpanded;
+                  }}
+                ></sl-icon-button>
+              </div>
+            `
+          : nothing}
       <scion-chat-thread
         conversationKey=${conv.conversationKey}
         projectId=${conv.projectId}

@@ -1179,7 +1179,7 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 	}
 }
 
-func TestChatV2_Send_DM_TypeChat(t *testing.T) {
+func TestChatV2_Send_DM_AgentDM_Routed(t *testing.T) {
 	srv, s, _, proj := setupSendTest(t)
 	ctx := context.Background()
 
@@ -1210,10 +1210,10 @@ func TestChatV2_Send_DM_TypeChat(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// Agent DM without mentions or default_agent on topic goes through
-	// human-to-human path (since DMs skip the default_agent check).
-	if resp.Type != messages.TypeChat {
-		t.Errorf("DM expected type %q, got %q", messages.TypeChat, resp.Type)
+	// W4 fix: Agent DM without @mention is now correctly routed to the agent
+	// (implicit agent routing). The message type should be "instruction".
+	if resp.Type != messages.TypeInstruction {
+		t.Errorf("agent DM expected type %q (agent-routed), got %q", messages.TypeInstruction, resp.Type)
 	}
 	// Sender should include the dev user label.
 	if resp.SenderID != DevUserID {
@@ -1316,6 +1316,153 @@ func TestChatV2_MethodNotAllowed(t *testing.T) {
 		rec := doRequest(t, srv, tt.method, tt.path, nil)
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s %s: expected 405, got %d", tt.method, tt.path, rec.Code)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W4: Agent DM implicit routing tests
+// ---------------------------------------------------------------------------
+
+func TestChatV2_Send_AgentDM_ImplicitRouting(t *testing.T) {
+	srv, s, _, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create an agent.
+	agent := &store.Agent{
+		ID:        tid("agent-dm-route"),
+		ProjectID: proj.ID,
+		Name:      "DM Router",
+		Slug:      "dm-router",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	// Build a valid agent DM key.
+	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+
+	// Send a message without any @mention — it should be implicitly
+	// routed to the agent (type:instruction), not go through human-to-human.
+	body := map[string]string{"content": "hello agent, help me please"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Agent DM without @mention should be type:instruction (routed to agent).
+	if resp.Type != messages.TypeInstruction {
+		t.Errorf("agent DM implicit routing: expected type %q, got %q", messages.TypeInstruction, resp.Type)
+	}
+}
+
+func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
+	srv, s, _, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create the DM agent.
+	dmAgent := &store.Agent{
+		ID:        tid("agent-dm-default"),
+		ProjectID: proj.ID,
+		Name:      "DM Default",
+		Slug:      "dm-default",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, dmAgent); err != nil {
+		t.Fatalf("CreateAgent (dm): %v", err)
+	}
+
+	// Create a different agent that will be mentioned.
+	otherAgent := &store.Agent{
+		ID:        tid("agent-other-mention"),
+		ProjectID: proj.ID,
+		Name:      "Other Agent",
+		Slug:      "other-agent",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, otherAgent); err != nil {
+		t.Fatalf("CreateAgent (other): %v", err)
+	}
+
+	dmKey := "dm:agent:" + dmAgent.ID + ":user:" + DevUserID
+
+	// Send a message with @other-agent mention — mention should take precedence
+	// over the implicit DM agent routing.
+	body := map[string]string{"content": "@other-agent please review this"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Should be type:instruction (agent-routed via mention).
+	if resp.Type != messages.TypeInstruction {
+		t.Errorf("mention-takes-precedence: expected type %q, got %q", messages.TypeInstruction, resp.Type)
+	}
+	// Mentions should include the mentioned agent.
+	if len(resp.Mentions) == 0 {
+		t.Error("expected non-empty mentions list for @other-agent")
+	}
+}
+
+func TestChatV2_Send_UserDM_HumanToHuman(t *testing.T) {
+	srv, _, _, _ := setupSendTest(t)
+
+	// Build a user-to-user DM key.
+	peerID := tid("dm-peer-user")
+	dmKey := "dm:user:" + DevUserID + ":user:" + peerID
+
+	body := map[string]string{"content": "hey there, how are you?"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMessageResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// User-to-user DM should be type:chat (human-to-human, no agent dispatch).
+	if resp.Type != messages.TypeChat {
+		t.Errorf("user DM: expected type %q, got %q", messages.TypeChat, resp.Type)
+	}
+	if resp.SenderID != DevUserID {
+		t.Errorf("senderID = %q, want %q", resp.SenderID, DevUserID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W4: parseAgentDMKey tests
+// ---------------------------------------------------------------------------
+
+func TestParseAgentDMKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"dm:agent:aaaa-bbbb:user:cccc-dddd", "aaaa-bbbb"},
+		{"dm:user:aaaa:user:bbbb", ""},
+		{"dm:agent:1234:user:5678", "1234"},
+		{"not-a-dm", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := parseAgentDMKey(tt.key); got != tt.want {
+			t.Errorf("parseAgentDMKey(%q) = %q, want %q", tt.key, got, tt.want)
 		}
 	}
 }

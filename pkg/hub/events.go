@@ -655,6 +655,21 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message)
 		!strings.HasPrefix(msg.ThreadID, "agent:") {
 		p.sink("project."+msg.ProjectID+".chat.message", evt)
 	}
+	// Fan out DM messages to user.<id>.chat.dm for both participants so the
+	// v2 frontend (which subscribes to user.<self>.chat.>) receives real-time
+	// DM updates. The wave-1 user.<id>.message subject above is kept for
+	// backward compat. Wave-2 §4.4.
+	if msg.Channel == "web" && msg.ThreadID != "" && strings.HasPrefix(msg.ThreadID, "dm:") {
+		// Publish to both participants extracted from the DM key.
+		dmParts := strings.Split(msg.ThreadID, ":")
+		if len(dmParts) >= 5 {
+			id1, id2 := dmParts[2], dmParts[4]
+			p.sink("user."+id1+".chat.dm", evt)
+			if id2 != id1 {
+				p.sink("user."+id2+".chat.dm", evt)
+			}
+		}
+	}
 }
 
 // PublishChatTopicEvent publishes a topic lifecycle event on
