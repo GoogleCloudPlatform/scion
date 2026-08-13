@@ -790,6 +790,14 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	primaryAgent := agents[0]
 
+	// Determine message type: explicit @mentions use type:mention so every
+	// mentioned agent receives the same type. Default-agent and DM-implicit
+	// routing (mentionResults == nil) keeps type:instruction.
+	msgType := messages.TypeInstruction
+	if mentionResults != nil {
+		msgType = messages.TypeMention
+	}
+
 	// Build the structured message for the primary agent.
 	msg := &messages.StructuredMessage{
 		Version:     messages.Version,
@@ -799,9 +807,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		Recipient:   "agent:" + primaryAgent.Slug,
 		RecipientID: primaryAgent.ID,
 		Msg:         content,
-		Type:        messages.TypeInstruction,
+		Type:        msgType,
 		Channel:     "web",
 		ThreadID:    key,
+	}
+
+	// For @-mention routing, add mention metadata so the agent sees the same
+	// envelope shape as fan-out recipients.
+	if mentionResults != nil {
+		msg.Metadata = map[string]string{
+			"mention_source":   "user:" + senderLabel,
+			"mention_position": "body",
+		}
 	}
 
 	// W7: Add attachment metadata and file paths for agent dispatch.
@@ -825,7 +842,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
-	// Persist the instruction message.
+	// Persist the message.
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
 		ProjectID:     projectID,
@@ -834,7 +851,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		Recipient:     msg.Recipient,
 		RecipientID:   msg.RecipientID,
 		Msg:           content,
-		Type:          messages.TypeInstruction,
+		Type:          msgType,
 		AgentID:       primaryAgent.ID,
 		Channel:       "web",
 		ThreadID:      key,

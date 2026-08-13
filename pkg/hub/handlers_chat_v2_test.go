@@ -1169,9 +1169,9 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// With a resolved mention, message should be type "instruction" (agent-routed).
-	if resp.Type != messages.TypeInstruction {
-		t.Errorf("expected type %q (mention-routed), got %q", messages.TypeInstruction, resp.Type)
+	// With a resolved @mention, message should be type "mention" (not "instruction").
+	if resp.Type != messages.TypeMention {
+		t.Errorf("expected type %q (mention-routed), got %q", messages.TypeMention, resp.Type)
 	}
 	// Mentions should be populated.
 	if len(resp.Mentions) == 0 {
@@ -1409,9 +1409,9 @@ func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// Should be type:instruction (agent-routed via mention).
-	if resp.Type != messages.TypeInstruction {
-		t.Errorf("mention-takes-precedence: expected type %q, got %q", messages.TypeInstruction, resp.Type)
+	// Should be type:mention (agent-routed via @mention).
+	if resp.Type != messages.TypeMention {
+		t.Errorf("mention-takes-precedence: expected type %q, got %q", messages.TypeMention, resp.Type)
 	}
 	// Mentions should include the mentioned agent.
 	if len(resp.Mentions) == 0 {
