@@ -763,8 +763,13 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		// Check if topic has a default_agent.
 		topic, err := wcs.GetTopic(ctx, key)
 		if err == nil && topic != nil && topic.DefaultAgent != "" {
-			// Resolve the default agent.
-			defaultAgent, err := s.store.GetAgent(ctx, topic.DefaultAgent)
+			// Resolve the default agent. The default_agent field stores either
+			// a slug (from /default command) or a UUID, so try both lookups.
+			defaultAgent, err := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
+			if err != nil || defaultAgent == nil {
+				// Fall back to lookup by ID in case the value is a UUID.
+				defaultAgent, err = s.store.GetAgent(ctx, topic.DefaultAgent)
+			}
 			if err == nil && defaultAgent != nil {
 				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, attachmentRefs, now)
 				return

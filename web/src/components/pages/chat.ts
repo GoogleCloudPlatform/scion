@@ -756,6 +756,17 @@ export class ScionPageChat extends LitElement {
     navigateTo('/');
   }
 
+  /** Handle default-agent-changed from the thread component. Updates local state in place to avoid re-render. */
+  private handleDefaultAgentChanged(e: CustomEvent): void {
+    const detail = e.detail as { defaultAgent: string };
+    if (this.v2Conversation) {
+      this.v2Conversation = {
+        ...this.v2Conversation,
+        defaultAgent: detail.defaultAgent || '',
+      };
+    }
+  }
+
   /**
    * Resolve DM peer info from the DM list endpoint. This handles the case
    * where the user navigates directly to /chat/dm/{key} (e.g., page refresh)
@@ -1169,9 +1180,11 @@ export class ScionPageChat extends LitElement {
               defaultAgent=${conv.defaultAgent}
               ?isDM=${conv.isDM}
               peerName=${conv.peerName}
+              currentUserId=${this.pageData?.user?.id || ''}
               ?canSend=${true}
               .members=${this.v2Members}
               .agents=${this.getAgentsFromMembers()}
+              @default-agent-changed=${this.handleDefaultAgentChanged}
             ></scion-chat-thread>
           `}
     `;
