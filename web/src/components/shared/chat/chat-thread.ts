@@ -153,7 +153,6 @@ export class ScionChatThread extends LitElement {
   @state() private messageMap = new Map<string, Message>();
   @state() private loading = false;
   @state() private error: string | null = null;
-  @state() private streaming = false;
   @state() private sending = false;
   @state() private sendError: string | null = null;
   @state() private pinnedToBottom = true;
@@ -238,24 +237,6 @@ export class ScionChatThread extends LitElement {
       display: inline-flex;
       align-items: center;
       gap: 0.375rem;
-    }
-
-    .stream-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--scion-success-500, #22c55e);
-      animation: pulse 1.5s ease-in-out infinite;
-    }
-
-    @keyframes pulse {
-      0%,
-      100% {
-        opacity: 1;
-      }
-      50% {
-        opacity: 0.3;
-      }
     }
 
     /* Message scroll area */
@@ -459,7 +440,7 @@ export class ScionChatThread extends LitElement {
     // Stop any active SSE listener
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
-    this.streaming = false;
+
 
     // Clear message state
     this.messageMap.clear();
@@ -639,7 +620,7 @@ export class ScionChatThread extends LitElement {
       stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
       stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     }
-    this.streaming = false;
+
   }
 
   // ---------------------------------------------------------------------------
@@ -793,7 +774,6 @@ export class ScionChatThread extends LitElement {
 
     const url = `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages/stream`;
     this.eventSource = new EventSource(url);
-    this.streaming = true;
 
     this.eventSource.addEventListener('message', (event: Event) => {
       try {
@@ -902,7 +882,6 @@ export class ScionChatThread extends LitElement {
     if (scope && scope.type === 'chat') {
       this._currentUserId = scope.userId;
     }
-    this.streaming = true;
   }
 
   /** Handle v2 SSE chat message events. Only backfill if the event is for this conversation. */
@@ -1366,13 +1345,11 @@ export class ScionChatThread extends LitElement {
   }
 
   private renderStreamBar() {
-    // Show the bar when streaming OR when the toggle is visible (they share the row).
-    if (!this.streaming && !this.showVisibilityToggle) return nothing;
+    // Show the bar only when the visibility toggle is visible.
+    if (!this.showVisibilityToggle) return nothing;
     return html`
       <div class="stream-bar">
-        <span class="stream-indicator">
-          ${this.streaming ? html`<span class="stream-dot"></span> Live` : nothing}
-        </span>
+        <span class="stream-indicator"></span>
         ${this.showVisibilityToggle
           ? html`
               <scion-chat-visibility-toggle

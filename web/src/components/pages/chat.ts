@@ -959,17 +959,8 @@ export class ScionPageChat extends LitElement {
       this._projectIdToSlug.set(detail.projectId, slug);
     }
 
-    // Use readable URL when slug is available, fall back to legacy format
-    if (slug) {
-      navigateTo(
-        `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(detail.conversationKey)}`
-      );
-    } else {
-      navigateTo(
-        `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`
-      );
-    }
-
+    // Set up conversation state directly (avoid page recreation from navigateTo
+    // which destroys and recreates the page element, causing visible flicker).
     this.v2Conversation = {
       conversationKey: detail.conversationKey,
       projectId: detail.projectId,
@@ -982,12 +973,38 @@ export class ScionPageChat extends LitElement {
       peerKind: 'user',
     };
     this.classList.add('thread-open');
+
+    // Update the URL with pushState to avoid page recreation flicker
+    const base = import.meta.env.BASE_URL;
+    let threadPath: string;
+    if (slug) {
+      threadPath = `/chat/${encodeURIComponent(slug)}/${encodeURIComponent(detail.conversationKey)}`;
+    } else {
+      threadPath = `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`;
+    }
+    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + threadPath : threadPath;
+    window.history.pushState({}, '', browserPath);
+
     dispatchPageTitle(this, `#${detail.threadName}`, 'Chat');
     void this.loadV2Members(detail.projectId);
   }
 
   private handleNavigateApp(): void {
     navigateTo('/');
+  }
+
+  /** Reset to the global /chat view (no conversation selected). */
+  private handleResetView(): void {
+    this.v2Conversation = null;
+    this.classList.remove('thread-open');
+    // Navigate to bare /chat
+    const base = import.meta.env.BASE_URL;
+    const chatPath = '/chat';
+    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + chatPath : chatPath;
+    window.history.pushState({}, '', browserPath);
+    dispatchPageTitle(this, '', 'Chat');
+    // Reload hub-level members for the sidebar
+    void this.loadHubMembers();
   }
 
   /**
@@ -1018,7 +1035,7 @@ export class ScionPageChat extends LitElement {
           peerId: dm.peerId,
           peerKind: dm.peerKind,
         };
-        dispatchPageTitle(this, `DM with ${peerName}`, 'Chat');
+        dispatchPageTitle(this, peerName, 'Chat');
       }
     } catch {
       // Non-critical — the DM will still work, just without a resolved peer name.
@@ -1060,7 +1077,7 @@ export class ScionPageChat extends LitElement {
             peerId: dm.peerId,
             peerKind: dm.peerKind,
           };
-          dispatchPageTitle(this, `DM with ${peerName}`, 'Chat');
+          dispatchPageTitle(this, peerName, 'Chat');
           return;
         }
       }
@@ -1096,7 +1113,7 @@ export class ScionPageChat extends LitElement {
         peerKind,
       };
       if (peerName) {
-        dispatchPageTitle(this, `DM with ${peerName}`, 'Chat');
+        dispatchPageTitle(this, peerName, 'Chat');
       }
     } catch {
       // Non-critical — set a basic conversation state so the thread can attempt to load
@@ -1374,7 +1391,7 @@ export class ScionPageChat extends LitElement {
     const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + dmPath : dmPath;
     window.history.pushState({}, '', browserPath);
 
-    dispatchPageTitle(this, `DM with ${detail.displayName}`, 'Chat');
+    dispatchPageTitle(this, detail.displayName, 'Chat');
   }
 
   // =========================================================================
@@ -1482,6 +1499,7 @@ export class ScionPageChat extends LitElement {
                 selectedKey=${this.v2Conversation?.conversationKey || ''}
                 @thread-select=${this.handleThreadSelect}
                 @navigate-app=${this.handleNavigateApp}
+                @reset-view=${this.handleResetView}
               ></scion-chat-space-rail>
             `
           : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
@@ -1514,7 +1532,9 @@ export class ScionPageChat extends LitElement {
           .humans=${this.v2HumanMembers}
           .agents=${this.v2AgentMembers}
           current-user-id="${this.pageData?.user?.id || ''}"
+          dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
           @member-click=${this.handleMemberClick}
+          @reset-view=${this.handleResetView}
         ></scion-chat-members>
       </div>
     `;
@@ -1532,7 +1552,7 @@ export class ScionPageChat extends LitElement {
                 name=${conv.peerKind === 'agent' ? 'cpu' : 'person'}
                 style="font-size: 0.875rem; color: var(--scion-text-muted)"
               ></sl-icon>
-              <span>DM with ${conv.peerName}</span>
+              <span>${conv.peerName}</span>
               <sl-icon-button
                 class="members-btn"
                 name="search"

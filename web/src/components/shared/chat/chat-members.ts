@@ -76,6 +76,10 @@ export class ScionChatMembers extends LitElement {
   @property({ attribute: 'current-user-id' })
   currentUserId = '';
 
+  /** ID of the current DM peer — highlighted in the members list. */
+  @property({ attribute: 'dm-peer-id' })
+  dmPeerId = '';
+
   static override styles = css`
     :host {
       display: flex;
@@ -107,6 +111,12 @@ export class ScionChatMembers extends LitElement {
 
     .member-item:hover {
       background: var(--scion-surface-hover, rgba(0, 0, 0, 0.05));
+    }
+
+    .member-item.active-peer {
+      background: var(--scion-primary-50, #eff6ff);
+      border-left: 2px solid var(--scion-primary, #3b82f6);
+      padding-left: 14px;
     }
 
     .member-info {
@@ -167,6 +177,34 @@ export class ScionChatMembers extends LitElement {
     }
   `;
 
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // Clicking empty area in the members sidebar resets to global view
+    this.addEventListener('click', this._handleHostClick);
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.removeEventListener('click', this._handleHostClick);
+  }
+
+  /** Click on the host element itself (empty space) triggers a reset. */
+  private _handleHostClick = (e: MouseEvent): void => {
+    // Only fire when the click lands on the host itself or on the
+    // scrollable container (not on a member item or section label)
+    const path = e.composedPath();
+    const clickedMember = path.some(
+      (el) => el instanceof HTMLElement && el.classList?.contains('member-item')
+    );
+    if (clickedMember) return;
+    const clickedLabel = path.some(
+      (el) => el instanceof HTMLElement && el.classList?.contains('section-label')
+    );
+    if (clickedLabel) return;
+
+    this.dispatchEvent(new CustomEvent('reset-view', { bubbles: true, composed: true }));
+  };
+
   override render() {
     return html` ${this.renderHumans()} ${this.renderAgents()} `;
   }
@@ -189,9 +227,10 @@ export class ScionChatMembers extends LitElement {
   }
 
   private renderHuman(m: ChatHumanMember) {
+    const isActive = this.dmPeerId === m.id;
     return html`
       <div
-        class="member-item"
+        class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(m.id, 'user', m.displayName)}
         title="${m.email || m.displayName}"
       >
@@ -229,10 +268,11 @@ export class ScionChatMembers extends LitElement {
   private renderAgent(a: ChatAgentMember) {
     const dotClass = this.agentDotClass(a.phase || '');
     const statusLabel = a.activity || a.phase || 'unknown';
+    const isActive = this.dmPeerId === a.id;
 
     return html`
       <div
-        class="member-item"
+        class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(a.id, 'agent', a.displayName)}
         title="${a.slug || a.displayName}"
       >

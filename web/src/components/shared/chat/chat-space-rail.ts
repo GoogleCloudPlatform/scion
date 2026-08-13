@@ -35,6 +35,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
+import { showConfirm } from '../confirm-dialog.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
@@ -214,6 +215,24 @@ export class ScionChatSpaceRail extends LitElement {
     .space-actions sl-icon-button::part(base) {
       font-size: 0.75rem;
       padding: 0.125rem;
+    }
+
+    .space-actions sl-menu {
+      min-width: 120px;
+      padding: 0.125rem 0;
+    }
+
+    .space-actions sl-menu-item::part(base) {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.5rem;
+    }
+
+    .space-actions sl-menu-item::part(label) {
+      font-size: 0.75rem;
+    }
+
+    .space-actions sl-menu-item sl-icon {
+      font-size: 0.75rem;
     }
 
     /* Thread items */
@@ -491,14 +510,21 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  /** Track whether spaces have been loaded at least once. */
+  private _initialLoadDone = false;
+
   private async loadSpaces(): Promise<void> {
     try {
       const res = await apiFetch('/api/v1/chat/spaces');
       if (res.ok) {
         const data = (await res.json()) as { spaces?: ChatSpace[] };
         this.spaces = data.spaces || [];
-        // Collapse all spaces by default — user expands explicitly
-        this.collapsedSpaces = new Set(this.spaces.map((s) => s.projectId));
+        if (!this._initialLoadDone) {
+          // Collapse all spaces by default on first load — user expands explicitly
+          this.collapsedSpaces = new Set(this.spaces.map((s) => s.projectId));
+          this._initialLoadDone = true;
+        }
+        // On subsequent reloads, preserve the current collapsed/expanded state
         // Load threads for each space
         await Promise.all(this.spaces.map((s) => this.loadThreads(s.projectId)));
       }
@@ -637,6 +663,17 @@ export class ScionChatSpaceRail extends LitElement {
   // Actions
   // ---------------------------------------------------------------------------
 
+  /** Clicking empty area of the rail body resets to global view. */
+  private handleRailBodyClick(e: MouseEvent): void {
+    // Only fire when the click target is the rail-body itself (empty space)
+    const target = e.target as HTMLElement;
+    if (target === e.currentTarget) {
+      this.dispatchEvent(
+        new CustomEvent('reset-view', { bubbles: true, composed: true })
+      );
+    }
+  }
+
   private handleThreadClick(thread: ChatSpaceThread, projectId: string): void {
     const space = this.spaces.find((s) => s.projectId === projectId);
     this.dispatchEvent(
@@ -750,7 +787,12 @@ export class ScionChatSpaceRail extends LitElement {
   private async handleDeleteThread(thread: ChatSpaceThread, projectId: string): Promise<void> {
     this.contextMenuTarget = null;
     if (thread.isGeneral) return;
-    if (!confirm(`Delete #${thread.name}? This cannot be undone.`)) return;
+    const confirmed = await showConfirm(`Delete #${thread.name}? This cannot be undone.`, {
+      title: 'Delete Thread',
+      confirmText: 'Delete',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
     try {
       await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(thread.id)}`, {
         method: 'DELETE',
@@ -835,7 +877,7 @@ export class ScionChatSpaceRail extends LitElement {
         ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
         : html`
             ${this.renderToolbar()}
-            <div class="rail-body">${this.renderSpaces()}</div>
+            <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
           `}
       ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
     `;
