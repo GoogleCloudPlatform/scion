@@ -592,7 +592,7 @@ export class ScionChatComposer extends LitElement {
         formData.append('files', file);
       }
 
-      const { apiFetch } = await import('../../../shared/api.js');
+      const { apiFetch } = await import('../../../client/api.js');
       const res = await apiFetch('/api/v1/chat/attachments', {
         method: 'POST',
         body: formData,
