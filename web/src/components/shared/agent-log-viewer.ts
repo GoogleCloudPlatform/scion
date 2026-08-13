@@ -143,11 +143,27 @@ export class ScionAgentLogViewer extends LitElement {
       letter-spacing: 0.03em;
       line-height: 1.4;
     }
-    .sev-DEBUG { background: var(--scion-neutral-100, #f1f5f9); color: var(--scion-neutral-500, #64748b); }
-    .sev-INFO { background: var(--scion-primary-50, #eff6ff); color: var(--scion-primary-700, #1d4ed8); }
-    .sev-WARNING { background: var(--scion-warning-50, #fffbeb); color: var(--scion-warning-700, #b45309); }
-    .sev-ERROR { background: var(--scion-danger-50, #fef2f2); color: var(--scion-danger-700, #b91c1c); }
-    .sev-CRITICAL { background: var(--scion-danger-100, #fee2e2); color: var(--scion-danger-800, #991b1b); font-weight: 700; }
+    .sev-DEBUG {
+      background: var(--scion-neutral-100, #f1f5f9);
+      color: var(--scion-neutral-500, #64748b);
+    }
+    .sev-INFO {
+      background: var(--scion-primary-50, #eff6ff);
+      color: var(--scion-primary-700, #1d4ed8);
+    }
+    .sev-WARNING {
+      background: var(--scion-warning-50, #fffbeb);
+      color: var(--scion-warning-700, #b45309);
+    }
+    .sev-ERROR {
+      background: var(--scion-danger-50, #fef2f2);
+      color: var(--scion-danger-700, #b91c1c);
+    }
+    .sev-CRITICAL {
+      background: var(--scion-danger-100, #fee2e2);
+      color: var(--scion-danger-800, #991b1b);
+      font-weight: 700;
+    }
 
     /* Timestamp */
     .ts {
@@ -220,8 +236,13 @@ export class ScionAgentLogViewer extends LitElement {
       animation: pulse 1.5s ease-in-out infinite;
     }
     @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
+      0%,
+      100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.3;
+      }
     }
   `;
 
@@ -266,9 +287,14 @@ export class ScionAgentLogViewer extends LitElement {
 
       const res = await apiFetch(url);
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({})) as { error?: { message?: string }; message?: string };
+        const errData = (await res.json().catch(() => ({}))) as {
+          error?: { message?: string };
+          message?: string;
+        };
         throw new Error(
-          (errData.error as { message?: string })?.message || errData.message || `HTTP ${res.status}`
+          (errData.error as { message?: string })?.message ||
+            errData.message ||
+            `HTTP ${res.status}`
         );
       }
 
@@ -289,15 +315,20 @@ export class ScionAgentLogViewer extends LitElement {
     try {
       const res = await apiFetch(`/api/v1/agents/${this.agentId}/logs?tail=500`);
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({})) as { error?: { message?: string }; message?: string };
+        const errData = (await res.json().catch(() => ({}))) as {
+          error?: { message?: string };
+          message?: string;
+        };
         throw new Error(
-          (errData.error as { message?: string })?.message || errData.message || `HTTP ${res.status}`
+          (errData.error as { message?: string })?.message ||
+            errData.message ||
+            `HTTP ${res.status}`
         );
       }
 
       const contentType = res.headers.get('Content-Type') || '';
       if (contentType.includes('application/json')) {
-        const data = await res.json() as { logs?: string };
+        const data = (await res.json()) as { logs?: string };
         this.brokerLogs = data.logs || '';
       } else {
         this.brokerLogs = await res.text();
@@ -437,15 +468,9 @@ export class ScionAgentLogViewer extends LitElement {
 
   override render() {
     if (!this.cloudLogging) {
-      return html`
-        ${this.renderBrokerToolbar()}
-        ${this.renderBrokerContent()}
-      `;
+      return html` ${this.renderBrokerToolbar()} ${this.renderBrokerContent()} `;
     }
-    return html`
-      ${this.renderToolbar()}
-      ${this.renderContent()}
-    `;
+    return html` ${this.renderToolbar()} ${this.renderContent()} `;
   }
 
   private renderBrokerToolbar() {
@@ -512,8 +537,7 @@ export class ScionAgentLogViewer extends LitElement {
                 style="min-width: 10rem"
               >
                 ${brokerEntries.map(
-                  ([id, name]) =>
-                    html`<sl-option value=${id}>${name || id}</sl-option>`
+                  ([id, name]) => html`<sl-option value=${id}>${name || id}</sl-option>`
                 )}
               </sl-select>
             `
@@ -526,10 +550,7 @@ export class ScionAgentLogViewer extends LitElement {
           @sl-change=${this.handleSeverityFilter}
           style="min-width: 9rem"
         >
-          ${SEVERITY_LEVELS.map(
-            (level) =>
-              html`<sl-option value=${level}>${level} +</sl-option>`
-          )}
+          ${SEVERITY_LEVELS.map((level) => html`<sl-option value=${level}>${level} +</sl-option>`)}
         </sl-select>
         ${this.streaming
           ? html`<span class="stream-indicator"><span class="stream-dot"></span>Streaming</span>`
@@ -583,7 +604,11 @@ export class ScionAgentLogViewer extends LitElement {
       `;
     }
 
-    return html`<table class="log-table"><tbody>${this.renderEntries()}</tbody></table>`;
+    return html`<table class="log-table">
+      <tbody>
+        ${this.renderEntries()}
+      </tbody>
+    </table>`;
   }
 
   private renderEntries() {
@@ -592,20 +617,31 @@ export class ScionAgentLogViewer extends LitElement {
 
     for (const entry of this.entries) {
       const d = new Date(entry.timestamp);
-      const dateStr = d.toLocaleDateString('en', { year: 'numeric', month: 'short', day: 'numeric' });
+      const dateStr = d.toLocaleDateString('en', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      });
 
       if (dateStr !== lastDate) {
         lastDate = dateStr;
         rows.push(html`
-          <tr><td colspan="4" class="date-divider">${dateStr}</td></tr>
+          <tr>
+            <td colspan="4" class="date-divider">${dateStr}</td>
+          </tr>
         `);
       }
 
       const isExpanded = this.expandedIds.has(entry.insertId);
-      const timeStr = d.toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 } as Intl.DateTimeFormatOptions);
-      const subsystem = entry.jsonPayload?.['subsystem'] as string
-        || entry.labels?.['component']
-        || '';
+      const timeStr = d.toLocaleTimeString('en', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        fractionalSecondDigits: 3,
+      } as Intl.DateTimeFormatOptions);
+      const subsystem =
+        (entry.jsonPayload?.['subsystem'] as string) || entry.labels?.['component'] || '';
 
       rows.push(html`
         <tr class="log-row" @click=${() => this.toggleExpand(entry.insertId)}>
@@ -620,7 +656,10 @@ export class ScionAgentLogViewer extends LitElement {
         rows.push(html`
           <tr class="detail-row">
             <td colspan="4">
-              <scion-json-browser .data=${this.buildDetailObject(entry)} expand-first></scion-json-browser>
+              <scion-json-browser
+                .data=${this.buildDetailObject(entry)}
+                expand-first
+              ></scion-json-browser>
             </td>
           </tr>
         `);

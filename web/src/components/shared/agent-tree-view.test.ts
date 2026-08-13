@@ -48,7 +48,9 @@ function agent(id: string, name: string, ancestry?: string[]): Agent {
 }
 
 function pressKey(key: string, init: KeyboardEventInit = {}, target: EventTarget = window): void {
-  target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, composed: true, ...init }));
+  target.dispatchEvent(
+    new KeyboardEvent('keydown', { key, bubbles: true, composed: true, ...init })
+  );
 }
 
 describe('scion-agent-tree-view keyboard shortcuts', () => {
@@ -68,7 +70,7 @@ describe('scion-agent-tree-view keyboard shortcuts', () => {
 
   it('toggles orientation on "t" and dispatches orientation-change', () => {
     let eventOrientation: string | null = null;
-    el.addEventListener('orientation-change', e => {
+    el.addEventListener('orientation-change', (e) => {
       eventOrientation = (e as CustomEvent<{ orientation: string }>).detail.orientation;
     });
 

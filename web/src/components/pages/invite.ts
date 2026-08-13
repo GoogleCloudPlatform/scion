@@ -199,7 +199,8 @@ export class ScionPageInvite extends LitElement {
         this.pageState = 'unauthenticated';
         return;
       } else {
-        this.errorMessage = 'Something went wrong. Please try again or contact your hub administrator.';
+        this.errorMessage =
+          'Something went wrong. Please try again or contact your hub administrator.';
       }
       this.pageState = 'error';
     } catch {
@@ -246,13 +247,21 @@ export class ScionPageInvite extends LitElement {
       <p>Sign in to accept your invitation and join the hub.</p>
       <div class="providers">
         ${this.googleEnabled
-          ? html`<sl-button variant="default" size="large" @click=${() => this.handleLogin('google')}>
+          ? html`<sl-button
+              variant="default"
+              size="large"
+              @click=${() => this.handleLogin('google')}
+            >
               <sl-icon slot="prefix" name="google"></sl-icon>
               Sign in with Google
             </sl-button>`
           : nothing}
         ${this.githubEnabled
-          ? html`<sl-button variant="default" size="large" @click=${() => this.handleLogin('github')}>
+          ? html`<sl-button
+              variant="default"
+              size="large"
+              @click=${() => this.handleLogin('github')}
+            >
               <sl-icon slot="prefix" name="github"></sl-icon>
               Sign in with GitHub
             </sl-button>`
@@ -266,7 +275,13 @@ export class ScionPageInvite extends LitElement {
       <sl-icon class="icon success" name="check-circle"></sl-icon>
       <h1>Welcome!</h1>
       <p>You now have access to this hub.</p>
-      <sl-button variant="primary" size="large" @click=${() => { window.location.href = '/'; }}>
+      <sl-button
+        variant="primary"
+        size="large"
+        @click=${() => {
+          window.location.href = '/';
+        }}
+      >
         Go to Dashboard
       </sl-button>
     `;
@@ -277,7 +292,12 @@ export class ScionPageInvite extends LitElement {
       <sl-icon class="icon error" name="exclamation-triangle"></sl-icon>
       <h1>Invite Not Valid</h1>
       <p>${this.errorMessage}</p>
-      <sl-button variant="default" @click=${() => { window.location.href = '/'; }}>
+      <sl-button
+        variant="default"
+        @click=${() => {
+          window.location.href = '/';
+        }}
+      >
         Go to Home
       </sl-button>
     `;
@@ -287,8 +307,15 @@ export class ScionPageInvite extends LitElement {
     return html`
       <sl-icon class="icon error" name="exclamation-triangle"></sl-icon>
       <h1>No Invite Code</h1>
-      <p>This page requires a valid invite link. Please ask your hub administrator for an invite.</p>
-      <sl-button variant="default" @click=${() => { window.location.href = '/'; }}>
+      <p>
+        This page requires a valid invite link. Please ask your hub administrator for an invite.
+      </p>
+      <sl-button
+        variant="default"
+        @click=${() => {
+          window.location.href = '/';
+        }}
+      >
         Go to Home
       </sl-button>
     `;

@@ -148,10 +148,18 @@ export class ScionDebugPanel extends LitElement {
       display: inline-block;
     }
 
-    .dot.green { background: #22c55e; }
-    .dot.yellow { background: #f59e0b; }
-    .dot.red { background: #ef4444; }
-    .dot.gray { background: #64748b; }
+    .dot.green {
+      background: #22c55e;
+    }
+    .dot.yellow {
+      background: #f59e0b;
+    }
+    .dot.red {
+      background: #ef4444;
+    }
+    .dot.gray {
+      background: #64748b;
+    }
 
     /* Panel - full height right side */
     .panel {
@@ -286,9 +294,15 @@ export class ScionDebugPanel extends LitElement {
       white-space: nowrap;
     }
 
-    .info-value.success { color: #22c55e; }
-    .info-value.warning { color: #f59e0b; }
-    .info-value.error { color: #ef4444; }
+    .info-value.success {
+      color: #22c55e;
+    }
+    .info-value.warning {
+      color: #f59e0b;
+    }
+    .info-value.error {
+      color: #ef4444;
+    }
 
     /* Status indicator */
     .status-row {
@@ -305,14 +319,28 @@ export class ScionDebugPanel extends LitElement {
       flex-shrink: 0;
     }
 
-    .status-dot.connected { background: #22c55e; }
-    .status-dot.reconnecting { background: #f59e0b; animation: pulse 1s infinite; }
-    .status-dot.disconnected { background: #ef4444; }
-    .status-dot.idle { background: #64748b; }
+    .status-dot.connected {
+      background: #22c55e;
+    }
+    .status-dot.reconnecting {
+      background: #f59e0b;
+      animation: pulse 1s infinite;
+    }
+    .status-dot.disconnected {
+      background: #ef4444;
+    }
+    .status-dot.idle {
+      background: #64748b;
+    }
 
     @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
+      0%,
+      100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.4;
+      }
     }
 
     /* Subject list */
@@ -388,9 +416,18 @@ export class ScionDebugPanel extends LitElement {
       flex-shrink: 0;
     }
 
-    .log-badge.sse { background: #1e3a5f; color: #60a5fa; }
-    .log-badge.state { background: #14532d; color: #4ade80; }
-    .log-badge.connection { background: #422006; color: #fbbf24; }
+    .log-badge.sse {
+      background: #1e3a5f;
+      color: #60a5fa;
+    }
+    .log-badge.state {
+      background: #14532d;
+      color: #4ade80;
+    }
+    .log-badge.connection {
+      background: #422006;
+      color: #fbbf24;
+    }
 
     .log-label {
       color: #e2e8f0;
@@ -577,8 +614,16 @@ export class ScionDebugPanel extends LitElement {
 
   private formatTime(ts: number): string {
     const d = new Date(ts);
-    return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    return (
+      d.toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }) +
+      '.' +
+      String(d.getMilliseconds()).padStart(3, '0')
+    );
   }
 
   private formatJson(data: unknown): string {
@@ -599,7 +644,14 @@ export class ScionDebugPanel extends LitElement {
     }
 
     const connStatus = this.getConnectionStatus();
-    const dotClass = connStatus === 'connected' ? 'green' : connStatus === 'reconnecting' ? 'yellow' : connStatus === 'idle' ? 'gray' : 'red';
+    const dotClass =
+      connStatus === 'connected'
+        ? 'green'
+        : connStatus === 'reconnecting'
+          ? 'yellow'
+          : connStatus === 'idle'
+            ? 'gray'
+            : 'red';
 
     return html`
       <button class="toggle-button" @click=${() => this.togglePanel()}>
@@ -616,11 +668,8 @@ export class ScionDebugPanel extends LitElement {
           </div>
         </div>
         <div class="panel-content">
-          ${this.renderConnectionStatus()}
-          ${this.renderCurrentScope()}
-          ${this.renderActiveSubscriptions()}
-          ${this.renderStateSummary()}
-          ${this.renderEventLog()}
+          ${this.renderConnectionStatus()} ${this.renderCurrentScope()}
+          ${this.renderActiveSubscriptions()} ${this.renderStateSummary()} ${this.renderEventLog()}
           ${this.renderAuthDebug()}
         </div>
       </div>
@@ -643,24 +692,30 @@ export class ScionDebugPanel extends LitElement {
           <span class="info-label">Endpoint</span>
           <span class="info-value">/events</span>
         </div>
-        ${debugLog.connectionId ? html`
-          <div class="info-row">
-            <span class="info-label">Connection ID</span>
-            <span class="info-value">${debugLog.connectionId}</span>
-          </div>
-        ` : nothing}
-        ${status !== 'idle' ? html`
-          <div class="info-row">
-            <span class="info-label">Reconnect Attempts</span>
-            <span class="info-value">${sse.reconnectAttemptCount}</span>
-          </div>
-        ` : nothing}
-        ${subjects.length > 0 ? html`
-          <div class="info-row">
-            <span class="info-label">Subjects</span>
-            <span class="info-value">${subjects.length}</span>
-          </div>
-        ` : nothing}
+        ${debugLog.connectionId
+          ? html`
+              <div class="info-row">
+                <span class="info-label">Connection ID</span>
+                <span class="info-value">${debugLog.connectionId}</span>
+              </div>
+            `
+          : nothing}
+        ${status !== 'idle'
+          ? html`
+              <div class="info-row">
+                <span class="info-label">Reconnect Attempts</span>
+                <span class="info-value">${sse.reconnectAttemptCount}</span>
+              </div>
+            `
+          : nothing}
+        ${subjects.length > 0
+          ? html`
+              <div class="info-row">
+                <span class="info-label">Subjects</span>
+                <span class="info-value">${subjects.length}</span>
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -699,10 +754,10 @@ export class ScionDebugPanel extends LitElement {
         ${subjects.length === 0
           ? html`<div class="empty-state">No active subscriptions</div>`
           : html`
-            <ul class="subject-list">
-              ${subjects.map(s => html`<li class="subject-item">${s}</li>`)}
-            </ul>
-          `}
+              <ul class="subject-list">
+                ${subjects.map((s) => html`<li class="subject-item">${s}</li>`)}
+              </ul>
+            `}
       </div>
     `;
   }
@@ -713,7 +768,12 @@ export class ScionDebugPanel extends LitElement {
     return html`
       <div class="section">
         <div class="section-title">
-          <span class="collapsible-title" @click=${() => { this.stateIdsExpanded = !this.stateIdsExpanded; }}>
+          <span
+            class="collapsible-title"
+            @click=${() => {
+              this.stateIdsExpanded = !this.stateIdsExpanded;
+            }}
+          >
             State Summary ${this.stateIdsExpanded ? '[-]' : '[+]'}
           </span>
         </div>
@@ -729,30 +789,50 @@ export class ScionDebugPanel extends LitElement {
           <span class="info-label">Brokers</span>
           <span class="info-value">${snap.brokerCount}</span>
         </div>
-        ${snap.deletedProjectIds.length > 0 ? html`
-          <div class="info-row">
-            <span class="info-label">Deleted Projects</span>
-            <span class="info-value warning">${snap.deletedProjectIds.length}</span>
-          </div>
-        ` : nothing}
-        ${this.stateIdsExpanded ? html`
-          ${snap.agentIds.length > 0 ? html`
-            <div class="info-label" style="margin-top: 0.4rem;">Agent IDs:</div>
-            <ul class="id-list">${snap.agentIds.map(id => html`<li>${id}</li>`)}</ul>
-          ` : nothing}
-          ${snap.projectIds.length > 0 ? html`
-            <div class="info-label" style="margin-top: 0.4rem;">Project IDs:</div>
-            <ul class="id-list">${snap.projectIds.map(id => html`<li>${id}</li>`)}</ul>
-          ` : nothing}
-          ${snap.brokerIds.length > 0 ? html`
-            <div class="info-label" style="margin-top: 0.4rem;">Broker IDs:</div>
-            <ul class="id-list">${snap.brokerIds.map(id => html`<li>${id}</li>`)}</ul>
-          ` : nothing}
-          ${snap.deletedProjectIds.length > 0 ? html`
-            <div class="info-label" style="margin-top: 0.4rem;">Deleted Project IDs:</div>
-            <ul class="id-list">${snap.deletedProjectIds.map(id => html`<li>${id}</li>`)}</ul>
-          ` : nothing}
-        ` : nothing}
+        ${snap.deletedProjectIds.length > 0
+          ? html`
+              <div class="info-row">
+                <span class="info-label">Deleted Projects</span>
+                <span class="info-value warning">${snap.deletedProjectIds.length}</span>
+              </div>
+            `
+          : nothing}
+        ${this.stateIdsExpanded
+          ? html`
+              ${snap.agentIds.length > 0
+                ? html`
+                    <div class="info-label" style="margin-top: 0.4rem;">Agent IDs:</div>
+                    <ul class="id-list">
+                      ${snap.agentIds.map((id) => html`<li>${id}</li>`)}
+                    </ul>
+                  `
+                : nothing}
+              ${snap.projectIds.length > 0
+                ? html`
+                    <div class="info-label" style="margin-top: 0.4rem;">Project IDs:</div>
+                    <ul class="id-list">
+                      ${snap.projectIds.map((id) => html`<li>${id}</li>`)}
+                    </ul>
+                  `
+                : nothing}
+              ${snap.brokerIds.length > 0
+                ? html`
+                    <div class="info-label" style="margin-top: 0.4rem;">Broker IDs:</div>
+                    <ul class="id-list">
+                      ${snap.brokerIds.map((id) => html`<li>${id}</li>`)}
+                    </ul>
+                  `
+                : nothing}
+              ${snap.deletedProjectIds.length > 0
+                ? html`
+                    <div class="info-label" style="margin-top: 0.4rem;">Deleted Project IDs:</div>
+                    <ul class="id-list">
+                      ${snap.deletedProjectIds.map((id) => html`<li>${id}</li>`)}
+                    </ul>
+                  `
+                : nothing}
+            `
+          : nothing}
       </div>
     `;
   }
@@ -767,10 +847,10 @@ export class ScionDebugPanel extends LitElement {
         ${this.logEntries.length === 0
           ? html`<div class="empty-state">No events captured</div>`
           : html`
-            <ul class="event-log-list" @scroll=${() => this.handleLogScroll()}>
-              ${this.logEntries.map(entry => this.renderLogEntry(entry))}
-            </ul>
-          `}
+              <ul class="event-log-list" @scroll=${() => this.handleLogScroll()}>
+                ${this.logEntries.map((entry) => this.renderLogEntry(entry))}
+              </ul>
+            `}
       </div>
     `;
   }
@@ -786,9 +866,9 @@ export class ScionDebugPanel extends LitElement {
           <span class="log-label">${entry.label}</span>
           ${entry.subject ? html`<span class="log-subject">${entry.subject}</span>` : nothing}
         </div>
-        ${isExpanded && entry.data != null ? html`
-          <div class="log-detail">${this.formatJson(entry.data)}</div>
-        ` : nothing}
+        ${isExpanded && entry.data != null
+          ? html` <div class="log-detail">${this.formatJson(entry.data)}</div> `
+          : nothing}
       </li>
     `;
   }
@@ -797,19 +877,34 @@ export class ScionDebugPanel extends LitElement {
     return html`
       <div class="section">
         <div class="section-title">
-          <span class="collapsible-title" @click=${() => { this.authExpanded = !this.authExpanded; }}>
+          <span
+            class="collapsible-title"
+            @click=${() => {
+              this.authExpanded = !this.authExpanded;
+            }}
+          >
             Auth Debug ${this.authExpanded ? '[-]' : '[+]'}
           </span>
-          ${this.authExpanded ? html`
-            <button class="action-button" ?disabled=${this.loading} @click=${() => this.loadDebugData()}>
-              ${this.loading ? 'Loading...' : 'Refresh'}
-            </button>
-          ` : nothing}
+          ${this.authExpanded
+            ? html`
+                <button
+                  class="action-button"
+                  ?disabled=${this.loading}
+                  @click=${() => this.loadDebugData()}
+                >
+                  ${this.loading ? 'Loading...' : 'Refresh'}
+                </button>
+              `
+            : nothing}
         </div>
-        ${this.authExpanded ? html`
-          ${this.error ? html`<div class="error-message">${this.error}</div>` : nothing}
-          ${this.loading ? html`<div class="empty-state">Loading...</div>` : this.renderAuthData()}
-        ` : nothing}
+        ${this.authExpanded
+          ? html`
+              ${this.error ? html`<div class="error-message">${this.error}</div>` : nothing}
+              ${this.loading
+                ? html`<div class="empty-state">Loading...</div>`
+                : this.renderAuthData()}
+            `
+          : nothing}
       </div>
     `;
   }

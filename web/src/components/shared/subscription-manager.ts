@@ -38,7 +38,14 @@ interface SubscriptionTemplate {
 }
 
 const DEFAULT_TRIGGERS = ['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED'];
-const ALL_TRIGGERS = ['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED', 'STALLED', 'ERROR', 'DELETED'];
+const ALL_TRIGGERS = [
+  'COMPLETED',
+  'WAITING_FOR_INPUT',
+  'LIMITS_EXCEEDED',
+  'STALLED',
+  'ERROR',
+  'DELETED',
+];
 
 @customElement('scion-subscription-manager')
 export class ScionSubscriptionManager extends LitElement {
@@ -96,10 +103,15 @@ export class ScionSubscriptionManager extends LitElement {
       const response = await apiFetch(url);
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
-      const data = (await response.json()) as Subscription[] | { subscriptions?: Subscription[] } | null;
+      const data = (await response.json()) as
+        | Subscription[]
+        | { subscriptions?: Subscription[] }
+        | null;
       if (data == null) {
         this.subscriptions = [];
       } else if (Array.isArray(data)) {
@@ -296,7 +308,9 @@ export class ScionSubscriptionManager extends LitElement {
         </div>
 
         ${this.loading
-          ? html`<div class="section-loading"><sl-spinner></sl-spinner> Loading subscriptions...</div>`
+          ? html`<div class="section-loading">
+              <sl-spinner></sl-spinner> Loading subscriptions...
+            </div>`
           : this.error
             ? html`
                 <div class="section-error">
@@ -309,11 +323,17 @@ export class ScionSubscriptionManager extends LitElement {
                   <div class="empty-state">
                     <sl-icon name="bell-slash"></sl-icon>
                     <h3>No Subscriptions</h3>
-                    <p>${this.projectId
-                      ? 'Subscribe to get notified about agent activity in this project.'
-                      : 'You have no notification subscriptions. Subscribe from a project or agent page.'}</p>
+                    <p>
+                      ${this.projectId
+                        ? 'Subscribe to get notified about agent activity in this project.'
+                        : 'You have no notification subscriptions. Subscribe from a project or agent page.'}
+                    </p>
                     ${this.projectId
-                      ? html`<sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
+                      ? html`<sl-button
+                          variant="primary"
+                          size="small"
+                          @click=${this.openCreateDialog}
+                        >
                           <sl-icon slot="prefix" name="bell"></sl-icon>
                           Subscribe
                         </sl-button>`
@@ -321,7 +341,6 @@ export class ScionSubscriptionManager extends LitElement {
                   </div>
                 `
               : this.renderTable()}
-
         ${this.renderDialog()}
       </div>
     `;
@@ -368,7 +387,6 @@ export class ScionSubscriptionManager extends LitElement {
             </div>
           `
         : this.renderTable()}
-
       ${this.renderDialog()}
     `;
   }
@@ -406,7 +424,10 @@ export class ScionSubscriptionManager extends LitElement {
       <tr>
         <td>
           <span class="key-info">
-            <sl-icon name=${scopeIcon} style="color: var(--scion-primary, #3b82f6); flex-shrink: 0;"></sl-icon>
+            <sl-icon
+              name=${scopeIcon}
+              style="color: var(--scion-primary, #3b82f6); flex-shrink: 0;"
+            ></sl-icon>
             <span>${sub.scope}</span>
           </span>
         </td>
@@ -486,10 +507,7 @@ export class ScionSubscriptionManager extends LitElement {
         @sl-request-close=${this.closeDialog}
       >
         <form class="dialog-form" @submit=${this.handleCreate}>
-          ${this.dialogError
-            ? html`<div class="dialog-error">${this.dialogError}</div>`
-            : nothing}
-
+          ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
           ${!this.agentId
             ? html`
                 <div class="radio-field">
@@ -497,7 +515,8 @@ export class ScionSubscriptionManager extends LitElement {
                   <sl-radio-group
                     .value=${this.dialogScope}
                     @sl-change=${(e: Event) =>
-                      (this.dialogScope = (e.target as HTMLInputElement).value as SubscriptionScope)}
+                      (this.dialogScope = (e.target as HTMLInputElement)
+                        .value as SubscriptionScope)}
                   >
                     <sl-radio-button value="project">Entire Project</sl-radio-button>
                     <sl-radio-button value="agent">Specific Agent</sl-radio-button>
@@ -510,7 +529,6 @@ export class ScionSubscriptionManager extends LitElement {
                 </div>
               `
             : nothing}
-
           ${this.dialogScope === 'agent' && !this.agentId
             ? html`
                 <sl-input
@@ -523,7 +541,6 @@ export class ScionSubscriptionManager extends LitElement {
                 ></sl-input>
               `
             : nothing}
-
           ${this.templates.length > 0
             ? html`
                 <div class="radio-field">
@@ -539,9 +556,7 @@ export class ScionSubscriptionManager extends LitElement {
                     }}
                   >
                     ${this.templates.map(
-                      (tmpl) => html`
-                        <sl-option value=${tmpl.id}>${tmpl.name}</sl-option>
-                      `
+                      (tmpl) => html` <sl-option value=${tmpl.id}>${tmpl.name}</sl-option> `
                     )}
                   </sl-select>
                 </div>
@@ -586,7 +601,8 @@ export class ScionSubscriptionManager extends LitElement {
           ?loading=${this.dialogLoading}
           ?disabled=${this.dialogTriggers.size === 0}
           @click=${this.handleCreate}
-        >Subscribe</sl-button>
+          >Subscribe</sl-button
+        >
       </sl-dialog>
     `;
   }

@@ -21,12 +21,7 @@
  * notification surface across the entire frontend. Replaces native `alert()`.
  */
 
-export type ToastVariant =
-  | 'primary'
-  | 'success'
-  | 'neutral'
-  | 'warning'
-  | 'danger';
+export type ToastVariant = 'primary' | 'success' | 'neutral' | 'warning' | 'danger';
 
 export interface ToastOptions {
   /** Shoelace icon name. Defaults to a variant-appropriate icon. */
@@ -65,7 +60,7 @@ const DEFAULT_DURATIONS: Record<ToastVariant, number> = {
 export function showToast(
   message: string,
   variant: ToastVariant = 'danger',
-  options?: ToastOptions,
+  options?: ToastOptions
 ): void {
   const icon = options?.icon ?? DEFAULT_ICONS[variant];
   const duration = options?.duration ?? DEFAULT_DURATIONS[variant];
@@ -90,9 +85,13 @@ export function showToast(
 
   // Remove the alert element from the DOM after it hides to prevent
   // accumulation — same pattern used in confirm-dialog.ts.
-  alert.addEventListener('sl-after-hide', () => {
-    alert.remove();
-  }, { once: true });
+  alert.addEventListener(
+    'sl-after-hide',
+    () => {
+      alert.remove();
+    },
+    { once: true }
+  );
 
   document.body.appendChild(alert);
   void (alert as HTMLElement & { toast(): Promise<void> }).toast();

@@ -89,7 +89,9 @@ export class ScionSecretList extends LitElement {
       const response = await apiFetch(url);
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const data = (await response.json()) as { secrets?: Secret[] } | Secret[];
@@ -151,7 +153,11 @@ export class ScionSecretList extends LitElement {
 
     try {
       const body: Record<string, unknown> = {
-        value: btoa(Array.from(new TextEncoder().encode(this.dialogValue), b => String.fromCharCode(b)).join('')),
+        value: btoa(
+          Array.from(new TextEncoder().encode(this.dialogValue), (b) =>
+            String.fromCharCode(b)
+          ).join('')
+        ),
         scope: this.scope,
         description: this.dialogDescription || undefined,
         type: this.dialogType,
@@ -171,7 +177,9 @@ export class ScionSecretList extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       this.closeDialog();
@@ -185,7 +193,10 @@ export class ScionSecretList extends LitElement {
   }
 
   private async handleDelete(secret: Secret, event?: MouseEvent): Promise<void> {
-    if (!event?.altKey && !(await showConfirm(`Delete secret "${secret.key}"? This cannot be undone.`))) {
+    if (
+      !event?.altKey &&
+      !(await showConfirm(`Delete secret "${secret.key}"? This cannot be undone.`))
+    ) {
       return;
     }
 
@@ -199,7 +210,9 @@ export class ScionSecretList extends LitElement {
       const response = await apiFetch(deleteUrl, { method: 'DELETE' });
 
       if (!response.ok && response.status !== 204) {
-        throw new Error(await extractApiError(response, `Failed to delete (HTTP ${response.status})`));
+        throw new Error(
+          await extractApiError(response, `Failed to delete (HTTP ${response.status})`)
+        );
       }
 
       await this.loadSecrets();
@@ -302,8 +315,9 @@ export class ScionSecretList extends LitElement {
           <div class="section-header-info">
             <h2>Secrets</h2>
             <p>
-              Manage encrypted secrets for ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'}. Values are write-only and cannot be
-              retrieved after saving.
+              Manage encrypted secrets for
+              ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'}. Values
+              are write-only and cannot be retrieved after saving.
             </p>
           </div>
           <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
@@ -376,17 +390,25 @@ export class ScionSecretList extends LitElement {
             : html`<span class="badge inject-always">always</span>`}
         </td>
         ${this.scope === 'user'
-          ? html`<td>${secret.allowProgeny ? html`<sl-icon name="check-lg" title="Progeny can access"></sl-icon>` : '\u2014'}</td>`
+          ? html`<td>
+              ${secret.allowProgeny
+                ? html`<sl-icon name="check-lg" title="Progeny can access"></sl-icon>`
+                : '\u2014'}
+            </td>`
           : nothing}
         <td class="description-cell hide-mobile">${secret.description || '\u2014'}</td>
         <td>
           ${secret.secretRef
-            ? html`<sl-tooltip content=${this.copiedSecretKey === secret.key ? 'Copied!' : secret.secretRef} hoist>
+            ? html`<sl-tooltip
+                content=${this.copiedSecretKey === secret.key ? 'Copied!' : secret.secretRef}
+                hoist
+              >
                 <span
                   class="version-badge version-badge-copyable"
                   @click=${() => this.copySecretRef(secret)}
                   title=""
-                >v${secret.version}</span>
+                  >v${secret.version}</span
+                >
               </sl-tooltip>`
             : html`<span class="version-badge">v${secret.version}</span>`}
         </td>
@@ -418,7 +440,11 @@ export class ScionSecretList extends LitElement {
         <h3>No Secrets</h3>
         <p>
           Add encrypted secrets that will be securely injected into
-          ${this.compact ? (this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project') : 'your agents'}.
+          ${this.compact
+            ? this.scope === 'hub'
+              ? 'all agents on this hub'
+              : 'agents in this project'
+            : 'your agents'}.
         </p>
         <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -542,11 +568,11 @@ export class ScionSecretList extends LitElement {
                   Allow agent progeny to access
                 </sl-switch>
                 <span class="radio-field-help">
-                  When enabled, agents spawned by your agents (and their descendants) will also receive this secret.
+                  When enabled, agents spawned by your agents (and their descendants) will also
+                  receive this secret.
                 </span>
               `
             : nothing}
-
           ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
         </form>
 

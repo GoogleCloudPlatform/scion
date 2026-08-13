@@ -24,7 +24,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Agent, AgentPhase, AgentActivity, ExposedPort } from '../../shared/types.js';
+import type {
+  PageData,
+  Agent,
+  AgentPhase,
+  AgentActivity,
+  ExposedPort,
+} from '../../shared/types.js';
 import { isTerminalAvailable } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -107,11 +113,11 @@ export class ScionPageTerminal extends LitElement {
   // --- Drag-and-drop file upload state ---
   @state() private uploadEnabled = false;
   @state() private uploadDisabledReason = '';
-  @state() private uploadTargetDir = '';     // shared dir name (e.g. "scratchpad")
-  @state() private uploadBasePath = '';      // container path (e.g. "/scion-volumes/scratchpad")
+  @state() private uploadTargetDir = ''; // shared dir name (e.g. "scratchpad")
+  @state() private uploadBasePath = ''; // container path (e.g. "/scion-volumes/scratchpad")
   @state() private isDragOver = false;
   @state() private isUploading = false;
-  @state() private uploadStatus = '';        // progress/error message in overlay
+  @state() private uploadStatus = ''; // progress/error message in overlay
 
   private terminal: Terminal | null = null;
   private fitAddon: FitAddon | null = null;
@@ -258,7 +264,9 @@ export class ScionPageTerminal extends LitElement {
       cursor: pointer;
       line-height: 1;
       padding: 0;
-      transition: color 0.15s, background 0.15s;
+      transition:
+        color 0.15s,
+        background 0.15s;
     }
 
     .toggle-group button:first-child {
@@ -427,7 +435,9 @@ export class ScionPageTerminal extends LitElement {
       font-size: 0.75rem;
       text-decoration: none;
       white-space: nowrap;
-      transition: border-color 0.15s, background 0.15s;
+      transition:
+        border-color 0.15s,
+        background 0.15s;
       animation: port-appear 0.3s ease-out;
       cursor: pointer;
     }
@@ -439,8 +449,14 @@ export class ScionPageTerminal extends LitElement {
     }
 
     @keyframes port-appear {
-      from { opacity: 0; transform: scale(0.9); }
-      to   { opacity: 1; transform: scale(1); }
+      from {
+        opacity: 0;
+        transform: scale(0.9);
+      }
+      to {
+        opacity: 1;
+        transform: scale(1);
+      }
     }
 
     /* Port dropdown for 4+ ports */
@@ -516,8 +532,12 @@ export class ScionPageTerminal extends LitElement {
     // Prevent the browser from navigating to a dropped file (which would
     // destroy the terminal session). Must be on window, not the drop target,
     // to catch near-miss drops outside the wrapper.
-    this._windowDragOver = (e: DragEvent) => { e.preventDefault(); };
-    this._windowDrop = (e: DragEvent) => { e.preventDefault(); };
+    this._windowDragOver = (e: DragEvent) => {
+      e.preventDefault();
+    };
+    this._windowDrop = (e: DragEvent) => {
+      e.preventDefault();
+    };
     window.addEventListener('dragover', this._windowDragOver);
     window.addEventListener('drop', this._windowDrop);
 
@@ -539,7 +559,9 @@ export class ScionPageTerminal extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const agent = (await response.json()) as Agent;
@@ -558,9 +580,10 @@ export class ScionPageTerminal extends LitElement {
       }
 
       if (!isTerminalAvailable(agent)) {
-        this.error = agent.activity === 'offline'
-          ? 'Agent is offline. Terminal is not available while the agent is unreachable.'
-          : `Agent phase is ${agent.phase}. Terminal is not available until the agent has started.`;
+        this.error =
+          agent.activity === 'offline'
+            ? 'Agent is offline. Terminal is not available while the agent is unreachable.'
+            : `Agent phase is ${agent.phase}. Terminal is not available until the agent has started.`;
         this.loading = false;
         return;
       }
@@ -714,7 +737,13 @@ export class ScionPageTerminal extends LitElement {
       // Shift+Enter: send ESC CR (\x1b\r) so that inner applications
       // (e.g. claude-code) can distinguish it from plain Enter.
       // This matches what native terminals send for Alt+Enter / Alt+Shift+Enter.
-      if (event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      if (
+        event.key === 'Enter' &&
+        event.shiftKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey
+      ) {
         if (event.type === 'keydown') {
           console.debug('[Terminal] Shift+Enter detected, sending ESC CR');
           this.sendData('\x1b\r');
@@ -797,12 +826,15 @@ export class ScionPageTerminal extends LitElement {
     const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
     if (!isMac || !this.terminal) return;
 
-    const selectionService = (this.terminal as Terminal & {
-      _core?: { _selectionService?: { shouldForceSelection?: (event: MouseEvent) => boolean } };
-    })._core?._selectionService;
+    const selectionService = (
+      this.terminal as Terminal & {
+        _core?: { _selectionService?: { shouldForceSelection?: (event: MouseEvent) => boolean } };
+      }
+    )._core?._selectionService;
     if (!selectionService?.shouldForceSelection) return;
 
-    const originalShouldForceSelection = selectionService.shouldForceSelection.bind(selectionService);
+    const originalShouldForceSelection =
+      selectionService.shouldForceSelection.bind(selectionService);
     selectionService.shouldForceSelection = (event: MouseEvent): boolean => {
       return event.shiftKey || originalShouldForceSelection(event);
     };
@@ -834,7 +866,11 @@ export class ScionPageTerminal extends LitElement {
       try {
         const raw = event.data;
         if (typeof raw !== 'string') {
-          console.warn('[Terminal] Received non-string message frame (binary/Blob), type:', typeof raw, raw);
+          console.warn(
+            '[Terminal] Received non-string message frame (binary/Blob), type:',
+            typeof raw,
+            raw
+          );
           return;
         }
         const msg = JSON.parse(raw) as PTYMessage;
@@ -906,7 +942,11 @@ export class ScionPageTerminal extends LitElement {
         return;
       }
       const data = await resp.json();
-      const dirs = (data.sharedDirs ?? []) as Array<{ name: string; read_only?: boolean; in_workspace?: boolean }>;
+      const dirs = (data.sharedDirs ?? []) as Array<{
+        name: string;
+        read_only?: boolean;
+        in_workspace?: boolean;
+      }>;
       // Filter: writable, non-in_workspace
       const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace);
       const target = candidates.find((d) => d.name === 'scratchpad') || candidates[0];
@@ -957,7 +997,7 @@ export class ScionPageTerminal extends LitElement {
 
   private async _handleFileDrop(files: FileList): Promise<void> {
     // Client-side size validation
-    const MAX_FILE = 50 * 1024 * 1024;  // 50MB
+    const MAX_FILE = 50 * 1024 * 1024; // 50MB
     const MAX_TOTAL = 100 * 1024 * 1024; // 100MB
     let total = 0;
     for (const f of files) {
@@ -973,9 +1013,10 @@ export class ScionPageTerminal extends LitElement {
     }
 
     this.isUploading = true;
-    const batchId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
-      ? crypto.randomUUID()
-      : Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+    const batchId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
     const formData = new FormData();
     const paths: string[] = [];
 
@@ -1180,7 +1221,7 @@ export class ScionPageTerminal extends LitElement {
         return;
       }
 
-      const result = await response.json() as { output: string; exitCode: number };
+      const result = (await response.json()) as { output: string; exitCode: number };
 
       if (result.exitCode === 0) {
         showToast('Credentials captured successfully.', 'success');
@@ -1212,30 +1253,42 @@ export class ScionPageTerminal extends LitElement {
   private renderCaptureAuthConflictDialog() {
     if (!this.captureAuthConflicts) return nothing;
     const secrets = this.captureAuthConflicts;
-    const label = secrets.length === 1
-      ? `Secret "${secrets[0]}" already exists`
-      : `${secrets.length} secrets already exist`;
+    const label =
+      secrets.length === 1
+        ? `Secret "${secrets[0]}" already exists`
+        : `${secrets.length} secrets already exist`;
     return html`
       <sl-dialog
         label=${label}
         open
-        @sl-request-close=${() => { if (!this.captureAuthLoading) this.captureAuthConflicts = null; }}
+        @sl-request-close=${() => {
+          if (!this.captureAuthLoading) this.captureAuthConflicts = null;
+        }}
       >
-        <p>The following secret${secrets.length > 1 ? 's' : ''} already exist${secrets.length === 1 ? 's' : ''}:</p>
-        <ul>${secrets.map(s => html`<li><code>${s}</code></li>`)}</ul>
+        <p>
+          The following secret${secrets.length > 1 ? 's' : ''} already
+          exist${secrets.length === 1 ? 's' : ''}:
+        </p>
+        <ul>
+          ${secrets.map((s) => html`<li><code>${s}</code></li>`)}
+        </ul>
         <p>Do you want to force-update ${secrets.length > 1 ? 'them' : 'it'}?</p>
         <sl-button
           slot="footer"
           variant="default"
           ?disabled=${this.captureAuthLoading}
-          @click=${() => { this.captureAuthConflicts = null; }}
-        >Cancel</sl-button>
+          @click=${() => {
+            this.captureAuthConflicts = null;
+          }}
+          >Cancel</sl-button
+        >
         <sl-button
           slot="footer"
           variant="warning"
           ?loading=${this.captureAuthLoading}
           @click=${() => void this.handleCaptureAuth(true)}
-        >Force Update</sl-button>
+          >Force Update</sl-button
+        >
       </sl-dialog>
     `;
   }
@@ -1263,22 +1316,51 @@ export class ScionPageTerminal extends LitElement {
 
   /** Robot icon (agent) */
   private renderRobotIcon() {
-    return html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><line x1="12" y1="7" x2="12" y2="11"/><line x1="8" y1="16" x2="8" y2="16" stroke-width="3" stroke-linecap="round"/><line x1="16" y1="16" x2="16" y2="16" stroke-width="3" stroke-linecap="round"/></svg>`;
+    return html`<svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <rect x="3" y="11" width="18" height="10" rx="2" />
+      <circle cx="12" cy="5" r="2" />
+      <line x1="12" y1="7" x2="12" y2="11" />
+      <line x1="8" y1="16" x2="8" y2="16" stroke-width="3" stroke-linecap="round" />
+      <line x1="16" y1="16" x2="16" y2="16" stroke-width="3" stroke-linecap="round" />
+    </svg>`;
   }
 
   /** Terminal/shell icon */
   private renderTerminalIcon() {
-    return html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
+    return html`<svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <polyline points="4 17 10 11 4 5" />
+      <line x1="12" y1="19" x2="20" y2="19" />
+    </svg>`;
   }
 
   override render() {
     if (this.loading) {
       return html`
         <div class="toolbar">
-          ${this.projectId ? html`<a href="/projects/${this.projectId}" class="back-link">&larr; Back to Project</a>` : ''}
-          <a href="/agents/${this.agentId}" class="back-link">
-            &larr; Back to Agent
-          </a>
+          ${this.projectId
+            ? html`<a href="/projects/${this.projectId}" class="back-link"
+                >&larr; Back to Project</a
+              >`
+            : ''}
+          <a href="/agents/${this.agentId}" class="back-link"> &larr; Back to Agent </a>
         </div>
         <div class="loading-state">
           <div class="spinner"></div>
@@ -1290,10 +1372,12 @@ export class ScionPageTerminal extends LitElement {
     if (this.error && !this.terminal) {
       return html`
         <div class="toolbar">
-          ${this.projectId ? html`<a href="/projects/${this.projectId}" class="back-link">&larr; Back to Project</a>` : ''}
-          <a href="/agents/${this.agentId}" class="back-link">
-            &larr; Back to Agent
-          </a>
+          ${this.projectId
+            ? html`<a href="/projects/${this.projectId}" class="back-link"
+                >&larr; Back to Project</a
+              >`
+            : ''}
+          <a href="/agents/${this.agentId}" class="back-link"> &larr; Back to Agent </a>
           ${this.agentName
             ? html`
                 <div class="separator"></div>
@@ -1311,10 +1395,10 @@ export class ScionPageTerminal extends LitElement {
 
     return html`
       <div class="toolbar">
-        ${this.projectId ? html`<a href="/projects/${this.projectId}" class="back-link">&larr; Back to Project</a>` : ''}
-        <a href="/agents/${this.agentId}" class="back-link">
-          &larr; Back to Agent
-        </a>
+        ${this.projectId
+          ? html`<a href="/projects/${this.projectId}" class="back-link">&larr; Back to Project</a>`
+          : ''}
+        <a href="/agents/${this.agentId}" class="back-link"> &larr; Back to Agent </a>
         <div class="separator"></div>
         <span class="agent-name">${this.agentName || this.agentId}</span>
         <div class="toggle-group" title="Switch between agent and shell tmux windows">
@@ -1323,13 +1407,17 @@ export class ScionPageTerminal extends LitElement {
             title="Agent window"
             @click=${() => this.switchToAgent()}
             ?disabled=${!this.connected}
-          >${this.renderRobotIcon()}</button>
+          >
+            ${this.renderRobotIcon()}
+          </button>
           <button
             class=${this.activeWindow === 'shell' ? 'active' : ''}
             title="Shell window"
             @click=${() => this.switchToShell()}
             ?disabled=${!this.connected}
-          >${this.renderTerminalIcon()}</button>
+          >
+            ${this.renderTerminalIcon()}
+          </button>
         </div>
         <div class="spacer"></div>
         ${this.renderPortButtons()}
@@ -1383,15 +1471,20 @@ export class ScionPageTerminal extends LitElement {
               <span class="overlay-text">DISCONNECTED</span>
             </div>`
           : ''}
-        <div class="drop-overlay ${this.isDragOver || this.uploadStatus ? 'visible' : ''} ${!this.uploadEnabled ? 'disabled' : ''}">
+        <div
+          class="drop-overlay ${this.isDragOver || this.uploadStatus ? 'visible' : ''} ${!this
+            .uploadEnabled
+            ? 'disabled'
+            : ''}"
+        >
           ${this.isUploading
             ? html`<sl-spinner></sl-spinner><span>${this.uploadStatus}</span>`
             : this.uploadStatus
               ? html`<sl-icon name="x-circle"></sl-icon><span>${this.uploadStatus}</span>`
               : this.uploadEnabled
                 ? html`<sl-icon name="cloud-upload"></sl-icon><span>Drop files to upload</span>`
-                : html`<sl-icon name="x-circle"></sl-icon><span>${this.uploadDisabledReason}</span>`
-          }
+                : html`<sl-icon name="x-circle"></sl-icon
+                    ><span>${this.uploadDisabledReason}</span>`}
         </div>
       </div>
       ${this.renderCaptureAuthConflictDialog()}

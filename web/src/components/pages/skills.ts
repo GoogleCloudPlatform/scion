@@ -219,10 +219,14 @@ export class ScionPageSkills extends LitElement {
           this.sortField = parsed.field;
           this.sortDir = parsed.dir;
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
 
-    const ssrData = this.pageData?.data as { skills?: Skill[]; _capabilities?: Capabilities } | undefined;
+    const ssrData = this.pageData?.data as
+      | { skills?: Skill[]; _capabilities?: Capabilities }
+      | undefined;
     if (ssrData?.skills && this.scopeFilter === '' && !this.searchQuery) {
       this.skills = ssrData.skills;
       this.scopeCapabilities = ssrData._capabilities;
@@ -244,10 +248,14 @@ export class ScionPageSkills extends LitElement {
 
       const response = await apiFetch(`/api/v1/skills?${params.toString()}`);
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
-      const data = (await response.json()) as { skills?: Skill[]; items?: Skill[]; _capabilities?: Capabilities } | Skill[];
+      const data = (await response.json()) as
+        | { skills?: Skill[]; items?: Skill[]; _capabilities?: Capabilities }
+        | Skill[];
       if (Array.isArray(data)) {
         this.skills = data;
         this.scopeCapabilities = undefined;
@@ -324,7 +332,10 @@ export class ScionPageSkills extends LitElement {
       this.sortField = field;
       this.sortDir = field === 'name' ? 'asc' : 'desc';
     }
-    localStorage.setItem('scion-sort-skills', JSON.stringify({ field: this.sortField, dir: this.sortDir }));
+    localStorage.setItem(
+      'scion-sort-skills',
+      JSON.stringify({ field: this.sortField, dir: this.sortDir })
+    );
   }
 
   private sortIndicator(field: SkillSortField): string {
@@ -342,21 +353,24 @@ export class ScionPageSkills extends LitElement {
             storageKey="scion-view-skills"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
-          ${can(this.scopeCapabilities, 'create') ? html`
-            <a href="/skills/new" style="text-decoration: none;">
-              <sl-button variant="primary" size="small">
-                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                Create Skill
-              </sl-button>
-            </a>
-          ` : nothing}
+          ${can(this.scopeCapabilities, 'create')
+            ? html`
+                <a href="/skills/new" style="text-decoration: none;">
+                  <sl-button variant="primary" size="small">
+                    <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                    Create Skill
+                  </sl-button>
+                </a>
+              `
+            : nothing}
         </div>
       </div>
 
-      ${this.loading ? this.renderLoading() : this.error ? this.renderError() : html`
-        ${this.renderFilterBar()}
-        ${this.renderSkills()}
-      `}
+      ${this.loading
+        ? this.renderLoading()
+        : this.error
+          ? this.renderError()
+          : html` ${this.renderFilterBar()} ${this.renderSkills()} `}
     `;
   }
 
@@ -386,19 +400,33 @@ export class ScionPageSkills extends LitElement {
           <sl-option value="project">Project</sl-option>
           <sl-option value="user">User</sl-option>
         </sl-select>
-        ${this.viewMode === 'grid' ? html`
-          <sl-dropdown>
-            <sl-button slot="trigger" size="small" outline>
-              <sl-icon slot="prefix" name=${this.sortDir === 'asc' ? 'sort-alpha-down' : 'sort-alpha-down-alt'}></sl-icon>
-              Sort: ${this.sortField}
-            </sl-button>
-            <sl-menu @sl-select=${(e: CustomEvent<{ item: { value: string } }>) => this.toggleSort(e.detail.item.value as SkillSortField)}>
-              <sl-menu-item value="name" ?checked=${this.sortField === 'name'}>Name</sl-menu-item>
-              <sl-menu-item value="created" ?checked=${this.sortField === 'created'}>Created</sl-menu-item>
-              <sl-menu-item value="updated" ?checked=${this.sortField === 'updated'}>Updated</sl-menu-item>
-            </sl-menu>
-          </sl-dropdown>
-        ` : nothing}
+        ${this.viewMode === 'grid'
+          ? html`
+              <sl-dropdown>
+                <sl-button slot="trigger" size="small" outline>
+                  <sl-icon
+                    slot="prefix"
+                    name=${this.sortDir === 'asc' ? 'sort-alpha-down' : 'sort-alpha-down-alt'}
+                  ></sl-icon>
+                  Sort: ${this.sortField}
+                </sl-button>
+                <sl-menu
+                  @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
+                    this.toggleSort(e.detail.item.value as SkillSortField)}
+                >
+                  <sl-menu-item value="name" ?checked=${this.sortField === 'name'}
+                    >Name</sl-menu-item
+                  >
+                  <sl-menu-item value="created" ?checked=${this.sortField === 'created'}
+                    >Created</sl-menu-item
+                  >
+                  <sl-menu-item value="updated" ?checked=${this.sortField === 'updated'}
+                    >Updated</sl-menu-item
+                  >
+                </sl-menu>
+              </sl-dropdown>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -452,23 +480,30 @@ export class ScionPageSkills extends LitElement {
         <sl-icon name="lightning-charge"></sl-icon>
         <h2>No Skills Found</h2>
         <p>
-          Skills are reusable capabilities for agents.${can(this.scopeCapabilities, 'create') ? ' Create your first skill to get started.' : ''}
+          Skills are reusable capabilities for
+          agents.${can(this.scopeCapabilities, 'create')
+            ? ' Create your first skill to get started.'
+            : ''}
         </p>
-        ${can(this.scopeCapabilities, 'create') ? html`
-          <a href="/skills/new" style="text-decoration: none;">
-            <sl-button variant="primary">
-              <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-              Create Skill
-            </sl-button>
-          </a>
-        ` : nothing}
+        ${can(this.scopeCapabilities, 'create')
+          ? html`
+              <a href="/skills/new" style="text-decoration: none;">
+                <sl-button variant="primary">
+                  <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                  Create Skill
+                </sl-button>
+              </a>
+            `
+          : nothing}
       </div>
     `;
   }
 
   private renderGrid() {
     return html`
-      <div class="resource-grid">${this.displaySkills.map((skill) => this.renderSkillCard(skill))}</div>
+      <div class="resource-grid">
+        ${this.displaySkills.map((skill) => this.renderSkillCard(skill))}
+      </div>
     `;
   }
 
@@ -488,17 +523,18 @@ export class ScionPageSkills extends LitElement {
           </div>
         </div>
 
-        ${skill.description ? html`<div class="skill-description">${skill.description}</div>` : nothing}
+        ${skill.description
+          ? html`<div class="skill-description">${skill.description}</div>`
+          : nothing}
+        ${skill.tags?.length
+          ? html`
+              <div class="skill-tags">
+                ${skill.tags.map((tag) => html`<span class="skill-tag">${tag}</span>`)}
+              </div>
+            `
+          : nothing}
 
-        ${skill.tags?.length ? html`
-          <div class="skill-tags">
-            ${skill.tags.map((tag) => html`<span class="skill-tag">${tag}</span>`)}
-          </div>
-        ` : nothing}
-
-        <div class="skill-footer">
-          Updated ${this.formatRelativeTime(skill.updated)}
-        </div>
+        <div class="skill-footer">Updated ${this.formatRelativeTime(skill.updated)}</div>
       </a>
     `;
   }
@@ -512,14 +548,18 @@ export class ScionPageSkills extends LitElement {
               <th
                 class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
                 @click=${() => this.toggleSort('name')}
-              >Name <span class="sort-indicator">${this.sortIndicator('name')}</span></th>
+              >
+                Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
+              </th>
               <th>Scope</th>
               <th class="hide-mobile">Visibility</th>
               <th class="hide-mobile">Tags</th>
               <th
                 class="sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
                 @click=${() => this.toggleSort('updated')}
-              >Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span></th>
+              >
+                Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -532,7 +572,13 @@ export class ScionPageSkills extends LitElement {
 
   private renderSkillRow(skill: Skill) {
     return html`
-      <tr class="clickable" @click=${() => { window.history.pushState({}, '', `/skills/${skill.id}`); window.dispatchEvent(new PopStateEvent('popstate')); }}>
+      <tr
+        class="clickable"
+        @click=${() => {
+          window.history.pushState({}, '', `/skills/${skill.id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }}
+      >
         <td>
           <span class="name-cell">
             <sl-icon name="lightning-charge"></sl-icon>
@@ -540,7 +586,9 @@ export class ScionPageSkills extends LitElement {
           </span>
         </td>
         <td><span class="scope-badge">${skill.scope}</span></td>
-        <td class="hide-mobile"><span class="visibility-badge ${skill.visibility}">${skill.visibility}</span></td>
+        <td class="hide-mobile">
+          <span class="visibility-badge ${skill.visibility}">${skill.visibility}</span>
+        </td>
         <td class="hide-mobile">
           ${skill.tags?.length
             ? skill.tags.map((tag) => html`<span class="skill-tag">${tag}</span> `)

@@ -50,7 +50,9 @@ export class ScionSkillPublishDialog extends LitElement {
   private fileInputRef: HTMLInputElement | null = null;
 
   static override styles = css`
-    :host { display: contents; }
+    :host {
+      display: contents;
+    }
 
     .step-content {
       display: flex;
@@ -76,7 +78,8 @@ export class ScionSkillPublishDialog extends LitElement {
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
     }
-    .drop-zone:hover, .drop-zone.dragover {
+    .drop-zone:hover,
+    .drop-zone.dragover {
       border-color: var(--scion-primary, #3b82f6);
       background: var(--sl-color-primary-50, #eff6ff);
       color: var(--scion-primary, #3b82f6);
@@ -129,9 +132,12 @@ export class ScionSkillPublishDialog extends LitElement {
       color: var(--scion-text-muted, #64748b);
       line-height: 1;
     }
-    .remove-btn:hover { color: var(--sl-color-danger-600, #dc2626); }
+    .remove-btn:hover {
+      color: var(--sl-color-danger-600, #dc2626);
+    }
 
-    .validation-error, .error-banner {
+    .validation-error,
+    .error-banner {
       background: var(--sl-color-danger-50, #fef2f2);
       border: 1px solid var(--sl-color-danger-200, #fecaca);
       border-radius: var(--scion-radius, 0.5rem);
@@ -142,7 +148,8 @@ export class ScionSkillPublishDialog extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
       font-size: 0.875rem;
     }
-    .validation-error sl-icon, .error-banner sl-icon {
+    .validation-error sl-icon,
+    .error-banner sl-icon {
       flex-shrink: 0;
       margin-top: 0.125rem;
     }
@@ -173,7 +180,9 @@ export class ScionSkillPublishDialog extends LitElement {
       margin: 0 auto 0.5rem;
     }
 
-    input[type="file"] { display: none; }
+    input[type='file'] {
+      display: none;
+    }
   `;
 
   override updated(changed: Map<PropertyKey, unknown>): void {
@@ -274,7 +283,8 @@ export class ScionSkillPublishDialog extends LitElement {
 
   private validate(): string | null {
     if (!this.version.trim()) return 'Version is required.';
-    if (!this.validateSemver(this.version.trim())) return 'Version must be valid semver (e.g. 1.0.0).';
+    if (!this.validateSemver(this.version.trim()))
+      return 'Version must be valid semver (e.g. 1.0.0).';
     if (this.selectedFiles.length === 0) return 'At least one file is required.';
     if (!this.selectedFiles.some((f) => f.file.name === 'SKILL.md' || f.path === 'SKILL.md'))
       return 'A file named exactly SKILL.md is required.';
@@ -320,11 +330,13 @@ export class ScionSkillPublishDialog extends LitElement {
       this.createdVersion = data.version ?? null;
       this.step = 'done';
 
-      this.dispatchEvent(new CustomEvent('skill-version-published', {
-        detail: { version: this.createdVersion },
-        bubbles: true,
-        composed: true,
-      }));
+      this.dispatchEvent(
+        new CustomEvent('skill-version-published', {
+          detail: { version: this.createdVersion },
+          bubbles: true,
+          composed: true,
+        })
+      );
     } catch (err) {
       console.error('Publish failed:', err);
       this.step = 'error';
@@ -360,19 +372,23 @@ export class ScionSkillPublishDialog extends LitElement {
   private renderInput() {
     return html`
       <div class="step-content">
-        ${this.validationError ? html`
-          <div class="validation-error">
-            <sl-icon name="exclamation-triangle"></sl-icon>
-            <span>${this.validationError}</span>
-          </div>
-        ` : nothing}
+        ${this.validationError
+          ? html`
+              <div class="validation-error">
+                <sl-icon name="exclamation-triangle"></sl-icon>
+                <span>${this.validationError}</span>
+              </div>
+            `
+          : nothing}
 
         <div class="form-field">
           <label>Version</label>
           <sl-input
             placeholder="1.0.0"
             .value=${this.version}
-            @sl-input=${(e: Event) => { this.version = (e.target as HTMLElement & { value: string }).value; }}
+            @sl-input=${(e: Event) => {
+              this.version = (e.target as HTMLElement & { value: string }).value;
+            }}
           ></sl-input>
         </div>
 
@@ -390,25 +406,35 @@ export class ScionSkillPublishDialog extends LitElement {
           </div>
         </div>
 
-        ${this.selectedFiles.length > 0 ? html`
-          <ul class="file-list">
-            ${this.selectedFiles.map((sf, i) => html`
-              <li class="file-item">
-                <div class="file-info">
-                  <sl-icon name="file-earmark"></sl-icon>
-                  <span class="file-name">${sf.path}</span>
-                  <span class="file-size">${this.formatFileSize(sf.file.size)}</span>
-                </div>
-                <button class="remove-btn" @click=${() => this.removeFile(i)} title="Remove">
-                  <sl-icon name="x-lg"></sl-icon>
-                </button>
-              </li>
-            `)}
-          </ul>
-        ` : nothing}
+        ${this.selectedFiles.length > 0
+          ? html`
+              <ul class="file-list">
+                ${this.selectedFiles.map(
+                  (sf, i) => html`
+                    <li class="file-item">
+                      <div class="file-info">
+                        <sl-icon name="file-earmark"></sl-icon>
+                        <span class="file-name">${sf.path}</span>
+                        <span class="file-size">${this.formatFileSize(sf.file.size)}</span>
+                      </div>
+                      <button class="remove-btn" @click=${() => this.removeFile(i)} title="Remove">
+                        <sl-icon name="x-lg"></sl-icon>
+                      </button>
+                    </li>
+                  `
+                )}
+              </ul>
+            `
+          : nothing}
       </div>
 
-      <sl-button slot="footer" variant="default" @click=${() => { this.open = false; }}>
+      <sl-button
+        slot="footer"
+        variant="default"
+        @click=${() => {
+          this.open = false;
+        }}
+      >
         Cancel
       </sl-button>
       <sl-button
@@ -444,7 +470,13 @@ export class ScionSkillPublishDialog extends LitElement {
           <p><strong>Version ${this.version} published successfully!</strong></p>
         </div>
       </div>
-      <sl-button slot="footer" variant="primary" @click=${() => { this.open = false; }}>
+      <sl-button
+        slot="footer"
+        variant="primary"
+        @click=${() => {
+          this.open = false;
+        }}
+      >
         Close
       </sl-button>
     `;
@@ -458,7 +490,13 @@ export class ScionSkillPublishDialog extends LitElement {
           <span>${this.error}</span>
         </div>
       </div>
-      <sl-button slot="footer" variant="default" @click=${() => { this.open = false; }}>
+      <sl-button
+        slot="footer"
+        variant="default"
+        @click=${() => {
+          this.open = false;
+        }}
+      >
         Cancel
       </sl-button>
       <sl-button slot="footer" variant="primary" @click=${() => this.startPublish()}>

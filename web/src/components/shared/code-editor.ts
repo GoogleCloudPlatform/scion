@@ -154,7 +154,15 @@ export class ScionCodeEditor extends LitElement {
       min-height: 200px;
       max-height: calc(100vh - 16rem);
       font-size: 0.875rem;
-      font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace);
+      font-family: var(
+        --scion-font-mono,
+        'SF Mono',
+        'Fira Code',
+        'Fira Mono',
+        Menlo,
+        Consolas,
+        monospace
+      );
     }
 
     .editor-container .cm-editor.cm-focused {
@@ -230,21 +238,38 @@ export class ScionCodeEditor extends LitElement {
 
     try {
       const cm = await loadCodeMirror();
-      const { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
-        drawSelection, rectangularSelection, highlightSpecialChars, dropCursor } = cm.view;
+      const {
+        EditorView,
+        keymap,
+        lineNumbers,
+        highlightActiveLine,
+        highlightActiveLineGutter,
+        drawSelection,
+        rectangularSelection,
+        highlightSpecialChars,
+        dropCursor,
+      } = cm.view;
       const { EditorState } = cm.state;
       const { defaultKeymap, history, historyKeymap, indentWithTab } = cm.commands;
-      const { syntaxHighlighting, defaultHighlightStyle, indentOnInput,
-        bracketMatching, foldGutter, foldKeymap } = cm.language;
+      const {
+        syntaxHighlighting,
+        defaultHighlightStyle,
+        indentOnInput,
+        bracketMatching,
+        foldGutter,
+        foldKeymap,
+      } = cm.language;
       const { searchKeymap, highlightSelectionMatches } = cm.search;
-      const { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } = cm.autocomplete;
+      const { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } =
+        cm.autocomplete;
 
       // Detect dark mode from document theme or system preference
-      const isDark = document.documentElement.getAttribute('data-theme') === 'dark'
-        || document.documentElement.classList.contains('sl-theme-dark')
-        || document.documentElement.classList.contains('dark')
-        || (!document.documentElement.getAttribute('data-theme')
-            && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      const isDark =
+        document.documentElement.getAttribute('data-theme') === 'dark' ||
+        document.documentElement.classList.contains('sl-theme-dark') ||
+        document.documentElement.classList.contains('dark') ||
+        (!document.documentElement.getAttribute('data-theme') &&
+          window.matchMedia('(prefers-color-scheme: dark)').matches);
 
       // Build a dark-mode-aware highlight style
       const { HighlightStyle } = cm.language;
@@ -257,10 +282,30 @@ export class ScionCodeEditor extends LitElement {
         { tag: [tags.function(tags.variableName), tags.labelName], color: '#61afef' },
         { tag: [tags.color, tags.constant(tags.name), tags.standard(tags.name)], color: '#d19a66' },
         { tag: [tags.definition(tags.name), tags.separator], color: '#abb2bf' },
-        { tag: [tags.typeName, tags.className, tags.number, tags.changed, tags.annotation,
-                tags.modifier, tags.self, tags.namespace], color: '#e5c07b' },
-        { tag: [tags.operator, tags.operatorKeyword, tags.url, tags.escape,
-                tags.regexp, tags.special(tags.string)], color: '#56b6c2' },
+        {
+          tag: [
+            tags.typeName,
+            tags.className,
+            tags.number,
+            tags.changed,
+            tags.annotation,
+            tags.modifier,
+            tags.self,
+            tags.namespace,
+          ],
+          color: '#e5c07b',
+        },
+        {
+          tag: [
+            tags.operator,
+            tags.operatorKeyword,
+            tags.url,
+            tags.escape,
+            tags.regexp,
+            tags.special(tags.string),
+          ],
+          color: '#56b6c2',
+        },
         { tag: [tags.meta, tags.comment], color: '#7f848e' },
         { tag: tags.strong, fontWeight: 'bold' },
         { tag: tags.emphasis, fontStyle: 'italic' },
@@ -366,17 +411,19 @@ export class ScionCodeEditor extends LitElement {
 
       // Change listener: dispatch content-changed event
       extensions.push(
-        EditorView.updateListener.of((update: { docChanged: boolean; state: { doc: { toString(): string } } }) => {
-          if (update.docChanged) {
-            this.dispatchEvent(
-              new CustomEvent('content-changed', {
-                detail: { content: update.state.doc.toString() },
-                bubbles: true,
-                composed: true,
-              })
-            );
+        EditorView.updateListener.of(
+          (update: { docChanged: boolean; state: { doc: { toString(): string } } }) => {
+            if (update.docChanged) {
+              this.dispatchEvent(
+                new CustomEvent('content-changed', {
+                  detail: { content: update.state.doc.toString() },
+                  bubbles: true,
+                  composed: true,
+                })
+              );
+            }
           }
-        })
+        )
       );
 
       // Destroy previous editor if exists

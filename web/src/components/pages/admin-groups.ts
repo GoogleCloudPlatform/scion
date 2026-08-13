@@ -306,7 +306,9 @@ export class ScionPageAdminGroups extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const data = (await response.json()) as { groups?: AdminGroup[] } | AdminGroup[];
@@ -419,10 +421,13 @@ export class ScionPageAdminGroups extends LitElement {
     const labels = group.labels ? Object.entries(group.labels) : [];
 
     return html`
-      <tr class="clickable" @click=${() => {
-        window.history.pushState({}, '', `/admin/groups/${group.id}`);
-        window.dispatchEvent(new PopStateEvent('popstate'));
-      }}>
+      <tr
+        class="clickable"
+        @click=${() => {
+          window.history.pushState({}, '', `/admin/groups/${group.id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }}
+      >
         <td>
           <div class="group-identity">
             <div class="group-icon ${group.groupType}">

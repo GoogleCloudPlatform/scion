@@ -98,14 +98,17 @@ function makeFetchMock(calls: Call[], opts: MockOptions = {}) {
 
     // Agent info (returns a minimal agent object)
     if (href.includes('/api/v1/agents/')) {
-      return jsonResponse({
-        id: 'test-agent',
-        name: 'test-agent',
-        phase: 'running',
-        projectId: 'proj-1',
-        activity: '',
-        exposedPorts: [],
-      }, 200);
+      return jsonResponse(
+        {
+          id: 'test-agent',
+          name: 'test-agent',
+          phase: 'running',
+          projectId: 'proj-1',
+          activity: '',
+          exposedPorts: [],
+        },
+        200
+      );
     }
 
     return jsonResponse({}, 200);
@@ -200,7 +203,13 @@ describe('terminal — _handleFileDrop size validation', () => {
 
     const bigFile = new File(['x'], 'big.bin');
     Object.defineProperty(bigFile, 'size', { value: 51 * 1024 * 1024 });
-    const fileList = { length: 1, 0: bigFile, [Symbol.iterator]: function* () { yield bigFile; } } as unknown as FileList;
+    const fileList = {
+      length: 1,
+      0: bigFile,
+      [Symbol.iterator]: function* () {
+        yield bigFile;
+      },
+    } as unknown as FileList;
 
     await (el as any)._handleFileDrop(fileList);
 
@@ -227,7 +236,9 @@ describe('terminal — _handleFileDrop size validation', () => {
       0: file1,
       1: file2,
       2: file3,
-      [Symbol.iterator]: function* () { for (const f of files) yield f; },
+      [Symbol.iterator]: function* () {
+        for (const f of files) yield f;
+      },
     } as unknown as FileList;
 
     await (el as any)._handleFileDrop(fileList);
@@ -249,11 +260,7 @@ describe('terminal — resolveUploadTarget', () => {
   it('prefers scratchpad when available', async () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls, {
-      sharedDirs: [
-        { name: 'data' },
-        { name: 'scratchpad' },
-        { name: 'other' },
-      ],
+      sharedDirs: [{ name: 'data' }, { name: 'scratchpad' }, { name: 'other' }],
     });
 
     await (el as any).resolveUploadTarget();
@@ -332,9 +339,13 @@ describe('terminal — _handleFileDrop upload paths', () => {
   function makeFileList(...files: File[]): FileList {
     const fl: any = {
       length: files.length,
-      [Symbol.iterator]: function* () { for (const f of files) yield f; },
+      [Symbol.iterator]: function* () {
+        for (const f of files) yield f;
+      },
     };
-    files.forEach((f, i) => { fl[i] = f; });
+    files.forEach((f, i) => {
+      fl[i] = f;
+    });
     return fl as FileList;
   }
 
@@ -350,9 +361,9 @@ describe('terminal — _handleFileDrop upload paths', () => {
   }
 
   it('shows error and disables upload on 409 response', async () => {
-    const el = setupElement(vi.fn(async () =>
-      jsonResponse({ error: { message: 'upload failed' } }, 409)
-    ));
+    const el = setupElement(
+      vi.fn(async () => jsonResponse({ error: { message: 'upload failed' } }, 409))
+    );
 
     const file = new File(['hello'], 'test.txt');
     await (el as any)._handleFileDrop(makeFileList(file));
@@ -366,9 +377,9 @@ describe('terminal — _handleFileDrop upload paths', () => {
   });
 
   it('shows error on non-ok HTTP response', async () => {
-    const el = setupElement(vi.fn(async () =>
-      jsonResponse({ error: { message: 'server error details' } }, 500)
-    ));
+    const el = setupElement(
+      vi.fn(async () => jsonResponse({ error: { message: 'server error details' } }, 500))
+    );
 
     const file = new File(['hello'], 'test.txt');
     await (el as any)._handleFileDrop(makeFileList(file));
@@ -380,9 +391,11 @@ describe('terminal — _handleFileDrop upload paths', () => {
   });
 
   it('shows error on network failure', async () => {
-    const el = setupElement(vi.fn(async () => {
-      throw new Error('Network failure');
-    }));
+    const el = setupElement(
+      vi.fn(async () => {
+        throw new Error('Network failure');
+      })
+    );
 
     const file = new File(['hello'], 'test.txt');
     await (el as any)._handleFileDrop(makeFileList(file));
@@ -393,12 +406,12 @@ describe('terminal — _handleFileDrop upload paths', () => {
   });
 
   it('calls sendData with shell-quoted paths on success', async () => {
-    const el = setupElement(vi.fn(async () =>
-      jsonResponse({ ok: true }, 200)
-    ));
+    const el = setupElement(vi.fn(async () => jsonResponse({ ok: true }, 200)));
     // Mock sendData to capture what gets sent to the terminal
     const sendDataCalls: string[] = [];
-    el.sendData = (data: string) => { sendDataCalls.push(data); };
+    el.sendData = (data: string) => {
+      sendDataCalls.push(data);
+    };
 
     const file = new File(['hello'], 'test.txt');
     await (el as any)._handleFileDrop(makeFileList(file));
@@ -413,11 +426,11 @@ describe('terminal — _handleFileDrop upload paths', () => {
   });
 
   it('sends multiple shell-quoted paths on multi-file success', async () => {
-    const el = setupElement(vi.fn(async () =>
-      jsonResponse({ ok: true }, 200)
-    ));
+    const el = setupElement(vi.fn(async () => jsonResponse({ ok: true }, 200)));
     const sendDataCalls: string[] = [];
-    el.sendData = (data: string) => { sendDataCalls.push(data); };
+    el.sendData = (data: string) => {
+      sendDataCalls.push(data);
+    };
 
     const file1 = new File(['a'], 'doc.pdf');
     const file2 = new File(['b'], 'has spaces.txt');

@@ -52,7 +52,10 @@ export class ScionPageProfileDiscord extends LitElement {
       this._discordUsername = userName;
     }
     if (code) {
-      this._code = code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+      this._code = code
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 6);
       if (this._code.length === 6) {
         this._autoLinked = true;
         this._autoSubmit();
@@ -75,14 +78,17 @@ export class ScionPageProfileDiscord extends LitElement {
 
       if (resp.ok) {
         this._status = 'success';
-        this._message = 'Discord account linked successfully! You can close this page and return to Discord.';
+        this._message =
+          'Discord account linked successfully! You can close this page and return to Discord.';
         this._code = '';
       } else {
         const errData = (await resp.json().catch(() => null)) as {
           message?: string;
         } | null;
         this._status = 'error';
-        this._message = errData?.message || 'Code not found or expired. Please try again with a new code from the bot.';
+        this._message =
+          errData?.message ||
+          'Code not found or expired. Please try again with a new code from the bot.';
       }
     } catch {
       this._status = 'error';
@@ -222,7 +228,10 @@ export class ScionPageProfileDiscord extends LitElement {
 
   private _handleInput(e: Event): void {
     const input = e.target as HTMLInputElement & { value: string };
-    this._code = input.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+    this._code = input.value
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '')
+      .slice(0, 6);
     input.value = this._code;
   }
 
@@ -247,14 +256,17 @@ export class ScionPageProfileDiscord extends LitElement {
 
       if (resp.ok) {
         this._status = 'success';
-        this._message = 'Discord account linked successfully! You can close this page and return to Discord.';
+        this._message =
+          'Discord account linked successfully! You can close this page and return to Discord.';
         this._code = '';
       } else {
         const errData = (await resp.json().catch(() => null)) as {
           message?: string;
         } | null;
         this._status = 'error';
-        this._message = errData?.message || 'Code not found or expired. Please try again with a new code from the bot.';
+        this._message =
+          errData?.message ||
+          'Code not found or expired. Please try again with a new code from the bot.';
       }
     } catch {
       this._status = 'error';
@@ -315,7 +327,9 @@ export class ScionPageProfileDiscord extends LitElement {
         </div>
 
         ${this._discordUsername
-          ? html`<p class="discord-user">Linking as Discord user: <strong>${this._discordUsername}</strong></p>`
+          ? html`<p class="discord-user">
+              Linking as Discord user: <strong>${this._discordUsername}</strong>
+            </p>`
           : nothing}
 
         <form class="code-form" @submit=${this._handleSubmit}>

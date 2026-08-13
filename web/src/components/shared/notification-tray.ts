@@ -633,9 +633,7 @@ export class ScionNotificationTray extends LitElement {
             : nothing}
         </div>
         <div class="panel-list">
-          ${count > 0
-            ? this.notifications.map((n) => this.renderItem(n))
-            : this.renderEmpty()}
+          ${count > 0 ? this.notifications.map((n) => this.renderItem(n)) : this.renderEmpty()}
         </div>
         <div class="panel-footer">
           <a
@@ -648,7 +646,8 @@ export class ScionNotificationTray extends LitElement {
               window.history.pushState({}, '', '/projects');
               window.dispatchEvent(new PopStateEvent('popstate'));
             }}
-          >Manage subscriptions</a>
+            >Manage subscriptions</a
+          >
         </div>
       </div>
     `;
@@ -667,13 +666,13 @@ export class ScionNotificationTray extends LitElement {
           </sl-tooltip>
           <div class="notif-meta">
             <span>${this.relativeTime(n.createdAt)}</span>
-            <a href="/agents/${n.agentId}" @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}>
+            <a
+              href="/agents/${n.agentId}"
+              @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}
+            >
               View agent
             </a>
-            <button
-              class="mark-read-link"
-              @click=${(): void => void this.ackOne(n.id)}
-            >
+            <button class="mark-read-link" @click=${(): void => void this.ackOne(n.id)}>
               Mark read
             </button>
           </div>

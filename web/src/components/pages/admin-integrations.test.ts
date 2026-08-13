@@ -28,8 +28,11 @@ function makeDiscordDetail(settingsOverride?: Record<string, string>): Record<st
 function createFetchHandler(
   detailResponse: Record<string, unknown>,
   opts?: {
-    putHandler?: (body: Record<string, unknown>) => { status: number; body: Record<string, unknown> };
-  },
+    putHandler?: (body: Record<string, unknown>) => {
+      status: number;
+      body: Record<string, unknown>;
+    };
+  }
 ) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
@@ -41,7 +44,7 @@ function createFetchHandler(
         new Response(JSON.stringify(result.body), {
           status: result.status,
           headers: { 'Content-Type': 'application/json' },
-        }),
+        })
       );
     }
 
@@ -51,7 +54,7 @@ function createFetchHandler(
         new Response(JSON.stringify(detailResponse), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
-        }),
+        })
       );
     }
 
@@ -61,7 +64,7 @@ function createFetchHandler(
         new Response(JSON.stringify([]), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
-        }),
+        })
       );
     }
 
@@ -70,7 +73,7 @@ function createFetchHandler(
         new Response(JSON.stringify(makeIntegrationList()), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
-        }),
+        })
       );
     }
 
@@ -78,7 +81,7 @@ function createFetchHandler(
       new Response(JSON.stringify({}), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-      }),
+      })
     );
   };
 }
@@ -87,7 +90,7 @@ function createFetchHandler(
 let ScionPageAdminIntegrations: any;
 
 async function createComponent(
-  fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
 ) {
   // Simulate being on the Discord detail page.
   Object.defineProperty(window, 'location', {
@@ -168,7 +171,7 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
 
   it('displays existing guild_ids value', async () => {
     element = await createComponent(
-      createFetchHandler(makeDiscordDetail({ guild_ids: '111,222,333' })),
+      createFetchHandler(makeDiscordDetail({ guild_ids: '111,222,333' }))
     );
 
     const inputs = queryAll(element, 'sl-input') as HTMLInputElement[];
@@ -194,7 +197,7 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
           capturedPayload = body;
           return { status: 200, body: {} };
         },
-      }),
+      })
     );
 
     // Click save button
@@ -220,7 +223,7 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
           capturedPayload = body;
           return { status: 200, body: {} };
         },
-      }),
+      })
     );
 
     const buttons = queryAll(element, 'sl-button[variant="primary"]');

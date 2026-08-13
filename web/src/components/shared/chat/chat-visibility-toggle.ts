@@ -26,8 +26,8 @@
  * user changes the selection.
  */
 
-import {LitElement, html, css} from 'lit';
-import {customElement, property} from 'lit/decorators.js';
+import { LitElement, html, css } from 'lit';
+import { customElement, property } from 'lit/decorators.js';
 
 export type VisibilityMode = 'conversation' | 'verbose' | 'full';
 
@@ -52,11 +52,7 @@ export class ScionChatVisibilityToggle extends LitElement {
 
   override render() {
     return html`
-      <sl-radio-group
-        value=${this.mode}
-        size="small"
-        @sl-change=${this.handleChange}
-      >
+      <sl-radio-group value=${this.mode} size="small" @sl-change=${this.handleChange}>
         <sl-radio-button value="conversation">
           <sl-icon slot="prefix" name="chat-dots" style="font-size: 0.75rem"></sl-icon>
           Conversation
@@ -79,7 +75,7 @@ export class ScionChatVisibilityToggle extends LitElement {
     this.mode = value;
     this.dispatchEvent(
       new CustomEvent<VisibilityChangeDetail>('visibility-change', {
-        detail: {mode: value},
+        detail: { mode: value },
         bubbles: true,
         composed: true,
       })

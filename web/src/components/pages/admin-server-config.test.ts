@@ -42,13 +42,56 @@ function makeBaseConfig(overrides: Record<string, unknown> = {}) {
 
 const SCHEMA_RESPONSE = {
   sections: {
-    access: { koanf_paths: ['server.hub.admin_emails', 'server.auth.user_access_mode', 'server.auth.authorized_domains'] },
-    lifecycle: { koanf_paths: ['server.hub.auto_suspend_stalled', 'server.hub.soft_delete_retention', 'server.hub.soft_delete_retain_files'] },
+    access: {
+      koanf_paths: [
+        'server.hub.admin_emails',
+        'server.auth.user_access_mode',
+        'server.auth.authorized_domains',
+      ],
+    },
+    lifecycle: {
+      koanf_paths: [
+        'server.hub.auto_suspend_stalled',
+        'server.hub.soft_delete_retention',
+        'server.hub.soft_delete_retain_files',
+      ],
+    },
     endpoints: { koanf_paths: ['server.hub.public_url', 'image_registry'] },
-    agent_defaults: { koanf_paths: ['default_template', 'default_harness_config', 'default_max_turns', 'default_max_model_calls', 'default_max_duration', 'default_resources'] },
-    telemetry: { koanf_paths: ['telemetry.enabled', 'telemetry.cloud.enabled', 'telemetry.cloud.endpoint', 'telemetry.cloud.protocol', 'telemetry.cloud.provider', 'telemetry.hub.enabled', 'telemetry.hub.report_interval', 'telemetry.local.enabled', 'telemetry.local.file', 'telemetry.local.console'] },
+    agent_defaults: {
+      koanf_paths: [
+        'default_template',
+        'default_harness_config',
+        'default_max_turns',
+        'default_max_model_calls',
+        'default_max_duration',
+        'default_resources',
+      ],
+    },
+    telemetry: {
+      koanf_paths: [
+        'telemetry.enabled',
+        'telemetry.cloud.enabled',
+        'telemetry.cloud.endpoint',
+        'telemetry.cloud.protocol',
+        'telemetry.cloud.provider',
+        'telemetry.hub.enabled',
+        'telemetry.hub.report_interval',
+        'telemetry.local.enabled',
+        'telemetry.local.file',
+        'telemetry.local.console',
+      ],
+    },
     notifications: { koanf_paths: ['server.notification_channels'] },
-    github_app: { koanf_paths: ['server.github_app', 'server.github_app.app_id', 'server.github_app.api_base_url', 'server.github_app.webhooks_enabled', 'server.github_app.installation_url', 'server.github_app.private_key_path'] },
+    github_app: {
+      koanf_paths: [
+        'server.github_app',
+        'server.github_app.app_id',
+        'server.github_app.api_base_url',
+        'server.github_app.webhooks_enabled',
+        'server.github_app.installation_url',
+        'server.github_app.private_key_path',
+      ],
+    },
   },
 };
 
@@ -56,8 +99,11 @@ function createFetchHandler(
   configResponse: Record<string, unknown>,
   opts?: {
     schemaResponse?: Record<string, unknown> | null;
-    putHandler?: (body: Record<string, unknown>) => { status: number; body: Record<string, unknown> };
-  },
+    putHandler?: (body: Record<string, unknown>) => {
+      status: number;
+      body: Record<string, unknown>;
+    };
+  }
 ) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
@@ -65,47 +111,59 @@ function createFetchHandler(
     if (init?.method === 'PUT' && opts?.putHandler) {
       const reqBody = JSON.parse(init.body as string);
       const result = opts.putHandler(reqBody);
-      return Promise.resolve(new Response(JSON.stringify(result.body), {
-        status: result.status,
-        headers: { 'Content-Type': 'application/json' },
-      }));
+      return Promise.resolve(
+        new Response(JSON.stringify(result.body), {
+          status: result.status,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
     }
 
     if (path.includes('/api/v1/admin/server-config/schema')) {
       if (opts?.schemaResponse === null) {
         return Promise.resolve(new Response('', { status: 500 }));
       }
-      return Promise.resolve(new Response(JSON.stringify(opts?.schemaResponse ?? SCHEMA_RESPONSE), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }));
+      return Promise.resolve(
+        new Response(JSON.stringify(opts?.schemaResponse ?? SCHEMA_RESPONSE), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
     }
 
     if (path.includes('/api/v1/admin/server-config')) {
-      return Promise.resolve(new Response(JSON.stringify(configResponse), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }));
+      return Promise.resolve(
+        new Response(JSON.stringify(configResponse), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
     }
 
     if (path.includes('/api/v1/github-app/installations')) {
-      return Promise.resolve(new Response(JSON.stringify([]), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }));
+      return Promise.resolve(
+        new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
     }
 
     if (path.includes('/api/v1/github-app')) {
-      return Promise.resolve(new Response(JSON.stringify({}), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }));
+      return Promise.resolve(
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
     }
 
-    return Promise.resolve(new Response(JSON.stringify([]), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }));
+    return Promise.resolve(
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
   };
 }
 
@@ -114,13 +172,15 @@ function createFetchHandler(
 let ScionPageAdminServerConfig: any;
 
 async function createComponent(
-  fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
 ) {
   vi.stubGlobal('fetch', vi.fn(fetchHandler));
-  const el = document.createElement('scion-page-admin-server-config') as InstanceType<typeof ScionPageAdminServerConfig>;
+  const el = document.createElement('scion-page-admin-server-config') as InstanceType<
+    typeof ScionPageAdminServerConfig
+  >;
   document.body.appendChild(el);
   await el.updateComplete;
-  await new Promise(resolve => setTimeout(resolve, 200));
+  await new Promise((resolve) => setTimeout(resolve, 200));
   await el.updateComplete;
   return el;
 }
@@ -166,7 +226,7 @@ describe('scion-page-admin-server-config', () => {
     element = await createComponent(createFetchHandler(makeBaseConfig()));
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       expect.stringContaining('/api/v1/admin/server-config'),
-      expect.any(Object),
+      expect.any(Object)
     );
   });
 
@@ -247,18 +307,20 @@ describe('scion-page-admin-server-config', () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
       let capturedPayload: Record<string, unknown> | null = null;
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: (body) => {
-          capturedPayload = body;
-          return { status: 200, body: { reload: { applied: [] } } };
-        },
-      }));
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       expect(saveBtn).not.toBeNull();
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       await (element as any).updateComplete;
 
       expect(capturedPayload).not.toBeNull();
@@ -283,17 +345,19 @@ describe('scion-page-admin-server-config', () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
       let putCalled = false;
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: () => {
-          putCalled = true;
-          return { status: 200, body: { reload: { applied: [] } } };
-        },
-      }));
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => {
+            putCalled = true;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
       expect(putCalled).toBe(true);
       expect(query(element, '.safety-net-notice')).toBeNull();
@@ -309,8 +373,8 @@ describe('scion-page-admin-server-config', () => {
 
       const badges = queryAll(element, '.read-only-badge');
       expect(badges.length).toBeGreaterThan(0);
-      const badgeTexts = badges.map(b => b.textContent ?? '');
-      expect(badgeTexts.some(t => t.includes('deployment configuration'))).toBe(true);
+      const badgeTexts = badges.map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('deployment configuration'))).toBe(true);
     });
 
     it('server.mode renders as read-only value (not editable select)', async () => {
@@ -318,7 +382,7 @@ describe('scion-page-admin-server-config', () => {
       element = await createComponent(createFetchHandler(config));
 
       const readOnlyValues = queryAll(element, '.read-only-value');
-      const values = readOnlyValues.map(el => el.textContent?.trim());
+      const values = readOnlyValues.map((el) => el.textContent?.trim());
       expect(values).toContain('standalone');
     });
 
@@ -327,7 +391,7 @@ describe('scion-page-admin-server-config', () => {
       element = await createComponent(createFetchHandler(config));
 
       const readOnlyValues = queryAll(element, '.read-only-value');
-      const values = readOnlyValues.map(el => el.textContent?.trim());
+      const values = readOnlyValues.map((el) => el.textContent?.trim());
       expect(values).toContain('postgres');
     });
 
@@ -336,7 +400,7 @@ describe('scion-page-admin-server-config', () => {
       element = await createComponent(createFetchHandler(config));
 
       const readOnlyValues = queryAll(element, '.read-only-value');
-      const values = readOnlyValues.map(el => el.textContent?.trim());
+      const values = readOnlyValues.map((el) => el.textContent?.trim());
       expect(values).toContain('info');
     });
 
@@ -345,7 +409,7 @@ describe('scion-page-admin-server-config', () => {
       element = await createComponent(createFetchHandler(config));
 
       const readOnlyValues = queryAll(element, '.read-only-value');
-      const values = readOnlyValues.map(el => el.textContent?.trim());
+      const values = readOnlyValues.map((el) => el.textContent?.trim());
       expect(values).toContain('8080');
     });
 
@@ -353,17 +417,19 @@ describe('scion-page-admin-server-config', () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
       let capturedPayload: Record<string, unknown> | null = null;
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: (body) => {
-          capturedPayload = body;
-          return { status: 200, body: { reload: { applied: [] } } };
-        },
-      }));
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
       expect(capturedPayload).not.toBeNull();
       const server = capturedPayload!.server as Record<string, unknown> | undefined;
@@ -398,11 +464,11 @@ describe('scion-page-admin-server-config', () => {
       element = await createComponent(createFetchHandler(config));
 
       const badges = queryAll(element, '.read-only-badge');
-      const badgeTexts = badges.map(b => b.textContent ?? '');
-      expect(badgeTexts.some(t => t.includes('environment variable'))).toBe(true);
+      const badgeTexts = badges.map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
 
       const readOnlyValues = queryAll(element, '.read-only-value');
-      const values = readOnlyValues.map(el => el.textContent?.trim());
+      const values = readOnlyValues.map((el) => el.textContent?.trim());
       expect(values).toContain('8080');
     });
 
@@ -413,17 +479,19 @@ describe('scion-page-admin-server-config', () => {
       });
       let capturedPayload: Record<string, unknown> | null = null;
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: (body) => {
-          capturedPayload = body;
-          return { status: 200, body: { reload: { applied: [] } } };
-        },
-      }));
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
       expect(capturedPayload).not.toBeNull();
       const server = capturedPayload!.server as Record<string, unknown> | undefined;
@@ -448,17 +516,19 @@ describe('scion-page-admin-server-config', () => {
       const config = makeBaseConfig({ settings_tier: 'file' });
       let capturedPayload: Record<string, unknown> | null = null;
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: (body) => {
-          capturedPayload = body;
-          return { status: 200, body: { reload: { applied: [] } } };
-        },
-      }));
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
       expect(capturedPayload).not.toBeNull();
       const server = capturedPayload!.server as Record<string, unknown> | undefined;
@@ -475,24 +545,24 @@ describe('scion-page-admin-server-config', () => {
     it('400 validation_failed renders inline errors', async () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: () => ({
-          status: 400,
-          body: {
-            error: 'validation_failed',
-            errors: {
-              access: [
-                { field: 'admin_emails', message: 'invalid email format' },
-              ],
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: {
+              error: 'validation_failed',
+              errors: {
+                access: [{ field: 'admin_emails', message: 'invalid email format' }],
+              },
             },
-          },
-        }),
-      }));
+          }),
+        })
+      );
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       await (element as any).updateComplete;
 
       const errorsEl = query(element, '.validation-errors');
@@ -505,21 +575,23 @@ describe('scion-page-admin-server-config', () => {
     it('409 revision_conflict renders conflict banner with Reload button', async () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: () => ({
-          status: 409,
-          body: {
-            error: 'revision_conflict',
-            message: 'Settings have been changed since you loaded this page.',
-            conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
-          },
-        }),
-      }));
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 409,
+            body: {
+              error: 'revision_conflict',
+              message: 'Settings have been changed since you loaded this page.',
+              conflicted: [{ section: 'access', expected_revision: 3, current_revision: 5 }],
+            },
+          }),
+        })
+      );
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       await (element as any).updateComplete;
 
       const bannerEl = query(element, '.conflict-banner');
@@ -536,20 +608,22 @@ describe('scion-page-admin-server-config', () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
       const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: () => ({
-          status: 422,
-          body: {
-            error: 'layer0_rejected',
-            keys: ['server.mode', 'server.database.driver'],
-          },
-        }),
-      }));
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: 'layer0_rejected',
+              keys: ['server.mode', 'server.database.driver'],
+            },
+          }),
+        })
+      );
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       await (element as any).updateComplete;
 
       const noticeEl = query(element, '.safety-net-notice');
@@ -561,7 +635,7 @@ describe('scion-page-admin-server-config', () => {
 
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining('layer0_rejected'),
-        expect.arrayContaining(['server.mode', 'server.database.driver']),
+        expect.arrayContaining(['server.mode', 'server.database.driver'])
       );
 
       consoleSpy.mockRestore();
@@ -570,20 +644,22 @@ describe('scion-page-admin-server-config', () => {
     it('unknown error falls back to generic error message', async () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: () => ({
-          status: 500,
-          body: {
-            error: 'some_unknown_error',
-            message: 'Something went terribly wrong',
-          },
-        }),
-      }));
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 500,
+            body: {
+              error: 'some_unknown_error',
+              message: 'Something went terribly wrong',
+            },
+          }),
+        })
+      );
 
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       await (element as any).updateComplete;
 
       expect(shadowText(element)).toContain('Something went terribly wrong');
@@ -602,8 +678,8 @@ describe('scion-page-admin-server-config', () => {
 
       const badges = queryAll(element, '.read-only-badge');
       expect(badges.length).toBeGreaterThan(0);
-      const badgeTexts = badges.map(b => b.textContent ?? '');
-      expect(badgeTexts.some(t => t.includes('deployment configuration'))).toBe(true);
+      const badgeTexts = badges.map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('deployment configuration'))).toBe(true);
     });
   });
 
@@ -621,12 +697,14 @@ describe('scion-page-admin-server-config', () => {
       });
       let capturedPayload: Record<string, unknown> | null = null;
 
-      element = await createComponent(createFetchHandler(config, {
-        putHandler: (body) => {
-          capturedPayload = body;
-          return { status: 200, body: { reload: { applied: [] } } };
-        },
-      }));
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
 
       // Simulate clearing the fields: set the internal state to zero/empty.
       // In the real UI, the user would clear the input fields.
@@ -637,10 +715,10 @@ describe('scion-page-admin-server-config', () => {
 
       // Trigger save.
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find(b => b.textContent?.trim() === 'Save & Reload');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       expect(saveBtn).not.toBeNull();
       (saveBtn as HTMLElement).click();
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       await (element as any).updateComplete;
 
       expect(capturedPayload).not.toBeNull();

@@ -21,7 +21,6 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import type { HarnessConfig } from '../../shared/types.js';
 import '../shared/dir-browser.js';
 
-
 const ONBOARDING_STATUS_KEY = 'onboardingStatus';
 const TOTAL_STEPS = 6;
 
@@ -90,7 +89,10 @@ export class ScionPageOnboarding extends LitElement {
   // Step 4: Harnesses + Images (merged)
   @state() private harnessConfigs: HarnessConfig[] = [];
   @state() private selectedHarnesses = new Set<string>();
-  @state() private imageCheckStatuses = new Map<string, { imageStatus: string; source?: string | undefined; checking?: boolean | undefined }>();
+  @state() private imageCheckStatuses = new Map<
+    string,
+    { imageStatus: string; source?: string | undefined; checking?: boolean | undefined }
+  >();
   @state() private imagePulling = false;
   @state() private imageRechecking = false;
   @state() private pullIndex = 0;
@@ -106,7 +108,15 @@ export class ScionPageOnboarding extends LitElement {
   @state() private workspaceMode: 'choose' | 'hub' | 'linked' = 'choose';
   @state() private wsProjectName = '';
   @state() private wsLocalPath = '';
-  @state() private wsPathValidation: { resolved: string; exists: boolean; isDir: boolean; isGit: boolean; isManaged: boolean; alreadyLinked: boolean; error?: string } | null = null;
+  @state() private wsPathValidation: {
+    resolved: string;
+    exists: boolean;
+    isDir: boolean;
+    isGit: boolean;
+    isManaged: boolean;
+    alreadyLinked: boolean;
+    error?: string;
+  } | null = null;
   @state() private wsValidatingPath = false;
   @state() private wsCreating = false;
   @state() private wsEmbeddedBrokerID = '';
@@ -499,7 +509,9 @@ export class ScionPageOnboarding extends LitElement {
       if (stored) {
         try {
           status = JSON.parse(stored) as OnboardingStatus;
-        } catch { /* ignore parse errors */ }
+        } catch {
+          /* ignore parse errors */
+        }
       }
 
       if (!status) {
@@ -525,8 +537,10 @@ export class ScionPageOnboarding extends LitElement {
       const previouslyStarted = sessionStorage.getItem('onboardingStarted') === 'true';
       if (status && previouslyStarted) {
         if (status.identitySet && this.currentStep === 0) this.currentStep = 1;
-        if (status.runtimeOK && this.currentStep <= 2) this.currentStep = Math.max(this.currentStep, 3);
-        if (status.harnessesSeeded && this.currentStep <= 3) this.currentStep = Math.max(this.currentStep, 4);
+        if (status.runtimeOK && this.currentStep <= 2)
+          this.currentStep = Math.max(this.currentStep, 3);
+        if (status.harnessesSeeded && this.currentStep <= 3)
+          this.currentStep = Math.max(this.currentStep, 4);
       }
 
       // Prefill identity from current user
@@ -537,7 +551,9 @@ export class ScionPageOnboarding extends LitElement {
           if (me.displayName) this.displayName = me.displayName;
           if (me.email) this.email = me.email;
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     } finally {
       this.loading = false;
     }
@@ -557,16 +573,18 @@ export class ScionPageOnboarding extends LitElement {
 
     return html`
       <div class="wizard">
-        ${this.currentStep < TOTAL_STEPS ? html`
-          <div class="progress">
-            <div class="step-label">Step ${this.currentStep + 1} of ${TOTAL_STEPS}</div>
-            <sl-progress-bar value=${Math.round((this.currentStep / TOTAL_STEPS) * 100)}></sl-progress-bar>
-          </div>
-        ` : nothing}
-
+        ${this.currentStep < TOTAL_STEPS
+          ? html`
+              <div class="progress">
+                <div class="step-label">Step ${this.currentStep + 1} of ${TOTAL_STEPS}</div>
+                <sl-progress-bar
+                  value=${Math.round((this.currentStep / TOTAL_STEPS) * 100)}
+                ></sl-progress-bar>
+              </div>
+            `
+          : nothing}
         ${this.error ? html`<div class="error-banner">${this.error}</div>` : nothing}
         ${this.dnsWarning ? html`<div class="warning-banner">${this.dnsWarning}</div>` : nothing}
-
         ${this.renderStep()}
       </div>
     `;
@@ -574,14 +592,22 @@ export class ScionPageOnboarding extends LitElement {
 
   private renderStep() {
     switch (this.currentStep) {
-      case 0: return this.renderIdentity();
-      case 1: return this.renderSystemCheck();
-      case 2: return this.renderRuntime();
-      case 3: return this.renderRegistry();
-      case 4: return this.renderHarnessesAndImages();
-      case 5: return this.renderWorkspacePlaceholder();
-      case 6: return this.renderDone();
-      default: return nothing;
+      case 0:
+        return this.renderIdentity();
+      case 1:
+        return this.renderSystemCheck();
+      case 2:
+        return this.renderRuntime();
+      case 3:
+        return this.renderRegistry();
+      case 4:
+        return this.renderHarnessesAndImages();
+      case 5:
+        return this.renderWorkspacePlaceholder();
+      case 6:
+        return this.renderDone();
+      default:
+        return nothing;
     }
   }
 
@@ -597,7 +623,9 @@ export class ScionPageOnboarding extends LitElement {
         <sl-input
           placeholder="Your name"
           value=${this.displayName}
-          @sl-input=${(e: Event) => { this.displayName = (e.target as HTMLInputElement).value; }}
+          @sl-input=${(e: Event) => {
+            this.displayName = (e.target as HTMLInputElement).value;
+          }}
         ></sl-input>
       </div>
 
@@ -607,7 +635,9 @@ export class ScionPageOnboarding extends LitElement {
           type="email"
           placeholder="you@example.com"
           value=${this.email}
-          @sl-input=${(e: Event) => { this.email = (e.target as HTMLInputElement).value; }}
+          @sl-input=${(e: Event) => {
+            this.email = (e.target as HTMLInputElement).value;
+          }}
         ></sl-input>
       </div>
 
@@ -618,7 +648,8 @@ export class ScionPageOnboarding extends LitElement {
             variant="primary"
             ?loading=${this.stepLoading}
             @click=${this.handleIdentityNext}
-          >Next</sl-button>
+            >Next</sl-button
+          >
         </div>
       </div>
     `;
@@ -657,44 +688,66 @@ export class ScionPageOnboarding extends LitElement {
       <h2>System Check</h2>
       <p>Verifying your environment is ready.</p>
 
-      ${this.stepLoading ? html`
-        <div class="loading-state">
-          <sl-spinner></sl-spinner>
-          <p>Running checks...</p>
-        </div>
-      ` : html`
-        <div class="check-results">
-          ${this.checkResults.map(r => html`
-            <div class="check-item">
-              <span class="pill ${r.status}">${r.status}</span>
-              <span class="name">${r.name}</span>
-              <span class="message">${r.message}</span>
+      ${this.stepLoading
+        ? html`
+            <div class="loading-state">
+              <sl-spinner></sl-spinner>
+              <p>Running checks...</p>
             </div>
-          `)}
-          ${!this.gitVersionOK && this.gitVersion ? html`
-            <div class="check-item">
-              <span class="pill warn">warn</span>
-              <span class="name">Git version</span>
-              <span class="message">
-                Git 2.47+ is required for agent worktrees. Detected: ${this.gitVersion}.
-                Run <code>brew install git</code> to upgrade.
-              </span>
+          `
+        : html`
+            <div class="check-results">
+              ${this.checkResults.map(
+                (r) => html`
+                  <div class="check-item">
+                    <span class="pill ${r.status}">${r.status}</span>
+                    <span class="name">${r.name}</span>
+                    <span class="message">${r.message}</span>
+                  </div>
+                `
+              )}
+              ${!this.gitVersionOK && this.gitVersion
+                ? html`
+                    <div class="check-item">
+                      <span class="pill warn">warn</span>
+                      <span class="name">Git version</span>
+                      <span class="message">
+                        Git 2.47+ is required for agent worktrees. Detected: ${this.gitVersion}. Run
+                        <code>brew install git</code> to upgrade.
+                      </span>
+                    </div>
+                  `
+                : nothing}
             </div>
-          ` : nothing}
-        </div>
-      `}
+          `}
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 0; }}>Back</sl-button>
+        <sl-button
+          variant="text"
+          @click=${() => {
+            this.currentStep = 0;
+          }}
+          >Back</sl-button
+        >
         <div class="footer-right">
-          <sl-button variant="default" ?loading=${this.stepLoading} @click=${() => { void this.loadSystemCheck(); }}>
+          <sl-button
+            variant="default"
+            ?loading=${this.stepLoading}
+            @click=${() => {
+              void this.loadSystemCheck();
+            }}
+          >
             Re-check
           </sl-button>
           <sl-button
             variant="primary"
             ?disabled=${!this.checkReady || this.stepLoading}
-            @click=${() => { this.currentStep = 2; void this.loadRuntime(); }}
-          >Next</sl-button>
+            @click=${() => {
+              this.currentStep = 2;
+              void this.loadRuntime();
+            }}
+            >Next</sl-button
+          >
         </div>
       </div>
     `;
@@ -726,45 +779,58 @@ export class ScionPageOnboarding extends LitElement {
       <h2>Container Runtime</h2>
       <p>Select the container runtime for your workstation.</p>
 
-      ${this.stepLoading ? html`
-        <div class="loading-state">
-          <sl-spinner></sl-spinner>
-          <p>Detecting runtime...</p>
-        </div>
-      ` : html`
-        <div class="runtime-info">
-          <div class="runtime-detected">
-            Detected: <strong>${this.detectedRuntime || 'none'}</strong>
-          </div>
-          ${this.configuredRuntime ? html`
-            <div class="runtime-detected">
-              Currently configured: <strong>${this.configuredRuntime}</strong>
+      ${this.stepLoading
+        ? html`
+            <div class="loading-state">
+              <sl-spinner></sl-spinner>
+              <p>Detecting runtime...</p>
             </div>
-          ` : nothing}
-        </div>
+          `
+        : html`
+            <div class="runtime-info">
+              <div class="runtime-detected">
+                Detected: <strong>${this.detectedRuntime || 'none'}</strong>
+              </div>
+              ${this.configuredRuntime
+                ? html`
+                    <div class="runtime-detected">
+                      Currently configured: <strong>${this.configuredRuntime}</strong>
+                    </div>
+                  `
+                : nothing}
+            </div>
 
-        <div class="form-group">
-          <label>Runtime</label>
-          <sl-select
-            value=${this.selectedRuntime}
-            @sl-change=${(e: Event) => { this.selectedRuntime = (e.target as HTMLSelectElement).value; }}
-          >
-            ${this.renderRuntimeOption('docker', 'Docker')}
-            ${this.renderRuntimeOption('podman', 'Podman')}
-            ${this.renderRuntimeOption('container', 'Container (Apple Virtualization)')}
-          </sl-select>
-        </div>
-      `}
+            <div class="form-group">
+              <label>Runtime</label>
+              <sl-select
+                value=${this.selectedRuntime}
+                @sl-change=${(e: Event) => {
+                  this.selectedRuntime = (e.target as HTMLSelectElement).value;
+                }}
+              >
+                ${this.renderRuntimeOption('docker', 'Docker')}
+                ${this.renderRuntimeOption('podman', 'Podman')}
+                ${this.renderRuntimeOption('container', 'Container (Apple Virtualization)')}
+              </sl-select>
+            </div>
+          `}
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 1; }}>Back</sl-button>
+        <sl-button
+          variant="text"
+          @click=${() => {
+            this.currentStep = 1;
+          }}
+          >Back</sl-button
+        >
         <div class="footer-right">
           <sl-button
             variant="primary"
             ?loading=${this.stepLoading}
             ?disabled=${!this.selectedRuntime}
             @click=${this.handleRuntimeNext}
-          >Next</sl-button>
+            >Next</sl-button
+          >
         </div>
       </div>
     `;
@@ -836,28 +902,48 @@ export class ScionPageOnboarding extends LitElement {
   private renderRegistry() {
     return html`
       <h2>Image Registry</h2>
-      <p>Enter the container image registry where Scion images are hosted. This is required to pull harness images.</p>
+      <p>
+        Enter the container image registry where Scion images are hosted. This is required to pull
+        harness images.
+      </p>
       <div class="form-group">
         <label>Registry URL</label>
         <sl-input
           placeholder="e.g. us-central1-docker.pkg.dev/my-project/scion"
           value=${this.registryInput}
-          @sl-input=${(e: Event) => { this.registryInput = (e.target as HTMLInputElement).value; }}
+          @sl-input=${(e: Event) => {
+            this.registryInput = (e.target as HTMLInputElement).value;
+          }}
         ></sl-input>
       </div>
       <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);">
-        Images like <code>${this.registryInput || 'your-registry'}/scion-claude:latest</code> will be pulled during setup.
+        Images like <code>${this.registryInput || 'your-registry'}/scion-claude:latest</code> will
+        be pulled during setup.
       </p>
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 2; }}>Back</sl-button>
+        <sl-button
+          variant="text"
+          @click=${() => {
+            this.currentStep = 2;
+          }}
+          >Back</sl-button
+        >
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 4; void this.loadHarnessConfigs(); }}>Skip for now</sl-button>
+          <sl-button
+            variant="default"
+            @click=${() => {
+              this.currentStep = 4;
+              void this.loadHarnessConfigs();
+            }}
+            >Skip for now</sl-button
+          >
           <sl-button
             variant="primary"
             ?loading=${this.registrySaving}
             ?disabled=${!this.registryInput.trim()}
             @click=${this.handleSaveRegistryAndNext}
-          >Next</sl-button>
+            >Next</sl-button
+          >
         </div>
       </div>
     `;
@@ -875,8 +961,8 @@ export class ScionPageOnboarding extends LitElement {
 
   private renderHarnessesAndImages() {
     const registry = this.imageRegistry || this.registryInput;
-    const selectedList = this.harnessConfigs.filter(hc => this.selectedHarnesses.has(hc.slug));
-    const needsPull = selectedList.filter(hc => {
+    const selectedList = this.harnessConfigs.filter((hc) => this.selectedHarnesses.has(hc.slug));
+    const needsPull = selectedList.filter((hc) => {
       const cs = this.imageCheckStatuses.get(hc.id);
       const status = cs?.imageStatus ?? hc.imageStatus ?? 'unknown';
       const source = cs?.source;
@@ -886,111 +972,146 @@ export class ScionPageOnboarding extends LitElement {
       <h2>AI Harnesses</h2>
       <p>Select harnesses and ensure container images are ready.</p>
 
-      ${this.stepLoading ? html`
-        <div class="loading-state">
-          <sl-spinner></sl-spinner>
-          <p>Loading harness configurations...</p>
-        </div>
-      ` : html`
-        ${this.imagePulling && this.pullTotal > 0 ? html`
-          <div class="pull-summary">
-            <div class="pull-summary-text">
-              Pulling image ${this.pullIndex} of ${this.pullTotal}...
+      ${this.stepLoading
+        ? html`
+            <div class="loading-state">
+              <sl-spinner></sl-spinner>
+              <p>Loading harness configurations...</p>
             </div>
-            <sl-progress-bar
-              value=${Math.round((this.pullIndex / this.pullTotal) * 100)}
-            ></sl-progress-bar>
-          </div>
-        ` : nothing}
+          `
+        : html`
+            ${this.imagePulling && this.pullTotal > 0
+              ? html`
+                  <div class="pull-summary">
+                    <div class="pull-summary-text">
+                      Pulling image ${this.pullIndex} of ${this.pullTotal}...
+                    </div>
+                    <sl-progress-bar
+                      value=${Math.round((this.pullIndex / this.pullTotal) * 100)}
+                    ></sl-progress-bar>
+                  </div>
+                `
+              : nothing}
 
-        <div class="harness-list">
-          ${this.harnessConfigs.map(hc => {
-            const cs = this.imageCheckStatuses.get(hc.id);
-            const imageStatus = cs?.imageStatus ?? hc.imageStatus ?? 'unknown';
-            const source = cs?.source;
-            const checking = cs?.checking ?? false;
-            const imageName = hc.config?.image ?? '';
-            const displayName = hc.displayName || hc.name;
+            <div class="harness-list">
+              ${this.harnessConfigs.map((hc) => {
+                const cs = this.imageCheckStatuses.get(hc.id);
+                const imageStatus = cs?.imageStatus ?? hc.imageStatus ?? 'unknown';
+                const source = cs?.source;
+                const checking = cs?.checking ?? false;
+                const imageName = hc.config?.image ?? '';
+                const displayName = hc.displayName || hc.name;
 
-            return html`
-              <div class="harness-item" style="flex-wrap:wrap;">
-                <sl-checkbox
-                  ?checked=${this.selectedHarnesses.has(hc.slug)}
-                  @sl-change=${(e: Event) => {
-                    const checked = (e.target as HTMLInputElement).checked;
-                    const next = new Set(this.selectedHarnesses);
-                    if (checked) { next.add(hc.slug); } else { next.delete(hc.slug); }
-                    this.selectedHarnesses = next;
-                  }}
-                >
-                  <span class="harness-name">${displayName}</span>
-                </sl-checkbox>
-                <span style="flex:1;font-family:monospace;font-size:0.8125rem;color:var(--scion-text-muted,#64748b);text-align:right;">
-                  ${imageName}
-                </span>
-                ${checking
-                  ? html`<span class="image-status pulling"><sl-spinner></sl-spinner> checking</span>`
-                  : imageStatus === 'valid' && source === 'local'
-                    ? html`<span class="image-status done">✓ ready</span>`
-                    : imageStatus === 'valid' && source === 'registry'
-                      ? html`<span class="image-status pulling">↓ available</span>`
-                      : imageStatus === 'invalid'
-                        ? html`<span class="image-status error">✗ not found</span>`
-                        : imageStatus === 'error'
-                          ? html`<span class="image-status error">⚠ error</span>`
-                          : html`<span class="image-status queued">? unknown</span>`
-                }
-              </div>
-            `;
-          })}
-        </div>
+                return html`
+                  <div class="harness-item" style="flex-wrap:wrap;">
+                    <sl-checkbox
+                      ?checked=${this.selectedHarnesses.has(hc.slug)}
+                      @sl-change=${(e: Event) => {
+                        const checked = (e.target as HTMLInputElement).checked;
+                        const next = new Set(this.selectedHarnesses);
+                        if (checked) {
+                          next.add(hc.slug);
+                        } else {
+                          next.delete(hc.slug);
+                        }
+                        this.selectedHarnesses = next;
+                      }}
+                    >
+                      <span class="harness-name">${displayName}</span>
+                    </sl-checkbox>
+                    <span
+                      style="flex:1;font-family:monospace;font-size:0.8125rem;color:var(--scion-text-muted,#64748b);text-align:right;"
+                    >
+                      ${imageName}
+                    </span>
+                    ${checking
+                      ? html`<span class="image-status pulling"
+                          ><sl-spinner></sl-spinner> checking</span
+                        >`
+                      : imageStatus === 'valid' && source === 'local'
+                        ? html`<span class="image-status done">✓ ready</span>`
+                        : imageStatus === 'valid' && source === 'registry'
+                          ? html`<span class="image-status pulling">↓ available</span>`
+                          : imageStatus === 'invalid'
+                            ? html`<span class="image-status error">✗ not found</span>`
+                            : imageStatus === 'error'
+                              ? html`<span class="image-status error">⚠ error</span>`
+                              : html`<span class="image-status queued">? unknown</span>`}
+                  </div>
+                `;
+              })}
+            </div>
 
-        ${this.selectedHarnesses.size > 0 ? html`
-          <div class="image-actions" style="margin-top:1rem;display:flex;gap:0.5rem;">
-            ${needsPull.length > 0 ? html`
-              <sl-button
-                variant="primary"
-                size="small"
-                ?loading=${this.imagePulling}
-                ?disabled=${this.imagePulling || !registry}
-                @click=${this.handlePullSelected}
-              >Pull selected</sl-button>
-            ` : nothing}
-            <sl-button
-              variant="default"
-              size="small"
-              ?loading=${this.imageRechecking}
-              ?disabled=${this.imagePulling || this.imageRechecking}
-              @click=${this.handleRecheckImages}
-            >Re-check</sl-button>
-          </div>
-        ` : nothing}
+            ${this.selectedHarnesses.size > 0
+              ? html`
+                  <div class="image-actions" style="margin-top:1rem;display:flex;gap:0.5rem;">
+                    ${needsPull.length > 0
+                      ? html`
+                          <sl-button
+                            variant="primary"
+                            size="small"
+                            ?loading=${this.imagePulling}
+                            ?disabled=${this.imagePulling || !registry}
+                            @click=${this.handlePullSelected}
+                            >Pull selected</sl-button
+                          >
+                        `
+                      : nothing}
+                    <sl-button
+                      variant="default"
+                      size="small"
+                      ?loading=${this.imageRechecking}
+                      ?disabled=${this.imagePulling || this.imageRechecking}
+                      @click=${this.handleRecheckImages}
+                      >Re-check</sl-button
+                    >
+                  </div>
+                `
+              : nothing}
 
-        <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin-top:1rem;">
-          Additional harnesses can be imported and configured from Hub settings after onboarding.
-        </p>
-      `}
-
-      ${this.gcloudADCAvailable ? html`
-        <div style="margin-top:1rem;padding:0.75rem 1rem;border:1px solid var(--sl-color-neutral-200);border-radius:var(--sl-border-radius-medium);background:var(--sl-color-neutral-50);">
-          <sl-checkbox
-            ?checked=${this.autoInjectGcloudADC}
-            @sl-change=${(e: Event) => {
-              this.autoInjectGcloudADC = (e.target as HTMLInputElement).checked;
-            }}
-          >
-            Automatically inject gcloud credentials into agent containers
-          </sl-checkbox>
-          <p style="font-size:0.75rem;color:var(--scion-text-muted,#64748b);margin:0.25rem 0 0 1.75rem;">
-            Detected: ~/.config/gcloud/application_default_credentials.json
-          </p>
-        </div>
-      ` : nothing}
+            <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin-top:1rem;">
+              Additional harnesses can be imported and configured from Hub settings after
+              onboarding.
+            </p>
+          `}
+      ${this.gcloudADCAvailable
+        ? html`
+            <div
+              style="margin-top:1rem;padding:0.75rem 1rem;border:1px solid var(--sl-color-neutral-200);border-radius:var(--sl-border-radius-medium);background:var(--sl-color-neutral-50);"
+            >
+              <sl-checkbox
+                ?checked=${this.autoInjectGcloudADC}
+                @sl-change=${(e: Event) => {
+                  this.autoInjectGcloudADC = (e.target as HTMLInputElement).checked;
+                }}
+              >
+                Automatically inject gcloud credentials into agent containers
+              </sl-checkbox>
+              <p
+                style="font-size:0.75rem;color:var(--scion-text-muted,#64748b);margin:0.25rem 0 0 1.75rem;"
+              >
+                Detected: ~/.config/gcloud/application_default_credentials.json
+              </p>
+            </div>
+          `
+        : nothing}
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
+        <sl-button
+          variant="text"
+          @click=${() => {
+            this.currentStep = 3;
+          }}
+          >Back</sl-button
+        >
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
+          <sl-button
+            variant="default"
+            @click=${() => {
+              this.cleanupImageEvents();
+              this.currentStep = 5;
+            }}
+          >
             Skip for now
           </sl-button>
           <sl-button
@@ -998,7 +1119,8 @@ export class ScionPageOnboarding extends LitElement {
             ?loading=${this.stepLoading}
             ?disabled=${this.selectedHarnesses.size === 0}
             @click=${this.handleHarnessesNext}
-          >Next</sl-button>
+            >Next</sl-button
+          >
         </div>
       </div>
     `;
@@ -1031,7 +1153,7 @@ export class ScionPageOnboarding extends LitElement {
   }
 
   private async checkStaleImageStatuses(): Promise<void> {
-    const staleConfigs = this.harnessConfigs.filter(hc => {
+    const staleConfigs = this.harnessConfigs.filter((hc) => {
       if (!hc.config?.image) return false;
       if (hc.imageStatus === 'unknown' || !hc.imageStatus) return true;
       if (hc.imageStatusCheckedAt) {
@@ -1044,7 +1166,7 @@ export class ScionPageOnboarding extends LitElement {
     const batchSize = 4;
     for (let i = 0; i < staleConfigs.length; i += batchSize) {
       const batch = staleConfigs.slice(i, i + batchSize);
-      await Promise.all(batch.map(hc => this.checkImageStatus(hc)));
+      await Promise.all(batch.map((hc) => this.checkImageStatus(hc)));
     }
   }
 
@@ -1054,11 +1176,17 @@ export class ScionPageOnboarding extends LitElement {
     this.imageCheckStatuses = next;
 
     try {
-      const res = await apiFetch(`/api/v1/harness-configs/${hc.id}/check-image`, { method: 'POST' });
+      const res = await apiFetch(`/api/v1/harness-configs/${hc.id}/check-image`, {
+        method: 'POST',
+      });
       if (res.ok) {
         const data = (await res.json()) as { image_status: string; source?: string };
         const updated = new Map(this.imageCheckStatuses);
-        updated.set(hc.id, { imageStatus: data.image_status, source: data.source, checking: false });
+        updated.set(hc.id, {
+          imageStatus: data.image_status,
+          source: data.source,
+          checking: false,
+        });
         this.imageCheckStatuses = updated;
       } else {
         const updated = new Map(this.imageCheckStatuses);
@@ -1105,15 +1233,15 @@ export class ScionPageOnboarding extends LitElement {
   private async handlePullSelected(): Promise<void> {
     this.error = null;
     this.imagePulling = true;
-    const selectedList = this.harnessConfigs.filter(hc => this.selectedHarnesses.has(hc.slug));
+    const selectedList = this.harnessConfigs.filter((hc) => this.selectedHarnesses.has(hc.slug));
     const harnesses = selectedList
-      .filter(hc => {
+      .filter((hc) => {
         const cs = this.imageCheckStatuses.get(hc.id);
         const status = cs?.imageStatus ?? hc.imageStatus ?? 'unknown';
         const source = cs?.source;
         return !(status === 'valid' && source === 'local');
       })
-      .map(hc => hc.slug);
+      .map((hc) => hc.slug);
 
     if (harnesses.length === 0) {
       this.imagePulling = false;
@@ -1167,7 +1295,10 @@ export class ScionPageOnboarding extends LitElement {
     es.addEventListener('update', (event: Event) => {
       lastEventTime = Date.now();
       try {
-        const wrapper = JSON.parse((event as MessageEvent).data) as { subject: string; data?: Record<string, unknown> };
+        const wrapper = JSON.parse((event as MessageEvent).data) as {
+          subject: string;
+          data?: Record<string, unknown>;
+        };
         const d = wrapper.data;
         if (!d) return;
 
@@ -1175,7 +1306,11 @@ export class ScionPageOnboarding extends LitElement {
           const fullImageName = d['image'] as string;
           const status = d['status'] as string;
 
-          if (status !== 'queued' && typeof d['index'] === 'number' && typeof d['total'] === 'number') {
+          if (
+            status !== 'queued' &&
+            typeof d['index'] === 'number' &&
+            typeof d['total'] === 'number'
+          ) {
             this.pullIndex = d['index'] as number;
             this.pullTotal = d['total'] as number;
           }
@@ -1215,7 +1350,7 @@ export class ScionPageOnboarding extends LitElement {
     const batchSize = 4;
     for (let i = 0; i < this.harnessConfigs.length; i += batchSize) {
       const batch = this.harnessConfigs.slice(i, i + batchSize);
-      await Promise.all(batch.map(hc => this.checkImageStatus(hc)));
+      await Promise.all(batch.map((hc) => this.checkImageStatus(hc)));
     }
   }
 
@@ -1265,33 +1400,67 @@ export class ScionPageOnboarding extends LitElement {
       <p>Create your first project to get started.</p>
 
       <div class="ws-cards">
-        <div class="ws-card" @click=${() => { this.workspaceMode = 'hub'; }}>
+        <div
+          class="ws-card"
+          @click=${() => {
+            this.workspaceMode = 'hub';
+          }}
+        >
           <sl-icon name="cloud"></sl-icon>
           <div class="ws-card-text">
             <div class="ws-card-title">Hub-managed project</div>
-            <div class="ws-card-desc">A workspace managed by the Hub. No git repository required.</div>
+            <div class="ws-card-desc">
+              A workspace managed by the Hub. No git repository required.
+            </div>
           </div>
         </div>
-        <div class="ws-card" @click=${() => { window.location.href = '/projects/new'; }}>
+        <div
+          class="ws-card"
+          @click=${() => {
+            window.location.href = '/projects/new';
+          }}
+        >
           <sl-icon name="git"></sl-icon>
           <div class="ws-card-text">
             <div class="ws-card-title">Link a git repo</div>
-            <div class="ws-card-desc">Connect to an existing git repository for source-controlled workspaces.</div>
+            <div class="ws-card-desc">
+              Connect to an existing git repository for source-controlled workspaces.
+            </div>
           </div>
         </div>
-        <div class="ws-card" @click=${() => { this.workspaceMode = 'linked'; void this.loadWsBrokerID(); }}>
+        <div
+          class="ws-card"
+          @click=${() => {
+            this.workspaceMode = 'linked';
+            void this.loadWsBrokerID();
+          }}
+        >
           <sl-icon name="folder-symlink"></sl-icon>
           <div class="ws-card-text">
             <div class="ws-card-title">Add local directory</div>
-            <div class="ws-card-desc">Link a local directory. It stays where it is and is operated on in place.</div>
+            <div class="ws-card-desc">
+              Link a local directory. It stays where it is and is operated on in place.
+            </div>
           </div>
         </div>
       </div>
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 4; }}>Back</sl-button>
+        <sl-button
+          variant="text"
+          @click=${() => {
+            this.currentStep = 4;
+          }}
+          >Back</sl-button
+        >
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
+          <sl-button
+            variant="default"
+            @click=${() => {
+              this.currentStep = 6;
+            }}
+            >Skip for now</sl-button
+          >
         </div>
       </div>
     `;
@@ -1307,20 +1476,35 @@ export class ScionPageOnboarding extends LitElement {
         <sl-input
           placeholder="my-project"
           .value=${this.wsProjectName}
-          @sl-input=${(e: Event) => { this.wsProjectName = (e.target as HTMLInputElement).value; }}
+          @sl-input=${(e: Event) => {
+            this.wsProjectName = (e.target as HTMLInputElement).value;
+          }}
         ></sl-input>
       </div>
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.workspaceMode = 'choose'; }}>Back</sl-button>
+        <sl-button
+          variant="text"
+          @click=${() => {
+            this.workspaceMode = 'choose';
+          }}
+          >Back</sl-button
+        >
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
+          <sl-button
+            variant="default"
+            @click=${() => {
+              this.currentStep = 6;
+            }}
+            >Skip for now</sl-button
+          >
           <sl-button
             variant="primary"
             ?loading=${this.wsCreating}
             ?disabled=${!this.wsProjectName.trim()}
             @click=${this.handleWsHubCreate}
-          >Create & Continue</sl-button>
+            >Create & Continue</sl-button
+          >
         </div>
       </div>
     `;
@@ -1348,7 +1532,11 @@ export class ScionPageOnboarding extends LitElement {
   }
 
   private renderWsLinked() {
-    const pathOk = this.wsPathValidation && !this.wsPathValidation.error && this.wsPathValidation.exists && this.wsPathValidation.isDir;
+    const pathOk =
+      this.wsPathValidation &&
+      !this.wsPathValidation.error &&
+      this.wsPathValidation.exists &&
+      this.wsPathValidation.isDir;
 
     return html`
       <h2>Add Local Directory</h2>
@@ -1359,7 +1547,9 @@ export class ScionPageOnboarding extends LitElement {
         <sl-input
           placeholder="my-project"
           .value=${this.wsProjectName}
-          @sl-input=${(e: Event) => { this.wsProjectName = (e.target as HTMLInputElement).value; }}
+          @sl-input=${(e: Event) => {
+            this.wsProjectName = (e.target as HTMLInputElement).value;
+          }}
         ></sl-input>
       </div>
 
@@ -1380,13 +1570,14 @@ export class ScionPageOnboarding extends LitElement {
         ></scion-dir-browser>
       </div>
 
-      ${this.wsLocalPath ? html`
-        <div class="form-group">
-          <label>Selected Path</label>
-          <sl-input readonly .value=${this.wsLocalPath}></sl-input>
-        </div>
-      ` : nothing}
-
+      ${this.wsLocalPath
+        ? html`
+            <div class="form-group">
+              <label>Selected Path</label>
+              <sl-input readonly .value=${this.wsLocalPath}></sl-input>
+            </div>
+          `
+        : nothing}
       ${this.wsValidatingPath
         ? html`<div class="ws-validation valid" style="display:flex;align-items:center;gap:0.5rem;">
             <sl-spinner style="font-size:0.875rem;"></sl-spinner> Validating…
@@ -1399,23 +1590,45 @@ export class ScionPageOnboarding extends LitElement {
                   ? html`<div class="ws-validation error">Path does not exist.</div>`
                   : !this.wsPathValidation.isDir
                     ? html`<div class="ws-validation error">Not a directory.</div>`
-                    : html`<div class="ws-validation valid">Path is valid: ${this.wsPathValidation.resolved}</div>
-                        ${this.wsPathValidation.isGit ? html`<div class="ws-validation warning" style="margin-top:0.25rem;">This is a git repository.</div>` : nothing}
-                        ${this.wsPathValidation.alreadyLinked ? html`<div class="ws-validation warning" style="margin-top:0.25rem;">Already linked to another project.</div>` : nothing}
-                      `}
+                    : html`<div class="ws-validation valid">
+                          Path is valid: ${this.wsPathValidation.resolved}
+                        </div>
+                        ${this.wsPathValidation.isGit
+                          ? html`<div class="ws-validation warning" style="margin-top:0.25rem;">
+                              This is a git repository.
+                            </div>`
+                          : nothing}
+                        ${this.wsPathValidation.alreadyLinked
+                          ? html`<div class="ws-validation warning" style="margin-top:0.25rem;">
+                              Already linked to another project.
+                            </div>`
+                          : nothing} `}
             `
           : nothing}
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.workspaceMode = 'choose'; }}>Back</sl-button>
+        <sl-button
+          variant="text"
+          @click=${() => {
+            this.workspaceMode = 'choose';
+          }}
+          >Back</sl-button
+        >
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
+          <sl-button
+            variant="default"
+            @click=${() => {
+              this.currentStep = 6;
+            }}
+            >Skip for now</sl-button
+          >
           <sl-button
             variant="primary"
             ?loading=${this.wsCreating}
             ?disabled=${!pathOk || !this.wsProjectName.trim()}
             @click=${this.handleWsLinkedCreate}
-          >Create & Continue</sl-button>
+            >Create & Continue</sl-button
+          >
         </div>
       </div>
     `;
@@ -1428,7 +1641,9 @@ export class ScionPageOnboarding extends LitElement {
       if (!res.ok) return;
       const data = (await res.json()) as { embeddedBrokerID?: string };
       if (data.embeddedBrokerID) this.wsEmbeddedBrokerID = data.embeddedBrokerID;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   private async wsValidatePath(path: string): Promise<void> {
@@ -1442,8 +1657,11 @@ export class ScionPageOnboarding extends LitElement {
       });
       if (!res.ok) return;
       this.wsPathValidation = (await res.json()) as typeof this.wsPathValidation;
-    } catch { /* ignore */ }
-    finally { this.wsValidatingPath = false; }
+    } catch {
+      /* ignore */
+    } finally {
+      this.wsValidatingPath = false;
+    }
   }
 
   private async handleWsLinkedCreate(): Promise<void> {
@@ -1465,15 +1683,24 @@ export class ScionPageOnboarding extends LitElement {
       }
       const projData = (await projRes.json()) as { project?: { id: string }; id?: string };
       const projectId = projData.project?.id || projData.id;
-      if (!projectId) { this.error = 'No project ID in response'; return; }
+      if (!projectId) {
+        this.error = 'No project ID in response';
+        return;
+      }
 
       const provRes = await apiFetch(`/api/v1/projects/${projectId}/providers`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brokerId: this.wsEmbeddedBrokerID, localPath: this.wsPathValidation!.resolved }),
+        body: JSON.stringify({
+          brokerId: this.wsEmbeddedBrokerID,
+          localPath: this.wsPathValidation!.resolved,
+        }),
       });
       if (!provRes.ok) {
-        this.error = await extractApiError(provRes, 'Project created but failed to link directory. You can retry.');
+        this.error = await extractApiError(
+          provRes,
+          'Project created but failed to link directory. You can retry.'
+        );
         return;
       }
       this.currentStep = 6;
@@ -1496,7 +1723,13 @@ export class ScionPageOnboarding extends LitElement {
         <sl-icon name="check-circle"></sl-icon>
         <h1>You're All Set</h1>
         <p>Your workstation is configured and ready to use.</p>
-        <sl-button variant="primary" size="large" @click=${() => { window.location.href = '/'; }}>
+        <sl-button
+          variant="primary"
+          size="large"
+          @click=${() => {
+            window.location.href = '/';
+          }}
+        >
           Go to Dashboard
         </sl-button>
       </div>

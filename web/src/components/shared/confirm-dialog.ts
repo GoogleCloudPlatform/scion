@@ -46,10 +46,7 @@ export interface ConfirmOptions {
  * Show a confirmation dialog and return a promise that resolves to `true`
  * (confirmed) or `false` (cancelled / dismissed).
  */
-export function showConfirm(
-  message: string,
-  options?: ConfirmOptions,
-): Promise<boolean> {
+export function showConfirm(message: string, options?: ConfirmOptions): Promise<boolean> {
   const title = options?.title ?? 'Confirm';
   const confirmText = options?.confirmText ?? 'Confirm';
   const cancelText = options?.cancelText ?? 'Cancel';
@@ -99,7 +96,14 @@ export function showConfirm(
     dialog.addEventListener('keydown', (e: KeyboardEvent) => {
       if (e.key === 'Enter') {
         const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-        if (tag === 'textarea' || tag === 'input' || tag === 'sl-textarea' || tag === 'sl-input' || tag === 'button' || tag === 'sl-button') {
+        if (
+          tag === 'textarea' ||
+          tag === 'input' ||
+          tag === 'sl-textarea' ||
+          tag === 'sl-input' ||
+          tag === 'button' ||
+          tag === 'sl-button'
+        ) {
           return;
         }
         e.preventDefault();
@@ -119,7 +123,7 @@ export function showConfirm(
           dialog.remove();
           resolve(result);
         },
-        { once: true },
+        { once: true }
       );
     }
 

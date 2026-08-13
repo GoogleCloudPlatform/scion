@@ -509,9 +509,7 @@ export class ScionInboxTray extends LitElement {
             : nothing}
         </div>
         <div class="panel-list">
-          ${count > 0
-            ? this.messages.map((m) => this.renderItem(m))
-            : this.renderEmpty()}
+          ${count > 0 ? this.messages.map((m) => this.renderItem(m)) : this.renderEmpty()}
         </div>
       </div>
     `;
@@ -529,10 +527,7 @@ export class ScionInboxTray extends LitElement {
           <div class="msg-meta">
             <span>${this.relativeTime(msg.createdAt)}</span>
             ${msg.type ? html`<span class="msg-type-badge">${msg.type}</span>` : nothing}
-            <button
-              class="mark-read-link"
-              @click=${(): void => void this.markOne(msg.id)}
-            >
+            <button class="mark-read-link" @click=${(): void => void this.markOne(msg.id)}>
               Mark read
             </button>
           </div>

@@ -35,12 +35,22 @@ export class ScionPageAdminSkillRegistries extends LitElement {
 
   // Create dialog state
   @state() private createOpen = false;
-  @state() private createForm = { name: '', endpoint: '', type: 'hub', trustLevel: 'pinned', description: '', authToken: '', resolvePath: '' };
+  @state() private createForm = {
+    name: '',
+    endpoint: '',
+    type: 'hub',
+    trustLevel: 'pinned',
+    description: '',
+    authToken: '',
+    resolvePath: '',
+  };
   @state() private createError: string | null = null;
   @state() private creating = false;
 
   static override styles = css`
-    :host { display: block; }
+    :host {
+      display: block;
+    }
 
     .header {
       display: flex;
@@ -61,7 +71,10 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       border-radius: var(--scion-radius-lg, 0.75rem);
       overflow: hidden;
     }
-    table { width: 100%; border-collapse: collapse; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
     th {
       text-align: left;
       padding: 0.75rem 1rem;
@@ -80,9 +93,15 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       vertical-align: middle;
     }
-    tr:last-child td { border-bottom: none; }
-    tr.clickable { cursor: pointer; }
-    tr.clickable:hover td { background: var(--scion-bg-subtle, #f1f5f9); }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    tr.clickable {
+      cursor: pointer;
+    }
+    tr.clickable:hover td {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
 
     .endpoint-text {
       font-family: var(--scion-font-mono, monospace);
@@ -94,7 +113,8 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       text-overflow: ellipsis;
     }
 
-    .type-badge, .trust-badge {
+    .type-badge,
+    .trust-badge {
       display: inline-flex;
       align-items: center;
       padding: 0.125rem 0.5rem;
@@ -152,7 +172,10 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       padding: 4rem 2rem;
       color: var(--scion-text-muted, #64748b);
     }
-    .loading-state sl-spinner { font-size: 2rem; margin-bottom: 1rem; }
+    .loading-state sl-spinner {
+      font-size: 2rem;
+      margin-bottom: 1rem;
+    }
 
     .error-state {
       text-align: center;
@@ -167,10 +190,15 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       margin-bottom: 1rem;
     }
     .error-state h2 {
-      font-size: 1.25rem; font-weight: 600;
-      color: var(--scion-text, #1e293b); margin: 0 0 0.5rem 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.5rem 0;
     }
-    .error-state p { color: var(--scion-text-muted, #64748b); margin: 0 0 1rem 0; }
+    .error-state p {
+      color: var(--scion-text-muted, #64748b);
+      margin: 0 0 1rem 0;
+    }
     .error-details {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
@@ -228,7 +256,9 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       if (!res.ok) {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
-      const data = (await res.json()) as { items?: SkillRegistry[]; registries?: SkillRegistry[] } | SkillRegistry[];
+      const data = (await res.json()) as
+        | { items?: SkillRegistry[]; registries?: SkillRegistry[] }
+        | SkillRegistry[];
       if (Array.isArray(data)) {
         this.registries = data;
       } else {
@@ -256,7 +286,9 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       if (hours < 24) return `${hours}h ago`;
       const days = Math.floor(hours / 24);
       return `${days}d ago`;
-    } catch { return dateString; }
+    } catch {
+      return dateString;
+    }
   }
 
   private async handleCreate(): Promise<void> {
@@ -290,7 +322,15 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       }
 
       this.createOpen = false;
-      this.createForm = { name: '', endpoint: '', type: 'hub', trustLevel: 'pinned', description: '', authToken: '', resolvePath: '' };
+      this.createForm = {
+        name: '',
+        endpoint: '',
+        type: 'hub',
+        trustLevel: 'pinned',
+        description: '',
+        authToken: '',
+        resolvePath: '',
+      };
       void this.loadRegistries();
     } catch (err) {
       this.createError = err instanceof Error ? err.message : 'Failed to create registry';
@@ -308,17 +348,25 @@ export class ScionPageAdminSkillRegistries extends LitElement {
     return html`
       <div class="header">
         <h1>Skill Registries</h1>
-        <sl-button variant="primary" size="small" @click=${() => { this.createOpen = true; }}>
+        <sl-button
+          variant="primary"
+          size="small"
+          @click=${() => {
+            this.createOpen = true;
+          }}
+        >
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>
           Create Registry
         </sl-button>
       </div>
 
-      ${this.loading ? this.renderLoading()
-        : this.error ? this.renderError()
-        : this.registries.length === 0 ? this.renderEmpty()
-        : this.renderTable()}
-
+      ${this.loading
+        ? this.renderLoading()
+        : this.error
+          ? this.renderError()
+          : this.registries.length === 0
+            ? this.renderEmpty()
+            : this.renderTable()}
       ${this.renderCreateDialog()}
     `;
   }
@@ -338,22 +386,24 @@ export class ScionPageAdminSkillRegistries extends LitElement {
             </tr>
           </thead>
           <tbody>
-            ${this.registries.map((r) => html`
-              <tr class="clickable" @click=${() => this.navigateToDetail(r.id)}>
-                <td><strong>${r.name}</strong></td>
-                <td><span class="endpoint-text">${r.endpoint}</span></td>
-                <td><span class="type-badge">${r.type}</span></td>
-                <td><span class="trust-badge ${r.trustLevel}">${r.trustLevel}</span></td>
-                <td>
-                  <scion-status-badge
-                    status=${r.status === 'active' ? 'success' : 'danger'}
-                    label=${r.status}
-                    size="small"
-                  ></scion-status-badge>
-                </td>
-                <td><span class="meta-text">${this.formatRelativeTime(r.created)}</span></td>
-              </tr>
-            `)}
+            ${this.registries.map(
+              (r) => html`
+                <tr class="clickable" @click=${() => this.navigateToDetail(r.id)}>
+                  <td><strong>${r.name}</strong></td>
+                  <td><span class="endpoint-text">${r.endpoint}</span></td>
+                  <td><span class="type-badge">${r.type}</span></td>
+                  <td><span class="trust-badge ${r.trustLevel}">${r.trustLevel}</span></td>
+                  <td>
+                    <scion-status-badge
+                      status=${r.status === 'active' ? 'success' : 'danger'}
+                      label=${r.status}
+                      size="small"
+                    ></scion-status-badge>
+                  </td>
+                  <td><span class="meta-text">${this.formatRelativeTime(r.created)}</span></td>
+                </tr>
+              `
+            )}
           </tbody>
         </table>
       </div>
@@ -365,22 +415,32 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       <sl-dialog
         label="Create Skill Registry"
         ?open=${this.createOpen}
-        @sl-after-hide=${() => { this.createOpen = false; this.createError = null; }}
+        @sl-after-hide=${() => {
+          this.createOpen = false;
+          this.createError = null;
+        }}
         style="--width: 500px;"
       >
-        ${this.createError ? html`
-          <div class="error-banner">
-            <sl-icon name="exclamation-triangle"></sl-icon>
-            <span>${this.createError}</span>
-          </div>
-        ` : nothing}
+        ${this.createError
+          ? html`
+              <div class="error-banner">
+                <sl-icon name="exclamation-triangle"></sl-icon>
+                <span>${this.createError}</span>
+              </div>
+            `
+          : nothing}
 
         <div class="form-field">
           <label>Name</label>
           <sl-input
             placeholder="production-hub"
             .value=${this.createForm.name}
-            @sl-input=${(e: Event) => { this.createForm = { ...this.createForm, name: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.createForm = {
+                ...this.createForm,
+                name: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
             required
           ></sl-input>
         </div>
@@ -390,7 +450,12 @@ export class ScionPageAdminSkillRegistries extends LitElement {
           <sl-input
             placeholder="https://registry.example.com"
             .value=${this.createForm.endpoint}
-            @sl-input=${(e: Event) => { this.createForm = { ...this.createForm, endpoint: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.createForm = {
+                ...this.createForm,
+                endpoint: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
             required
           ></sl-input>
         </div>
@@ -399,7 +464,12 @@ export class ScionPageAdminSkillRegistries extends LitElement {
           <label>Type</label>
           <sl-select
             .value=${this.createForm.type}
-            @sl-change=${(e: Event) => { this.createForm = { ...this.createForm, type: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-change=${(e: Event) => {
+              this.createForm = {
+                ...this.createForm,
+                type: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
           >
             <sl-option value="hub">Hub</sl-option>
             <sl-option value="gcp">GCP</sl-option>
@@ -410,7 +480,12 @@ export class ScionPageAdminSkillRegistries extends LitElement {
           <label>Trust Level</label>
           <sl-select
             .value=${this.createForm.trustLevel}
-            @sl-change=${(e: Event) => { this.createForm = { ...this.createForm, trustLevel: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-change=${(e: Event) => {
+              this.createForm = {
+                ...this.createForm,
+                trustLevel: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
           >
             <sl-option value="pinned">Pinned</sl-option>
             <sl-option value="trusted">Trusted</sl-option>
@@ -426,7 +501,12 @@ export class ScionPageAdminSkillRegistries extends LitElement {
           <label>Description (optional)</label>
           <sl-textarea
             .value=${this.createForm.description}
-            @sl-input=${(e: Event) => { this.createForm = { ...this.createForm, description: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.createForm = {
+                ...this.createForm,
+                description: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
             rows="2"
           ></sl-textarea>
         </div>
@@ -436,7 +516,12 @@ export class ScionPageAdminSkillRegistries extends LitElement {
           <sl-input
             type="password"
             .value=${this.createForm.authToken}
-            @sl-input=${(e: Event) => { this.createForm = { ...this.createForm, authToken: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.createForm = {
+                ...this.createForm,
+                authToken: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
             toggle-password
           ></sl-input>
         </div>
@@ -446,18 +531,31 @@ export class ScionPageAdminSkillRegistries extends LitElement {
           <sl-input
             placeholder="/api/v1/skills/resolve"
             .value=${this.createForm.resolvePath}
-            @sl-input=${(e: Event) => { this.createForm = { ...this.createForm, resolvePath: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.createForm = {
+                ...this.createForm,
+                resolvePath: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
           ></sl-input>
         </div>
 
-        <sl-button slot="footer" variant="default" @click=${() => { this.createOpen = false; }}>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.createOpen = false;
+          }}
+        >
           Cancel
         </sl-button>
         <sl-button
           slot="footer"
           variant="primary"
           ?loading=${this.creating}
-          ?disabled=${this.creating || !this.createForm.name.trim() || !this.createForm.endpoint.trim()}
+          ?disabled=${this.creating ||
+          !this.createForm.name.trim() ||
+          !this.createForm.endpoint.trim()}
           @click=${() => this.handleCreate()}
         >
           Create
@@ -496,7 +594,12 @@ export class ScionPageAdminSkillRegistries extends LitElement {
         <sl-icon name="cloud-arrow-down"></sl-icon>
         <h2>No Registries</h2>
         <p>No skill registries have been configured yet.</p>
-        <sl-button variant="primary" @click=${() => { this.createOpen = true; }}>
+        <sl-button
+          variant="primary"
+          @click=${() => {
+            this.createOpen = true;
+          }}
+        >
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>
           Create Registry
         </sl-button>

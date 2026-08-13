@@ -104,7 +104,7 @@ export class ScionPageProjectCreate extends LitElement {
 
   // Template mode state
   @state()
-  private templates: Array<{id: string; name: string; slug: string}> = [];
+  private templates: Array<{ id: string; name: string; slug: string }> = [];
 
   @state()
   private selectedTemplateId = '';
@@ -457,7 +457,9 @@ export class ScionPageProjectCreate extends LitElement {
     try {
       const res = await apiFetch('/api/v1/projects?isTemplate=true');
       if (res.ok) {
-        const data = (await res.json()) as { projects?: Array<{id: string; name: string; slug: string}> };
+        const data = (await res.json()) as {
+          projects?: Array<{ id: string; name: string; slug: string }>;
+        };
         this.templates = data.projects ?? [];
       } else {
         this.error = 'Failed to load templates. Please try again.';
@@ -499,9 +501,7 @@ export class ScionPageProjectCreate extends LitElement {
 
   private async checkExistingProjects(gitUrl: string): Promise<void> {
     try {
-      const response = await apiFetch(
-        `/api/v1/projects?gitRemote=${encodeURIComponent(gitUrl)}`,
-      );
+      const response = await apiFetch(`/api/v1/projects?gitRemote=${encodeURIComponent(gitUrl)}`);
       if (!response.ok) return;
       const data = (await response.json()) as {
         projects?: Array<{ id: string; name: string; slug: string }>;
@@ -533,12 +533,18 @@ export class ScionPageProjectCreate extends LitElement {
         this.error = 'Local directory path is required.';
         return;
       }
-      if (!this.pathValidation || this.pathValidation.error || !this.pathValidation.exists || !this.pathValidation.isDir) {
+      if (
+        !this.pathValidation ||
+        this.pathValidation.error ||
+        !this.pathValidation.exists ||
+        !this.pathValidation.isDir
+      ) {
         this.error = 'Please select a valid directory path.';
         return;
       }
       if (!this.embeddedBrokerID) {
-        this.error = 'No embedded broker available. Ensure the server is running in workstation mode.';
+        this.error =
+          'No embedded broker available. Ensure the server is running in workstation mode.';
         return;
       }
     }
@@ -563,7 +569,10 @@ export class ScionPageProjectCreate extends LitElement {
           }),
         });
         if (!response.ok) {
-          const errorText = await extractApiError(response, 'Failed to create project from template');
+          const errorText = await extractApiError(
+            response,
+            'Failed to create project from template'
+          );
           throw new Error(errorText);
         }
         const created = (await response.json()) as { id: string };
@@ -642,7 +651,10 @@ export class ScionPageProjectCreate extends LitElement {
           }),
         });
         if (!providerRes.ok) {
-          this.error = await extractApiError(providerRes, 'Project created but failed to link directory. You can retry.');
+          this.error = await extractApiError(
+            providerRes,
+            'Project created but failed to link directory. You can retry.'
+          );
           this.submitting = false;
           return;
         }
@@ -729,17 +741,22 @@ export class ScionPageProjectCreate extends LitElement {
                     @sl-input=${(e: Event) => this.onGitRemoteInput(e)}
                     required
                   ></sl-input>
-                  <div class="hint">
-                    HTTPS or SSH URL of the git repository.
-                  </div>
+                  <div class="hint">HTTPS or SSH URL of the git repository.</div>
                 </div>
 
                 ${this.githubAppUrl
                   ? html`
                       <div class="github-app-hint">
                         <sl-icon name="github"></sl-icon>
-                        <span>Ensure this repository is accessible via the
-                          <a href=${this.githubAppUrl} target="_blank" rel="noopener">GitHub App <sl-icon name="box-arrow-up-right" style="font-size: 0.7em; vertical-align: middle;"></sl-icon></a>
+                        <span
+                          >Ensure this repository is accessible via the
+                          <a href=${this.githubAppUrl} target="_blank" rel="noopener"
+                            >GitHub App
+                            <sl-icon
+                              name="box-arrow-up-right"
+                              style="font-size: 0.7em; vertical-align: middle;"
+                            ></sl-icon
+                          ></a>
                         </span>
                       </div>
                     `
@@ -758,21 +775,26 @@ export class ScionPageProjectCreate extends LitElement {
                     password-toggle
                   ></sl-input>
                   <div class="hint">
-                    Optional. A personal access token for cloning private repositories. Saved as a project secret.
+                    Optional. A personal access token for cloning private repositories. Saved as a
+                    project secret.
                   </div>
                 </div>
 
                 ${this.existingProjectsForRemote.length > 0
-
                   ? html`
                       <div class="info-banner">
                         <sl-icon name="info-circle"></sl-icon>
                         <div>
-                          <strong>${this.existingProjectsForRemote.length} existing project(s)</strong> share this git remote.
-                          A new project will be created with a unique slug.
+                          <strong
+                            >${this.existingProjectsForRemote.length} existing project(s)</strong
+                          >
+                          share this git remote. A new project will be created with a unique slug.
                           <ul style="margin: 0.25rem 0 0; padding-left: 1.25rem;">
                             ${this.existingProjectsForRemote.map(
-                              (p) => html`<li>${p.name} <span style="opacity: 0.7">(${p.slug})</span></li>`,
+                              (p) =>
+                                html`<li>
+                                  ${p.name} <span style="opacity: 0.7">(${p.slug})</span>
+                                </li>`
                             )}
                           </ul>
                         </div>
@@ -785,7 +807,8 @@ export class ScionPageProjectCreate extends LitElement {
                   <sl-radio-group
                     .value=${this.gitWorkspaceMode}
                     @sl-change=${(e: Event) => {
-                      this.gitWorkspaceMode = (e.target as HTMLElement & { value: string }).value as GitWorkspaceMode;
+                      this.gitWorkspaceMode = (e.target as HTMLElement & { value: string })
+                        .value as GitWorkspaceMode;
                     }}
                   >
                     <sl-radio-button value="per-agent">Clone per agent</sl-radio-button>
@@ -801,8 +824,9 @@ export class ScionPageProjectCreate extends LitElement {
                   </div>
                   ${this.gitWorkspaceMode === 'worktree-per-agent'
                     ? html`<div class="workspace-mode-note">
-                        A single base clone is created, and each agent gets a lightweight git worktree.
-                        Requires git ≥ 2.47 on the node. On Kubernetes, requires the NFS backend.
+                        A single base clone is created, and each agent gets a lightweight git
+                        worktree. Requires git ≥ 2.47 on the node. On Kubernetes, requires the NFS
+                        backend.
                       </div>`
                     : this.gitWorkspaceMode === 'shared'
                       ? html`<div class="workspace-mode-note">
@@ -813,37 +837,43 @@ export class ScionPageProjectCreate extends LitElement {
                 </div>
               `
             : nothing}
-
           ${this.mode === 'template'
             ? html`
                 <div class="form-field">
                   <label>Template</label>
-                  ${this.templatesLoading ? html`<sl-spinner></sl-spinner>` : html`
-                  <sl-select
-                    placeholder="Select a template..."
-                    .value=${this.selectedTemplateId}
-                    @sl-change=${(e: Event) => (this.selectedTemplateId = (e.target as HTMLSelectElement).value)}
-                  >
-                    ${this.templates.length === 0
-                      ? html`<sl-option disabled value="">No templates available</sl-option>`
-                      : this.templates.map(t => html`<sl-option value=${t.id}>${t.name}</sl-option>`)}
-                  </sl-select>
-                  `}
+                  ${this.templatesLoading
+                    ? html`<sl-spinner></sl-spinner>`
+                    : html`
+                        <sl-select
+                          placeholder="Select a template..."
+                          .value=${this.selectedTemplateId}
+                          @sl-change=${(e: Event) =>
+                            (this.selectedTemplateId = (e.target as HTMLSelectElement).value)}
+                        >
+                          ${this.templates.length === 0
+                            ? html`<sl-option disabled value="">No templates available</sl-option>`
+                            : this.templates.map(
+                                (t) => html`<sl-option value=${t.id}>${t.name}</sl-option>`
+                              )}
+                        </sl-select>
+                      `}
                 </div>
                 <div class="form-field">
                   <label>Git Remote URL (optional)</label>
                   <sl-input
                     placeholder="https://github.com/org/repo.git"
                     .value=${this.templateGitRemote}
-                    @sl-input=${(e: Event) => { this.templateGitRemote = (e.target as HTMLElement & {value: string}).value; }}
+                    @sl-input=${(e: Event) => {
+                      this.templateGitRemote = (e.target as HTMLElement & { value: string }).value;
+                    }}
                   ></sl-input>
                   <div class="hint">
-                    Override the git remote from the template. Leave blank to use the template's default.
+                    Override the git remote from the template. Leave blank to use the template's
+                    default.
                   </div>
                 </div>
               `
             : nothing}
-
           ${this.mode === 'linked'
             ? html`
                 <div class="form-field">
@@ -855,7 +885,12 @@ export class ScionPageProjectCreate extends LitElement {
                       .value=${this.localPath}
                       @sl-input=${(e: Event) => this.onLocalPathInput(e)}
                     ></sl-input>
-                    <sl-button variant="default" @click=${() => { this.browseDialogOpen = true; }}>
+                    <sl-button
+                      variant="default"
+                      @click=${() => {
+                        this.browseDialogOpen = true;
+                      }}
+                    >
                       Browse…
                     </sl-button>
                   </div>
@@ -865,7 +900,10 @@ export class ScionPageProjectCreate extends LitElement {
                 </div>
 
                 ${this.validatingPath
-                  ? html`<div class="validation-result valid" style="display: flex; align-items: center; gap: 0.5rem;">
+                  ? html`<div
+                      class="validation-result valid"
+                      style="display: flex; align-items: center; gap: 0.5rem;"
+                    >
                       <sl-spinner style="font-size: 0.875rem;"></sl-spinner> Validating path…
                     </div>`
                   : this.pathValidation
@@ -891,13 +929,20 @@ export class ScionPageProjectCreate extends LitElement {
                                     Path resolved to: ${this.pathValidation.resolved}
                                   </div>
                                   ${this.pathValidation.isGit
-                                    ? html`<div class="validation-result warning" style="margin-top: 0.25rem;">
+                                    ? html`<div
+                                        class="validation-result warning"
+                                        style="margin-top: 0.25rem;"
+                                      >
                                         <sl-icon name="info-circle"></sl-icon>
-                                        This is a git repository. Agents will operate on the working tree.
+                                        This is a git repository. Agents will operate on the working
+                                        tree.
                                       </div>`
                                     : nothing}
                                   ${this.pathValidation.alreadyLinked
-                                    ? html`<div class="validation-result warning" style="margin-top: 0.25rem;">
+                                    ? html`<div
+                                        class="validation-result warning"
+                                        style="margin-top: 0.25rem;"
+                                      >
                                         <sl-icon name="info-circle"></sl-icon>
                                         This directory is already linked to another project.
                                       </div>`
@@ -907,20 +952,22 @@ export class ScionPageProjectCreate extends LitElement {
                     : nothing}
               `
             : nothing}
-
-          ${this.mode !== 'template' ? html`
-          <div class="form-field">
-            <label for="slug">Slug</label>
-            <sl-input
-              id="slug"
-              placeholder="my-project"
-              .value=${this.slug}
-              @sl-input=${(e: Event) => this.onSlugInput(e)}
-            ></sl-input>
-            <div class="hint">URL-safe identifier. Auto-derived from name if left unchanged.</div>
-          </div>
-          ` : nothing}
-
+          ${this.mode !== 'template'
+            ? html`
+                <div class="form-field">
+                  <label for="slug">Slug</label>
+                  <sl-input
+                    id="slug"
+                    placeholder="my-project"
+                    .value=${this.slug}
+                    @sl-input=${(e: Event) => this.onSlugInput(e)}
+                  ></sl-input>
+                  <div class="hint">
+                    URL-safe identifier. Auto-derived from name if left unchanged.
+                  </div>
+                </div>
+              `
+            : nothing}
           ${this.mode === 'git'
             ? html`
                 <div class="form-field">
@@ -937,23 +984,24 @@ export class ScionPageProjectCreate extends LitElement {
                 </div>
               `
             : nothing}
-
-          ${this.mode !== 'template' ? html`
-          <div class="form-field">
-            <label for="visibility">Visibility</label>
-            <sl-select
-              id="visibility"
-              .value=${this.visibility}
-              @sl-change=${(e: Event) => {
-                this.visibility = (e.target as HTMLElement & { value: string }).value;
-              }}
-            >
-              <sl-option value="private">Private</sl-option>
-              <sl-option value="team">Team</sl-option>
-              <sl-option value="public">Public</sl-option>
-            </sl-select>
-          </div>
-          ` : nothing}
+          ${this.mode !== 'template'
+            ? html`
+                <div class="form-field">
+                  <label for="visibility">Visibility</label>
+                  <sl-select
+                    id="visibility"
+                    .value=${this.visibility}
+                    @sl-change=${(e: Event) => {
+                      this.visibility = (e.target as HTMLElement & { value: string }).value;
+                    }}
+                  >
+                    <sl-option value="private">Private</sl-option>
+                    <sl-option value="team">Team</sl-option>
+                    <sl-option value="public">Public</sl-option>
+                  </sl-select>
+                </div>
+              `
+            : nothing}
 
           <div class="form-actions">
             <sl-button
@@ -966,9 +1014,7 @@ export class ScionPageProjectCreate extends LitElement {
               Create Project
             </sl-button>
             <a href="/projects" style="text-decoration: none;">
-              <sl-button variant="default" ?disabled=${this.submitting}>
-                Cancel
-              </sl-button>
+              <sl-button variant="default" ?disabled=${this.submitting}> Cancel </sl-button>
             </a>
           </div>
         </div>
@@ -977,7 +1023,9 @@ export class ScionPageProjectCreate extends LitElement {
       <sl-dialog
         label="Browse Directory"
         ?open=${this.browseDialogOpen}
-        @sl-after-hide=${() => { this.browseDialogOpen = false; }}
+        @sl-after-hide=${() => {
+          this.browseDialogOpen = false;
+        }}
         style="--width: 36rem;"
       >
         <scion-dir-browser
@@ -988,11 +1036,11 @@ export class ScionPageProjectCreate extends LitElement {
       <sl-dialog
         label="Project Already Exists"
         ?open=${this.existingProjectId !== null}
-        @sl-after-hide=${() => { this.existingProjectId = null; }}
+        @sl-after-hide=${() => {
+          this.existingProjectId = null;
+        }}
       >
-        <div class="exists-dialog-body">
-          A project with this ID already exists.
-        </div>
+        <div class="exists-dialog-body">A project with this ID already exists.</div>
         <sl-button
           slot="footer"
           variant="primary"

@@ -709,11 +709,7 @@ export class ScionResourceList extends LitElement {
         ></span>`;
       case 'error':
         return html`<span class="refresh-status"
-          ><sl-icon
-            class="refresh-error"
-            name="x-circle"
-            aria-label="Refresh failed"
-          ></sl-icon
+          ><sl-icon class="refresh-error" name="x-circle" aria-label="Refresh failed"></sl-icon
         ></span>`;
     }
   }

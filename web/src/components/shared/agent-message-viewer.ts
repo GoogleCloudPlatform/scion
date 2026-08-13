@@ -215,8 +215,13 @@ export class ScionAgentMessageViewer extends LitElement {
       animation: pulse 1.5s ease-in-out infinite;
     }
     @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
+      0%,
+      100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.3;
+      }
     }
 
     /* Message list */
@@ -433,9 +438,14 @@ export class ScionAgentMessageViewer extends LitElement {
       }
       const res = await apiFetch(`${baseUrl}?${params.toString()}`);
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({})) as { error?: { message?: string }; message?: string };
+        const errData = (await res.json().catch(() => ({}))) as {
+          error?: { message?: string };
+          message?: string;
+        };
         throw new Error(
-          (errData.error as { message?: string })?.message || errData.message || `HTTP ${res.status}`
+          (errData.error as { message?: string })?.message ||
+            errData.message ||
+            `HTTP ${res.status}`
         );
       }
       const logData = (await res.json()) as MessageLogsResponse;
@@ -451,9 +461,8 @@ export class ScionAgentMessageViewer extends LitElement {
   private parseHubMessage(msg: Message): ParsedMessage {
     // Hub store: senderId === agentId means the agent sent the message (outbound).
     // Otherwise the agent is the recipient (inbound from human).
-    const direction: 'sent' | 'received' = !this.agentId || msg.senderId === this.agentId
-      ? 'sent'
-      : 'received';
+    const direction: 'sent' | 'received' =
+      !this.agentId || msg.senderId === this.agentId ? 'sent' : 'received';
 
     return {
       sender: msg.sender,
@@ -497,8 +506,8 @@ export class ScionAgentMessageViewer extends LitElement {
     const sender = labels['sender'] || (payload['sender'] as string) || '';
     const recipient = labels['recipient'] || (payload['recipient'] as string) || '';
     const msgType = labels['msg_type'] || (payload['msg_type'] as string) || '';
-    const urgent = (payload['urgent'] === true) || (labels['urgent'] === 'true');
-    const broadcasted = (payload['broadcasted'] === true) || (labels['broadcasted'] === 'true');
+    const urgent = payload['urgent'] === true || labels['urgent'] === 'true';
+    const broadcasted = payload['broadcasted'] === true || labels['broadcasted'] === 'true';
 
     // Determine direction relative to this agent using unique IDs.
     // Check sender_id and recipient_id labels first (UUID-based, unambiguous).
@@ -526,8 +535,7 @@ export class ScionAgentMessageViewer extends LitElement {
     // payload['message'] and entry.message are the Cloud Logging message
     // (e.g. "message dispatched"), NOT the scion message content.
     // The actual message body is in payload['message_content'].
-    const body = (payload['message_content'] as string)
-      || '';
+    const body = (payload['message_content'] as string) || '';
 
     return {
       sender,
@@ -712,8 +720,7 @@ export class ScionAgentMessageViewer extends LitElement {
 
   override render() {
     return html`
-      ${this.canSend ? this.renderCompose() : nothing}
-      ${this.renderToolbar()}
+      ${this.canSend ? this.renderCompose() : nothing} ${this.renderToolbar()}
       ${this.renderContent()}
     `;
   }
@@ -727,19 +734,23 @@ export class ScionAgentMessageViewer extends LitElement {
 
     return html`
       <div class="compose-box">
-        ${isBroadcast ? html`
-          <div class="compose-label">
-            <sl-icon name="broadcast-pin" style="font-size: 0.875rem;"></sl-icon>
-            Broadcast to all running agents in this project
-          </div>
-        ` : nothing}
+        ${isBroadcast
+          ? html`
+              <div class="compose-label">
+                <sl-icon name="broadcast-pin" style="font-size: 0.875rem;"></sl-icon>
+                Broadcast to all running agents in this project
+              </div>
+            `
+          : nothing}
         <div class="compose-row">
           <div class="compose-input">
             <sl-input
               placeholder=${placeholder}
               size="small"
               .value=${this.composeText}
-              @sl-input=${(e: Event) => { this.composeText = (e.target as HTMLInputElement).value; }}
+              @sl-input=${(e: Event) => {
+                this.composeText = (e.target as HTMLInputElement).value;
+              }}
               @keydown=${this.handleComposeKeydown}
               ?disabled=${this.sending}
             ></sl-input>
@@ -750,7 +761,9 @@ export class ScionAgentMessageViewer extends LitElement {
               <sl-checkbox
                 size="small"
                 ?checked=${this.composePlain}
-                @sl-change=${(e: Event) => { this.composePlain = (e.target as HTMLInputElement).checked; }}
+                @sl-change=${(e: Event) => {
+                  this.composePlain = (e.target as HTMLInputElement).checked;
+                }}
               ></sl-checkbox>
               Plain
             </label>
@@ -758,7 +771,9 @@ export class ScionAgentMessageViewer extends LitElement {
               <sl-checkbox
                 size="small"
                 ?checked=${this.composeInterrupt}
-                @sl-change=${(e: Event) => { this.composeInterrupt = (e.target as HTMLInputElement).checked; }}
+                @sl-change=${(e: Event) => {
+                  this.composeInterrupt = (e.target as HTMLInputElement).checked;
+                }}
               ></sl-checkbox>
               Interrupt
             </label>
@@ -846,7 +861,11 @@ export class ScionAgentMessageViewer extends LitElement {
 
     for (const msg of this.messages) {
       const d = new Date(msg.timestamp);
-      const dateStr = d.toLocaleDateString('en', { year: 'numeric', month: 'short', day: 'numeric' });
+      const dateStr = d.toLocaleDateString('en', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      });
 
       if (dateStr !== lastDate) {
         lastDate = dateStr;
@@ -854,7 +873,10 @@ export class ScionAgentMessageViewer extends LitElement {
       }
 
       const timeStr = d.toLocaleTimeString('en', {
-        hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
       });
       const isExpanded = this.expandedIds.has(msg.insertId);
 
@@ -875,9 +897,13 @@ export class ScionAgentMessageViewer extends LitElement {
               <sl-icon name="arrow-right" class="msg-arrow" style="font-size:0.6875rem"></sl-icon>
               <span class="msg-target">${toLabel}</span>
               <div class="msg-badges">
-                ${msg.msgType ? html`<span class="msg-badge badge-type">${msg.msgType}</span>` : nothing}
+                ${msg.msgType
+                  ? html`<span class="msg-badge badge-type">${msg.msgType}</span>`
+                  : nothing}
                 ${msg.urgent ? html`<span class="msg-badge badge-urgent">urgent</span>` : nothing}
-                ${msg.broadcasted ? html`<span class="msg-badge badge-broadcast">broadcast</span>` : nothing}
+                ${msg.broadcasted
+                  ? html`<span class="msg-badge badge-broadcast">broadcast</span>`
+                  : nothing}
               </div>
               <span class="msg-time">${timeStr}</span>
             </div>

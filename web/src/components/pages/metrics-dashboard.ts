@@ -59,8 +59,16 @@ interface TokensData {
 }
 
 const CHART_COLORS = [
-  '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
-  '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1',
+  '#3b82f6',
+  '#10b981',
+  '#f59e0b',
+  '#ef4444',
+  '#8b5cf6',
+  '#ec4899',
+  '#06b6d4',
+  '#84cc16',
+  '#f97316',
+  '#6366f1',
 ];
 
 @customElement('scion-page-metrics')
@@ -257,9 +265,7 @@ export class ScionPageMetrics extends LitElement {
       const basePath = this.projectId
         ? `/api/v1/projects/${this.projectId}/metrics`
         : `/api/v1/metrics/`;
-      const response = await apiFetch(
-        `${basePath}?view=${view}&period=${this.periodDays}`
-      );
+      const response = await apiFetch(`${basePath}?view=${view}&period=${this.periodDays}`);
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
@@ -316,7 +322,11 @@ export class ScionPageMetrics extends LitElement {
   }
 
   private static readonly CHART_PROPERTIES = new Set([
-    'sessions', 'modelCalls', 'tokens', 'activeTab', 'loading',
+    'sessions',
+    'modelCalls',
+    'tokens',
+    'activeTab',
+    'loading',
   ]);
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -335,24 +345,34 @@ export class ScionPageMetrics extends LitElement {
         if (this.sessions) {
           if (this.sessions.dailyCounts?.length) {
             const sorted = this.sortPointsByDate(this.sessions.dailyCounts);
-            this.renderChart('chart-sessions', 'bar', sorted.map(p => p.timestamp), [
-              {
-                label: 'Sessions',
-                data: sorted.map(p => p.value),
-                backgroundColor: CHART_COLORS[0],
-              },
-            ]);
+            this.renderChart(
+              'chart-sessions',
+              'bar',
+              sorted.map((p) => p.timestamp),
+              [
+                {
+                  label: 'Sessions',
+                  data: sorted.map((p) => p.value),
+                  backgroundColor: CHART_COLORS[0],
+                },
+              ]
+            );
           }
           if (this.sessions.activeAgents?.length) {
             const sorted = this.sortPointsByDate(this.sessions.activeAgents);
-            this.renderChart('chart-agents', 'line', sorted.map(p => p.timestamp), [
-              {
-                label: 'Active Agents',
-                data: sorted.map(p => p.value),
-                borderColor: CHART_COLORS[1],
-                backgroundColor: CHART_COLORS[1] + '33',
-              },
-            ]);
+            this.renderChart(
+              'chart-agents',
+              'line',
+              sorted.map((p) => p.timestamp),
+              [
+                {
+                  label: 'Active Agents',
+                  data: sorted.map((p) => p.value),
+                  borderColor: CHART_COLORS[1],
+                  backgroundColor: CHART_COLORS[1] + '33',
+                },
+              ]
+            );
           }
         }
         break;
@@ -482,7 +502,7 @@ export class ScionPageMetrics extends LitElement {
         </div>
         <div class="period-selector">
           ${[7, 14, 30].map(
-            d => html`
+            (d) => html`
               <button
                 class="period-btn ${this.periodDays === d ? 'active' : ''}"
                 @click=${() => this.handlePeriodChange(d)}
@@ -505,9 +525,15 @@ export class ScionPageMetrics extends LitElement {
 
       <sl-tab-group @sl-tab-show=${this.handleTabChange}>
         <sl-tab slot="nav" panel="summary" ?active=${this.activeTab === 'summary'}>Summary</sl-tab>
-        <sl-tab slot="nav" panel="sessions" ?active=${this.activeTab === 'sessions'}>Sessions & Users</sl-tab>
-        <sl-tab slot="nav" panel="model-calls" ?active=${this.activeTab === 'model-calls'}>Model Calls</sl-tab>
-        <sl-tab slot="nav" panel="tokens" ?active=${this.activeTab === 'tokens'}>Token Usage</sl-tab>
+        <sl-tab slot="nav" panel="sessions" ?active=${this.activeTab === 'sessions'}
+          >Sessions & Users</sl-tab
+        >
+        <sl-tab slot="nav" panel="model-calls" ?active=${this.activeTab === 'model-calls'}
+          >Model Calls</sl-tab
+        >
+        <sl-tab slot="nav" panel="tokens" ?active=${this.activeTab === 'tokens'}
+          >Token Usage</sl-tab
+        >
 
         <sl-tab-panel name="summary">${this.renderSummaryTab()}</sl-tab-panel>
         <sl-tab-panel name="sessions">${this.renderSessionsTab()}</sl-tab-panel>
@@ -635,6 +661,6 @@ export class ScionPageMetrics extends LitElement {
     for (const p of points) {
       map.set(p.timestamp, p.value);
     }
-    return dates.map(d => map.get(d) ?? 0);
+    return dates.map((d) => map.get(d) ?? 0);
   }
 }

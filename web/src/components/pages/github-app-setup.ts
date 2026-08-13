@@ -132,9 +132,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
         };
         // Update the project in our list
         this.projects = this.projects.map((p) =>
-          p.id === project.id
-            ? { ...p, githubAppStatus: data.status || p.githubAppStatus }
-            : p
+          p.id === project.id ? { ...p, githubAppStatus: data.status || p.githubAppStatus } : p
         );
       }
     } catch (err) {
@@ -147,12 +145,8 @@ export class ScionPageGitHubAppSetup extends LitElement {
   }
 
   private async checkAllProjects(): Promise<void> {
-    const projectsWithInstallation = this.projects.filter(
-      (p) => p.githubInstallationId
-    );
-    await Promise.allSettled(
-      projectsWithInstallation.map((p) => this.checkProjectStatus(p))
-    );
+    const projectsWithInstallation = this.projects.filter((p) => p.githubInstallationId);
+    await Promise.allSettled(projectsWithInstallation.map((p) => this.checkProjectStatus(p)));
   }
 
   private navigateTo(path: string): void {
@@ -408,7 +402,10 @@ export class ScionPageGitHubAppSetup extends LitElement {
           <sl-icon name="github"></sl-icon>
           GitHub App Setup
         </h1>
-        <p>Your GitHub App installation has been recorded. Set up projects for your repositories below.</p>
+        <p>
+          Your GitHub App installation has been recorded. Set up projects for your repositories
+          below.
+        </p>
       </div>
 
       ${this.error
@@ -419,7 +416,6 @@ export class ScionPageGitHubAppSetup extends LitElement {
             </div>
           `
         : nothing}
-
       ${this.discoveryResult && this.discoveryResult.matched > 0
         ? html`
             <div class="success-banner">
@@ -436,10 +432,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
       <div class="actions-card">
         <h2>Get Started</h2>
         <p>Create a new project linked to a GitHub repository to start running agents.</p>
-        <sl-button
-          variant="primary"
-          @click=${() => this.navigateTo('/projects/new')}
-        >
+        <sl-button variant="primary" @click=${() => this.navigateTo('/projects/new')}>
           <sl-icon slot="prefix" name="folder-plus"></sl-icon>
           Create New Project
         </sl-button>

@@ -179,7 +179,9 @@ export class ScionPageBrokers extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const data = (await response.json()) as { brokers?: RuntimeBroker[] } | RuntimeBroker[];
@@ -305,7 +307,9 @@ export class ScionPageBrokers extends LitElement {
 
   private renderGrid() {
     return html`
-      <div class="resource-grid">${this.brokers.map((broker) => this.renderBrokerCard(broker))}</div>
+      <div class="resource-grid">
+        ${this.brokers.map((broker) => this.renderBrokerCard(broker))}
+      </div>
     `;
   }
 
@@ -324,8 +328,7 @@ export class ScionPageBrokers extends LitElement {
           <div>
             <h3 class="resource-name">
               <sl-icon name="hdd-rack"></sl-icon>
-              ${broker.name}
-              ${this.renderBrokerTypeBadge(broker)}
+              ${broker.name} ${this.renderBrokerTypeBadge(broker)}
             </h3>
             ${broker.version ? html`<div class="broker-version">v${broker.version}</div>` : ''}
           </div>
@@ -397,15 +400,17 @@ export class ScionPageBrokers extends LitElement {
 
   private renderBrokerRow(broker: RuntimeBroker) {
     return html`
-      <tr class="clickable" @click=${() => {
-        window.history.pushState({}, '', `/brokers/${broker.id}`);
-        window.dispatchEvent(new PopStateEvent('popstate'));
-      }}>
+      <tr
+        class="clickable"
+        @click=${() => {
+          window.history.pushState({}, '', `/brokers/${broker.id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }}
+      >
         <td>
           <span class="name-cell">
             <sl-icon name="hdd-rack"></sl-icon>
-            ${broker.name}
-            ${this.renderBrokerTypeBadge(broker)}
+            ${broker.name} ${this.renderBrokerTypeBadge(broker)}
           </span>
         </td>
         <td class="hide-mobile">
@@ -422,9 +427,15 @@ export class ScionPageBrokers extends LitElement {
           ${broker.capabilities
             ? html`
                 <span class="capability-tags-inline">
-                  <span class="capability-tag ${broker.capabilities.webPTY ? 'enabled' : ''}">WebPTY</span>
-                  <span class="capability-tag ${broker.capabilities.sync ? 'enabled' : ''}">Sync</span>
-                  <span class="capability-tag ${broker.capabilities.attach ? 'enabled' : ''}">Attach</span>
+                  <span class="capability-tag ${broker.capabilities.webPTY ? 'enabled' : ''}"
+                    >WebPTY</span
+                  >
+                  <span class="capability-tag ${broker.capabilities.sync ? 'enabled' : ''}"
+                    >Sync</span
+                  >
+                  <span class="capability-tag ${broker.capabilities.attach ? 'enabled' : ''}"
+                    >Attach</span
+                  >
                 </span>
               `
             : '\u2014'}
@@ -432,9 +443,7 @@ export class ScionPageBrokers extends LitElement {
         <td>
           <span class="meta-text">${this.formatRelativeTime(broker.lastHeartbeat)}</span>
         </td>
-        <td class="hide-mobile">
-          ${broker.profiles ? broker.profiles.length : '\u2014'}
-        </td>
+        <td class="hide-mobile">${broker.profiles ? broker.profiles.length : '\u2014'}</td>
       </tr>
     `;
   }

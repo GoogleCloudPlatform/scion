@@ -145,7 +145,7 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
     if (visited.has(node.agent.id)) return;
     visited.add(node.agent.id);
     node.depth = depth;
-    node.children = node.children.filter(c => !visited.has(c.agent.id));
+    node.children = node.children.filter((c) => !visited.has(c.agent.id));
     for (const child of node.children) visit(child, depth + 1);
   };
   for (const root of roots) visit(root, 0);
@@ -183,7 +183,10 @@ export function descendantCounts(roots: LineageNode[]): Map<string, number> {
  * subtrees. Mutates the given forest (buildLineageForest returns a fresh
  * one per call) and returns it for chaining.
  */
-export function pruneCollapsed(roots: LineageNode[], collapsed: ReadonlySet<string>): LineageNode[] {
+export function pruneCollapsed(
+  roots: LineageNode[],
+  collapsed: ReadonlySet<string>
+): LineageNode[] {
   const walk = (node: LineageNode): void => {
     if (collapsed.has(node.agent.id)) {
       node.children = [];
@@ -282,12 +285,12 @@ export function layoutForestWithUsers(roots: LineageNode[]): ForestLayout {
   for (const root of ordered) bump(root, 1);
 
   const base = layoutForest(ordered);
-  const nodeById = new Map(base.nodes.map(n => [n.agent.id, n]));
+  const nodeById = new Map(base.nodes.map((n) => [n.agent.id, n]));
 
   const users: PositionedUser[] = [];
   const edges = [...base.edges];
   for (const [uid, groupRoots] of groups) {
-    const xs = groupRoots.map(r => nodeById.get(r.agent.id)!.px);
+    const xs = groupRoots.map((r) => nodeById.get(r.agent.id)!.px);
     const px = (Math.min(...xs) + Math.max(...xs)) / 2;
     const py = PAD;
     users.push({ id: uid, px, py });
@@ -327,12 +330,12 @@ export function transposeLayout(layout: ForestLayout): ForestLayout {
   const hx = (depth: number) => PAD + depth * (NODE_W + H_GAP_X);
   const hy = (slot: number) => PAD + slot * (NODE_H + H_GAP_Y);
 
-  const nodes: PositionedNode[] = layout.nodes.map(n => ({
+  const nodes: PositionedNode[] = layout.nodes.map((n) => ({
     agent: n.agent,
     px: hx(depthOf(n.py)),
     py: hy(slotOf(n.px)),
   }));
-  const users: PositionedUser[] = layout.users.map(u => ({
+  const users: PositionedUser[] = layout.users.map((u) => ({
     id: u.id,
     px: hx(depthOf(u.py)),
     py: hy(slotOf(u.px)),

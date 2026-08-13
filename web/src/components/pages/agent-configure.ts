@@ -27,7 +27,13 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
-import type { Agent, CapabilityField, GCPIdentityConfig, GCPServiceAccount, HarnessAdvancedCapabilities } from '../../shared/types.js';
+import type {
+  Agent,
+  CapabilityField,
+  GCPIdentityConfig,
+  GCPServiceAccount,
+  HarnessAdvancedCapabilities,
+} from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
@@ -433,11 +439,17 @@ export class ScionPageAgentConfigure extends LitElement {
     }
   }
 
-  private deriveModelSelection(model: string): { selection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other'; customId: string } {
+  private deriveModelSelection(model: string): {
+    selection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
+    customId: string;
+  } {
     if (!model) return { selection: '', customId: '' };
     const normalized = normalizeModelAlias(model);
     if (['small', 'medium', 'large', 'extra-large'].includes(normalized)) {
-      return { selection: normalized as 'small' | 'medium' | 'large' | 'extra-large', customId: '' };
+      return {
+        selection: normalized as 'small' | 'medium' | 'large' | 'extra-large',
+        customId: '',
+      };
     }
     return { selection: 'other', customId: model };
   }
@@ -459,11 +471,12 @@ export class ScionPageAgentConfigure extends LitElement {
     this.authMethod = ac?.harnessAuth || ic?.auth_selectedType || '';
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
     this.telemetryEnabled = ic?.telemetry?.enabled ?? this.globalTelemetryDefault;
-    this.autoExposePortsEnabled = ic?.env?.SCION_AUTO_EXPOSE_PORTS === 'true'
-      ? true
-      : ic?.env?.SCION_AUTO_EXPOSE_PORTS === 'false'
-        ? false
-        : this.globalAutoExposePortsDefault;
+    this.autoExposePortsEnabled =
+      ic?.env?.SCION_AUTO_EXPOSE_PORTS === 'true'
+        ? true
+        : ic?.env?.SCION_AUTO_EXPOSE_PORTS === 'false'
+          ? false
+          : this.globalAutoExposePortsDefault;
     this.autoExposePortsMode = ic?.env?.SCION_AUTO_EXPOSE_MODE || 'allowlist';
     this.autoExposePortsList = ic?.env?.SCION_AUTO_EXPOSE_PORTS_LIST || '';
     this.autoExposePortsInterval = ic?.env?.SCION_AUTO_EXPOSE_INTERVAL || '3s';
@@ -485,8 +498,10 @@ export class ScionPageAgentConfigure extends LitElement {
 
     // Environment — filter out auto-expose env vars managed by dedicated UI controls
     const autoExposeEnvKeys = new Set([
-      'SCION_AUTO_EXPOSE_PORTS', 'SCION_AUTO_EXPOSE_MODE',
-      'SCION_AUTO_EXPOSE_PORTS_LIST', 'SCION_AUTO_EXPOSE_INTERVAL',
+      'SCION_AUTO_EXPOSE_PORTS',
+      'SCION_AUTO_EXPOSE_MODE',
+      'SCION_AUTO_EXPOSE_PORTS_LIST',
+      'SCION_AUTO_EXPOSE_INTERVAL',
     ]);
     const env = ac?.env || ic?.env || {};
     this.envEntries = Object.entries(env)
@@ -494,9 +509,7 @@ export class ScionPageAgentConfigure extends LitElement {
       .map(([key, value]) => ({ key, value }));
 
     // Detect required keys that are empty (from env gathering)
-    this.requiredEnvKeys = this.envEntries
-      .filter((e) => e.key && !e.value)
-      .map((e) => e.key);
+    this.requiredEnvKeys = this.envEntries.filter((e) => e.key && !e.value).map((e) => e.key);
 
     // GCP Identity
     const gcpId = ac?.gcpIdentity;
@@ -508,21 +521,24 @@ export class ScionPageAgentConfigure extends LitElement {
     const config: ScionConfigPayload = {};
     const caps = this.harnessCapabilities;
 
-    const model = this.modelSelection === 'other'
-      ? this.customModelId
-      : this.modelSelection;
+    const model = this.modelSelection === 'other' ? this.customModelId : this.modelSelection;
     if (model) config.model = model;
     config.thinking_level = this.thinkingLevel;
     if (this.image) config.image = this.image;
     if (this.branch) config.branch = this.branch;
     if (this.containerUser) config.user = this.containerUser;
-    if (this.authMethod && this.authMethodSupported(this.authMethod)) config.auth_selectedType = this.authMethod;
+    if (this.authMethod && this.authMethodSupported(this.authMethod))
+      config.auth_selectedType = this.authMethod;
     if (this.task) config.task = this.task;
-    if (this.systemPrompt && !this.isUnsupported(caps?.prompts.system_prompt)) config.system_prompt = this.systemPrompt;
+    if (this.systemPrompt && !this.isUnsupported(caps?.prompts.system_prompt))
+      config.system_prompt = this.systemPrompt;
     if (this.agentInstructions) config.agent_instructions = this.agentInstructions;
-    if (this.maxTurns && !this.isUnsupported(caps?.limits.max_turns)) config.max_turns = this.maxTurns;
-    if (this.maxModelCalls && !this.isUnsupported(caps?.limits.max_model_calls)) config.max_model_calls = this.maxModelCalls;
-    if (this.maxDuration && !this.isUnsupported(caps?.limits.max_duration)) config.max_duration = this.maxDuration;
+    if (this.maxTurns && !this.isUnsupported(caps?.limits.max_turns))
+      config.max_turns = this.maxTurns;
+    if (this.maxModelCalls && !this.isUnsupported(caps?.limits.max_model_calls))
+      config.max_model_calls = this.maxModelCalls;
+    if (this.maxDuration && !this.isUnsupported(caps?.limits.max_duration))
+      config.max_duration = this.maxDuration;
 
     // Resources
     const hasResources =
@@ -721,9 +737,12 @@ export class ScionPageAgentConfigure extends LitElement {
             <sl-icon name="exclamation-triangle"></sl-icon>
             <span>${this.error || 'Agent not found'}</span>
           </div>
-          <sl-button variant="default" @click=${() => {
-            navigateTo('/agents');
-          }}>
+          <sl-button
+            variant="default"
+            @click=${() => {
+              navigateTo('/agents');
+            }}
+          >
             Back to Agents
           </sl-button>
         </div>
@@ -809,7 +828,9 @@ export class ScionPageAgentConfigure extends LitElement {
             variant="danger"
             outline
             ?disabled=${isBusy}
-            @click=${() => { this.showDeleteDialog = true; }}
+            @click=${() => {
+              this.showDeleteDialog = true;
+            }}
           >
             <sl-icon slot="prefix" name="trash"></sl-icon>
             Delete
@@ -820,10 +841,21 @@ export class ScionPageAgentConfigure extends LitElement {
       <sl-dialog
         label="Delete Agent"
         ?open=${this.showDeleteDialog}
-        @sl-request-close=${() => { this.showDeleteDialog = false; }}
+        @sl-request-close=${() => {
+          this.showDeleteDialog = false;
+        }}
       >
-        <p>Are you sure you want to delete agent <strong>${this.agent.name}</strong>? This action cannot be undone.</p>
-        <sl-button slot="footer" variant="default" @click=${() => { this.showDeleteDialog = false; }}>
+        <p>
+          Are you sure you want to delete agent <strong>${this.agent.name}</strong>? This action
+          cannot be undone.
+        </p>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.showDeleteDialog = false;
+          }}
+        >
           Cancel
         </sl-button>
         <sl-button slot="footer" variant="danger" @click=${() => this.handleDelete()}>
@@ -842,8 +874,16 @@ export class ScionPageAgentConfigure extends LitElement {
 
     return html`
       <div class="form-field">
-        <sl-select label="Model" placeholder="use harness default" .value=${this.modelSelection} clearable
-            @sl-change=${(e: any) => { this.modelSelection = e.target.value; if (e.target.value !== 'other') this.customModelId = ''; }}>
+        <sl-select
+          label="Model"
+          placeholder="use harness default"
+          .value=${this.modelSelection}
+          clearable
+          @sl-change=${(e: any) => {
+            this.modelSelection = e.target.value;
+            if (e.target.value !== 'other') this.customModelId = '';
+          }}
+        >
           <sl-option value="small">Small</sl-option>
           <sl-option value="medium">Medium</sl-option>
           <sl-option value="large">Large</sl-option>
@@ -851,29 +891,50 @@ export class ScionPageAgentConfigure extends LitElement {
           <sl-option value="other">Other (specify)</sl-option>
         </sl-select>
 
-        ${this.modelSelection === 'other' ? html`
-          <sl-input label="Model ID" placeholder="e.g. claude-opus-4-8"
-            .value=${this.customModelId}
-            @sl-input=${(e: any) => { this.customModelId = e.target.value; }}
-            style="margin-top: 0.75rem">
-          </sl-input>
-        ` : ''}
+        ${this.modelSelection === 'other'
+          ? html`
+              <sl-input
+                label="Model ID"
+                placeholder="e.g. claude-opus-4-8"
+                .value=${this.customModelId}
+                @sl-input=${(e: any) => {
+                  this.customModelId = e.target.value;
+                }}
+                style="margin-top: 0.75rem"
+              >
+              </sl-input>
+            `
+          : ''}
       </div>
 
       <div class="form-field">
-        <label>Thinking Level${this.thinkingLevel !== null ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)">(${this.thinkingLevel})</span>` : ''}</label>
+        <label
+          >Thinking
+          Level${this.thinkingLevel !== null
+            ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
+                >(${this.thinkingLevel})</span
+              >`
+            : ''}</label
+        >
         <div style="display:flex;align-items:center;gap:0.75rem">
           <sl-range
-            min="0" max="100" step="1"
+            min="0"
+            max="100"
+            step="1"
             .value=${this.thinkingLevel ?? 50}
             ?disabled=${this.thinkingLevel === null}
             style="flex:1"
-            @sl-input=${(e: any) => { this.thinkingLevel = e.target.value; }}
+            @sl-input=${(e: any) => {
+              this.thinkingLevel = e.target.value;
+            }}
           ></sl-range>
           <sl-checkbox
             ?checked=${this.thinkingLevel !== null}
-            @sl-change=${(e: any) => { this.thinkingLevel = e.target.checked ? 50 : null; }}
-          >Set</sl-checkbox>
+            @sl-change=${(e: any) => {
+              this.thinkingLevel = e.target.checked ? 50 : null;
+            }}
+            >Set</sl-checkbox
+          >
         </div>
         <div class="hint" style="display:flex;justify-content:space-between;margin-top:0.25rem">
           <span>0 = minimal reasoning</span>
@@ -887,7 +948,9 @@ export class ScionPageAgentConfigure extends LitElement {
         <sl-input
           placeholder="Container image override"
           .value=${this.image}
-          @sl-input=${(e: Event) => { this.image = (e.target as HTMLElement & { value: string }).value; }}
+          @sl-input=${(e: Event) => {
+            this.image = (e.target as HTMLElement & { value: string }).value;
+          }}
         ></sl-input>
       </div>
 
@@ -896,7 +959,9 @@ export class ScionPageAgentConfigure extends LitElement {
         <sl-input
           placeholder="Git branch for the agent"
           .value=${this.branch}
-          @sl-input=${(e: Event) => { this.branch = (e.target as HTMLElement & { value: string }).value; }}
+          @sl-input=${(e: Event) => {
+            this.branch = (e.target as HTMLElement & { value: string }).value;
+          }}
         ></sl-input>
       </div>
 
@@ -905,7 +970,9 @@ export class ScionPageAgentConfigure extends LitElement {
         <sl-input
           placeholder="Unix user inside container"
           .value=${this.containerUser}
-          @sl-input=${(e: Event) => { this.containerUser = (e.target as HTMLElement & { value: string }).value; }}
+          @sl-input=${(e: Event) => {
+            this.containerUser = (e.target as HTMLElement & { value: string }).value;
+          }}
         ></sl-input>
       </div>
 
@@ -914,13 +981,21 @@ export class ScionPageAgentConfigure extends LitElement {
         <sl-select
           placeholder="Select auth method..."
           .value=${this.authMethod}
-          @sl-change=${(e: Event) => { this.authMethod = (e.target as HTMLElement & { value: string }).value; }}
+          @sl-change=${(e: Event) => {
+            this.authMethod = (e.target as HTMLElement & { value: string }).value;
+          }}
         >
           <sl-option value="">Auto Detected</sl-option>
           <sl-option value="api-key">Provider API Key</sl-option>
-          <sl-option value="oauth-token" ?disabled=${this.isUnsupported(oauthTokenCap)}>OAuth Token (env var)</sl-option>
-          <sl-option value="vertex-ai" ?disabled=${this.isUnsupported(vertexCap)}>Vertex Model Garden</sl-option>
-          <sl-option value="auth-file" ?disabled=${this.isUnsupported(authFileCap)}>Harness credential file</sl-option>
+          <sl-option value="oauth-token" ?disabled=${this.isUnsupported(oauthTokenCap)}
+            >OAuth Token (env var)</sl-option
+          >
+          <sl-option value="vertex-ai" ?disabled=${this.isUnsupported(vertexCap)}
+            >Vertex Model Garden</sl-option
+          >
+          <sl-option value="auth-file" ?disabled=${this.isUnsupported(authFileCap)}
+            >Harness credential file</sl-option
+          >
           <sl-option value="none">No Authentication</sl-option>
         </sl-select>
         ${this.authMethod && this.isUnsupported(selectedAuthCap || undefined)
@@ -937,7 +1012,6 @@ export class ScionPageAgentConfigure extends LitElement {
             </div>
           `
         : nothing}
-
       ${this.agent?.appliedConfig?.agentRole
         ? html`
             <div class="form-field">
@@ -948,7 +1022,9 @@ export class ScionPageAgentConfigure extends LitElement {
                 <sl-option value="baseline">Baseline — Standard access</sl-option>
                 <sl-option value="full">Full — Full access</sl-option>
               </sl-select>
-              <div class="hint">Authorization role set at creation time. Determines hub API access level.</div>
+              <div class="hint">
+                Authorization role set at creation time. Determines hub API access level.
+              </div>
             </div>
           `
         : nothing}
@@ -979,7 +1055,7 @@ export class ScionPageAgentConfigure extends LitElement {
             ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
             : this.gcpMetadataMode === 'assign'
               ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-              : 'No metadata interception. The agent inherits the broker\'s GCP identity. Requires broker ownership.'}
+              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
         </div>
       </div>
 
@@ -994,7 +1070,9 @@ export class ScionPageAgentConfigure extends LitElement {
                       placeholder="Select a service account..."
                       .value=${this.gcpServiceAccountId}
                       @sl-change=${(e: Event) => {
-                        this.gcpServiceAccountId = (e.target as HTMLElement & { value: string }).value;
+                        this.gcpServiceAccountId = (
+                          e.target as HTMLElement & { value: string }
+                        ).value;
                       }}
                     >
                       ${this.verifiedGCPServiceAccounts.map(
@@ -1007,7 +1085,8 @@ export class ScionPageAgentConfigure extends LitElement {
                   `
                 : html`
                     <div class="hint" style="margin-top: 0;">
-                      No verified service accounts available. Register and verify service accounts in project settings.
+                      No verified service accounts available. Register and verify service accounts
+                      in project settings.
                     </div>
                   `}
             </div>
@@ -1018,10 +1097,7 @@ export class ScionPageAgentConfigure extends LitElement {
         ${this.isUnsupported(telemetryCap)
           ? html`
               <sl-tooltip content=${this.supportReason(telemetryCap)} hoist>
-                <sl-checkbox
-                  ?checked=${this.telemetryEnabled}
-                  ?disabled=${true}
-                >
+                <sl-checkbox ?checked=${this.telemetryEnabled} ?disabled=${true}>
                   Enable Telemetry
                 </sl-checkbox>
               </sl-tooltip>
@@ -1029,7 +1105,9 @@ export class ScionPageAgentConfigure extends LitElement {
           : html`
               <sl-checkbox
                 ?checked=${this.telemetryEnabled}
-                @sl-change=${(e: Event) => { this.telemetryEnabled = (e.target as HTMLInputElement).checked; }}
+                @sl-change=${(e: Event) => {
+                  this.telemetryEnabled = (e.target as HTMLInputElement).checked;
+                }}
               >
                 Enable Telemetry
               </sl-checkbox>
@@ -1045,7 +1123,9 @@ export class ScionPageAgentConfigure extends LitElement {
       <div class="notify-field">
         <sl-checkbox
           ?checked=${this.autoExposePortsEnabled}
-          @sl-change=${(e: Event) => { this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked; }}
+          @sl-change=${(e: Event) => {
+            this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
+          }}
         >
           Enable Auto-Expose Ports
         </sl-checkbox>
@@ -1087,7 +1167,10 @@ export class ScionPageAgentConfigure extends LitElement {
                   this.autoExposePortsList = (e.target as HTMLElement & { value: string }).value;
                 }}
               ></sl-input>
-              <div class="hint">Comma-separated list of ports to ${this.autoExposePortsMode === 'allowlist' ? 'allow' : 'deny'}.</div>
+              <div class="hint">
+                Comma-separated list of ports to
+                ${this.autoExposePortsMode === 'allowlist' ? 'allow' : 'deny'}.
+              </div>
             </div>
             <div class="form-field">
               <label for="auto-expose-interval">Scan Interval</label>
@@ -1096,10 +1179,14 @@ export class ScionPageAgentConfigure extends LitElement {
                 placeholder="3s"
                 .value=${this.autoExposePortsInterval}
                 @sl-input=${(e: Event) => {
-                  this.autoExposePortsInterval = (e.target as HTMLElement & { value: string }).value;
+                  this.autoExposePortsInterval = (
+                    e.target as HTMLElement & { value: string }
+                  ).value;
                 }}
               ></sl-input>
-              <div class="hint">How often to scan for new listening ports (e.g. 3s, 5s). Minimum 1s.</div>
+              <div class="hint">
+                How often to scan for new listening ports (e.g. 3s, 5s). Minimum 1s.
+              </div>
             </div>
           `
         : nothing}
@@ -1115,7 +1202,9 @@ export class ScionPageAgentConfigure extends LitElement {
         <sl-textarea
           placeholder="Describe what this agent should work on..."
           .value=${this.task}
-          @sl-input=${(e: Event) => { this.task = (e.target as HTMLElement & { value: string }).value; }}
+          @sl-input=${(e: Event) => {
+            this.task = (e.target as HTMLElement & { value: string }).value;
+          }}
           rows="8"
           resize="auto"
         ></sl-textarea>
@@ -1140,7 +1229,9 @@ export class ScionPageAgentConfigure extends LitElement {
               <sl-textarea
                 placeholder="System prompt content or file:// URI..."
                 .value=${this.systemPrompt}
-                @sl-input=${(e: Event) => { this.systemPrompt = (e.target as HTMLElement & { value: string }).value; }}
+                @sl-input=${(e: Event) => {
+                  this.systemPrompt = (e.target as HTMLElement & { value: string }).value;
+                }}
                 rows="8"
                 resize="auto"
               ></sl-textarea>
@@ -1155,7 +1246,9 @@ export class ScionPageAgentConfigure extends LitElement {
         <sl-textarea
           placeholder="Agent instructions content or file:// URI..."
           .value=${this.agentInstructions}
-          @sl-input=${(e: Event) => { this.agentInstructions = (e.target as HTMLElement & { value: string }).value; }}
+          @sl-input=${(e: Event) => {
+            this.agentInstructions = (e.target as HTMLElement & { value: string }).value;
+          }}
           rows="8"
           resize="auto"
         ></sl-textarea>
@@ -1188,7 +1281,10 @@ export class ScionPageAgentConfigure extends LitElement {
                   type="number"
                   placeholder="0 = unlimited"
                   .value=${String(this.maxTurns || '')}
-                  @sl-input=${(e: Event) => { this.maxTurns = parseInt((e.target as HTMLElement & { value: string }).value) || 0; }}
+                  @sl-input=${(e: Event) => {
+                    this.maxTurns =
+                      parseInt((e.target as HTMLElement & { value: string }).value) || 0;
+                  }}
                 ></sl-input>
               `}
         </div>
@@ -1210,7 +1306,10 @@ export class ScionPageAgentConfigure extends LitElement {
                   type="number"
                   placeholder="0 = unlimited"
                   .value=${String(this.maxModelCalls || '')}
-                  @sl-input=${(e: Event) => { this.maxModelCalls = parseInt((e.target as HTMLElement & { value: string }).value) || 0; }}
+                  @sl-input=${(e: Event) => {
+                    this.maxModelCalls =
+                      parseInt((e.target as HTMLElement & { value: string }).value) || 0;
+                  }}
                 ></sl-input>
               `}
         </div>
@@ -1232,7 +1331,9 @@ export class ScionPageAgentConfigure extends LitElement {
               <sl-input
                 placeholder="e.g. 30m, 2h"
                 .value=${this.maxDuration}
-                @sl-input=${(e: Event) => { this.maxDuration = (e.target as HTMLElement & { value: string }).value; }}
+                @sl-input=${(e: Event) => {
+                  this.maxDuration = (e.target as HTMLElement & { value: string }).value;
+                }}
               ></sl-input>
             `}
         <div class="hint">Go duration string. Empty means no limit.</div>
@@ -1244,7 +1345,9 @@ export class ScionPageAgentConfigure extends LitElement {
           <sl-input
             placeholder='e.g. "2", "500m"'
             .value=${this.cpuRequest}
-            @sl-input=${(e: Event) => { this.cpuRequest = (e.target as HTMLElement & { value: string }).value; }}
+            @sl-input=${(e: Event) => {
+              this.cpuRequest = (e.target as HTMLElement & { value: string }).value;
+            }}
           ></sl-input>
         </div>
         <div class="form-field">
@@ -1252,7 +1355,9 @@ export class ScionPageAgentConfigure extends LitElement {
           <sl-input
             placeholder='e.g. "4Gi"'
             .value=${this.memoryRequest}
-            @sl-input=${(e: Event) => { this.memoryRequest = (e.target as HTMLElement & { value: string }).value; }}
+            @sl-input=${(e: Event) => {
+              this.memoryRequest = (e.target as HTMLElement & { value: string }).value;
+            }}
           ></sl-input>
         </div>
       </div>
@@ -1263,7 +1368,9 @@ export class ScionPageAgentConfigure extends LitElement {
           <sl-input
             placeholder='e.g. "4"'
             .value=${this.cpuLimit}
-            @sl-input=${(e: Event) => { this.cpuLimit = (e.target as HTMLElement & { value: string }).value; }}
+            @sl-input=${(e: Event) => {
+              this.cpuLimit = (e.target as HTMLElement & { value: string }).value;
+            }}
           ></sl-input>
         </div>
         <div class="form-field">
@@ -1271,7 +1378,9 @@ export class ScionPageAgentConfigure extends LitElement {
           <sl-input
             placeholder='e.g. "8Gi"'
             .value=${this.memoryLimit}
-            @sl-input=${(e: Event) => { this.memoryLimit = (e.target as HTMLElement & { value: string }).value; }}
+            @sl-input=${(e: Event) => {
+              this.memoryLimit = (e.target as HTMLElement & { value: string }).value;
+            }}
           ></sl-input>
         </div>
       </div>
@@ -1281,7 +1390,9 @@ export class ScionPageAgentConfigure extends LitElement {
         <sl-input
           placeholder='e.g. "20Gi"'
           .value=${this.disk}
-          @sl-input=${(e: Event) => { this.disk = (e.target as HTMLElement & { value: string }).value; }}
+          @sl-input=${(e: Event) => {
+            this.disk = (e.target as HTMLElement & { value: string }).value;
+          }}
         ></sl-input>
       </div>
     `;

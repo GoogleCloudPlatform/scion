@@ -57,7 +57,13 @@ export class DebugEventLog extends EventTarget {
     return this.entries.length;
   }
 
-  add(category: DebugCategory, label: string, subject?: string, data?: unknown, direction?: DebugDirection): void {
+  add(
+    category: DebugCategory,
+    label: string,
+    subject?: string,
+    data?: unknown,
+    direction?: DebugDirection
+  ): void {
     const entry: DebugEntry = {
       id: this.nextId++,
       timestamp: Date.now(),
@@ -98,7 +104,9 @@ export class DebugEventLog extends EventTarget {
     }) as EventListener);
 
     // SSE connection events
-    sse.addEventListener('connected', ((event: CustomEvent<{ connectionId: string; subjects: string[] }>) => {
+    sse.addEventListener('connected', ((
+      event: CustomEvent<{ connectionId: string; subjects: string[] }>
+    ) => {
       this._connectionId = event.detail.connectionId;
       this.add('connection', 'connected', undefined, event.detail);
     }) as EventListener);

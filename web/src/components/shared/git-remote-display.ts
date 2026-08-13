@@ -72,7 +72,8 @@ export class ScionGitRemoteDisplay extends LitElement {
 
   static gitHubLink(remote: string): { url: string; display: string } | null {
     const sshMatch = remote.match(/^git@github\.com:(.+?)(?:\.git)?$/);
-    if (sshMatch) return { url: `https://github.com/${sshMatch[1]}`, display: `github.com/${sshMatch[1]}` };
+    if (sshMatch)
+      return { url: `https://github.com/${sshMatch[1]}`, display: `github.com/${sshMatch[1]}` };
     const httpsMatch = remote.match(/^https?:\/\/(github\.com\/.+?)(?:\.git)?$/);
     if (httpsMatch) return { url: `https://${httpsMatch[1]}`, display: httpsMatch[1] };
     const bareMatch = remote.match(/^(github\.com\/.+?)(?:\.git)?$/);
@@ -95,22 +96,39 @@ export class ScionGitRemoteDisplay extends LitElement {
 
     const ghLink = ScionGitRemoteDisplay.gitHubLink(project.gitRemote);
     const urlContent = ghLink
-      ? html`<a href="${ghLink.url}" target="_blank" rel="noopener noreferrer" @click=${this.handleLinkClick}>${ghLink.display}</a>`
+      ? html`<a
+          href="${ghLink.url}"
+          target="_blank"
+          rel="noopener noreferrer"
+          @click=${this.handleLinkClick}
+          >${ghLink.display}</a
+        >`
       : project.gitRemote;
 
     const worktree = isWorktreeWorkspace(project);
     const shared = isSharedWorkspace(project);
     const workspaceModeIcon = shared
-      ? html`<sl-tooltip content="Shared workspace"><sl-icon name="folder-fill" class="decorator-icon"></sl-icon></sl-tooltip>`
+      ? html`<sl-tooltip content="Shared workspace"
+          ><sl-icon name="folder-fill" class="decorator-icon"></sl-icon
+        ></sl-tooltip>`
       : worktree
-        ? html`<sl-tooltip content="Worktree per agent"><sl-icon name="diagram-3-fill" class="decorator-icon"></sl-icon></sl-tooltip>`
-        : html`<sl-tooltip content="Clone per agent"><sl-icon name="robot" class="decorator-icon"></sl-icon></sl-tooltip>`;
+        ? html`<sl-tooltip content="Worktree per agent"
+            ><sl-icon name="diagram-3-fill" class="decorator-icon"></sl-icon
+          ></sl-tooltip>`
+        : html`<sl-tooltip content="Clone per agent"
+            ><sl-icon name="robot" class="decorator-icon"></sl-icon
+          ></sl-tooltip>`;
 
-    const githubIcon = project.githubInstallationId != null
-      ? html`<sl-tooltip content="GitHub App installed"><sl-icon name="github" class="decorator-icon"></sl-icon></sl-tooltip>`
-      : nothing;
+    const githubIcon =
+      project.githubInstallationId != null
+        ? html`<sl-tooltip content="GitHub App installed"
+            ><sl-icon name="github" class="decorator-icon"></sl-icon
+          ></sl-tooltip>`
+        : nothing;
 
-    return html`<span class="git-remote-display">${urlContent}${workspaceModeIcon}${githubIcon}</span>`;
+    return html`<span class="git-remote-display"
+      >${urlContent}${workspaceModeIcon}${githubIcon}</span
+    >`;
   }
 }
 

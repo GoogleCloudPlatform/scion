@@ -416,7 +416,7 @@ export class ScionPageHealthDashboard extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .stall-edit-form input[type="number"] {
+    .stall-edit-form input[type='number'] {
       width: 60px;
       padding: 0.25rem 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -453,7 +453,8 @@ export class ScionPageHealthDashboard extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
-    .loading, .error-msg {
+    .loading,
+    .error-msg {
       text-align: center;
       padding: 3rem 1rem;
       color: var(--scion-text-muted, #64748b);
@@ -531,21 +532,28 @@ export class ScionPageHealthDashboard extends LitElement {
         </div>
         <div class="header-right">
           <label class="toggle-label">
-            <input type="checkbox" .checked=${this.autoRefresh}
-              @change=${() => this.toggleAutoRefresh()} />
+            <input
+              type="checkbox"
+              .checked=${this.autoRefresh}
+              @change=${() => this.toggleAutoRefresh()}
+            />
             Auto-refresh
           </label>
           <button class="refresh-btn" @click=${() => void this.fetchData()}>Refresh</button>
         </div>
       </div>
 
-      ${this.error ? html`<div class="error-msg" style="margin-bottom:1rem;text-align:left;padding:0.75rem;background:#fef2f2;border-radius:0.375rem;font-size:0.875rem">${this.error}</div>` : nothing}
+      ${this.error
+        ? html`<div
+            class="error-msg"
+            style="margin-bottom:1rem;text-align:left;padding:0.75rem;background:#fef2f2;border-radius:0.375rem;font-size:0.875rem"
+          >
+            ${this.error}
+          </div>`
+        : nothing}
 
       <!-- Hub & Database -->
-      <div class="grid-2">
-        ${this.renderHubCard(d)}
-        ${this.renderDatabaseCard(d)}
-      </div>
+      <div class="grid-2">${this.renderHubCard(d)} ${this.renderDatabaseCard(d)}</div>
 
       <!-- Brokers -->
       ${this.renderBrokersCard(d)}
@@ -554,10 +562,7 @@ export class ScionPageHealthDashboard extends LitElement {
       ${this.renderAgentsCard(d)}
 
       <!-- Dispatch & Stall Config -->
-      <div class="grid-2">
-        ${this.renderDispatchCard(d)}
-        ${this.renderStallCard(d)}
-      </div>
+      <div class="grid-2">${this.renderDispatchCard(d)} ${this.renderStallCard(d)}</div>
 
       <!-- Recent Alerts placeholder -->
       <div class="grid-full">
@@ -565,7 +570,12 @@ export class ScionPageHealthDashboard extends LitElement {
           <div class="card-title">Recent Alerts</div>
           <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
             View recent alerts in the
-            <a class="alerts-link" href="https://console.cloud.google.com/monitoring/alerting" target="_blank" rel="noopener">
+            <a
+              class="alerts-link"
+              href="https://console.cloud.google.com/monitoring/alerting"
+              target="_blank"
+              rel="noopener"
+            >
               GCP Cloud Monitoring Console
             </a>
           </div>
@@ -579,32 +589,51 @@ export class ScionPageHealthDashboard extends LitElement {
       <div class="card">
         <div class="card-title">Hub Status</div>
         <div class="status-line">
-          <span style="color: ${this.statusColor(d.hub.status)}">${this.statusIcon(d.hub.status)}</span>
+          <span style="color: ${this.statusColor(d.hub.status)}"
+            >${this.statusIcon(d.hub.status)}</span
+          >
           ${d.hub.status}
         </div>
         <div class="stat-row"><span class="label">Uptime</span><span>${d.hub.uptime}</span></div>
         <div class="stat-row"><span class="label">Version</span><span>${d.hub.version}</span></div>
-        <div class="stat-row"><span class="label">Connected Brokers</span><span>${d.hub.connected_brokers}</span></div>
-        <div class="stat-row"><span class="label">Active Agents</span><span>${d.hub.active_agents}</span></div>
-        <div class="stat-row"><span class="label">Projects</span><span>${d.hub.projects}</span></div>
+        <div class="stat-row">
+          <span class="label">Connected Brokers</span><span>${d.hub.connected_brokers}</span>
+        </div>
+        <div class="stat-row">
+          <span class="label">Active Agents</span><span>${d.hub.active_agents}</span>
+        </div>
+        <div class="stat-row">
+          <span class="label">Projects</span><span>${d.hub.projects}</span>
+        </div>
       </div>
     `;
   }
 
   private renderDatabaseCard(d: HealthSummary) {
-    const poolUtil = d.database.pool_max > 0
-      ? Math.round((d.database.pool_active / d.database.pool_max) * 100)
-      : 0;
+    const poolUtil =
+      d.database.pool_max > 0
+        ? Math.round((d.database.pool_active / d.database.pool_max) * 100)
+        : 0;
     return html`
       <div class="card">
         <div class="card-title">Database</div>
         <div class="status-line">
-          <span style="color: ${this.statusColor(d.database.status)}">${this.statusIcon(d.database.status)}</span>
+          <span style="color: ${this.statusColor(d.database.status)}"
+            >${this.statusIcon(d.database.status)}</span
+          >
           ${d.database.status}
         </div>
-        <div class="stat-row"><span class="label">Pool</span><span>${d.database.pool_active}/${d.database.pool_max} active (${poolUtil}%)</span></div>
-        <div class="stat-row"><span class="label">Idle</span><span>${d.database.pool_idle}</span></div>
-        <div class="stat-row"><span class="label">Wait Count (Total)</span><span>${d.database.pool_wait_count_total}</span></div>
+        <div class="stat-row">
+          <span class="label">Pool</span
+          ><span>${d.database.pool_active}/${d.database.pool_max} active (${poolUtil}%)</span>
+        </div>
+        <div class="stat-row">
+          <span class="label">Idle</span><span>${d.database.pool_idle}</span>
+        </div>
+        <div class="stat-row">
+          <span class="label">Wait Count (Total)</span
+          ><span>${d.database.pool_wait_count_total}</span>
+        </div>
       </div>
     `;
   }
@@ -615,7 +644,9 @@ export class ScionPageHealthDashboard extends LitElement {
         <div class="grid-full">
           <div class="card">
             <div class="card-title">Brokers</div>
-            <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">No brokers registered</div>
+            <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
+              No brokers registered
+            </div>
           </div>
         </div>
       `;
@@ -626,19 +657,31 @@ export class ScionPageHealthDashboard extends LitElement {
         <div class="card">
           <div class="card-title">Brokers</div>
           <div class="broker-grid">
-            ${d.brokers.map(b => html`
-              <div class="broker-card">
-                <div class="broker-name">${b.name || b.id}</div>
-                <div class="status-line" style="font-size:0.875rem">
-                  <span style="color: ${this.statusColor(b.status)}">${this.statusIcon(b.status)}</span>
-                  ${b.status}
+            ${d.brokers.map(
+              (b) => html`
+                <div class="broker-card">
+                  <div class="broker-name">${b.name || b.id}</div>
+                  <div class="status-line" style="font-size:0.875rem">
+                    <span style="color: ${this.statusColor(b.status)}"
+                      >${this.statusIcon(b.status)}</span
+                    >
+                    ${b.status}
+                  </div>
+                  <div class="broker-stat">Agents: ${b.agent_healthy}/${b.agent_count} healthy</div>
+                  <div class="broker-stat">
+                    Runtime: ${b.runtime} ${b.runtime_available ? '✓' : '✗'}
+                  </div>
+                  <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">
+                    NFS: not reported
+                  </div>
+                  ${b.last_heartbeat
+                    ? html`<div class="broker-stat">
+                        Heartbeat: ${this.timeAgo(b.last_heartbeat)}
+                      </div>`
+                    : nothing}
                 </div>
-                <div class="broker-stat">Agents: ${b.agent_healthy}/${b.agent_count} healthy</div>
-                <div class="broker-stat">Runtime: ${b.runtime} ${b.runtime_available ? '✓' : '✗'}</div>
-                <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">NFS: not reported</div>
-                ${b.last_heartbeat ? html`<div class="broker-stat">Heartbeat: ${this.timeAgo(b.last_heartbeat)}</div>` : nothing}
-              </div>
-            `)}
+              `
+            )}
           </div>
         </div>
       </div>
@@ -652,27 +695,37 @@ export class ScionPageHealthDashboard extends LitElement {
           <div class="card-title">Agents</div>
           <div class="agent-summary">
             <div><span class="stat">${d.agents.total}</span> Total</div>
-            ${Object.entries(d.agents.by_phase).map(([phase, count]) =>
-              html`<div><span class="stat">${count}</span> ${phase}</div>`
+            ${Object.entries(d.agents.by_phase).map(
+              ([phase, count]) => html`<div><span class="stat">${count}</span> ${phase}</div>`
             )}
           </div>
-          ${d.agents.stalled.length > 0 ? html`
-            <div class="agent-alert alert-warn">
-              ⚠ ${d.agents.stalled.length} stalled: ${d.agents.stalled.join(', ')}
-            </div>
-          ` : nothing}
-          ${d.agents.crashed.length > 0 ? html`
-            <div class="agent-alert alert-error">
-              ✗ ${d.agents.crashed.length} crashed: ${d.agents.crashed.join(', ')}
-            </div>
-          ` : nothing}
-          ${d.agents.errored.length > 0 ? html`
-            <div class="agent-alert alert-error">
-              ✗ ${d.agents.errored.length} errored: ${d.agents.errored.join(', ')}
-            </div>
-          ` : nothing}
-          ${d.agents.stalled.length === 0 && d.agents.crashed.length === 0 && d.agents.errored.length === 0
-            ? html`<div style="font-size:0.875rem;color:var(--scion-success,#22c55e)">All agents healthy</div>`
+          ${d.agents.stalled.length > 0
+            ? html`
+                <div class="agent-alert alert-warn">
+                  ⚠ ${d.agents.stalled.length} stalled: ${d.agents.stalled.join(', ')}
+                </div>
+              `
+            : nothing}
+          ${d.agents.crashed.length > 0
+            ? html`
+                <div class="agent-alert alert-error">
+                  ✗ ${d.agents.crashed.length} crashed: ${d.agents.crashed.join(', ')}
+                </div>
+              `
+            : nothing}
+          ${d.agents.errored.length > 0
+            ? html`
+                <div class="agent-alert alert-error">
+                  ✗ ${d.agents.errored.length} errored: ${d.agents.errored.join(', ')}
+                </div>
+              `
+            : nothing}
+          ${d.agents.stalled.length === 0 &&
+          d.agents.crashed.length === 0 &&
+          d.agents.errored.length === 0
+            ? html`<div style="font-size:0.875rem;color:var(--scion-success,#22c55e)">
+                All agents healthy
+              </div>`
             : nothing}
         </div>
       </div>
@@ -685,8 +738,8 @@ export class ScionPageHealthDashboard extends LitElement {
         <div class="card">
           <div class="card-title">Dispatch Pipeline</div>
           <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-            Dispatch metrics not yet available. A future update will expose dispatch
-            pipeline stats via the health summary API.
+            Dispatch metrics not yet available. A future update will expose dispatch pipeline stats
+            via the health summary API.
           </div>
         </div>
       `;
@@ -696,11 +749,17 @@ export class ScionPageHealthDashboard extends LitElement {
         <div class="card-title">Dispatch Pipeline</div>
         <div class="stat-row">
           <span class="label">Stuck Messages</span>
-          <span style="color: ${d.dispatch.stuck_messages > 0 ? 'var(--scion-error,#ef4444)' : 'inherit'}; font-weight: ${d.dispatch.stuck_messages > 0 ? '600' : 'normal'}">
+          <span
+            style="color: ${d.dispatch.stuck_messages > 0
+              ? 'var(--scion-error,#ef4444)'
+              : 'inherit'}; font-weight: ${d.dispatch.stuck_messages > 0 ? '600' : 'normal'}"
+          >
             ${d.dispatch.stuck_messages}
           </span>
         </div>
-        <div class="stat-row"><span class="label">Failed (1h)</span><span>${d.dispatch.failed_1h}</span></div>
+        <div class="stat-row">
+          <span class="label">Failed (1h)</span><span>${d.dispatch.failed_1h}</span>
+        </div>
       </div>
     `;
   }
@@ -715,18 +774,39 @@ export class ScionPageHealthDashboard extends LitElement {
                as read-only. Only auto_suspend_stalled is a runtime setting. -->
           <div class="stat-row" style="margin-bottom:0.75rem">
             <span class="label">Stalled Threshold</span>
-            <span>${Math.round(d.stall_config.threshold_seconds / 60)} min <span style="font-size:0.75rem;color:var(--scion-text-muted,#94a3b8)">(set at startup)</span></span>
+            <span
+              >${Math.round(d.stall_config.threshold_seconds / 60)} min
+              <span style="font-size:0.75rem;color:var(--scion-text-muted,#94a3b8)"
+                >(set at startup)</span
+              ></span
+            >
           </div>
           <div class="stall-edit-form">
             <label style="display:flex;align-items:center;gap:0.375rem">
-              <input type="checkbox" .checked=${this.stallAutoSuspend}
-                @change=${() => { this.stallAutoSuspend = !this.stallAutoSuspend; }} />
+              <input
+                type="checkbox"
+                .checked=${this.stallAutoSuspend}
+                @change=${() => {
+                  this.stallAutoSuspend = !this.stallAutoSuspend;
+                }}
+              />
               Auto-suspend stalled agents
             </label>
-            <button class="save-btn" ?disabled=${this.savingStall} @click=${() => void this.saveStallConfig()}>
+            <button
+              class="save-btn"
+              ?disabled=${this.savingStall}
+              @click=${() => void this.saveStallConfig()}
+            >
               ${this.savingStall ? 'Saving...' : 'Save'}
             </button>
-            <button class="cancel-btn" @click=${() => { this.editingStall = false; }}>Cancel</button>
+            <button
+              class="cancel-btn"
+              @click=${() => {
+                this.editingStall = false;
+              }}
+            >
+              Cancel
+            </button>
           </div>
         </div>
       `;
@@ -734,12 +814,28 @@ export class ScionPageHealthDashboard extends LitElement {
 
     return html`
       <div class="card">
-        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+        <div
+          class="card-title"
+          style="display:flex;justify-content:space-between;align-items:center"
+        >
           Stall Detection Settings
-          <button class="edit-btn" @click=${() => { this.editingStall = true; }}>Edit</button>
+          <button
+            class="edit-btn"
+            @click=${() => {
+              this.editingStall = true;
+            }}
+          >
+            Edit
+          </button>
         </div>
-        <div class="stat-row"><span class="label">Stalled Threshold</span><span>${Math.round(d.stall_config.threshold_seconds / 60)} min</span></div>
-        <div class="stat-row"><span class="label">Auto-Suspend Stalled</span><span>${d.stall_config.auto_suspend ? 'enabled' : 'disabled'}</span></div>
+        <div class="stat-row">
+          <span class="label">Stalled Threshold</span
+          ><span>${Math.round(d.stall_config.threshold_seconds / 60)} min</span>
+        </div>
+        <div class="stat-row">
+          <span class="label">Auto-Suspend Stalled</span
+          ><span>${d.stall_config.auto_suspend ? 'enabled' : 'disabled'}</span>
+        </div>
       </div>
     `;
   }

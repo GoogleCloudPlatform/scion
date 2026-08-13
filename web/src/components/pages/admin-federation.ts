@@ -599,7 +599,13 @@ export class ScionPageAdminFederation extends LitElement {
           <sl-icon name="globe"></sl-icon>
           <h1>Federation Authentication</h1>
         </div>
-        <sl-button variant="primary" ?loading=${this.saving} @click=${() => { void this.save(); }}>
+        <sl-button
+          variant="primary"
+          ?loading=${this.saving}
+          @click=${() => {
+            void this.save();
+          }}
+        >
           Save
         </sl-button>
       </div>
@@ -607,9 +613,7 @@ export class ScionPageAdminFederation extends LitElement {
         Manage trusted external OIDC issuers for cross-hub federation authentication.
       </p>
 
-      ${this.renderGlobalSettings()}
-      ${this.renderIssuersSection()}
-      ${this.renderAddEditDialog()}
+      ${this.renderGlobalSettings()} ${this.renderIssuersSection()} ${this.renderAddEditDialog()}
       ${this.renderDeleteDialog()}
     `;
   }
@@ -621,7 +625,14 @@ export class ScionPageAdminFederation extends LitElement {
       <div class="section">
         <div class="section-header">
           <h3 class="section-title">Global Settings</h3>
-          <sl-button size="small" variant="default" ?loading=${this.downloading} @click=${() => { void this.downloadJWKS(); }}>
+          <sl-button
+            size="small"
+            variant="default"
+            ?loading=${this.downloading}
+            @click=${() => {
+              void this.downloadJWKS();
+            }}
+          >
             <sl-icon slot="prefix" name="download"></sl-icon>
             Download JWKS
           </sl-button>
@@ -648,7 +659,7 @@ export class ScionPageAdminFederation extends LitElement {
               @sl-change=${(e: Event) => {
                 const value = (e.target as HTMLSelectElement).value;
                 this.algorithms = Array.isArray(value)
-                  ? value as string[]
+                  ? (value as string[])
                   : value.split(' ').filter(Boolean);
               }}
             >
@@ -660,9 +671,7 @@ export class ScionPageAdminFederation extends LitElement {
         </div>
 
         <div class="cache-section">
-          <label class="cache-section-label">
-            JWKS Cache
-          </label>
+          <label class="cache-section-label"> JWKS Cache </label>
           <div class="cache-row">
             <div class="form-field">
               <label>Refresh Interval</label>
@@ -711,7 +720,8 @@ export class ScionPageAdminFederation extends LitElement {
                 <sl-icon name="shield-lock"></sl-icon>
                 <p>No trusted issuers configured.</p>
                 <p style="font-size: 0.8125rem">
-                  Add a trusted OIDC issuer to enable federation authentication from external hubs or services.
+                  Add a trusted OIDC issuer to enable federation authentication from external hubs
+                  or services.
                 </p>
               </div>
             `
@@ -726,26 +736,42 @@ export class ScionPageAdminFederation extends LitElement {
                   </tr>
                 </thead>
                 <tbody>
-                  ${this.issuers.map((issuer, index) => html`
-                    <tr>
-                      <td class="issuer-url-cell" title=${issuer.issuer_url}>${issuer.issuer_url}</td>
-                      <td>${issuer.issuer_type ?? 'hub'}</td>
-                      <td>${issuer.expected_audience
-                        ? html`<span title=${issuer.expected_audience}>${this.truncate(issuer.expected_audience, 30)}</span>`
-                        : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
-                      </td>
-                      <td>
-                        <div class="issuer-actions">
-                          <sl-button size="small" variant="default" @click=${() => this.openEditDialog(index)}>
-                            Edit
-                          </sl-button>
-                          <sl-button size="small" variant="danger" outline @click=${() => this.openDeleteDialog(index)}>
-                            Delete
-                          </sl-button>
-                        </div>
-                      </td>
-                    </tr>
-                  `)}
+                  ${this.issuers.map(
+                    (issuer, index) => html`
+                      <tr>
+                        <td class="issuer-url-cell" title=${issuer.issuer_url}>
+                          ${issuer.issuer_url}
+                        </td>
+                        <td>${issuer.issuer_type ?? 'hub'}</td>
+                        <td>
+                          ${issuer.expected_audience
+                            ? html`<span title=${issuer.expected_audience}
+                                >${this.truncate(issuer.expected_audience, 30)}</span
+                              >`
+                            : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
+                        </td>
+                        <td>
+                          <div class="issuer-actions">
+                            <sl-button
+                              size="small"
+                              variant="default"
+                              @click=${() => this.openEditDialog(index)}
+                            >
+                              Edit
+                            </sl-button>
+                            <sl-button
+                              size="small"
+                              variant="danger"
+                              outline
+                              @click=${() => this.openDeleteDialog(index)}
+                            >
+                              Delete
+                            </sl-button>
+                          </div>
+                        </td>
+                      </tr>
+                    `
+                  )}
                 </tbody>
               </table>
             `}
@@ -793,8 +819,12 @@ export class ScionPageAdminFederation extends LitElement {
                     }}
                   ></sl-input>
                   ${this.issuerUrlError
-                    ? html`<span class="hint" style="color: var(--scion-error-text, #991b1b);">${this.issuerUrlError}</span>`
-                    : html`<span class="hint">The OIDC issuer URL of the trusted external hub or service.</span>`}
+                    ? html`<span class="hint" style="color: var(--scion-error-text, #991b1b);"
+                        >${this.issuerUrlError}</span
+                      >`
+                    : html`<span class="hint"
+                        >The OIDC issuer URL of the trusted external hub or service.</span
+                      >`}
                 </div>
 
                 <div class="form-field">
@@ -848,7 +878,9 @@ export class ScionPageAdminFederation extends LitElement {
                       };
                     }}
                   ></sl-input>
-                  <span class="hint">Expected audience claim in JWT tokens. Usually this hub's URL.</span>
+                  <span class="hint"
+                    >Expected audience claim in JWT tokens. Usually this hub's URL.</span
+                  >
                 </div>
 
                 ${issuerType === 'hub' ? this.renderHubFields() : nothing}
@@ -866,7 +898,7 @@ export class ScionPageAdminFederation extends LitElement {
                       this.editingIssuer = {
                         ...this.editingIssuer!,
                         default_scopes: this.commaStringToArray(
-                          (e.target as HTMLInputElement).value,
+                          (e.target as HTMLInputElement).value
                         ),
                       };
                     }}
@@ -905,9 +937,7 @@ export class ScionPageAdminFederation extends LitElement {
             @sl-change=${(e: Event) => {
               this.editingIssuer = {
                 ...this.editingIssuer!,
-                allowed_projects: this.commaStringToArray(
-                  (e.target as HTMLInputElement).value,
-                ),
+                allowed_projects: this.commaStringToArray((e.target as HTMLInputElement).value),
               };
             }}
           ></sl-input>
@@ -921,9 +951,7 @@ export class ScionPageAdminFederation extends LitElement {
             @sl-change=${(e: Event) => {
               this.editingIssuer = {
                 ...this.editingIssuer!,
-                allowed_root_users: this.commaStringToArray(
-                  (e.target as HTMLInputElement).value,
-                ),
+                allowed_root_users: this.commaStringToArray((e.target as HTMLInputElement).value),
               };
             }}
           ></sl-input>
@@ -949,13 +977,13 @@ export class ScionPageAdminFederation extends LitElement {
             @sl-change=${(e: Event) => {
               this.editingIssuer = {
                 ...this.editingIssuer!,
-                allowed_emails: this.commaStringToArray(
-                  (e.target as HTMLInputElement).value,
-                ),
+                allowed_emails: this.commaStringToArray((e.target as HTMLInputElement).value),
               };
             }}
           ></sl-input>
-          <span class="hint">Comma-separated email patterns. Use * for wildcards (e.g. *@corp.com).</span>
+          <span class="hint"
+            >Comma-separated email patterns. Use * for wildcards (e.g. *@corp.com).</span
+          >
         </div>
       </div>
     `;
@@ -987,9 +1015,10 @@ export class ScionPageAdminFederation extends LitElement {
   // --- Delete Confirmation Dialog ---
 
   private renderDeleteDialog() {
-    const issuer = this.deletingIndex >= 0 && this.deletingIndex < this.issuers.length
-      ? this.issuers[this.deletingIndex]
-      : null;
+    const issuer =
+      this.deletingIndex >= 0 && this.deletingIndex < this.issuers.length
+        ? this.issuers[this.deletingIndex]
+        : null;
 
     return html`
       <sl-dialog
@@ -1002,8 +1031,8 @@ export class ScionPageAdminFederation extends LitElement {
           ? html`
               <p style="font-size: 0.875rem; color: var(--scion-text, #1e293b); margin: 0;">
                 Are you sure you want to remove the trusted issuer
-                <strong>${issuer.issuer_url}</strong>?
-                This will revoke federation trust for agents from this issuer.
+                <strong>${issuer.issuer_url}</strong>? This will revoke federation trust for agents
+                from this issuer.
               </p>
               <div slot="footer" class="dialog-footer">
                 <sl-button variant="default" @click=${() => this.handleDeleteDialogClose()}>

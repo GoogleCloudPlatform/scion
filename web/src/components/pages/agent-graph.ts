@@ -83,9 +83,9 @@ export class AgentGraphPage extends LitElement {
 
   private onAgentsUpdated(): void {
     const updated = stateManager.getAgents();
-    const prev = new Map(this.agents.map(a => [a.id, a]));
+    const prev = new Map(this.agents.map((a) => [a.id, a]));
     let ancestryGap = false;
-    this.agents = updated.map(a => {
+    this.agents = updated.map((a) => {
       if (a.ancestry && a.ancestry.length > 0) return a;
       const old = prev.get(a.id);
       if (old?.ancestry?.length) return { ...a, ancestry: old.ancestry };
@@ -114,7 +114,9 @@ export class AgentGraphPage extends LitElement {
     try {
       const response = await apiFetch('/api/v1/agents');
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
       const data = (await response.json()) as { agents?: Agent[] } | Agent[];
       this.agents = Array.isArray(data) ? data : data.agents || [];
@@ -130,7 +132,7 @@ export class AgentGraphPage extends LitElement {
   /** Agents after the project filter is applied */
   private get visibleAgents(): Agent[] {
     if (!this.projectFilter) return this.agents;
-    return this.agents.filter(a => a.projectId === this.projectFilter);
+    return this.agents.filter((a) => a.projectId === this.projectFilter);
   }
 
   private get projects(): Array<{ id: string; name: string }> {
@@ -140,7 +142,9 @@ export class AgentGraphPage extends LitElement {
         seen.set(agent.projectId, agent.project || agent.projectId);
       }
     }
-    return Array.from(seen, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+    return Array.from(seen, ([id, name]) => ({ id, name })).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
   }
 
   private onProjectFilterChange(e: Event): void {
@@ -184,37 +188,44 @@ export class AgentGraphPage extends LitElement {
   override render() {
     return html`
       <div style="padding: var(--sl-spacing-large, 1.25rem);">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
+        <div
+          style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;"
+        >
           <h1 style="margin: 0; font-size: 1.5rem;">Agents</h1>
           <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
-            ${this.initiallyProjectScoped ? nothing : html`
-              <sl-select
-                size="small"
-                placeholder="All projects"
-                clearable
-                value=${this.projectFilter}
-                @sl-change=${this.onProjectFilterChange}
-                style="min-width: 180px"
-              >
-                ${this.projects.map(p => html`<sl-option value=${p.id}>${p.name}</sl-option>`)}
-              </sl-select>
-            `}
-            <scion-view-toggle
-              view="graph"
-              @view-change=${this.onViewChange}
-            ></scion-view-toggle>
+            ${this.initiallyProjectScoped
+              ? nothing
+              : html`
+                  <sl-select
+                    size="small"
+                    placeholder="All projects"
+                    clearable
+                    value=${this.projectFilter}
+                    @sl-change=${this.onProjectFilterChange}
+                    style="min-width: 180px"
+                  >
+                    ${this.projects.map(
+                      (p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`
+                    )}
+                  </sl-select>
+                `}
+            <scion-view-toggle view="graph" @view-change=${this.onViewChange}></scion-view-toggle>
           </div>
         </div>
         ${this.loading
           ? html`
-              <div style="display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 3rem 1rem; color: var(--sl-color-neutral-600); text-align: center;">
+              <div
+                style="display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 3rem 1rem; color: var(--sl-color-neutral-600); text-align: center;"
+              >
                 <sl-spinner></sl-spinner>
                 <p>Loading agents...</p>
               </div>
             `
           : this.error
             ? html`
-                <div style="display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 3rem 1rem; color: var(--sl-color-danger-600); text-align: center;">
+                <div
+                  style="display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 3rem 1rem; color: var(--sl-color-danger-600); text-align: center;"
+                >
                   <sl-icon name="exclamation-triangle"></sl-icon>
                   <p>${this.error}</p>
                   <sl-button size="small" @click=${() => this.loadAgents()}>Retry</sl-button>

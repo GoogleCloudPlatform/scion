@@ -362,20 +362,75 @@ export class HarnessConfigFileBrowserDataSource implements FileBrowserDataSource
 
 const PREVIEWABLE_EXTENSIONS = new Set([
   // Images
-  '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.svg',
+  '.webp',
+  '.bmp',
+  '.ico',
   // Text
-  '.txt', '.log', '.csv', '.tsv',
+  '.txt',
+  '.log',
+  '.csv',
+  '.tsv',
   // Markdown
   '.md',
   // Code
-  '.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs',
-  '.py', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.hpp', '.cs',
-  '.css', '.scss', '.less', '.html', '.htm', '.xml', '.xsl',
-  '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
-  '.sh', '.bash', '.zsh', '.fish',
-  '.sql', '.rb', '.php', '.swift', '.kt', '.scala', '.r', '.lua',
-  '.pl', '.ex', '.exs', '.elm', '.hs', '.clj', '.vim',
-  '.dockerfile', '.makefile', '.env', '.gitignore', '.editorconfig',
+  '.js',
+  '.ts',
+  '.jsx',
+  '.tsx',
+  '.mjs',
+  '.cjs',
+  '.py',
+  '.go',
+  '.rs',
+  '.java',
+  '.c',
+  '.cpp',
+  '.h',
+  '.hpp',
+  '.cs',
+  '.css',
+  '.scss',
+  '.less',
+  '.html',
+  '.htm',
+  '.xml',
+  '.xsl',
+  '.json',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.ini',
+  '.cfg',
+  '.conf',
+  '.sh',
+  '.bash',
+  '.zsh',
+  '.fish',
+  '.sql',
+  '.rb',
+  '.php',
+  '.swift',
+  '.kt',
+  '.scala',
+  '.r',
+  '.lua',
+  '.pl',
+  '.ex',
+  '.exs',
+  '.elm',
+  '.hs',
+  '.clj',
+  '.vim',
+  '.dockerfile',
+  '.makefile',
+  '.env',
+  '.gitignore',
+  '.editorconfig',
   // PDF
   '.pdf',
 ]);
@@ -385,20 +440,64 @@ const EDITABLE_EXTENSIONS = new Set([
   // Markdown
   '.md',
   // Data formats
-  '.json', '.yaml', '.yml', '.toml',
+  '.json',
+  '.yaml',
+  '.yml',
+  '.toml',
   // Shell
-  '.sh', '.bash', '.zsh',
+  '.sh',
+  '.bash',
+  '.zsh',
   // Programming languages
-  '.go', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-  '.py', '.rs', '.java', '.c', '.cpp', '.h', '.hpp', '.cs',
-  '.rb', '.php', '.swift', '.kt', '.scala', '.r', '.lua',
-  '.pl', '.ex', '.exs', '.elm', '.hs', '.clj',
+  '.go',
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.py',
+  '.rs',
+  '.java',
+  '.c',
+  '.cpp',
+  '.h',
+  '.hpp',
+  '.cs',
+  '.rb',
+  '.php',
+  '.swift',
+  '.kt',
+  '.scala',
+  '.r',
+  '.lua',
+  '.pl',
+  '.ex',
+  '.exs',
+  '.elm',
+  '.hs',
+  '.clj',
   // Web
-  '.css', '.scss', '.less', '.html', '.htm', '.xml', '.xsl',
+  '.css',
+  '.scss',
+  '.less',
+  '.html',
+  '.htm',
+  '.xml',
+  '.xsl',
   // Config & text
-  '.txt', '.log', '.csv', '.tsv', '.ini', '.cfg', '.conf',
-  '.env', '.gitignore', '.editorconfig',
-  '.dockerfile', '.makefile',
+  '.txt',
+  '.log',
+  '.csv',
+  '.tsv',
+  '.ini',
+  '.cfg',
+  '.conf',
+  '.env',
+  '.gitignore',
+  '.editorconfig',
+  '.dockerfile',
+  '.makefile',
   // SQL
   '.sql',
 ]);
@@ -926,7 +1025,7 @@ export class ScionFileBrowser extends LitElement {
 
     try {
       await this.dataSource.deleteFile(filePath);
-      this.files = this.files.filter(f => f.path !== filePath);
+      this.files = this.files.filter((f) => f.path !== filePath);
       void this.loadFiles();
     } catch (err) {
       console.error('Failed to delete file:', err);
@@ -992,10 +1091,7 @@ export class ScionFileBrowser extends LitElement {
   // ── Render ──
 
   override render() {
-    return html`
-      ${this.renderToolbar()}
-      ${this.renderContent()}
-    `;
+    return html` ${this.renderToolbar()} ${this.renderContent()} `;
   }
 
   private renderToolbar() {
@@ -1007,7 +1103,8 @@ export class ScionFileBrowser extends LitElement {
       const localMatches = this.applyFilter(base);
       const localCount = localMatches.length;
       if (this.backendSearching) {
-        countLabel = html`${localCount} local match${localCount !== 1 ? 'es' : ''} · <sl-spinner class="search-spinner"></sl-spinner> searching workspace…`;
+        countLabel = html`${localCount} local match${localCount !== 1 ? 'es' : ''} ·
+          <sl-spinner class="search-spinner"></sl-spinner> searching workspace…`;
       } else if (this.backendError) {
         countLabel = html`${localCount} local match${localCount !== 1 ? 'es' : ''}
           <sl-tooltip content="Workspace search unavailable — showing local results only">
@@ -1061,7 +1158,8 @@ export class ScionFileBrowser extends LitElement {
                   @sl-change=${(e: Event) => {
                     this.showDotFiles = (e.target as HTMLInputElement).checked;
                   }}
-                >show .dot files</sl-checkbox>
+                  >show .dot files</sl-checkbox
+                >
               `
             : nothing}
         </div>
@@ -1070,7 +1168,8 @@ export class ScionFileBrowser extends LitElement {
             ? html`
                 <div class="provider-warning">
                   <sl-icon name="exclamation-triangle"></sl-icon>
-                  Showing files from this server only — ${this.providerCount} brokers serve this project
+                  Showing files from this server only — ${this.providerCount} brokers serve this
+                  project
                 </div>
               `
             : nothing}
@@ -1082,7 +1181,11 @@ export class ScionFileBrowser extends LitElement {
           ></sl-icon-button>
           ${this.showArchive && this.dataSource?.getArchiveUrl?.() && this.files.length > 0
             ? html`
-                <sl-button size="small" variant="default" @click=${() => this.handleArchiveDownload()}>
+                <sl-button
+                  size="small"
+                  variant="default"
+                  @click=${() => this.handleArchiveDownload()}
+                >
                   <sl-icon slot="prefix" name="file-earmark-zip"></sl-icon>
                   Download Zip
                 </sl-button>
@@ -1090,11 +1193,7 @@ export class ScionFileBrowser extends LitElement {
             : nothing}
           ${this.editable
             ? html`
-                <sl-button
-                  size="small"
-                  variant="default"
-                  @click=${() => this.handleNewFile()}
-                >
+                <sl-button size="small" variant="default" @click=${() => this.handleNewFile()}>
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                   New File
                 </sl-button>
@@ -1138,9 +1237,7 @@ export class ScionFileBrowser extends LitElement {
       return html`
         <div class="empty-state">
           <sl-icon name="file-earmark"></sl-icon>
-          <p>
-            No files in this directory.${this.editable ? ' Upload files to get started.' : ''}
-          </p>
+          <p>No files in this directory.${this.editable ? ' Upload files to get started.' : ''}</p>
           ${this.editable
             ? html`
                 <sl-button
@@ -1168,99 +1265,100 @@ export class ScionFileBrowser extends LitElement {
         ${this.filterText && displayFiles.length === 0 && !this.backendSearching
           ? html`<div class="empty-filter">No files match the current filter.</div>`
           : html`
-        <table class="file-table">
-          <thead>
-            <tr>
-              <th
-                class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('name')}
-              >
-                <span class="sort-indicator">${this.sortIndicator('name')}</span>
-                Name
-              </th>
-              <th
-                class="sortable ${this.sortField === 'size' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('size')}
-              >
-                <span class="sort-indicator">${this.sortIndicator('size')}</span>
-                Size
-              </th>
-              <th
-                class="sortable hide-mobile ${this.sortField === 'modified' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('modified')}
-              >
-                <span class="sort-indicator">${this.sortIndicator('modified')}</span>
-                Modified
-              </th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            ${displayFiles.slice(0, 1000).map(
-              (file) => html`
-                <tr>
-                  <td>
-                    <span class="file-name">
-                      <sl-icon name="file-earmark"></sl-icon>
-                      ${file.path}
-                    </span>
-                  </td>
-                  <td><span class="file-size">${formatFileSize(file.size)}</span></td>
-                  <td class="hide-mobile">
-                    <span class="file-date">${this.formatDate(file.modTime)}</span>
-                  </td>
-                  <td class="file-actions">
-                    ${isPreviewable(file.path)
-                      ? html`
+              <table class="file-table">
+                <thead>
+                  <tr>
+                    <th
+                      class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
+                      @click=${() => this.toggleSort('name')}
+                    >
+                      <span class="sort-indicator">${this.sortIndicator('name')}</span>
+                      Name
+                    </th>
+                    <th
+                      class="sortable ${this.sortField === 'size' ? 'sorted' : ''}"
+                      @click=${() => this.toggleSort('size')}
+                    >
+                      <span class="sort-indicator">${this.sortIndicator('size')}</span>
+                      Size
+                    </th>
+                    <th
+                      class="sortable hide-mobile ${this.sortField === 'modified' ? 'sorted' : ''}"
+                      @click=${() => this.toggleSort('modified')}
+                    >
+                      <span class="sort-indicator">${this.sortIndicator('modified')}</span>
+                      Modified
+                    </th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${displayFiles.slice(0, 1000).map(
+                    (file) => html`
+                      <tr>
+                        <td>
+                          <span class="file-name">
+                            <sl-icon name="file-earmark"></sl-icon>
+                            ${file.path}
+                          </span>
+                        </td>
+                        <td><span class="file-size">${formatFileSize(file.size)}</span></td>
+                        <td class="hide-mobile">
+                          <span class="file-date">${this.formatDate(file.modTime)}</span>
+                        </td>
+                        <td class="file-actions">
+                          ${isPreviewable(file.path)
+                            ? html`
+                                <sl-icon-button
+                                  name="eye"
+                                  label="Preview ${file.path}"
+                                  @click=${() => this.handlePreview(file.path)}
+                                ></sl-icon-button>
+                              `
+                            : html`
+                                <sl-icon-button
+                                  name="eye"
+                                  label="Preview not available for this format"
+                                  class="preview-disabled"
+                                  disabled
+                                ></sl-icon-button>
+                              `}
+                          ${this.editable && isEditable(file.path, file.size)
+                            ? html`
+                                <sl-icon-button
+                                  name="pencil"
+                                  label="Edit ${file.path}"
+                                  @click=${() => this.handleEdit(file.path)}
+                                ></sl-icon-button>
+                              `
+                            : nothing}
                           <sl-icon-button
-                            name="eye"
-                            label="Preview ${file.path}"
-                            @click=${() => this.handlePreview(file.path)}
+                            name="download"
+                            label="Download ${file.path}"
+                            @click=${() => this.handleDownload(file.path)}
                           ></sl-icon-button>
-                        `
-                      : html`
-                          <sl-icon-button
-                            name="eye"
-                            label="Preview not available for this format"
-                            class="preview-disabled"
-                            disabled
-                          ></sl-icon-button>
-                        `}
-                    ${this.editable && isEditable(file.path, file.size)
-                      ? html`
-                          <sl-icon-button
-                            name="pencil"
-                            label="Edit ${file.path}"
-                            @click=${() => this.handleEdit(file.path)}
-                          ></sl-icon-button>
-                        `
-                      : nothing}
-                    <sl-icon-button
-                      name="download"
-                      label="Download ${file.path}"
-                      @click=${() => this.handleDownload(file.path)}
-                    ></sl-icon-button>
-                    ${this.editable
-                      ? html`
-                          <sl-icon-button
-                            name="trash"
-                            label="Delete ${file.path}"
-                            @click=${(e: MouseEvent) => this.handleDelete(file.path, e)}
-                          ></sl-icon-button>
-                        `
-                      : nothing}
-                  </td>
-                </tr>
-              `
-            )}
-          </tbody>
-        </table>
-        ${displayFiles.length > 1000
-          ? html`<div class="file-list-truncated">
-              File list truncated — showing 1,000 of ${displayFiles.length.toLocaleString()} files
-            </div>`
-          : nothing}
-        `}
+                          ${this.editable
+                            ? html`
+                                <sl-icon-button
+                                  name="trash"
+                                  label="Delete ${file.path}"
+                                  @click=${(e: MouseEvent) => this.handleDelete(file.path, e)}
+                                ></sl-icon-button>
+                              `
+                            : nothing}
+                        </td>
+                      </tr>
+                    `
+                  )}
+                </tbody>
+              </table>
+              ${displayFiles.length > 1000
+                ? html`<div class="file-list-truncated">
+                    File list truncated — showing 1,000 of ${displayFiles.length.toLocaleString()}
+                    files
+                  </div>`
+                : nothing}
+            `}
       </div>
     `;
   }

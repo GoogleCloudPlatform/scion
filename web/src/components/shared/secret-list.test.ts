@@ -41,7 +41,9 @@ function encodeValue(raw: string): string {
 }
 
 /** Create the component, append to DOM, and wait for render. */
-async function createComponent(fetchMock: (url: string | URL | Request, init?: RequestInit) => Promise<Response>) {
+async function createComponent(
+  fetchMock: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
+) {
   vi.stubGlobal('fetch', vi.fn(fetchMock));
   const el = document.createElement('scion-secret-list') as InstanceType<typeof ScionSecretList>;
   el.setAttribute('scope', 'user');
@@ -68,10 +70,10 @@ function makeBasicFetch(putSpy?: (body: Record<string, unknown>) => void) {
         }
       }
       return Promise.resolve(
-        new Response(
-          JSON.stringify({ secret: { key: 'TEST', version: 1 }, created: true }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } },
-        ),
+        new Response(JSON.stringify({ secret: { key: 'TEST', version: 1 }, created: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       );
     }
     // GET /api/v1/secrets — return empty list.
@@ -79,7 +81,7 @@ function makeBasicFetch(putSpy?: (body: Record<string, unknown>) => void) {
       new Response(JSON.stringify({ secrets: [] }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-      }),
+      })
     );
   };
 }
@@ -99,7 +101,11 @@ describe('scion-secret-list — base64 encoding before send (issue #251)', () =>
     const rawValue = 'my-plain-secret';
     let capturedBody: Record<string, unknown> = {};
 
-    const el = await createComponent(makeBasicFetch((body) => { capturedBody = body; }));
+    const el = await createComponent(
+      makeBasicFetch((body) => {
+        capturedBody = body;
+      })
+    );
 
     // Simulate the user opening the dialog and typing a value.
     (el as any).dialogKey = 'MY_SECRET';
@@ -121,7 +127,11 @@ describe('scion-secret-list — base64 encoding before send (issue #251)', () =>
     const unicodeValue = 'こんにちは🔑secret';
     let capturedBody: Record<string, unknown> = {};
 
-    const el = await createComponent(makeBasicFetch((body) => { capturedBody = body; }));
+    const el = await createComponent(
+      makeBasicFetch((body) => {
+        capturedBody = body;
+      })
+    );
 
     (el as any).dialogKey = 'UNICODE_KEY';
     (el as any).dialogValue = unicodeValue;
@@ -155,7 +165,11 @@ describe('scion-secret-list — base64 encoding before send (issue #251)', () =>
     const rawValue = 'api-key-value';
     let capturedBody: Record<string, unknown> = {};
 
-    const el = await createComponent(makeBasicFetch((body) => { capturedBody = body; }));
+    const el = await createComponent(
+      makeBasicFetch((body) => {
+        capturedBody = body;
+      })
+    );
 
     (el as any).dialogKey = 'API_KEY';
     (el as any).dialogValue = rawValue;

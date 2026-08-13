@@ -223,7 +223,9 @@ export class ScionAgentTreeView extends LitElement {
       stroke: var(--sl-color-neutral-400);
       stroke-width: 1.6;
       fill: none;
-      transition: opacity 0.2s ease, stroke 0.2s ease;
+      transition:
+        opacity 0.2s ease,
+        stroke 0.2s ease;
       marker-end: url(#arrow-neutral);
     }
 
@@ -490,7 +492,10 @@ export class ScionAgentTreeView extends LitElement {
     super.willUpdate(changedProperties);
     // Flipping the flow direction swaps the canvas aspect ratio; re-fit so
     // the whole forest stays visible.
-    if (changedProperties.has('orientation') && changedProperties.get('orientation') !== undefined) {
+    if (
+      changedProperties.has('orientation') &&
+      changedProperties.get('orientation') !== undefined
+    ) {
       this.didAutoFit = false;
     }
     if (changedProperties.has('agents')) {
@@ -569,7 +574,8 @@ export class ScionAgentTreeView extends LitElement {
     for (const el of e.composedPath()) {
       if (el === this.canvasEl) break;
       const tag = (el as HTMLElement).tagName;
-      if (tag === 'A' || tag === 'BUTTON' || tag === 'SL-BUTTON' || tag === 'SL-ICON-BUTTON') return;
+      if (tag === 'A' || tag === 'BUTTON' || tag === 'SL-BUTTON' || tag === 'SL-ICON-BUTTON')
+        return;
     }
     e.preventDefault();
     this.dragging = true;
@@ -689,7 +695,7 @@ export class ScionAgentTreeView extends LitElement {
       return related;
     }
 
-    const byId = new Map(agents.map(a => [a.id, a]));
+    const byId = new Map(agents.map((a) => [a.id, a]));
     const hovered = byId.get(this.hoverId);
     if (!hovered) return null;
 
@@ -734,11 +740,9 @@ export class ScionAgentTreeView extends LitElement {
   private renderToolbar() {
     return html`
       <div class="toolbar">
-        <sl-switch
-          size="small"
-          ?checked=${this.showUsers}
-          @sl-change=${this.onShowUsersChange}
-        >Show users</sl-switch>
+        <sl-switch size="small" ?checked=${this.showUsers} @sl-change=${this.onShowUsersChange}
+          >Show users</sl-switch
+        >
         <div class="orientation-toggle" role="group" aria-label="Graph orientation">
           <button
             class=${this.orientation === 'vertical' ? 'active' : ''}
@@ -790,7 +794,7 @@ export class ScionAgentTreeView extends LitElement {
     // the fit retries on the next render rather than getting permanently
     // skipped.
     if (!this.didAutoFit) {
-      const focus = this.focusId ? nodes.find(n => n.agent.id === this.focusId) : undefined;
+      const focus = this.focusId ? nodes.find((n) => n.agent.id === this.focusId) : undefined;
       const capturedW = width;
       const capturedH = height;
       requestAnimationFrame(() => {
@@ -822,18 +826,29 @@ export class ScionAgentTreeView extends LitElement {
         @pointercancel=${this.onPointerUp}
         @pointerleave=${() => (this.hoverId = null)}
       >
-        <div class="stage" style="transform: translate(${this.panX}px, ${this.panY}px) scale(${this.scale})">
+        <div
+          class="stage"
+          style="transform: translate(${this.panX}px, ${this.panY}px) scale(${this.scale})"
+        >
           <svg width=${width} height=${height} aria-hidden="true">
-            ${this.renderEdgeMarkers()}
-            ${edges.map(e => this.renderEdge(e, related))}
+            ${this.renderEdgeMarkers()} ${edges.map((e) => this.renderEdge(e, related))}
           </svg>
-          ${users.map(u => this.renderUserNode(u, agents, edges, related))}
-          ${nodes.map(n => this.renderNode(n, related, hiddenCounts))}
+          ${users.map((u) => this.renderUserNode(u, agents, edges, related))}
+          ${nodes.map((n) => this.renderNode(n, related, hiddenCounts))}
         </div>
         <div class="zoom-controls">
-          <sl-button size="small" @click=${() => this.zoomButtons(1.25)} title="Zoom in (+)">+</sl-button>
-          <sl-button size="small" @click=${() => this.zoomButtons(1 / 1.25)} title="Zoom out (−)">−</sl-button>
-          <sl-button size="small" @click=${() => this.fitToView(width, height)} title="Fit to view (F)">Fit</sl-button>
+          <sl-button size="small" @click=${() => this.zoomButtons(1.25)} title="Zoom in (+)"
+            >+</sl-button
+          >
+          <sl-button size="small" @click=${() => this.zoomButtons(1 / 1.25)} title="Zoom out (−)"
+            >−</sl-button
+          >
+          <sl-button
+            size="small"
+            @click=${() => this.fitToView(width, height)}
+            title="Fit to view (F)"
+            >Fit</sl-button
+          >
         </div>
       </div>
 
@@ -841,7 +856,9 @@ export class ScionAgentTreeView extends LitElement {
         agentId=${this.quickMessageAgentId}
         agentName=${this.quickMessageAgentName}
         ?open=${this.quickMessageOpen}
-        @sl-request-close=${() => { this.quickMessageOpen = false; }}
+        @sl-request-close=${() => {
+          this.quickMessageOpen = false;
+        }}
       ></scion-quick-message-dialog>
     `;
   }
@@ -909,13 +926,17 @@ export class ScionAgentTreeView extends LitElement {
     this.collapsedIds = next;
   }
 
-  private renderNode(n: PositionedNode, related: Set<string> | null, hiddenCounts: Map<string, number>) {
+  private renderNode(
+    n: PositionedNode,
+    related: Set<string> | null,
+    hiddenCounts: Map<string, number>
+  ) {
     const agent = n.agent;
     const status = getAgentDisplayStatus(agent);
     const color = VARIANT_COLOR[getStateDisplay(status).variant];
     const creator = agent.appliedConfig?.creatorName || agent.createdBy || '';
     const parentId = parentIdOf(agent);
-    const isRoot = !parentId || !this.agents.some(a => a.id === parentId);
+    const isRoot = !parentId || !this.agents.some((a) => a.id === parentId);
     const dim = related !== null && !related.has(agent.id);
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);
@@ -945,36 +966,46 @@ export class ScionAgentTreeView extends LitElement {
           ></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
         </a>
-        ${can(agent._capabilities, 'message') ? html`
-          <sl-icon-button
-            class="message-btn"
-            name="chat-dots"
-            label="Message"
-            @click=${(e: Event) => {
-              e.preventDefault();
-              e.stopPropagation();
-              this.quickMessageAgentId = agent.id;
-              this.quickMessageAgentName = agent.name;
-              this.quickMessageOpen = true;
-            }}
-          ></sl-icon-button>
-        ` : nothing}
-        ${can(agent._capabilities, 'attach') ? html`
-          <sl-icon-button
-            class="terminal-btn"
-            name="terminal"
-            label="Terminal"
-            href=${isTerminalAvailable(agent) ? `/agents/${agent.id}/terminal` : nothing}
-            ?disabled=${!isTerminalAvailable(agent)}
-          ></sl-icon-button>
-        ` : nothing}
-        ${descendants > 0 ? html`
-          <button
-            class="collapse-chip ${this.orientation === 'horizontal' ? 'horizontal' : ''}"
-            title=${collapsed ? `Expand ${descendants} hidden agent${descendants === 1 ? '' : 's'}` : 'Collapse subtree'}
-            @click=${(e: Event) => this.toggleCollapse(agent.id, e)}
-          >${collapsed ? `+${descendants}` : '−'}</button>
-        ` : nothing}
+        ${can(agent._capabilities, 'message')
+          ? html`
+              <sl-icon-button
+                class="message-btn"
+                name="chat-dots"
+                label="Message"
+                @click=${(e: Event) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  this.quickMessageAgentId = agent.id;
+                  this.quickMessageAgentName = agent.name;
+                  this.quickMessageOpen = true;
+                }}
+              ></sl-icon-button>
+            `
+          : nothing}
+        ${can(agent._capabilities, 'attach')
+          ? html`
+              <sl-icon-button
+                class="terminal-btn"
+                name="terminal"
+                label="Terminal"
+                href=${isTerminalAvailable(agent) ? `/agents/${agent.id}/terminal` : nothing}
+                ?disabled=${!isTerminalAvailable(agent)}
+              ></sl-icon-button>
+            `
+          : nothing}
+        ${descendants > 0
+          ? html`
+              <button
+                class="collapse-chip ${this.orientation === 'horizontal' ? 'horizontal' : ''}"
+                title=${collapsed
+                  ? `Expand ${descendants} hidden agent${descendants === 1 ? '' : 's'}`
+                  : 'Collapse subtree'}
+                @click=${(e: Event) => this.toggleCollapse(agent.id, e)}
+              >
+                ${collapsed ? `+${descendants}` : '−'}
+              </button>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -993,7 +1024,7 @@ export class ScionAgentTreeView extends LitElement {
       if (label) break;
     }
     if (!label) label = u.id.slice(0, 8);
-    const started = edges.filter(e => e.parentId === key).length;
+    const started = edges.filter((e) => e.parentId === key).length;
     const dim = related !== null && !related.has(key);
     return html`
       <div

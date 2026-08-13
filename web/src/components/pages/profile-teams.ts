@@ -330,7 +330,9 @@ export class ScionPageProfileTeams extends LitElement {
       <div class="page-header">
         <div class="page-header-info">
           <h1>Microsoft Teams</h1>
-          <p>Link your Microsoft Teams account to receive notifications and interact with agents.</p>
+          <p>
+            Link your Microsoft Teams account to receive notifications and interact with agents.
+          </p>
         </div>
       </div>
 

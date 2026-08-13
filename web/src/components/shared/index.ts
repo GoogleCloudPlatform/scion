@@ -38,9 +38,18 @@ export { ScionAgentLogViewer } from './agent-log-viewer.js';
 export { ScionSharedDirList } from './shared-dir-list.js';
 export { ScionFileBrowser } from './file-browser.js';
 export type { FileEntry, FileListResult, FileBrowserDataSource } from './file-browser.js';
-export { WorkspaceFileBrowserDataSource, SharedDirFileBrowserDataSource, TemplateFileBrowserDataSource } from './file-browser.js';
+export {
+  WorkspaceFileBrowserDataSource,
+  SharedDirFileBrowserDataSource,
+  TemplateFileBrowserDataSource,
+} from './file-browser.js';
 export { ScionCodeEditor, getLanguageFromPath } from './code-editor.js';
-export { ScionFileEditor, WorkspaceFileEditorDataSource, SharedDirFileEditorDataSource, TemplateFileEditorDataSource } from './file-editor.js';
+export {
+  ScionFileEditor,
+  WorkspaceFileEditorDataSource,
+  SharedDirFileEditorDataSource,
+  TemplateFileEditorDataSource,
+} from './file-editor.js';
 export type { FileEditorDataSource, FileContentResponse } from './file-editor.js';
 export { ScionGCPServiceAccountList } from './gcp-service-account-list.js';
 export { ScionSubscriptionManager } from './subscription-manager.js';

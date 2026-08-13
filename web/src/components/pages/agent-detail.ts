@@ -593,7 +593,6 @@ export class ScionPageAgentDetail extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #64748b);
     }
-
   `;
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
@@ -619,7 +618,10 @@ export class ScionPageAgentDetail extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.removeEventListener(
+      'projects-updated',
+      this.boundOnProjectsUpdated as EventListener
+    );
     if (this.relativeTimeInterval) {
       clearInterval(this.relativeTimeInterval);
       this.relativeTimeInterval = null;
@@ -655,7 +657,12 @@ export class ScionPageAgentDetail extends LitElement {
         const agentResponse = await apiFetch(`/api/v1/agents/${this.agentId}`);
 
         if (!agentResponse.ok) {
-          throw new Error(await extractApiError(agentResponse, `HTTP ${agentResponse.status}: ${agentResponse.statusText}`));
+          throw new Error(
+            await extractApiError(
+              agentResponse,
+              `HTTP ${agentResponse.status}: ${agentResponse.statusText}`
+            )
+          );
         }
 
         this.agent = (await agentResponse.json()) as Agent;
@@ -707,8 +714,12 @@ export class ScionPageAgentDetail extends LitElement {
           apiFetch(`/api/v1/notifications/subscriptions?agentId=${this.agentId}`)
             .then(async (subRes) => {
               if (subRes.ok) {
-                const data = (await subRes.json()) as Subscription[] | { subscriptions?: Subscription[] };
-                const subs = Array.isArray(data) ? data : (data as { subscriptions?: Subscription[] }).subscriptions || [];
+                const data = (await subRes.json()) as
+                  | Subscription[]
+                  | { subscriptions?: Subscription[] };
+                const subs = Array.isArray(data)
+                  ? data
+                  : (data as { subscriptions?: Subscription[] }).subscriptions || [];
                 const match = subs.find((s) => s.scope === 'agent' && s.agentId === this.agentId);
                 if (match) {
                   this.subscribed = true;
@@ -835,14 +846,11 @@ export class ScionPageAgentDetail extends LitElement {
     if (action === 'reset-auth') {
       this.actionLoading = { ...this.actionLoading, 'reset-auth': true };
       try {
-        const response = await apiFetch(
-          `/api/v1/agents/${this.agentId}/reset-auth`,
-          { method: 'POST' }
-        );
+        const response = await apiFetch(`/api/v1/agents/${this.agentId}/reset-auth`, {
+          method: 'POST',
+        });
         if (!response.ok) {
-          throw new Error(
-            await extractApiError(response, 'Failed to reset auth')
-          );
+          throw new Error(await extractApiError(response, 'Failed to reset auth'));
         }
         this.backgroundRefresh();
       } catch (err) {
@@ -1034,9 +1042,7 @@ export class ScionPageAgentDetail extends LitElement {
               : {}}
           ></scion-agent-log-viewer>
         </sl-tab-panel>
-        <sl-tab-panel name="messages">
-          ${this.renderMessagesPanel()}
-        </sl-tab-panel>
+        <sl-tab-panel name="messages"> ${this.renderMessagesPanel()} </sl-tab-panel>
         <sl-tab-panel name="configuration">${this.renderConfigurationTab()}</sl-tab-panel>
       </sl-tab-group>
 
@@ -1044,7 +1050,9 @@ export class ScionPageAgentDetail extends LitElement {
         agentId=${this.agentId}
         agentName=${this.agent.name || ''}
         ?open=${this.quickMessageOpen}
-        @sl-request-close=${() => { this.quickMessageOpen = false; }}
+        @sl-request-close=${() => {
+          this.quickMessageOpen = false;
+        }}
       ></scion-quick-message-dialog>
     `;
   }
@@ -1154,7 +1162,9 @@ export class ScionPageAgentDetail extends LitElement {
                   variant="default"
                   size="small"
                   outline
-                  @click=${() => { this.quickMessageOpen = true; }}
+                  @click=${() => {
+                    this.quickMessageOpen = true;
+                  }}
                 >
                   <sl-icon slot="prefix" name="chat-dots"></sl-icon>
                   Message
@@ -1265,7 +1275,10 @@ export class ScionPageAgentDetail extends LitElement {
               `
             : nothing}
           <sl-tooltip content="See this agent in graph">
-            <a href="/agents/graph?project=${agent.projectId}&focus=${this.agentId}" style="text-decoration: none;">
+            <a
+              href="/agents/graph?project=${agent.projectId}&focus=${this.agentId}"
+              style="text-decoration: none;"
+            >
               <sl-button variant="default" size="small">
                 <sl-icon slot="prefix" name="diagram-3"></sl-icon>
               </sl-button>
@@ -1298,8 +1311,7 @@ export class ScionPageAgentDetail extends LitElement {
     return html`
       ${this.renderCurrentStateCard(agent)} ${this.renderCurrentTaskCard(agent)}
       ${this.renderLimitsUsageCard(agent)} ${this.renderConnectivityCard(agent)}
-      ${this.renderExposedPortsCard(agent)}
-      ${this.renderNotificationsCard()}
+      ${this.renderExposedPortsCard(agent)} ${this.renderNotificationsCard()}
     `;
   }
 
@@ -1310,7 +1322,11 @@ export class ScionPageAgentDetail extends LitElement {
           <h3 class="card-title">Current State</h3>
           ${this.pageData?.user
             ? html`
-                <sl-tooltip content=${this.subscribed ? 'Unsubscribe from notifications' : 'Subscribe to notifications'}>
+                <sl-tooltip
+                  content=${this.subscribed
+                    ? 'Unsubscribe from notifications'
+                    : 'Subscribe to notifications'}
+                >
                   <sl-button
                     size="small"
                     variant=${this.subscribed ? 'primary' : 'default'}
@@ -1342,12 +1358,22 @@ export class ScionPageAgentDetail extends LitElement {
             <span class="info-value">
               ${agent.activity
                 ? html`<scion-status-badge
-                    status=${agent.activity as StatusType}
-                    label=${agent.activity}
-                    size="small"
-                  ></scion-status-badge>${((agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) || agent.updated || agent.updatedAt)
-                    ? html`<span style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;">${this.formatRelativeTime(((agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ? agent.lastActivityEvent : (agent.updated || agent.updatedAt))!)}</span>`
-                    : ''}`
+                      status=${agent.activity as StatusType}
+                      label=${agent.activity}
+                      size="small"
+                    ></scion-status-badge
+                    >${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
+                    agent.updated ||
+                    agent.updatedAt
+                      ? html`<span
+                          style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;"
+                          >${this.formatRelativeTime(
+                            (agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)
+                              ? agent.lastActivityEvent
+                              : agent.updated || agent.updatedAt)!
+                          )}</span
+                        >`
+                      : ''}`
                 : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
             </span>
           </div>
@@ -1498,9 +1524,7 @@ export class ScionPageAgentDetail extends LitElement {
           ${ports.map(
             (p) => html`
               <div class="info-item">
-                <span class="info-label">
-                  :${p.port}${p.label ? ` (${p.label})` : ''}
-                </span>
+                <span class="info-label"> :${p.port}${p.label ? ` (${p.label})` : ''} </span>
                 <span class="info-value">
                   <a
                     href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
@@ -1591,7 +1615,9 @@ export class ScionPageAgentDetail extends LitElement {
                       <span class="info-value">
                         ${t.calls} calls
                         ${t.error > 0
-                          ? html`<span style="color: var(--scion-danger-500, #ef4444)"> (${t.error} errors)</span>`
+                          ? html`<span style="color: var(--scion-danger-500, #ef4444)">
+                              (${t.error} errors)</span
+                            >`
                           : nothing}
                       </span>
                     </div>
@@ -1684,7 +1710,9 @@ export class ScionPageAgentDetail extends LitElement {
             ? html`
                 <div class="info-item">
                   <span class="info-label">Auth Method</span>
-                  <span class="info-value">${agent.harnessAuth || agent.appliedConfig?.harnessAuth}</span>
+                  <span class="info-value"
+                    >${agent.harnessAuth || agent.appliedConfig?.harnessAuth}</span
+                  >
                 </div>
               `
             : ''}
@@ -1768,7 +1796,10 @@ export class ScionPageAgentDetail extends LitElement {
                 <div class="info-item">
                   <span class="info-label">Template Hash</span>
                   <span class="info-value mono">
-                    <scion-hash-display .hash=${cfg.templateHash} max-width="14ch"></scion-hash-display>
+                    <scion-hash-display
+                      .hash=${cfg.templateHash}
+                      max-width="14ch"
+                    ></scion-hash-display>
                   </span>
                 </div>
               `

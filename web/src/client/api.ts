@@ -79,9 +79,7 @@ export async function apiFetch(path: string, options?: RequestInit): Promise<Res
     } catch {
       // Body wasn't JSON — use empty detail
     }
-    window.dispatchEvent(
-      new CustomEvent('scion:access-denied', { detail })
-    );
+    window.dispatchEvent(new CustomEvent('scion:access-denied', { detail }));
   }
 
   return response;

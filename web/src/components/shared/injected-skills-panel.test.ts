@@ -115,10 +115,7 @@ function makeFetchMock(calls: Call[], opts: MockOptions = {}) {
 
     // Hub list GET and project/user list GET have different shapes; return both
     // keys so either read path finds the configured list.
-    return jsonResponse(
-      { entries: opts.entries ?? [], system: [], user_defined: [] },
-      200
-    );
+    return jsonResponse({ entries: opts.entries ?? [], system: [], user_defined: [] }, 200);
   };
 }
 
@@ -337,7 +334,10 @@ describe('injected-skills-panel — handleDiscoverDirectory', () => {
   it('sends projectId for project scope', async () => {
     const calls: Call[] = [];
     const el = await createPanel('project', calls, {
-      discover: { status: 200, body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 } },
+      discover: {
+        status: 200,
+        body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 },
+      },
     });
     el.dialogUri = 'https://github.com/org/repo/tree/main/skills';
     await el.handleDiscoverDirectory();
@@ -349,7 +349,10 @@ describe('injected-skills-panel — handleDiscoverDirectory', () => {
   it('sends no projectId for hub scope', async () => {
     const calls: Call[] = [];
     const el = await createPanel('hub', calls, {
-      discover: { status: 200, body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 } },
+      discover: {
+        status: 200,
+        body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 },
+      },
     });
     el.dialogUri = 'https://github.com/org/repo/tree/main/skills';
     await el.handleDiscoverDirectory();
@@ -364,7 +367,10 @@ describe('injected-skills-panel — handleDiscoverDirectory', () => {
     // unauthenticated fetch of a public repo.
     const calls: Call[] = [];
     const el = await createPanel('user', calls, {
-      discover: { status: 200, body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 } },
+      discover: {
+        status: 200,
+        body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 },
+      },
     });
     el.dialogUri = 'https://github.com/org/repo/tree/main/skills';
     await el.handleDiscoverDirectory();
@@ -376,7 +382,10 @@ describe('injected-skills-panel — handleDiscoverDirectory', () => {
   it('posts the raw directory URL, not the normalized form', async () => {
     const calls: Call[] = [];
     const el = await createPanel('project', calls, {
-      discover: { status: 200, body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 } },
+      discover: {
+        status: 200,
+        body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 },
+      },
     });
     el.dialogUri = 'https://github.com/org/repo/tree/main/custom/dir';
     el.dialogTransformed = 'https://github.com/org/repo/tree/main/custom/dir';
@@ -493,7 +502,10 @@ describe('injected-skills-panel — handleDiscoverDirectory', () => {
 
     const el = await createPanel('project', [], {
       discoverGate: gate,
-      discover: { status: 200, body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 } },
+      discover: {
+        status: 200,
+        body: { skills: [{ uri: 'gh://org/repo/a@main', name: 'a' }], count: 1 },
+      },
     });
     el.dialogUri = 'https://github.com/org/repo/tree/main/skills';
 

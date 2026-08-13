@@ -285,7 +285,8 @@ export class ScionPageProfileSettings extends LitElement {
   }
 
   override render() {
-    const isDisabled = this._permissionState === 'unsupported' || this._permissionState === 'denied';
+    const isDisabled =
+      this._permissionState === 'unsupported' || this._permissionState === 'denied';
 
     return html`
       <div class="page-header">
@@ -305,8 +306,8 @@ export class ScionPageProfileSettings extends LitElement {
           <div class="setting-info">
             <p class="setting-label">Enable Push Notifications</p>
             <p class="setting-description">
-              Receive browser notifications when agents complete tasks, encounter errors,
-              or need your input.
+              Receive browser notifications when agents complete tasks, encounter errors, or need
+              your input.
             </p>
           </div>
           <div class="setting-control">
@@ -321,30 +322,34 @@ export class ScionPageProfileSettings extends LitElement {
         ${this._renderPermissionStatus()}
       </div>
 
-      ${this._gcloudADCAvailable && this._isWorkstation ? html`
-        <div class="settings-card">
-          <h2 class="section-title">
-            <sl-icon name="cloud"></sl-icon>
-            GCP Credentials
-          </h2>
+      ${this._gcloudADCAvailable && this._isWorkstation
+        ? html`
+            <div class="settings-card">
+              <h2 class="section-title">
+                <sl-icon name="cloud"></sl-icon>
+                GCP Credentials
+              </h2>
 
-          <div class="setting-row">
-            <div class="setting-info">
-              <p class="setting-label">Automatically inject gcloud credentials into agent containers</p>
-              <p class="setting-description">
-                When enabled, agents launched in workstation mode will have access to
-                your local gcloud Application Default Credentials.
-              </p>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <p class="setting-label">
+                    Automatically inject gcloud credentials into agent containers
+                  </p>
+                  <p class="setting-description">
+                    When enabled, agents launched in workstation mode will have access to your local
+                    gcloud Application Default Credentials.
+                  </p>
+                </div>
+                <div class="setting-control">
+                  <sl-switch
+                    ?checked=${this._autoInjectGcloudADC}
+                    @sl-change=${this._handleADCToggle}
+                  ></sl-switch>
+                </div>
+              </div>
             </div>
-            <div class="setting-control">
-              <sl-switch
-                ?checked=${this._autoInjectGcloudADC}
-                @sl-change=${this._handleADCToggle}
-              ></sl-switch>
-            </div>
-          </div>
-        </div>
-      ` : nothing}
+          `
+        : nothing}
 
       <scion-subscription-manager compact></scion-subscription-manager>
     `;

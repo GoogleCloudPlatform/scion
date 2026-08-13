@@ -70,358 +70,358 @@ export class ScionPageBrokerDetail extends LitElement {
   static override styles = [
     brokerTypeBadgeStyles,
     css`
-    :host {
-      display: block;
-    }
+      :host {
+        display: block;
+      }
 
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
+      .back-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: var(--scion-text-muted, #64748b);
+        text-decoration: none;
+        font-size: 0.875rem;
+        margin-bottom: 1rem;
+      }
 
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
+      .back-link:hover {
+        color: var(--scion-primary, #3b82f6);
+      }
 
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
+      .header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        margin-bottom: 1.5rem;
+        gap: 1rem;
+      }
 
-    .header-info {
-      flex: 1;
-    }
+      .header-info {
+        flex: 1;
+      }
 
-    .header-title {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 0.5rem;
-    }
+      .header-title {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.5rem;
+      }
 
-    .header-title sl-icon {
-      color: var(--scion-primary, #3b82f6);
-      font-size: 1.5rem;
-    }
+      .header-title sl-icon {
+        color: var(--scion-primary, #3b82f6);
+        font-size: 1.5rem;
+      }
 
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
+      .header h1 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+      }
 
-    .header-subtitle {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.25rem;
-      word-break: break-all;
-    }
+      .header-subtitle {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.875rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.25rem;
+        word-break: break-all;
+      }
 
-    .stats-row {
-      display: flex;
-      gap: 2rem;
-      margin-bottom: 2rem;
-      padding: 1.25rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      flex-wrap: wrap;
-    }
+      .stats-row {
+        display: flex;
+        gap: 2rem;
+        margin-bottom: 2rem;
+        padding: 1.25rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        flex-wrap: wrap;
+      }
 
-    .stat {
-      display: flex;
-      flex-direction: column;
-    }
+      .stat {
+        display: flex;
+        flex-direction: column;
+      }
 
-    .stat-label {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 0.25rem;
-    }
+      .stat-label {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.25rem;
+      }
 
-    .stat-value {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-    }
+      .stat-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--scion-text, #1e293b);
+      }
 
-    .stat-value-sm {
-      font-size: 1rem;
-      font-weight: 500;
-      color: var(--scion-text, #1e293b);
-    }
+      .stat-value-sm {
+        font-size: 1rem;
+        font-weight: 500;
+        color: var(--scion-text, #1e293b);
+      }
 
-    .section {
-      margin-bottom: 2rem;
-    }
+      .section {
+        margin-bottom: 2rem;
+      }
 
-    .section-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 1rem;
-    }
+      .section-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+      }
 
-    .section-header h2 {
-      font-size: 1.125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
+      .section-header h2 {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+      }
 
-    .capabilities-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      margin-bottom: 2rem;
-    }
+      .capabilities-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-bottom: 2rem;
+      }
 
-    .capability-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      padding: 0.25rem 0.5rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.75rem;
-      font-weight: 500;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
+      .capability-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0.25rem 0.5rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.75rem;
+        font-weight: 500;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+      }
 
-    .capability-tag.enabled {
-      background: var(--sl-color-success-100, #dcfce7);
-      color: var(--sl-color-success-700, #15803d);
-    }
+      .capability-tag.enabled {
+        background: var(--sl-color-success-100, #dcfce7);
+        color: var(--sl-color-success-700, #15803d);
+      }
 
-    .profiles-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      margin-bottom: 2rem;
-    }
+      .profiles-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-bottom: 2rem;
+      }
 
-    .profile-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-      padding: 0.375rem 0.75rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.8125rem;
-      font-weight: 500;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-      border: 1px solid var(--scion-border, #e2e8f0);
-    }
+      .profile-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.375rem;
+        padding: 0.375rem 0.75rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.8125rem;
+        font-weight: 500;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+        border: 1px solid var(--scion-border, #e2e8f0);
+      }
 
-    .profile-tag.available {
-      background: var(--scion-surface, #ffffff);
-      color: var(--scion-text, #1e293b);
-    }
+      .profile-tag.available {
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text, #1e293b);
+      }
 
-    .profile-type {
-      font-size: 0.6875rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      opacity: 0.7;
-    }
+      .profile-type {
+        font-size: 0.6875rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        opacity: 0.7;
+      }
 
-    .project-section {
-      margin-bottom: 1.5rem;
-    }
+      .project-section {
+        margin-bottom: 1.5rem;
+      }
 
-    .project-section-header {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 1rem;
-      padding-bottom: 0.5rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
+      .project-section-header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
 
-    .project-section-header h3 {
-      font-size: 1rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
+      .project-section-header h3 {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+      }
 
-    .project-section-header a {
-      color: inherit;
-      text-decoration: none;
-    }
+      .project-section-header a {
+        color: inherit;
+        text-decoration: none;
+      }
 
-    .project-section-header a:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
+      .project-section-header a:hover {
+        color: var(--scion-primary, #3b82f6);
+      }
 
-    .project-section-header sl-icon {
-      color: var(--scion-primary, #3b82f6);
-    }
+      .project-section-header sl-icon {
+        color: var(--scion-primary, #3b82f6);
+      }
 
-    .project-agent-count {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      background: var(--scion-bg-subtle, #f1f5f9);
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-    }
+      .project-agent-count {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        background: var(--scion-bg-subtle, #f1f5f9);
+        padding: 0.125rem 0.5rem;
+        border-radius: 9999px;
+      }
 
-    .agent-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 1.5rem;
-    }
+      .agent-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 1.5rem;
+      }
 
-    .agent-card {
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      padding: 1.5rem;
-      transition: all var(--scion-transition-fast, 150ms ease);
-      text-decoration: none;
-      color: inherit;
-      display: block;
-    }
+      .agent-card {
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        padding: 1.5rem;
+        transition: all var(--scion-transition-fast, 150ms ease);
+        text-decoration: none;
+        color: inherit;
+        display: block;
+      }
 
-    .agent-card:hover {
-      border-color: var(--scion-primary, #3b82f6);
-      box-shadow: var(--scion-shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.1));
-    }
+      .agent-card:hover {
+        border-color: var(--scion-primary, #3b82f6);
+        box-shadow: var(--scion-shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.1));
+      }
 
-    .agent-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 0.75rem;
-    }
+      .agent-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        margin-bottom: 0.75rem;
+      }
 
-    .agent-name {
-      font-size: 1.125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
+      .agent-name {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
 
-    .agent-name sl-icon {
-      color: var(--scion-primary, #3b82f6);
-    }
+      .agent-name sl-icon {
+        color: var(--scion-primary, #3b82f6);
+      }
 
-    .agent-meta {
-      font-size: 0.813rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.25rem;
-    }
+      .agent-meta {
+        font-size: 0.813rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.25rem;
+      }
 
-    .agent-meta sl-icon {
-      font-size: 0.875rem;
-      vertical-align: -0.125em;
-      opacity: 0.7;
-    }
+      .agent-meta sl-icon {
+        font-size: 0.875rem;
+        vertical-align: -0.125em;
+        opacity: 0.7;
+      }
 
-    .agent-task {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      margin-top: 0.75rem;
-      padding: 0.75rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: var(--scion-radius, 0.5rem);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
+      .agent-task {
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        margin-top: 0.75rem;
+        padding: 0.75rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: var(--scion-radius, 0.5rem);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
 
-    .empty-state {
-      text-align: center;
-      padding: 4rem 2rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px dashed var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-    }
+      .empty-state {
+        text-align: center;
+        padding: 4rem 2rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px dashed var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+      }
 
-    .empty-state > sl-icon {
-      font-size: 4rem;
-      color: var(--scion-text-muted, #64748b);
-      opacity: 0.5;
-      margin-bottom: 1rem;
-    }
+      .empty-state > sl-icon {
+        font-size: 4rem;
+        color: var(--scion-text-muted, #64748b);
+        opacity: 0.5;
+        margin-bottom: 1rem;
+      }
 
-    .empty-state h2 {
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.5rem 0;
-    }
+      .empty-state h2 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.5rem 0;
+      }
 
-    .empty-state p {
-      color: var(--scion-text-muted, #64748b);
-      margin: 0;
-    }
+      .empty-state p {
+        color: var(--scion-text-muted, #64748b);
+        margin: 0;
+      }
 
-    .loading-state {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 4rem 2rem;
-      color: var(--scion-text-muted, #64748b);
-    }
+      .loading-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 4rem 2rem;
+        color: var(--scion-text-muted, #64748b);
+      }
 
-    .loading-state sl-spinner {
-      font-size: 2rem;
-      margin-bottom: 1rem;
-    }
+      .loading-state sl-spinner {
+        font-size: 2rem;
+        margin-bottom: 1rem;
+      }
 
-    .error-state {
-      text-align: center;
-      padding: 3rem 2rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--sl-color-danger-200, #fecaca);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-    }
+      .error-state {
+        text-align: center;
+        padding: 3rem 2rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--sl-color-danger-200, #fecaca);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+      }
 
-    .error-state sl-icon {
-      font-size: 3rem;
-      color: var(--sl-color-danger-500, #ef4444);
-      margin-bottom: 1rem;
-    }
+      .error-state sl-icon {
+        font-size: 3rem;
+        color: var(--sl-color-danger-500, #ef4444);
+        margin-bottom: 1rem;
+      }
 
-    .error-state h2 {
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.5rem 0;
-    }
+      .error-state h2 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.5rem 0;
+      }
 
-    .error-state p {
-      color: var(--scion-text-muted, #64748b);
-      margin: 0 0 1rem 0;
-    }
+      .error-state p {
+        color: var(--scion-text-muted, #64748b);
+        margin: 0 0 1rem 0;
+      }
 
-    .error-details {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.875rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      padding: 0.75rem 1rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      color: var(--sl-color-danger-700, #b91c1c);
-      margin-bottom: 1rem;
-    }
-  `,
+      .error-details {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.875rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        padding: 0.75rem 1rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        color: var(--sl-color-danger-700, #b91c1c);
+        margin-bottom: 1rem;
+      }
+    `,
   ];
 
   override connectedCallback(): void {
@@ -476,7 +476,12 @@ export class ScionPageBrokerDetail extends LitElement {
       ]);
 
       if (!brokerResponse.ok) {
-        throw new Error(await extractApiError(brokerResponse, `HTTP ${brokerResponse.status}: ${brokerResponse.statusText}`));
+        throw new Error(
+          await extractApiError(
+            brokerResponse,
+            `HTTP ${brokerResponse.status}: ${brokerResponse.statusText}`
+          )
+        );
       }
 
       this.broker = (await brokerResponse.json()) as RuntimeBroker;
@@ -638,7 +643,9 @@ export class ScionPageBrokerDetail extends LitElement {
           ? html`
               <div class="stat">
                 <span class="stat-label">Created By</span>
-                <span class="stat-value-sm">${this.broker.createdByName || this.broker.createdBy}</span>
+                <span class="stat-value-sm"
+                  >${this.broker.createdByName || this.broker.createdBy}</span
+                >
               </div>
             `
           : ''}
@@ -747,9 +754,7 @@ export class ScionPageBrokerDetail extends LitElement {
               <sl-icon name="cpu"></sl-icon>
               ${agent.name}
             </h3>
-            <div class="agent-meta">
-              <sl-icon name="code-square"></sl-icon> ${agent.template}
-            </div>
+            <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}

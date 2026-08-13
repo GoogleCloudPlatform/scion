@@ -72,11 +72,15 @@ export class ScionEnvVarList extends LitElement {
 
     try {
       const url =
-        this.scope !== 'project' ? `${this.apiBasePath}/env?scope=${this.scope}` : `${this.apiBasePath}/env`;
+        this.scope !== 'project'
+          ? `${this.apiBasePath}/env?scope=${this.scope}`
+          : `${this.apiBasePath}/env`;
       const response = await apiFetch(url);
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const data = (await response.json()) as { envVars?: EnvVar[] } | EnvVar[];
@@ -155,7 +159,9 @@ export class ScionEnvVarList extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       this.closeDialog();
@@ -169,7 +175,10 @@ export class ScionEnvVarList extends LitElement {
   }
 
   private async handleDelete(envVar: EnvVar, event?: MouseEvent): Promise<void> {
-    if (!event?.altKey && !(await showConfirm(`Delete environment variable "${envVar.key}"? This cannot be undone.`))) {
+    if (
+      !event?.altKey &&
+      !(await showConfirm(`Delete environment variable "${envVar.key}"? This cannot be undone.`))
+    ) {
       return;
     }
 
@@ -183,7 +192,9 @@ export class ScionEnvVarList extends LitElement {
       const response = await apiFetch(deleteUrl, { method: 'DELETE' });
 
       if (!response.ok && response.status !== 204) {
-        throw new Error(await extractApiError(response, `Failed to delete (HTTP ${response.status})`));
+        throw new Error(
+          await extractApiError(response, `Failed to delete (HTTP ${response.status})`)
+        );
       }
 
       await this.loadEnvVars();
@@ -272,7 +283,11 @@ export class ScionEnvVarList extends LitElement {
         <div class="section-header">
           <div class="section-header-info">
             <h2>Environment Variables</h2>
-            <p>Manage environment variables injected into ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'} at runtime.</p>
+            <p>
+              Manage environment variables injected into
+              ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'} at
+              runtime.
+            </p>
           </div>
           <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -384,7 +399,11 @@ export class ScionEnvVarList extends LitElement {
         <h3>No Environment Variables</h3>
         <p>
           Add environment variables that will be injected into
-          ${this.compact ? (this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project') : 'your agents'}.
+          ${this.compact
+            ? this.scope === 'hub'
+              ? 'all agents on this hub'
+              : 'agents in this project'
+            : 'your agents'}.
         </p>
         <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>

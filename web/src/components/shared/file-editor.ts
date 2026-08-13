@@ -52,7 +52,11 @@ export interface FileEditorDataSource {
   /** Fetch file content as JSON (for editing). */
   getFileContent(path: string): Promise<FileContentResponse>;
   /** Save file content. Returns updated metadata. */
-  saveFileContent(path: string, content: string, expectedModTime?: string): Promise<{ modTime: string }>;
+  saveFileContent(
+    path: string,
+    content: string,
+    expectedModTime?: string
+  ): Promise<{ modTime: string }>;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -79,7 +83,11 @@ export class WorkspaceFileEditorDataSource implements FileEditorDataSource {
     return (await res.json()) as FileContentResponse;
   }
 
-  async saveFileContent(path: string, content: string, expectedModTime?: string): Promise<{ modTime: string }> {
+  async saveFileContent(
+    path: string,
+    content: string,
+    expectedModTime?: string
+  ): Promise<{ modTime: string }> {
     const body: Record<string, string> = { content };
     if (expectedModTime) body.expectedModTime = expectedModTime;
 
@@ -107,7 +115,11 @@ export class SharedDirFileEditorDataSource implements FileEditorDataSource {
     return (await res.json()) as FileContentResponse;
   }
 
-  async saveFileContent(path: string, content: string, expectedModTime?: string): Promise<{ modTime: string }> {
+  async saveFileContent(
+    path: string,
+    content: string,
+    expectedModTime?: string
+  ): Promise<{ modTime: string }> {
     const body: Record<string, string> = { content };
     if (expectedModTime) body.expectedModTime = expectedModTime;
 
@@ -135,7 +147,11 @@ export class TemplateFileEditorDataSource implements FileEditorDataSource {
     return (await res.json()) as FileContentResponse;
   }
 
-  async saveFileContent(path: string, content: string, _expectedModTime?: string): Promise<{ modTime: string }> {
+  async saveFileContent(
+    path: string,
+    content: string,
+    _expectedModTime?: string
+  ): Promise<{ modTime: string }> {
     const body: Record<string, string> = { content };
 
     const res = await apiFetch(`${this.basePath}/${encodeFilePath(path)}`, {
@@ -168,7 +184,11 @@ export class HarnessConfigFileEditorDataSource implements FileEditorDataSource {
     return (await res.json()) as FileContentResponse;
   }
 
-  async saveFileContent(path: string, content: string, _expectedModTime?: string): Promise<{ modTime: string }> {
+  async saveFileContent(
+    path: string,
+    content: string,
+    _expectedModTime?: string
+  ): Promise<{ modTime: string }> {
     const body: Record<string, string> = { content };
 
     const res = await apiFetch(`${this.basePath}/${encodeFilePath(path)}`, {
@@ -295,9 +315,15 @@ export class ScionFileEditor extends LitElement {
     }
 
     @keyframes fade-out {
-      0% { opacity: 1; }
-      70% { opacity: 1; }
-      100% { opacity: 0; }
+      0% {
+        opacity: 1;
+      }
+      70% {
+        opacity: 1;
+      }
+      100% {
+        opacity: 0;
+      }
     }
 
     .new-file-input {
@@ -355,7 +381,11 @@ export class ScionFileEditor extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if ((changed.has('filePath') || changed.has('dataSource')) && this.filePath && this.dataSource) {
+    if (
+      (changed.has('filePath') || changed.has('dataSource')) &&
+      this.filePath &&
+      this.dataSource
+    ) {
       void this.loadFile();
     }
   }
@@ -418,7 +448,9 @@ export class ScionFileEditor extends LitElement {
       }
 
       this.saveSuccess = true;
-      setTimeout(() => { this.saveSuccess = false; }, 2000);
+      setTimeout(() => {
+        this.saveSuccess = false;
+      }, 2000);
 
       this.dispatchEvent(
         new CustomEvent('file-saved', {
@@ -487,9 +519,7 @@ export class ScionFileEditor extends LitElement {
           `
         : this.showPreview && this.isMarkdown
           ? html`
-              <scion-markdown-preview
-                .content=${this.currentContent}
-              ></scion-markdown-preview>
+              <scion-markdown-preview .content=${this.currentContent}></scion-markdown-preview>
             `
           : html`
               <scion-code-editor
@@ -523,7 +553,9 @@ export class ScionFileEditor extends LitElement {
               `
             : html`
                 <span class="file-name">${this.filePath}</span>
-                ${this.dirty ? html`<span class="dirty-indicator" title="Unsaved changes"></span>` : nothing}
+                ${this.dirty
+                  ? html`<span class="dirty-indicator" title="Unsaved changes"></span>`
+                  : nothing}
               `}
           ${this.saveSuccess ? html`<span class="save-flash">Saved</span>` : nothing}
         </div>
@@ -563,9 +595,7 @@ export class ScionFileEditor extends LitElement {
                 </sl-button>
               `
             : nothing}
-          <sl-button size="small" variant="default" @click=${this.handleClose}>
-            Close
-          </sl-button>
+          <sl-button size="small" variant="default" @click=${this.handleClose}> Close </sl-button>
         </div>
       </div>
     `;
