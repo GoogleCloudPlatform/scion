@@ -964,6 +964,16 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "hub_name")
 	}
 
+	// Image registry (#985) — wire DB value to the consumption path.
+	// resolveImageRegistry() reads s.config.MaintenanceConfig.ImageRegistry.
+	if snap.ImageRegistry != "" {
+		old := s.config.MaintenanceConfig.ImageRegistry
+		s.config.MaintenanceConfig.ImageRegistry = snap.ImageRegistry
+		if old != snap.ImageRegistry {
+			applied = append(applied, "image_registry")
+		}
+	}
+
 	// Agent defaults (hub operational agent_defaults section).
 	//
 	// Written unconditionally from the snapshot rather than only-if-non-empty,
@@ -1009,18 +1019,31 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		}
 	}
 
-	// NOTE: Runtimes, Profiles, and HarnessConfigs are deliberately NOT
-	// applied here. The provisioning system reads these fresh from disk via
-	// config.LoadEffectiveSettings() on every provisioning request — it has
-	// no DB awareness. Making it consume DB values requires wiring the
-	// provisioning path to the DB layer (design doc OQ1: koanf overlay
-	// injection for co-located brokers, API-based fetch for standalone).
-	// Until that follow-up ships, the immediate value is admin persistence
-	// + GET/PUT correctness + cross-replica propagation of the GET response.
-	//
-	// TODO(#939): Wire runtimes/profiles/harness_configs into the
-	// provisioning path so that DB changes take effect without restart.
-	// See layer1-registration design doc, Open Question OQ1.
+	// Runtimes, profiles, and harness configs: update the global settings
+	// overlay so that the co-located broker (which reads via
+	// config.LoadEffectiveSettings on every dispatch) sees DB-backed values.
+	// The overlay is installed at hub startup in co-located mode (see
+	// cmd/server_foreground.go). For standalone brokers the overlay is nil
+	// and they continue reading from disk only.
+	if snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil {
+		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {
+			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+			if snap.Runtimes != nil {
+				applied = append(applied, "runtimes")
+			}
+			if snap.Profiles != nil {
+				applied = append(applied, "profiles")
+			}
+			if snap.HarnessConfigs != nil {
+				applied = append(applied, "harness_configs")
+			}
+			slog.Info("Settings overlay updated with DB-backed runtimes/profiles/harness_configs",
+				"runtimes", len(snap.Runtimes),
+				"profiles", len(snap.Profiles),
+				"harness_configs", len(snap.HarnessConfigs),
+			)
+		}
+	}
 
 	// NOTE: Maintenance state is deliberately NOT applied here.
 	// Maintenance is runtime/API-owned state. In file mode, reloadSettings
