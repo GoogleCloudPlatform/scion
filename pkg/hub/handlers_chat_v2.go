@@ -246,6 +246,8 @@ func (s *Server) handleChatTopicRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.Method {
+	case http.MethodGet:
+		s.handleTopicGet(w, r, topicID)
 	case http.MethodPatch:
 		s.handleTopicPatch(w, r, topicID)
 	case http.MethodDelete:
@@ -431,6 +433,42 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	s.events.PublishChatTopicEvent(r.Context(), projectID, "created", topic)
 
 	writeJSON(w, http.StatusCreated, topic)
+}
+
+// handleTopicGet handles GET /api/v1/chat/topics/{topicId}.
+func (s *Server) handleTopicGet(w http.ResponseWriter, r *http.Request, topicID string) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	topic, err := wcs.GetTopic(r.Context(), topicID)
+	if err != nil || topic == nil {
+		NotFound(w, "Thread")
+		return
+	}
+
+	// Authorize project access.
+	project, err := s.store.GetProject(r.Context(), topic.ProjectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	writeJSON(w, http.StatusOK, topic)
 }
 
 // handleTopicPatch handles PATCH /api/v1/chat/topics/{topicId}.
