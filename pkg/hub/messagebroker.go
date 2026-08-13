@@ -50,6 +50,7 @@ type MessageBrokerProxy struct {
 	getDispatcher func() AgentDispatcher
 	log           *slog.Logger
 	messageLog    *slog.Logger
+	chatNotifier  *ChatNotifier // W6: DM notification trigger for agent replies (nil-safe)
 
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
@@ -454,6 +455,14 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 
 	// Publish SSE event so connected browser clients receive real-time inbox updates.
 	p.events.PublishUserMessage(ctx, storeMsg)
+
+	// W6: DM notification for agent → human replies via broker path.
+	if p.chatNotifier != nil && storeMsg.ThreadID != "" &&
+		strings.HasPrefix(storeMsg.ThreadID, "dm:") &&
+		storeMsg.RecipientID != "" && strings.HasPrefix(storeMsg.Sender, "agent:") {
+		senderName := strings.TrimPrefix(storeMsg.Sender, "agent:")
+		go p.chatNotifier.NotifyDMReceived(context.Background(), storeMsg.RecipientID, senderName, storeMsg.ThreadID, storeMsg.Msg, projectID)
+	}
 
 	// Log to dedicated message audit log
 	if p.messageLog != nil {

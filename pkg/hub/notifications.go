@@ -695,10 +695,14 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID, s
 // formatChatNotification formats a notification message for chat triggers.
 func formatChatNotification(trigger, senderName, conversationName, messagePreview string) string {
 	// Truncate preview to a reasonable length for push notifications.
+	// Use rune-based slicing to avoid splitting multi-byte UTF-8 characters.
 	const maxPreview = 100
-	preview := messagePreview
-	if len(preview) > maxPreview {
-		preview = preview[:maxPreview] + "…"
+	runes := []rune(messagePreview)
+	var preview string
+	if len(runes) > maxPreview {
+		preview = string(runes[:maxPreview]) + "…"
+	} else {
+		preview = messagePreview
 	}
 
 	switch trigger {

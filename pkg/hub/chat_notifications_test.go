@@ -284,44 +284,120 @@ func TestFormatChatNotification(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAgentMentions_DoNotCreateUserNotifications(t *testing.T) {
-	// This test verifies that when an agent is @mentioned, NO user
-	// notification is created for it. Agent mentions create type:mention
+	// This test verifies that when an agent is @mentioned, the
+	// fireHumanMentionNotifications helper does NOT create a user
+	// notification for the agent. Agent mentions create type:mention
 	// messages for the agent dispatch pipeline — not human notifications.
-	// This is the existing behavior and must not regress.
-	env := setupChatNotifTest(t)
-	defer env.unsub()
-
+	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a project and agent.
+	// Set up WebChatStore + ChatNotifier on the server.
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	// Create a project.
 	proj := &store.Project{
-		ID: api.NewUUID(), Name: "test-proj", Slug: "test-proj",
+		ID: api.NewUUID(), Name: "mention-test", Slug: "mention-test",
 		Created: time.Now(), Updated: time.Now(),
 	}
-	require.NoError(t, env.store.CreateProject(ctx, proj))
+	require.NoError(t, s.CreateProject(ctx, proj))
 
+	// Create an agent in the project.
 	agent := &store.Agent{
 		ID: api.NewUUID(), Slug: "scout", Name: "Scout",
 		Template: "claude", ProjectID: proj.ID,
 		Visibility: store.VisibilityPrivate,
 	}
-	require.NoError(t, env.store.CreateAgent(ctx, agent))
+	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	// Simulate: message contains @scout. The mention resolution in
-	// handleConversationSend will match "scout" as an agent, NOT a human.
-	// The agent gets a type:mention side message through the dispatch path.
-	// The ChatNotifier should NOT be called for agent mentions.
+	// Create a human user and add to project members group.
+	humanUser := &store.User{
+		ID: api.NewUUID(), Email: "alice@example.com",
+		DisplayName: "Alice", Role: "member", Status: "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, humanUser))
 
-	// Verify: calling NotifyMention with the agent's UUID would be wrong.
-	// The fireHumanMentionNotifications helper only resolves mentions against
-	// project HUMAN members — agents are excluded. So if we have only agents
-	// in the project, no mention notification should fire.
+	groupID := api.NewUUID()
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID:   groupID,
+		Name: "mention-test members",
+		Slug: "project:mention-test:members",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    groupID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   humanUser.ID,
+		Role:       "member",
+	}))
 
-	// No human members → no mention notifications.
-	// (The only member is the agent, which is not a human.)
-	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, agent.ID, false)
+	// Create a topic for the conversation.
+	topicID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: proj.ID, Name: "general",
+		CreatedBy: humanUser.ID, CreatedAt: time.Now(),
+	}))
+
+	senderID := api.NewUUID() // some other user
+
+	// Call fireHumanMentionNotifications with the agent slug as a mention.
+	// The helper should resolve "scout" against project members, NOT find
+	// it as a human, and skip it.
+	srv.fireHumanMentionNotifications(ctx,
+		[]string{"scout"},         // mentionNames — agent slug, not a human
+		proj.ID,                   // projectID
+		topicID,                   // conversationKey
+		senderID,                  // senderUserID
+		"Bob",                     // senderName
+		"Hey @scout check this",   // messageContent
+	)
+
+	// Verify: no notification was created for the agent UUID.
+	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, agent.ID, false)
 	require.NoError(t, err)
 	assert.Empty(t, notifs, "agent mentions must not create user notifications")
+
+	// Also verify no notification for the human — the human was not mentioned.
+	humanNotifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, humanUser.ID, false)
+	require.NoError(t, err)
+	assert.Empty(t, humanNotifs, "human should not be notified when only the agent was mentioned")
+
+	// Now mention the human by display name — she SHOULD get a notification.
+	srv.fireHumanMentionNotifications(ctx,
+		[]string{"Alice"},         // mentionNames — human display name
+		proj.ID,
+		topicID,
+		senderID,
+		"Bob",
+		"Hey @Alice check this",
+	)
+	humanNotifs, err = s.GetNotifications(ctx, store.SubscriberTypeUser, humanUser.ID, false)
+	require.NoError(t, err)
+	require.Len(t, humanNotifs, 1, "human should be notified when mentioned by display name")
+	assert.Contains(t, humanNotifs[0].Message, "@Bob mentioned you")
+
+	// Mention both agent and human — only human gets a notification.
+	srv.fireHumanMentionNotifications(ctx,
+		[]string{"scout", "Alice"}, // both agent and human
+		proj.ID,
+		topicID,
+		senderID,
+		"Charlie",
+		"Hey @scout @Alice",
+	)
+	// Alice should now have 2 total notifications.
+	humanNotifs, err = s.GetNotifications(ctx, store.SubscriberTypeUser, humanUser.ID, false)
+	require.NoError(t, err)
+	assert.Len(t, humanNotifs, 2, "human should get another notification")
+
+	// Agent should still have zero.
+	agentNotifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, agent.ID, false)
+	require.NoError(t, err)
+	assert.Empty(t, agentNotifs, "agent must never get user notifications from mentions")
 }
 
 // ---------------------------------------------------------------------------

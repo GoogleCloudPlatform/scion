@@ -259,6 +259,18 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// W6: DM notification for agent → human replies (non-broker path only).
+	// The broker path fires notifications from deliverToUser in messagebroker.go.
+	if bp := s.GetMessageBrokerProxy(); bp == nil {
+		if cn := s.getChatNotifier(); cn != nil && req.ThreadID != "" && strings.HasPrefix(req.ThreadID, "dm:") && recipientID != "" {
+			senderName := agent.Name
+			if senderName == "" {
+				senderName = agent.Slug
+			}
+			go cn.NotifyDMReceived(context.Background(), recipientID, senderName, req.ThreadID, req.Msg, agent.ProjectID)
+		}
+	}
+
 	s.logMessage("outbound message sent",
 		"agent_id", agent.ID,
 		"agent_name", agent.Name,

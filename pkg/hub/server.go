@@ -1883,6 +1883,10 @@ func (s *Server) SetWebChatStore(wcs WebChatStore) {
 	s.webChatStore = wcs
 	// Initialize ChatNotifier with the store; presence checker is nil (W5 stub).
 	s.chatNotifier = NewChatNotifier(s.store, s.events, wcs, nil, s.messageLog)
+	// Wire into existing broker proxy if already started (startup order varies).
+	if s.messageBrokerProxy != nil {
+		s.messageBrokerProxy.chatNotifier = s.chatNotifier
+	}
 	s.mu.Unlock()
 }
 
@@ -2338,6 +2342,7 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 
 	proxy := NewMessageBrokerProxy(b, s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.broker"))
 	proxy.messageLog = s.dedicatedMessageLog
+	proxy.chatNotifier = s.chatNotifier // W6: wire DM notification trigger
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 
