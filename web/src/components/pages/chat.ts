@@ -974,29 +974,6 @@ export class ScionPageChat extends LitElement {
     void this.loadV2Members(detail.projectId);
   }
 
-  private handleDMSelect(e: CustomEvent): void {
-    const detail = e.detail as {
-      conversationKey: string;
-      peerName: string;
-      peerId: string;
-      peerKind: 'user' | 'agent';
-    };
-    navigateTo(`/chat/dm/${encodeURIComponent(detail.conversationKey)}`);
-    this.v2Conversation = {
-      conversationKey: detail.conversationKey,
-      projectId: '',
-      projectSlug: '',
-      threadName: '',
-      defaultAgent: '',
-      isDM: true,
-      peerName: detail.peerName,
-      peerId: detail.peerId,
-      peerKind: detail.peerKind,
-    };
-    this.classList.add('thread-open');
-    dispatchPageTitle(this, detail.peerName, 'Chat');
-  }
-
   private handleNavigateApp(): void {
     navigateTo('/');
   }
@@ -1029,7 +1006,7 @@ export class ScionPageChat extends LitElement {
           peerId: dm.peerId,
           peerKind: dm.peerKind,
         };
-        dispatchPageTitle(this, peerName, 'Chat');
+        dispatchPageTitle(this, `DM with ${peerName}`, 'Chat');
       }
     } catch {
       // Non-critical — the DM will still work, just without a resolved peer name.
@@ -1195,8 +1172,21 @@ export class ScionPageChat extends LitElement {
       dmKey = `dm:user:${ids[0]}:user:${ids[1]}`;
     }
 
-    // Navigate to the DM
+    // Set up conversation state and navigate to the DM
+    this.v2Conversation = {
+      conversationKey: dmKey,
+      projectId: '',
+      projectSlug: '',
+      threadName: '',
+      defaultAgent: '',
+      isDM: true,
+      peerName: detail.displayName,
+      peerId: detail.memberId,
+      peerKind: detail.memberKind,
+    };
+    this.classList.add('thread-open');
     navigateTo(`/chat/dm/${encodeURIComponent(dmKey)}`);
+    dispatchPageTitle(this, `DM with ${detail.displayName}`, 'Chat');
   }
 
   // =========================================================================
@@ -1303,7 +1293,6 @@ export class ScionPageChat extends LitElement {
               <scion-chat-space-rail
                 selectedKey=${this.v2Conversation?.conversationKey || ''}
                 @thread-select=${this.handleThreadSelect}
-                @dm-select=${this.handleDMSelect}
                 @navigate-app=${this.handleNavigateApp}
               ></scion-chat-space-rail>
             `
@@ -1317,7 +1306,7 @@ export class ScionPageChat extends LitElement {
               <div class="empty-state">
                 <sl-icon name="chat-dots"></sl-icon>
                 <span class="title">Select a conversation</span>
-                <span class="subtitle">Choose a thread or DM from the left to start chatting</span>
+                <span class="subtitle">Choose a thread from the left, or click a member to start a DM</span>
               </div>
             `}
       </div>
@@ -1355,7 +1344,7 @@ export class ScionPageChat extends LitElement {
                 name=${conv.peerKind === 'agent' ? 'cpu' : 'person'}
                 style="font-size: 0.875rem; color: var(--scion-text-muted)"
               ></sl-icon>
-              <span>${conv.peerName}</span>
+              <span>DM with ${conv.peerName}</span>
               <sl-icon-button
                 class="members-btn"
                 name="search"

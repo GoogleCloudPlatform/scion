@@ -21,13 +21,13 @@
  *   - Spaces section: one per project the user can access
  *   - Each space is collapsible (chevron toggle)
  *   - Under each space: thread list (#general first, pinned, then sorted)
- *   - DM section below spaces
  *
  * Data sources:
  *   - GET /api/v1/chat/spaces — visible spaces with unread rollup
  *   - GET /api/v1/chat/spaces/{projectId}/threads — threads per space
- *   - GET /api/v1/chat/dms — DM conversations
  *   - GET /api/v1/chat/prefs — user preferences (sort mode, custom order)
+ *
+ * DMs are accessed via member-click in the members sidebar (chat-members).
  *
  * Interactions: thread select, context menu, create thread, sorting, DnD.
  */
@@ -35,7 +35,6 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
-import { hashColor, getInitials } from './chat-avatar.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
@@ -60,18 +59,6 @@ export interface ChatSpaceThread {
   hasUnreadMention: boolean;
 }
 
-/** A DM conversation. */
-export interface ChatDM {
-  conversationKey: string;
-  peerName: string;
-  peerId: string;
-  peerKind: 'user' | 'agent';
-  peerAvatarUrl?: string;
-  lastMessagePreview?: string;
-  lastActivityAt?: string;
-  hasUnread: boolean;
-}
-
 /** User preferences for rail display. */
 interface RailPrefs {
   spaceSortMode: 'activity' | 'alpha' | 'custom';
@@ -88,14 +75,6 @@ export interface ThreadSelectDetail {
   defaultAgent: string;
 }
 
-/** Event detail for DM selection. */
-export interface DMSelectDetail {
-  conversationKey: string;
-  peerName: string;
-  peerId: string;
-  peerKind: 'user' | 'agent';
-}
-
 @customElement('scion-chat-space-rail')
 export class ScionChatSpaceRail extends LitElement {
   /** Currently selected conversation key. */
@@ -104,7 +83,6 @@ export class ScionChatSpaceRail extends LitElement {
 
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
-  @state() private dms: ChatDM[] = [];
   @state() private collapsedSpaces = new Set<string>();
   @state() private loading = true;
   @state() private prefs: RailPrefs = {
@@ -122,8 +100,6 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private contextMenuPos = { x: 0, y: 0 };
   @state() private renamingThread: string | null = null;
   @state() private renameValue = '';
-  @state() private dmSectionCollapsed = false;
-
   /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
   @state() private spaceFilter: 'all' | 'unread' = 'all';
 
@@ -333,61 +309,6 @@ export class ScionChatSpaceRail extends LitElement {
       border-color: var(--scion-border, #e2e8f0);
     }
 
-    /* DM section */
-    .dm-section {
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-      margin-top: 0.25rem;
-      padding-top: 0.25rem;
-    }
-
-    .dm-item {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.375rem 0.75rem 0.375rem 1rem;
-      cursor: pointer;
-      font-size: 0.8125rem;
-      color: var(--scion-text, #1e293b);
-      transition: background 0.1s;
-    }
-
-    .dm-item:hover {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .dm-item.selected {
-      background: var(--scion-primary-50, #eff6ff);
-      font-weight: 600;
-    }
-
-    .dm-avatar {
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 0.625rem;
-      font-weight: 600;
-      color: #fff;
-      flex-shrink: 0;
-    }
-
-    .dm-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .dm-name {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .dm-name.unread {
-      font-weight: 700;
-    }
-
     /* Context menu */
     .context-menu {
       position: fixed;
@@ -549,7 +470,7 @@ export class ScionChatSpaceRail extends LitElement {
   private async loadData(): Promise<void> {
     this.loading = true;
     try {
-      await Promise.all([this.loadSpaces(), this.loadDMs(), this.loadPrefs()]);
+      await Promise.all([this.loadSpaces(), this.loadPrefs()]);
     } finally {
       this.loading = false;
       // Notify parent that rail data is ready (for SSE scope setup)
@@ -594,18 +515,6 @@ export class ScionChatSpaceRail extends LitElement {
         const newMap = new Map(this.threadsBySpace);
         newMap.set(projectId, data.threads || []);
         this.threadsBySpace = newMap;
-      }
-    } catch {
-      // Silently fail
-    }
-  }
-
-  private async loadDMs(): Promise<void> {
-    try {
-      const res = await apiFetch('/api/v1/chat/dms');
-      if (res.ok) {
-        const data = (await res.json()) as { dms?: ChatDM[] };
-        this.dms = data.dms || [];
       }
     } catch {
       // Silently fail
@@ -772,21 +681,6 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  private handleDMClick(dm: ChatDM): void {
-    this.dispatchEvent(
-      new CustomEvent<DMSelectDetail>('dm-select', {
-        detail: {
-          conversationKey: dm.conversationKey,
-          peerName: dm.peerName,
-          peerId: dm.peerId,
-          peerKind: dm.peerKind,
-        },
-        bubbles: true,
-        composed: true,
-      })
-    );
-  }
-
   private handleContextMenu(e: MouseEvent, thread: ChatSpaceThread, projectId: string): void {
     e.preventDefault();
     e.stopPropagation();
@@ -941,7 +835,7 @@ export class ScionChatSpaceRail extends LitElement {
         ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
         : html`
             ${this.renderToolbar()}
-            <div class="rail-body">${this.renderSpaces()} ${this.renderDMs()}</div>
+            <div class="rail-body">${this.renderSpaces()}</div>
           `}
       ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
     `;
@@ -1163,53 +1057,6 @@ export class ScionChatSpaceRail extends LitElement {
           }}
           style="flex: 1"
         ></sl-input>
-      </div>
-    `;
-  }
-
-  private renderDMs() {
-    if (this.dms.length === 0) return nothing;
-
-    return html`
-      <div class="dm-section">
-        <div
-          class="space-header"
-          @click=${() => {
-            this.dmSectionCollapsed = !this.dmSectionCollapsed;
-          }}
-        >
-          <sl-icon
-            name="chevron-down"
-            class="chevron ${this.dmSectionCollapsed ? 'collapsed' : ''}"
-          ></sl-icon>
-          <span class="space-name">Direct Messages</span>
-        </div>
-        ${!this.dmSectionCollapsed ? this.dms.map((dm) => this.renderDM(dm)) : nothing}
-      </div>
-    `;
-  }
-
-  private renderDM(dm: ChatDM) {
-    const isSelected = dm.conversationKey === this.selectedKey;
-    const avatarColor = hashColor(dm.peerId);
-    const initials = getInitials(dm.peerName);
-    const icon = dm.peerKind === 'agent' ? 'cpu' : 'person';
-
-    return html`
-      <div class="dm-item ${isSelected ? 'selected' : ''}" @click=${() => this.handleDMClick(dm)}>
-        <div class="dm-avatar" style="background: ${avatarColor}">${initials}</div>
-        <div class="dm-info">
-          <span class="dm-name ${dm.hasUnread ? 'unread' : ''}">
-            <sl-icon name="${icon}" style="font-size: 0.6875rem; vertical-align: -1px"></sl-icon>
-            ${dm.peerName}
-          </span>
-        </div>
-        ${dm.hasUnread
-          ? html`<span
-              class="unread-dot"
-              style="width: 6px; height: 6px; border-radius: 50%; background: var(--scion-primary, #3b82f6); flex-shrink: 0;"
-            ></span>`
-          : nothing}
       </div>
     `;
   }
