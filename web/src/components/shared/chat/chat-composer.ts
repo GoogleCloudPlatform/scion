@@ -781,6 +781,13 @@ export class ScionChatComposer extends LitElement {
             this.runeCount = 0;
             this.acceptedMentions.clear();
             this.pendingFiles = [];
+            // Re-focus the textarea so the user can immediately type the next message.
+            void this.updateComplete.then(() => {
+              const ta = this.getTextareaElement();
+              if (ta) {
+                ta.focus();
+              }
+            });
           },
         },
         bubbles: true,

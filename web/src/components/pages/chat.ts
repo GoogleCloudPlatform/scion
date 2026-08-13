@@ -140,11 +140,16 @@ export class ScionPageChat extends LitElement {
   private _onChatMessage = this.handleChatMessage.bind(this);
   private _onChatTopic = this.handleChatTopic.bind(this);
   private _onPresenceUpdated = this.handlePresenceUpdated.bind(this);
+  private _onChatTyping = this.handleChatTyping.bind(this);
   private _onRailLoaded = this.handleRailLoaded.bind(this);
   /** Map from project slug → project ID for deep-link resolution. */
   private _slugToProjectId = new Map<string, string>();
   /** Map from project ID → project slug for URL generation. */
   private _projectIdToSlug = new Map<string, string>();
+  /** IDs of users currently typing (for the members sidebar overlay). */
+  @state() private v2TypingUserIds: string[] = [];
+  /** Map of userId → expiry timer for typing indicators at page level. */
+  private _typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Whether the search panel is visible. */
   @state() private v2SearchActive = false;
   /** Whether the search component has been lazy-loaded. */
@@ -431,8 +436,14 @@ export class ScionPageChat extends LitElement {
       stateManager.removeEventListener('chat-message-received', this._onChatMessage);
       stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
       stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
+      stateManager.removeEventListener('chat-typing-received', this._onChatTyping);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
       this.stopPresenceHeartbeat();
+      // Clean up typing timers
+      for (const timer of this._typingTimers.values()) {
+        clearTimeout(timer);
+      }
+      this._typingTimers.clear();
     } else {
       stateManager.removeEventListener('user-message-created', this._onUserMessage);
     }
@@ -617,6 +628,7 @@ export class ScionPageChat extends LitElement {
     stateManager.addEventListener('chat-message-received', this._onChatMessage);
     stateManager.addEventListener('chat-topic-updated', this._onChatTopic);
     stateManager.addEventListener('chat-presence-updated', this._onPresenceUpdated);
+    stateManager.addEventListener('chat-typing-received', this._onChatTyping);
 
     // Listen for rail-loaded to set up the SSE scope with space IDs
     this.addEventListener('rail-loaded', this._onRailLoaded);
@@ -1352,6 +1364,40 @@ export class ScionPageChat extends LitElement {
     }
   }
 
+  /** Handle typing SSE events to show typing overlay on member avatars. */
+  private handleChatTyping(e: Event): void {
+    const detail = (e as CustomEvent).detail as {
+      data?: { userId?: string; displayName?: string };
+      userId?: string;
+    };
+    const eventData = detail?.data || detail;
+    const userId = (eventData as Record<string, unknown>).userId as string | undefined;
+
+    if (!userId) return;
+
+    // Skip self
+    const currentUserId = this.pageData?.user?.id || '';
+    if (userId === currentUserId) return;
+
+    // Clear existing timer for this user
+    const existing = this._typingTimers.get(userId);
+    if (existing) {
+      clearTimeout(existing);
+    }
+
+    // Set a new timer to expire the typing indicator after 6s
+    const timer = setTimeout(() => {
+      this._typingTimers.delete(userId);
+      this.v2TypingUserIds = this.v2TypingUserIds.filter((id) => id !== userId);
+    }, 6000);
+    this._typingTimers.set(userId, timer);
+
+    // Add to typing list if not already present
+    if (!this.v2TypingUserIds.includes(userId)) {
+      this.v2TypingUserIds = [...this.v2TypingUserIds, userId];
+    }
+  }
+
   /** Start sending presence heartbeats every 60s while the tab is focused. */
   private startPresenceHeartbeat(): void {
     // Stop any existing heartbeat
@@ -1576,6 +1622,7 @@ export class ScionPageChat extends LitElement {
         <scion-chat-members
           .humans=${this.v2HumanMembers}
           .agents=${this.v2AgentMembers}
+          .typingUserIds=${this.v2TypingUserIds}
           current-user-id="${this.pageData?.user?.id || ''}"
           dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
           @member-click=${this.handleMemberClick}

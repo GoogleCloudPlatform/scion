@@ -80,6 +80,10 @@ export class ScionChatMembers extends LitElement {
   @property({ attribute: 'dm-peer-id' })
   dmPeerId = '';
 
+  /** IDs of members currently typing — shows a dot overlay on their avatar. */
+  @property({ type: Array })
+  typingUserIds: string[] = [];
+
   static override styles = css`
     :host {
       display: flex;
@@ -175,6 +179,54 @@ export class ScionChatMembers extends LitElement {
       color: var(--scion-text-muted, #94a3b8);
       font-style: italic;
     }
+
+    /* Typing indicator overlay on avatar */
+    .avatar-wrapper {
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .typing-overlay {
+      position: absolute;
+      bottom: -2px;
+      right: -2px;
+      display: flex;
+      align-items: center;
+      gap: 1.5px;
+      background: var(--scion-surface, #ffffff);
+      border-radius: 6px;
+      padding: 2px 3px;
+      box-shadow: 0 0 0 1.5px var(--scion-surface, #ffffff);
+    }
+
+    .typing-overlay span {
+      width: 3px;
+      height: 3px;
+      border-radius: 50%;
+      background: var(--scion-primary, #3b82f6);
+      animation: typing-dot-bounce 1.4s ease-in-out infinite;
+    }
+
+    .typing-overlay span:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+
+    .typing-overlay span:nth-child(3) {
+      animation-delay: 0.4s;
+    }
+
+    @keyframes typing-dot-bounce {
+      0%,
+      60%,
+      100% {
+        transform: translateY(0);
+        opacity: 0.4;
+      }
+      30% {
+        transform: translateY(-2px);
+        opacity: 1;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -231,18 +283,24 @@ export class ScionChatMembers extends LitElement {
 
   private renderHuman(m: ChatHumanMember) {
     const isActive = this.dmPeerId === m.id;
+    const isTyping = this.typingUserIds.includes(m.id);
     return html`
       <div
         class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(m.id, 'user', m.displayName)}
         title="${m.email || m.displayName}"
       >
-        <scion-chat-avatar
-          name="${m.displayName}"
-          avatar-url="${m.avatarUrl || ''}"
-          size="28"
-          presence-state="${m.presenceState || ''}"
-        ></scion-chat-avatar>
+        <div class="avatar-wrapper">
+          <scion-chat-avatar
+            name="${m.displayName}"
+            avatar-url="${m.avatarUrl || ''}"
+            size="28"
+            presence-state="${m.presenceState || ''}"
+          ></scion-chat-avatar>
+          ${isTyping
+            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+            : nothing}
+        </div>
         <div class="member-info">
           <div class="member-name">${m.displayName}</div>
           ${m.role ? html`<div class="member-role">${m.role}</div>` : nothing}
@@ -272,6 +330,7 @@ export class ScionChatMembers extends LitElement {
     const dotClass = this.agentDotClass(a.phase || '');
     const statusLabel = a.activity || a.phase || 'unknown';
     const isActive = this.dmPeerId === a.id;
+    const isTyping = this.typingUserIds.includes(a.id);
 
     return html`
       <div
@@ -279,7 +338,12 @@ export class ScionChatMembers extends LitElement {
         @click=${() => this.handleMemberClick(a.id, 'agent', a.displayName)}
         title="${a.slug || a.displayName}"
       >
-        <scion-chat-avatar name="${a.slug || a.displayName}" size="28"></scion-chat-avatar>
+        <div class="avatar-wrapper">
+          <scion-chat-avatar name="${a.slug || a.displayName}" size="28"></scion-chat-avatar>
+          ${isTyping
+            ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
+            : nothing}
+        </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
           <div class="agent-status">
