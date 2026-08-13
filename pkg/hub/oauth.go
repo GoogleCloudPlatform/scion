@@ -1050,7 +1050,7 @@ func validateOIDCLoginConfig(cfg *config.OIDCLoginConfig) error {
 	}
 	// Require https, but allow http for localhost/127.0.0.1 (local dev).
 	host := parsed.Hostname()
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && (host == "localhost" || host == "127.0.0.1")) {
+	if parsed.Scheme != "https" && (parsed.Scheme != "http" || (host != "localhost" && host != "127.0.0.1")) {
 		return fmt.Errorf("issuerUrl must use https scheme (got %q)", parsed.Scheme)
 	}
 	if parsed.RawQuery != "" {
