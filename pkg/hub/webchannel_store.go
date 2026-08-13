@@ -344,12 +344,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_one_general
 		return fmt.Errorf("webchat store: create general index: %w", err)
 	}
 
-	// Enforce unique topic name per project (excluding soft-deleted topics).
-	// SQLite LIKE is case-insensitive for ASCII by default, and the index
-	// on (project_id, name) catches duplicates at insert time.
+	// Enforce case-insensitive unique topic name per project (excluding
+	// soft-deleted topics). COLLATE NOCASE makes the index compare names
+	// case-insensitively, matching the Postgres LOWER(name) index.
 	const nameIdx = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
-    ON webchat_topic (project_id, name) WHERE deleted_at IS NULL;
+    ON webchat_topic (project_id, name COLLATE NOCASE) WHERE deleted_at IS NULL;
 `
 	if _, err := s.db.Exec(nameIdx); err != nil {
 		return fmt.Errorf("webchat store: create name uniqueness index: %w", err)
