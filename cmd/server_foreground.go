@@ -2377,6 +2377,27 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		rhCfg.ColocatedStorage = hubSrv.GetStorage()
 	}
 
+	// In co-located mode, install a global settings overlay so that the
+	// broker's config.LoadEffectiveSettings() calls pick up DB-backed
+	// runtimes, profiles, and harness_configs. Without this, the broker
+	// always reads from the ephemeral settings.yaml file and never sees
+	// changes made through the admin UI (issue #985).
+	if hubSrv != nil && cfg.Database.Driver == "postgres" {
+		overlay := config.NewSettingsOverlay()
+		config.SetGlobalSettingsOverlay(overlay)
+		// Seed the overlay from the current operational settings snapshot
+		// so that DB values are available from the first agent dispatch,
+		// not only after the next LISTEN/NOTIFY propagation.
+		if ops := hubSrv.GetOperationalSettings(); ops != nil {
+			snap := ops.Snapshot()
+			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+			log.Printf("Settings overlay installed for co-located broker (runtimes=%d, profiles=%d, harness_configs=%d)",
+				len(snap.Runtimes), len(snap.Profiles), len(snap.HarnessConfigs))
+		} else {
+			log.Printf("Settings overlay installed for co-located broker (operational settings not yet available)")
+		}
+	}
+
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
 	rhSrv.SetRequestLogger(requestLogger)
 	if messageLogger != nil {

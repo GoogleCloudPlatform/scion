@@ -2178,6 +2178,11 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 		if missingSchemaVersion {
 			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
 		}
+		// Apply DB-backed settings overlay (co-located hub+broker mode).
+		// DB values win over file values for runtimes, profiles, harness_configs.
+		if o := globalOverlay; o != nil {
+			o.Apply(vs)
+		}
 		return vs, warnings, nil
 	}
 
@@ -2217,6 +2222,10 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 	}
 	vs, legacyWarnings := AdaptLegacySettings(legacy)
 	warnings = append(warnings, legacyWarnings...)
+	// Apply DB-backed settings overlay (co-located hub+broker mode).
+	if o := globalOverlay; o != nil {
+		o.Apply(vs)
+	}
 	return vs, warnings, nil
 }
 
