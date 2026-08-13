@@ -1,0 +1,21 @@
+# Release Notes (2026-08-12)
+
+Native web chat reached feature-complete status with Phases 2–6 shipping in a single day (core components, visibility filtering, @-mentions, top-level chat mode, and cross-channel coherence), while Teams integration received critical inbound message and setup card fixes, and the admin UI gained a full Runtimes & Profiles configuration tab.
+
+## 🚀 Features
+* **[Web Chat]:** Native web chat Phases 2–6 — Phase 2 adds the core `scion-chat-thread` component with Chat|Log toggle gated on `web.native_chat` flag (#1144). Phase 3 adds three-state visibility filtering (Conversation/Verbose/Full) with server-side filtering, per-agent thread prefs persistence, and delivery state indicators with dispatch failure tooltips (#1151). Phase 4 adds @-mention autocomplete with fuzzy-match dropdown, keyboard navigation, code fence guard, a shared `pkg/messages/mentions.go` package, and server-side fan-out capped at 10 recipients (#1152). Phase 5 promotes chat to a top-level 4th ShellType with thread rail, unread dots, SSE refresh, batch queries, deep-linking, and no-reload mode switching (#1156). Phase 6 adds cross-channel coherence with broker inbound persistence, per-(user, project, agent) reply affinity, and TouchThread/Broadcasted propagation (#1157).
+* **[Admin]:** Runtimes & Profiles tab on admin server-config page — full CRUD editors for runtimes (type-aware Docker/Podman/K8s/Cloud Run fields), profiles (resource limits, image registry, template overrides), and harness configs (JSON textarea). Fixes `buildLayer1Payload()` and `buildFilePayload()` to use edited state instead of raw config passthrough (#1155).
+* **[Hub]:** Register runtimes, profiles, and harness_configs as Layer-1 operational settings — previously unclassified and silently dropped on admin PUT, now persisted to `hub_settings` DB table as whole-map JSONB documents with seeding, propagation, and CAS support (#1145).
+* **[Teams]:** Fix setup card callback by switching from Action.Submit to Action.Execute (invoke activity), add per-channel default agent command matching Discord integration, and add mutex-safe `getStore()` to CallbackHandler (#1154).
+* **[Bridge]:** JWKS/OIDC discovery proxy endpoints on the A2A bridge for deployments behind IAP — uses bridge transport auth to fetch from hub, serves publicly with 5-minute cache and `jwks_uri` rewriting (#1147). Companion JWKS download button on federation admin page for out-of-band distribution (#1146).
+
+## 🐛 Fixes
+* **[Teams]:** Correct four bugs in inbound message path — Type (`"chat"` → `"instruction"`), Channel (project UUID → `"teams"`), ThreadID (empty → normalized conversation ID fallback), and Recipient (empty → `agent:<slug>`) (#1163). Normalize conversation IDs via `stripThreadSuffix()` in all channel link storage/lookup operations to fix setup confirmation persistence failures (#1159). Bump manifest version to 1.1.0 so Teams Admin Center accepts app updates (#1162).
+* **[Hub]:** Add durable workspace storage via NFS with `workspace_storage.backend` config pivot, plus 503 safety gate on write endpoints when Cloud Run lacks durable storage. Fixes WebDAV per-request lock store bug (#1148). Move Telegram/Discord/Teams account-link codes from per-process in-memory maps to database — at min-instances=2, ~50% link failure rate (#1136).
+* **[Web]:** Prevent `sl-tab-panel` events from bubbling to `sl-details` handlers in agent-create form by adding `e.target !== e.currentTarget` guards (#1141).
+* **[Repo]:** Resolve `AGENTS.md`/`agents.md` case collision breaking checkout on macOS/Windows — merge into single uppercase file, retarget symlink, update cross-references (#1153).
+* **[Harness]:** Update antigravity model strings to current AGY CLI values — previous Gemini 3.5 Flash and Gemini 3.1 Pro strings were invalid/stale (#1161).
+
+## 📖 Docs
+* **[Docs]:** Nightly documentation update for Aug 11 — Teams integration, Google Chat Pub/Sub/attachments, A2A federation auth, OIDC login provider, HMAC nonce security, multi-instance config fields, glossary additions (#1150).
+* **[README]:** Remove Kubernetes experimental caveats — Kubernetes runtime is now supported and in active use alongside Local and Hub modes (#1158).
