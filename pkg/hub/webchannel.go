@@ -65,34 +65,66 @@ func NewWebChannelBus(log *slog.Logger, store WebChatStore) eventbus.EventBus {
 // Publish does real work — updates webchat_* state. It does NOT persist
 // the canonical message row or emit the core SSE frame (deliverToUser
 // handles both on the inprocess path).
+//
+// Wave-2 re-key: when msg.ThreadID is present, the spoke routes metadata
+// updates through the thread_id-based path (TouchTopicActivity for space
+// threads, TouchDMActivity for DMs). The legacy (userID, projectID,
+// agentID) path via TouchThread is kept as a fallback for wave-1
+// messages that may still carry the old-style agent:<slug> thread_id.
+// Reply affinity (RecordChannel) still uses identityFromTopic.
 func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	if msg == nil || msg.ObserverOnly {
 		return nil
 	}
 
+	// --- Wave-2 thread_id-based path ---
+	//
+	// StructuredMessage has no ID field — the store-assigned ID is only
+	// available after deliverToUser persists the message on the inprocess
+	// spoke, which runs concurrently. TouchTopicActivity / TouchDMActivity
+	// accept empty messageID gracefully (update only last_activity_at).
+	threadHandled := false
+	if msg.ThreadID != "" {
+		if strings.HasPrefix(msg.ThreadID, "dm:") {
+			// DM thread — update both participant rows.
+			if err := b.store.TouchDMActivity(ctx, msg.ThreadID, ""); err != nil {
+				b.log.Error("Failed to update DM activity",
+					"thread_id", msg.ThreadID, "error", err)
+				return err
+			}
+			threadHandled = true
+		} else if !strings.HasPrefix(msg.ThreadID, "agent:") {
+			// Topic thread (UUID) — not a legacy agent:<slug> key.
+			if err := b.store.TouchTopicActivity(ctx, msg.ThreadID, ""); err != nil {
+				b.log.Error("Failed to update topic activity",
+					"thread_id", msg.ThreadID, "error", err)
+				return err
+			}
+			threadHandled = true
+		}
+	}
+
+	// --- Legacy path: (userID, projectID, agentID) ---
 	userID, projectID, agentID, ok := identityFromTopic(topic, msg)
 	if !ok {
-		// Not a conversation-scoped message; nothing to record.
+		// Not a conversation-scoped message; if we handled a thread_id
+		// above, that's enough — otherwise nothing to record.
 		return nil
 	}
 
-	now := time.Now().UTC()
-
-	// 1. Thread watermark — this is what makes the Phase 5 rail endpoint
-	//    a single indexed read instead of an aggregate query.
-	//
-	// messageID is "" because StructuredMessage has no ID field — the
-	// store-assigned ID is only available after deliverToUser persists the
-	// message on the inprocess spoke, which runs concurrently. Phase 5
-	// will address this gap (design §5.3).
-	if err := b.store.TouchThread(ctx, userID, projectID, agentID, "", now); err != nil {
-		b.log.Error("Failed to update thread watermark",
-			"user_id", userID, "project_id", projectID, "agent_id", agentID, "error", err)
-		return err
+	// Wave-1 thread watermark — kept as fallback for legacy agent:<slug>
+	// messages (will be retired when wave-1 thread_id backfill completes).
+	if !threadHandled {
+		now := time.Now().UTC()
+		if err := b.store.TouchThread(ctx, userID, projectID, agentID, "", now); err != nil {
+			b.log.Error("Failed to update thread watermark",
+				"user_id", userID, "project_id", projectID, "agent_id", agentID, "error", err)
+			return err
+		}
 	}
 
-	// 2. Reply affinity as a row, not a config flag.
-	if err := b.store.RecordChannel(ctx, userID, projectID, agentID, "web", now); err != nil {
+	// Reply affinity — still needed for cross-channel reply routing.
+	if err := b.store.RecordChannel(ctx, userID, projectID, agentID, "web", time.Now().UTC()); err != nil {
 		b.log.Error("Failed to record conversation context",
 			"user_id", userID, "project_id", projectID, "agent_id", agentID, "error", err)
 		return err

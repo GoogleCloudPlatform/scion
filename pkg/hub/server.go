@@ -2040,6 +2040,13 @@ func (s *Server) GetStore() store.Store {
 	return s.store
 }
 
+// GetAuthzService returns the authorization service.
+func (s *Server) GetAuthzService() *AuthzService {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.authzService
+}
+
 // GetBrokerAuthService returns the broker authentication service.
 func (s *Server) GetBrokerAuthService() *BrokerAuthService {
 	s.mu.RLock()

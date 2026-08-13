@@ -2165,6 +2165,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())
 		webSrv.SetMaintenanceState(hubSrv.GetMaintenanceState())
+		webSrv.SetAuthzService(hubSrv.GetAuthzService())
 		webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupResources)
 
 		localHubSrv := hubSrv

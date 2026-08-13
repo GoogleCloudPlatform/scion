@@ -527,10 +527,20 @@ func (s *Server) ensureProjectGeneralTopic(ctx context.Context, project *store.P
 	if createdBy == "" {
 		createdBy = "system"
 	}
-	if _, err := s.webChatStore.EnsureGeneralTopic(ctx, project.ID, createdBy); err != nil {
+	topicID, err := s.webChatStore.EnsureGeneralTopic(ctx, project.ID, createdBy)
+	if err != nil {
 		s.projectsLogger().Warn("failed to create #general topic for project",
 			"project_id", project.ID, "error", err)
+		return
 	}
+
+	// Publish a topic-created event so SSE subscribers can update the rail.
+	// Best-effort: if the fetch fails we still bootstrapped successfully.
+	topic, err := s.webChatStore.GetTopic(ctx, topicID)
+	if err != nil || topic == nil {
+		return
+	}
+	s.events.PublishChatTopicEvent(ctx, project.ID, "created", *topic)
 }
 
 // createProjectMembersGroupAndPolicy creates an explicit members group for a project

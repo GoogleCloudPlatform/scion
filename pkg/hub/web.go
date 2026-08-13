@@ -172,6 +172,7 @@ type WebServer struct {
 	hubHandler   http.Handler                // mounted Hub API handler, or nil
 	hubShutdown  func(context.Context) error // Hub resource cleanup, or nil
 	maintenance  *MaintenanceState           // runtime maintenance mode state (shared with Hub)
+	authzService *AuthzService               // authorization service for SSE subject checks
 	startTime    time.Time
 	log          *slog.Logger // subsystem logger for hub.web
 
@@ -557,6 +558,11 @@ func (ws *WebServer) SetUserTokenService(svc *UserTokenService) {
 // SetEventPublisher sets the event publisher for real-time SSE streaming.
 func (ws *WebServer) SetEventPublisher(pub EventPublisher) {
 	ws.events = pub
+}
+
+// SetAuthzService sets the authorization service for SSE subject-level checks.
+func (ws *WebServer) SetAuthzService(a *AuthzService) {
+	ws.authzService = a
 }
 
 // SetRequestLogger sets the dedicated request logger.
@@ -1078,6 +1084,19 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subject-level authorization: verify the caller has access to every
+	// requested subject. This runs once at connection time, not per-event.
+	if denied := ws.authorizeSSESubjects(r, subjects); len(denied) > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		body, _ := json.Marshal(map[string]interface{}{
+			"error":           "access denied for one or more subjects",
+			"denied_subjects": denied,
+		})
+		_, _ = w.Write(body)
+		return
+	}
+
 	// Disable the server's WriteTimeout for this long-lived SSE connection.
 	// Without this, the global WriteTimeout (e.g. 60s) kills the stream,
 	// causing reconnection churn and wasted connection-pool slots.
@@ -1172,6 +1191,96 @@ func validateSSESubjects(subjects []string) string {
 		}
 	}
 	return ""
+}
+
+// authorizeSSESubjects checks that the caller has access to every requested
+// subject. Returns the list of denied subjects; an empty slice means all are
+// authorized. For project-scoped subjects (project.<id>.*) the caller must
+// have ActionRead on the project. For user-scoped subjects (user.<id>.*)
+// the caller's identity must match the user ID. Other subjects (notification,
+// broker, etc.) pass through without additional checks.
+func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []string {
+	if ws.authzService == nil {
+		// No authz service configured (e.g., tests); allow all.
+		return nil
+	}
+
+	// Build the caller identity from the web session.
+	sessionUser := getWebSessionUser(r.Context())
+	if sessionUser == nil {
+		// No session user — should not happen (sessionAuthMiddleware gates
+		// the SSE endpoint), but fail closed.
+		return subjects
+	}
+	identity := NewAuthenticatedUser(
+		sessionUser.UserID,
+		sessionUser.Email,
+		sessionUser.Name,
+		sessionUser.Role,
+		"web",
+	)
+
+	// Collect unique project IDs and user IDs from subjects.
+	projectIDs := map[string]bool{}
+	userIDs := map[string]bool{}
+	for _, sub := range subjects {
+		tokens := strings.Split(sub, ".")
+		if len(tokens) >= 2 {
+			switch tokens[0] {
+			case "project":
+				projectIDs[tokens[1]] = true
+			case "user":
+				userIDs[tokens[1]] = true
+			}
+		}
+	}
+
+	// Batch-check project access.
+	deniedProjects := map[string]bool{}
+	if len(projectIDs) > 0 {
+		var resources []Resource
+		var ids []string
+		for pid := range projectIDs {
+			ids = append(ids, pid)
+			resources = append(resources, Resource{Type: "project", ID: pid})
+		}
+		caps := ws.authzService.ComputeCapabilitiesBatch(r.Context(), identity, resources, "project")
+		for i, c := range caps {
+			if !capabilityAllows(c, ActionRead) {
+				deniedProjects[ids[i]] = true
+			}
+		}
+	}
+
+	// Check user subjects: caller can only subscribe to their own user subjects.
+	deniedUsers := map[string]bool{}
+	for uid := range userIDs {
+		if uid != sessionUser.UserID {
+			deniedUsers[uid] = true
+		}
+	}
+
+	// Build denied list.
+	if len(deniedProjects) == 0 && len(deniedUsers) == 0 {
+		return nil
+	}
+	var denied []string
+	for _, sub := range subjects {
+		tokens := strings.Split(sub, ".")
+		if len(tokens) >= 2 {
+			switch tokens[0] {
+			case "project":
+				if deniedProjects[tokens[1]] {
+					denied = append(denied, sub)
+				}
+			case "user":
+				if deniedUsers[tokens[1]] {
+					denied = append(denied, sub)
+				}
+			}
+		}
+	}
+	return denied
 }
 
 // isAllowedSubjectChar returns true if the character is valid in a subject token.

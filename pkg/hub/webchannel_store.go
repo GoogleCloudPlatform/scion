@@ -169,16 +169,16 @@ type WebChatThread struct {
 // WebChatTopic represents a shared thread entity within a space (project).
 // One row per thread; the #general topic has IsGeneral = true.
 type WebChatTopic struct {
-	ID             string
-	ProjectID      string
-	Name           string
-	IsGeneral      bool
-	DefaultAgent   string // empty = no default
-	CreatedBy      string
-	CreatedAt      time.Time
-	LastMessageID  string
-	LastActivityAt time.Time
-	DeletedAt      *time.Time // nil = not deleted
+	ID             string     `json:"id"`
+	ProjectID      string     `json:"projectId"`
+	Name           string     `json:"name"`
+	IsGeneral      bool       `json:"isGeneral"`
+	DefaultAgent   string     `json:"defaultAgent,omitempty"` // empty = no default
+	CreatedBy      string     `json:"createdBy"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	LastMessageID  string     `json:"lastMessageId,omitempty"`
+	LastActivityAt time.Time  `json:"lastActivityAt"`
+	DeletedAt      *time.Time `json:"deletedAt,omitempty"` // nil = not deleted
 }
 
 // TopicUpdate carries optional updates for a topic.
@@ -662,14 +662,22 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 	return nil
 }
 
-// TouchTopicActivity updates last_message_id and last_activity_at.
+// TouchTopicActivity updates last_activity_at and, when messageID is
+// non-empty, also updates last_message_id. An empty messageID is
+// accepted gracefully — this happens when the spoke receives a
+// StructuredMessage (which has no ID) rather than a store.Message.
 func (s *sqliteWebChatStore) TouchTopicActivity(ctx context.Context, topicID, messageID string) error {
-	const query = `
-UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ?
- WHERE id = ?
-`
-	_, err := s.db.ExecContext(ctx, query, messageID,
-		time.Now().UTC().Format(time.RFC3339Nano), topicID)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if messageID != "" {
+		const q = `UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ? WHERE id = ?`
+		_, err := s.db.ExecContext(ctx, q, messageID, now, topicID)
+		if err != nil {
+			return fmt.Errorf("webchat store: touch topic activity: %w", err)
+		}
+		return nil
+	}
+	const q = `UPDATE webchat_topic SET last_activity_at = ? WHERE id = ?`
+	_, err := s.db.ExecContext(ctx, q, now, topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: touch topic activity: %w", err)
 	}
@@ -935,14 +943,20 @@ SELECT conversation_key, participant_id, peer_id, peer_kind,
 	return dms, rows.Err()
 }
 
-// TouchDMActivity updates watermarks for a DM conversation (all participant rows).
+// TouchDMActivity updates watermarks for a DM conversation (all participant
+// rows). When messageID is empty, only last_activity_at is updated.
 func (s *sqliteWebChatStore) TouchDMActivity(ctx context.Context, conversationKey, messageID string) error {
-	const query = `
-UPDATE webchat_dm SET last_message_id = ?, last_activity_at = ?
- WHERE conversation_key = ?
-`
-	_, err := s.db.ExecContext(ctx, query, messageID,
-		time.Now().UTC().Format(time.RFC3339Nano), conversationKey)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if messageID != "" {
+		const q = `UPDATE webchat_dm SET last_message_id = ?, last_activity_at = ? WHERE conversation_key = ?`
+		_, err := s.db.ExecContext(ctx, q, messageID, now, conversationKey)
+		if err != nil {
+			return fmt.Errorf("webchat store: touch dm activity: %w", err)
+		}
+		return nil
+	}
+	const q = `UPDATE webchat_dm SET last_activity_at = ? WHERE conversation_key = ?`
+	_, err := s.db.ExecContext(ctx, q, now, conversationKey)
 	if err != nil {
 		return fmt.Errorf("webchat store: touch dm activity: %w", err)
 	}

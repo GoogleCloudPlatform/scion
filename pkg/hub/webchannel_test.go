@@ -387,3 +387,197 @@ func TestIdentityFromTopic_MissingUserID_ReturnsFalse(t *testing.T) {
 	_, _, _, ok := identityFromTopic("scion.project.proj1.agent.coder.messages", msg)
 	require.False(t, ok)
 }
+
+// --- Wave-2 WebChannelBus re-key tests ---
+
+func TestWebChannelBus_Publish_TopicThread(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	// Pre-create a topic so TouchTopicActivity has a row to update.
+	ctx := context.Background()
+	topicID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES (?, 'proj1', 'design', 0, 'user1', datetime('now'))`,
+		topicID)
+	require.NoError(t, err)
+
+	log := slog.Default()
+	bus := NewWebChannelBus(log, store)
+
+	// Publish a message with a topic thread_id (UUID).
+	topic := "scion.project.proj1.user.user1.messages"
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		SenderID:  "agent-uuid-1",
+		Recipient: "user:alice",
+		Msg:       "topic message",
+		Type:      messages.TypeInstruction,
+		Channel:   "web",
+		ThreadID:  topicID,
+	}
+
+	err = bus.Publish(ctx, topic, msg)
+	require.NoError(t, err)
+
+	// Verify webchat_topic was updated (last_activity_at is non-NULL).
+	var activityAt string
+	err = db.QueryRow(`SELECT last_activity_at FROM webchat_topic WHERE id = ?`, topicID).Scan(&activityAt)
+	require.NoError(t, err)
+	require.NotEmpty(t, activityAt, "TouchTopicActivity should have updated last_activity_at")
+
+	// Verify webchat_thread was NOT updated (thread_id path takes precedence).
+	var count int
+	err = db.QueryRow(`SELECT COUNT(*) FROM webchat_thread`).Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 0, count, "topic thread_id should NOT touch webchat_thread")
+}
+
+func TestWebChannelBus_Publish_DMThread(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	dmKey := "dm:agent:agent-uuid-1:user:user1"
+
+	// Pre-create DM rows so TouchDMActivity has rows to update.
+	for _, pid := range []string{"user1", "agent-uuid-1"} {
+		_, err := db.ExecContext(ctx,
+			`INSERT INTO webchat_dm (conversation_key, participant_id, peer_id, peer_kind)
+			 VALUES (?, ?, 'peer', 'user')`, dmKey, pid)
+		require.NoError(t, err)
+	}
+
+	log := slog.Default()
+	bus := NewWebChannelBus(log, store)
+
+	topic := "scion.project.proj1.user.user1.messages"
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		SenderID:  "agent-uuid-1",
+		Recipient: "user:alice",
+		Msg:       "DM message",
+		Type:      messages.TypeInstruction,
+		Channel:   "web",
+		ThreadID:  dmKey,
+	}
+
+	err := bus.Publish(ctx, topic, msg)
+	require.NoError(t, err)
+
+	// Verify webchat_dm was updated (last_activity_at is non-NULL).
+	var activityAt sql.NullString
+	err = db.QueryRow(`SELECT last_activity_at FROM webchat_dm WHERE participant_id = 'user1'`).Scan(&activityAt)
+	require.NoError(t, err)
+	require.True(t, activityAt.Valid, "TouchDMActivity should have updated last_activity_at")
+
+	// Verify webchat_thread was NOT updated (DM thread_id takes precedence).
+	var count int
+	err = db.QueryRow(`SELECT COUNT(*) FROM webchat_thread`).Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 0, count, "DM thread_id should NOT touch webchat_thread")
+}
+
+func TestWebChannelBus_Publish_LegacyAgentThread(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	log := slog.Default()
+	bus := NewWebChannelBus(log, store)
+
+	ctx := context.Background()
+	// Legacy agent:<slug> thread_id should fall through to the
+	// (userID, projectID, agentID) path and touch webchat_thread.
+	topic := "scion.project.proj1.user.user1.messages"
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		SenderID:  "agent-uuid-1",
+		Recipient: "user:alice",
+		Msg:       "legacy message",
+		Type:      messages.TypeInstruction,
+		Channel:   "web",
+		ThreadID:  "agent:coder",
+	}
+
+	err := bus.Publish(ctx, topic, msg)
+	require.NoError(t, err)
+
+	// Verify webchat_thread WAS updated (legacy path).
+	var userID, projectID, agentID string
+	err = db.QueryRow(`SELECT user_id, project_id, agent_id FROM webchat_thread`).Scan(&userID, &projectID, &agentID)
+	require.NoError(t, err)
+	require.Equal(t, "user1", userID)
+	require.Equal(t, "proj1", projectID)
+	require.Equal(t, "agent-uuid-1", agentID)
+}
+
+// --- Wave-2 TouchTopicActivity / TouchDMActivity empty messageID tests ---
+
+func TestTouchTopicActivity_EmptyMessageID(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	topicID := "topic-1"
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at, last_message_id)
+		 VALUES (?, 'proj1', 'test', 0, 'user1', datetime('now'), 'original-msg')`, topicID)
+	require.NoError(t, err)
+
+	// Touch with empty messageID — should update last_activity_at but NOT last_message_id.
+	err = store.TouchTopicActivity(ctx, topicID, "")
+	require.NoError(t, err)
+
+	var lastMsgID string
+	var activityAt string
+	err = db.QueryRow(`SELECT last_message_id, last_activity_at FROM webchat_topic WHERE id = ?`, topicID).Scan(&lastMsgID, &activityAt)
+	require.NoError(t, err)
+	require.Equal(t, "original-msg", lastMsgID, "empty messageID should not overwrite last_message_id")
+	require.NotEmpty(t, activityAt)
+}
+
+func TestTouchTopicActivity_WithMessageID(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	topicID := "topic-2"
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO webchat_topic (id, project_id, name, is_general, created_by, created_at)
+		 VALUES (?, 'proj1', 'test2', 0, 'user1', datetime('now'))`, topicID)
+	require.NoError(t, err)
+
+	err = store.TouchTopicActivity(ctx, topicID, "msg-42")
+	require.NoError(t, err)
+
+	var lastMsgID string
+	err = db.QueryRow(`SELECT last_message_id FROM webchat_topic WHERE id = ?`, topicID).Scan(&lastMsgID)
+	require.NoError(t, err)
+	require.Equal(t, "msg-42", lastMsgID)
+}
+
+func TestTouchDMActivity_EmptyMessageID(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	dmKey := "dm:user:a:user:b"
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO webchat_dm (conversation_key, participant_id, peer_id, peer_kind, last_message_id)
+		 VALUES (?, 'a', 'b', 'user', 'old-msg')`, dmKey)
+	require.NoError(t, err)
+
+	err = store.TouchDMActivity(ctx, dmKey, "")
+	require.NoError(t, err)
+
+	var lastMsgID string
+	var activityAt sql.NullString
+	err = db.QueryRow(`SELECT last_message_id, last_activity_at FROM webchat_dm WHERE conversation_key = ?`, dmKey).Scan(&lastMsgID, &activityAt)
+	require.NoError(t, err)
+	require.Equal(t, "old-msg", lastMsgID, "empty messageID should not overwrite last_message_id")
+	require.True(t, activityAt.Valid, "last_activity_at should be set")
+}
