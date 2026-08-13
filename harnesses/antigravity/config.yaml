@@ -31,10 +31,10 @@ env_template:
   SCION_AGENT_NAME: "{{ .AgentName }}"
 
 model_aliases:
-  small: "Gemini 3.5 Flash"
-  medium: "Gemini 3.5 Flash"
-  large: "Gemini 3.1 Pro"
-  extra-large: "Gemini 3.1 Pro"
+  small: "Gemini 3.1 Flash Lite"
+  medium: "Gemini 3.6 Flash (Medium)"
+  large: "Gemini 3.1 Pro (Low)"
+  extra-large: "Gemini 3.1 Pro (Low)"
 
 mcp:
   global_config_file: .gemini/config/mcp_config.json
