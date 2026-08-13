@@ -121,7 +121,8 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 		}
 		wg.Wait()
 		if target == nil {
-			return fmt.Errorf("no broker registered for channel %q", msg.Channel)
+			errs[1] = fmt.Errorf("no broker registered for channel %q", msg.Channel)
+			return errors.Join(errs...)
 		}
 		return errors.Join(errs...)
 	}
