@@ -89,9 +89,17 @@ export function getInitials(name: string): string {
 
 @customElement('scion-chat-avatar')
 export class ScionChatAvatar extends LitElement {
-  /** Display name used for initials and colour hashing. */
+  /** Display name used for initials (and colour hashing when colorSeed is unset). */
   @property()
   name = '';
+
+  /**
+   * Optional seed string for colour hashing — typically the member's UUID.
+   * When set, colour is derived from this value instead of `name`,
+   * avoiding collisions for short similar display names.
+   */
+  @property({ attribute: 'color-seed' })
+  colorSeed = '';
 
   /** Optional image URL; when set, renders an <img> instead of initials. */
   @property({ attribute: 'avatar-url' })
@@ -156,7 +164,7 @@ export class ScionChatAvatar extends LitElement {
     const dotSize = Math.max(8, Math.round(s * 0.3));
 
     const hasImage = this.avatarUrl && this.avatarUrl.length > 0;
-    const bg = hasImage ? 'transparent' : hashColor(this.name);
+    const bg = hasImage ? 'transparent' : hashColor(this.colorSeed || this.name);
     const initials = getInitials(this.name);
 
     return html`

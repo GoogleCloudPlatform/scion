@@ -293,6 +293,7 @@ export class ScionChatMembers extends LitElement {
         <div class="avatar-wrapper">
           <scion-chat-avatar
             name="${m.displayName}"
+            color-seed="${m.id}"
             avatar-url="${m.avatarUrl || ''}"
             size="28"
             presence-state="${m.presenceState || ''}"
@@ -339,7 +340,7 @@ export class ScionChatMembers extends LitElement {
         title="${a.slug || a.displayName}"
       >
         <div class="avatar-wrapper">
-          <scion-chat-avatar name="${a.slug || a.displayName}" size="28"></scion-chat-avatar>
+          <scion-chat-avatar name="${a.slug || a.displayName}" color-seed="${a.id}" size="28"></scion-chat-avatar>
           ${isTyping
             ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
             : nothing}

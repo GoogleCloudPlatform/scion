@@ -1497,6 +1497,7 @@ export class ScionChatThread extends LitElement {
         <scion-chat-message
           body=${msg.msg}
           sender=${msg.sender}
+          senderId=${msg.senderId || ''}
           senderName=${senderDisplayName}
           ?fromAgent=${isFromAgent}
           ?plain=${msg.plain ?? false}

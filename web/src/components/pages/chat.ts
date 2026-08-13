@@ -744,8 +744,61 @@ export class ScionPageChat extends LitElement {
         };
         void this.resolveDMPeerInfo(segment);
       } else {
-        // Peer ID format (/chat/dm/<peerId>) — resolve DM from API
-        void this.resolveDMByPeerId(segment);
+        // Peer ID format (/chat/dm/<peerId>) — reconstruct the full
+        // composite DM key synchronously so the thread component can
+        // start loading immediately, avoiding "invalid DM key format"
+        // errors from the backend receiving a bare UUID.
+        const userId = this.pageData?.user?.id || '';
+        if (userId) {
+          const isAgent = this.v2AgentMembers.some((a) => a.id === segment);
+          let dmKey: string;
+          let peerKind: 'user' | 'agent';
+          let peerName = '';
+
+          if (isAgent) {
+            peerKind = 'agent';
+            dmKey = `dm:agent:${segment}:user:${userId}`;
+            const agent = this.v2AgentMembers.find((a) => a.id === segment);
+            peerName = agent?.displayName || '';
+          } else {
+            peerKind = 'user';
+            const ids = [segment, userId].sort();
+            dmKey = `dm:user:${ids[0]}:user:${ids[1]}`;
+            const human = this.v2HumanMembers.find((h) => h.id === segment);
+            peerName = human?.displayName || '';
+          }
+
+          // If we already have the correct DM conversation open, skip
+          // re-setting state to avoid unnecessary thread reloads.
+          if (this.v2Conversation?.conversationKey === dmKey) {
+            return;
+          }
+
+          this.v2Conversation = {
+            conversationKey: dmKey,
+            projectId: '',
+            projectSlug: '',
+            threadName: '',
+            defaultAgent: '',
+            isDM: true,
+            peerName,
+            peerId: segment,
+            peerKind,
+          };
+          if (peerName) {
+            dispatchPageTitle(this, peerName, 'Chat');
+          }
+
+          // If the member lists were empty (cold load), the peer kind
+          // guess may be wrong. Verify via the DM list API and correct
+          // the key if needed.
+          if (this.v2AgentMembers.length === 0 && this.v2HumanMembers.length === 0) {
+            void this.resolveDMByPeerId(segment);
+          }
+        } else {
+          // No current user ID yet — fall back to async API resolution
+          void this.resolveDMByPeerId(segment);
+        }
       }
       return;
     }
@@ -1558,7 +1611,7 @@ export class ScionPageChat extends LitElement {
     const isSelected =
       thread.agentId === this.selectedAgentId || thread.agentSlug === this.selectedAgentId;
     const displayName = thread.agentName || thread.agentSlug || thread.agentId;
-    const avatarColor = hashColor(thread.agentSlug || thread.agentId);
+    const avatarColor = hashColor(thread.agentId);
     const initials = getInitials(displayName);
     const timeStr = thread.lastMessage?.createdAt
       ? this.formatRelativeTime(thread.lastMessage.createdAt)

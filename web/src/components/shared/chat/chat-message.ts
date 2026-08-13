@@ -71,6 +71,10 @@ export class ScionChatMessage extends LitElement {
   @property()
   agentSlug = '';
 
+  /** Sender unique ID for avatar colour hashing (avoids collisions from similar names). */
+  @property()
+  senderId = '';
+
   /** Sender display name for v2 multi-sender rendering. */
   @property()
   senderName = '';
@@ -816,9 +820,9 @@ export class ScionChatMessage extends LitElement {
     }
   }
 
-  /** Deterministic colour from the agent slug or sender name. */
+  /** Deterministic colour from the sender ID (preferred) or slug/name fallback. */
   private getAvatarColor(): string {
-    return hashColor(this.agentSlug || this.sender || '');
+    return hashColor(this.senderId || this.agentSlug || this.sender || '');
   }
 
   /** Initials derived from the agent slug or sender name. */
