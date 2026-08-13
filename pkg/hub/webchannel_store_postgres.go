@@ -131,6 +131,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_one_general
 		return fmt.Errorf("webchat store: create general index: %w", err)
 	}
 
+	// Enforce case-insensitive unique topic name per project (excluding
+	// soft-deleted topics). Postgres uses LOWER() for case-insensitive matching.
+	const nameIdx = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
+    ON webchat_topic (project_id, LOWER(name)) WHERE deleted_at IS NULL;
+`
+	if _, err := s.db.Exec(nameIdx); err != nil {
+		return fmt.Errorf("webchat store: create name uniqueness index: %w", err)
+	}
+
 	// Run idempotent migrations.
 	if err := s.runMigrations(); err != nil {
 		return fmt.Errorf("webchat store: migrations: %w", err)

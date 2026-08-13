@@ -113,6 +113,42 @@ func TestWave2_GetTopic_NotFound(t *testing.T) {
 	require.Nil(t, got)
 }
 
+func TestWave2_CreateTopic_DuplicateName(t *testing.T) {
+	store, db := newTestWebChatStoreV2(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Create a topic.
+	require.NoError(t, store.CreateTopic(ctx, WebChatTopic{
+		ID: "t1", ProjectID: "proj-1", Name: "design", CreatedBy: "u1", CreatedAt: now,
+	}))
+
+	// Duplicate name in same project should fail (unique index).
+	err := store.CreateTopic(ctx, WebChatTopic{
+		ID: "t2", ProjectID: "proj-1", Name: "design", CreatedBy: "u1", CreatedAt: now,
+	})
+	require.Error(t, err, "duplicate topic name in same project should be rejected")
+
+	// Same name in a different project should succeed.
+	require.NoError(t, store.CreateTopic(ctx, WebChatTopic{
+		ID: "t3", ProjectID: "proj-2", Name: "design", CreatedBy: "u1", CreatedAt: now,
+	}))
+
+	// Soft-delete the original, then reuse the name — should succeed.
+	require.NoError(t, store.DeleteTopic(ctx, "t1"))
+	require.NoError(t, store.CreateTopic(ctx, WebChatTopic{
+		ID: "t4", ProjectID: "proj-1", Name: "design", CreatedBy: "u1", CreatedAt: now,
+	}))
+
+	// Verify the new topic is the one returned.
+	got, err := store.GetTopic(ctx, "t4")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "design", got.Name)
+}
+
 func TestWave2_ListTopics(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck

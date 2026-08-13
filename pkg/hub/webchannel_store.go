@@ -134,7 +134,9 @@ type WebChatStore interface {
 
 	// --- Wave-2 DM methods ---
 
-	// UpsertDM upserts both participant rows for a DM conversation.
+	// UpsertDM upserts a single participant row for a DM conversation.
+	// Callers must invoke this once per participant (typically twice per
+	// DM — one row per side).
 	UpsertDM(ctx context.Context, dm WebChatDM) error
 
 	// ListDMs returns all DM conversations for a participant.
@@ -340,6 +342,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_one_general
 `
 	if _, err := s.db.Exec(generalIdx); err != nil {
 		return fmt.Errorf("webchat store: create general index: %w", err)
+	}
+
+	// Enforce unique topic name per project (excluding soft-deleted topics).
+	// SQLite LIKE is case-insensitive for ASCII by default, and the index
+	// on (project_id, name) catches duplicates at insert time.
+	const nameIdx = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
+    ON webchat_topic (project_id, name) WHERE deleted_at IS NULL;
+`
+	if _, err := s.db.Exec(nameIdx); err != nil {
+		return fmt.Errorf("webchat store: create name uniqueness index: %w", err)
 	}
 
 	// Run idempotent migrations.
