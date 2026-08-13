@@ -46,6 +46,15 @@ export interface ChatSendDetail {
   mentions: string[];
 }
 
+/** Member info for human mention in v2 mode. */
+export interface MemberInfo {
+  id: string;
+  name: string;
+  email: string;
+  avatarUrl?: string;
+  kind: 'user' | 'agent';
+}
+
 /**
  * Count "runes" (user-perceived characters) in a string.
  * Uses Intl.Segmenter where available, falls back to spread length.
@@ -72,10 +81,31 @@ export class ScionChatComposer extends LitElement {
   @property({ type: Array })
   agents: Agent[] = [];
 
+  // ---- Wave-2 v2 properties ----
+
+  /** Members available for @-mention in v2 mode. */
+  @property({ type: Array })
+  members: MemberInfo[] = [];
+
+  /** Default agent slug for this thread (v2 mode). */
+  @property()
+  defaultAgent = '';
+
+  /** Conversation mode: 'thread' or 'dm' (v2 mode). */
+  @property()
+  conversationMode: 'thread' | 'dm' | '' = '';
+
+  /** DM peer name (v2 DM mode). */
+  @property()
+  peerName = '';
+
   @state() private text = '';
   @state() private plain = false;
   @state() private interrupt = false;
   @state() private runeCount = 0;
+
+  /** Live mention override for the destination chip. */
+  @state() private liveMentionOverride = '';
 
   /** Set of accepted mention slugs. Filtered to those still present on send. */
   private acceptedMentions = new Set<string>();
@@ -155,6 +185,48 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-danger-600, #dc2626);
       font-weight: 600;
     }
+
+    /* Destination chip (v2) */
+    .destination-chip {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.25rem 0.75rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-radius: 0.5rem 0.5rem 0 0;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-bottom: none;
+      margin: 0 1rem;
+      margin-bottom: -1px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .destination-chip .arrow {
+      font-weight: 700;
+      color: var(--scion-primary, #3b82f6);
+    }
+
+    .destination-chip .agent-name {
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .destination-chip .hint {
+      font-style: italic;
+      opacity: 0.8;
+    }
+
+    .destination-chip .mention-override {
+      font-weight: 600;
+      color: var(--scion-warning-600, #d97706);
+    }
+
+    .destination-chip.dm {
+      background: var(--scion-primary-50, #eff6ff);
+    }
   `;
 
   override render() {
@@ -165,6 +237,7 @@ export class ScionChatComposer extends LitElement {
     const counterClass = isOverLimit ? 'over' : isNearLimit ? 'warn' : '';
 
     return html`
+      ${this.conversationMode ? this.renderDestinationChip() : nothing}
       <div class="composer">
         <div class="input-row">
           <div class="textarea-wrapper">
@@ -180,6 +253,7 @@ export class ScionChatComposer extends LitElement {
             ></sl-textarea>
             <scion-mention-autocomplete
               .agents=${this.agents}
+              .members=${this.members}
               @mention-accept=${this.handleMentionAccept}
             ></scion-mention-autocomplete>
           </div>
@@ -225,15 +299,61 @@ export class ScionChatComposer extends LitElement {
     `;
   }
 
+  /** Render the destination chip showing where the message will go. */
+  private renderDestinationChip() {
+    if (this.conversationMode === 'dm') {
+      return html`
+        <div class="destination-chip dm">
+          <span class="arrow">&rarr;</span>
+          <span class="agent-name">@${this.peerName}</span>
+        </div>
+      `;
+    }
+
+    // Thread mode with live mention override
+    if (this.liveMentionOverride) {
+      return html`
+        <div class="destination-chip">
+          <span class="arrow">&rarr;</span>
+          <span class="mention-override">@${this.liveMentionOverride}</span>
+          <span class="hint">(mention)</span>
+        </div>
+      `;
+    }
+
+    // Thread mode with default agent
+    if (this.defaultAgent) {
+      return html`
+        <div class="destination-chip">
+          <span class="arrow">&rarr;</span>
+          <sl-icon name="cpu" style="font-size: 0.75rem"></sl-icon>
+          <span class="agent-name">${this.defaultAgent}</span>
+          <span class="hint">(thread default)</span>
+        </div>
+      `;
+    }
+
+    // Thread mode with no default
+    return html`
+      <div class="destination-chip">
+        <span class="arrow">&rarr;</span>
+        <span class="hint">no agent &mdash; visible to space members</span>
+      </div>
+    `;
+  }
+
   private handleInput(e: Event): void {
     const target = e.target as HTMLInputElement;
     this.text = target.value;
     this.runeCount = countRunes(this.text);
 
+    // Update live mention override for destination chip
+    this.updateLiveMentionOverride();
+
     // Feed the autocomplete component.
-    const autocomplete = this.shadowRoot?.querySelector(
-      'scion-mention-autocomplete'
-    ) as import('./mention-autocomplete.js').ScionMentionAutocomplete | null;
+    const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
+      | import('./mention-autocomplete.js').ScionMentionAutocomplete
+      | null;
     if (autocomplete) {
       const textarea = this.getTextareaElement();
       if (textarea) {
@@ -242,11 +362,33 @@ export class ScionChatComposer extends LitElement {
     }
   }
 
+  /** Update live mention override based on @mentions in the text. */
+  private updateLiveMentionOverride(): void {
+    if (!this.conversationMode || this.conversationMode === 'dm') {
+      this.liveMentionOverride = '';
+      return;
+    }
+    // Find the first @mention in the text
+    const mentionMatch = this.text.match(/@(\S+)/);
+    if (mentionMatch) {
+      const slug = mentionMatch[1];
+      // Check if this matches a known agent
+      const matchedAgent = this.agents.find(
+        (a) => (a.slug || a.name || '').toLowerCase() === slug.toLowerCase()
+      );
+      if (matchedAgent) {
+        this.liveMentionOverride = matchedAgent.slug || matchedAgent.name || slug;
+        return;
+      }
+    }
+    this.liveMentionOverride = '';
+  }
+
   private handleKeydown(e: KeyboardEvent): void {
     // Let the autocomplete handle keys first.
-    const autocomplete = this.shadowRoot?.querySelector(
-      'scion-mention-autocomplete'
-    ) as import('./mention-autocomplete.js').ScionMentionAutocomplete | null;
+    const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
+      | import('./mention-autocomplete.js').ScionMentionAutocomplete
+      | null;
     if (autocomplete?.handleKeydown(e)) {
       return; // consumed by autocomplete
     }
@@ -276,7 +418,7 @@ export class ScionChatComposer extends LitElement {
 
     // Restore cursor position after the inserted text.
     const newCursorPos = triggerStart + insertion.length;
-    this.updateComplete.then(() => {
+    void this.updateComplete.then(() => {
       const ta = this.getTextareaElement();
       if (ta) {
         ta.value = this.text;
@@ -299,9 +441,7 @@ export class ScionChatComposer extends LitElement {
     if (!trimmed || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled) return;
 
     // Filter accepted mentions to those still literally present in the text.
-    const mentions = [...this.acceptedMentions].filter((slug) =>
-      trimmed.includes(`@${slug}`)
-    );
+    const mentions = [...this.acceptedMentions].filter((slug) => trimmed.includes(`@${slug}`));
 
     this.dispatchEvent(
       new CustomEvent<ChatSendDetail>('chat-send', {
@@ -329,10 +469,7 @@ export class ScionChatComposer extends LitElement {
     const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
     if (!slTextarea) return null;
     // Shoelace sl-textarea wraps a native <textarea> inside its shadow root.
-    return (
-      (slTextarea.shadowRoot?.querySelector('textarea') as HTMLTextAreaElement) ??
-      null
-    );
+    return (slTextarea.shadowRoot?.querySelector('textarea') as HTMLTextAreaElement) ?? null;
   }
 }
 

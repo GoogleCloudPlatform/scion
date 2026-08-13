@@ -42,6 +42,7 @@ import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
 import type { VisibilityMode, VisibilityChangeDetail } from './chat-visibility-toggle.js';
+import { stateManager } from '../../../client/main.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
@@ -94,6 +95,50 @@ export class ScionChatThread extends LitElement {
   @property({ type: Array })
   agents: Agent[] = [];
 
+  // ---- Wave-2 v2 properties ----
+
+  /**
+   * Conversation key for v2 mode (topic UUID or DM key).
+   * When set, the component uses v2 conversation endpoints and SSE.
+   */
+  @property()
+  conversationKey = '';
+
+  /** The project ID this conversation belongs to (for v2 mode). */
+  @property()
+  projectId = '';
+
+  /** Thread name for display (v2 mode). */
+  @property()
+  threadName = '';
+
+  /** Default agent slug for this thread (v2 mode). */
+  @property()
+  defaultAgent = '';
+
+  /** Whether this is a DM conversation (v2 mode). */
+  @property({ type: Boolean })
+  isDM = false;
+
+  /** DM peer name (v2 mode). */
+  @property()
+  peerName = '';
+
+  /** Members available for @-mention in v2 mode. */
+  @property({ type: Array })
+  members: Array<{
+    id: string;
+    name: string;
+    email: string;
+    avatarUrl?: string;
+    kind: 'user' | 'agent';
+  }> = [];
+
+  /** Whether v2 mode is active. Derived from conversationKey presence. */
+  private get isV2(): boolean {
+    return this.conversationKey.length > 0;
+  }
+
   @state() private messages: Message[] = [];
   @state() private messageMap = new Map<string, Message>();
   @state() private loading = false;
@@ -113,6 +158,24 @@ export class ScionChatThread extends LitElement {
   private lastKnownTimestamp: string | null = null;
   private hadError = false;
   private fetchId = 0;
+
+  /** Bound listener for v2 SSE chat-message events via stateManager. */
+  private _v2MessageHandler = this.handleV2ChatMessage.bind(this);
+
+  /** Read tracking: debounce timer for advancing watermark. */
+  private _readDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Read tracking: whether the tab is focused. */
+  private _tabFocused = true;
+
+  /** Focus/blur handlers for read tracking. */
+  private _focusHandler = () => {
+    this._tabFocused = true;
+    this.maybeAdvanceReadWatermark();
+  };
+  private _blurHandler = () => {
+    this._tabFocused = false;
+  };
 
   static override styles = css`
     :host {
@@ -156,8 +219,13 @@ export class ScionChatThread extends LitElement {
     }
 
     @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
+      0%,
+      100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.3;
+      }
     }
 
     /* Message scroll area */
@@ -288,13 +356,26 @@ export class ScionChatThread extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopStream();
+    // Clean up v2 SSE listener
+    stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
+    // Clean up read tracking
+    window.removeEventListener('focus', this._focusHandler);
+    window.removeEventListener('blur', this._blurHandler);
+    if (this._readDebounceTimer) {
+      clearTimeout(this._readDebounceTimer);
+      this._readDebounceTimer = null;
+    }
   }
 
   /** Called by the parent when the chat view is first shown. */
   loadHistory(): void {
     if (this.loaded) return;
     this.loaded = true;
-    void this.loadPrefsAndHistory();
+    if (this.isV2) {
+      void this.initialLoadV2();
+    } else {
+      void this.loadPrefsAndHistory();
+    }
   }
 
   /** Load saved preferences first, then fetch history. */
@@ -310,7 +391,10 @@ export class ScionChatThread extends LitElement {
       const res = await apiFetch(`/api/v1/chat/prefs?agentId=${encodeURIComponent(this.agentId)}`);
       if (res.ok) {
         const data = (await res.json()) as { visibility_mode?: string };
-        if (data.visibility_mode && ['conversation', 'verbose', 'full'].includes(data.visibility_mode)) {
+        if (
+          data.visibility_mode &&
+          ['conversation', 'verbose', 'full'].includes(data.visibility_mode)
+        ) {
           this.visibilityMode = data.visibility_mode as VisibilityMode;
         }
       }
@@ -374,11 +458,36 @@ export class ScionChatThread extends LitElement {
     }
   }
 
+  /** Check if a message sender is an agent (v2 multi-sender). */
+  private isSenderAgent(msg: Message): boolean {
+    // Agent messages have sender like "agent:slug" or recipient patterns
+    if (msg.sender.startsWith('agent:')) return true;
+    // Check against known members
+    const member = this.members.find((m) => m.id === msg.senderId || m.email === msg.sender);
+    if (member) return member.kind === 'agent';
+    // If sender is not in the current user's perspective, check the type
+    return msg.type === 'assistant-reply' || msg.type === 'mention-reply';
+  }
+
+  /** Get display name for a message sender (v2 multi-sender). */
+  private getSenderDisplayName(msg: Message): string {
+    const member = this.members.find((m) => m.id === msg.senderId || m.email === msg.sender);
+    if (member) return member.name;
+    // Fall back to parsing the sender string
+    if (msg.sender.startsWith('agent:')) return msg.sender.slice(6);
+    if (msg.sender.startsWith('user:')) return msg.sender.slice(5);
+    return msg.sender;
+  }
+
   /** Stop the SSE stream. Called on tab hide / disconnect. */
   stopStream(): void {
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = null;
+    }
+    // Also clean up v2 SSE listener
+    if (this.isV2) {
+      stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     }
     this.streaming = false;
   }
@@ -537,11 +646,11 @@ export class ScionChatThread extends LitElement {
 
     this.eventSource.addEventListener('message', (event: Event) => {
       try {
-        const msg = JSON.parse((event as MessageEvent).data) as Message;
+        const msg = JSON.parse((event as MessageEvent).data as string) as Message;
         const wasPinned = this.pinnedToBottom;
         this.mergeMessages([msg]);
         if (wasPinned) {
-          this.updateComplete.then(() => this.scrollToBottom());
+          void this.updateComplete.then(() => this.scrollToBottom());
         }
       } catch {
         // Skip unparseable entries
@@ -568,6 +677,212 @@ export class ScionChatThread extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
+  // V2 mode: conversation-key-based loading + stateManager SSE
+  // ---------------------------------------------------------------------------
+
+  private async initialLoadV2(): Promise<void> {
+    this.loading = true;
+    this.error = null;
+
+    try {
+      await this.fetchHistoryV2();
+      this.startStreamV2();
+      // Set up read tracking
+      window.addEventListener('focus', this._focusHandler);
+      window.addEventListener('blur', this._blurHandler);
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to load messages';
+    } finally {
+      this.loading = false;
+      this.scrollToBottom();
+    }
+  }
+
+  private async fetchHistoryV2(cursor?: string): Promise<void> {
+    const currentId = this.fetchId;
+    const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
+    if (cursor) {
+      params.set('cursor', cursor);
+    }
+
+    const res = await apiFetch(
+      `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
+    );
+
+    if (currentId !== this.fetchId) return;
+
+    if (!res.ok) {
+      throw new Error(await extractApiError(res, 'Failed to fetch messages'));
+    }
+
+    const data = (await res.json()) as {
+      items?: Message[];
+      nextCursor?: string;
+    };
+
+    const items = data?.items ?? [];
+
+    if (items.length < HISTORY_PAGE_SIZE) {
+      this.hasOlderMessages = false;
+    }
+
+    if (data?.nextCursor) {
+      this.nextCursor = data.nextCursor;
+    }
+
+    this.mergeMessages(items);
+  }
+
+  /** Start listening for v2 messages via stateManager instead of per-thread EventSource. */
+  private startStreamV2(): void {
+    stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
+    this.streaming = true;
+  }
+
+  /** Handle v2 SSE chat message events. Backfill from REST to get the actual message. */
+  private handleV2ChatMessage(): void {
+    // The stateManager event doesn't include the full message payload for a specific
+    // conversation, so we backfill from REST to pick up new messages.
+    void this.backfillV2();
+  }
+
+  private async backfillV2(): Promise<void> {
+    if (!this.conversationKey) return;
+    const currentId = this.fetchId;
+    const params = new URLSearchParams({
+      limit: String(HISTORY_PAGE_SIZE),
+    });
+
+    const res = await apiFetch(
+      `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
+    );
+
+    if (currentId !== this.fetchId) return;
+    if (!res.ok) return;
+
+    const data = (await res.json()) as { items?: Message[] };
+    const items = data?.items ?? [];
+    const wasPinned = this.pinnedToBottom;
+    this.mergeMessages(items);
+    if (wasPinned) {
+      void this.updateComplete.then(() => this.scrollToBottom());
+    }
+    // Advance read watermark if applicable
+    this.maybeAdvanceReadWatermark();
+  }
+
+  /** Send a message in v2 mode. */
+  private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
+    const { text, plain, mentions, onSuccess } = e.detail;
+    if (!text || this.sending) return;
+
+    // Check for /default slash command
+    if (text.startsWith('/default ')) {
+      await this.handleDefaultCommand(text);
+      onSuccess();
+      return;
+    }
+
+    this.sending = true;
+    this.sendError = null;
+
+    try {
+      const body: Record<string, unknown> = {
+        structured_message: { msg: text, plain },
+      };
+      if (mentions && mentions.length > 0) {
+        body.mentions = mentions;
+      }
+
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      );
+
+      if (!res.ok) {
+        this.sendError = await extractApiError(res, 'Failed to send message');
+      } else {
+        onSuccess();
+        // Backfill to pick up the message immediately
+        void this.backfillV2();
+      }
+    } catch (err) {
+      this.sendError = err instanceof Error ? err.message : 'Failed to send message';
+    } finally {
+      this.sending = false;
+    }
+  }
+
+  /** Handle /default slash command. */
+  private async handleDefaultCommand(text: string): Promise<void> {
+    const arg = text.slice('/default '.length).trim();
+    if (!this.conversationKey || this.isDM) return;
+
+    try {
+      const body: Record<string, unknown> = {};
+      if (arg === 'clear') {
+        body.default_agent = null;
+      } else {
+        body.default_agent = arg;
+      }
+      const res = await apiFetch(
+        `/api/v1/chat/threads/${encodeURIComponent(this.conversationKey)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      );
+      if (res.ok) {
+        this.defaultAgent = arg === 'clear' ? '' : arg;
+        this.dispatchEvent(
+          new CustomEvent('default-agent-changed', {
+            detail: { defaultAgent: this.defaultAgent },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
+  /** Advance the read watermark if conditions are met. */
+  private maybeAdvanceReadWatermark(): void {
+    if (!this.isV2 || !this._tabFocused || !this.pinnedToBottom) return;
+    if (this.messages.length === 0) return;
+
+    // Debounce
+    if (this._readDebounceTimer) clearTimeout(this._readDebounceTimer);
+    this._readDebounceTimer = setTimeout(() => {
+      const lastMsg = this.messages[this.messages.length - 1];
+      if (lastMsg) {
+        void this.advanceReadWatermark(lastMsg.id);
+      }
+    }, 1000);
+  }
+
+  private async advanceReadWatermark(messageId: string): Promise<void> {
+    try {
+      await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/read`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ last_read_message_id: messageId }),
+        }
+      );
+    } catch {
+      // Non-critical
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Scroll handling
   // ---------------------------------------------------------------------------
 
@@ -583,7 +898,16 @@ export class ScionChatThread extends LitElement {
       this.hasOlderMessages &&
       this.nextCursor
     ) {
-      void this.loadOlderMessages(el);
+      if (this.isV2) {
+        void this.loadOlderMessagesV2(el);
+      } else {
+        void this.loadOlderMessages(el);
+      }
+    }
+
+    // Advance read watermark in v2 mode
+    if (this.pinnedToBottom) {
+      this.maybeAdvanceReadWatermark();
     }
   }
 
@@ -598,6 +922,22 @@ export class ScionChatThread extends LitElement {
     } finally {
       this.loadingOlder = false;
       // Preserve scroll position after prepending
+      await this.updateComplete;
+      const newScrollHeight = scrollEl.scrollHeight;
+      scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+    }
+  }
+
+  private async loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void> {
+    this.loadingOlder = true;
+    const prevScrollHeight = scrollEl.scrollHeight;
+
+    try {
+      await this.fetchHistoryV2(this.nextCursor || undefined);
+    } catch {
+      // Silently fail for older messages
+    } finally {
+      this.loadingOlder = false;
       await this.updateComplete;
       const newScrollHeight = scrollEl.scrollHeight;
       scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
@@ -679,13 +1019,13 @@ export class ScionChatThread extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    if (this.isV2) {
+      return this.renderV2();
+    }
     return html`
       <div class="thread-container">
-        ${this.renderStreamBar()}
-        ${this.renderContent()}
-        ${this.sendError
-          ? html`<div class="send-error">${this.sendError}</div>`
-          : nothing}
+        ${this.renderStreamBar()} ${this.renderContent()}
+        ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         ${this.canSend
           ? html`
               <scion-chat-composer
@@ -699,15 +1039,31 @@ export class ScionChatThread extends LitElement {
     `;
   }
 
+  private renderV2() {
+    return html`
+      <div class="thread-container">
+        ${this.renderStreamBar()} ${this.renderContent()}
+        ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
+        <scion-chat-composer
+          ?disabled=${this.sending}
+          .agents=${this.agents}
+          .members=${this.members}
+          .defaultAgent=${this.defaultAgent}
+          .conversationMode=${this.isDM ? 'dm' : 'thread'}
+          .peerName=${this.peerName}
+          @chat-send=${this.handleChatSendV2}
+        ></scion-chat-composer>
+      </div>
+    `;
+  }
+
   private renderStreamBar() {
     // Show the bar when streaming OR when the toggle is visible (they share the row).
     if (!this.streaming && !this.showVisibilityToggle) return nothing;
     return html`
       <div class="stream-bar">
         <span class="stream-indicator">
-          ${this.streaming
-            ? html`<span class="stream-dot"></span> Live`
-            : nothing}
+          ${this.streaming ? html`<span class="stream-dot"></span> Live` : nothing}
         </span>
         ${this.showVisibilityToggle
           ? html`
@@ -736,7 +1092,13 @@ export class ScionChatThread extends LitElement {
         <div class="state-msg">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <span>${this.error}</span>
-          <sl-button size="small" @click=${() => { this.loaded = false; this.loadHistory(); }}>
+          <sl-button
+            size="small"
+            @click=${() => {
+              this.loaded = false;
+              this.loadHistory();
+            }}
+          >
             Retry
           </sl-button>
         </div>
@@ -824,15 +1186,22 @@ export class ScionChatThread extends LitElement {
       const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
       const showHeader = !sameSender || !withinWindow;
 
-      const isFromAgent = msg.senderId === this.agentId;
+      // In v2 mode, determine if from agent by checking sender against known members
+      const isFromAgent = this.isV2 ? this.isSenderAgent(msg) : msg.senderId === this.agentId;
+      const senderDisplayName = this.isV2
+        ? this.getSenderDisplayName(msg)
+        : isFromAgent
+          ? this.agentName || ''
+          : '';
 
       rows.push(html`
         <scion-chat-message
           body=${msg.msg}
           sender=${msg.sender}
+          senderName=${senderDisplayName}
           ?fromAgent=${isFromAgent}
           ?plain=${msg.plain ?? false}
-          agentSlug=${isFromAgent ? (this.agentName || '') : ''}
+          agentSlug=${isFromAgent ? senderDisplayName : ''}
           timestamp=${msg.createdAt}
           ?showHeader=${showHeader}
           ?urgent=${msg.urgent ?? false}
@@ -851,15 +1220,11 @@ export class ScionChatThread extends LitElement {
       if (msgMentionResults) {
         const delivered = msgMentionResults.filter((r) => r.status === 'delivered');
         if (delivered.length > 0) {
-          const slugs = delivered.map(
-            (r) => html`<span class="mention-slug">@${r.slug}</span>`
-          );
+          const slugs = delivered.map((r) => html`<span class="mention-slug">@${r.slug}</span>`);
           rows.push(html`
             <div class="mention-results">
-              Also notified: ${slugs.reduce(
-                (acc, s, i) => (i === 0 ? [s] : [...acc, ', ', s]),
-                [] as unknown[]
-              )}
+              Also notified:
+              ${slugs.reduce((acc, s, i) => (i === 0 ? [s] : [...acc, ', ', s]), [] as unknown[])}
             </div>
           `);
         }
@@ -871,7 +1236,6 @@ export class ScionChatThread extends LitElement {
 
     return rows;
   }
-
 }
 
 declare global {

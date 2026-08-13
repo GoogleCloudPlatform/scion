@@ -34,9 +34,7 @@ declare global {
  * Feature flags that are ON by default (Phase 5+).
  * These can still be disabled via server injection or localStorage override.
  */
-const DEFAULT_ON_FLAGS = new Set([
-  'web.native_chat',
-]);
+const DEFAULT_ON_FLAGS = new Set(['web.native_chat']);
 
 /**
  * Check whether a feature flag is enabled.

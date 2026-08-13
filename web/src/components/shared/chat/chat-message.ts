@@ -52,6 +52,10 @@ export class ScionChatMessage extends LitElement {
   @property()
   agentSlug = '';
 
+  /** Sender display name for v2 multi-sender rendering. */
+  @property()
+  senderName = '';
+
   /** Timestamp string. */
   @property()
   timestamp = '';
@@ -216,9 +220,15 @@ export class ScionChatMessage extends LitElement {
       margin-top: 0;
     }
 
-    .md-content h1 { font-size: 1.25rem; }
-    .md-content h2 { font-size: 1.125rem; }
-    .md-content h3 { font-size: 1rem; }
+    .md-content h1 {
+      font-size: 1.25rem;
+    }
+    .md-content h2 {
+      font-size: 1.125rem;
+    }
+    .md-content h3 {
+      font-size: 1rem;
+    }
 
     .md-content a {
       color: var(--sl-color-primary-600, #2563eb);
@@ -492,9 +502,8 @@ export class ScionChatMessage extends LitElement {
       btn.className = 'copy-btn';
       btn.textContent = 'Copy';
       btn.addEventListener('click', () => {
-        const code =
-          pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
-        navigator.clipboard.writeText(code);
+        const code = pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
+        void navigator.clipboard.writeText(code);
         btn.textContent = 'Copied!';
         setTimeout(() => {
           btn.textContent = 'Copy';
@@ -532,7 +541,9 @@ export class ScionChatMessage extends LitElement {
     return html`
       <div class="message-wrapper ${dirClass}${visClass}">
         ${this.showHeader && this.fromAgent
-          ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">${this.getInitials()}</div>`
+          ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
+              ${this.getInitials()}
+            </div>`
           : this.fromAgent
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
@@ -553,12 +564,8 @@ export class ScionChatMessage extends LitElement {
                 </div>
               `
             : nothing}
-          <div class="bubble-content">
-            ${this.renderBody()}
-          </div>
-          ${this.renderDeliveryState()}
-          ${this.renderBadges()}
-          ${this.renderAttachments()}
+          <div class="bubble-content">${this.renderBody()}</div>
+          ${this.renderDeliveryState()} ${this.renderBadges()} ${this.renderAttachments()}
         </div>
       </div>
     `;
@@ -671,8 +678,14 @@ export class ScionChatMessage extends LitElement {
   /** Simple deterministic colour from the agent slug. */
   private getAvatarColor(): string {
     const colors = [
-      '#3b82f6', '#8b5cf6', '#06b6d4', '#10b981',
-      '#f59e0b', '#ef4444', '#ec4899', '#6366f1',
+      '#3b82f6',
+      '#8b5cf6',
+      '#06b6d4',
+      '#10b981',
+      '#f59e0b',
+      '#ef4444',
+      '#ec4899',
+      '#6366f1',
     ];
     let hash = 0;
     const s = this.agentSlug || this.sender || '';

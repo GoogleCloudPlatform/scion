@@ -47,17 +47,38 @@ export interface MentionAcceptDetail {
   triggerStart: number;
 }
 
+/** Human member for mention autocomplete (v2). */
+export interface MentionMember {
+  id: string;
+  name: string;
+  email: string;
+  avatarUrl?: string;
+  kind: 'user' | 'agent';
+}
+
+/** A unified candidate for the dropdown. */
+interface MentionCandidate {
+  slug: string;
+  name: string;
+  kind: 'agent' | 'user';
+  avatarUrl: string | undefined;
+}
+
 @customElement('scion-mention-autocomplete')
 export class ScionMentionAutocomplete extends LitElement {
   /** All agents available for mentioning. Set by the parent. */
   @property({ type: Array })
   agents: Agent[] = [];
 
+  /** Human members available for mentioning (v2). Set by the parent. */
+  @property({ type: Array })
+  members: MentionMember[] = [];
+
   /** Whether the autocomplete is currently active. */
   @state() active = false;
 
   /** Matched candidates (already filtered + ranked). */
-  @state() private candidates: Agent[] = [];
+  @state() private candidates: MentionCandidate[] = [];
 
   /** Index of the highlighted candidate. */
   @state() private highlightIndex = 0;
@@ -155,16 +176,24 @@ export class ScionMentionAutocomplete extends LitElement {
         @mousedown=${this.handleMouseDown}
       >
         ${this.candidates.map(
-          (agent, i) => html`
+          (candidate, i) => html`
             <div
               class="dropdown-item ${i === this.highlightIndex ? 'highlighted' : ''}"
               data-index=${i}
               @click=${() => this.acceptCandidate(i)}
-              @mouseenter=${() => { this.highlightIndex = i; }}
+              @mouseenter=${() => {
+                this.highlightIndex = i;
+              }}
             >
-              <span class="slug">@${agent.slug || agent.name}</span>
-              ${agent.slug && agent.name && agent.slug !== agent.name
-                ? html`<span class="name">${agent.name}</span>`
+              <span class="slug">
+                <sl-icon
+                  name="${candidate.kind === 'agent' ? 'cpu' : 'person'}"
+                  style="font-size: 0.6875rem; vertical-align: -1px; margin-right: 0.125rem;"
+                ></sl-icon>
+                @${candidate.slug}
+              </span>
+              ${candidate.slug !== candidate.name
+                ? html`<span class="name">${candidate.name}</span>`
                 : nothing}
             </div>
           `
@@ -193,8 +222,8 @@ export class ScionMentionAutocomplete extends LitElement {
     this.triggerStart = triggerInfo.start;
     const query = text.slice(triggerInfo.start + 1, cursorPos);
 
-    // Filter and rank agents.
-    const matched = this.matchAgents(query);
+    // Filter and rank agents + members.
+    const matched = this.matchCandidates(query);
 
     if (matched.length === 0) {
       this.dismiss();
@@ -263,10 +292,7 @@ export class ScionMentionAutocomplete extends LitElement {
    * - The `@` must be at position 0 or preceded by whitespace (word boundary).
    * - The `@` must NOT be inside a fenced code block (AC17).
    */
-  private findTrigger(
-    text: string,
-    cursorPos: number
-  ): { start: number } | null {
+  private findTrigger(text: string, cursorPos: number): { start: number } | null {
     // Walk backwards from cursor to find @.
     for (let i = cursorPos - 1; i >= 0; i--) {
       const ch = text[i];
@@ -306,37 +332,65 @@ export class ScionMentionAutocomplete extends LitElement {
   }
 
   /**
-   * Match agents against a query string using case-insensitive subsequence
-   * matching over slug and name. Exact-prefix matches ranked first.
+   * Match agents and human members against a query string using case-insensitive
+   * subsequence matching over slug and name. Exact-prefix matches ranked first.
+   * Agents appear first, then humans (distinct icon styling in the dropdown).
    */
-  private matchAgents(query: string): Agent[] {
-    const agents = this.agents || [];
-    if (query === '') {
-      // Show all agents when just @ is typed, capped at MAX_DROPDOWN_ITEMS.
-      return agents.slice(0, MAX_DROPDOWN_ITEMS);
+  private matchCandidates(query: string): MentionCandidate[] {
+    // Build a unified list of candidates from agents + members
+    const allCandidates: MentionCandidate[] = [];
+
+    for (const agent of this.agents || []) {
+      allCandidates.push({
+        slug: agent.slug || agent.name || '',
+        name: agent.name || '',
+        kind: 'agent',
+        avatarUrl: undefined,
+      });
     }
 
-    const lowerQuery = query.toLowerCase();
-
-    const prefixMatches: Agent[] = [];
-    const subsequenceMatches: Agent[] = [];
-
-    for (const agent of agents) {
-      const slug = (agent.slug || agent.name || '').toLowerCase();
-      const name = (agent.name || '').toLowerCase();
-
-      // Check exact prefix match on slug or name.
-      if (slug.startsWith(lowerQuery) || name.startsWith(lowerQuery)) {
-        prefixMatches.push(agent);
-      } else if (
-        this.isSubsequence(lowerQuery, slug) ||
-        this.isSubsequence(lowerQuery, name)
-      ) {
-        subsequenceMatches.push(agent);
+    for (const member of this.members || []) {
+      // Avoid duplicate entries if a member is also an agent
+      const slug = member.name.toLowerCase().replace(/\s+/g, '-');
+      if (!allCandidates.some((c) => c.slug === slug)) {
+        allCandidates.push({
+          slug,
+          name: member.name,
+          kind: member.kind === 'agent' ? 'agent' : 'user',
+          avatarUrl: member.avatarUrl,
+        });
       }
     }
 
-    // Prefix matches first, then subsequence matches.
+    if (query === '') {
+      return allCandidates.slice(0, MAX_DROPDOWN_ITEMS);
+    }
+
+    const lowerQuery = query.toLowerCase();
+    const prefixMatches: MentionCandidate[] = [];
+    const subsequenceMatches: MentionCandidate[] = [];
+
+    for (const candidate of allCandidates) {
+      const slug = candidate.slug.toLowerCase();
+      const name = candidate.name.toLowerCase();
+
+      if (slug.startsWith(lowerQuery) || name.startsWith(lowerQuery)) {
+        prefixMatches.push(candidate);
+      } else if (this.isSubsequence(lowerQuery, slug) || this.isSubsequence(lowerQuery, name)) {
+        subsequenceMatches.push(candidate);
+      }
+    }
+
+    // Agents first, then humans, within each tier
+    const sortByKind = (a: MentionCandidate, b: MentionCandidate) =>
+      a.kind === 'agent' && b.kind !== 'agent'
+        ? -1
+        : a.kind !== 'agent' && b.kind === 'agent'
+          ? 1
+          : 0;
+    prefixMatches.sort(sortByKind);
+    subsequenceMatches.sort(sortByKind);
+
     return [...prefixMatches, ...subsequenceMatches].slice(0, MAX_DROPDOWN_ITEMS);
   }
 
@@ -351,15 +405,13 @@ export class ScionMentionAutocomplete extends LitElement {
 
   /** Dispatch the accept event and close the dropdown. */
   private acceptCandidate(index: number): void {
-    const agent = this.candidates[index];
-    if (!agent) return;
-
-    const slug = agent.slug || agent.name;
+    const candidate = this.candidates[index];
+    if (!candidate) return;
 
     this.dispatchEvent(
       new CustomEvent<MentionAcceptDetail>('mention-accept', {
         detail: {
-          slug,
+          slug: candidate.slug,
           triggerStart: this.triggerStart,
         },
         bubbles: true,
@@ -372,10 +424,21 @@ export class ScionMentionAutocomplete extends LitElement {
 
   /** Styles copied from the textarea onto the mirror div. */
   private static readonly MIRROR_STYLES = [
-    'font-family', 'font-size', 'font-weight', 'line-height',
-    'letter-spacing', 'word-spacing', 'padding-top', 'padding-right',
-    'padding-bottom', 'padding-left', 'border-width', 'box-sizing',
-    'white-space', 'word-wrap', 'overflow-wrap',
+    'font-family',
+    'font-size',
+    'font-weight',
+    'line-height',
+    'letter-spacing',
+    'word-spacing',
+    'padding-top',
+    'padding-right',
+    'padding-bottom',
+    'padding-left',
+    'border-width',
+    'box-sizing',
+    'white-space',
+    'word-wrap',
+    'overflow-wrap',
   ] as const;
 
   /**
@@ -424,10 +487,7 @@ export class ScionMentionAutocomplete extends LitElement {
     const markerRect = this.mirrorMarker!.getBoundingClientRect();
     const hostRect = this.getBoundingClientRect();
 
-    this.dropdownLeft = Math.max(
-      0,
-      markerRect.left - hostRect.left
-    );
+    this.dropdownLeft = Math.max(0, markerRect.left - hostRect.left);
   }
 
   /**
