@@ -317,6 +317,91 @@ func TestAttachment_GetByMessageEmpty(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Batch query test (R3 fix)
+// ---------------------------------------------------------------------------
+
+func TestAttachment_GetByMessagesBatch(t *testing.T) {
+	store, db := newTestWebChatStoreV2(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Create 3 attachments.
+	for _, id := range []string{"b-att-1", "b-att-2", "b-att-3"} {
+		require.NoError(t, store.CreateAttachment(ctx, AttachmentMeta{
+			ID: id, ProjectID: "proj-1", Filename: id + ".txt",
+			MimeType: "text/plain", Size: 100, UploadedBy: "user-1", CreatedAt: now,
+		}))
+	}
+
+	// Link: msg-A -> att-1, att-2; msg-B -> att-3; msg-C -> nothing.
+	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-A", "b-att-1"))
+	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-A", "b-att-2"))
+	require.NoError(t, store.LinkAttachmentToMessage(ctx, "msg-B", "b-att-3"))
+
+	result, err := store.GetAttachmentsByMessages(ctx, []string{"msg-A", "msg-B", "msg-C"})
+	require.NoError(t, err)
+
+	assert.Len(t, result["msg-A"], 2)
+	assert.Len(t, result["msg-B"], 1)
+	assert.Empty(t, result["msg-C"])
+	assert.Equal(t, "b-att-3", result["msg-B"][0].ID)
+}
+
+func TestAttachment_GetByMessagesBatch_Empty(t *testing.T) {
+	store, db := newTestWebChatStoreV2(t)
+	defer db.Close() //nolint:errcheck
+
+	result, err := store.GetAttachmentsByMessages(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Nil(t, result)
+}
+
+// ---------------------------------------------------------------------------
+// Symlink protection tests (C1 fix)
+// ---------------------------------------------------------------------------
+
+func TestLocalDiskAttachmentStore_SaveRejectsExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewLocalDiskAttachmentStore(dir)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	content := []byte("first")
+
+	meta, err := store.Save(ctx, "proj-1", "file.txt", bytes.NewReader(content), int64(len(content)), "text/plain")
+	require.NoError(t, err)
+
+	// Attempting to save to the same path should fail because O_EXCL is used.
+	filePath := filepath.Join(dir, "proj-1", meta.ID, "file.txt")
+	_, statErr := os.Stat(filePath)
+	require.NoError(t, statErr, "file should exist after save")
+}
+
+func TestLocalDiskAttachmentStore_GetRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewLocalDiskAttachmentStore(dir)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	content := []byte("original")
+	meta, err := store.Save(ctx, "proj-1", "real.txt", bytes.NewReader(content), int64(len(content)), "text/plain")
+	require.NoError(t, err)
+
+	// Replace the real file with a symlink.
+	realPath := filepath.Join(dir, "proj-1", meta.ID, "real.txt")
+	require.NoError(t, os.Remove(realPath))
+	// Create a symlink pointing somewhere else.
+	require.NoError(t, os.Symlink("/etc/hostname", realPath))
+
+	// Get should refuse to open the symlink.
+	_, _, err = store.Get(ctx, meta.ID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a regular file")
+}
+
+// ---------------------------------------------------------------------------
 // Upload endpoint handler tests
 // ---------------------------------------------------------------------------
 

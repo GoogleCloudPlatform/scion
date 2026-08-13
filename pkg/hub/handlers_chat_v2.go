@@ -1091,13 +1091,18 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		result.Items = []store.Message{}
 	}
 
-	// W7: Enrich messages with attachment metadata.
+	// W7: Enrich messages with attachment metadata using a single batch
+	// query (R3 — avoids N+1 per-message queries on history pages).
 	var messageAttachments map[string][]AttachmentRef
 	if wcs != nil && len(result.Items) > 0 {
-		messageAttachments = make(map[string][]AttachmentRef)
-		for _, msg := range result.Items {
-			attachments, err := wcs.GetAttachmentsByMessage(ctx, msg.ID)
-			if err == nil && len(attachments) > 0 {
+		msgIDs := make([]string, len(result.Items))
+		for i, msg := range result.Items {
+			msgIDs[i] = msg.ID
+		}
+		batchAttachments, err := wcs.GetAttachmentsByMessages(ctx, msgIDs)
+		if err == nil && len(batchAttachments) > 0 {
+			messageAttachments = make(map[string][]AttachmentRef, len(batchAttachments))
+			for msgID, attachments := range batchAttachments {
 				refs := make([]AttachmentRef, 0, len(attachments))
 				for _, a := range attachments {
 					refs = append(refs, AttachmentRef{
@@ -1107,7 +1112,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 						Size:     a.Size,
 					})
 				}
-				messageAttachments[msg.ID] = refs
+				messageAttachments[msgID] = refs
 			}
 		}
 	}
@@ -2397,12 +2402,18 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", mimeType)
 
+	// R1: Prevent browsers from MIME-sniffing the response body.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
 	// Content-Disposition: inline for images, attachment for everything else.
 	disposition := "attachment"
 	if IsImageMime(mimeType) {
 		disposition = "inline"
 	}
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, meta.Filename))
+	// R2: Escape backslash and double-quote in the filename to prevent
+	// Content-Disposition header injection (RFC 6266 §4.3).
+	safeName := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(meta.Filename)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, safeName))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", fileMeta.Size))
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 

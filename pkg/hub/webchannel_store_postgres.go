@@ -1119,3 +1119,44 @@ WHERE ma.message_id = $1
 	}
 	return result, rows.Err()
 }
+
+// GetAttachmentsByMessages returns attachments for multiple messages in a
+// single IN (...) query, keyed by message ID. This replaces per-message
+// loops in the history endpoint to avoid N+1 queries.
+func (s *pgWebChatStore) GetAttachmentsByMessages(ctx context.Context, messageIDs []string) (map[string][]AttachmentMeta, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, len(messageIDs))
+	args := make([]interface{}, len(messageIDs))
+	for i, id := range messageIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+SELECT ma.message_id, a.id, a.project_id, a.filename, a.mime_type, a.size, a.uploaded_by, a.created_at
+FROM webchat_attachment a
+JOIN webchat_message_attachment ma ON ma.attachment_id = a.id
+WHERE ma.message_id IN (%s)
+`, strings.Join(placeholders, ","))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: get messages attachments: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]AttachmentMeta)
+	for rows.Next() {
+		var messageID string
+		var meta AttachmentMeta
+		if err := rows.Scan(&messageID, &meta.ID, &meta.ProjectID, &meta.Filename, &meta.MimeType,
+			&meta.Size, &meta.UploadedBy, &meta.CreatedAt); err != nil {
+			return nil, fmt.Errorf("webchat store: scan attachment: %w", err)
+		}
+		result[messageID] = append(result[messageID], meta)
+	}
+	return result, rows.Err()
+}

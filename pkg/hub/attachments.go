@@ -178,7 +178,9 @@ func (s *LocalDiskAttachmentStore) Save(_ context.Context, projectID, filename s
 	}
 
 	filePath := filepath.Join(dir, filename)
-	f, err := os.Create(filePath)
+	// Use O_EXCL to prevent following symlinks — fails if the name already
+	// exists (including as a symlink), mitigating symlink-based path traversal.
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
 	if err != nil {
 		return AttachmentMeta{}, fmt.Errorf("attachment store: create file: %w", err)
 	}
@@ -224,9 +226,15 @@ func (s *LocalDiskAttachmentStore) Get(_ context.Context, id string) (io.ReadClo
 
 	filename := entries[0].Name()
 	filePath := filepath.Join(dir, filename)
-	info, err := entries[0].Info()
+
+	// Use Lstat (not Stat) to detect symlinks — refuse to open anything
+	// that is not a regular file, preventing symlink-based path traversal.
+	info, err := os.Lstat(filePath)
 	if err != nil {
 		return nil, AttachmentMeta{}, fmt.Errorf("attachment stat: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, AttachmentMeta{}, fmt.Errorf("attachment not a regular file: %s", id)
 	}
 
 	f, err := os.Open(filePath)
