@@ -1404,7 +1404,7 @@ WHERE ma.message_id = ?
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: get message attachments: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var result []AttachmentMeta
 	for rows.Next() {
@@ -1446,7 +1446,7 @@ WHERE ma.message_id IN (%s)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: get messages attachments: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := make(map[string][]AttachmentMeta)
 	for rows.Next() {

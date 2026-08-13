@@ -130,7 +130,7 @@ func TestLocalDiskAttachmentStore_SaveAndGet(t *testing.T) {
 	// Get the file back.
 	reader, getMeta, err := store.Get(ctx, meta.ID)
 	require.NoError(t, err)
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	assert.Equal(t, meta.ID, getMeta.ID)
 	assert.Equal(t, "test.txt", getMeta.Filename)
@@ -411,7 +411,7 @@ func testAttachmentServer(t *testing.T) (*Server, WebChatStore, AttachmentStore)
 
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -503,14 +503,4 @@ func TestWebchatAttachmentTableExists(t *testing.T) {
 		err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
 		require.NoError(t, err, "table %s should exist", table)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// withTestUserCtx injects a user identity into the context for handler tests.
-func withTestUserCtx(ctx context.Context, id, email string) context.Context {
-	user := NewAuthenticatedUser(id, email, email, "admin", "web")
-	return contextWithIdentity(ctx, user)
 }

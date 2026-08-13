@@ -184,16 +184,16 @@ func (s *LocalDiskAttachmentStore) Save(_ context.Context, projectID, filename s
 	if err != nil {
 		return AttachmentMeta{}, fmt.Errorf("attachment store: create file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	written, err := io.Copy(f, io.LimitReader(content, MaxAttachmentSize+1))
 	if err != nil {
 		// Clean up on write failure.
-		os.Remove(filePath)
+		_ = os.Remove(filePath)
 		return AttachmentMeta{}, fmt.Errorf("attachment store: write file: %w", err)
 	}
 	if written > MaxAttachmentSize {
-		os.Remove(filePath)
+		_ = os.Remove(filePath)
 		return AttachmentMeta{}, fmt.Errorf("file exceeds maximum size of %d bytes", MaxAttachmentSize)
 	}
 

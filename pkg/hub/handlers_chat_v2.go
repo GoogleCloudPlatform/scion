@@ -2351,7 +2351,7 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 
 		// Save to storage.
 		meta, err := as.Save(ctx, projectID, safeName, file, fh.Size, mime)
-		file.Close()
+		_ = file.Close()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "INTERNAL", fmt.Sprintf("failed to save file: %v", err), nil)
 			return
@@ -2423,7 +2423,7 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 		NotFound(w, "Attachment file")
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	// Set headers.
 	mimeType := meta.MimeType
@@ -2448,7 +2448,7 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, reader)
+	_, _ = io.Copy(w, reader)
 }
 
 type attachmentUploadResult struct {
