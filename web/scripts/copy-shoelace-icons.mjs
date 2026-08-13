@@ -132,6 +132,7 @@ const USED_ICONS = [
   'shield-x',
   'slash-circle',
   'sliders',
+  'sort-down',
   'star',
   'star-fill',
   'stop-circle',

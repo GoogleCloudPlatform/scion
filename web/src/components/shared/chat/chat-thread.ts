@@ -757,9 +757,7 @@ export class ScionChatThread extends LitElement {
 
   private mergeMessages(newMessages: Message[]): void {
     for (const msg of newMessages) {
-      if (!this.messageMap.has(msg.id)) {
-        this.messageMap.set(msg.id, msg);
-      }
+      this.messageMap.set(msg.id, msg);
     }
 
     // Sort ascending by createdAt (oldest first for chat display)
@@ -872,10 +870,7 @@ export class ScionChatThread extends LitElement {
       items?: Message[];
       messages?: Message[];
       nextCursor?: string;
-      messageAttachments?: Record<
-        string,
-        import('./chat-message.js').AttachmentRefInfo[]
-      >;
+      messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
     };
 
     const items = data?.items ?? data?.messages ?? [];
@@ -993,10 +988,7 @@ export class ScionChatThread extends LitElement {
     const data = (await res.json()) as {
       items?: Message[];
       messages?: Message[];
-      messageAttachments?: Record<
-        string,
-        import('./chat-message.js').AttachmentRefInfo[]
-      >;
+      messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
     };
     const items = data?.items ?? data?.messages ?? [];
 
@@ -1097,6 +1089,38 @@ export class ScionChatThread extends LitElement {
       );
       if (res.ok) {
         this.defaultAgent = arg === 'clear' ? '' : arg;
+        this.dispatchEvent(
+          new CustomEvent('default-agent-changed', {
+            detail: { defaultAgent: this.defaultAgent },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
+  /** Handle default-agent-change from the composer dropdown. */
+  private async handleDefaultAgentChange(e: CustomEvent<{ defaultAgent: string }>): Promise<void> {
+    const newDefault = e.detail.defaultAgent;
+    if (!this.conversationKey || this.isDM) return;
+
+    try {
+      const body: Record<string, unknown> = {
+        default_agent: newDefault || null,
+      };
+      const res = await apiFetch(
+        `/api/v1/chat/threads/${encodeURIComponent(this.conversationKey)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      );
+      if (res.ok) {
+        this.defaultAgent = newDefault;
         this.dispatchEvent(
           new CustomEvent('default-agent-changed', {
             detail: { defaultAgent: this.defaultAgent },
@@ -1313,6 +1337,7 @@ export class ScionChatThread extends LitElement {
           .projectId=${this.projectId}
           @chat-send=${this.handleChatSendV2}
           @chat-typing=${() => this.sendTypingEvent()}
+          @default-agent-change=${this.handleDefaultAgentChange}
         ></scion-chat-composer>
       </div>
     `;

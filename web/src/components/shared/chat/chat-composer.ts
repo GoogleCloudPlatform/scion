@@ -245,6 +245,21 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-warning-600, #d97706);
     }
 
+    .destination-chip.clickable {
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .destination-chip.clickable:hover {
+      background: var(--scion-border, #e2e8f0);
+    }
+
+    .chip-chevron {
+      font-size: 0.625rem;
+      margin-left: auto;
+      opacity: 0.6;
+    }
+
     .destination-chip.dm {
       background: var(--scion-primary-50, #eff6ff);
     }
@@ -426,25 +441,80 @@ export class ScionChatComposer extends LitElement {
       `;
     }
 
-    // Thread mode with default agent
+    // Thread mode: clickable chip to set/change default agent
+    const agentMembers = this.members.filter((m) => m.kind === 'agent');
+    const hasAgents = agentMembers.length > 0;
+
     if (this.defaultAgent) {
       return html`
-        <div class="destination-chip">
-          <span class="arrow">&rarr;</span>
-          <sl-icon name="cpu" style="font-size: 0.75rem"></sl-icon>
-          <span class="agent-name">${this.defaultAgent}</span>
-          <span class="hint">(thread default)</span>
-        </div>
+        <sl-dropdown>
+          <div class="destination-chip clickable" slot="trigger">
+            <span class="arrow">&rarr;</span>
+            <sl-icon name="cpu" style="font-size: 0.75rem"></sl-icon>
+            <span class="agent-name">${this.defaultAgent}</span>
+            <span class="hint">(thread default)</span>
+            ${hasAgents
+              ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
+              : nothing}
+          </div>
+          ${hasAgents ? this.renderAgentMenu(agentMembers) : nothing}
+        </sl-dropdown>
       `;
     }
 
     // Thread mode with no default
     return html`
-      <div class="destination-chip">
-        <span class="arrow">&rarr;</span>
-        <span class="hint">no agent &mdash; visible to space members</span>
-      </div>
+      <sl-dropdown>
+        <div class="destination-chip clickable" slot="trigger">
+          <span class="arrow">&rarr;</span>
+          <span class="hint">no agent &mdash; visible to space members</span>
+          ${hasAgents
+            ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
+            : nothing}
+        </div>
+        ${hasAgents ? this.renderAgentMenu(agentMembers) : nothing}
+      </sl-dropdown>
     `;
+  }
+
+  /** Render the dropdown menu for selecting a default agent. */
+  private renderAgentMenu(agentMembers: MemberInfo[]) {
+    return html`
+      <sl-menu @sl-select=${this.handleAgentMenuSelect}>
+        <sl-menu-label>Set thread default agent</sl-menu-label>
+        ${agentMembers.map(
+          (m) => html`
+            <sl-menu-item value=${m.name} ?checked=${this.defaultAgent === m.name}>
+              <sl-icon slot="prefix" name="cpu"></sl-icon>
+              ${m.name}
+            </sl-menu-item>
+          `
+        )}
+        <sl-divider></sl-divider>
+        <sl-menu-item value="__clear__" ?checked=${!this.defaultAgent}>
+          <sl-icon slot="prefix" name="x-circle"></sl-icon>
+          No agent (visible to space)
+        </sl-menu-item>
+      </sl-menu>
+    `;
+  }
+
+  /** Handle agent selection from the dropdown menu. */
+  private handleAgentMenuSelect(e: Event): void {
+    const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+    const item = detail?.item;
+    const value = item?.getAttribute('value') || '';
+    const newDefault = value === '__clear__' ? '' : value;
+
+    if (newDefault === this.defaultAgent) return;
+
+    this.dispatchEvent(
+      new CustomEvent('default-agent-change', {
+        detail: { defaultAgent: newDefault },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private handleInput(e: Event): void {
@@ -549,7 +619,9 @@ export class ScionChatComposer extends LitElement {
                 ? html`<img src=${file.url} alt=${file.name} />`
                 : html`<sl-icon name="file-earmark" style="font-size:0.875rem"></sl-icon>`}
               <span class="file-name" title=${file.name}>${file.name}</span>
-              <button class="remove-btn" @click=${() => this.removePendingFile(idx)}>&times;</button>
+              <button class="remove-btn" @click=${() => this.removePendingFile(idx)}>
+                &times;
+              </button>
             </div>
           `
         )}
@@ -643,7 +715,8 @@ export class ScionChatComposer extends LitElement {
   private handleSend(): void {
     const trimmed = this.text.trim();
     const hasAttachments = this.pendingFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled) return;
+    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
+      return;
 
     // Filter accepted mentions to those still literally present in the text.
     const mentions = [...this.acceptedMentions].filter((slug) => trimmed.includes(`@${slug}`));

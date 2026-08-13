@@ -122,6 +122,9 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private renameValue = '';
   @state() private dmSectionCollapsed = false;
 
+  /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
+  @state() private spaceFilter: 'all' | 'unread' = 'all';
+
   static override styles = css`
     :host {
       display: flex;
@@ -411,6 +414,68 @@ export class ScionChatSpaceRail extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    /* Filter + sort toolbar */
+    .rail-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .filter-toggle {
+      display: inline-flex;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
+      overflow: hidden;
+      flex: 1;
+    }
+
+    .filter-toggle button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.125rem;
+      height: 1.5rem;
+      border: none;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      padding: 0 0.5rem;
+      font-size: 0.6875rem;
+      font-family: inherit;
+      font-weight: 500;
+      transition: all 150ms ease;
+      white-space: nowrap;
+      flex: 1;
+      justify-content: center;
+    }
+
+    .filter-toggle button:not(:last-child) {
+      border-right: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .filter-toggle button:hover:not(.active) {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .filter-toggle button.active {
+      background: var(--scion-primary, #3b82f6);
+      color: white;
+    }
+
+    .filter-toggle button sl-icon {
+      font-size: 0.6875rem;
+    }
+
+    .sort-btn {
+      flex-shrink: 0;
+    }
+
+    .sort-btn::part(base) {
+      font-size: 0.75rem;
+      padding: 0.125rem;
+    }
+
     /* Sort dropdown */
     .sort-selector {
       padding: 0.375rem 0.75rem;
@@ -430,6 +495,9 @@ export class ScionChatSpaceRail extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Restore persisted filter/sort from localStorage
+    const savedFilter = localStorage.getItem('scion-chat-space-filter');
+    if (savedFilter === 'unread') this.spaceFilter = 'unread';
     void this.loadData();
     // Close context menu on outside click
     this._outsideClickHandler = this.handleOutsideClick.bind(this);
@@ -843,19 +911,95 @@ export class ScionChatSpaceRail extends LitElement {
 
       ${this.loading
         ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
-        : html` <div class="rail-body">${this.renderSpaces()} ${this.renderDMs()}</div> `}
+        : html`
+            ${this.renderToolbar()}
+            <div class="rail-body">${this.renderSpaces()} ${this.renderDMs()}</div>
+          `}
       ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
     `;
   }
 
-  private renderSpaces() {
+  /** Render the filter + sort toolbar below the rail header. */
+  private renderToolbar() {
+    return html`
+      <div class="rail-toolbar">
+        <div class="filter-toggle">
+          <button
+            class=${this.spaceFilter === 'all' ? 'active' : ''}
+            @click=${() => this.setSpaceFilter('all')}
+          >
+            All
+          </button>
+          <button
+            class=${this.spaceFilter === 'unread' ? 'active' : ''}
+            @click=${() => this.setSpaceFilter('unread')}
+          >
+            <sl-icon name="envelope"></sl-icon>
+            Unread
+          </button>
+        </div>
+        <sl-dropdown>
+          <sl-icon-button
+            slot="trigger"
+            name="sort-down"
+            class="sort-btn"
+            label="Sort spaces"
+          ></sl-icon-button>
+          <sl-menu @sl-select=${this.handleSortSelect}>
+            <sl-menu-label>Sort spaces</sl-menu-label>
+            <sl-menu-item value="activity" ?checked=${this.prefs.spaceSortMode === 'activity'}>
+              Recent activity
+            </sl-menu-item>
+            <sl-menu-item value="alpha" ?checked=${this.prefs.spaceSortMode === 'alpha'}>
+              Alphabetical
+            </sl-menu-item>
+          </sl-menu>
+        </sl-dropdown>
+      </div>
+    `;
+  }
+
+  /** Set space filter and persist to localStorage. */
+  private setSpaceFilter(filter: 'all' | 'unread'): void {
+    if (this.spaceFilter === filter) return;
+    this.spaceFilter = filter;
+    if (filter === 'all') {
+      localStorage.removeItem('scion-chat-space-filter');
+    } else {
+      localStorage.setItem('scion-chat-space-filter', filter);
+    }
+  }
+
+  /** Handle sort mode selection from the dropdown. */
+  private handleSortSelect(e: Event): void {
+    const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+    const item = detail?.item;
+    const value = item?.getAttribute('value');
+    if (value === 'activity' || value === 'alpha') {
+      void this.savePrefs({ spaceSortMode: value });
+    }
+  }
+
+  /** Get filtered spaces based on current filter. */
+  private getFilteredSpaces(): ChatSpace[] {
     const sorted = this.getSortedSpaces();
-    if (sorted.length === 0) {
+    if (this.spaceFilter === 'unread') {
+      return sorted.filter((s) => s.unreadCount > 0 || s.hasUnreadMention);
+    }
+    return sorted;
+  }
+
+  private renderSpaces() {
+    const filtered = this.getFilteredSpaces();
+    if (filtered.length === 0) {
+      if (this.spaceFilter === 'unread') {
+        return html`<div class="loading-state" style="font-size: 0.8125rem">All caught up!</div>`;
+      }
       return html`<div class="loading-state" style="font-size: 0.8125rem">
         No spaces available
       </div>`;
     }
-    return sorted.map((space) => this.renderSpace(space));
+    return filtered.map((space) => this.renderSpace(space));
   }
 
   private renderSpace(space: ChatSpace) {
