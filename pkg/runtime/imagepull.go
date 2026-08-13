@@ -20,11 +20,13 @@ import (
 )
 
 var harnessImageMap = map[string]string{
-	"claude":      "scion-claude:latest",
-	"gemini":      "scion-gemini:latest",
-	"codex":       "scion-codex:latest",
-	"opencode":    "scion-opencode:latest",
 	"antigravity": "scion-antigravity:latest",
+	"claude":      "scion-claude:latest",
+	"codex":       "scion-codex:latest",
+	"copilot":     "scion-copilot:latest",
+	"gemini-cli":  "scion-gemini-cli:latest",
+	"hermes":      "scion-hermes:latest",
+	"opencode":    "scion-opencode:latest",
 }
 
 // HarnessImages returns the fully qualified image names needed for the given harness keys.
