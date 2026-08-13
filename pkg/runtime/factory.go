@@ -45,7 +45,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: ResolveRuntime failed: %v", err)
 			// If profile resolution fails, we might be passed a direct runtime type
 			// Fallback to legacy behavior for now if profileName matches a known type
-			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" {
+			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" || profileName == "cloudrun-instances" {
 				runtimeType = profileName
 				util.Debugf("GetRuntime: using profileName as runtimeType: %s", runtimeType)
 			} else {
@@ -168,6 +168,12 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		return rt
 	case "cloudrun":
 		rt := NewCloudRunRuntime(rtConfig.CloudRun)
+		if vs != nil && vs.Server != nil {
+			rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+		}
+		return rt
+	case "cloudrun-instances":
+		rt := NewCloudRunRuntimeFromInstances(rtConfig.CloudRunInstances)
 		if vs != nil && vs.Server != nil {
 			rt.WorkspaceStorage = vs.Server.WorkspaceStorage
 		}

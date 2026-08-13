@@ -24,9 +24,14 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	yamlparser "github.com/knadh/koanf/parsers/yaml"
 )
 
 // --- Struct round-trip tests ---
@@ -1427,6 +1432,168 @@ func TestResolveRuntime_RuntimeNotFound(t *testing.T) {
 	_, _, err := vs.ResolveRuntime("")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "missing-runtime")
+}
+
+// --- CloudRunInstances koanf unmarshal tests ---
+
+func TestCloudRunInstancesConfig_KoanfUnmarshalFromYAML(t *testing.T) {
+	// Verify that the CloudRunInstances nested struct is correctly populated
+	// when loading from a YAML file via koanf. This was the failing path
+	// described in issue #984: the nested struct fields (especially ProjectID)
+	// were silently dropped.
+	tmpDir := t.TempDir()
+	settingsYAML := `
+schema_version: "1"
+active_profile: cr-prod
+runtimes:
+  cr:
+    type: cloudrun-instances
+    cloudrun_instances:
+      project_id: my-gcp-project
+      region: us-central1
+profiles:
+  cr-prod:
+    runtime: cr
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	k := koanf.New(".")
+	require.NoError(t, k.Load(file.Provider(filepath.Join(tmpDir, "settings.yaml")), yamlparser.Parser()))
+
+	settings := &VersionedSettings{
+		Runtimes: make(map[string]V1RuntimeConfig),
+		Profiles: make(map[string]V1ProfileConfig),
+	}
+	require.NoError(t, k.Unmarshal("", settings))
+
+	rt, ok := settings.Runtimes["cr"]
+	require.True(t, ok, "runtime 'cr' should exist")
+	assert.Equal(t, "cloudrun-instances", rt.Type)
+	require.NotNil(t, rt.CloudRunInstances, "CloudRunInstances should not be nil")
+	assert.Equal(t, "my-gcp-project", rt.CloudRunInstances.ProjectID)
+	assert.Equal(t, "us-central1", rt.CloudRunInstances.Region)
+}
+
+func TestCloudRunInstancesConfig_KoanfUnmarshalFromConfmap(t *testing.T) {
+	// Verify that flat koanf keys (as used by confmap.Provider or env vars)
+	// correctly populate the CloudRunInstances nested struct.
+	k := koanf.New(".")
+	require.NoError(t, k.Load(confmap.Provider(map[string]interface{}{
+		"runtimes.cr.type":                            "cloudrun-instances",
+		"runtimes.cr.cloudrun_instances.project_id":   "my-gcp-project",
+		"runtimes.cr.cloudrun_instances.region":        "us-central1",
+		"runtimes.docker.type":                        "docker",
+	}, "."), nil))
+
+	settings := &VersionedSettings{
+		Runtimes: make(map[string]V1RuntimeConfig),
+	}
+	require.NoError(t, k.Unmarshal("", settings))
+
+	rt, ok := settings.Runtimes["cr"]
+	require.True(t, ok, "runtime 'cr' should exist")
+	assert.Equal(t, "cloudrun-instances", rt.Type)
+	require.NotNil(t, rt.CloudRunInstances, "CloudRunInstances should not be nil")
+	assert.Equal(t, "my-gcp-project", rt.CloudRunInstances.ProjectID)
+	assert.Equal(t, "us-central1", rt.CloudRunInstances.Region)
+
+	// Docker runtime should not have CloudRunInstances
+	docker, ok := settings.Runtimes["docker"]
+	require.True(t, ok)
+	assert.Nil(t, docker.CloudRunInstances)
+}
+
+func TestCloudRunInstancesConfig_JSONRoundTrip(t *testing.T) {
+	// Verify that JSON marshal/unmarshal of V1RuntimeConfig preserves
+	// the CloudRunInstances nested struct. This exercises the DB storage
+	// path in operational settings (populateMapSections).
+	original := map[string]V1RuntimeConfig{
+		"cr": {
+			Type: "cloudrun-instances",
+			CloudRunInstances: &V1CloudRunInstancesConfig{
+				ProjectID: "my-gcp-project",
+				Region:    "us-central1",
+			},
+		},
+		"docker": {
+			Type: "docker",
+		},
+	}
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var restored map[string]V1RuntimeConfig
+	require.NoError(t, json.Unmarshal(data, &restored))
+
+	rt := restored["cr"]
+	assert.Equal(t, "cloudrun-instances", rt.Type)
+	require.NotNil(t, rt.CloudRunInstances)
+	assert.Equal(t, "my-gcp-project", rt.CloudRunInstances.ProjectID)
+	assert.Equal(t, "us-central1", rt.CloudRunInstances.Region)
+	assert.Nil(t, rt.CloudRun, "CloudRun should be nil for cloudrun-instances type")
+}
+
+func TestCloudRunInstancesConfig_ResolveRuntime(t *testing.T) {
+	// Verify that ResolveRuntime correctly returns the CloudRunInstances
+	// config when the active profile references a cloudrun-instances runtime.
+	vs := &VersionedSettings{
+		ActiveProfile: "cr-prod",
+		Runtimes: map[string]V1RuntimeConfig{
+			"cr": {
+				Type: "cloudrun-instances",
+				CloudRunInstances: &V1CloudRunInstancesConfig{
+					ProjectID: "my-gcp-project",
+					Region:    "us-central1",
+				},
+			},
+		},
+		Profiles: map[string]V1ProfileConfig{
+			"cr-prod": {Runtime: "cr"},
+		},
+	}
+
+	rtConfig, runtimeType, err := vs.ResolveRuntime("")
+	require.NoError(t, err)
+	assert.Equal(t, "cloudrun-instances", runtimeType)
+	require.NotNil(t, rtConfig.CloudRunInstances)
+	assert.Equal(t, "my-gcp-project", rtConfig.CloudRunInstances.ProjectID)
+	assert.Equal(t, "us-central1", rtConfig.CloudRunInstances.Region)
+}
+
+func TestCloudRunInstancesConfig_CoexistsWithCloudRun(t *testing.T) {
+	// Verify that both CloudRun and CloudRunInstances can be configured
+	// as separate runtime entries without interference.
+	k := koanf.New(".")
+	require.NoError(t, k.Load(confmap.Provider(map[string]interface{}{
+		"runtimes.cr-service.type":                          "cloudrun",
+		"runtimes.cr-service.cloudrun.project":              "service-project",
+		"runtimes.cr-service.cloudrun.region":               "us-east1",
+		"runtimes.cr-instances.type":                        "cloudrun-instances",
+		"runtimes.cr-instances.cloudrun_instances.project_id": "instances-project",
+		"runtimes.cr-instances.cloudrun_instances.region":    "us-west1",
+	}, "."), nil))
+
+	settings := &VersionedSettings{
+		Runtimes: make(map[string]V1RuntimeConfig),
+	}
+	require.NoError(t, k.Unmarshal("", settings))
+
+	// Check cloudrun service entry
+	svc := settings.Runtimes["cr-service"]
+	assert.Equal(t, "cloudrun", svc.Type)
+	require.NotNil(t, svc.CloudRun)
+	assert.Equal(t, "service-project", svc.CloudRun.Project)
+	assert.Equal(t, "us-east1", svc.CloudRun.Region)
+	assert.Nil(t, svc.CloudRunInstances)
+
+	// Check cloudrun-instances entry
+	inst := settings.Runtimes["cr-instances"]
+	assert.Equal(t, "cloudrun-instances", inst.Type)
+	require.NotNil(t, inst.CloudRunInstances)
+	assert.Equal(t, "instances-project", inst.CloudRunInstances.ProjectID)
+	assert.Equal(t, "us-west1", inst.CloudRunInstances.Region)
+	assert.Nil(t, inst.CloudRun)
 }
 
 // --- Hub helper method tests ---

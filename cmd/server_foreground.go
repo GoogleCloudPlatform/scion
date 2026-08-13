@@ -2644,11 +2644,10 @@ func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtim
 	sort.Strings(profileNames)
 	for _, profileName := range profileNames {
 		rtConfig, runtimeType, err := settings.ResolveRuntime(profileName)
-		if err != nil || runtimeType != "cloudrun" || rtConfig.CloudRun == nil {
+		if err != nil {
 			continue
 		}
-		projectID := strings.TrimSpace(rtConfig.CloudRun.Project)
-		location := strings.TrimSpace(rtConfig.CloudRun.Region)
+		projectID, location := resolveCloudRunProjectAndRegion(rtConfig, runtimeType)
 		if projectID == "" || location == "" {
 			continue
 		}
@@ -2660,16 +2659,33 @@ func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtim
 	if err != nil {
 		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: failed to resolve runtime: %w", err)
 	}
-	if runtimeType != "cloudrun" || rtConfig.CloudRun == nil {
-		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: no cloudrun profile with project+region found in settings (active profile runtime: %q)", runtimeType)
-	}
-	projectID := strings.TrimSpace(rtConfig.CloudRun.Project)
-	location := strings.TrimSpace(rtConfig.CloudRun.Region)
+	projectID, location := resolveCloudRunProjectAndRegion(rtConfig, runtimeType)
 	if projectID == "" || location == "" {
-		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: project (%q) and region (%q) must both be set in cloudrun runtime config", projectID, location)
+		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: project (%q) and region (%q) must both be set in cloudrun runtime config (type: %q)", projectID, location, runtimeType)
 	}
 	seed := fmt.Sprintf("cloudrun:%s:%s", projectID, location)
 	return uuid.NewSHA1(cloudRunLogicalBrokerNamespace, []byte(seed)).String(), nil
+}
+
+// resolveCloudRunProjectAndRegion extracts the GCP project ID and region from
+// a V1RuntimeConfig for both "cloudrun" and "cloudrun-instances" runtime types.
+// Returns empty strings when the runtime type is not a Cloud Run variant or
+// when the required nested config is absent.
+func resolveCloudRunProjectAndRegion(rtConfig config.V1RuntimeConfig, runtimeType string) (string, string) {
+	switch runtimeType {
+	case "cloudrun":
+		if rtConfig.CloudRun == nil {
+			return "", ""
+		}
+		return strings.TrimSpace(rtConfig.CloudRun.Project), strings.TrimSpace(rtConfig.CloudRun.Region)
+	case "cloudrun-instances":
+		if rtConfig.CloudRunInstances == nil {
+			return "", ""
+		}
+		return strings.TrimSpace(rtConfig.CloudRunInstances.ProjectID), strings.TrimSpace(rtConfig.CloudRunInstances.Region)
+	default:
+		return "", ""
+	}
 }
 
 // resolveBrokerName determines the broker name from various sources.

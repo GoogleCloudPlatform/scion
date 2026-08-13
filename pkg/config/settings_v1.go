@@ -837,6 +837,16 @@ type V1CloudRunConfig struct {
 	Region string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
 }
 
+// V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
+// This is the per-agent-instance variant of Cloud Run, where each agent
+// gets its own Cloud Run service instance.
+type V1CloudRunInstancesConfig struct {
+	// ProjectID is the GCP project ID for Cloud Run Instances API calls.
+	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	// Region is the GCP region for Cloud Run instances (e.g. "us-central1").
+	Region string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+}
+
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
 type V1RuntimeConfig struct {
 	Type              string            `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
@@ -849,6 +859,8 @@ type V1RuntimeConfig struct {
 	ListAllNamespaces bool              `json:"list_all_namespaces,omitempty" yaml:"list_all_namespaces,omitempty" koanf:"list_all_namespaces"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *V1CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
+	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
+	CloudRunInstances *V1CloudRunInstancesConfig `json:"cloudrun_instances,omitempty" yaml:"cloudrun_instances,omitempty" koanf:"cloudrun_instances"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to
