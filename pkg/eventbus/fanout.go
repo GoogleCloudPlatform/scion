@@ -164,6 +164,8 @@ func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscr
 		h := handler
 		if nb.Name != InProcessBusName {
 			h = nil
+		} else if h == nil {
+			continue
 		}
 		sub, err := nb.Bus.Subscribe(pattern, h)
 		if err != nil {
@@ -278,6 +280,9 @@ func (f *FanOutEventBus) ReplaceSpoke(name string, newBus NamedEventBus) error {
 // because only the inprocess spoke invokes handlers — external spokes use
 // the pattern for remote-side filtering only.
 func (f *FanOutEventBus) replaySubscriptions(bus NamedEventBus) {
+	if bus.Name == InProcessBusName {
+		return
+	}
 	f.subMu.Lock()
 	subs := make([]string, len(f.subscriptions))
 	copy(subs, f.subscriptions)
