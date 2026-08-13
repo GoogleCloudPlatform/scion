@@ -127,6 +127,16 @@ export function showConfirm(message: string, options?: ConfirmOptions): Promise<
       );
     }
 
+    // Inherit the active theme so the dialog panel, text, and buttons
+    // use the correct light / dark palette.  Shoelace's sl-dialog renders
+    // its panel in shadow DOM and keys off these CSS custom properties.
+    if (document.documentElement.classList.contains('sl-theme-dark')) {
+      dialog.classList.add('sl-theme-dark');
+    }
+    dialog.style.setProperty('--sl-panel-background-color', 'var(--scion-surface-raised)');
+    dialog.style.setProperty('--sl-panel-border-color', 'var(--scion-border)');
+    body.style.color = 'var(--scion-text)';
+
     document.body.appendChild(dialog);
     // Open after appending so Shoelace can initialise.
     requestAnimationFrame(() => {

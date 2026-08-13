@@ -1559,6 +1559,14 @@ export class ScionPageChat extends LitElement {
                 label="Search messages"
                 @click=${() => void this.openSearch()}
               ></sl-icon-button>
+              <sl-icon-button
+                class="members-btn"
+                name="people"
+                label="Toggle members"
+                @click=${() => {
+                  this.v2MembersExpanded = !this.v2MembersExpanded;
+                }}
+              ></sl-icon-button>
             </div>
           `
         : conv.threadName
