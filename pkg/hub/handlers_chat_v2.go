@@ -677,7 +677,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// Step 3: Determine routing.
 	if len(mentionedAgents) > 0 {
 		// --- Agent-routed: explicit mentions ---
-		s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, mentionedAgents, mentionResults, now)
+		s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, mentionedAgents, mentionNames, mentionResults, now)
 		// Ensure DM registry rows exist so the DM appears in the rail.
 		if isDM {
 			s.ensureDMRegistered(ctx, key, user.ID())
@@ -693,7 +693,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		if agentID := parseAgentDMKey(key); agentID != "" {
 			dmAgent, err := s.store.GetAgent(ctx, agentID)
 			if err == nil && dmAgent != nil {
-				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, nil, now)
+				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, mentionNames, nil, now)
 				// Ensure DM registry rows exist so the DM appears in the rail.
 				s.ensureDMRegistered(ctx, key, user.ID())
 				return
@@ -706,19 +706,19 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			// Resolve the default agent.
 			defaultAgent, err := s.store.GetAgent(ctx, topic.DefaultAgent)
 			if err == nil && defaultAgent != nil {
-				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, nil, now)
+				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, now)
 				return
 			}
 		}
 	}
 
 	// --- Human-to-human message ---
-	s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, now)
+	s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, mentionNames, now)
 }
 
 // sendAgentRouted sends a message through the existing agent dispatch path.
 func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
-	content, senderLabel string, agents []*store.Agent, mentionResults []messages.MentionResult, now time.Time) {
+	content, senderLabel string, agents []*store.Agent, mentionNames []string, mentionResults []messages.MentionResult, now time.Time) {
 
 	ctx := r.Context()
 
@@ -820,6 +820,13 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// Update topic/DM watermark.
 	s.touchConversationActivity(ctx, key, storeMsg.ID)
 
+	// --- W6: Human mention notifications ---
+	// Resolve @mentions that didn't match agents — they may be human members.
+	// Fire in a goroutine to avoid blocking the response.
+	if cn := s.getChatNotifier(); cn != nil && len(mentionNames) > 0 && projectID != "" {
+		go s.fireHumanMentionNotifications(context.Background(), mentionNames, projectID, key, user.ID(), senderLabel, content)
+	}
+
 	writeJSON(w, http.StatusCreated, chatMessageResponse{
 		ID:        storeMsg.ID,
 		Content:   content,
@@ -833,7 +840,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 // sendHumanToHuman persists a type:chat message for human-to-human communication.
 func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
-	content, senderLabel string, isDM bool, now time.Time) {
+	content, senderLabel string, isDM bool, mentionNames []string, now time.Time) {
 
 	ctx := r.Context()
 
@@ -899,6 +906,18 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	// For DMs, ensure DM registry rows exist for both participants.
 	if isDM && wcs != nil {
 		s.ensureDMRegistered(ctx, key, user.ID())
+	}
+
+	// --- W6: Chat notifications ---
+	if cn := s.getChatNotifier(); cn != nil {
+		// DM received notification: notify the peer when a DM is sent.
+		if isDM && recipientID != "" && recipientID != user.ID() {
+			go cn.NotifyDMReceived(context.Background(), recipientID, senderLabel, key, content, projectID)
+		}
+		// Human mention notifications.
+		if len(mentionNames) > 0 && projectID != "" {
+			go s.fireHumanMentionNotifications(context.Background(), mentionNames, projectID, key, user.ID(), senderLabel, content)
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, chatMessageResponse{
@@ -1569,6 +1588,118 @@ func (s *Server) ensureDMRegistered(ctx context.Context, key, callerID string) {
 		PeerKind:        peerKind1,
 		LastActivityAt:  now,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// W6: Chat notification helpers
+// ---------------------------------------------------------------------------
+
+// fireHumanMentionNotifications resolves @mention names against project members
+// (humans, not agents) and fires a notification for each match. The sender is
+// excluded from notifications. Agent slugs are skipped — they already get
+// type:mention messages through the existing pipeline.
+func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames []string, projectID, conversationKey, senderUserID, senderName, messageContent string) {
+	cn := s.getChatNotifier()
+	if cn == nil {
+		return
+	}
+
+	// Resolve human members for the project.
+	humanMembers := s.resolveProjectHumanMembers(ctx, projectID)
+	if len(humanMembers) == 0 {
+		return
+	}
+
+	// Build a lookup by lowercase display name and email.
+	type memberInfo struct {
+		ID          string
+		DisplayName string
+	}
+	lookup := make(map[string]memberInfo)
+	for _, m := range humanMembers {
+		if m.DisplayName != "" {
+			lookup[strings.ToLower(m.DisplayName)] = memberInfo{ID: m.ID, DisplayName: m.DisplayName}
+		}
+		if m.Email != "" {
+			// Also match by email prefix (before @).
+			lookup[strings.ToLower(m.Email)] = memberInfo{ID: m.ID, DisplayName: m.DisplayName}
+			if at := strings.IndexByte(m.Email, '@'); at > 0 {
+				lookup[strings.ToLower(m.Email[:at])] = memberInfo{ID: m.ID, DisplayName: m.DisplayName}
+			}
+		}
+	}
+
+	// Resolve the conversation name for the notification message.
+	conversationName := ""
+	if !strings.HasPrefix(conversationKey, "dm:") {
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			if topic, err := wcs.GetTopic(ctx, conversationKey); err == nil && topic != nil {
+				conversationName = topic.Name
+			}
+		}
+	}
+
+	seen := make(map[string]bool)
+	for _, name := range mentionNames {
+		lower := strings.ToLower(name)
+		member, ok := lookup[lower]
+		if !ok {
+			continue
+		}
+		// Skip the sender — don't notify yourself.
+		if member.ID == senderUserID {
+			continue
+		}
+		// Deduplicate.
+		if seen[member.ID] {
+			continue
+		}
+		seen[member.ID] = true
+
+		cn.NotifyMention(ctx, member.ID, senderName, conversationKey, conversationName, messageContent, projectID)
+	}
+}
+
+// resolveProjectHumanMembers returns the human members of a project by
+// looking up the project's members group. This is used to match @mentions
+// against human display names.
+func (s *Server) resolveProjectHumanMembers(ctx context.Context, projectID string) []chatMemberEntry {
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		return nil
+	}
+
+	membersSlug := "project:" + project.Slug + ":members"
+	group, err := s.store.GetGroupBySlug(ctx, membersSlug)
+	if err != nil || group == nil {
+		return nil
+	}
+
+	members, err := s.store.GetGroupMembers(ctx, group.ID)
+	if err != nil {
+		return nil
+	}
+
+	var humans []chatMemberEntry
+	for _, m := range members {
+		if m.MemberType != store.GroupMemberTypeUser {
+			continue
+		}
+		u, err := s.store.GetUser(ctx, m.MemberID)
+		if err != nil {
+			continue
+		}
+		humans = append(humans, chatMemberEntry{
+			ID:          u.ID,
+			Kind:        "user",
+			DisplayName: u.DisplayName,
+			Email:       u.Email,
+		})
+	}
+	return humans
 }
 
 // ---------------------------------------------------------------------------

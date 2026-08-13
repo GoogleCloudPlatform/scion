@@ -125,6 +125,11 @@ type WebChatStore interface {
 	// SetMuted updates the muted flag for a user+conversation pair.
 	SetMuted(ctx context.Context, userID, conversationKey string, muted bool) error
 
+	// IsConversationMuted returns whether the given user has muted the
+	// conversation identified by conversationKey. Returns false if no
+	// read-state row exists (unmuted by default).
+	IsConversationMuted(ctx context.Context, userID, conversationKey string) (bool, error)
+
 	// --- Wave-2 User-prefs methods ---
 
 	// GetUserPrefs returns the user's rail preferences.
@@ -842,6 +847,20 @@ DO UPDATE SET muted = excluded.muted
 		return fmt.Errorf("webchat store: set muted: %w", err)
 	}
 	return nil
+}
+
+// IsConversationMuted returns whether the user has muted the conversation.
+// Returns false (unmuted) when no read-state row exists.
+func (s *sqliteWebChatStore) IsConversationMuted(ctx context.Context, userID, conversationKey string) (bool, error) {
+	const query = `SELECT muted FROM webchat_read_state WHERE user_id = ? AND conversation_key = ?`
+	var muted int
+	if err := s.db.QueryRowContext(ctx, query, userID, conversationKey).Scan(&muted); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("webchat store: is conversation muted: %w", err)
+	}
+	return muted != 0, nil
 }
 
 // ---------------------------------------------------------------------------

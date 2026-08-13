@@ -599,6 +599,20 @@ DO UPDATE SET muted = EXCLUDED.muted
 	return nil
 }
 
+// IsConversationMuted returns whether the user has muted the conversation.
+// Returns false (unmuted) when no read-state row exists.
+func (s *pgWebChatStore) IsConversationMuted(ctx context.Context, userID, conversationKey string) (bool, error) {
+	const query = `SELECT muted FROM webchat_read_state WHERE user_id = $1 AND conversation_key = $2`
+	var muted bool
+	if err := s.db.QueryRowContext(ctx, query, userID, conversationKey).Scan(&muted); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("webchat store: is conversation muted: %w", err)
+	}
+	return muted, nil
+}
+
 // ---------------------------------------------------------------------------
 // Wave-2 User-prefs methods (Postgres)
 // ---------------------------------------------------------------------------

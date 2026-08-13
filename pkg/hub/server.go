@@ -739,6 +739,9 @@ type Server struct {
 	// Web chat store for webchat_* tables (thread prefs, chat threads, etc.) — nil = disabled.
 	webChatStore WebChatStore
 
+	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
+	chatNotifier *ChatNotifier
+
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -1870,10 +1873,20 @@ func (s *Server) GetMessageBrokerProxy() *MessageBrokerProxy {
 }
 
 // SetWebChatStore sets the webchat store for thread prefs and chat threads API.
-func (s *Server) SetWebChatStore(store WebChatStore) {
+// It also initializes the ChatNotifier for human-mention and DM notifications (W6).
+func (s *Server) SetWebChatStore(wcs WebChatStore) {
 	s.mu.Lock()
-	s.webChatStore = store
+	s.webChatStore = wcs
+	// Initialize ChatNotifier with the store; presence checker is nil (W5 stub).
+	s.chatNotifier = NewChatNotifier(s.store, s.events, wcs, nil, s.messageLog)
 	s.mu.Unlock()
+}
+
+// getChatNotifier returns the chat notifier, or nil if not initialized.
+func (s *Server) getChatNotifier() *ChatNotifier {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.chatNotifier
 }
 
 // SetPluginManager sets the plugin manager for broker integration admin API.

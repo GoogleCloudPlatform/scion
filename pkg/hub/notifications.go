@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -500,6 +501,217 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 	nd.events.PublishUserMessage(ctx, storeMsg)
 	nd.log.Debug("Inbox message created for notification",
 		"notificationID", notif.ID, "messageID", storeMsg.ID, "subscriberID", sub.SubscriberID)
+}
+
+// ---------------------------------------------------------------------------
+// Chat notification triggers (W6): human mention + DM received
+// ---------------------------------------------------------------------------
+
+// ChatNotificationStatus constants for chat-specific notification triggers.
+const (
+	ChatNotificationMention    = "MENTION"
+	ChatNotificationDMReceived = "DM_RECEIVED"
+)
+
+// PresenceChecker reports whether a user has active presence (i.e. is
+// currently viewing the chat UI). When a user is actively present, DM
+// notifications are suppressed to avoid interrupting them.
+//
+// W5 will implement a real presence map; until then a nil PresenceChecker
+// (or the NoOpPresenceChecker) treats every user as absent, which means
+// DM notifications always fire — the conservative default.
+type PresenceChecker interface {
+	// IsUserActive returns true if the user is actively present
+	// (heartbeat within the presence window).
+	IsUserActive(userID string) bool
+}
+
+// NoOpPresenceChecker always returns false (user is not active).
+// Used as the default when W5 presence is not yet available.
+type NoOpPresenceChecker struct{}
+
+// IsUserActive always returns false — the user is assumed absent.
+func (NoOpPresenceChecker) IsUserActive(_ string) bool { return false }
+
+// ChatNotifier creates notifications for chat events (human mentions,
+// DM received) using the existing notification pipeline (SSE publish +
+// store). It is wired into the Server at startup and called from the
+// send path in handlers_chat_v2.go.
+type ChatNotifier struct {
+	store         store.Store
+	events        EventPublisher
+	webChatStore  WebChatStore
+	presence      PresenceChecker
+	log           *slog.Logger
+}
+
+// NewChatNotifier creates a ChatNotifier. If presence is nil, a
+// NoOpPresenceChecker is used (DM notifications always fire).
+func NewChatNotifier(s store.Store, events EventPublisher, wcs WebChatStore, presence PresenceChecker, log *slog.Logger) *ChatNotifier {
+	if presence == nil {
+		presence = NoOpPresenceChecker{}
+	}
+	return &ChatNotifier{
+		store:        s,
+		events:       events,
+		webChatStore: wcs,
+		presence:     presence,
+		log:          log,
+	}
+}
+
+// NotifyMention creates a notification for a human user who was @mentioned
+// in a thread or DM. It respects the muted flag on the conversation.
+//
+// Parameters:
+//   - mentionedUserID: the UUID of the mentioned user
+//   - senderName: display name (or email) of the sender
+//   - conversationKey: thread UUID or DM key
+//   - conversationName: human-readable name (thread name or "DM")
+//   - messagePreview: the raw message text (will be truncated)
+//   - projectID: project UUID (may be empty for user-user DMs)
+func (cn *ChatNotifier) NotifyMention(ctx context.Context, mentionedUserID, senderName, conversationKey, conversationName, messagePreview, projectID string) {
+	if cn == nil || cn.webChatStore == nil {
+		return
+	}
+
+	// Respect muted flag.
+	muted, err := cn.webChatStore.IsConversationMuted(ctx, mentionedUserID, conversationKey)
+	if err != nil {
+		cn.log.Error("Failed to check muted state for mention notification",
+			"userID", mentionedUserID, "conversationKey", conversationKey, "error", err)
+		return
+	}
+	if muted {
+		cn.log.Debug("Skipping mention notification — conversation muted",
+			"userID", mentionedUserID, "conversationKey", conversationKey)
+		return
+	}
+
+	message := formatChatNotification(ChatNotificationMention, senderName, conversationName, messagePreview)
+
+	// Use nil UUIDs for SubscriptionID and AgentID since chat notifications
+	// are not tied to an agent subscription — they are direct triggers.
+	nilUUID := uuid.Nil.String()
+	effectiveProjectID := projectID
+	if effectiveProjectID == "" {
+		effectiveProjectID = nilUUID
+	}
+
+	notif := &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: nilUUID,
+		AgentID:        nilUUID,
+		ProjectID:      effectiveProjectID,
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   mentionedUserID,
+		Status:         ChatNotificationMention,
+		Message:        message,
+		CreatedAt:      time.Now(),
+	}
+
+	if err := cn.store.CreateNotification(ctx, notif); err != nil {
+		cn.log.Error("Failed to create mention notification",
+			"userID", mentionedUserID, "error", err)
+		return
+	}
+
+	cn.events.PublishNotification(ctx, notif)
+	cn.log.Info("Mention notification created",
+		"notificationID", notif.ID, "mentionedUser", mentionedUserID,
+		"sender", senderName, "conversationKey", conversationKey)
+}
+
+// NotifyDMReceived creates a notification for a user who received a DM.
+// Notifications are skipped when:
+//   - the conversation is muted
+//   - the recipient has active presence (W5 integration)
+//
+// Parameters:
+//   - recipientUserID: the UUID of the DM recipient
+//   - senderName: display name (or email) of the sender
+//   - conversationKey: the DM key (dm:...)
+//   - messagePreview: the raw message text (will be truncated)
+//   - projectID: project UUID (may be empty for user-user DMs)
+func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID, senderName, conversationKey, messagePreview, projectID string) {
+	if cn == nil || cn.webChatStore == nil {
+		return
+	}
+
+	// Respect muted flag.
+	muted, err := cn.webChatStore.IsConversationMuted(ctx, recipientUserID, conversationKey)
+	if err != nil {
+		cn.log.Error("Failed to check muted state for DM notification",
+			"userID", recipientUserID, "conversationKey", conversationKey, "error", err)
+		return
+	}
+	if muted {
+		cn.log.Debug("Skipping DM notification — conversation muted",
+			"userID", recipientUserID, "conversationKey", conversationKey)
+		return
+	}
+
+	// Skip if recipient has active presence (they're already viewing chat).
+	if cn.presence.IsUserActive(recipientUserID) {
+		cn.log.Debug("Skipping DM notification — user has active presence",
+			"userID", recipientUserID, "conversationKey", conversationKey)
+		return
+	}
+
+	message := formatChatNotification(ChatNotificationDMReceived, senderName, "", messagePreview)
+
+	// Use nil UUIDs for SubscriptionID and AgentID since chat notifications
+	// are not tied to an agent subscription — they are direct triggers.
+	nilUUID := uuid.Nil.String()
+	effectiveProjectID := projectID
+	if effectiveProjectID == "" {
+		effectiveProjectID = nilUUID
+	}
+
+	notif := &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: nilUUID,
+		AgentID:        nilUUID,
+		ProjectID:      effectiveProjectID,
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   recipientUserID,
+		Status:         ChatNotificationDMReceived,
+		Message:        message,
+		CreatedAt:      time.Now(),
+	}
+
+	if err := cn.store.CreateNotification(ctx, notif); err != nil {
+		cn.log.Error("Failed to create DM notification",
+			"userID", recipientUserID, "error", err)
+		return
+	}
+
+	cn.events.PublishNotification(ctx, notif)
+	cn.log.Info("DM notification created",
+		"notificationID", notif.ID, "recipient", recipientUserID,
+		"sender", senderName, "conversationKey", conversationKey)
+}
+
+// formatChatNotification formats a notification message for chat triggers.
+func formatChatNotification(trigger, senderName, conversationName, messagePreview string) string {
+	// Truncate preview to a reasonable length for push notifications.
+	const maxPreview = 100
+	preview := messagePreview
+	if len(preview) > maxPreview {
+		preview = preview[:maxPreview] + "…"
+	}
+
+	switch trigger {
+	case ChatNotificationMention:
+		if conversationName != "" {
+			return fmt.Sprintf("@%s mentioned you in #%s: %s", senderName, conversationName, preview)
+		}
+		return fmt.Sprintf("@%s mentioned you: %s", senderName, preview)
+	case ChatNotificationDMReceived:
+		return fmt.Sprintf("%s sent you a message: %s", senderName, preview)
+	default:
+		return fmt.Sprintf("Chat notification from %s: %s", senderName, preview)
+	}
 }
 
 // formatNotificationMessage formats a notification message based on agent state and status.
