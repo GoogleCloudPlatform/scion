@@ -15,6 +15,7 @@
 package harness
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -81,6 +82,8 @@ func TestAllHarnessNames_MatchesDisk(t *testing.T) {
 		configPath := filepath.Join(harnessesDir, e.Name(), "config.yaml")
 		if _, err := os.Stat(configPath); err == nil {
 			diskNames = append(diskNames, e.Name())
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unexpected error checking %s: %v", configPath, err)
 		}
 	}
 	sort.Strings(diskNames)
