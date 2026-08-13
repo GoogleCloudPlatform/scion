@@ -344,6 +344,7 @@ if $FULL_DEPLOY; then
 # Scion rebuild-server maintenance task privileges.
 scion ALL=(root) NOPASSWD: /usr/bin/install -m 755 /home/scion/scion/scion.rebuild /usr/local/bin/scion
 scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart scion-hub
+scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart --no-block scion-hub
 SUDOERS_EOF
     if ! diff -q /tmp/scion-rebuild-server "$SUDOERS_RULE" >/dev/null 2>&1; then
         sudo install -m 440 -o root -g root /tmp/scion-rebuild-server "$SUDOERS_RULE"
