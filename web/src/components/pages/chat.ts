@@ -47,6 +47,8 @@ import '../shared/chat/chat-thread.js';
 const loadSpaceRail = () => import('../shared/chat/chat-space-rail.js');
 // Lazy-load the members sidebar only when v2 is active
 const loadChatMembers = () => import('../shared/chat/chat-members.js');
+// Lazy-load the search component only when v2 is active
+const loadChatSearch = () => import('../shared/chat/chat-search.js');
 
 // ---- V1 types ----
 
@@ -119,6 +121,10 @@ export class ScionPageChat extends LitElement {
   private _onChatTopic = this.handleChatTopic.bind(this);
   private _onPresenceUpdated = this.handlePresenceUpdated.bind(this);
   private _onRailLoaded = this.handleRailLoaded.bind(this);
+  /** Whether the search panel is visible. */
+  @state() private v2SearchActive = false;
+  /** Whether the search component has been lazy-loaded. */
+  @state() private v2SearchLoaded = false;
   /** Presence heartbeat interval timer. */
   private _presenceInterval: ReturnType<typeof setInterval> | null = null;
   /** Tracked project IDs for presence heartbeat. */
@@ -1085,6 +1091,12 @@ export class ScionPageChat extends LitElement {
                 style="font-size: 0.875rem; color: var(--scion-text-muted)"
               ></sl-icon>
               <span>${conv.peerName}</span>
+              <sl-icon-button
+                class="members-btn"
+                name="search"
+                label="Search messages"
+                @click=${() => void this.openSearch()}
+              ></sl-icon-button>
             </div>
           `
         : conv.threadName
@@ -1104,6 +1116,12 @@ export class ScionPageChat extends LitElement {
                   : nothing}
                 <sl-icon-button
                   class="members-btn"
+                  name="search"
+                  label="Search messages"
+                  @click=${() => void this.openSearch()}
+                ></sl-icon-button>
+                <sl-icon-button
+                  class="members-btn"
                   name="people"
                   label="Toggle members"
                   @click=${() => {
@@ -1113,18 +1131,76 @@ export class ScionPageChat extends LitElement {
               </div>
             `
           : nothing}
-      <scion-chat-thread
-        conversationKey=${conv.conversationKey}
-        projectId=${conv.projectId}
-        threadName=${conv.threadName}
-        defaultAgent=${conv.defaultAgent}
-        ?isDM=${conv.isDM}
-        peerName=${conv.peerName}
-        ?canSend=${true}
-        .members=${this.v2Members}
-        .agents=${this.getAgentsFromMembers()}
-      ></scion-chat-thread>
+      ${this.v2SearchActive && this.v2SearchLoaded
+        ? html`
+            <scion-chat-search
+              projectId=${conv.projectId}
+              conversationKey=${conv.conversationKey}
+              conversationName=${conv.isDM ? conv.peerName : conv.threadName ? '#' + conv.threadName : ''}
+              @search-close=${this.handleSearchClose}
+              @search-navigate=${this.handleSearchNavigate}
+            ></scion-chat-search>
+          `
+        : html`
+            <scion-chat-thread
+              conversationKey=${conv.conversationKey}
+              projectId=${conv.projectId}
+              threadName=${conv.threadName}
+              defaultAgent=${conv.defaultAgent}
+              ?isDM=${conv.isDM}
+              peerName=${conv.peerName}
+              ?canSend=${true}
+              .members=${this.v2Members}
+              .agents=${this.getAgentsFromMembers()}
+            ></scion-chat-thread>
+          `}
     `;
+  }
+
+  /** Open the search panel, lazy-loading the component if needed. */
+  private async openSearch(): Promise<void> {
+    if (!this.v2SearchLoaded) {
+      await loadChatSearch();
+      this.v2SearchLoaded = true;
+    }
+    this.v2SearchActive = true;
+    // Focus the search input after render.
+    requestAnimationFrame(() => {
+      const search = this.shadowRoot?.querySelector('scion-chat-search') as
+        | import('../shared/chat/chat-search.js').ScionChatSearch
+        | null;
+      search?.open();
+    });
+  }
+
+  /** Handle search panel close. */
+  private handleSearchClose(): void {
+    this.v2SearchActive = false;
+  }
+
+  /** Handle navigation from a search result click. */
+  private handleSearchNavigate(e: CustomEvent): void {
+    const detail = e.detail as {
+      conversationKey: string;
+      messageId: string;
+      projectId: string;
+    };
+    if (!detail) return;
+
+    this.v2SearchActive = false;
+
+    // If the result is in a different conversation, navigate to it.
+    if (detail.conversationKey !== this.v2Conversation?.conversationKey) {
+      const isDM = detail.conversationKey.startsWith('dm:');
+      if (isDM) {
+        navigateTo(`/chat/dm/${encodeURIComponent(detail.conversationKey)}`);
+      } else if (detail.projectId) {
+        navigateTo(
+          `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`
+        );
+      }
+    }
+    // TODO: scroll to the specific messageId within the conversation
   }
 
   /** Extract agent members as Agent-like objects for the mention autocomplete. */

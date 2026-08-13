@@ -1541,7 +1541,14 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleChatSearch handles GET /api/v1/chat/search.
-// Stub for W8.
+// Searches chat messages with optional scoping by project or conversation.
+//
+// Query params:
+//   - q: search text (required, minimum 2 characters)
+//   - projectId: scope to a single project (optional)
+//   - key: scope to a single conversation (optional)
+//   - limit: max results (default 50, max 200)
+//   - cursor: keyset pagination cursor (optional)
 func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
@@ -1554,10 +1561,130 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Full search implementation in W8.
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"results":    []interface{}{},
-		"totalCount": 0,
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Validate query first (before any store access).
+	query := strings.TrimSpace(q.Get("q"))
+	if query == "" {
+		ValidationError(w, "q is required", nil)
+		return
+	}
+	if len([]rune(query)) < 2 {
+		ValidationError(w, "q must be at least 2 characters", nil)
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeJSON(w, http.StatusOK, chatSearchResponse{Results: []ChatSearchResult{}})
+		return
+	}
+
+	// Parse limit.
+	limit := 50
+	if l := q.Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+
+	filter := ChatSearchFilter{
+		Query:  query,
+		Limit:  limit,
+		Cursor: q.Get("cursor"),
+	}
+
+	// Scoping.
+	projectID := q.Get("projectId")
+	conversationKey := q.Get("key")
+
+	if conversationKey != "" {
+		// Scope to one conversation — authorize access.
+		isDM := strings.HasPrefix(conversationKey, "dm:")
+		if isDM {
+			if !validDMKey(conversationKey) {
+				BadRequest(w, "invalid DM key format")
+				return
+			}
+			if !isDMParticipant(conversationKey, user.ID()) {
+				Forbidden(w)
+				return
+			}
+		} else {
+			topic, err := wcs.GetTopic(ctx, conversationKey)
+			if err != nil || topic == nil {
+				NotFound(w, "Thread")
+				return
+			}
+			project, err := s.store.GetProject(ctx, topic.ProjectID)
+			if err != nil {
+				NotFound(w, "Project")
+				return
+			}
+			if !s.authorize(w, r, projectResource(project), ActionRead) {
+				return
+			}
+		}
+		filter.ConversationKey = conversationKey
+	} else if projectID != "" {
+		// Scope to one project — authorize access.
+		project, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			NotFound(w, "Project")
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionRead) {
+			return
+		}
+		filter.ProjectID = projectID
+	} else {
+		// Search all visible projects. Filter by user's accessible projects.
+		allProjects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
+			return
+		}
+
+		identity := GetIdentityFromContext(ctx)
+		resources := make([]Resource, len(allProjects.Items))
+		for i := range allProjects.Items {
+			resources[i] = projectResource(&allProjects.Items[i])
+		}
+		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project")
+
+		var visibleIDs []string
+		for i, p := range allProjects.Items {
+			if capabilityAllows(caps[i], ActionRead) {
+				visibleIDs = append(visibleIDs, p.ID)
+			}
+		}
+		if len(visibleIDs) == 0 {
+			writeJSON(w, http.StatusOK, chatSearchResponse{Results: []ChatSearchResult{}})
+			return
+		}
+		filter.ProjectIDs = visibleIDs
+	}
+
+	results, nextCursor, err := wcs.SearchChatMessages(ctx, filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed", nil)
+		return
+	}
+
+	// Enrich results with thread/DM names.
+	s.enrichSearchResults(ctx, wcs, results)
+
+	if results == nil {
+		results = []ChatSearchResult{}
+	}
+
+	writeJSON(w, http.StatusOK, chatSearchResponse{
+		Results:    results,
+		NextCursor: nextCursor,
 	})
 }
 
@@ -1803,6 +1930,60 @@ func (s *Server) resolveProjectHumanMembers(ctx context.Context, projectID strin
 }
 
 // ---------------------------------------------------------------------------
+// W8 Search helpers
+// ---------------------------------------------------------------------------
+
+// enrichSearchResults populates the ThreadName field of search results by
+// looking up topic names and DM peer names.
+func (s *Server) enrichSearchResults(ctx context.Context, wcs WebChatStore, results []ChatSearchResult) {
+	// Collect unique conversation keys.
+	seen := make(map[string]bool, len(results))
+	for _, r := range results {
+		seen[r.ConversationKey] = true
+	}
+
+	// Resolve names.
+	names := make(map[string]string, len(seen))
+	for key := range seen {
+		if key == "" {
+			continue
+		}
+		if strings.HasPrefix(key, "dm:") {
+			// For DMs, derive a name from the key format.
+			parts := strings.Split(key, ":")
+			if len(parts) >= 5 {
+				peerKind := parts[1]
+				peerID := parts[2]
+				if peerKind == "agent" {
+					if a, err := s.store.GetAgent(ctx, peerID); err == nil && a != nil {
+						names[key] = "DM: " + a.Name
+						continue
+					}
+				} else if peerKind == "user" {
+					if u, err := s.store.GetUser(ctx, peerID); err == nil {
+						names[key] = "DM: " + u.DisplayName
+						continue
+					}
+				}
+			}
+			names[key] = "DM"
+		} else {
+			// Topic thread — look up name.
+			if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
+				names[key] = "#" + topic.Name
+			}
+		}
+	}
+
+	// Apply names.
+	for i := range results {
+		if name, ok := names[results[i].ConversationKey]; ok {
+			results[i].ThreadName = name
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
 
@@ -1884,6 +2065,11 @@ type chatDMEntry struct {
 type chatMembersResponse struct {
 	Humans []chatMemberEntry `json:"humans"`
 	Agents []chatMemberEntry `json:"agents"`
+}
+
+type chatSearchResponse struct {
+	Results    []ChatSearchResult `json:"results"`
+	NextCursor string             `json:"nextCursor,omitempty"`
 }
 
 type chatMemberEntry struct {

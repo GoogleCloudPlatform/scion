@@ -746,6 +746,112 @@ func (s *pgWebChatStore) TouchDMActivity(ctx context.Context, conversationKey, m
 }
 
 // ---------------------------------------------------------------------------
+// Wave-2 Search methods (Postgres)
+// ---------------------------------------------------------------------------
+
+// SearchChatMessages performs a case-insensitive substring search over the
+// messages table, scoped to channel='web'. Uses ILIKE for case-insensitive
+// matching.
+func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSearchFilter) ([]ChatSearchResult, string, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = 50
+	}
+	if filter.Limit > 200 {
+		filter.Limit = 200
+	}
+
+	// Check if the messages table exists.
+	var tableExists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT FROM information_schema.tables WHERE table_name = 'messages'
+	)`).Scan(&tableExists); err != nil || !tableExists {
+		return nil, "", nil
+	}
+
+	// Build the query dynamically based on filter.
+	var conditions []string
+	var args []interface{}
+	argIdx := 1
+
+	conditions = append(conditions, "channel = 'web'")
+	conditions = append(conditions, fmt.Sprintf("msg ILIKE '%%' || $%d || '%%'", argIdx))
+	args = append(args, filter.Query)
+	argIdx++
+
+	if filter.ConversationKey != "" {
+		conditions = append(conditions, fmt.Sprintf("thread_id = $%d", argIdx))
+		args = append(args, filter.ConversationKey)
+		argIdx++
+	}
+
+	if filter.ProjectID != "" {
+		conditions = append(conditions, fmt.Sprintf("project_id = $%d", argIdx))
+		args = append(args, filter.ProjectID)
+		argIdx++
+	} else if len(filter.ProjectIDs) > 0 {
+		placeholders := make([]string, len(filter.ProjectIDs))
+		for i, pid := range filter.ProjectIDs {
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
+			args = append(args, pid)
+			argIdx++
+		}
+		conditions = append(conditions, fmt.Sprintf("project_id IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	// Keyset pagination cursor: "timestamp|id"
+	if filter.Cursor != "" {
+		cursorParts := strings.SplitN(filter.Cursor, "|", 2)
+		if len(cursorParts) == 2 {
+			conditions = append(conditions, fmt.Sprintf("(created < $%d OR (created = $%d AND id < $%d))", argIdx, argIdx+1, argIdx+2))
+			args = append(args, cursorParts[0], cursorParts[0], cursorParts[1])
+			argIdx += 3
+		}
+	}
+
+	query := fmt.Sprintf(`
+SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
+  FROM messages
+ WHERE %s
+ ORDER BY created DESC, id DESC
+ LIMIT $%d
+`, strings.Join(conditions, " AND "), argIdx)
+	args = append(args, filter.Limit+1)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("webchat store: search messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []ChatSearchResult
+	for rows.Next() {
+		var r ChatSearchResult
+		var createdAt *time.Time
+		if err := rows.Scan(&r.MessageID, &r.ProjectID, &r.ConversationKey, &r.SenderName, &r.Content, &createdAt); err != nil {
+			return nil, "", fmt.Errorf("webchat store: scan search result: %w", err)
+		}
+		if createdAt != nil {
+			r.Timestamp = *createdAt
+		}
+		r.Snippet = generateSnippet(r.Content, filter.Query, 80)
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("webchat store: search rows: %w", err)
+	}
+
+	// Determine next cursor.
+	var nextCursor string
+	if len(results) > filter.Limit {
+		results = results[:filter.Limit]
+		last := results[filter.Limit-1]
+		nextCursor = last.Timestamp.UTC().Format(time.RFC3339Nano) + "|" + last.MessageID
+	}
+
+	return results, nextCursor, nil
+}
+
+// ---------------------------------------------------------------------------
 // Wave-2 Migrations (Postgres)
 // ---------------------------------------------------------------------------
 

@@ -152,6 +152,13 @@ type WebChatStore interface {
 	// TouchDMActivity updates the last_message_id and last_activity_at
 	// watermarks for a DM conversation (both participant rows).
 	TouchDMActivity(ctx context.Context, conversationKey, messageID string) error
+
+	// --- Wave-2 Search methods ---
+
+	// SearchChatMessages performs a case-insensitive substring search across
+	// web-channel messages. Results are ordered by created_at DESC with
+	// keyset pagination via (created_at, id) cursor.
+	SearchChatMessages(ctx context.Context, filter ChatSearchFilter) ([]ChatSearchResult, string, error)
 }
 
 // ThreadPrefs holds per-thread display preferences from webchat_thread_prefs.
@@ -224,6 +231,28 @@ type WebChatDM struct {
 	PeerKind        string // "user" or "agent"
 	LastMessageID   string
 	LastActivityAt  time.Time
+}
+
+// ChatSearchFilter defines query parameters for searching chat messages.
+type ChatSearchFilter struct {
+	Query           string   // search text (required, min 2 chars)
+	ProjectID       string   // scope to one project (optional)
+	ConversationKey string   // scope to one conversation (optional)
+	ProjectIDs      []string // scope to visible projects (for "all" search)
+	Limit           int      // max results (default 50)
+	Cursor          string   // keyset pagination cursor (base64-encoded "timestamp|id")
+}
+
+// ChatSearchResult represents a single search result.
+type ChatSearchResult struct {
+	MessageID       string    `json:"messageId"`
+	ConversationKey string    `json:"conversationKey"`
+	ThreadName      string    `json:"threadName"`
+	SenderName      string    `json:"senderName"`
+	Content         string    `json:"content"`
+	Snippet         string    `json:"snippet"`
+	Timestamp       time.Time `json:"timestamp"`
+	ProjectID       string    `json:"projectId"`
 }
 
 // NewWebChatStore creates a new WebChatStore backed by the given database.
@@ -987,6 +1016,102 @@ func (s *sqliteWebChatStore) TouchDMActivity(ctx context.Context, conversationKe
 }
 
 // ---------------------------------------------------------------------------
+// Wave-2 Search methods (SQLite)
+// ---------------------------------------------------------------------------
+
+// SearchChatMessages performs a case-insensitive substring search over the
+// messages table, scoped to channel='web'. SQLite LIKE is case-insensitive
+// for ASCII which covers most search queries.
+func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSearchFilter) ([]ChatSearchResult, string, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = 50
+	}
+	if filter.Limit > 200 {
+		filter.Limit = 200
+	}
+
+	// Check if the messages table exists.
+	var tableExists int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists); err != nil || tableExists == 0 {
+		return nil, "", nil
+	}
+
+	// Build the query dynamically based on filter.
+	var conditions []string
+	var args []interface{}
+
+	conditions = append(conditions, "channel = 'web'")
+	conditions = append(conditions, "msg LIKE '%' || ? || '%'")
+	args = append(args, filter.Query)
+
+	if filter.ConversationKey != "" {
+		conditions = append(conditions, "thread_id = ?")
+		args = append(args, filter.ConversationKey)
+	}
+
+	if filter.ProjectID != "" {
+		conditions = append(conditions, "project_id = ?")
+		args = append(args, filter.ProjectID)
+	} else if len(filter.ProjectIDs) > 0 {
+		placeholders := make([]string, len(filter.ProjectIDs))
+		for i, pid := range filter.ProjectIDs {
+			placeholders[i] = "?"
+			args = append(args, pid)
+		}
+		conditions = append(conditions, fmt.Sprintf("project_id IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	// Keyset pagination cursor: "timestamp|id"
+	if filter.Cursor != "" {
+		cursorParts := strings.SplitN(filter.Cursor, "|", 2)
+		if len(cursorParts) == 2 {
+			conditions = append(conditions, "(created < ? OR (created = ? AND id < ?))")
+			args = append(args, cursorParts[0], cursorParts[0], cursorParts[1])
+		}
+	}
+
+	query := fmt.Sprintf(`
+SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
+  FROM messages
+ WHERE %s
+ ORDER BY created DESC, id DESC
+ LIMIT ?
+`, strings.Join(conditions, " AND "))
+	args = append(args, filter.Limit+1) // fetch one extra to detect next page
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("webchat store: search messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []ChatSearchResult
+	for rows.Next() {
+		var r ChatSearchResult
+		var createdStr string
+		if err := rows.Scan(&r.MessageID, &r.ProjectID, &r.ConversationKey, &r.SenderName, &r.Content, &createdStr); err != nil {
+			return nil, "", fmt.Errorf("webchat store: scan search result: %w", err)
+		}
+		r.Timestamp = parseSQLiteTime(createdStr)
+		r.Snippet = generateSnippet(r.Content, filter.Query, 80)
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("webchat store: search rows: %w", err)
+	}
+
+	// Determine next cursor.
+	var nextCursor string
+	if len(results) > filter.Limit {
+		results = results[:filter.Limit]
+		last := results[filter.Limit-1]
+		nextCursor = last.Timestamp.UTC().Format(time.RFC3339Nano) + "|" + last.MessageID
+	}
+
+	return results, nextCursor, nil
+}
+
+// ---------------------------------------------------------------------------
 // Wave-2 Migrations (SQLite)
 // ---------------------------------------------------------------------------
 
@@ -1190,4 +1315,75 @@ func nullableString(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+// generateSnippet extracts a snippet around the first case-insensitive match
+// of query in content, with approximately contextLen characters of context.
+// The match is wrapped in <mark> tags for client-side highlighting.
+func generateSnippet(content, query string, contextLen int) string {
+	if query == "" || content == "" {
+		return truncateSnippet(content, contextLen)
+	}
+
+	contentRunes := []rune(content)
+	queryRunes := []rune(strings.ToLower(query))
+	lowerRunes := []rune(strings.ToLower(content))
+
+	// Find the first match position (rune-based).
+	matchStart := -1
+	for i := 0; i <= len(lowerRunes)-len(queryRunes); i++ {
+		found := true
+		for j := 0; j < len(queryRunes); j++ {
+			if lowerRunes[i+j] != queryRunes[j] {
+				found = false
+				break
+			}
+		}
+		if found {
+			matchStart = i
+			break
+		}
+	}
+
+	if matchStart < 0 {
+		return truncateSnippet(content, contextLen)
+	}
+
+	matchEnd := matchStart + len(queryRunes)
+
+	// Calculate window around the match.
+	halfCtx := contextLen / 2
+	start := matchStart - halfCtx
+	if start < 0 {
+		start = 0
+	}
+	end := matchEnd + halfCtx
+	if end > len(contentRunes) {
+		end = len(contentRunes)
+	}
+
+	// Build snippet with <mark> tags.
+	var sb strings.Builder
+	if start > 0 {
+		sb.WriteString("...")
+	}
+	sb.WriteString(string(contentRunes[start:matchStart]))
+	sb.WriteString("<mark>")
+	sb.WriteString(string(contentRunes[matchStart:matchEnd]))
+	sb.WriteString("</mark>")
+	sb.WriteString(string(contentRunes[matchEnd:end]))
+	if end < len(contentRunes) {
+		sb.WriteString("...")
+	}
+
+	return sb.String()
+}
+
+// truncateSnippet truncates content to maxLen runes for display.
+func truncateSnippet(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen]) + "..."
 }

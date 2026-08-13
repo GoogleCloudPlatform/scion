@@ -1466,3 +1466,412 @@ func TestParseAgentDMKey(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// W8: Search tests
+// ---------------------------------------------------------------------------
+
+// newTestWebChatStoreWithMessages creates a WebChatStore backed by an in-memory
+// SQLite DB, including a minimal messages table for search testing.
+func newTestWebChatStoreWithMessages(t *testing.T) (WebChatStore, *sql.DB) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	store := NewWebChatStore(db, "sqlite3")
+	if err := store.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	// Create a minimal messages table matching the Ent schema columns
+	// used by SearchChatMessages.
+	const createMessages = `
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    sender TEXT NOT NULL DEFAULT '',
+    sender_id TEXT,
+    recipient TEXT NOT NULL DEFAULT '',
+    recipient_id TEXT,
+    msg TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT 'instruction',
+    channel TEXT,
+    thread_id TEXT,
+    visibility TEXT DEFAULT 'normal',
+    created TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);
+`
+	if _, err := db.Exec(createMessages); err != nil {
+		t.Fatalf("create messages table: %v", err)
+	}
+
+	return store, db
+}
+
+// insertTestMessage is a helper to insert a message row for search testing.
+func insertTestMessage(t *testing.T, db *sql.DB, id, projectID, threadID, sender, msg string, created time.Time) {
+	t.Helper()
+	const query = `INSERT INTO messages (id, project_id, thread_id, sender, msg, channel, created) VALUES (?, ?, ?, ?, ?, 'web', ?)`
+	_, err := db.Exec(query, id, projectID, threadID, sender, msg, created.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("insert test message: %v", err)
+	}
+}
+
+func TestSearchChatMessages_BasicMatch(t *testing.T) {
+	store, db := newTestWebChatStoreWithMessages(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	insertTestMessage(t, db, "m1", "proj-1", "topic-1", "user:alice", "Hello world from alice", now.Add(-3*time.Minute))
+	insertTestMessage(t, db, "m2", "proj-1", "topic-1", "user:bob", "Goodbye world from bob", now.Add(-2*time.Minute))
+	insertTestMessage(t, db, "m3", "proj-1", "topic-1", "user:alice", "Just a test message", now.Add(-1*time.Minute))
+
+	results, nextCursor, err := store.SearchChatMessages(ctx, ChatSearchFilter{
+		Query:     "world",
+		ProjectID: "proj-1",
+		Limit:     50,
+	})
+	if err != nil {
+		t.Fatalf("SearchChatMessages: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	// Results should be ordered by created DESC.
+	if results[0].MessageID != "m2" {
+		t.Errorf("first result should be m2 (most recent), got %s", results[0].MessageID)
+	}
+	if results[1].MessageID != "m1" {
+		t.Errorf("second result should be m1, got %s", results[1].MessageID)
+	}
+
+	if nextCursor != "" {
+		t.Errorf("expected empty nextCursor, got %q", nextCursor)
+	}
+}
+
+func TestSearchChatMessages_CaseInsensitive(t *testing.T) {
+	store, db := newTestWebChatStoreWithMessages(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	insertTestMessage(t, db, "m1", "proj-1", "topic-1", "user:alice", "Hello WORLD", now.Add(-2*time.Minute))
+	insertTestMessage(t, db, "m2", "proj-1", "topic-1", "user:bob", "hello World", now.Add(-1*time.Minute))
+
+	results, _, err := store.SearchChatMessages(ctx, ChatSearchFilter{
+		Query:     "world",
+		ProjectID: "proj-1",
+	})
+	if err != nil {
+		t.Fatalf("SearchChatMessages: %v", err)
+	}
+
+	// SQLite LIKE is case-insensitive for ASCII.
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results for case-insensitive search, got %d", len(results))
+	}
+}
+
+func TestSearchChatMessages_NoResults(t *testing.T) {
+	store, db := newTestWebChatStoreWithMessages(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	insertTestMessage(t, db, "m1", "proj-1", "topic-1", "user:alice", "Hello world", now)
+
+	results, _, err := store.SearchChatMessages(ctx, ChatSearchFilter{
+		Query:     "nonexistent",
+		ProjectID: "proj-1",
+	})
+	if err != nil {
+		t.Fatalf("SearchChatMessages: %v", err)
+	}
+
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results, got %d", len(results))
+	}
+}
+
+func TestSearchChatMessages_ScopedByProject(t *testing.T) {
+	store, db := newTestWebChatStoreWithMessages(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	insertTestMessage(t, db, "m1", "proj-1", "topic-1", "user:alice", "Hello world", now.Add(-2*time.Minute))
+	insertTestMessage(t, db, "m2", "proj-2", "topic-2", "user:bob", "Hello world", now.Add(-1*time.Minute))
+
+	results, _, err := store.SearchChatMessages(ctx, ChatSearchFilter{
+		Query:     "world",
+		ProjectID: "proj-1",
+	})
+	if err != nil {
+		t.Fatalf("SearchChatMessages: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result scoped to proj-1, got %d", len(results))
+	}
+	if results[0].ProjectID != "proj-1" {
+		t.Errorf("result project = %q, want %q", results[0].ProjectID, "proj-1")
+	}
+}
+
+func TestSearchChatMessages_ScopedByConversation(t *testing.T) {
+	store, db := newTestWebChatStoreWithMessages(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	insertTestMessage(t, db, "m1", "proj-1", "topic-1", "user:alice", "Hello world", now.Add(-2*time.Minute))
+	insertTestMessage(t, db, "m2", "proj-1", "topic-2", "user:bob", "Hello world", now.Add(-1*time.Minute))
+
+	results, _, err := store.SearchChatMessages(ctx, ChatSearchFilter{
+		Query:           "world",
+		ConversationKey: "topic-1",
+	})
+	if err != nil {
+		t.Fatalf("SearchChatMessages: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result scoped to topic-1, got %d", len(results))
+	}
+	if results[0].ConversationKey != "topic-1" {
+		t.Errorf("result conversation = %q, want %q", results[0].ConversationKey, "topic-1")
+	}
+}
+
+func TestSearchChatMessages_MultipleProjects(t *testing.T) {
+	store, db := newTestWebChatStoreWithMessages(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	insertTestMessage(t, db, "m1", "proj-1", "topic-1", "user:alice", "Hello world", now.Add(-3*time.Minute))
+	insertTestMessage(t, db, "m2", "proj-2", "topic-2", "user:bob", "Hello world", now.Add(-2*time.Minute))
+	insertTestMessage(t, db, "m3", "proj-3", "topic-3", "user:carol", "Hello world", now.Add(-1*time.Minute))
+
+	// Search across proj-1 and proj-2 only.
+	results, _, err := store.SearchChatMessages(ctx, ChatSearchFilter{
+		Query:      "world",
+		ProjectIDs: []string{"proj-1", "proj-2"},
+	})
+	if err != nil {
+		t.Fatalf("SearchChatMessages: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results across proj-1 and proj-2, got %d", len(results))
+	}
+}
+
+func TestSearchChatMessages_Pagination(t *testing.T) {
+	store, db := newTestWebChatStoreWithMessages(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Insert 5 messages.
+	for i := 0; i < 5; i++ {
+		insertTestMessage(t, db, "m"+string(rune('a'+i)), "proj-1", "topic-1", "user:alice",
+			"Hello world message", now.Add(-time.Duration(5-i)*time.Minute))
+	}
+
+	// First page: limit 2.
+	results, nextCursor, err := store.SearchChatMessages(ctx, ChatSearchFilter{
+		Query:     "world",
+		ProjectID: "proj-1",
+		Limit:     2,
+	})
+	if err != nil {
+		t.Fatalf("SearchChatMessages page 1: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("page 1: expected 2 results, got %d", len(results))
+	}
+	if nextCursor == "" {
+		t.Fatal("page 1: expected non-empty nextCursor")
+	}
+
+	// Second page using cursor.
+	results2, nextCursor2, err := store.SearchChatMessages(ctx, ChatSearchFilter{
+		Query:     "world",
+		ProjectID: "proj-1",
+		Limit:     2,
+		Cursor:    nextCursor,
+	})
+	if err != nil {
+		t.Fatalf("SearchChatMessages page 2: %v", err)
+	}
+
+	if len(results2) != 2 {
+		t.Fatalf("page 2: expected 2 results, got %d", len(results2))
+	}
+
+	// Third page — should have 1 remaining.
+	results3, nextCursor3, err := store.SearchChatMessages(ctx, ChatSearchFilter{
+		Query:     "world",
+		ProjectID: "proj-1",
+		Limit:     2,
+		Cursor:    nextCursor2,
+	})
+	if err != nil {
+		t.Fatalf("SearchChatMessages page 3: %v", err)
+	}
+
+	if len(results3) != 1 {
+		t.Fatalf("page 3: expected 1 result, got %d", len(results3))
+	}
+	if nextCursor3 != "" {
+		t.Errorf("page 3: expected empty nextCursor, got %q", nextCursor3)
+	}
+
+	// Verify no duplicates across pages.
+	allIDs := make(map[string]bool)
+	for _, r := range results {
+		allIDs[r.MessageID] = true
+	}
+	for _, r := range results2 {
+		if allIDs[r.MessageID] {
+			t.Errorf("duplicate result across pages: %s", r.MessageID)
+		}
+		allIDs[r.MessageID] = true
+	}
+	for _, r := range results3 {
+		if allIDs[r.MessageID] {
+			t.Errorf("duplicate result across pages: %s", r.MessageID)
+		}
+		allIDs[r.MessageID] = true
+	}
+
+	if len(allIDs) != 5 {
+		t.Errorf("expected 5 unique results across all pages, got %d", len(allIDs))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W8: Snippet generation tests
+// ---------------------------------------------------------------------------
+
+func TestGenerateSnippet_BasicMatch(t *testing.T) {
+	snippet := generateSnippet("Hello world, how are you doing today?", "world", 80)
+
+	if !strings.Contains(snippet, "<mark>world</mark>") {
+		t.Errorf("snippet should contain <mark>world</mark>, got %q", snippet)
+	}
+}
+
+func TestGenerateSnippet_MatchAtStart(t *testing.T) {
+	snippet := generateSnippet("Hello there", "Hello", 80)
+
+	if !strings.Contains(snippet, "<mark>Hello</mark>") {
+		t.Errorf("snippet should contain <mark>Hello</mark>, got %q", snippet)
+	}
+	// Should not have leading "..." since match is at start.
+	if strings.HasPrefix(snippet, "...") {
+		t.Errorf("snippet should not start with ... when match is at start, got %q", snippet)
+	}
+}
+
+func TestGenerateSnippet_MatchAtEnd(t *testing.T) {
+	snippet := generateSnippet("This is the end", "end", 80)
+
+	if !strings.Contains(snippet, "<mark>end</mark>") {
+		t.Errorf("snippet should contain <mark>end</mark>, got %q", snippet)
+	}
+	// Should not have trailing "..." since match is at end.
+	if strings.HasSuffix(snippet, "...") {
+		t.Errorf("snippet should not end with ... when match is at end, got %q", snippet)
+	}
+}
+
+func TestGenerateSnippet_CaseInsensitive(t *testing.T) {
+	snippet := generateSnippet("Hello WORLD today", "world", 80)
+
+	if !strings.Contains(snippet, "<mark>WORLD</mark>") {
+		t.Errorf("snippet should preserve original case in <mark>, got %q", snippet)
+	}
+}
+
+func TestGenerateSnippet_LongContent(t *testing.T) {
+	long := strings.Repeat("a", 200) + "findme" + strings.Repeat("b", 200)
+	snippet := generateSnippet(long, "findme", 80)
+
+	if !strings.Contains(snippet, "<mark>findme</mark>") {
+		t.Errorf("snippet should contain <mark>findme</mark>, got %q", snippet)
+	}
+	// Should have ellipsis on both sides for content in the middle.
+	if !strings.HasPrefix(snippet, "...") {
+		t.Errorf("snippet should start with ... for middle match, got %q", snippet)
+	}
+	if !strings.HasSuffix(snippet, "...") {
+		t.Errorf("snippet should end with ... for middle match, got %q", snippet)
+	}
+}
+
+func TestGenerateSnippet_NoMatch(t *testing.T) {
+	snippet := generateSnippet("Hello world", "xyz", 80)
+
+	// When no match, should return truncated content.
+	if strings.Contains(snippet, "<mark>") {
+		t.Errorf("snippet should not contain <mark> when no match, got %q", snippet)
+	}
+}
+
+func TestGenerateSnippet_EmptyInputs(t *testing.T) {
+	if s := generateSnippet("", "test", 80); s != "" {
+		t.Errorf("empty content should return empty, got %q", s)
+	}
+	if s := generateSnippet("hello", "", 80); s != "hello" {
+		t.Errorf("empty query should return content, got %q", s)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W8: Search endpoint tests
+// ---------------------------------------------------------------------------
+
+func TestChatSearch_EmptyQuery(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/search", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing q, got %d", rec.Code)
+	}
+}
+
+func TestChatSearch_TooShortQuery(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/search?q=a", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for q < 2 chars, got %d", rec.Code)
+	}
+}
+
+func TestChatSearch_MethodNotAllowed(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/search?q=hello", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for POST, got %d", rec.Code)
+	}
+}
