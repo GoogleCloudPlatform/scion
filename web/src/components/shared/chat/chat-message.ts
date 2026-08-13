@@ -146,6 +146,10 @@ export class ScionChatMessage extends LitElement {
       flex-direction: row-reverse;
     }
 
+    .message-wrapper.grouped {
+      padding-top: 0;
+    }
+
     /* Avatar */
     .avatar {
       width: 2rem;
@@ -628,9 +632,10 @@ export class ScionChatMessage extends LitElement {
 
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
     const visClass = this.visibility === 'verbose' ? ' verbose' : '';
+    const groupClass = !this.showHeader ? ' grouped' : '';
 
     return html`
-      <div class="message-wrapper ${dirClass}${visClass}">
+      <div class="message-wrapper ${dirClass}${visClass}${groupClass}">
         ${this.showHeader && this.fromAgent
           ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
               ${this.getInitials()}

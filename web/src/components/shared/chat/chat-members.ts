@@ -51,6 +51,7 @@ export interface ChatAgentMember {
   slug?: string;
   phase?: string;
   activity?: string;
+  lastSeen?: string;
 }
 
 export type ChatMember = ChatHumanMember | ChatAgentMember;
@@ -171,6 +172,57 @@ export class ScionChatMembers extends LitElement {
 
     .dot.error {
       background: #ef4444;
+    }
+
+    .agent-status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 0.5625rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      padding: 1px 6px;
+      border-radius: 9999px;
+      line-height: 1.25rem;
+    }
+
+    .agent-status-badge.running {
+      background: rgba(34, 197, 94, 0.12);
+      color: #16a34a;
+    }
+
+    .agent-status-badge.idle {
+      background: rgba(245, 158, 11, 0.12);
+      color: #d97706;
+    }
+
+    .agent-status-badge.stopped {
+      background: rgba(148, 163, 184, 0.12);
+      color: #64748b;
+    }
+
+    .agent-status-badge.error {
+      background: rgba(239, 68, 68, 0.12);
+      color: #dc2626;
+    }
+
+    .agent-popout {
+      display: inline-flex;
+      align-items: center;
+      color: var(--scion-text-muted, #94a3b8);
+      opacity: 0;
+      transition: opacity 0.15s;
+      text-decoration: none;
+      flex-shrink: 0;
+    }
+
+    .member-item:hover .agent-popout {
+      opacity: 1;
+    }
+
+    .agent-popout:hover {
+      color: var(--scion-primary, #3b82f6);
     }
 
     .empty-note {
@@ -329,15 +381,19 @@ export class ScionChatMembers extends LitElement {
 
   private renderAgent(a: ChatAgentMember) {
     const dotClass = this.agentDotClass(a.phase || '');
-    const statusLabel = a.activity || a.phase || 'unknown';
     const isActive = this.dmPeerId === a.id;
     const isTyping = this.typingUserIds.includes(a.id);
 
-    return html`
+    // Build tooltip content: activity detail + last seen
+    const tooltipParts: string[] = [];
+    if (a.activity) tooltipParts.push(a.activity);
+    if (a.lastSeen) tooltipParts.push(`Last seen: ${this.formatRelativeTime(a.lastSeen)}`);
+    const tooltipContent = tooltipParts.join('\n') || a.phase || 'unknown';
+
+    const agentRow = html`
       <div
         class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(a.id, 'agent', a.displayName)}
-        title="${a.slug || a.displayName}"
       >
         <div class="avatar-wrapper">
           <scion-chat-avatar name="${a.slug || a.displayName}" color-seed="${a.id}" size="28"></scion-chat-avatar>
@@ -347,13 +403,42 @@ export class ScionChatMembers extends LitElement {
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
-          <div class="agent-status">
-            <span class="dot ${dotClass}"></span>
-            ${statusLabel}
-          </div>
+          <span class="agent-status-badge ${dotClass}">${a.phase || 'unknown'}</span>
         </div>
+        <a
+          href="/agents/${a.id}"
+          target="_blank"
+          class="agent-popout"
+          title="Open agent detail"
+          @click=${(e: Event) => e.stopPropagation()}
+        >
+          <sl-icon name="box-arrow-up-right" style="font-size: 0.75rem;"></sl-icon>
+        </a>
       </div>
     `;
+
+    return html`
+      <sl-tooltip .content=${tooltipContent} placement="left" hoist>
+        ${agentRow}
+      </sl-tooltip>
+    `;
+  }
+
+  /** Format an ISO timestamp as relative time (e.g., "2 min ago"). */
+  private formatRelativeTime(iso: string): string {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const now = Date.now();
+    const diffMs = now - d.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return `${diffMin} min ago`;
+    const diffHrs = Math.floor(diffMin / 60);
+    if (diffHrs < 24) return `${diffHrs} hr ago`;
+    const diffDays = Math.floor(diffHrs / 24);
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
   }
 
   private agentDotClass(phase: string): string {

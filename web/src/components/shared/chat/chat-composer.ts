@@ -497,7 +497,7 @@ export class ScionChatComposer extends LitElement {
         <sl-dropdown>
           <div class="destination-chip clickable" slot="trigger">
             <span class="arrow">&rarr;</span>
-            <sl-icon name="cpu" style="font-size: 0.75rem"></sl-icon>
+            <span style="font-size: 0.75rem">\u{1F916}</span>
             <span class="agent-name">${this.defaultAgent}</span>
             <span class="hint">(thread default)</span>
             ${hasAgents
@@ -528,11 +528,11 @@ export class ScionChatComposer extends LitElement {
   private renderAgentMenu(agentMembers: MemberInfo[]) {
     return html`
       <sl-menu @sl-select=${this.handleAgentMenuSelect}>
-        <sl-menu-label>Set thread default agent</sl-menu-label>
+        <sl-menu-label style="padding: 0 var(--sl-spacing-medium);">Set thread default agent</sl-menu-label>
         ${agentMembers.map(
           (m) => html`
             <sl-menu-item value=${m.name} ?checked=${this.defaultAgent === m.name}>
-              <sl-icon slot="prefix" name="cpu"></sl-icon>
+              <span slot="prefix" style="font-size: 1.1em;">\u{1F916}</span>
               ${m.name}
             </sl-menu-item>
           `

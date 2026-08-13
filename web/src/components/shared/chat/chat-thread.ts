@@ -1503,7 +1503,7 @@ export class ScionChatThread extends LitElement {
           ?plain=${msg.plain ?? false}
           agentSlug=${isFromAgent ? senderDisplayName : ''}
           timestamp=${msg.createdAt}
-          ?showHeader=${showHeader}
+          .showHeader=${showHeader}
           ?urgent=${msg.urgent ?? false}
           ?broadcasted=${msg.broadcasted ?? false}
           channel=${msg.channel || ''}

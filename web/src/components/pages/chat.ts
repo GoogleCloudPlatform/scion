@@ -692,12 +692,15 @@ export class ScionPageChat extends LitElement {
         navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topicId)}`);
         return;
       }
+      const existingDefault = this.v2Conversation?.conversationKey === topicId
+        ? this.v2Conversation.defaultAgent
+        : '';
       this.v2Conversation = {
         conversationKey: topicId,
         projectId,
         projectSlug: '',
         threadName: '',
-        defaultAgent: '',
+        defaultAgent: existingDefault,
         isDM: false,
         peerName: '',
         peerId: '',
@@ -705,6 +708,9 @@ export class ScionPageChat extends LitElement {
       };
       this.classList.add('thread-open');
       void this.loadV2Members(projectId);
+      if (!existingDefault) {
+        void this.fetchThreadDefaultAgent(topicId);
+      }
       dispatchPageTitle(this, 'Thread', 'Chat');
       return;
     }
@@ -814,12 +820,15 @@ export class ScionPageChat extends LitElement {
       // Resolve slug → projectId (may need async API call on cold load)
       const projectId = this._slugToProjectId.get(segment1);
       if (projectId) {
+        const existingDefault = this.v2Conversation?.conversationKey === threadId
+          ? this.v2Conversation.defaultAgent
+          : '';
         this.v2Conversation = {
           conversationKey: threadId,
           projectId,
           projectSlug: segment1,
           threadName: '',
-          defaultAgent: '',
+          defaultAgent: existingDefault,
           isDM: false,
           peerName: '',
           peerId: '',
@@ -827,6 +836,9 @@ export class ScionPageChat extends LitElement {
         };
         this.classList.add('thread-open');
         void this.loadV2Members(projectId);
+        if (!existingDefault) {
+          void this.fetchThreadDefaultAgent(threadId);
+        }
         dispatchPageTitle(this, 'Thread', 'Chat');
       } else {
         // Slug not yet in cache — resolve via API (deep-link cold load)
@@ -875,12 +887,15 @@ export class ScionPageChat extends LitElement {
     const projectId = await this.resolveProjectBySlug(slug);
     if (!projectId) return;
 
+    const existingDefault = this.v2Conversation?.conversationKey === threadId
+      ? this.v2Conversation.defaultAgent
+      : '';
     this.v2Conversation = {
       conversationKey: threadId,
       projectId,
       projectSlug: slug,
       threadName: '',
-      defaultAgent: '',
+      defaultAgent: existingDefault,
       isDM: false,
       peerName: '',
       peerId: '',
@@ -888,6 +903,9 @@ export class ScionPageChat extends LitElement {
     };
     this.classList.add('thread-open');
     void this.loadV2Members(projectId);
+    if (!existingDefault) {
+      void this.fetchThreadDefaultAgent(threadId);
+    }
     dispatchPageTitle(this, 'Thread', 'Chat');
   }
 
@@ -1086,6 +1104,32 @@ export class ScionPageChat extends LitElement {
     void this.loadHubMembers();
   }
 
+  /**
+   * Fetch the defaultAgent for a thread from the topic detail endpoint.
+   * Called on first load of a thread (not on re-parse of the same thread).
+   */
+  private async fetchThreadDefaultAgent(conversationKey: string): Promise<void> {
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/topics/${encodeURIComponent(conversationKey)}`
+      );
+      if (res.ok) {
+        const data = (await res.json()) as { defaultAgent?: string };
+        if (
+          this.v2Conversation?.conversationKey === conversationKey &&
+          data.defaultAgent
+        ) {
+          this.v2Conversation = {
+            ...this.v2Conversation,
+            defaultAgent: data.defaultAgent,
+          };
+        }
+      }
+    } catch {
+      // Non-critical — thread will work without a default agent
+    }
+  }
+
   /** Handle default-agent-changed from the thread component. Updates local state in place to avoid re-render. */
   private handleDefaultAgentChanged(e: CustomEvent): void {
     const detail = e.detail as { defaultAgent: string };
@@ -1269,6 +1313,8 @@ export class ScionPageChat extends LitElement {
             slug?: string;
             phase?: string;
             status?: string;
+            activity?: string;
+            lastSeen?: string;
           }>;
         };
         this.v2AgentMembers = (agentData.agents || []).map((a) => ({
@@ -1277,7 +1323,8 @@ export class ScionPageChat extends LitElement {
           displayName: a.name || a.slug || a.id,
           slug: a.slug || '',
           phase: a.phase || '',
-          activity: '',
+          activity: a.activity || '',
+          lastSeen: a.lastSeen || '',
         }));
       }
 
@@ -1361,6 +1408,7 @@ export class ScionPageChat extends LitElement {
             slug?: string;
             phase?: string;
             activity?: string;
+            lastSeen?: string;
           }>;
           members?: SpaceMember[];
         };
@@ -1381,6 +1429,7 @@ export class ScionPageChat extends LitElement {
           slug: a.slug || '',
           phase: a.phase || '',
           activity: a.activity || '',
+          lastSeen: a.lastSeen || '',
         }));
         // Also populate the legacy v2Members for the thread component
         this.v2Members = [

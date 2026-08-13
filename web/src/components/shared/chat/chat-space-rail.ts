@@ -461,6 +461,27 @@ export class ScionChatSpaceRail extends LitElement {
     document.addEventListener('click', this._outsideClickHandler);
   }
 
+  override updated(changedProperties: Map<string, unknown>): void {
+    // Auto-expand the space containing the selected thread (deep-link support)
+    if (changedProperties.has('selectedKey') && this.selectedKey) {
+      this.expandSpaceForSelectedKey();
+    }
+  }
+
+  /** Expand the space that contains the currently selected thread. */
+  private expandSpaceForSelectedKey(): void {
+    for (const space of this.spaces) {
+      const threads = this.threadsBySpace.get(space.projectId) || [];
+      const hasThread = threads.some((t) => t.id === this.selectedKey);
+      if (hasThread && this.collapsedSpaces.has(space.projectId)) {
+        const newSet = new Set(this.collapsedSpaces);
+        newSet.delete(space.projectId);
+        this.collapsedSpaces = newSet;
+        break;
+      }
+    }
+  }
+
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     if (this._outsideClickHandler) {
@@ -513,20 +534,39 @@ export class ScionChatSpaceRail extends LitElement {
   /** Track whether spaces have been loaded at least once. */
   private _initialLoadDone = false;
 
+  /** Track known space IDs so we can collapse only truly new spaces on reload. */
+  private _knownSpaceIds = new Set<string>();
+
   private async loadSpaces(): Promise<void> {
     try {
       const res = await apiFetch('/api/v1/chat/spaces');
       if (res.ok) {
         const data = (await res.json()) as { spaces?: ChatSpace[] };
         this.spaces = data.spaces || [];
+        const newSpaceIds = new Set(this.spaces.map((s) => s.projectId));
         if (!this._initialLoadDone) {
           // Collapse all spaces by default on first load — user expands explicitly
-          this.collapsedSpaces = new Set(this.spaces.map((s) => s.projectId));
+          this.collapsedSpaces = new Set(newSpaceIds);
           this._initialLoadDone = true;
+        } else {
+          // Preserve existing collapsed/expanded state on reload.
+          // Remove stale entries for spaces that no longer exist.
+          const updated = new Set([...this.collapsedSpaces].filter((id) => newSpaceIds.has(id)));
+          // Collapse any brand-new spaces the user hasn't seen yet.
+          for (const id of newSpaceIds) {
+            if (!this._knownSpaceIds.has(id)) {
+              updated.add(id);
+            }
+          }
+          this.collapsedSpaces = updated;
         }
-        // On subsequent reloads, preserve the current collapsed/expanded state
+        this._knownSpaceIds = newSpaceIds;
         // Load threads for each space
         await Promise.all(this.spaces.map((s) => this.loadThreads(s.projectId)));
+        // Auto-expand the space containing the selected thread (deep-link on first load)
+        if (this.selectedKey) {
+          this.expandSpaceForSelectedKey();
+        }
       }
     } catch {
       // Silently fail
