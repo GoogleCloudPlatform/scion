@@ -189,11 +189,13 @@ The Microsoft Teams integration (powered by the `scion-plugin-teams` plugin) bri
 
 ### Key Capabilities
 
-- **Bidirectional Messaging**: Users interact with agents in Channels or Group Chats, with inbound topics automatically routed using the canonical `scion.project` format.
+- **Bidirectional Messaging**: Users interact with agents in Channels or Group Chats. The inbound message path correctly maps inbound message Types (`"instruction"`), Channels (`"teams"`), ThreadIDs (fallback to normalized conversation IDs), and Recipient attributes (`agent:<slug>`).
+- **Interactive Setup Cards**: Confirm setups using modern adaptive cards switching from standard submit actions to Azure Bot Framework `Action.Execute` (invoke activities), with mutex-safe state management.
 - **Card-Level Agent Attribution**: While Teams utilizes a single bot identity (as defined in the downloadable App Manifest), outbound cards are styled as **Adaptive Cards** and explicitly display the sending agent's name (bolded, accent-colored) and project slug in the header for clear attribution.
+- **Resilient Suffix Normalization**: Automatically normalizes conversation IDs using `stripThreadSuffix()` across all channel links, ensuring setup confirmation persistence succeeds across Teams restarts and multi-instance deployments.
 - **Authentication**: Bidirectional communication is secured via Azure Active Directory (Azure AD) OAuth2 and JWT validation.
-- **Flexible Storage**: Supports both local SQLite and robust PostgreSQL backends.
-- **Sideloading and Deployment**: Admins configure the plugin via the Scion Admin UI, download the automatically compiled App Manifest package (`.zip`), and sideload or publish it to the Teams Admin Center.
+- **Flexible Storage**: Supports both local SQLite and robust PostgreSQL backends, migrating account link-codes from memory maps to DB for high-availability setups.
+- **Sideloading and Deployment**: Admins configure the plugin via the Scion Admin UI, download the automatically compiled App Manifest package (version `1.1.0` for smooth Admin Center updates, `.zip` format), and sideload or publish it to the Teams Admin Center.
 - **Channel Prefix Resiliency**: Handles the hidden `28:` bot prefix Teams adds to bot entity IDs in channel contexts, ensuring slash and bot commands work flawlessly in all group contexts.
 
 ### Bot Commands
@@ -204,6 +206,7 @@ Interact with the Teams bot using these `@-mention` commands:
 - **`@BotName register`**: Pairs your Teams account with your Scion Hub identity.
 - **`@BotName unregister`**: Unlinks your Teams account from the Hub.
 - **`@BotName agents`**: Lists all running agents within the bound project.
+- **`@BotName default [agent]`**: Sets or clears the channel-specific default routing agent, matching the Discord integration behavior and allowing untagged messages to route automatically.
 
 For step-by-step setup guides, App Manifest templates, and Azure AD registration details, see the [Microsoft Teams Plugin Guide](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-teams/README.md).
 

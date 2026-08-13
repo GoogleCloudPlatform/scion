@@ -330,6 +330,11 @@ The A2A bridge supports three authentication schemes for granular access control
 * **How it works**: Callers present an OIDC ID token issued by a trusted federation provider.
 * **Token Verification & Bookkeeping**: The bridge decodes the OIDC token and performs local bookkeeping. It fully supports RFC 7519 `aud` (audience) claim validation, accepting the claim in either string or array-of-strings format.
 * **Transport Auth Wiring**: Integrated with Google Cloud Identity-Aware Proxy (IAP) transport auth wiring to automatically resolve and bypass platform-level guards when accessing protected backends.
+* **OIDC & JWKS Discovery Proxying**: Behind IAP, third-party federation callers cannot access the Scion Hub's OIDC discovery and JWKS public keys because they lack IAP credentials. The bridge resolves this by proxying `/.well-known/openid-configuration` and `/.well-known/jwks.json`:
+  - It uses its own internal **bridge transport auth** (IAP credentials) to fetch these documents from the Hub.
+  - It rewrites the returned `jwks_uri` inside the OIDC config to point back to the bridge's own `/.well-known/jwks.json` endpoint.
+  - It serves these endpoints publicly and caches them for **5 minutes** to ensure high performance and reduce Hub load.
+  - For air-gapped or manual distribution, administrators can also use the **Download JWKS** button on the federation admin page in the Web Dashboard to download public keys out-of-band.
 
 ### Per-User Isolation Benefits
 
@@ -351,6 +356,8 @@ The bridge exposes the following HTTP endpoints:
 | Endpoint | Method | Authentication | Description |
 | :--- | :--- | :--- | :--- |
 | `/.well-known/agent-card.json` | GET | None | Base bridge registry agent card. |
+| `/.well-known/openid-configuration` | GET | None | OIDC discovery proxy document for deployments behind IAP. Uses bridge transport auth to fetch from the Hub and rewrites the `jwks_uri` to point back to the bridge. Cached for 5 minutes. |
+| `/.well-known/jwks.json` | GET | None | JSON Web Key Set (JWKS) proxy endpoint. Serves Hub public keys with a 5-minute cache. |
 | `/projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json` | GET | Configured Scheme | Per-agent capabilities card. |
 | `/projects/{projectSlug}/agents/{agentSlug}/jsonrpc` | POST | Configured Scheme | Primary A2A JSON-RPC 2.0 communication endpoint. |
 | `/healthz` | GET | None | Liveness check (returns HTTP 200). |
