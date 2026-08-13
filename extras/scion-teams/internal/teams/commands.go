@@ -117,7 +117,7 @@ func (h *CommandHandler) Handle(ctx context.Context, activity *Activity) (bool, 
 // handleSetup links a Teams conversation to a Scion project.
 // Usage: setup [project-slug]
 func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, args []string) error {
-	conversationID := activity.Conversation.ID
+	conversationID := stripThreadSuffix(activity.Conversation.ID)
 
 	// Check if already linked.
 	store := h.getStore()
@@ -266,7 +266,7 @@ func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, 
 	}
 
 	link := &ChannelLink{
-		ConversationID:     activity.Conversation.ID,
+		ConversationID:     stripThreadSuffix(activity.Conversation.ID),
 		TeamID:             teamID,
 		ProjectID:          projectID,
 		ProjectSlug:        projectSlug,
@@ -309,7 +309,7 @@ func (h *CommandHandler) handleUnlink(ctx context.Context, activity *Activity) e
 		return h.sendReply(ctx, activity, "Unlink failed: store not initialized.")
 	}
 
-	conversationID := activity.Conversation.ID
+	conversationID := stripThreadSuffix(activity.Conversation.ID)
 	link, err := store.GetChannelLink(ctx, conversationID)
 	if err != nil {
 		h.log.Warn("Error looking up channel link", "error", err)
@@ -866,7 +866,7 @@ func (h *CommandHandler) resolveChannelLink(ctx context.Context, activity *Activ
 		return nil, fmt.Errorf("store not initialized")
 	}
 
-	link, err := store.GetChannelLink(ctx, activity.Conversation.ID)
+	link, err := store.GetChannelLink(ctx, stripThreadSuffix(activity.Conversation.ID))
 	if err != nil {
 		h.log.Warn("Error looking up channel link", "error", err)
 		_ = h.sendReply(ctx, activity, "An error occurred. Please try again.")

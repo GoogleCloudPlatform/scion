@@ -255,8 +255,15 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
 	}
 
+	// Normalize conversation ID — strip thread suffix for consistent lookups.
+	convID := stripThreadSuffix(activity.Conversation.ID)
+
 	// Check if already linked.
-	existing, _ := store.GetChannelLink(ctx, activity.Conversation.ID)
+	existing, err := store.GetChannelLink(ctx, convID)
+	if err != nil {
+		h.log.Error("Failed to check existing channel link", "error", err)
+		return h.respondWithUpdatedCard(activity, "An error occurred while checking existing link."), nil
+	}
 	if existing != nil {
 		return h.respondWithUpdatedCard(activity,
 			fmt.Sprintf("This conversation is already linked to project **%s**.", existing.ProjectSlug)), nil
@@ -282,7 +289,7 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 	}
 
 	link := &ChannelLink{
-		ConversationID:     activity.Conversation.ID,
+		ConversationID:     convID,
 		TeamID:             teamID,
 		ProjectID:          projectID,
 		ProjectSlug:        projectSlug,
