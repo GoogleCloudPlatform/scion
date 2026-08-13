@@ -61,8 +61,8 @@ interface PlatformFieldDef {
   description: string;
   defaultValue: string;
   placeholder?: string;
-  type?: 'text' | 'select' | 'toggle';  // default 'text'
-  options?: { value: string; label: string }[];  // for 'select' type
+  type?: 'text' | 'select' | 'toggle'; // default 'text'
+  options?: { value: string; label: string }[]; // for 'select' type
 }
 
 interface PlatformSecretDef {
@@ -89,22 +89,53 @@ interface ProjectInfo {
 
 const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
   telegram: [
-    { key: 'bot_token', label: 'Bot Token', description: 'Telegram bot token from @BotFather', required: true },
-    { key: 'webhook_secret', label: 'Webhook Secret', description: 'Secret for webhook verification (webhook mode only)' },
+    {
+      key: 'bot_token',
+      label: 'Bot Token',
+      description: 'Telegram bot token from @BotFather',
+      required: true,
+    },
+    {
+      key: 'webhook_secret',
+      label: 'Webhook Secret',
+      description: 'Secret for webhook verification (webhook mode only)',
+    },
   ],
   discord: [
     { key: 'bot_token', label: 'Bot Token', description: 'Discord bot token', required: true },
   ],
   slack: [
-    { key: 'bot_token', label: 'Bot Token', description: 'Slack bot token (xoxb-...)', required: true },
-    { key: 'app_token', label: 'App Token', description: 'Slack app-level token for Socket Mode (xapp-...)' },
-    { key: 'signing_secret', label: 'Signing Secret', description: 'Slack signing secret for HTTP mode' },
+    {
+      key: 'bot_token',
+      label: 'Bot Token',
+      description: 'Slack bot token (xoxb-...)',
+      required: true,
+    },
+    {
+      key: 'app_token',
+      label: 'App Token',
+      description: 'Slack app-level token for Socket Mode (xapp-...)',
+    },
+    {
+      key: 'signing_secret',
+      label: 'Signing Secret',
+      description: 'Slack signing secret for HTTP mode',
+    },
   ],
   a2a: [
-    { key: 'api_key', label: 'API Key', description: 'Static API key for apiKey/bearer auth schemes' },
+    {
+      key: 'api_key',
+      label: 'API Key',
+      description: 'Static API key for apiKey/bearer auth schemes',
+    },
   ],
   gchat: [
-    { key: 'signing_key', label: 'Hub Signing Key', description: 'Shared signing key for hub authentication (HS256 JWT)', required: true },
+    {
+      key: 'signing_key',
+      label: 'Hub Signing Key',
+      description: 'Shared signing key for hub authentication (HS256 JWT)',
+      required: true,
+    },
   ],
   teams: [
     { key: 'app_secret', label: 'App Secret', description: 'Azure App Registration client secret' },
@@ -113,44 +144,139 @@ const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
 
 function resolvePlatform(name: string): string {
   switch (name) {
-    case 'telegram': return 'telegram';
-    case 'discord': return 'discord';
-    case 'slack': return 'slack';
-    case 'chat-app': return 'gchat';
-    case 'a2a-bridge': return 'a2a';
-    case 'teams': return 'teams';
-    default: return name;
+    case 'telegram':
+      return 'telegram';
+    case 'discord':
+      return 'discord';
+    case 'slack':
+      return 'slack';
+    case 'chat-app':
+      return 'gchat';
+    case 'a2a-bridge':
+      return 'a2a';
+    case 'teams':
+      return 'teams';
+    default:
+      return name;
   }
 }
 
 const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
   telegram: [
-    { key: 'inbound_mode', label: 'Inbound Mode', description: 'How Telegram delivers updates (poll or webhook)', defaultValue: 'poll' },
-    { key: 'webhook_url', label: 'Webhook URL', description: 'Public URL for Telegram to send webhook updates to', defaultValue: '' },
-    { key: 'webhook_listen', label: 'Webhook Listen', description: 'HTTP listen address for webhook mode', defaultValue: ':9094' },
-    { key: 'db_path', label: 'Database Path', description: 'Path to SQLite database', defaultValue: 'telegram_v2.db' },
-    { key: 'skip_set_webhook', label: 'Skip Webhook Registration', description: 'Set to true when running in HA mode to skip automatic webhook registration', defaultValue: 'false' },
-    { key: 'agent_cache_ttl', label: 'Agent Cache TTL', description: 'How long to cache agent info', defaultValue: '5m' },
-    { key: 'send_queue_size', label: 'Send Queue Size', description: 'Buffer size for outbound message queue (0 = unbuffered)', defaultValue: '0' },
-    { key: 'send_min_delay', label: 'Send Min Delay', description: 'Minimum delay between outbound messages (e.g. 100ms)', defaultValue: '' },
-    { key: 'chat_routes', label: 'Chat Routes', description: 'JSON map of Telegram chat IDs to topic patterns (v1 migration seeding only)', defaultValue: '' },
-    { key: 'user_mappings', label: 'User Mappings', description: 'JSON map of Telegram usernames to scion user IDs (v1 migration seeding only)', defaultValue: '' },
+    {
+      key: 'inbound_mode',
+      label: 'Inbound Mode',
+      description: 'How Telegram delivers updates (poll or webhook)',
+      defaultValue: 'poll',
+    },
+    {
+      key: 'webhook_url',
+      label: 'Webhook URL',
+      description: 'Public URL for Telegram to send webhook updates to',
+      defaultValue: '',
+    },
+    {
+      key: 'webhook_listen',
+      label: 'Webhook Listen',
+      description: 'HTTP listen address for webhook mode',
+      defaultValue: ':9094',
+    },
+    {
+      key: 'db_path',
+      label: 'Database Path',
+      description: 'Path to SQLite database',
+      defaultValue: 'telegram_v2.db',
+    },
+    {
+      key: 'skip_set_webhook',
+      label: 'Skip Webhook Registration',
+      description: 'Set to true when running in HA mode to skip automatic webhook registration',
+      defaultValue: 'false',
+    },
+    {
+      key: 'agent_cache_ttl',
+      label: 'Agent Cache TTL',
+      description: 'How long to cache agent info',
+      defaultValue: '5m',
+    },
+    {
+      key: 'send_queue_size',
+      label: 'Send Queue Size',
+      description: 'Buffer size for outbound message queue (0 = unbuffered)',
+      defaultValue: '0',
+    },
+    {
+      key: 'send_min_delay',
+      label: 'Send Min Delay',
+      description: 'Minimum delay between outbound messages (e.g. 100ms)',
+      defaultValue: '',
+    },
+    {
+      key: 'chat_routes',
+      label: 'Chat Routes',
+      description: 'JSON map of Telegram chat IDs to topic patterns (v1 migration seeding only)',
+      defaultValue: '',
+    },
+    {
+      key: 'user_mappings',
+      label: 'User Mappings',
+      description: 'JSON map of Telegram usernames to scion user IDs (v1 migration seeding only)',
+      defaultValue: '',
+    },
   ],
   discord: [
-    { key: 'application_id', label: 'Application ID', description: 'Discord application ID for slash commands', defaultValue: '' },
-    { key: 'guild_ids', label: 'Allowed Guild IDs', description: 'Comma-separated Discord server IDs. Leave empty to register commands globally across all servers the bot joins.', defaultValue: '', placeholder: 'Global — all servers' },
+    {
+      key: 'application_id',
+      label: 'Application ID',
+      description: 'Discord application ID for slash commands',
+      defaultValue: '',
+    },
+    {
+      key: 'guild_ids',
+      label: 'Allowed Guild IDs',
+      description:
+        'Comma-separated Discord server IDs. Leave empty to register commands globally across all servers the bot joins.',
+      defaultValue: '',
+      placeholder: 'Global — all servers',
+    },
   ],
   slack: [
-    { key: 'socket_mode', label: 'Socket Mode', description: 'Use Slack Socket Mode instead of HTTP webhooks (no public URL needed)', defaultValue: 'false' },
-    { key: 'listen_address', label: 'Listen Address', description: 'HTTP listen address (HTTP mode only)', defaultValue: ':3000' },
-    { key: 'db_path', label: 'Database Path', description: 'Path to SQLite database', defaultValue: '~/.scion/scion-slack.db' },
-    { key: 'agent_cache_ttl', label: 'Agent Cache TTL', description: 'How long to cache agent info', defaultValue: '5m' },
+    {
+      key: 'socket_mode',
+      label: 'Socket Mode',
+      description: 'Use Slack Socket Mode instead of HTTP webhooks (no public URL needed)',
+      defaultValue: 'false',
+    },
+    {
+      key: 'listen_address',
+      label: 'Listen Address',
+      description: 'HTTP listen address (HTTP mode only)',
+      defaultValue: ':3000',
+    },
+    {
+      key: 'db_path',
+      label: 'Database Path',
+      description: 'Path to SQLite database',
+      defaultValue: '~/.scion/scion-slack.db',
+    },
+    {
+      key: 'agent_cache_ttl',
+      label: 'Agent Cache TTL',
+      description: 'How long to cache agent info',
+      defaultValue: '5m',
+    },
   ],
   a2a: [
-    { key: 'external_url', label: 'External URL',
+    {
+      key: 'external_url',
+      label: 'External URL',
       description: 'Public URL where the bridge serves agent cards and JSON-RPC',
-      defaultValue: '', placeholder: 'https://a2a.example.com' },
-    { key: 'auth_scheme', label: 'Auth Scheme',
+      defaultValue: '',
+      placeholder: 'https://a2a.example.com',
+    },
+    {
+      key: 'auth_scheme',
+      label: 'Auth Scheme',
       description: 'Authentication method for A2A clients',
       defaultValue: 'none',
       type: 'select',
@@ -160,47 +286,133 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
         { value: 'bearer', label: 'Bearer Token' },
         { value: 'hubUAT', label: 'Hub UAT' },
         { value: 'hubJWT', label: 'Hub JWT' },
-      ] },
-    { key: 'rate_limit_enabled', label: 'Rate Limiting',
+      ],
+    },
+    {
+      key: 'rate_limit_enabled',
+      label: 'Rate Limiting',
       description: 'Enable request rate limiting',
-      defaultValue: 'false', type: 'toggle' },
-    { key: 'rate_limit_rps', label: 'Rate Limit (req/s)',
+      defaultValue: 'false',
+      type: 'toggle',
+    },
+    {
+      key: 'rate_limit_rps',
+      label: 'Rate Limit (req/s)',
       description: 'Maximum requests per second',
-      defaultValue: '10', placeholder: '10' },
-    { key: 'rate_limit_burst', label: 'Rate Limit Burst',
+      defaultValue: '10',
+      placeholder: '10',
+    },
+    {
+      key: 'rate_limit_burst',
+      label: 'Rate Limit Burst',
       description: 'Maximum burst size for rate limiter',
-      defaultValue: '20', placeholder: '20' },
-    { key: 'send_message_timeout', label: 'Send Message Timeout',
+      defaultValue: '20',
+      placeholder: '20',
+    },
+    {
+      key: 'send_message_timeout',
+      label: 'Send Message Timeout',
       description: 'Timeout for sending messages to agents',
-      defaultValue: '120s', placeholder: '120s' },
-    { key: 'sse_keepalive', label: 'SSE Keepalive Interval',
+      defaultValue: '120s',
+      placeholder: '120s',
+    },
+    {
+      key: 'sse_keepalive',
+      label: 'SSE Keepalive Interval',
       description: 'Interval for SSE keepalive pings',
-      defaultValue: '30s', placeholder: '30s' },
-    { key: 'push_retry_max', label: 'Push Notification Retries',
+      defaultValue: '30s',
+      placeholder: '30s',
+    },
+    {
+      key: 'push_retry_max',
+      label: 'Push Notification Retries',
       description: 'Maximum retries for push notification delivery',
-      defaultValue: '3', placeholder: '3' },
-    { key: 'provider_org', label: 'Provider Organization',
+      defaultValue: '3',
+      placeholder: '3',
+    },
+    {
+      key: 'provider_org',
+      label: 'Provider Organization',
       description: 'Organization name for agent card metadata',
-      defaultValue: '', placeholder: 'My Organization' },
-    { key: 'provider_url', label: 'Provider URL',
+      defaultValue: '',
+      placeholder: 'My Organization',
+    },
+    {
+      key: 'provider_url',
+      label: 'Provider URL',
       description: 'Organization URL for agent card metadata',
-      defaultValue: '', placeholder: 'https://example.com' },
-    { key: 'uat_cache_ttl', label: 'UAT Cache TTL',
+      defaultValue: '',
+      placeholder: 'https://example.com',
+    },
+    {
+      key: 'uat_cache_ttl',
+      label: 'UAT Cache TTL',
       description: 'How long to cache UAT validation results',
-      defaultValue: '60s', placeholder: '60s' },
+      defaultValue: '60s',
+      placeholder: '60s',
+    },
   ],
   gchat: [
-    { key: 'project_id', label: 'GCP Project ID', description: 'Google Cloud project ID hosting the Chat app', defaultValue: '' },
-    { key: 'credentials', label: 'Credentials Path', description: 'Path to service account key JSON file (leave empty for ADC)', defaultValue: '' },
-    { key: 'listen_address', label: 'Webhook Listen Address', description: 'HTTP listen address for webhook mode', defaultValue: ':8443' },
-    { key: 'external_url', label: 'External URL', description: 'Public URL where Google Chat sends events', defaultValue: '' },
-    { key: 'service_account_email', label: 'Service Account Email', description: 'Email of the GCP service account (for JWT verification)', defaultValue: '' },
+    {
+      key: 'project_id',
+      label: 'GCP Project ID',
+      description: 'Google Cloud project ID hosting the Chat app',
+      defaultValue: '',
+    },
+    {
+      key: 'credentials',
+      label: 'Credentials Path',
+      description: 'Path to service account key JSON file (leave empty for ADC)',
+      defaultValue: '',
+    },
+    {
+      key: 'listen_address',
+      label: 'Webhook Listen Address',
+      description: 'HTTP listen address for webhook mode',
+      defaultValue: ':8443',
+    },
+    {
+      key: 'external_url',
+      label: 'External URL',
+      description: 'Public URL where Google Chat sends events',
+      defaultValue: '',
+    },
+    {
+      key: 'service_account_email',
+      label: 'Service Account Email',
+      description: 'Email of the GCP service account (for JWT verification)',
+      defaultValue: '',
+    },
   ],
   teams: [
-    { key: 'app_id', label: 'Application (Client) ID', description: 'Azure App Registration Client ID', defaultValue: '', placeholder: 'e.g. 12345678-abcd-1234-efgh-123456789012' },
-    { key: 'tenant_id', label: 'Tenant ID', description: 'Azure AD Tenant ID (GUID)', defaultValue: '', placeholder: 'e.g. 12345678-abcd-1234-efgh-123456789012' },
-    { key: 'listen_address', label: 'Listen Address', description: 'HTTP listen address for the Teams webhook endpoint', defaultValue: ':3978', placeholder: ':3978' },
-    { key: 'db_path', label: 'Database Path', description: 'Path to SQLite database', defaultValue: '~/.scion/scion-teams.db', placeholder: '~/.scion/scion-teams.db' },
+    {
+      key: 'app_id',
+      label: 'Application (Client) ID',
+      description: 'Azure App Registration Client ID',
+      defaultValue: '',
+      placeholder: 'e.g. 12345678-abcd-1234-efgh-123456789012',
+    },
+    {
+      key: 'tenant_id',
+      label: 'Tenant ID',
+      description: 'Azure AD Tenant ID (GUID)',
+      defaultValue: '',
+      placeholder: 'e.g. 12345678-abcd-1234-efgh-123456789012',
+    },
+    {
+      key: 'listen_address',
+      label: 'Listen Address',
+      description: 'HTTP listen address for the Teams webhook endpoint',
+      defaultValue: ':3978',
+      placeholder: ':3978',
+    },
+    {
+      key: 'db_path',
+      label: 'Database Path',
+      description: 'Path to SQLite database',
+      defaultValue: '~/.scion/scion-teams.db',
+      placeholder: '~/.scion/scion-teams.db',
+    },
   ],
 };
 
@@ -233,7 +445,6 @@ export class ScionPageAdminIntegrations extends LitElement {
 
   // Available projects for A2A project selector
   @state() private availableProjects: ProjectInfo[] = [];
-
 
   static override styles = css`
     :host {
@@ -815,9 +1026,7 @@ export class ScionPageAdminIntegrations extends LitElement {
             : 'Update complete';
           await this.loadDetail(integrationName);
         } else {
-          this.error = data.detail
-            ? `Update failed: ${data.detail}`
-            : 'Update failed';
+          this.error = data.detail ? `Update failed: ${data.detail}` : 'Update failed';
         }
       }
     } catch {
@@ -835,10 +1044,9 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.error = null;
     this.successMessage = null;
     try {
-      const res = await apiFetch(
-        `/api/v1/admin/integrations/${encodeURIComponent(name)}/install`,
-        { method: 'POST' }
-      );
+      const res = await apiFetch(`/api/v1/admin/integrations/${encodeURIComponent(name)}/install`, {
+        method: 'POST',
+      });
       if (!res.ok) {
         this.error = await extractApiError(res, 'Failed to install integration');
         return;
@@ -876,7 +1084,9 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private navigateTo(path: string): void {
-    this.dispatchEvent(new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true }));
+    this.dispatchEvent(
+      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
+    );
   }
 
   override render() {
@@ -904,8 +1114,8 @@ export class ScionPageAdminIntegrations extends LitElement {
         <h1>Integrations</h1>
       </div>
       <p class="header-description">
-        Manage chat integrations — Telegram, Discord, Google Chat, and Slack plugins connected to this
-        hub.
+        Manage chat integrations — Telegram, Discord, Google Chat, and Slack plugins connected to
+        this hub.
       </p>
 
       ${this.integrations.length === 0
@@ -936,10 +1146,13 @@ export class ScionPageAdminIntegrations extends LitElement {
                     (i) => html`
                       <tr
                         class="clickable"
-                        @click=${() => this.navigateTo(`/admin/integrations/${encodeURIComponent(i.name)}`)}
+                        @click=${() =>
+                          this.navigateTo(`/admin/integrations/${encodeURIComponent(i.name)}`)}
                       >
                         <td><strong>${i.name}</strong></td>
-                        <td><span class="platform-name">${this.platformLabel(i.platform)}</span></td>
+                        <td>
+                          <span class="platform-name">${this.platformLabel(i.platform)}</span>
+                        </td>
                         <td>${this.renderStatusBadge(i.status)}</td>
                         <td>${this.renderDeploymentModeBadge(i.deployment_mode)}</td>
                       </tr>
@@ -949,7 +1162,6 @@ export class ScionPageAdminIntegrations extends LitElement {
               </table>
             </div>
           `}
-
       ${this.availableIntegrations.length > 0
         ? html`
             <div class="header" style="margin-top: 2rem;">
@@ -957,8 +1169,8 @@ export class ScionPageAdminIntegrations extends LitElement {
               <h1 style="font-size: 1.25rem;">Available Integrations</h1>
             </div>
             <p class="header-description">
-              These integrations can be installed from source. After installing, configure
-              secrets and restart to activate.
+              These integrations can be installed from source. After installing, configure secrets
+              and restart to activate.
             </p>
             <div class="section" style="padding: 0;">
               <table class="integration-table">
@@ -974,14 +1186,18 @@ export class ScionPageAdminIntegrations extends LitElement {
                     (a) => html`
                       <tr>
                         <td><strong>${a.name}</strong></td>
-                        <td><span class="platform-name">${this.platformLabel(a.platform)}</span></td>
+                        <td>
+                          <span class="platform-name">${this.platformLabel(a.platform)}</span>
+                        </td>
                         <td>
                           <sl-button
                             size="small"
                             variant="primary"
                             ?loading=${this.installingName === a.name}
                             ?disabled=${this.installingName !== null}
-                            @click=${() => { void this.handleInstall(a.name); }}
+                            @click=${() => {
+                              void this.handleInstall(a.name);
+                            }}
                           >
                             Install
                           </sl-button>
@@ -1010,16 +1226,14 @@ export class ScionPageAdminIntegrations extends LitElement {
       </a>
 
       <h2 class="detail-name">${d.name}</h2>
-      <p class="detail-platform">${this.platformLabel(d.platform)} · ${this.deploymentModeLabel(d.deployment_mode)}</p>
+      <p class="detail-platform">
+        ${this.platformLabel(d.platform)} · ${this.deploymentModeLabel(d.deployment_mode)}
+      </p>
 
-      ${this.renderStatusSection(d.status)}
-      ${this.renderSetupBanner(d)}
-      ${this.renderSelfManagedSetupSection(d)}
-      ${this.renderSecretsSection(d)}
-      ${this.renderConfigSection(d)}
-      ${this.renderA2AProjectsSection(d)}
-      ${this.renderDiscordInviteLink(d)}
-      ${this.renderTeamsSetupSection(d)}
+      ${this.renderStatusSection(d.status)} ${this.renderSetupBanner(d)}
+      ${this.renderSelfManagedSetupSection(d)} ${this.renderSecretsSection(d)}
+      ${this.renderConfigSection(d)} ${this.renderA2AProjectsSection(d)}
+      ${this.renderDiscordInviteLink(d)} ${this.renderTeamsSetupSection(d)}
       ${this.renderActionsSection()}
     `;
   }
@@ -1029,7 +1243,9 @@ export class ScionPageAdminIntegrations extends LitElement {
       return html`
         <div class="section">
           <h3 class="section-title">Status</h3>
-          <p style="color: var(--scion-text-muted); font-size: 0.875rem;">No status information available.</p>
+          <p style="color: var(--scion-text-muted); font-size: 0.875rem;">
+            No status information available.
+          </p>
         </div>
       `;
     }
@@ -1045,7 +1261,13 @@ export class ScionPageAdminIntegrations extends LitElement {
           ? html`
               <div class="status-row">
                 <span class="status-label">Health</span>
-                <sl-badge variant=${status.health === 'healthy' ? 'success' : status.health === 'unhealthy' ? 'danger' : 'neutral'}>
+                <sl-badge
+                  variant=${status.health === 'healthy'
+                    ? 'success'
+                    : status.health === 'unhealthy'
+                      ? 'danger'
+                      : 'neutral'}
+                >
                   ${status.health}
                 </sl-badge>
               </div>
@@ -1071,7 +1293,9 @@ export class ScionPageAdminIntegrations extends LitElement {
           ? html`
               <div class="status-row">
                 <span class="status-label">Channel ID</span>
-                <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;">${status.channel_id}</span>
+                <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;"
+                  >${status.channel_id}</span
+                >
               </div>
             `
           : nothing}
@@ -1089,7 +1313,9 @@ export class ScionPageAdminIntegrations extends LitElement {
           : nothing}
         ${status.details && Object.keys(status.details).length > 0
           ? html`
-              <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--scion-border, #e2e8f0);">
+              <div
+                style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--scion-border, #e2e8f0);"
+              >
                 ${Object.entries(status.details).map(
                   ([k, v]) => html`
                     <div class="status-row">
@@ -1115,7 +1341,7 @@ export class ScionPageAdminIntegrations extends LitElement {
       hiddenExtraKeys.add('projects_json');
     }
     const extraKeys = Object.keys(d.settings || {}).filter(
-      (k) => !definedKeys.has(k) && !hiddenExtraKeys.has(k),
+      (k) => !definedKeys.has(k) && !hiddenExtraKeys.has(k)
     );
     const hasFields = fieldDefs.length > 0 || extraKeys.length > 0;
 
@@ -1123,7 +1349,9 @@ export class ScionPageAdminIntegrations extends LitElement {
       return html`
         <div class="section">
           <h3 class="section-title">Configuration</h3>
-          <p style="color: var(--scion-text-muted); font-size: 0.875rem;">No configurable settings for this integration.</p>
+          <p style="color: var(--scion-text-muted); font-size: 0.875rem;">
+            No configurable settings for this integration.
+          </p>
         </div>
       `;
     }
@@ -1256,7 +1484,10 @@ export class ScionPageAdminIntegrations extends LitElement {
       <div class="section">
         <h3 class="section-title">Projects & Agent Exposure</h3>
         ${warning
-          ? html`<div class="warning-message" style="color: var(--sl-color-warning-600); margin-bottom: 0.5rem;">
+          ? html`<div
+              class="warning-message"
+              style="color: var(--sl-color-warning-600); margin-bottom: 0.5rem;"
+            >
               <sl-icon name="exclamation-triangle" style="margin-right: 0.25rem;"></sl-icon>
               ${warning}
             </div>`
@@ -1267,9 +1498,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 <p>No projects configured. Add a project to expose its agents via A2A.</p>
               </div>
             `
-          : projects.map((proj, idx) =>
-              this.renderProjectCard(proj, idx, projects, usedSlugs),
-            )}
+          : projects.map((proj, idx) => this.renderProjectCard(proj, idx, projects, usedSlugs))}
         <sl-button
           variant="default"
           size="small"
@@ -1287,12 +1516,10 @@ export class ScionPageAdminIntegrations extends LitElement {
     proj: A2AProjectEntry,
     idx: number,
     allProjects: A2AProjectEntry[],
-    usedSlugs: Set<string>,
+    usedSlugs: Set<string>
   ) {
     // Build project display name for the header.
-    const matchedProject = this.availableProjects.find(
-      (p) => (p.slug ?? p.id) === proj.slug,
-    );
+    const matchedProject = this.availableProjects.find((p) => (p.slug ?? p.id) === proj.slug);
     const headerLabel = matchedProject
       ? `${matchedProject.name} (${proj.slug})`
       : proj.slug || 'New Project';
@@ -1323,7 +1550,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                         allProjects,
                         idx,
                         'slug',
-                        (e.target as HTMLSelectElement).value,
+                        (e.target as HTMLSelectElement).value
                       )}
                   >
                     ${this.availableProjects.map((p) => {
@@ -1346,7 +1573,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                         allProjects,
                         idx,
                         'slug',
-                        (e.target as HTMLInputElement).value,
+                        (e.target as HTMLInputElement).value
                       )}
                   ></sl-input>
                 `}
@@ -1363,7 +1590,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                   allProjects,
                   idx,
                   'default_template',
-                  (e.target as HTMLInputElement).value,
+                  (e.target as HTMLInputElement).value
                 )}
             ></sl-input>
             <span class="hint">Agent template for auto-provisioned agents</span>
@@ -1378,7 +1605,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                   allProjects,
                   idx,
                   'auto_provision',
-                  (e.target as HTMLInputElement).checked,
+                  (e.target as HTMLInputElement).checked
                 )}
             ></sl-switch>
             <span class="hint">Automatically create agents from A2A requests</span>
@@ -1394,7 +1621,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                   allProjects,
                   idx,
                   'exposed_agents',
-                  (e.target as HTMLInputElement).value,
+                  (e.target as HTMLInputElement).value
                 )}
             ></sl-input>
             <span class="hint">Comma-separated agent names. Leave empty to expose all agents.</span>
@@ -1417,10 +1644,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.serializeProjectsJSON(updated);
   }
 
-  private handleRemoveProject(
-    currentProjects: A2AProjectEntry[],
-    idx: number,
-  ): void {
+  private handleRemoveProject(currentProjects: A2AProjectEntry[], idx: number): void {
     const updated = currentProjects.filter((_, i) => i !== idx);
     this.serializeProjectsJSON(updated);
   }
@@ -1429,7 +1653,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     currentProjects: A2AProjectEntry[],
     idx: number,
     field: keyof A2AProjectEntry,
-    value: string | boolean,
+    value: string | boolean
   ): void {
     const updated = currentProjects.map((p, i) => {
       if (i !== idx) return { ...p };
@@ -1447,7 +1671,10 @@ export class ScionPageAdminIntegrations extends LitElement {
         case 'exposed_agents': {
           const raw = (value as string).trim();
           copy.exposed_agents = raw
-            ? raw.split(',').map((s) => s.trim()).filter((s) => s !== '')
+            ? raw
+                .split(',')
+                .map((s) => s.trim())
+                .filter((s) => s !== '')
             : [];
           break;
         }
@@ -1475,7 +1702,9 @@ export class ScionPageAdminIntegrations extends LitElement {
             <div>
               <p class="invite-link-description">Add the bot to your Discord server</p>
               <p class="invite-link-permissions">
-                Grants required permissions: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Embed Links, Add Reactions, Manage Webhooks
+                Grants required permissions: View Channels, Send Messages, Send Messages in Threads,
+                Create Public Threads, Manage Threads, Read Message History, Embed Links, Add
+                Reactions, Manage Webhooks
               </p>
             </div>
           </div>
@@ -1514,16 +1743,12 @@ export class ScionPageAdminIntegrations extends LitElement {
             <div>
               <p class="invite-link-description">Download the Teams app package (.zip)</p>
               <p class="invite-link-permissions">
-                Upload it to your Microsoft Teams Admin Center or sideload it in Teams to enable the bot integration.
+                Upload it to your Microsoft Teams Admin Center or sideload it in Teams to enable the
+                bot integration.
               </p>
             </div>
           </div>
-          <sl-button
-            variant="primary"
-            size="small"
-            href=${downloadUrl}
-            download="teams-app.zip"
-          >
+          <sl-button variant="primary" size="small" href=${downloadUrl} download="teams-app.zip">
             <sl-icon slot="prefix" name="download"></sl-icon>
             Download App Package
           </sl-button>
@@ -1540,11 +1765,7 @@ export class ScionPageAdminIntegrations extends LitElement {
           </div>
         </div>
         <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem;">
-          <sl-input
-            readonly
-            value=${messagingEndpoint}
-            style="flex: 1;"
-          ></sl-input>
+          <sl-input readonly value=${messagingEndpoint} style="flex: 1;"></sl-input>
           <sl-button
             size="small"
             @click=${() => {
@@ -1599,15 +1820,21 @@ export class ScionPageAdminIntegrations extends LitElement {
         <div style="font-size: 0.875rem; display: flex; flex-direction: column; gap: 0.5rem;">
           <div class="status-row">
             <span class="status-label">Binary</span>
-            <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;">${binaryName}</span>
+            <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;"
+              >${binaryName}</span
+            >
           </div>
           <div class="status-row">
             <span class="status-label">Config File</span>
-            <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;">${configFile}</span>
+            <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;"
+              >${configFile}</span
+            >
           </div>
           <div class="status-row">
             <span class="status-label">Start Command</span>
-            <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;">${startCommand}</span>
+            <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;"
+              >${startCommand}</span
+            >
           </div>
         </div>
       </div>
@@ -1617,9 +1844,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   private renderSetupBanner(d: IntegrationDetail) {
     const platform = resolvePlatform(d.name);
     const secretDefs = PLATFORM_SECRETS[platform] ?? [];
-    const missingRequired = secretDefs.filter(
-      (s) => s.required && !d.has_secrets?.[s.key]
-    );
+    const missingRequired = secretDefs.filter((s) => s.required && !d.has_secrets?.[s.key]);
     if (missingRequired.length === 0) return nothing;
 
     const platformName = this.platformLabel(d.platform);
@@ -1660,7 +1885,8 @@ export class ScionPageAdminIntegrations extends LitElement {
           const def = secretDefMap.get(key);
           const label = def?.label ?? key;
           // For A2A, mark api_key as required when the scheme needs it.
-          const isRequired = platform === 'a2a' && key === 'api_key' ? apiKeyRelevant : (def?.required ?? false);
+          const isRequired =
+            platform === 'a2a' && key === 'api_key' ? apiKeyRelevant : (def?.required ?? false);
           const isConfigured = d.has_secrets?.[key];
           return html`
             <div class="secret-row">
@@ -1668,7 +1894,9 @@ export class ScionPageAdminIntegrations extends LitElement {
                 <span class="secret-key">
                   ${label}${isRequired ? html`<span class="required-tag">Required</span>` : nothing}
                 </span>
-                ${def?.description ? html`<div class="secret-description">${def.description}</div>` : nothing}
+                ${def?.description
+                  ? html`<div class="secret-description">${def.description}</div>`
+                  : nothing}
               </div>
               <span class="secret-status">
                 ${isConfigured
@@ -1679,7 +1907,9 @@ export class ScionPageAdminIntegrations extends LitElement {
                 class="secret-input"
                 type="password"
                 password-toggle
-                placeholder=${isConfigured ? 'Enter new value to update' : `Enter ${label.toLowerCase()}`}
+                placeholder=${isConfigured
+                  ? 'Enter new value to update'
+                  : `Enter ${label.toLowerCase()}`}
                 .value=${this.editedSecrets[key] ?? ''}
                 @sl-change=${(e: Event) => {
                   this.editedSecrets = {
@@ -1704,14 +1934,18 @@ export class ScionPageAdminIntegrations extends LitElement {
         <sl-button
           variant="primary"
           ?loading=${this.saving}
-          @click=${() => { void this.handleSaveConfig(); }}
+          @click=${() => {
+            void this.handleSaveConfig();
+          }}
         >
           Save Configuration
         </sl-button>
         <sl-button
           variant="default"
           ?loading=${this.restarting}
-          @click=${() => { void this.handleRestart(); }}
+          @click=${() => {
+            void this.handleRestart();
+          }}
         >
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           ${restartLabel}
@@ -1721,7 +1955,9 @@ export class ScionPageAdminIntegrations extends LitElement {
               <sl-button
                 variant="default"
                 ?loading=${this.updating}
-                @click=${() => { void this.handleUpdate(); }}
+                @click=${() => {
+                  void this.handleUpdate();
+                }}
               >
                 <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
                 Update
@@ -1754,9 +1990,7 @@ export class ScionPageAdminIntegrations extends LitElement {
         variant = 'success';
         break;
       case 'failed':
-        message = this.updateDetail
-          ? `Update failed: ${this.updateDetail}`
-          : 'Update failed';
+        message = this.updateDetail ? `Update failed: ${this.updateDetail}` : 'Update failed';
         variant = 'danger';
         break;
     }
@@ -1767,7 +2001,10 @@ export class ScionPageAdminIntegrations extends LitElement {
       <sl-alert variant=${variant} open style="margin-top: 0.75rem;">
         ${showSpinner
           ? html`<sl-spinner slot="icon" style="font-size: 1rem;"></sl-spinner>`
-          : html`<sl-icon slot="icon" name=${variant === 'success' ? 'check-circle' : 'exclamation-triangle'}></sl-icon>`}
+          : html`<sl-icon
+              slot="icon"
+              name=${variant === 'success' ? 'check-circle' : 'exclamation-triangle'}
+            ></sl-icon>`}
         ${message}
       </sl-alert>
     `;

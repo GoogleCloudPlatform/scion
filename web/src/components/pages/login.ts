@@ -336,11 +336,11 @@ export class ScionLoginPage extends LitElement {
         if (data.providers) {
           // New-style response with provider list
           this._providers = data.providers.map((p) => ({
-              id: p.id,
-              name: p.name,
-              icon: p.id,
-              available: p.enabled,
-            }));
+            id: p.id,
+            name: p.name,
+            icon: p.id,
+            available: p.enabled,
+          }));
         } else {
           // Legacy fallback (defensive — should not occur after deploy)
           this._providers = [];
@@ -404,7 +404,10 @@ export class ScionLoginPage extends LitElement {
             ? html`
                 <div class="no-providers">
                   <p>Authentication is handled by your organization's identity provider.</p>
-                  <p>If you continue to see this page, the authenticating proxy may not be configured correctly.</p>
+                  <p>
+                    If you continue to see this page, the authenticating proxy may not be configured
+                    correctly.
+                  </p>
                 </div>
               `
             : hasProviders
@@ -433,14 +436,10 @@ export class ScionLoginPage extends LitElement {
         'You have been signed out because the server security credentials were updated. Please sign in again.',
       session_error:
         'Your session could not be saved. Please contact an administrator if this persists.',
-      state_mismatch:
-        'Login verification failed. Please try signing in again.',
-      exchange_failed:
-        'Could not complete sign-in with the provider. Please try again.',
-      unauthorized_domain:
-        'Your email domain is not authorized to access this application.',
-      user_create_failed:
-        'Could not create your account. Please contact an administrator.',
+      state_mismatch: 'Login verification failed. Please try signing in again.',
+      exchange_failed: 'Could not complete sign-in with the provider. Please try again.',
+      unauthorized_domain: 'Your email domain is not authorized to access this application.',
+      user_create_failed: 'Could not create your account. Please contact an administrator.',
     };
     return messages[this.error] ?? this.error;
   }

@@ -43,7 +43,12 @@ export class ScionPageSkillDetail extends LitElement {
   @state() private versions: SkillVersion[] = [];
   @state() private error: string | null = null;
   @state() private editing = false;
-  @state() private editForm: Partial<{ name: string; description: string; visibility: string; tags: string }> = {};
+  @state() private editForm: Partial<{
+    name: string;
+    description: string;
+    visibility: string;
+    tags: string;
+  }> = {};
   @state() private saving = false;
   @state() private actionLoading: Record<string, boolean> = {};
 
@@ -62,7 +67,9 @@ export class ScionPageSkillDetail extends LitElement {
   @state() private filesLoading = false;
 
   static override styles = css`
-    :host { display: block; }
+    :host {
+      display: block;
+    }
 
     .back-link {
       display: inline-flex;
@@ -73,7 +80,9 @@ export class ScionPageSkillDetail extends LitElement {
       font-size: 0.875rem;
       margin-bottom: 1rem;
     }
-    .back-link:hover { color: var(--scion-primary, #3b82f6); }
+    .back-link:hover {
+      color: var(--scion-primary, #3b82f6);
+    }
 
     .header {
       display: flex;
@@ -82,7 +91,9 @@ export class ScionPageSkillDetail extends LitElement {
       margin-bottom: 1.5rem;
       gap: 1rem;
     }
-    .header-info { flex: 1; }
+    .header-info {
+      flex: 1;
+    }
     .header-title {
       display: flex;
       align-items: center;
@@ -111,8 +122,12 @@ export class ScionPageSkillDetail extends LitElement {
       flex-shrink: 0;
     }
 
-    sl-tab-group { --track-color: var(--scion-border, #e2e8f0); }
-    sl-tab-group::part(body) { padding-top: 1.5rem; }
+    sl-tab-group {
+      --track-color: var(--scion-border, #e2e8f0);
+    }
+    sl-tab-group::part(body) {
+      padding-top: 1.5rem;
+    }
 
     .card {
       background: var(--scion-surface, #ffffff);
@@ -141,7 +156,10 @@ export class ScionPageSkillDetail extends LitElement {
       grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
       gap: 1.5rem;
     }
-    .info-item { display: flex; flex-direction: column; }
+    .info-item {
+      display: flex;
+      flex-direction: column;
+    }
     .info-label {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
@@ -173,7 +191,8 @@ export class ScionPageSkillDetail extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .scope-badge, .visibility-badge {
+    .scope-badge,
+    .visibility-badge {
       display: inline-flex;
       align-items: center;
       padding: 0.125rem 0.5rem;
@@ -213,7 +232,9 @@ export class ScionPageSkillDetail extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
-    .edit-field { margin-bottom: 1rem; }
+    .edit-field {
+      margin-bottom: 1rem;
+    }
     .edit-field label {
       display: block;
       font-size: 0.75rem;
@@ -235,7 +256,10 @@ export class ScionPageSkillDetail extends LitElement {
       border-radius: var(--scion-radius-lg, 0.75rem);
       overflow: hidden;
     }
-    .version-table table { width: 100%; border-collapse: collapse; }
+    .version-table table {
+      width: 100%;
+      border-collapse: collapse;
+    }
     .version-table th {
       text-align: left;
       padding: 0.75rem 1rem;
@@ -254,8 +278,13 @@ export class ScionPageSkillDetail extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       vertical-align: middle;
     }
-    .version-table tr:last-child td { border-bottom: none; }
-    .version-table .actions-cell { text-align: right; white-space: nowrap; }
+    .version-table tr:last-child td {
+      border-bottom: none;
+    }
+    .version-table .actions-cell {
+      text-align: right;
+      white-space: nowrap;
+    }
 
     .file-table {
       background: var(--scion-surface, #ffffff);
@@ -263,7 +292,10 @@ export class ScionPageSkillDetail extends LitElement {
       border-radius: var(--scion-radius-lg, 0.75rem);
       overflow: hidden;
     }
-    .file-table table { width: 100%; border-collapse: collapse; }
+    .file-table table {
+      width: 100%;
+      border-collapse: collapse;
+    }
     .file-table th {
       text-align: left;
       padding: 0.75rem 1rem;
@@ -282,7 +314,9 @@ export class ScionPageSkillDetail extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       vertical-align: middle;
     }
-    .file-table tr:last-child td { border-bottom: none; }
+    .file-table tr:last-child td {
+      border-bottom: none;
+    }
 
     .version-selector {
       margin-bottom: 1rem;
@@ -296,7 +330,10 @@ export class ScionPageSkillDetail extends LitElement {
       padding: 4rem 2rem;
       color: var(--scion-text-muted, #64748b);
     }
-    .loading-state sl-spinner { font-size: 2rem; margin-bottom: 1rem; }
+    .loading-state sl-spinner {
+      font-size: 2rem;
+      margin-bottom: 1rem;
+    }
 
     .error-state {
       text-align: center;
@@ -311,10 +348,15 @@ export class ScionPageSkillDetail extends LitElement {
       margin-bottom: 1rem;
     }
     .error-state h2 {
-      font-size: 1.25rem; font-weight: 600;
-      color: var(--scion-text, #1e293b); margin: 0 0 0.5rem 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.5rem 0;
     }
-    .error-state p { color: var(--scion-text-muted, #64748b); margin: 0 0 1rem 0; }
+    .error-state p {
+      color: var(--scion-text-muted, #64748b);
+      margin: 0 0 1rem 0;
+    }
     .error-details {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
@@ -371,7 +413,9 @@ export class ScionPageSkillDetail extends LitElement {
 
       const versionsRes = await apiFetch(`/api/v1/skills/${this.skillId}/versions`);
       if (versionsRes.ok) {
-        const data = (await versionsRes.json()) as { items?: SkillVersion[]; versions?: SkillVersion[] } | SkillVersion[];
+        const data = (await versionsRes.json()) as
+          | { items?: SkillVersion[]; versions?: SkillVersion[] }
+          | SkillVersion[];
         if (Array.isArray(data)) {
           this.versions = data;
         } else {
@@ -400,7 +444,9 @@ export class ScionPageSkillDetail extends LitElement {
       if (hours < 24) return `${hours}h ago`;
       const days = Math.floor(hours / 24);
       return `${days}d ago`;
-    } catch { return dateString; }
+    } catch {
+      return dateString;
+    }
   }
 
   private formatFileSize(bytes: number): string {
@@ -411,10 +457,14 @@ export class ScionPageSkillDetail extends LitElement {
 
   private versionStatusType(status: string): StatusType {
     switch (status) {
-      case 'published': return 'success' as StatusType;
-      case 'deprecated': return 'warning' as StatusType;
-      case 'archived': return 'danger' as StatusType;
-      default: return 'default' as StatusType;
+      case 'published':
+        return 'success' as StatusType;
+      case 'deprecated':
+        return 'warning' as StatusType;
+      case 'archived':
+        return 'danger' as StatusType;
+      default:
+        return 'default' as StatusType;
     }
   }
 
@@ -429,7 +479,9 @@ export class ScionPageSkillDetail extends LitElement {
   private async copyUri(): Promise<void> {
     try {
       await navigator.clipboard.writeText(this.getSkillUri());
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   // -- Edit mode --
@@ -462,11 +514,17 @@ export class ScionPageSkillDetail extends LitElement {
       if (this.editForm.description !== undefined) {
         body.description = this.editForm.description;
       }
-      if (this.editForm.visibility !== undefined && this.editForm.visibility !== this.skill.visibility) {
+      if (
+        this.editForm.visibility !== undefined &&
+        this.editForm.visibility !== this.skill.visibility
+      ) {
         body.visibility = this.editForm.visibility;
       }
       if (this.editForm.tags !== undefined) {
-        body.tags = this.editForm.tags.split(',').map((t) => t.trim()).filter((t) => t);
+        body.tags = this.editForm.tags
+          .split(',')
+          .map((t) => t.trim())
+          .filter((t) => t);
       }
 
       const res = await apiFetch(`/api/v1/skills/${this.skillId}`, {
@@ -558,9 +616,13 @@ export class ScionPageSkillDetail extends LitElement {
   private async loadFiles(version: string): Promise<void> {
     this.filesLoading = true;
     try {
-      const res = await apiFetch(`/api/v1/skills/${this.skillId}/download?version=${encodeURIComponent(version)}`);
+      const res = await apiFetch(
+        `/api/v1/skills/${this.skillId}/download?version=${encodeURIComponent(version)}`
+      );
       if (res.ok) {
-        const data = (await res.json()) as { files?: SkillDownloadUrl[]; urls?: SkillDownloadUrl[] } | SkillDownloadUrl[];
+        const data = (await res.json()) as
+          | { files?: SkillDownloadUrl[]; urls?: SkillDownloadUrl[] }
+          | SkillDownloadUrl[];
         if (Array.isArray(data)) {
           this.fileUrls = data;
         } else {
@@ -616,8 +678,7 @@ export class ScionPageSkillDetail extends LitElement {
         <sl-tab-panel name="files">${this.renderFilesTab()}</sl-tab-panel>
       </sl-tab-group>
 
-      ${this.renderDeprecateDialog()}
-      ${this.renderPublishDialog()}
+      ${this.renderDeprecateDialog()} ${this.renderPublishDialog()}
     `;
   }
 
@@ -640,35 +701,48 @@ export class ScionPageSkillDetail extends LitElement {
           </div>
         </div>
         <div class="header-actions">
-          ${can(skill._capabilities, 'update') ? html`
-            <sl-button variant="default" size="small" outline @click=${() => this.startEditing()}>
-              <sl-icon slot="prefix" name="pencil"></sl-icon>
-              Edit
-            </sl-button>
-          ` : nothing}
-          ${can(skill._capabilities, 'update') ? html`
-            <sl-button
-              variant="primary"
-              size="small"
-              @click=${() => { this.publishDialogOpen = true; }}
-            >
-              <sl-icon slot="prefix" name="upload"></sl-icon>
-              Publish Version
-            </sl-button>
-          ` : nothing}
-          ${can(skill._capabilities, 'delete') ? html`
-            <sl-button
-              variant="danger"
-              size="small"
-              outline
-              ?loading=${this.actionLoading['archive']}
-              ?disabled=${this.actionLoading['archive']}
-              @click=${() => this.handleArchive()}
-            >
-              <sl-icon slot="prefix" name="trash"></sl-icon>
-              Archive
-            </sl-button>
-          ` : nothing}
+          ${can(skill._capabilities, 'update')
+            ? html`
+                <sl-button
+                  variant="default"
+                  size="small"
+                  outline
+                  @click=${() => this.startEditing()}
+                >
+                  <sl-icon slot="prefix" name="pencil"></sl-icon>
+                  Edit
+                </sl-button>
+              `
+            : nothing}
+          ${can(skill._capabilities, 'update')
+            ? html`
+                <sl-button
+                  variant="primary"
+                  size="small"
+                  @click=${() => {
+                    this.publishDialogOpen = true;
+                  }}
+                >
+                  <sl-icon slot="prefix" name="upload"></sl-icon>
+                  Publish Version
+                </sl-button>
+              `
+            : nothing}
+          ${can(skill._capabilities, 'delete')
+            ? html`
+                <sl-button
+                  variant="danger"
+                  size="small"
+                  outline
+                  ?loading=${this.actionLoading['archive']}
+                  ?disabled=${this.actionLoading['archive']}
+                  @click=${() => this.handleArchive()}
+                >
+                  <sl-icon slot="prefix" name="trash"></sl-icon>
+                  Archive
+                </sl-button>
+              `
+            : nothing}
         </div>
       </div>
     `;
@@ -704,40 +778,55 @@ export class ScionPageSkillDetail extends LitElement {
           </div>
           <div class="info-item">
             <span class="info-label">Description</span>
-            <span class="info-value">${skill.description || html`<span style="color: var(--scion-text-muted);">No description</span>`}</span>
+            <span class="info-value"
+              >${skill.description ||
+              html`<span style="color: var(--scion-text-muted);">No description</span>`}</span
+            >
           </div>
           <div class="info-item">
             <span class="info-label">Scope</span>
             <span class="info-value"><span class="scope-badge">${skill.scope}</span></span>
           </div>
-          ${skill.scopeId ? html`
-            <div class="info-item">
-              <span class="info-label">Scope ID</span>
-              <span class="info-value mono">${skill.scopeId}</span>
-            </div>
-          ` : nothing}
+          ${skill.scopeId
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Scope ID</span>
+                  <span class="info-value mono">${skill.scopeId}</span>
+                </div>
+              `
+            : nothing}
           <div class="info-item">
             <span class="info-label">Visibility</span>
-            <span class="info-value"><span class="visibility-badge ${skill.visibility}">${skill.visibility}</span></span>
+            <span class="info-value"
+              ><span class="visibility-badge ${skill.visibility}">${skill.visibility}</span></span
+            >
           </div>
-          ${skill.ownerId ? html`
-            <div class="info-item">
-              <span class="info-label">Owner</span>
-              <span class="info-value">${skill.ownerId}</span>
-            </div>
-          ` : nothing}
+          ${skill.ownerId
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Owner</span>
+                  <span class="info-value">${skill.ownerId}</span>
+                </div>
+              `
+            : nothing}
           <div class="info-item">
             <span class="info-label">Tags</span>
             <span class="info-value">
               ${skill.tags?.length
-                ? html`<div class="tag-list">${skill.tags.map((t) => html`<span class="tag-item">${t}</span>`)}</div>`
+                ? html`<div class="tag-list">
+                    ${skill.tags.map((t) => html`<span class="tag-item">${t}</span>`)}
+                  </div>`
                 : html`<span style="color: var(--scion-text-muted);">No tags</span>`}
             </span>
           </div>
           <div class="info-item">
             <span class="info-label">Status</span>
             <span class="info-value">
-              <scion-status-badge status=${skill.status as StatusType} label=${skill.status} size="small"></scion-status-badge>
+              <scion-status-badge
+                status=${skill.status as StatusType}
+                label=${skill.status}
+                size="small"
+              ></scion-status-badge>
             </span>
           </div>
           <div class="info-item">
@@ -761,14 +850,24 @@ export class ScionPageSkillDetail extends LitElement {
           <label>Name</label>
           <sl-input
             .value=${this.editForm.name || ''}
-            @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, name: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.editForm = {
+                ...this.editForm,
+                name: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
           ></sl-input>
         </div>
         <div class="edit-field">
           <label>Description</label>
           <sl-textarea
             .value=${this.editForm.description || ''}
-            @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, description: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.editForm = {
+                ...this.editForm,
+                description: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
             rows="3"
             help-text="Once set, this field cannot be cleared."
           ></sl-textarea>
@@ -777,7 +876,12 @@ export class ScionPageSkillDetail extends LitElement {
           <label>Visibility</label>
           <sl-radio-group
             .value=${this.editForm.visibility || 'private'}
-            @sl-change=${(e: Event) => { this.editForm = { ...this.editForm, visibility: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-change=${(e: Event) => {
+              this.editForm = {
+                ...this.editForm,
+                visibility: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
           >
             <sl-radio-button value="private">Private</sl-radio-button>
             <sl-radio-button value="public">Public</sl-radio-button>
@@ -787,15 +891,30 @@ export class ScionPageSkillDetail extends LitElement {
           <label>Tags</label>
           <sl-input
             .value=${this.editForm.tags || ''}
-            @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, tags: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.editForm = {
+                ...this.editForm,
+                tags: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
             placeholder="comma-separated tags"
           ></sl-input>
         </div>
         <div class="edit-actions">
-          <sl-button variant="primary" size="small" ?loading=${this.saving} @click=${() => this.saveEdit()}>
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.saving}
+            @click=${() => this.saveEdit()}
+          >
             Save
           </sl-button>
-          <sl-button variant="default" size="small" ?disabled=${this.saving} @click=${() => this.cancelEditing()}>
+          <sl-button
+            variant="default"
+            size="small"
+            ?disabled=${this.saving}
+            @click=${() => this.cancelEditing()}
+          >
             Cancel
           </sl-button>
         </div>
@@ -808,9 +927,9 @@ export class ScionPageSkillDetail extends LitElement {
       return html`
         <div class="empty-versions">
           <p>No versions published yet.</p>
-          ${can(this.skill?._capabilities, 'update') ? html`
-            <p>Use the "Publish Version" button to upload the first version.</p>
-          ` : nothing}
+          ${can(this.skill?._capabilities, 'update')
+            ? html` <p>Use the "Publish Version" button to upload the first version.</p> `
+            : nothing}
         </div>
       `;
     }
@@ -850,18 +969,30 @@ export class ScionPageSkillDetail extends LitElement {
         </td>
         <td class="hide-mobile">
           ${v.contentHash
-            ? html`<scion-hash-display .hash=${v.contentHash} max-width="14ch"></scion-hash-display>`
+            ? html`<scion-hash-display
+                .hash=${v.contentHash}
+                max-width="14ch"
+              ></scion-hash-display>`
             : '—'}
         </td>
         <td class="hide-mobile">${v.files?.length ?? 0} files</td>
         <td class="hide-mobile">${v.downloadCount}</td>
         <td class="hide-mobile">${this.formatRelativeTime(v.created)}</td>
         <td class="actions-cell">
-          ${v.status === 'published' && can(this.skill?._capabilities, 'update') ? html`
-            <sl-button size="small" variant="warning" outline @click=${() => { this.deprecateVersionId = v.id; }}>
-              Deprecate
-            </sl-button>
-          ` : nothing}
+          ${v.status === 'published' && can(this.skill?._capabilities, 'update')
+            ? html`
+                <sl-button
+                  size="small"
+                  variant="warning"
+                  outline
+                  @click=${() => {
+                    this.deprecateVersionId = v.id;
+                  }}
+                >
+                  Deprecate
+                </sl-button>
+              `
+            : nothing}
         </td>
       </tr>
     `;
@@ -889,64 +1020,82 @@ export class ScionPageSkillDetail extends LitElement {
         >
           ${published.map((v) => html`<sl-option value=${v.version}>v${v.version}</sl-option>`)}
         </sl-select>
-        ${!this.filesLoading && this.fileUrls.length > 0 ? html`
-          <span style="font-size: 0.875rem; color: var(--scion-text-muted, #64748b);">${this.fileUrls.length} file${this.fileUrls.length !== 1 ? 's' : ''}</span>
-        ` : nothing}
+        ${!this.filesLoading && this.fileUrls.length > 0
+          ? html`
+              <span style="font-size: 0.875rem; color: var(--scion-text-muted, #64748b);"
+                >${this.fileUrls.length} file${this.fileUrls.length !== 1 ? 's' : ''}</span
+              >
+            `
+          : nothing}
       </div>
 
-      ${this.filesLoading ? html`
-        <div class="loading-state" style="padding: 2rem;">
-          <sl-spinner></sl-spinner>
-          <p>Loading files...</p>
-        </div>
-      ` : this.fileUrls.length === 0 ? html`
-        <div class="empty-versions">
-          <p>No files found for this version.</p>
-        </div>
-      ` : html`
-        <div class="file-table">
-          <table>
-            <thead>
-              <tr>
-                <th>Path</th>
-                <th>Size</th>
-                <th class="hide-mobile">Hash</th>
-                <th style="text-align: right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${this.fileUrls.map((f) => html`
-                <tr>
-                  <td>
-                    <span style="display: flex; align-items: center; gap: 0.5rem;">
-                      <sl-icon name="file-earmark"></sl-icon>
-                      ${f.path}
-                    </span>
-                  </td>
-                  <td>${this.formatFileSize(f.size)}</td>
-                  <td class="hide-mobile">
-                    ${f.hash
-                      ? html`<scion-hash-display .hash=${f.hash} max-width="14ch"></scion-hash-display>`
-                      : '—'}
-                  </td>
-                  <td style="text-align: right">
-                    <sl-button size="small" variant="default" outline @click=${() => {
-                      const a = document.createElement('a');
-                      a.href = f.url;
-                      a.target = '_blank';
-                      a.rel = 'noopener noreferrer';
-                      a.click();
-                    }}>
-                      <sl-icon slot="prefix" name="download"></sl-icon>
-                      Download
-                    </sl-button>
-                  </td>
-                </tr>
-              `)}
-            </tbody>
-          </table>
-        </div>
-      `}
+      ${this.filesLoading
+        ? html`
+            <div class="loading-state" style="padding: 2rem;">
+              <sl-spinner></sl-spinner>
+              <p>Loading files...</p>
+            </div>
+          `
+        : this.fileUrls.length === 0
+          ? html`
+              <div class="empty-versions">
+                <p>No files found for this version.</p>
+              </div>
+            `
+          : html`
+              <div class="file-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Path</th>
+                      <th>Size</th>
+                      <th class="hide-mobile">Hash</th>
+                      <th style="text-align: right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${this.fileUrls.map(
+                      (f) => html`
+                        <tr>
+                          <td>
+                            <span style="display: flex; align-items: center; gap: 0.5rem;">
+                              <sl-icon name="file-earmark"></sl-icon>
+                              ${f.path}
+                            </span>
+                          </td>
+                          <td>${this.formatFileSize(f.size)}</td>
+                          <td class="hide-mobile">
+                            ${f.hash
+                              ? html`<scion-hash-display
+                                  .hash=${f.hash}
+                                  max-width="14ch"
+                                ></scion-hash-display>`
+                              : '—'}
+                          </td>
+                          <td style="text-align: right">
+                            <sl-button
+                              size="small"
+                              variant="default"
+                              outline
+                              @click=${() => {
+                                const a = document.createElement('a');
+                                a.href = f.url;
+                                a.target = '_blank';
+                                a.rel = 'noopener noreferrer';
+                                a.click();
+                              }}
+                            >
+                              <sl-icon slot="prefix" name="download"></sl-icon>
+                              Download
+                            </sl-button>
+                          </td>
+                        </tr>
+                      `
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            `}
     `;
   }
 
@@ -955,21 +1104,27 @@ export class ScionPageSkillDetail extends LitElement {
       <sl-dialog
         label="Deprecate Version"
         ?open=${this.deprecateVersionId !== null}
-        @sl-after-hide=${() => { this.deprecateVersionId = null; }}
+        @sl-after-hide=${() => {
+          this.deprecateVersionId = null;
+        }}
       >
         <div style="display: flex; flex-direction: column; gap: 1rem;">
           <sl-textarea
             label="Deprecation Message"
             placeholder="Reason for deprecation..."
             .value=${this.deprecateMessage}
-            @sl-input=${(e: Event) => { this.deprecateMessage = (e.target as HTMLElement & { value: string }).value; }}
+            @sl-input=${(e: Event) => {
+              this.deprecateMessage = (e.target as HTMLElement & { value: string }).value;
+            }}
             required
           ></sl-textarea>
           <sl-input
             label="Replacement URI (optional)"
             placeholder="global:replacement-skill@1.0.0"
             .value=${this.deprecateReplacement}
-            @sl-input=${(e: Event) => { this.deprecateReplacement = (e.target as HTMLElement & { value: string }).value; }}
+            @sl-input=${(e: Event) => {
+              this.deprecateReplacement = (e.target as HTMLElement & { value: string }).value;
+            }}
           ></sl-input>
         </div>
         <sl-button
@@ -998,8 +1153,13 @@ export class ScionPageSkillDetail extends LitElement {
         .skillId=${this.skillId}
         ?open=${this.publishDialogOpen}
         .latestVersion=${this.latestPublishedVersion}
-        @sl-after-hide=${() => { this.publishDialogOpen = false; }}
-        @skill-version-published=${() => { this.publishDialogOpen = false; void this.loadData(); }}
+        @sl-after-hide=${() => {
+          this.publishDialogOpen = false;
+        }}
+        @skill-version-published=${() => {
+          this.publishDialogOpen = false;
+          void this.loadData();
+        }}
       ></scion-skill-publish-dialog>
     `;
   }

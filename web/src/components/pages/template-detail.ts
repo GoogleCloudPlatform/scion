@@ -169,7 +169,9 @@ export class ScionPageTemplateDetail extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     if (typeof window !== 'undefined') {
-      const projectMatch = window.location.pathname.match(/\/projects\/([^/]+)\/templates\/([^/]+)/);
+      const projectMatch = window.location.pathname.match(
+        /\/projects\/([^/]+)\/templates\/([^/]+)/
+      );
       if (projectMatch) {
         this.projectId = projectMatch[1];
         this.templateId = projectMatch[2];
@@ -207,7 +209,11 @@ export class ScionPageTemplateDetail extends LitElement {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
       this.template = (await response.json()) as Template;
-      dispatchPageTitle(this, this.template.displayName || this.template.name || this.templateId, 'Templates');
+      dispatchPageTitle(
+        this,
+        this.template.displayName || this.template.name || this.templateId,
+        'Templates'
+      );
 
       // Create data sources
       this.fileBrowserDataSource = new TemplateFileBrowserDataSource(this.templateId);
@@ -247,9 +253,9 @@ export class ScionPageTemplateDetail extends LitElement {
   }
 
   private refreshFileBrowser(): void {
-    const browser = this.shadowRoot?.querySelector(
-      'scion-file-browser'
-    ) as import('../shared/file-browser.js').ScionFileBrowser | null;
+    const browser = this.shadowRoot?.querySelector('scion-file-browser') as
+      | import('../shared/file-browser.js').ScionFileBrowser
+      | null;
     browser?.loadFiles();
   }
 
@@ -282,8 +288,7 @@ export class ScionPageTemplateDetail extends LitElement {
         )}
       </div>
 
-      ${this.renderHeader()}
-      ${this.renderFilesSection()}
+      ${this.renderHeader()} ${this.renderFilesSection()}
     `;
   }
 
@@ -292,7 +297,10 @@ export class ScionPageTemplateDetail extends LitElement {
     return html`
       <div class="template-header">
         <div class="template-title">
-          <sl-icon name="file-earmark-code" style="font-size: 1.25rem; color: var(--sl-color-neutral-500);"></sl-icon>
+          <sl-icon
+            name="file-earmark-code"
+            style="font-size: 1.25rem; color: var(--sl-color-neutral-500);"
+          ></sl-icon>
           <h1>${t.displayName || t.name}</h1>
           ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}
         </div>
@@ -301,7 +309,10 @@ export class ScionPageTemplateDetail extends LitElement {
           <span>Scope: ${t.scope}</span>
           <span>Status: ${t.status}</span>
           ${t.contentHash
-            ? html`<span class="hash-meta">Hash: <scion-hash-display .hash=${t.contentHash} max-width="14ch"></scion-hash-display></span>`
+            ? html`<span class="hash-meta"
+                >Hash:
+                <scion-hash-display .hash=${t.contentHash} max-width="14ch"></scion-hash-display
+              ></span>`
             : ''}
         </div>
       </div>

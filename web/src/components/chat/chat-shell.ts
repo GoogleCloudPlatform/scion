@@ -41,6 +41,7 @@ import { showToast } from '../../utils/toast.js';
 import { performLogout } from '../../utils/auth.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import type { PageTitleDetail } from '../../client/page-title.js';
+import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
 
 @customElement('scion-chat-shell')
 export class ScionChatShell extends LitElement {
@@ -74,6 +75,84 @@ export class ScionChatShell extends LitElement {
       overflow: hidden;
       display: flex;
       flex-direction: column;
+    }
+
+    /* V2 three-panel layout */
+    .content-v2 {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: row;
+    }
+
+    .content-v2 .rail-panel {
+      width: 260px;
+      min-width: 200px;
+      max-width: 320px;
+      border-right: 1px solid var(--scion-border, #e2e8f0);
+      overflow: hidden;
+    }
+
+    .content-v2 .center-panel {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .content-v2 .members-panel {
+      width: 240px;
+      border-left: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--scion-surface, #ffffff);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .members-panel.collapsed {
+      display: none;
+    }
+
+    .members-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .members-placeholder {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.8125rem;
+      padding: 1rem;
+      text-align: center;
+    }
+
+    /* Members toggle button in the header area */
+    .members-toggle {
+      position: absolute;
+      right: 1rem;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    @media (max-width: 768px) {
+      .content-v2 .rail-panel {
+        width: 100%;
+        max-width: none;
+      }
+
+      .content-v2 .members-panel {
+        display: none;
+      }
     }
   `;
 
@@ -130,6 +209,8 @@ export class ScionChatShell extends LitElement {
   }
 
   override render() {
+    const isV2 = isFeatureEnabled(NATIVE_CHAT_V2_FLAG);
+
     return html`
       <main class="main">
         <scion-header
@@ -140,7 +221,7 @@ export class ScionChatShell extends LitElement {
           @logout=${(): void => this.handleLogout()}
         ></scion-header>
 
-        <div class="content">
+        <div class="${isV2 ? 'content-v2' : 'content'}">
           <slot></slot>
         </div>
       </main>

@@ -146,7 +146,6 @@ export class ScionPageProjects extends LitElement {
       .scope-toggle button sl-icon {
         font-size: 0.875rem;
       }
-
     `,
   ];
 
@@ -197,7 +196,10 @@ export class ScionPageProjects extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.removeEventListener(
+      'projects-updated',
+      this.boundOnProjectsUpdated as EventListener
+    );
   }
 
   private onProjectsUpdated(): void {
@@ -236,16 +238,21 @@ export class ScionPageProjects extends LitElement {
     this.error = null;
 
     try {
-      const url = this.projectScope !== 'all'
-        ? `/api/v1/projects?scope=${this.projectScope}`
-        : '/api/v1/projects';
+      const url =
+        this.projectScope !== 'all'
+          ? `/api/v1/projects?scope=${this.projectScope}`
+          : '/api/v1/projects';
       const response = await apiFetch(url);
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
-      const data = (await response.json()) as { projects?: Project[]; _capabilities?: Capabilities } | Project[];
+      const data = (await response.json()) as
+        | { projects?: Project[]; _capabilities?: Capabilities }
+        | Project[];
       if (Array.isArray(data)) {
         this.projects = data;
         this.scopeCapabilities = undefined;
@@ -288,49 +295,59 @@ export class ScionPageProjects extends LitElement {
       <div class="header">
         <h1>Projects</h1>
         <div class="header-actions">
-          ${this.pageData?.user ? html`
-            <div class="scope-toggle">
-              <button
-                class=${this.projectScope === 'all' ? 'active' : ''}
-                title="All projects"
-                @click=${() => this.setScope('all')}
-              >All</button>
-              <button
-                class=${this.projectScope === 'mine' ? 'active' : ''}
-                title="Projects I own"
-                @click=${() => this.setScope('mine')}
-              >
-                <sl-icon name="person"></sl-icon>
-                Mine
-              </button>
-              <button
-                class=${this.projectScope === 'shared' ? 'active' : ''}
-                title="Projects shared with me"
-                @click=${() => this.setScope('shared')}
-              >
-                <sl-icon name="people"></sl-icon>
-                Shared
-              </button>
-            </div>
-          ` : nothing}
+          ${this.pageData?.user
+            ? html`
+                <div class="scope-toggle">
+                  <button
+                    class=${this.projectScope === 'all' ? 'active' : ''}
+                    title="All projects"
+                    @click=${() => this.setScope('all')}
+                  >
+                    All
+                  </button>
+                  <button
+                    class=${this.projectScope === 'mine' ? 'active' : ''}
+                    title="Projects I own"
+                    @click=${() => this.setScope('mine')}
+                  >
+                    <sl-icon name="person"></sl-icon>
+                    Mine
+                  </button>
+                  <button
+                    class=${this.projectScope === 'shared' ? 'active' : ''}
+                    title="Projects shared with me"
+                    @click=${() => this.setScope('shared')}
+                  >
+                    <sl-icon name="people"></sl-icon>
+                    Shared
+                  </button>
+                </div>
+              `
+            : nothing}
           <scion-view-toggle
             .view=${this.viewMode}
             .showGraph=${false}
             storageKey="scion-view-projects"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
-          ${can(this.scopeCapabilities, 'create') ? html`
-            <a href="/projects/new" style="text-decoration: none;">
-              <sl-button variant="primary" size="small">
-                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                New Project
-              </sl-button>
-            </a>
-          ` : nothing}
+          ${can(this.scopeCapabilities, 'create')
+            ? html`
+                <a href="/projects/new" style="text-decoration: none;">
+                  <sl-button variant="primary" size="small">
+                    <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                    New Project
+                  </sl-button>
+                </a>
+              `
+            : nothing}
         </div>
       </div>
 
-      ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderProjects()}
+      ${this.loading
+        ? this.renderLoading()
+        : this.error
+          ? this.renderError()
+          : this.renderProjects()}
     `;
   }
 
@@ -381,7 +398,9 @@ export class ScionPageProjects extends LitElement {
       return this.renderEmptyState();
     }
 
-    return this.viewMode === 'grid' ? this.renderGrid(this.projects) : this.renderTable(this.projects);
+    return this.viewMode === 'grid'
+      ? this.renderGrid(this.projects)
+      : this.renderTable(this.projects);
   }
 
   private renderEmptyState() {
@@ -390,17 +409,22 @@ export class ScionPageProjects extends LitElement {
         <sl-icon name="folder2-open"></sl-icon>
         <h2>No Projects Found</h2>
         <p>
-          Projects are project workspaces that contain your agents.${can(this.scopeCapabilities, 'create') ? ' Create your first project to get started, or run' : ' Run'}
+          Projects are project workspaces that contain your
+          agents.${can(this.scopeCapabilities, 'create')
+            ? ' Create your first project to get started, or run'
+            : ' Run'}
           <code>scion init</code> in a project directory.
         </p>
-        ${can(this.scopeCapabilities, 'create') ? html`
-          <a href="/projects/new" style="text-decoration: none;">
-            <sl-button variant="primary">
-              <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-              Create Project
-            </sl-button>
-          </a>
-        ` : nothing}
+        ${can(this.scopeCapabilities, 'create')
+          ? html`
+              <a href="/projects/new" style="text-decoration: none;">
+                <sl-button variant="primary">
+                  <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                  Create Project
+                </sl-button>
+              </a>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -417,7 +441,12 @@ export class ScionPageProjects extends LitElement {
 
   private renderLinkedBadge(project: Project) {
     if (project.projectType !== 'linked') return nothing;
-    return html` <sl-tooltip content="Linked project"><sl-icon name="link-45deg" style="font-size: 0.875rem; vertical-align: middle; opacity: 0.7;"></sl-icon></sl-tooltip>`;
+    return html` <sl-tooltip content="Linked project"
+      ><sl-icon
+        name="link-45deg"
+        style="font-size: 0.875rem; vertical-align: middle; opacity: 0.7;"
+      ></sl-icon
+    ></sl-tooltip>`;
   }
 
   private renderProjectCard(project: Project) {
@@ -426,10 +455,14 @@ export class ScionPageProjects extends LitElement {
         <div class="project-header">
           <div>
             <h3 class="resource-name">
-              ${this.renderProjectIcon()}
-              ${project.name}${this.renderLinkedBadge(project)}
+              ${this.renderProjectIcon()} ${project.name}${this.renderLinkedBadge(project)}
             </h3>
-            <div class="project-path"><scion-git-remote-display .project=${project} stop-propagation></scion-git-remote-display></div>
+            <div class="project-path">
+              <scion-git-remote-display
+                .project=${project}
+                stop-propagation
+              ></scion-git-remote-display>
+            </div>
           </div>
         </div>
         <div class="project-stats">
@@ -470,17 +503,21 @@ export class ScionPageProjects extends LitElement {
 
   private renderProjectRow(project: Project) {
     return html`
-      <tr class="clickable" @click=${() => {
-        window.history.pushState({}, '', `/projects/${project.id}`);
-        window.dispatchEvent(new PopStateEvent('popstate'));
-      }}>
+      <tr
+        class="clickable"
+        @click=${() => {
+          window.history.pushState({}, '', `/projects/${project.id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }}
+      >
         <td>
           <span class="name-cell">
-            ${this.renderProjectIcon()}
-            ${project.name}${this.renderLinkedBadge(project)}
+            ${this.renderProjectIcon()} ${project.name}${this.renderLinkedBadge(project)}
           </span>
         </td>
-        <td class="mono-cell"><scion-git-remote-display .project=${project} stop-propagation></scion-git-remote-display></td>
+        <td class="mono-cell">
+          <scion-git-remote-display .project=${project} stop-propagation></scion-git-remote-display>
+        </td>
         <td>${project.agentCount}</td>
         <td class="hide-mobile">
           <span class="meta-text">${project.ownerName || '—'}</span>

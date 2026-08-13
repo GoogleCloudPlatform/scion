@@ -633,5 +633,298 @@ func TestNoopEventPublisher(t *testing.T) {
 	pub.PublishBrokerDisconnected(ctx, "", nil)
 	pub.PublishBrokerStatus(ctx, "", "")
 	pub.PublishNotification(ctx, &store.Notification{})
+	pub.PublishChatTopicEvent(ctx, "proj1", "created", WebChatTopic{})
 	pub.Close()
+}
+
+// --- Wave-2: PublishUserMessage chat subject fan-out ---
+
+func TestPublishUserMessage_ChatMessageSubject(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	// Subscribe to the project chat.message subject.
+	ch, unsub := pub.Subscribe("project.proj1.chat.message")
+	defer unsub()
+
+	topicUUID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	msg := &store.Message{
+		ID:          "msg-1",
+		ProjectID:   "proj1",
+		Sender:      "agent:coder",
+		SenderID:    "agent-uuid-1",
+		Recipient:   "user:alice",
+		RecipientID: "user-uuid-1",
+		Msg:         "hello from agent",
+		Type:        "assistant-reply",
+		Channel:     "web",
+		ThreadID:    topicUUID,
+		CreatedAt:   time.Now(),
+	}
+
+	pub.PublishUserMessage(context.Background(), msg)
+
+	// Should receive on project.proj1.chat.message
+	select {
+	case evt := <-ch:
+		if evt.Subject != "project.proj1.chat.message" {
+			t.Errorf("expected subject project.proj1.chat.message, got %s", evt.Subject)
+		}
+		var payload UserMessageEvent
+		if err := json.Unmarshal(evt.Data, &payload); err != nil {
+			t.Fatalf("failed to unmarshal event: %v", err)
+		}
+		if payload.ThreadID != topicUUID {
+			t.Errorf("expected threadId %s, got %s", topicUUID, payload.ThreadID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for chat.message event")
+	}
+}
+
+func TestPublishUserMessage_NoChatMessageForDM(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	ch, unsub := pub.Subscribe("project.proj1.chat.message")
+	defer unsub()
+
+	// DM thread_id should NOT produce a project.*.chat.message event.
+	msg := &store.Message{
+		ID:          "msg-2",
+		ProjectID:   "proj1",
+		Sender:      "agent:coder",
+		SenderID:    "agent-uuid-1",
+		Recipient:   "user:alice",
+		RecipientID: "user-uuid-1",
+		Msg:         "DM message",
+		Type:        "assistant-reply",
+		Channel:     "web",
+		ThreadID:    "dm:agent:agent-uuid-1:user:user-uuid-1",
+		CreatedAt:   time.Now(),
+	}
+
+	pub.PublishUserMessage(context.Background(), msg)
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("DM should not produce chat.message event, got: %s", evt.Subject)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: no event.
+	}
+}
+
+func TestPublishUserMessage_NoChatMessageForLegacyThread(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	ch, unsub := pub.Subscribe("project.proj1.chat.message")
+	defer unsub()
+
+	// Legacy agent:<slug> thread_id should NOT produce chat.message.
+	msg := &store.Message{
+		ID:          "msg-3",
+		ProjectID:   "proj1",
+		Sender:      "agent:coder",
+		SenderID:    "agent-uuid-1",
+		Recipient:   "user:alice",
+		RecipientID: "user-uuid-1",
+		Msg:         "legacy",
+		Type:        "assistant-reply",
+		Channel:     "web",
+		ThreadID:    "agent:coder",
+		CreatedAt:   time.Now(),
+	}
+
+	pub.PublishUserMessage(context.Background(), msg)
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("legacy thread_id should not produce chat.message event, got: %s", evt.Subject)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: no event.
+	}
+}
+
+func TestPublishUserMessage_NoChatMessageForNonWebChannel(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	ch, unsub := pub.Subscribe("project.proj1.chat.message")
+	defer unsub()
+
+	msg := &store.Message{
+		ID:          "msg-4",
+		ProjectID:   "proj1",
+		Sender:      "agent:coder",
+		SenderID:    "agent-uuid-1",
+		Recipient:   "user:alice",
+		RecipientID: "user-uuid-1",
+		Msg:         "discord message",
+		Type:        "assistant-reply",
+		Channel:     "discord",
+		ThreadID:    "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		CreatedAt:   time.Now(),
+	}
+
+	pub.PublishUserMessage(context.Background(), msg)
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("non-web channel should not produce chat.message event, got: %s", evt.Subject)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: no event.
+	}
+}
+
+// --- Wave-2: PublishChatTopicEvent ---
+
+func TestPublishChatTopicEvent(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	ch, unsub := pub.Subscribe("project.proj1.chat.topic")
+	defer unsub()
+
+	topic := WebChatTopic{
+		ID:        "topic-1",
+		ProjectID: "proj1",
+		Name:      "general",
+		IsGeneral: true,
+		CreatedBy: "user1",
+		CreatedAt: time.Now(),
+	}
+
+	pub.PublishChatTopicEvent(context.Background(), "proj1", "created", topic)
+
+	select {
+	case evt := <-ch:
+		if evt.Subject != "project.proj1.chat.topic" {
+			t.Errorf("expected subject project.proj1.chat.topic, got %s", evt.Subject)
+		}
+		var payload TopicEvent
+		if err := json.Unmarshal(evt.Data, &payload); err != nil {
+			t.Fatalf("failed to unmarshal event: %v", err)
+		}
+		if payload.Action != "created" {
+			t.Errorf("expected action created, got %s", payload.Action)
+		}
+		if payload.Topic.ID != "topic-1" {
+			t.Errorf("expected topic ID topic-1, got %s", payload.Topic.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for chat.topic event")
+	}
+}
+
+// --- Wave-2 W4: DM SSE subject publish ---
+
+func TestPublishUserMessage_DMChatSubject(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	agentUUID := "aaaaaaaa-1111-2222-3333-444444444444"
+	userUUID := "bbbbbbbb-5555-6666-7777-888888888888"
+	dmKey := "dm:agent:" + agentUUID + ":user:" + userUUID
+
+	// Subscribe to both participants' DM subjects.
+	chAgent, unsubA := pub.Subscribe("user." + agentUUID + ".chat.dm")
+	defer unsubA()
+	chUser, unsubU := pub.Subscribe("user." + userUUID + ".chat.dm")
+	defer unsubU()
+
+	// Should NOT produce a project.*.chat.message event for DMs.
+	chProject, unsubP := pub.Subscribe("project.proj1.chat.message")
+	defer unsubP()
+
+	msg := &store.Message{
+		ID:          "dm-msg-1",
+		ProjectID:   "proj1",
+		Sender:      "user:alice@example.com",
+		SenderID:    userUUID,
+		Recipient:   "agent:coder",
+		RecipientID: agentUUID,
+		Msg:         "hello agent",
+		Type:        "instruction",
+		Channel:     "web",
+		ThreadID:    dmKey,
+		CreatedAt:   time.Now(),
+	}
+
+	pub.PublishUserMessage(context.Background(), msg)
+
+	// Should receive on user.{agentUUID}.chat.dm
+	select {
+	case evt := <-chAgent:
+		if evt.Subject != "user."+agentUUID+".chat.dm" {
+			t.Errorf("expected subject user.%s.chat.dm, got %s", agentUUID, evt.Subject)
+		}
+		var payload UserMessageEvent
+		if err := json.Unmarshal(evt.Data, &payload); err != nil {
+			t.Fatalf("failed to unmarshal agent-side DM event: %v", err)
+		}
+		if payload.ThreadID != dmKey {
+			t.Errorf("expected threadId %s, got %s", dmKey, payload.ThreadID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for agent-side DM event")
+	}
+
+	// Should receive on user.{userUUID}.chat.dm
+	select {
+	case evt := <-chUser:
+		if evt.Subject != "user."+userUUID+".chat.dm" {
+			t.Errorf("expected subject user.%s.chat.dm, got %s", userUUID, evt.Subject)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for user-side DM event")
+	}
+
+	// Should NOT produce a project-scoped chat.message event for DMs.
+	select {
+	case evt := <-chProject:
+		t.Fatalf("DM should not produce project.*.chat.message event, got: %s", evt.Subject)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: no event.
+	}
+}
+
+func TestPublishUserMessage_UserDM_BothSidesReceive(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	user1 := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	user2 := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	dmKey := "dm:user:" + user1 + ":user:" + user2
+
+	ch1, unsub1 := pub.Subscribe("user." + user1 + ".chat.dm")
+	defer unsub1()
+	ch2, unsub2 := pub.Subscribe("user." + user2 + ".chat.dm")
+	defer unsub2()
+
+	msg := &store.Message{
+		ID:          "dm-msg-2",
+		ProjectID:   "",
+		Sender:      "user:alice@example.com",
+		SenderID:    user1,
+		Recipient:   "user:bob@example.com",
+		RecipientID: user2,
+		Msg:         "hey bob",
+		Type:        "chat",
+		Channel:     "web",
+		ThreadID:    dmKey,
+		CreatedAt:   time.Now(),
+	}
+
+	pub.PublishUserMessage(context.Background(), msg)
+
+	// Both users should receive the DM event.
+	for _, ch := range []<-chan Event{ch1, ch2} {
+		select {
+		case <-ch:
+			// OK
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for user DM event")
+		}
+	}
 }

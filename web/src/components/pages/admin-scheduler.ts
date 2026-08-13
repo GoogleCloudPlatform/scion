@@ -397,7 +397,9 @@ export class ScionPageAdminScheduler extends LitElement {
       ]);
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const data = (await response.json()) as SchedulerResponse;
@@ -406,7 +408,9 @@ export class ScionPageAdminScheduler extends LitElement {
 
       // Build project ID -> name/slug lookup map
       if (projectsResponse.ok) {
-        const projectsBody = (await projectsResponse.json()) as { projects: { id: string; name: string; slug?: string }[] };
+        const projectsBody = (await projectsResponse.json()) as {
+          projects: { id: string; name: string; slug?: string }[];
+        };
         const projectsData = projectsBody.projects ?? [];
         const map = new Map<string, { name: string; slug: string }>();
         for (const p of projectsData) {
@@ -476,10 +480,14 @@ export class ScionPageAdminScheduler extends LitElement {
   private renderProjectCell(projectId: string) {
     const project = this.projectMap.get(projectId);
     if (project) {
-      return html`<a class="project-link" href="/projects/${encodeURIComponent(project.slug)}">${project.name}</a>`;
+      return html`<a class="project-link" href="/projects/${encodeURIComponent(project.slug)}"
+        >${project.name}</a
+      >`;
     }
     // Fallback to truncated ID if project not found
-    return html`<span class="mono">${projectId.length > 12 ? projectId.slice(0, 12) + '...' : projectId}</span>`;
+    return html`<span class="mono"
+      >${projectId.length > 12 ? projectId.slice(0, 12) + '...' : projectId}</span
+    >`;
   }
 
   private formatInterval(minutes: number): string {
@@ -557,9 +565,7 @@ export class ScionPageAdminScheduler extends LitElement {
       return html`
         <div class="section">
           <h2 class="section-title">Scheduler Not Available</h2>
-          <p class="section-description">
-            The scheduler has not been initialized on this server.
-          </p>
+          <p class="section-description">The scheduler has not been initialized on this server.</p>
         </div>
       `;
     }
@@ -567,10 +573,8 @@ export class ScionPageAdminScheduler extends LitElement {
     const events = scheduledEvents ?? [];
 
     return html`
-      ${this.renderOverview(scheduler)}
-      ${this.renderRecurringHandlers(scheduler.recurringHandlers)}
-      ${this.renderEventHandlers(scheduler.eventHandlers)}
-      ${this.renderRecurringSchedules()}
+      ${this.renderOverview(scheduler)} ${this.renderRecurringHandlers(scheduler.recurringHandlers)}
+      ${this.renderEventHandlers(scheduler.eventHandlers)} ${this.renderRecurringSchedules()}
       ${this.renderScheduledEvents(events)}
     `;
   }
@@ -728,9 +732,7 @@ export class ScionPageAdminScheduler extends LitElement {
                                 : '-'}
                             </span>
                           </td>
-                          <td class="hide-mobile">
-                            ${this.renderProjectCell(sched.projectId)}
-                          </td>
+                          <td class="hide-mobile">${this.renderProjectCell(sched.projectId)}</td>
                           <td class="hide-mobile">
                             <span class="meta-text">
                               ${sched.runCount}${sched.errorCount > 0
@@ -744,7 +746,12 @@ export class ScionPageAdminScheduler extends LitElement {
                                   <span class="meta-text">
                                     ${this.formatRelativeTime(sched.lastRunAt)}
                                     ${sched.lastRunStatus === 'error'
-                                      ? html`<span class="error-text" title=${sched.lastRunError || ''}> (error)</span>`
+                                      ? html`<span
+                                          class="error-text"
+                                          title=${sched.lastRunError || ''}
+                                        >
+                                          (error)</span
+                                        >`
                                       : ''}
                                   </span>
                                 `
@@ -773,9 +780,7 @@ export class ScionPageAdminScheduler extends LitElement {
         <td><span class="type-badge">${evt.eventType}</span></td>
         <td><span class="status-badge ${evt.status}">${evt.status}</span></td>
         <td><span class="meta-text">${fireTimeDisplay}</span></td>
-        <td class="hide-mobile">
-          ${this.renderProjectCell(evt.projectId)}
-        </td>
+        <td class="hide-mobile">${this.renderProjectCell(evt.projectId)}</td>
         <td class="hide-mobile">
           <span class="meta-text">${this.formatRelativeTime(evt.createdAt)}</span>
         </td>

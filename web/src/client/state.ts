@@ -38,7 +38,8 @@ export type ViewScope =
   | { type: 'project'; projectId: string }
   | { type: 'agent-detail'; projectId: string; agentId: string }
   | { type: 'brokers-list' }
-  | { type: 'broker-detail'; brokerId: string };
+  | { type: 'broker-detail'; brokerId: string }
+  | { type: 'chat'; spaceIds: string[]; userId: string };
 
 /** Full in-memory state for the current scope */
 export interface AppState {
@@ -62,7 +63,11 @@ export type StateEventType =
   | 'disconnected'
   | 'scope-changed'
   | 'notification-created'
-  | 'user-message-created';
+  | 'user-message-created'
+  | 'chat-message-received'
+  | 'chat-topic-updated'
+  | 'chat-presence-updated'
+  | 'chat-typing-received';
 
 export class StateManager extends EventTarget {
   private state: AppState = {
@@ -116,7 +121,7 @@ export class StateManager extends EventTarget {
    */
   hydrate(
     initialData: { agents?: Agent[]; projects?: Project[] },
-    scopeCapabilities?: import('../shared/types.js').Capabilities,
+    scopeCapabilities?: import('../shared/types.js').Capabilities
   ): void {
     if (initialData.agents) {
       for (const agent of initialData.agents) {
@@ -188,6 +193,18 @@ export class StateManager extends EventTarget {
 
       case 'broker-detail':
         return ['broker.>', 'notification.>'];
+
+      case 'chat': {
+        const subs: string[] = [];
+        for (const spaceId of scope.spaceIds) {
+          subs.push(`project.${spaceId}.chat.>`);
+          // Also subscribe to project-level agent events for the members sidebar
+          subs.push(`project.${spaceId}.agent.>`);
+        }
+        subs.push(`user.${scope.userId}.chat.>`);
+        subs.push('notification.>');
+        return subs;
+      }
     }
   }
 
@@ -199,6 +216,13 @@ export class StateManager extends EventTarget {
     if (a.type === 'project' && b.type === 'project') return a.projectId === b.projectId;
     if (a.type === 'agent-detail' && b.type === 'agent-detail') {
       return a.projectId === b.projectId && a.agentId === b.agentId;
+    }
+    if (a.type === 'chat' && b.type === 'chat') {
+      return (
+        a.userId === b.userId &&
+        a.spaceIds.length === b.spaceIds.length &&
+        a.spaceIds.every((id, i) => id === b.spaceIds[i])
+      );
     }
     return false;
   }
@@ -215,6 +239,12 @@ export class StateManager extends EventTarget {
     // Notification events: notification.created
     if (parts[0] === 'notification') {
       this.notify('notification-created');
+      return;
+    }
+
+    // User-scoped chat events: user.{userId}.chat.dm
+    if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
+      this.notifyWithData('chat-message-received', data);
       return;
     }
 
@@ -255,6 +285,27 @@ export class StateManager extends EventTarget {
         return;
       }
 
+      // Chat events: project.{projectId}.chat.{eventType}
+      if (parts[2] === 'chat' && parts.length >= 4) {
+        const chatEventType = parts[3];
+        // Include projectId and the SSE payload so consumers can filter by conversation
+        const chatDetail = { projectId, ...(data as Record<string, unknown>) };
+        if (chatEventType === 'message') {
+          this.notifyWithData('chat-message-received', chatDetail);
+        } else if (chatEventType === 'topic') {
+          this.notifyWithData('chat-topic-updated', chatDetail);
+        } else if (chatEventType === 'presence') {
+          this.notifyWithData('chat-presence-updated', chatDetail);
+        } else if (chatEventType === 'typing') {
+          this.notifyWithData('chat-typing-received', chatDetail);
+        }
+        // Also dispatch the legacy user-message-created for v1 compat
+        if (chatEventType === 'message') {
+          this.notify('user-message-created');
+        }
+        return;
+      }
+
       // User-targeted message events: project.{projectId}.user.{userId}
       if (parts[2] === 'user') {
         this.notify('user-message-created');
@@ -292,7 +343,7 @@ export class StateManager extends EventTarget {
         this.pendingAgentDeltas.set(agentId, prev ? { ...prev, ...delta } : delta);
         return;
       }
-      let base = existing || ({} as Agent);
+      const base = existing || ({} as Agent);
 
       // For "created" events, apply any buffered deltas that arrived early.
       // The buffered delta is applied AFTER the created snapshot so that
@@ -318,7 +369,7 @@ export class StateManager extends EventTarget {
         delete delta.activity;
       }
       // Promote detail fields from SSE detail to top-level agent
-      const detail = delta.detail as import('../shared/types.js').AgentDetail | undefined;
+      const detail = delta.detail as import('../shared/types.js').AgentDetail;
       if (detail) {
         if (detail.message) {
           (delta as Record<string, unknown>).message = detail.message;
@@ -381,7 +432,7 @@ export class StateManager extends EventTarget {
       const existing = this.state.brokers.get(brokerId) || ({} as RuntimeBroker);
       const delta = data as Partial<RuntimeBroker>;
       // Map brokerId field from event payload to id
-      const id = (delta as Record<string, unknown>).brokerId as string || brokerId;
+      const id = ((delta as Record<string, unknown>).brokerId as string) || brokerId;
       const updated = { ...existing, ...delta, id };
       this.state.brokers.set(id, updated as RuntimeBroker);
     }
@@ -390,6 +441,11 @@ export class StateManager extends EventTarget {
 
   private notify(event: StateEventType): void {
     this.dispatchEvent(new CustomEvent(event, { detail: this.state }));
+  }
+
+  /** Dispatch an event with additional SSE payload data for consumer filtering. */
+  private notifyWithData(event: StateEventType, data: unknown): void {
+    this.dispatchEvent(new CustomEvent(event, { detail: { state: this.state, data } }));
   }
 
   /**

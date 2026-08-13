@@ -47,9 +47,7 @@ const IDENT = String.raw`'(?:${FORBIDDEN_IDENTS.join('|')})'`;
  * anywhere in the array -- so reordering the elements, or leading with a name
  * that is not a harness, does not defeat it.
  */
-const HARNESS_ARRAY_LITERAL = new RegExp(
-  String.raw`\[[^\]]*${IDENT}\s*,\s*${IDENT}`
-);
+const HARNESS_ARRAY_LITERAL = new RegExp(String.raw`\[[^\]]*${IDENT}\s*,\s*${IDENT}`);
 
 describe('KNOWN_HARNESS_NAMES', () => {
   it('matches the harnesses/ directory, which is the source of truth', () => {

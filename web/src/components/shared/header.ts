@@ -310,7 +310,11 @@ export class ScionHeader extends LitElement {
 
     return html`
       <div class="user-buttons">
-        <a href="/profile" class="profile-link" @click=${(e: Event): void => this.handleProfileClick(e)}>
+        <a
+          href="/profile"
+          class="profile-link"
+          @click=${(e: Event): void => this.handleProfileClick(e)}
+        >
           <sl-icon name="person"></sl-icon>
           Profile
         </a>

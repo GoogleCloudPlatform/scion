@@ -26,12 +26,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type {
-  Project,
-  RuntimeBroker,
-  Template,
-  GCPServiceAccount,
-} from '../../shared/types.js';
+import type { Project, RuntimeBroker, Template, GCPServiceAccount } from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -513,7 +508,10 @@ export class ScionPageAgentCreate extends LitElement {
     if (!model) return { selection: '', customId: '' };
     const normalized = normalizeModelAlias(model);
     if (['small', 'medium', 'large', 'extra-large'].includes(normalized)) {
-      return { selection: normalized as 'small' | 'medium' | 'large' | 'extra-large', customId: '' };
+      return {
+        selection: normalized as 'small' | 'medium' | 'large' | 'extra-large',
+        customId: '',
+      };
     }
     return { selection: 'other', customId: model };
   }
@@ -640,9 +638,7 @@ export class ScionPageAgentCreate extends LitElement {
     try {
       const res = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts`);
       if (res.ok) {
-        const data = (await res.json()) as
-          | { items?: GCPServiceAccount[] }
-          | GCPServiceAccount[];
+        const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
         this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
       }
     } catch {
@@ -655,9 +651,7 @@ export class ScionPageAgentCreate extends LitElement {
       const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
       if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
         const verified = this.verifiedGCPServiceAccounts;
-        const match = verified.find(
-          (sa) => sa.id === settings.defaultGCPIdentityServiceAccountID
-        );
+        const match = verified.find((sa) => sa.id === settings.defaultGCPIdentityServiceAccountID);
         if (match) {
           this.gcpMetadataMode = 'assign';
           this.gcpServiceAccountId = match.id;
@@ -668,9 +662,7 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
-  private async fetchProjectSettings(
-    projectId: string
-  ): Promise<{
+  private async fetchProjectSettings(projectId: string): Promise<{
     defaultTemplate?: string;
     defaultHarnessConfig?: string;
     defaultMaxTurns?: number;
@@ -777,9 +769,7 @@ export class ScionPageAgentCreate extends LitElement {
     const config: Record<string, unknown> = {};
 
     // Model
-    const model = this.modelSelection === 'other'
-      ? this.customModelId
-      : this.modelSelection;
+    const model = this.modelSelection === 'other' ? this.customModelId : this.modelSelection;
     if (model) config.model = model;
 
     // Thinking level
@@ -1016,7 +1006,9 @@ export class ScionPageAgentCreate extends LitElement {
                       >&nbsp;&mdash;
                       ${this.errorLinks.map(
                         (link, i) =>
-                          html`${i > 0 ? html` or ` : nothing}<a href=${link.href}>${link.label}</a>`
+                          html`${i > 0 ? html` or ` : nothing}<a href=${link.href}
+                              >${link.label}</a
+                            >`
                       )}</span
                     >`
                   : nothing}
@@ -1136,9 +1128,7 @@ export class ScionPageAgentCreate extends LitElement {
                 }}
                 required
               >
-                ${this.projects.map(
-                  (p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`
-                )}
+                ${this.projects.map((p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`)}
               </sl-select>
               <div class="hint">The project workspace for this agent.</div>
             </div>
@@ -1190,9 +1180,7 @@ export class ScionPageAgentCreate extends LitElement {
                 `
               )
             : KNOWN_HARNESS_NAMES.map(
-                (name) => html`
-                  <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
-                `
+                (name) => html` <sl-option value=${name}>${harnessDisplayName(name)}</sl-option> `
               )}
           <sl-option value="__other__">Other...</sl-option>
         </sl-select>
@@ -1333,7 +1321,8 @@ export class ScionPageAgentCreate extends LitElement {
           .value=${this.modelSelection}
           clearable
           @sl-change=${(e: Event) => {
-            this.modelSelection = (e.target as HTMLElement & { value: string }).value as typeof this.modelSelection;
+            this.modelSelection = (e.target as HTMLElement & { value: string })
+              .value as typeof this.modelSelection;
             if (this.modelSelection !== 'other') this.customModelId = '';
           }}
         >
@@ -1364,8 +1353,11 @@ export class ScionPageAgentCreate extends LitElement {
       <!-- Thinking Level -->
       <div class="form-field">
         <label>
-          Thinking Level${this.thinkingLevel !== null
-            ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)">(${this.thinkingLevel})</span>`
+          Thinking
+          Level${this.thinkingLevel !== null
+            ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
+                >(${this.thinkingLevel})</span
+              >`
             : nothing}
         </label>
         <div style="display:flex;align-items:center;gap:0.75rem">
@@ -1494,7 +1486,9 @@ export class ScionPageAgentCreate extends LitElement {
                 placeholder="3s"
                 .value=${this.autoExposePortsInterval}
                 @sl-input=${(e: Event) => {
-                  this.autoExposePortsInterval = (e.target as HTMLElement & { value: string }).value;
+                  this.autoExposePortsInterval = (
+                    e.target as HTMLElement & { value: string }
+                  ).value;
                 }}
               ></sl-input>
               <div class="hint">How often to scan for new listening ports (e.g. 3s, 5s).</div>
@@ -1573,7 +1567,7 @@ export class ScionPageAgentCreate extends LitElement {
             ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
             : this.gcpMetadataMode === 'assign'
               ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-              : 'No metadata interception. The agent inherits the broker\'s GCP identity. Requires broker ownership.'}
+              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
         </div>
       </div>
 
@@ -1603,8 +1597,8 @@ export class ScionPageAgentCreate extends LitElement {
                   `
                 : html`
                     <div class="hint" style="margin-top: 0;">
-                      No verified service accounts available. Register and verify service
-                      accounts in project settings.
+                      No verified service accounts available. Register and verify service accounts
+                      in project settings.
                     </div>
                   `}
             </div>
@@ -1628,7 +1622,9 @@ export class ScionPageAgentCreate extends LitElement {
           rows="6"
           resize="auto"
         ></sl-textarea>
-        <div class="hint">Custom system prompt for the agent. Can be inline text or a file:// URI.</div>
+        <div class="hint">
+          Custom system prompt for the agent. Can be inline text or a file:// URI.
+        </div>
       </div>
 
       <div class="form-field">
@@ -1642,7 +1638,9 @@ export class ScionPageAgentCreate extends LitElement {
           rows="6"
           resize="auto"
         ></sl-textarea>
-        <div class="hint">Additional instructions for the agent. Can be inline text or a file:// URI.</div>
+        <div class="hint">
+          Additional instructions for the agent. Can be inline text or a file:// URI.
+        </div>
       </div>
     `;
   }
@@ -1659,8 +1657,7 @@ export class ScionPageAgentCreate extends LitElement {
             placeholder="0 = unlimited"
             .value=${String(this.maxTurns || '')}
             @sl-input=${(e: Event) => {
-              this.maxTurns =
-                parseInt((e.target as HTMLElement & { value: string }).value) || 0;
+              this.maxTurns = parseInt((e.target as HTMLElement & { value: string }).value) || 0;
             }}
           ></sl-input>
         </div>
@@ -1769,9 +1766,7 @@ export class ScionPageAgentCreate extends LitElement {
         <label>Labels</label>
         ${this.labelEntries.map(
           (entry, i) => html`
-            <div
-              style="display: flex; gap: 0.5em; margin-bottom: 0.5em; align-items: center;"
-            >
+            <div style="display: flex; gap: 0.5em; margin-bottom: 0.5em; align-items: center;">
               <sl-input
                 size="small"
                 placeholder="key"

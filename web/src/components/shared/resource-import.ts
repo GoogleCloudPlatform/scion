@@ -245,8 +245,7 @@ export class ScionResourceImport extends LitElement {
         discoverEndpoint = '/api/v1/resources/discover';
         discoverBody = { kind: this.kind, scope: 'global', sourceUrl: this.source };
       } else {
-        const path =
-          this.kind === 'template' ? 'discover-templates' : 'discover-harness-configs';
+        const path = this.kind === 'template' ? 'discover-templates' : 'discover-harness-configs';
         discoverEndpoint = `/api/v1/projects/${this.scopeId}/${path}`;
         discoverBody =
           this.mode === 'workspace'
@@ -261,9 +260,7 @@ export class ScionResourceImport extends LitElement {
       });
 
       if (!discoverResponse.ok) {
-        throw new Error(
-          await extractApiError(discoverResponse, `Failed to discover ${this.noun}`)
-        );
+        throw new Error(await extractApiError(discoverResponse, `Failed to discover ${this.noun}`));
       }
 
       const discovered = (await discoverResponse.json()) as {
@@ -525,9 +522,7 @@ export class ScionResourceImport extends LitElement {
             ?indeterminate=${!allSelected && !noneSelected}
             @sl-change=${(e: Event) => {
               const checked = (e.target as HTMLInputElement).checked;
-              this.selectedNames = checked
-                ? new Set(this.discoveredNames)
-                : new Set();
+              this.selectedNames = checked ? new Set(this.discoveredNames) : new Set();
               this.requestUpdate();
             }}
           >

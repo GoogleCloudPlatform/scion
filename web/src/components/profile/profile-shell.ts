@@ -167,7 +167,11 @@ export class ScionProfileShell extends LitElement {
         placement="start"
         @sl-hide=${(): void => this.handleDrawerClose()}
       >
-        <scion-profile-nav .user=${this.user} .currentPath=${this.currentPath} .hideCollapse=${true}></scion-profile-nav>
+        <scion-profile-nav
+          .user=${this.user}
+          .currentPath=${this.currentPath}
+          .hideCollapse=${true}
+        ></scion-profile-nav>
       </sl-drawer>
 
       <main class="main">

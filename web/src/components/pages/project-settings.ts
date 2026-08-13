@@ -23,7 +23,19 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Project, Template, AdminGroup, GitHubAppProjectStatus, GitHubTokenPermissions, RuntimeBroker, BrokerProfile, GCPServiceAccount, PreStartHook, PreStartHookSummary } from '../../shared/types.js';
+import type {
+  PageData,
+  Project,
+  Template,
+  AdminGroup,
+  GitHubAppProjectStatus,
+  GitHubTokenPermissions,
+  RuntimeBroker,
+  BrokerProfile,
+  GCPServiceAccount,
+  PreStartHook,
+  PreStartHookSummary,
+} from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
@@ -43,7 +55,6 @@ import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
-
 
 interface ProjectResourceSpec {
   requests?: { cpu?: string | undefined; memory?: string | undefined };
@@ -261,7 +272,6 @@ export class ScionPageProjectSettings extends LitElement {
   private brokersError: string | null = null;
 
   private brokerRelativeTimeInterval: ReturnType<typeof setInterval> | null = null;
-
 
   static override styles = css`
     :host {
@@ -630,10 +640,18 @@ export class ScionPageProjectSettings extends LitElement {
       border-radius: 50%;
     }
 
-    .github-status-dot.ok { background: #16a34a; }
-    .github-status-dot.degraded { background: #eab308; }
-    .github-status-dot.error { background: #dc2626; }
-    .github-status-dot.unchecked { background: #94a3b8; }
+    .github-status-dot.ok {
+      background: #16a34a;
+    }
+    .github-status-dot.degraded {
+      background: #eab308;
+    }
+    .github-status-dot.error {
+      background: #dc2626;
+    }
+    .github-status-dot.unchecked {
+      background: #94a3b8;
+    }
 
     .github-permissions {
       margin-top: 1rem;
@@ -697,9 +715,15 @@ export class ScionPageProjectSettings extends LitElement {
       flex-shrink: 0;
     }
 
-    .broker-status-dot.online { background: #16a34a; }
-    .broker-status-dot.offline { background: #94a3b8; }
-    .broker-status-dot.degraded { background: #eab308; }
+    .broker-status-dot.online {
+      background: #16a34a;
+    }
+    .broker-status-dot.offline {
+      background: #94a3b8;
+    }
+    .broker-status-dot.degraded {
+      background: #eab308;
+    }
 
     .broker-info {
       flex: 1;
@@ -822,7 +846,9 @@ export class ScionPageProjectSettings extends LitElement {
       const response = await apiFetch(`/api/v1/projects/${this.projectId}`);
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       this.project = (await response.json()) as Project;
@@ -991,9 +1017,7 @@ export class ScionPageProjectSettings extends LitElement {
         console.warn(
           '[project-settings] /settings/resolved returned 404, falling back to /settings'
         );
-        const fallbackResponse = await apiFetch(
-          `/api/v1/projects/${this.projectId}/settings`
-        );
+        const fallbackResponse = await apiFetch(`/api/v1/projects/${this.projectId}/settings`);
         if (fallbackResponse.ok) {
           this.settings = (await fallbackResponse.json()) as ProjectSettings;
         }
@@ -1002,9 +1026,7 @@ export class ScionPageProjectSettings extends LitElement {
         void this.loadHubTelemetryDefaultFallback();
       } else {
         // Other error — try the plain endpoint as fallback
-        const fallbackResponse = await apiFetch(
-          `/api/v1/projects/${this.projectId}/settings`
-        );
+        const fallbackResponse = await apiFetch(`/api/v1/projects/${this.projectId}/settings`);
         if (fallbackResponse.ok) {
           this.settings = (await fallbackResponse.json()) as ProjectSettings;
         }
@@ -1138,9 +1160,7 @@ export class ScionPageProjectSettings extends LitElement {
 
   private async loadGCPServiceAccounts(): Promise<void> {
     try {
-      const response = await apiFetch(
-        `/api/v1/projects/${this.projectId}/gcp-service-accounts`
-      );
+      const response = await apiFetch(`/api/v1/projects/${this.projectId}/gcp-service-accounts`);
       if (response.ok) {
         const data = (await response.json()) as { items?: GCPServiceAccount[] };
         this.gcpServiceAccounts = (data.items || []).filter((sa) => sa.verified);
@@ -1183,9 +1203,10 @@ export class ScionPageProjectSettings extends LitElement {
         }
       }
 
-      const defaultModel = this.defaultModelSelection === 'other'
-        ? this.defaultCustomModelId
-        : this.defaultModelSelection;
+      const defaultModel =
+        this.defaultModelSelection === 'other'
+          ? this.defaultCustomModelId
+          : this.defaultModelSelection;
 
       const body: ProjectSettings = {
         defaultTemplate: this.configDefaultTemplate || undefined,
@@ -1247,7 +1268,9 @@ export class ScionPageProjectSettings extends LitElement {
       });
 
       if (!response.ok && response.status !== 204) {
-        throw new Error(await extractApiError(response, `Failed to delete project: HTTP ${response.status}`));
+        throw new Error(
+          await extractApiError(response, `Failed to delete project: HTTP ${response.status}`)
+        );
       }
 
       // Navigate back to projects list
@@ -1281,10 +1304,7 @@ export class ScionPageProjectSettings extends LitElement {
         <h1>${this.project.name} Settings</h1>
       </div>
 
-      ${this.renderConfigSection()}
-
-      ${this.renderGitHubAppSection()}
-
+      ${this.renderConfigSection()} ${this.renderGitHubAppSection()}
       ${this.membersGroup
         ? html`
             <scion-group-member-editor
@@ -1296,9 +1316,7 @@ export class ScionPageProjectSettings extends LitElement {
             ></scion-group-member-editor>
           `
         : ''}
-
       ${this.renderResourcesSection()}
-
       ${this.pageData?.user
         ? html`
             <scion-subscription-manager
@@ -1307,9 +1325,7 @@ export class ScionPageProjectSettings extends LitElement {
             ></scion-subscription-manager>
           `
         : ''}
-
       ${this.renderSchedulesSection()}
-
       ${can(this.project._capabilities, 'delete')
         ? html`
             <div class="section danger-section">
@@ -1370,21 +1386,31 @@ export class ScionPageProjectSettings extends LitElement {
 
     const stateIcon = (s: string | undefined) => {
       switch (s) {
-        case 'ok': return html`<span class="github-status-dot ok"></span>`;
-        case 'degraded': return html`<span class="github-status-dot degraded"></span>`;
-        case 'error': return html`<span class="github-status-dot error"></span>`;
-        case 'unchecked': return html`<span class="github-status-dot unchecked"></span>`;
-        default: return '';
+        case 'ok':
+          return html`<span class="github-status-dot ok"></span>`;
+        case 'degraded':
+          return html`<span class="github-status-dot degraded"></span>`;
+        case 'error':
+          return html`<span class="github-status-dot error"></span>`;
+        case 'unchecked':
+          return html`<span class="github-status-dot unchecked"></span>`;
+        default:
+          return '';
       }
     };
 
     const stateLabel = (s: string | undefined) => {
       switch (s) {
-        case 'ok': return 'Active';
-        case 'degraded': return 'Degraded';
-        case 'error': return 'Error';
-        case 'unchecked': return 'Unchecked';
-        default: return 'Not configured';
+        case 'ok':
+          return 'Active';
+        case 'degraded':
+          return 'Degraded';
+        case 'error':
+          return 'Error';
+        case 'unchecked':
+          return 'Unchecked';
+        default:
+          return 'Not configured';
       }
     };
 
@@ -1393,119 +1419,165 @@ export class ScionPageProjectSettings extends LitElement {
         <h2>GitHub App Integration</h2>
         <p>Automatic token management for GitHub operations via GitHub App installation tokens.</p>
 
-        ${this.githubAppError ? html`
-          <div class="status-message error">${this.githubAppError}</div>
-        ` : ''}
+        ${this.githubAppError
+          ? html` <div class="status-message error">${this.githubAppError}</div> `
+          : ''}
+        ${!hasInstallation
+          ? html`
+              <div class="github-no-install">
+                <sl-icon
+                  name="github"
+                  style="font-size: 2rem; color: var(--scion-text-muted, #64748b);"
+                ></sl-icon>
+                ${this.githubAppLoading
+                  ? html` <p>Checking for GitHub App installation…</p> `
+                  : !this.githubAppConfigured
+                    ? html`
+                        <p>No GitHub App has been configured on this Hub.</p>
+                        <p class="field-help">
+                          Ask your Hub admin to configure the GitHub App integration, then install
+                          it on your organization or account.
+                        </p>
+                      `
+                    : html`
+                        <p>No GitHub App installation found for this project's repository.</p>
 
-        ${!hasInstallation ? html`
-          <div class="github-no-install">
-            <sl-icon name="github" style="font-size: 2rem; color: var(--scion-text-muted, #64748b);"></sl-icon>
-            ${this.githubAppLoading ? html`
-              <p>Checking for GitHub App installation…</p>
-            ` : !this.githubAppConfigured ? html`
-              <p>No GitHub App has been configured on this Hub.</p>
-              <p class="field-help">Ask your Hub admin to configure the GitHub App integration, then install it on your organization or account.</p>
-            ` : html`
-              <p>No GitHub App installation found for this project's repository.</p>
+                        ${this.githubAppInstallationUrl
+                          ? html`
+                              <p class="field-help">
+                                <a
+                                  href=${this.githubAppInstallationUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  Install the GitHub App
+                                </a>
+                                on your organization or account, then click Discover.
+                              </p>
+                            `
+                          : html`
+                              <p class="field-help">
+                                Install the GitHub App on your organization or account, then click
+                                Discover.
+                              </p>
+                            `}
+                        <sl-button
+                          variant="default"
+                          size="small"
+                          @click=${() => this.discoverGitHubInstallation()}
+                        >
+                          <sl-icon slot="prefix" name="search"></sl-icon>
+                          Discover Installation
+                        </sl-button>
+                      `}
+              </div>
+            `
+          : html`
+              <div class="github-status-row">
+                <div class="github-status-item">
+                  <span class="field-help">Status</span>
+                  <div class="github-status-value">
+                    ${stateIcon(status?.state)}
+                    <strong>${stateLabel(status?.state)}</strong>
+                  </div>
+                </div>
+                <div class="github-status-item">
+                  <span class="field-help">Installation ID</span>
+                  <code>${this.githubAppInstallationId}</code>
+                </div>
+                ${status?.last_token_mint
+                  ? html`
+                      <div class="github-status-item">
+                        <span class="field-help">Last Token Mint</span>
+                        <span>${new Date(status.last_token_mint).toLocaleString()}</span>
+                      </div>
+                    `
+                  : ''}
+              </div>
 
-              ${this.githubAppInstallationUrl ? html`
-                <p class="field-help">
-                  <a href=${this.githubAppInstallationUrl} target="_blank" rel="noopener noreferrer">
-                    Install the GitHub App
-                  </a> on your organization or account, then click Discover.
-                </p>
-              ` : html`
-                <p class="field-help">Install the GitHub App on your organization or account, then click Discover.</p>
-              `}
-              <sl-button variant="default" size="small" @click=${() => this.discoverGitHubInstallation()}>
-                <sl-icon slot="prefix" name="search"></sl-icon>
-                Discover Installation
-              </sl-button>
+              ${status?.state === 'error' || status?.state === 'degraded'
+                ? html`
+                    <div class="status-message ${status.state === 'error' ? 'error' : 'warning'}">
+                      <strong>${this.formatGitHubErrorCode(status.error_code)}:</strong>
+                      ${status.error_message}
+                      ${status.state === 'error' && this.project?.gitRemote
+                        ? html` <br /><small>Agents will use PAT fallback if available.</small> `
+                        : ''}
+                    </div>
+                  `
+                : ''}
+
+              <div class="github-permissions">
+                <span class="field-help">Token Permissions</span>
+                <div class="github-perm-grid">
+                  ${this.renderPermBadge('Contents', this.githubAppPermissions?.contents)}
+                  ${this.renderPermBadge('Pull Requests', this.githubAppPermissions?.pull_requests)}
+                  ${this.renderPermBadge('Issues', this.githubAppPermissions?.issues)}
+                  ${this.renderPermBadge('Metadata', this.githubAppPermissions?.metadata)}
+                  ${this.renderPermBadge('Checks', this.githubAppPermissions?.checks)}
+                  ${this.renderPermBadge('Actions', this.githubAppPermissions?.actions)}
+                </div>
+              </div>
+
+              <div style="margin-top: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                <sl-button
+                  variant="default"
+                  size="small"
+                  ?loading=${this.githubAppLoading}
+                  ?disabled=${this.githubAppLoading}
+                  @click=${() => this.checkGitHubStatus()}
+                >
+                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                  ${status?.state === 'unchecked' ? 'Check Status' : 'Recheck Status'}
+                </sl-button>
+                <a
+                  href=${`https://github.com/settings/installations/${this.githubAppInstallationId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style="text-decoration: none;"
+                >
+                  <sl-button variant="text" size="small">
+                    <sl-icon slot="prefix" name="gear"></sl-icon>
+                    Configure Installation
+                  </sl-button>
+                </a>
+                <sl-button
+                  variant="text"
+                  size="small"
+                  @click=${() => this.removeGitHubInstallation()}
+                >
+                  <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                  Remove
+                </sl-button>
+              </div>
             `}
-          </div>
-        ` : html`
-          <div class="github-status-row">
-            <div class="github-status-item">
-              <span class="field-help">Status</span>
-              <div class="github-status-value">
-                ${stateIcon(status?.state)}
-                <strong>${stateLabel(status?.state)}</strong>
-              </div>
-            </div>
-            <div class="github-status-item">
-              <span class="field-help">Installation ID</span>
-              <code>${this.githubAppInstallationId}</code>
-            </div>
-            ${status?.last_token_mint ? html`
-              <div class="github-status-item">
-                <span class="field-help">Last Token Mint</span>
-                <span>${new Date(status.last_token_mint).toLocaleString()}</span>
-              </div>
-            ` : ''}
-          </div>
-
-          ${status?.state === 'error' || status?.state === 'degraded' ? html`
-            <div class="status-message ${status.state === 'error' ? 'error' : 'warning'}">
-              <strong>${this.formatGitHubErrorCode(status.error_code)}:</strong> ${status.error_message}
-              ${status.state === 'error' && this.project?.gitRemote ? html`
-                <br><small>Agents will use PAT fallback if available.</small>
-              ` : ''}
-            </div>
-          ` : ''}
-
-          <div class="github-permissions">
-            <span class="field-help">Token Permissions</span>
-            <div class="github-perm-grid">
-              ${this.renderPermBadge('Contents', this.githubAppPermissions?.contents)}
-              ${this.renderPermBadge('Pull Requests', this.githubAppPermissions?.pull_requests)}
-              ${this.renderPermBadge('Issues', this.githubAppPermissions?.issues)}
-              ${this.renderPermBadge('Metadata', this.githubAppPermissions?.metadata)}
-              ${this.renderPermBadge('Checks', this.githubAppPermissions?.checks)}
-              ${this.renderPermBadge('Actions', this.githubAppPermissions?.actions)}
-            </div>
-          </div>
-
-          <div style="margin-top: 1rem; display: flex; align-items: center; gap: 0.5rem;">
-            <sl-button variant="default" size="small" ?loading=${this.githubAppLoading} ?disabled=${this.githubAppLoading} @click=${() => this.checkGitHubStatus()}>
-              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-              ${status?.state === 'unchecked' ? 'Check Status' : 'Recheck Status'}
-            </sl-button>
-            <a href=${`https://github.com/settings/installations/${this.githubAppInstallationId}`}
-               target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
-              <sl-button variant="text" size="small">
-                <sl-icon slot="prefix" name="gear"></sl-icon>
-                Configure Installation
-              </sl-button>
-            </a>
-            <sl-button variant="text" size="small" @click=${() => this.removeGitHubInstallation()}>
-              <sl-icon slot="prefix" name="x-circle"></sl-icon>
-              Remove
-            </sl-button>
-          </div>
-        `}
       </div>
     `;
   }
 
   private renderPermBadge(label: string, value: string | undefined) {
     if (!value) return '';
-    return html`
-      <span class="github-perm-badge ${value}">
-        ${label}: ${value}
-      </span>
-    `;
+    return html` <span class="github-perm-badge ${value}"> ${label}: ${value} </span> `;
   }
 
   private formatGitHubErrorCode(code?: string): string {
     switch (code) {
-      case 'private_key_invalid': return 'Private Key Invalid';
-      case 'app_not_found': return 'App Not Found';
-      case 'installation_revoked': return 'Installation Revoked';
-      case 'installation_suspended': return 'Installation Suspended';
-      case 'repo_not_accessible': return 'Repository Not Accessible';
-      case 'permission_denied': return 'Permission Denied';
-      case 'token_mint_failed': return 'Token Mint Failed';
-      default: return code ?? 'Error';
+      case 'private_key_invalid':
+        return 'Private Key Invalid';
+      case 'app_not_found':
+        return 'App Not Found';
+      case 'installation_revoked':
+        return 'Installation Revoked';
+      case 'installation_suspended':
+        return 'Installation Suspended';
+      case 'repo_not_accessible':
+        return 'Repository Not Accessible';
+      case 'permission_denied':
+        return 'Permission Denied';
+      case 'token_mint_failed':
+        return 'Token Mint Failed';
+      default:
+        return code ?? 'Error';
     }
   }
 
@@ -1514,7 +1586,9 @@ export class ScionPageProjectSettings extends LitElement {
     this.githubAppLoading = true;
     try {
       // Actively verify the installation by minting a test token
-      const res = await apiFetch(`/api/v1/projects/${this.projectId}/github-status`, { method: 'POST' });
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/github-status`, {
+        method: 'POST',
+      });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { message?: string };
         throw new Error(data.message || `Check failed (${res.status})`);
@@ -1569,17 +1643,29 @@ export class ScionPageProjectSettings extends LitElement {
       this.githubAppPermissions = project.githubPermissions ?? null;
       // Update the project object in place so renderProjectIcon and other parts reflect the change
       if (this.project) {
-        this.project = { ...this.project, githubInstallationId: project.githubInstallationId, githubAppStatus: project.githubAppStatus, githubPermissions: project.githubPermissions };
+        this.project = {
+          ...this.project,
+          githubInstallationId: project.githubInstallationId,
+          githubAppStatus: project.githubAppStatus,
+          githubPermissions: project.githubPermissions,
+        };
       }
     }
   }
 
   private async removeGitHubInstallation(): Promise<void> {
-    if (!(await showConfirm('Remove GitHub App installation from this project? Agents will fall back to PAT authentication.'))) return;
+    if (
+      !(await showConfirm(
+        'Remove GitHub App installation from this project? Agents will fall back to PAT authentication.'
+      ))
+    )
+      return;
     this.githubAppLoading = true;
     this.githubAppError = null;
     try {
-      const res = await apiFetch(`/api/v1/projects/${this.projectId}/github-installation`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/github-installation`, {
+        method: 'DELETE',
+      });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { message?: string };
         throw new Error(data.message || `Failed to remove installation (${res.status})`);
@@ -1588,7 +1674,12 @@ export class ScionPageProjectSettings extends LitElement {
       this.githubAppStatus = null;
       this.githubAppPermissions = null;
       if (this.project) {
-        this.project = { ...this.project, githubInstallationId: undefined, githubAppStatus: undefined, githubPermissions: undefined };
+        this.project = {
+          ...this.project,
+          githubInstallationId: undefined,
+          githubAppStatus: undefined,
+          githubPermissions: undefined,
+        };
       }
     } catch (err) {
       this.githubAppError = err instanceof Error ? err.message : 'Remove failed';
@@ -1635,10 +1726,19 @@ export class ScionPageProjectSettings extends LitElement {
 
           <sl-tab-panel name="general">
             <div class="config-form">
-              <div class="config-field ${this.isHubDefault('scion.io/default-template') ? 'hub-inherited' : ''}">
-                <label>Default Template ${this.renderHubIndicator('scion.io/default-template')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-template')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Template ${this.renderHubIndicator('scion.io/default-template')}</label
+                >
                 <sl-select
-                  placeholder=${this.hubSelectLabel('scion.io/default-template', 'None (use server default)')}
+                  placeholder=${this.hubSelectLabel(
+                    'scion.io/default-template',
+                    'None (use server default)'
+                  )}
                   clearable
                   value=${this.configDefaultTemplate}
                   ?disabled=${!canEdit}
@@ -1655,10 +1755,20 @@ export class ScionPageProjectSettings extends LitElement {
                 >
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-harness-config') ? 'hub-inherited' : ''}">
-                <label>Default Harness Config ${this.renderHubIndicator('scion.io/default-harness-config')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-harness-config')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Harness Config
+                  ${this.renderHubIndicator('scion.io/default-harness-config')}</label
+                >
                 <sl-select
-                  placeholder=${this.hubSelectLabel('scion.io/default-harness-config', 'None (use server default)')}
+                  placeholder=${this.hubSelectLabel(
+                    'scion.io/default-harness-config',
+                    'None (use server default)'
+                  )}
                   clearable
                   value=${this.configDefaultHarnessConfig}
                   ?disabled=${!canEdit}
@@ -1687,7 +1797,11 @@ export class ScionPageProjectSettings extends LitElement {
                 >
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-model') ? 'hub-inherited' : ''}">
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-model')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
                 <label>Default Model ${this.renderHubIndicator('scion.io/default-model')}</label>
                 <sl-select
                   placeholder="use harness default"
@@ -1695,7 +1809,13 @@ export class ScionPageProjectSettings extends LitElement {
                   value=${this.defaultModelSelection}
                   ?disabled=${!canEdit}
                   @sl-change=${(e: Event) => {
-                    const val = (e.target as HTMLSelectElement).value as '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
+                    const val = (e.target as HTMLSelectElement).value as
+                      | ''
+                      | 'small'
+                      | 'medium'
+                      | 'large'
+                      | 'extra-large'
+                      | 'other';
                     this.defaultModelSelection = val;
                     if (val !== 'other') this.defaultCustomModelId = '';
                   }}
@@ -1706,9 +1826,7 @@ export class ScionPageProjectSettings extends LitElement {
                   <sl-option value="extra-large">Extra Large</sl-option>
                   <sl-option value="other">Other (specify)</sl-option>
                 </sl-select>
-                <span class="field-help"
-                  >Default model alias or ID used for new agents.</span
-                >
+                <span class="field-help">Default model alias or ID used for new agents.</span>
               </div>
 
               ${this.defaultModelSelection === 'other'
@@ -1727,30 +1845,62 @@ export class ScionPageProjectSettings extends LitElement {
                   `
                 : ''}
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-thinking-level') ? 'hub-inherited' : ''}">
-                <label>Default Thinking Level ${this.renderHubIndicator('scion.io/default-thinking-level')}${this.defaultThinkingLevel !== null ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)">(${this.defaultThinkingLevel})</span>` : ''}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-thinking-level')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Thinking Level
+                  ${this.renderHubIndicator('scion.io/default-thinking-level')}${this
+                    .defaultThinkingLevel !== null
+                    ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
+                        >(${this.defaultThinkingLevel})</span
+                      >`
+                    : ''}</label
+                >
                 <div style="display:flex;align-items:center;gap:0.75rem">
                   <sl-range
-                    min="0" max="100" step="1"
+                    min="0"
+                    max="100"
+                    step="1"
                     .value=${this.defaultThinkingLevel ?? 50}
                     ?disabled=${this.defaultThinkingLevel === null || !canEdit}
                     style="flex:1"
-                    @sl-input=${(e: Event) => { this.defaultThinkingLevel = (e.target as HTMLInputElement & { value: number }).value; }}
+                    @sl-input=${(e: Event) => {
+                      this.defaultThinkingLevel = (
+                        e.target as HTMLInputElement & { value: number }
+                      ).value;
+                    }}
                   ></sl-range>
                   <sl-checkbox
                     ?checked=${this.defaultThinkingLevel !== null}
                     ?disabled=${!canEdit}
-                    @sl-change=${(e: Event) => { this.defaultThinkingLevel = (e.target as HTMLInputElement & { checked: boolean }).checked ? 50 : null; }}
-                  >Set</sl-checkbox>
+                    @sl-change=${(e: Event) => {
+                      this.defaultThinkingLevel = (
+                        e.target as HTMLInputElement & { checked: boolean }
+                      ).checked
+                        ? 50
+                        : null;
+                    }}
+                    >Set</sl-checkbox
+                  >
                 </div>
-                <span class="field-help" style="display:flex;justify-content:space-between;margin-top:0.25rem">
+                <span
+                  class="field-help"
+                  style="display:flex;justify-content:space-between;margin-top:0.25rem"
+                >
                   <span>0 = minimal reasoning</span>
                   <span>${this.defaultThinkingLevel === null ? 'Using harness default' : ''}</span>
                   <span>100 = maximum reasoning</span>
                 </span>
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/telemetry-enabled') ? 'hub-inherited' : ''}">
+              <div
+                class="config-field ${this.isHubDefault('scion.io/telemetry-enabled')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
                 <label>Telemetry ${this.renderHubIndicator('scion.io/telemetry-enabled')}</label>
                 <sl-select
                   value=${this.configTelemetryEnabled === true
@@ -1766,18 +1916,31 @@ export class ScionPageProjectSettings extends LitElement {
                   }}
                 >
                   <sl-option value="inherit"
-                    >Use hub default (${this.hubTelemetryDefault === null ? '…' : this.hubTelemetryDefault ? 'enabled' : 'disabled'})</sl-option
+                    >Use hub default
+                    (${this.hubTelemetryDefault === null
+                      ? '…'
+                      : this.hubTelemetryDefault
+                        ? 'enabled'
+                        : 'disabled'})</sl-option
                   >
                   <sl-option value="enabled">Enabled</sl-option>
                   <sl-option value="disabled">Disabled</sl-option>
                 </sl-select>
                 <span class="field-help"
-                  >Controls telemetry for agents in this project. "Use hub default" inherits the server-level setting.</span
+                  >Controls telemetry for agents in this project. "Use hub default" inherits the
+                  server-level setting.</span
                 >
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/auto-expose-ports-enabled') ? 'hub-inherited' : ''}">
-                <label>Auto-Expose Ports ${this.renderHubIndicator('scion.io/auto-expose-ports-enabled')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/auto-expose-ports-enabled')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Auto-Expose Ports
+                  ${this.renderHubIndicator('scion.io/auto-expose-ports-enabled')}</label
+                >
                 <sl-select
                   value=${this.configAutoExposePortsEnabled === true
                     ? 'enabled'
@@ -1792,20 +1955,36 @@ export class ScionPageProjectSettings extends LitElement {
                   }}
                 >
                   <sl-option value="inherit"
-                    >Use hub default (${this.hubAutoExposePortsDefault === null ? '…' : this.hubAutoExposePortsDefault ? 'enabled' : 'disabled'})</sl-option
+                    >Use hub default
+                    (${this.hubAutoExposePortsDefault === null
+                      ? '…'
+                      : this.hubAutoExposePortsDefault
+                        ? 'enabled'
+                        : 'disabled'})</sl-option
                   >
                   <sl-option value="enabled">Enabled</sl-option>
                   <sl-option value="disabled">Disabled</sl-option>
                 </sl-select>
                 <span class="field-help"
-                  >Automatically detect and expose listening TCP ports in agent containers. "Use hub default" inherits the server-level setting.</span
+                  >Automatically detect and expose listening TCP ports in agent containers. "Use hub
+                  default" inherits the server-level setting.</span
                 >
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-agent-role') ? 'hub-inherited' : ''}">
-                <label>Default Agent Role ${this.renderHubIndicator('scion.io/default-agent-role')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-agent-role')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Agent Role
+                  ${this.renderHubIndicator('scion.io/default-agent-role')}</label
+                >
                 <sl-select
-                  placeholder=${this.hubSelectLabel('scion.io/default-agent-role', 'Full (default)')}
+                  placeholder=${this.hubSelectLabel(
+                    'scion.io/default-agent-role',
+                    'Full (default)'
+                  )}
                   clearable
                   value=${this.configDefaultAgentRole}
                   ?disabled=${!canEdit}
@@ -1823,8 +2002,14 @@ export class ScionPageProjectSettings extends LitElement {
                 >
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/max-agent-role') ? 'hub-inherited' : ''}">
-                <label>Maximum Agent Role ${this.renderHubIndicator('scion.io/max-agent-role')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/max-agent-role')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Maximum Agent Role ${this.renderHubIndicator('scion.io/max-agent-role')}</label
+                >
                 <sl-select
                   placeholder=${this.hubSelectLabel('scion.io/max-agent-role', 'Full (default)')}
                   clearable
@@ -1863,7 +2048,9 @@ export class ScionPageProjectSettings extends LitElement {
                   <sl-option value="assign">Assign Service Account</sl-option>
                 </sl-select>
                 <span class="field-help"
-                  >Controls GCP metadata server access for new agents. "Block" prevents access, "Passthrough" allows host identity, "Assign" binds a specific service account.</span
+                  >Controls GCP metadata server access for new agents. "Block" prevents access,
+                  "Passthrough" allows host identity, "Assign" binds a specific service
+                  account.</span
                 >
               </div>
 
@@ -1874,9 +2061,13 @@ export class ScionPageProjectSettings extends LitElement {
                       <div style="display: flex; align-items: center; gap: 0.25rem;">
                         ${this.configDefaultGCPIdentitySAID
                           ? html`
-                              <sl-tooltip content=${this.copiedDefaultSAEmail ? 'Copied!' : 'Copy email'}>
+                              <sl-tooltip
+                                content=${this.copiedDefaultSAEmail ? 'Copied!' : 'Copy email'}
+                              >
                                 <sl-icon-button
-                                  name=${this.copiedDefaultSAEmail ? 'clipboard-check' : 'clipboard'}
+                                  name=${this.copiedDefaultSAEmail
+                                    ? 'clipboard-check'
+                                    : 'clipboard'}
                                   label="Copy service account email"
                                   style="font-size: 1rem;"
                                   @click=${() => {
@@ -1884,12 +2075,15 @@ export class ScionPageProjectSettings extends LitElement {
                                       (s) => s.id === this.configDefaultGCPIdentitySAID
                                     );
                                     if (sa && navigator.clipboard) {
-                                      void navigator.clipboard.writeText(sa.email).then(() => {
-                                        this.copiedDefaultSAEmail = true;
-                                        setTimeout(() => {
-                                          this.copiedDefaultSAEmail = false;
-                                        }, 1500);
-                                      }).catch(() => {});
+                                      void navigator.clipboard
+                                        .writeText(sa.email)
+                                        .then(() => {
+                                          this.copiedDefaultSAEmail = true;
+                                          setTimeout(() => {
+                                            this.copiedDefaultSAEmail = false;
+                                          }, 1500);
+                                        })
+                                        .catch(() => {});
                                     }
                                   }}
                                 ></sl-icon-button>
@@ -1903,7 +2097,9 @@ export class ScionPageProjectSettings extends LitElement {
                           value=${this.configDefaultGCPIdentitySAID}
                           ?disabled=${!canEdit}
                           @sl-change=${(e: Event) => {
-                            this.configDefaultGCPIdentitySAID = (e.target as HTMLSelectElement).value;
+                            this.configDefaultGCPIdentitySAID = (
+                              e.target as HTMLSelectElement
+                            ).value;
                             this.copiedDefaultSAEmail = false;
                           }}
                         >
@@ -1922,7 +2118,8 @@ export class ScionPageProjectSettings extends LitElement {
                         </sl-select>
                       </div>
                       <span class="field-help"
-                        >The GCP service account to assign to new agents by default. Only verified accounts are shown.</span
+                        >The GCP service account to assign to new agents by default. Only verified
+                        accounts are shown.</span
                       >
                     </div>
                   `
@@ -1936,8 +2133,14 @@ export class ScionPageProjectSettings extends LitElement {
                 >Applied to new agents unless overridden by template or agent config.</span
               >
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-max-turns') ? 'hub-inherited' : ''}">
-                <label>Default Max Turns ${this.renderHubIndicator('scion.io/default-max-turns')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-max-turns')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Max Turns ${this.renderHubIndicator('scion.io/default-max-turns')}</label
+                >
                 <sl-input
                   type="number"
                   placeholder=${this.hubHint('scion.io/default-max-turns') || 'No limit'}
@@ -1951,8 +2154,15 @@ export class ScionPageProjectSettings extends LitElement {
                 <span class="field-help">Maximum conversation turns per agent.</span>
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-max-model-calls') ? 'hub-inherited' : ''}">
-                <label>Default Max Model Calls ${this.renderHubIndicator('scion.io/default-max-model-calls')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-max-model-calls')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Max Model Calls
+                  ${this.renderHubIndicator('scion.io/default-max-model-calls')}</label
+                >
                 <sl-input
                   type="number"
                   placeholder=${this.hubHint('scion.io/default-max-model-calls') || 'No limit'}
@@ -1968,8 +2178,15 @@ export class ScionPageProjectSettings extends LitElement {
                 <span class="field-help">Maximum LLM API calls per agent.</span>
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-max-duration') ? 'hub-inherited' : ''}">
-                <label>Default Max Duration ${this.renderHubIndicator('scion.io/default-max-duration')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-max-duration')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Default Max Duration
+                  ${this.renderHubIndicator('scion.io/default-max-duration')}</label
+                >
                 <sl-input
                   type="text"
                   placeholder=${this.hubHint('scion.io/default-max-duration') || 'e.g. 2h, 30m'}
@@ -1990,11 +2207,19 @@ export class ScionPageProjectSettings extends LitElement {
                 >Default resource requests and limits for new agents.</span
               >
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-resources-cpu-request') ? 'hub-inherited' : ''}">
-                <label>CPU Request ${this.renderHubIndicator('scion.io/default-resources-cpu-request')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-resources-cpu-request')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >CPU Request
+                  ${this.renderHubIndicator('scion.io/default-resources-cpu-request')}</label
+                >
                 <sl-input
                   type="text"
-                  placeholder=${this.hubHint('scion.io/default-resources-cpu-request') || 'e.g. 500m, 1'}
+                  placeholder=${this.hubHint('scion.io/default-resources-cpu-request') ||
+                  'e.g. 500m, 1'}
                   .value=${this.configDefaultResCpuReq}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -2003,11 +2228,19 @@ export class ScionPageProjectSettings extends LitElement {
                 ></sl-input>
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-resources-memory-request') ? 'hub-inherited' : ''}">
-                <label>Memory Request ${this.renderHubIndicator('scion.io/default-resources-memory-request')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-resources-memory-request')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Memory Request
+                  ${this.renderHubIndicator('scion.io/default-resources-memory-request')}</label
+                >
                 <sl-input
                   type="text"
-                  placeholder=${this.hubHint('scion.io/default-resources-memory-request') || 'e.g. 512Mi, 1Gi'}
+                  placeholder=${this.hubHint('scion.io/default-resources-memory-request') ||
+                  'e.g. 512Mi, 1Gi'}
                   .value=${this.configDefaultResMemReq}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -2016,8 +2249,15 @@ export class ScionPageProjectSettings extends LitElement {
                 ></sl-input>
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-resources-cpu-limit') ? 'hub-inherited' : ''}">
-                <label>CPU Limit ${this.renderHubIndicator('scion.io/default-resources-cpu-limit')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-resources-cpu-limit')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >CPU Limit
+                  ${this.renderHubIndicator('scion.io/default-resources-cpu-limit')}</label
+                >
                 <sl-input
                   type="text"
                   placeholder=${this.hubHint('scion.io/default-resources-cpu-limit') || 'e.g. 1, 2'}
@@ -2029,11 +2269,19 @@ export class ScionPageProjectSettings extends LitElement {
                 ></sl-input>
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-resources-memory-limit') ? 'hub-inherited' : ''}">
-                <label>Memory Limit ${this.renderHubIndicator('scion.io/default-resources-memory-limit')}</label>
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-resources-memory-limit')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
+                <label
+                  >Memory Limit
+                  ${this.renderHubIndicator('scion.io/default-resources-memory-limit')}</label
+                >
                 <sl-input
                   type="text"
-                  placeholder=${this.hubHint('scion.io/default-resources-memory-limit') || 'e.g. 1Gi, 2Gi'}
+                  placeholder=${this.hubHint('scion.io/default-resources-memory-limit') ||
+                  'e.g. 1Gi, 2Gi'}
                   .value=${this.configDefaultResMemLim}
                   ?disabled=${!canEdit}
                   @sl-input=${(e: Event) => {
@@ -2042,7 +2290,11 @@ export class ScionPageProjectSettings extends LitElement {
                 ></sl-input>
               </div>
 
-              <div class="config-field ${this.isHubDefault('scion.io/default-resources-disk') ? 'hub-inherited' : ''}">
+              <div
+                class="config-field ${this.isHubDefault('scion.io/default-resources-disk')
+                  ? 'hub-inherited'
+                  : ''}"
+              >
                 <label>Disk ${this.renderHubIndicator('scion.io/default-resources-disk')}</label>
                 <sl-input
                   type="text"
@@ -2057,9 +2309,7 @@ export class ScionPageProjectSettings extends LitElement {
             </div>
           </sl-tab-panel>
 
-          <sl-tab-panel name="brokers">
-            ${this.renderBrokersContent()}
-          </sl-tab-panel>
+          <sl-tab-panel name="brokers"> ${this.renderBrokersContent()} </sl-tab-panel>
         </sl-tab-group>
 
         ${canEdit && this.activeConfigTab !== 'brokers'
@@ -2101,14 +2351,39 @@ export class ScionPageProjectSettings extends LitElement {
             this.activeResourcesTab = (e.detail as { name: string }).name;
           }}
         >
-          <sl-tab slot="nav" panel="env-vars" ?active=${this.activeResourcesTab === 'env-vars'}>Environment Variables</sl-tab>
-          <sl-tab slot="nav" panel="secrets" ?active=${this.activeResourcesTab === 'secrets'}>Secrets</sl-tab>
-          <sl-tab slot="nav" panel="shared-dirs" ?active=${this.activeResourcesTab === 'shared-dirs'}>Shared Directories</sl-tab>
-          <sl-tab slot="nav" panel="templates" ?active=${this.activeResourcesTab === 'templates'}>Templates</sl-tab>
-          <sl-tab slot="nav" panel="harness-configs" ?active=${this.activeResourcesTab === 'harness-configs'}>Harness Configs</sl-tab>
-          <sl-tab slot="nav" panel="pre-start-hooks" ?active=${this.activeResourcesTab === 'pre-start-hooks'}>Pre-Start Hooks</sl-tab>
-          <sl-tab slot="nav" panel="gcp-sa" ?active=${this.activeResourcesTab === 'gcp-sa'}>GCP Service Accounts</sl-tab>
-          <sl-tab slot="nav" panel="skills" ?active=${this.activeResourcesTab === 'skills'}>Skills</sl-tab>
+          <sl-tab slot="nav" panel="env-vars" ?active=${this.activeResourcesTab === 'env-vars'}
+            >Environment Variables</sl-tab
+          >
+          <sl-tab slot="nav" panel="secrets" ?active=${this.activeResourcesTab === 'secrets'}
+            >Secrets</sl-tab
+          >
+          <sl-tab
+            slot="nav"
+            panel="shared-dirs"
+            ?active=${this.activeResourcesTab === 'shared-dirs'}
+            >Shared Directories</sl-tab
+          >
+          <sl-tab slot="nav" panel="templates" ?active=${this.activeResourcesTab === 'templates'}
+            >Templates</sl-tab
+          >
+          <sl-tab
+            slot="nav"
+            panel="harness-configs"
+            ?active=${this.activeResourcesTab === 'harness-configs'}
+            >Harness Configs</sl-tab
+          >
+          <sl-tab
+            slot="nav"
+            panel="pre-start-hooks"
+            ?active=${this.activeResourcesTab === 'pre-start-hooks'}
+            >Pre-Start Hooks</sl-tab
+          >
+          <sl-tab slot="nav" panel="gcp-sa" ?active=${this.activeResourcesTab === 'gcp-sa'}
+            >GCP Service Accounts</sl-tab
+          >
+          <sl-tab slot="nav" panel="skills" ?active=${this.activeResourcesTab === 'skills'}
+            >Skills</sl-tab
+          >
 
           <sl-tab-panel name="env-vars">
             <scion-env-var-list
@@ -2133,17 +2408,13 @@ export class ScionPageProjectSettings extends LitElement {
             ></scion-shared-dir-list>
           </sl-tab-panel>
 
-          <sl-tab-panel name="templates">
-            ${this.renderTemplatesContent()}
-          </sl-tab-panel>
+          <sl-tab-panel name="templates"> ${this.renderTemplatesContent()} </sl-tab-panel>
 
           <sl-tab-panel name="harness-configs">
             ${this.renderHarnessConfigsContent()}
           </sl-tab-panel>
 
-          <sl-tab-panel name="pre-start-hooks">
-            ${this.renderPreStartHooksContent()}
-          </sl-tab-panel>
+          <sl-tab-panel name="pre-start-hooks"> ${this.renderPreStartHooksContent()} </sl-tab-panel>
 
           <sl-tab-panel name="gcp-sa">
             <scion-gcp-service-account-list
@@ -2190,7 +2461,8 @@ export class ScionPageProjectSettings extends LitElement {
         .scopeId=${this.projectId}
         detailBasePath="/projects/${this.projectId}"
         ?canClone=${canSync}
-        ?canDelete=${can(this.project!._capabilities, 'delete') || can(this.project!._capabilities, 'manage')}
+        ?canDelete=${can(this.project!._capabilities, 'delete') ||
+        can(this.project!._capabilities, 'manage')}
         ?cloneFromGlobal=${canSync}
         @resource-changed=${() => {
           this.refreshTemplatesList();
@@ -2206,8 +2478,8 @@ export class ScionPageProjectSettings extends LitElement {
       <div class="section-header" style="margin-bottom: 1rem;">
         <div class="section-header-text">
           <p style="margin: 0;">
-            Project-scoped harness configurations imported into the Hub. Open one to browse
-            and edit its files.
+            Project-scoped harness configurations imported into the Hub. Open one to browse and edit
+            its files.
           </p>
         </div>
       </div>
@@ -2227,7 +2499,8 @@ export class ScionPageProjectSettings extends LitElement {
         .scopeId=${this.projectId}
         detailBasePath="/projects/${this.projectId}"
         ?canClone=${canSync}
-        ?canDelete=${can(this.project!._capabilities, 'delete') || can(this.project!._capabilities, 'manage')}
+        ?canDelete=${can(this.project!._capabilities, 'delete') ||
+        can(this.project!._capabilities, 'manage')}
         ?cloneFromGlobal=${canSync}
         @resource-changed=${() => this.refreshHarnessConfigsList()}
       ></scion-resource-list>
@@ -2240,8 +2513,8 @@ export class ScionPageProjectSettings extends LitElement {
       <div class="section-header" style="margin-bottom: 1rem;">
         <div class="section-header-text">
           <p style="margin: 0;">
-            Project-scoped pre-start scripts staged before each agent container starts.
-            A project hook overrides the hub-wide default.
+            Project-scoped pre-start scripts staged before each agent container starts. A project
+            hook overrides the hub-wide default.
           </p>
         </div>
       </div>
@@ -2264,19 +2537,19 @@ export class ScionPageProjectSettings extends LitElement {
             this.activeSchedulesTab = (e.detail as { name: string }).name;
           }}
         >
-          <sl-tab slot="nav" panel="events" ?active=${this.activeSchedulesTab === 'events'}>Events</sl-tab>
-          <sl-tab slot="nav" panel="recurring" ?active=${this.activeSchedulesTab === 'recurring'}>Recurring</sl-tab>
+          <sl-tab slot="nav" panel="events" ?active=${this.activeSchedulesTab === 'events'}
+            >Events</sl-tab
+          >
+          <sl-tab slot="nav" panel="recurring" ?active=${this.activeSchedulesTab === 'recurring'}
+            >Recurring</sl-tab
+          >
 
           <sl-tab-panel name="events">
-            <scion-scheduled-event-list
-              .projectId=${this.project!.id}
-            ></scion-scheduled-event-list>
+            <scion-scheduled-event-list .projectId=${this.project!.id}></scion-scheduled-event-list>
           </sl-tab-panel>
 
           <sl-tab-panel name="recurring">
-            <scion-schedule-list
-              .projectId=${this.project!.id}
-            ></scion-schedule-list>
+            <scion-schedule-list .projectId=${this.project!.id}></scion-schedule-list>
           </sl-tab-panel>
         </sl-tab-group>
       </div>
@@ -2291,7 +2564,7 @@ export class ScionPageProjectSettings extends LitElement {
       if (!response.ok) {
         throw new Error(await extractApiError(response, 'Failed to load brokers'));
       }
-      const data = await response.json() as { brokers: RuntimeBrokerWithProvider[] };
+      const data = (await response.json()) as { brokers: RuntimeBrokerWithProvider[] };
       this.brokers = data.brokers || [];
 
       // Start relative time refresh if we have brokers
@@ -2427,7 +2700,9 @@ export class ScionPageProjectSettings extends LitElement {
                 <div class="broker-profiles">
                   ${broker.profiles.map(
                     (p: BrokerProfile) => html`
-                      <span class="broker-profile-badge ${p.available ? 'available' : ''}">${p.name} (${p.type})</span>
+                      <span class="broker-profile-badge ${p.available ? 'available' : ''}"
+                        >${p.name} (${p.type})</span
+                      >
                     `
                   )}
                 </div>

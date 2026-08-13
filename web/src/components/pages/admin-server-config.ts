@@ -446,7 +446,13 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Default agent model settings
   @state() private defaultModel = '';
-  @state() private defaultModelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
+  @state() private defaultModelSelection:
+    | ''
+    | 'small'
+    | 'medium'
+    | 'large'
+    | 'extra-large'
+    | 'other' = '';
   @state() private defaultCustomModelId = '';
   @state() private defaultThinkingLevel: number | null = null;
 
@@ -1385,9 +1391,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         sections?: Record<string, { koanf_paths?: string[] }>;
       };
       if (data.sections) {
-        const keys = Object.values(data.sections).flatMap(
-          (s) => s.koanf_paths ?? [],
-        );
+        const keys = Object.values(data.sections).flatMap((s) => s.koanf_paths ?? []);
         if (keys.length > 0) this.layer1Keys = new Set(keys);
       }
     } catch {
@@ -1632,7 +1636,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   ): ReturnType<typeof html> {
     const reason = this.readOnlyReason(koanfKey);
     if (reason) {
-      return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value">${displayValue || '—'}</span>`;
+      return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value"
+          >${displayValue || '—'}</span
+        >`;
     }
     return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}`;
   }
@@ -1643,16 +1649,13 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // General — only Layer-1 top-level keys
     if (ok('default_template')) payload.default_template = this.defaultTemplate;
-    if (ok('default_harness_config'))
-      payload.default_harness_config = this.resolvedHarnessConfig;
+    if (ok('default_harness_config')) payload.default_harness_config = this.resolvedHarnessConfig;
     if (ok('image_registry')) payload.image_registry = this.imageRegistry;
 
     // Default agent limits
     if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns;
-    if (ok('default_max_model_calls'))
-      payload.default_max_model_calls = this.defaultMaxModelCalls;
-    if (ok('default_max_duration'))
-      payload.default_max_duration = this.defaultMaxDuration;
+    if (ok('default_max_model_calls')) payload.default_max_model_calls = this.defaultMaxModelCalls;
+    if (ok('default_max_duration')) payload.default_max_duration = this.defaultMaxDuration;
 
     if (
       ok('default_resources') &&
@@ -1681,9 +1684,10 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Default model settings
     if (ok('default_model')) {
-      const resolvedModel = this.defaultModelSelection === 'other'
-        ? this.defaultCustomModelId.trim()
-        : this.defaultModelSelection;
+      const resolvedModel =
+        this.defaultModelSelection === 'other'
+          ? this.defaultCustomModelId.trim()
+          : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
     if (ok('default_thinking_level')) {
@@ -1715,10 +1719,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
-    if (ok('server.hub.stalled_threshold'))
-      hub.stalled_threshold = this.hubStalledThreshold;
-    if (ok('server.hub.gcp_iam_check_mode'))
-      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
+    if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
+    if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
     if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     if (Object.keys(hub).length > 0) server.hub = hub;
@@ -1815,10 +1817,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     // convert 0/"" to undefined, omitting the key from JSON and preventing
     // the user from resetting a limit to null. See ptone/scion#860.
     if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns;
-    if (ok('default_max_model_calls'))
-      payload.default_max_model_calls = this.defaultMaxModelCalls;
-    if (ok('default_max_duration'))
-      payload.default_max_duration = this.defaultMaxDuration;
+    if (ok('default_max_model_calls')) payload.default_max_model_calls = this.defaultMaxModelCalls;
+    if (ok('default_max_duration')) payload.default_max_duration = this.defaultMaxDuration;
     if (
       ok('default_resources') &&
       (this.defaultResCpuReq ||
@@ -1846,9 +1846,10 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Default model settings
     if (ok('default_model')) {
-      const resolvedModel = this.defaultModelSelection === 'other'
-        ? this.defaultCustomModelId.trim()
-        : this.defaultModelSelection;
+      const resolvedModel =
+        this.defaultModelSelection === 'other'
+          ? this.defaultCustomModelId.trim()
+          : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
     if (ok('default_thinking_level')) {
@@ -1890,10 +1891,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
-    if (ok('server.hub.stalled_threshold'))
-      hub.stalled_threshold = this.hubStalledThreshold;
-    if (ok('server.hub.gcp_iam_check_mode'))
-      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
+    if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
+    if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
     if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     server.hub = hub;
@@ -2095,8 +2094,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       case 'revision_conflict':
         this.conflictInfo = {
           message:
-            (body.message as string) ||
-            'Settings have been changed since you loaded this page.',
+            (body.message as string) || 'Settings have been changed since you loaded this page.',
           conflicted: (body.conflicted as ConflictInfo['conflicted']) ?? [],
         };
         break;
@@ -2104,10 +2102,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       case 'layer0_rejected': {
         const keys = (body.keys as string[]) ?? [];
         this.safetyNetKeys = keys;
-        console.log(
-          '[admin-server-config] layer0_rejected — bootstrap keys in payload:',
-          keys,
-        );
+        console.log('[admin-server-config] layer0_rejected — bootstrap keys in payload:', keys);
         break;
       }
 
@@ -2138,11 +2133,10 @@ export class ScionPageAdminServerConfig extends LitElement {
         others require a server restart.
       </p>
 
-      ${this.loading ? nothing : this.renderEnvOverrideBanner()}
-      ${this.renderDeprecatedEnvNotice()} ${this.renderSupersededPanel()}
-      ${this.renderConflictBanner()} ${this.renderValidationErrors()}
-      ${this.renderSafetyNetNotice()} ${this.renderIgnoredKeysNotice()}
-      ${this.renderResetConfirmDialog()}
+      ${this.loading ? nothing : this.renderEnvOverrideBanner()} ${this.renderDeprecatedEnvNotice()}
+      ${this.renderSupersededPanel()} ${this.renderConflictBanner()}
+      ${this.renderValidationErrors()} ${this.renderSafetyNetNotice()}
+      ${this.renderIgnoredKeysNotice()} ${this.renderResetConfirmDialog()}
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.successMessage
         ? html`<div class="status-message success">
@@ -2310,11 +2304,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         </div>
         <ul class="deprecated-notice-list">
           ${this.deprecatedEnvKeys.map(
-            (dk) => html`
-              <li>
-                <code>${dk.env_var}</code> → <code>${dk.seed_equivalent}</code>
-              </li>
-            `
+            (dk) => html` <li><code>${dk.env_var}</code> → <code>${dk.seed_equivalent}</code></li> `
           )}
         </ul>
       </div>
@@ -2355,10 +2345,7 @@ export class ScionPageAdminServerConfig extends LitElement {
    * Renders a section header with title and optional "Reset to bootstrap" button
    * for managed sections in DB mode.
    */
-  private renderSectionHeader(
-    title: string,
-    sectionName?: string
-  ): ReturnType<typeof html> {
+  private renderSectionHeader(title: string, sectionName?: string): ReturnType<typeof html> {
     if (sectionName && this.canResetSection(sectionName)) {
       return html`
         <div class="section-header">
@@ -2452,14 +2439,13 @@ export class ScionPageAdminServerConfig extends LitElement {
                 ${(errors as ValidationErrorDetail[]).map(
                   (err) => html`
                     <li>
-                      ${err.field ? html`<code>${err.field}</code>` : nothing}
-                      ${err.message || err}
+                      ${err.field ? html`<code>${err.field}</code>` : nothing} ${err.message || err}
                     </li>
-                  `,
+                  `
                 )}
               </ul>
             </div>
-          `,
+          `
         )}
       </div>
     `;
@@ -2500,8 +2486,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${this.safetyNetKeys.map((k) => html` <code>${k}</code>`)}
         <br />
         <span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);">
-          These settings are managed via deployment configuration (settings.yaml / env).
-          This error should not normally occur — check the browser console for details.
+          These settings are managed via deployment configuration (settings.yaml / env). This error
+          should not normally occur — check the browser console for details.
         </span>
       </div>
     `;
@@ -2538,7 +2524,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           >Runtime Broker</sl-tab
         >
         <sl-tab slot="nav" panel="data" ?active=${this.activeTab === 'data'}>Data & Storage</sl-tab>
-        <sl-tab slot="nav" panel="runtimes-profiles" ?active=${this.activeTab === 'runtimes-profiles'}
+        <sl-tab
+          slot="nav"
+          panel="runtimes-profiles"
+          ?active=${this.activeTab === 'runtimes-profiles'}
           >Runtimes & Profiles</sl-tab
         >
         <sl-tab slot="nav" panel="auth" ?active=${this.activeTab === 'auth'}>Authentication</sl-tab>
@@ -2564,7 +2553,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       </sl-tab-group>
 
       ${this.hasHarnessConfigErrors
-        ? html`<div class="error" style="margin-bottom:0.75rem;">Cannot save: one or more harness config entries contain invalid JSON. Fix the errors on the Runtimes &amp; Profiles tab before saving.</div>`
+        ? html`<div class="error" style="margin-bottom:0.75rem;">
+            Cannot save: one or more harness config entries contain invalid JSON. Fix the errors on
+            the Runtimes &amp; Profiles tab before saving.
+          </div>`
         : nothing}
       <div class="actions">
         <sl-button
@@ -2748,12 +2740,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'image_registry',
               this.imageRegistry,
               html`${this.renderEnvBadge('image_registry')}<sl-input
-                value=${this.imageRegistry}
-                placeholder="ghcr.io/myorg"
-                @sl-input=${(e: Event) => {
-                  this.imageRegistry = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.imageRegistry}
+                  placeholder="ghcr.io/myorg"
+                  @sl-input=${(e: Event) => {
+                    this.imageRegistry = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
           <div class="form-field">
@@ -2784,9 +2776,15 @@ export class ScionPageAdminServerConfig extends LitElement {
               this.agentDefaultsTab = (e.detail as { name: string }).name;
             }}
           >
-            <sl-tab slot="nav" panel="general" ?active=${this.agentDefaultsTab === 'general'}>General</sl-tab>
-            <sl-tab slot="nav" panel="limits" ?active=${this.agentDefaultsTab === 'limits'}>Limits</sl-tab>
-            <sl-tab slot="nav" panel="resources" ?active=${this.agentDefaultsTab === 'resources'}>Resources</sl-tab>
+            <sl-tab slot="nav" panel="general" ?active=${this.agentDefaultsTab === 'general'}
+              >General</sl-tab
+            >
+            <sl-tab slot="nav" panel="limits" ?active=${this.agentDefaultsTab === 'limits'}
+              >Limits</sl-tab
+            >
+            <sl-tab slot="nav" panel="resources" ?active=${this.agentDefaultsTab === 'resources'}
+              >Resources</sl-tab
+            >
 
             <sl-tab-panel name="general">
               <div class="form-grid">
@@ -2796,12 +2794,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                     'default_template',
                     this.defaultTemplate,
                     html`${this.renderEnvBadge('default_template')}<sl-input
-                      value=${this.defaultTemplate}
-                      placeholder="default"
-                      @sl-input=${(e: Event) => {
-                        this.defaultTemplate = (e.target as HTMLInputElement).value;
-                      }}
-                    ></sl-input>`
+                        value=${this.defaultTemplate}
+                        placeholder="default"
+                        @sl-input=${(e: Event) => {
+                          this.defaultTemplate = (e.target as HTMLInputElement).value;
+                        }}
+                      ></sl-input>`
                   )}
                 </div>
                 <div class="form-field">
@@ -2810,32 +2808,32 @@ export class ScionPageAdminServerConfig extends LitElement {
                     'default_harness_config',
                     this.resolvedHarnessConfig,
                     html`${this.renderEnvBadge('default_harness_config')}
-                  <sl-select
-                    .value=${this.harnessConfigSelection}
-                    @sl-change=${(e: Event) => {
-                      this.harnessConfigSelection = (e.target as HTMLSelectElement).value;
-                      if (this.harnessConfigSelection !== '__other__') {
-                        this.customHarnessConfig = '';
-                      }
-                    }}
-                  >
-                    <sl-option value="">None</sl-option>
-                    ${this.harnessConfigs.length > 0
-                      ? this.harnessConfigs.map(
-                          (hc) => html`
-                            <sl-option value=${hc.name}>
-                              ${hc.displayName || hc.name}
-                              ${hc.harness ? html` <small>(${hc.harness})</small>` : ''}
-                            </sl-option>
-                          `
-                        )
-                      : KNOWN_HARNESS_NAMES.map(
-                          (name) => html`
-                            <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
-                          `
-                        )}
-                    <sl-option value="__other__">Other (specify)</sl-option>
-                  </sl-select>`
+                      <sl-select
+                        .value=${this.harnessConfigSelection}
+                        @sl-change=${(e: Event) => {
+                          this.harnessConfigSelection = (e.target as HTMLSelectElement).value;
+                          if (this.harnessConfigSelection !== '__other__') {
+                            this.customHarnessConfig = '';
+                          }
+                        }}
+                      >
+                        <sl-option value="">None</sl-option>
+                        ${this.harnessConfigs.length > 0
+                          ? this.harnessConfigs.map(
+                              (hc) => html`
+                                <sl-option value=${hc.name}>
+                                  ${hc.displayName || hc.name}
+                                  ${hc.harness ? html` <small>(${hc.harness})</small>` : ''}
+                                </sl-option>
+                              `
+                            )
+                          : KNOWN_HARNESS_NAMES.map(
+                              (name) => html`
+                                <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
+                              `
+                            )}
+                        <sl-option value="__other__">Other (specify)</sl-option>
+                      </sl-select>`
                   )}
                 </div>
                 ${this.harnessConfigSelection === '__other__'
@@ -2849,7 +2847,10 @@ export class ScionPageAdminServerConfig extends LitElement {
                             this.customHarnessConfig = (e.target as HTMLInputElement).value;
                           }}
                         ></sl-input>
-                        <span class="hint">Name of the harness config directory (from .scion/harness-configs/).</span>
+                        <span class="hint"
+                          >Name of the harness config directory (from
+                          .scion/harness-configs/).</span
+                        >
                       </div>
                     `
                   : nothing}
@@ -2872,12 +2873,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                     'telemetry.enabled',
                     this.telemetryEnabled ? 'Enabled' : 'Disabled',
                     html`${this.renderEnvBadge('telemetry.enabled')}<sl-switch
-                      ?checked=${this.telemetryEnabled}
-                      @sl-change=${(e: Event) => {
-                        this.telemetryEnabled = (e.target as HTMLInputElement).checked;
-                      }}
-                      >Enable Telemetry</sl-switch
-                    >`
+                        ?checked=${this.telemetryEnabled}
+                        @sl-change=${(e: Event) => {
+                          this.telemetryEnabled = (e.target as HTMLInputElement).checked;
+                        }}
+                        >Enable Telemetry</sl-switch
+                      >`
                   )}
                   <span class="hint">Default opt-in state for new agents</span>
                 </div>
@@ -2886,14 +2887,16 @@ export class ScionPageAdminServerConfig extends LitElement {
                     'auto_expose_ports.enabled',
                     this.autoExposePortsEnabled ? 'Enabled' : 'Disabled',
                     html`${this.renderEnvBadge('auto_expose_ports.enabled')}<sl-switch
-                      ?checked=${this.autoExposePortsEnabled}
-                      @sl-change=${(e: Event) => {
-                        this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
-                      }}
-                      >Enable Auto-Expose Ports</sl-switch
-                    >`
+                        ?checked=${this.autoExposePortsEnabled}
+                        @sl-change=${(e: Event) => {
+                          this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
+                        }}
+                        >Enable Auto-Expose Ports</sl-switch
+                      >`
                   )}
-                  <span class="hint">Automatically detect and expose listening TCP ports in agent containers</span>
+                  <span class="hint"
+                    >Automatically detect and expose listening TCP ports in agent containers</span
+                  >
                 </div>
                 <div class="form-field">
                   <label>Default Model</label>
@@ -2901,21 +2904,27 @@ export class ScionPageAdminServerConfig extends LitElement {
                     'default_model',
                     this.defaultModel || '—',
                     html`${this.renderEnvBadge('default_model')}<sl-select
-                      placeholder="use harness default"
-                      clearable
-                      value=${this.defaultModelSelection}
-                      @sl-change=${(e: Event) => {
-                        const val = (e.target as HTMLSelectElement).value as '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
-                        this.defaultModelSelection = val;
-                        if (val !== 'other') this.defaultCustomModelId = '';
-                      }}
-                    >
-                      <sl-option value="small">Small</sl-option>
-                      <sl-option value="medium">Medium</sl-option>
-                      <sl-option value="large">Large</sl-option>
-                      <sl-option value="extra-large">Extra Large</sl-option>
-                      <sl-option value="other">Other (specify)</sl-option>
-                    </sl-select>`
+                        placeholder="use harness default"
+                        clearable
+                        value=${this.defaultModelSelection}
+                        @sl-change=${(e: Event) => {
+                          const val = (e.target as HTMLSelectElement).value as
+                            | ''
+                            | 'small'
+                            | 'medium'
+                            | 'large'
+                            | 'extra-large'
+                            | 'other';
+                          this.defaultModelSelection = val;
+                          if (val !== 'other') this.defaultCustomModelId = '';
+                        }}
+                      >
+                        <sl-option value="small">Small</sl-option>
+                        <sl-option value="medium">Medium</sl-option>
+                        <sl-option value="large">Large</sl-option>
+                        <sl-option value="extra-large">Extra Large</sl-option>
+                        <sl-option value="other">Other (specify)</sl-option>
+                      </sl-select>`
                   )}
                 </div>
                 ${this.defaultModelSelection === 'other'
@@ -2933,71 +2942,106 @@ export class ScionPageAdminServerConfig extends LitElement {
                     `
                   : nothing}
                 <div class="form-field full-width">
-                  <label>Default Thinking Level${this.defaultThinkingLevel !== null ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)">(${this.defaultThinkingLevel})</span>` : ''}</label>
+                  <label
+                    >Default Thinking
+                    Level${this.defaultThinkingLevel !== null
+                      ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
+                          >(${this.defaultThinkingLevel})</span
+                        >`
+                      : ''}</label
+                  >
                   ${this.renderFieldValue(
                     'default_thinking_level',
-                    this.defaultThinkingLevel !== null ? String(this.defaultThinkingLevel) : 'Not set',
+                    this.defaultThinkingLevel !== null
+                      ? String(this.defaultThinkingLevel)
+                      : 'Not set',
                     html`${this.renderEnvBadge('default_thinking_level')}
-                    <div style="display:flex;align-items:center;gap:0.75rem">
-                      <sl-range
-                        min="1" max="100" step="1"
-                        .value=${this.defaultThinkingLevel ?? 50}
-                        ?disabled=${this.defaultThinkingLevel === null}
-                        style="flex:1"
-                        @sl-input=${(e: Event) => { this.defaultThinkingLevel = (e.target as HTMLInputElement & { value: number }).value; }}
-                      ></sl-range>
-                      <sl-checkbox
-                        ?checked=${this.defaultThinkingLevel !== null}
-                        @sl-change=${(e: Event) => { this.defaultThinkingLevel = (e.target as HTMLInputElement & { checked: boolean }).checked ? 50 : null; }}
-                      >Set</sl-checkbox>
-                    </div>
-                    <span class="hint" style="display:flex;justify-content:space-between;margin-top:0.25rem">
-                      <span>1 = minimal reasoning</span>
-                      <span>${this.defaultThinkingLevel === null ? 'Using harness default' : ''}</span>
-                      <span>100 = maximum reasoning</span>
-                    </span>`
+                      <div style="display:flex;align-items:center;gap:0.75rem">
+                        <sl-range
+                          min="1"
+                          max="100"
+                          step="1"
+                          .value=${this.defaultThinkingLevel ?? 50}
+                          ?disabled=${this.defaultThinkingLevel === null}
+                          style="flex:1"
+                          @sl-input=${(e: Event) => {
+                            this.defaultThinkingLevel = (
+                              e.target as HTMLInputElement & { value: number }
+                            ).value;
+                          }}
+                        ></sl-range>
+                        <sl-checkbox
+                          ?checked=${this.defaultThinkingLevel !== null}
+                          @sl-change=${(e: Event) => {
+                            this.defaultThinkingLevel = (
+                              e.target as HTMLInputElement & { checked: boolean }
+                            ).checked
+                              ? 50
+                              : null;
+                          }}
+                          >Set</sl-checkbox
+                        >
+                      </div>
+                      <span
+                        class="hint"
+                        style="display:flex;justify-content:space-between;margin-top:0.25rem"
+                      >
+                        <span>1 = minimal reasoning</span>
+                        <span
+                          >${this.defaultThinkingLevel === null
+                            ? 'Using harness default'
+                            : ''}</span
+                        >
+                        <span>100 = maximum reasoning</span>
+                      </span>`
                   )}
                 </div>
                 <div class="form-field">
                   <label>Default Agent Role</label>
-                  <span class="hint">Role assigned to new agents when not explicitly specified. Can be overridden per-project.</span>
+                  <span class="hint"
+                    >Role assigned to new agents when not explicitly specified. Can be overridden
+                    per-project.</span
+                  >
                   ${this.renderFieldValue(
                     'default_agent_role',
                     this.defaultAgentRole || 'Full (default)',
                     html`${this.renderEnvBadge('default_agent_role')}<sl-select
-                      placeholder="Full (default)"
-                      clearable
-                      value=${this.defaultAgentRole}
-                      @sl-change=${(e: Event) => {
-                        this.defaultAgentRole = (e.target as HTMLSelectElement).value;
-                      }}
-                    >
-                      <sl-option value="none">None — No hub access</sl-option>
-                      <sl-option value="readonly">Read-only — Read-only access</sl-option>
-                      <sl-option value="baseline">Baseline — Standard access</sl-option>
-                      <sl-option value="full">Full — Full access</sl-option>
-                    </sl-select>`
+                        placeholder="Full (default)"
+                        clearable
+                        value=${this.defaultAgentRole}
+                        @sl-change=${(e: Event) => {
+                          this.defaultAgentRole = (e.target as HTMLSelectElement).value;
+                        }}
+                      >
+                        <sl-option value="none">None — No hub access</sl-option>
+                        <sl-option value="readonly">Read-only — Read-only access</sl-option>
+                        <sl-option value="baseline">Baseline — Standard access</sl-option>
+                        <sl-option value="full">Full — Full access</sl-option>
+                      </sl-select>`
                   )}
                 </div>
                 <div class="form-field">
                   <label>Default Maximum Agent Role</label>
-                  <span class="hint">Default maximum role for agents in new projects. Can be overridden per-project.</span>
+                  <span class="hint"
+                    >Default maximum role for agents in new projects. Can be overridden
+                    per-project.</span
+                  >
                   ${this.renderFieldValue(
                     'default_max_agent_role',
                     this.defaultMaxAgentRole || 'Full (default)',
                     html`${this.renderEnvBadge('default_max_agent_role')}<sl-select
-                      placeholder="Full (default)"
-                      clearable
-                      value=${this.defaultMaxAgentRole}
-                      @sl-change=${(e: Event) => {
-                        this.defaultMaxAgentRole = (e.target as HTMLSelectElement).value;
-                      }}
-                    >
-                      <sl-option value="none">None — No hub access</sl-option>
-                      <sl-option value="readonly">Read-only — Read-only access</sl-option>
-                      <sl-option value="baseline">Baseline — Standard access</sl-option>
-                      <sl-option value="full">Full — Full access</sl-option>
-                    </sl-select>`
+                        placeholder="Full (default)"
+                        clearable
+                        value=${this.defaultMaxAgentRole}
+                        @sl-change=${(e: Event) => {
+                          this.defaultMaxAgentRole = (e.target as HTMLSelectElement).value;
+                        }}
+                      >
+                        <sl-option value="none">None — No hub access</sl-option>
+                        <sl-option value="readonly">Read-only — Read-only access</sl-option>
+                        <sl-option value="baseline">Baseline — Standard access</sl-option>
+                        <sl-option value="full">Full — Full access</sl-option>
+                      </sl-select>`
                   )}
                 </div>
               </div>
@@ -3012,13 +3056,14 @@ export class ScionPageAdminServerConfig extends LitElement {
                     'default_max_turns',
                     this.defaultMaxTurns ? String(this.defaultMaxTurns) : '',
                     html`${this.renderEnvBadge('default_max_turns')}<sl-input
-                      type="number"
-                      value=${this.defaultMaxTurns ? String(this.defaultMaxTurns) : ''}
-                      placeholder="No limit"
-                      @sl-input=${(e: Event) => {
-                        this.defaultMaxTurns = parseInt((e.target as HTMLInputElement).value) || 0;
-                      }}
-                    ></sl-input>`
+                        type="number"
+                        value=${this.defaultMaxTurns ? String(this.defaultMaxTurns) : ''}
+                        placeholder="No limit"
+                        @sl-input=${(e: Event) => {
+                          this.defaultMaxTurns =
+                            parseInt((e.target as HTMLInputElement).value) || 0;
+                        }}
+                      ></sl-input>`
                   )}
                 </div>
                 <div class="form-field">
@@ -3028,13 +3073,14 @@ export class ScionPageAdminServerConfig extends LitElement {
                     'default_max_model_calls',
                     this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : '',
                     html`${this.renderEnvBadge('default_max_model_calls')}<sl-input
-                      type="number"
-                      value=${this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : ''}
-                      placeholder="No limit"
-                      @sl-input=${(e: Event) => {
-                        this.defaultMaxModelCalls = parseInt((e.target as HTMLInputElement).value) || 0;
-                      }}
-                    ></sl-input>`
+                        type="number"
+                        value=${this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : ''}
+                        placeholder="No limit"
+                        @sl-input=${(e: Event) => {
+                          this.defaultMaxModelCalls =
+                            parseInt((e.target as HTMLInputElement).value) || 0;
+                        }}
+                      ></sl-input>`
                   )}
                 </div>
                 <div class="form-field full-width">
@@ -3044,12 +3090,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                     'default_max_duration',
                     this.defaultMaxDuration,
                     html`${this.renderEnvBadge('default_max_duration')}<sl-input
-                      value=${this.defaultMaxDuration}
-                      placeholder="e.g. 2h, 30m"
-                      @sl-input=${(e: Event) => {
-                        this.defaultMaxDuration = (e.target as HTMLInputElement).value;
-                      }}
-                    ></sl-input>`
+                        value=${this.defaultMaxDuration}
+                        placeholder="e.g. 2h, 30m"
+                        @sl-input=${(e: Event) => {
+                          this.defaultMaxDuration = (e.target as HTMLInputElement).value;
+                        }}
+                      ></sl-input>`
                   )}
                 </div>
               </div>
@@ -3058,60 +3104,68 @@ export class ScionPageAdminServerConfig extends LitElement {
             <sl-tab-panel name="resources">
               ${this.renderFieldValue(
                 'default_resources',
-                [this.defaultResCpuReq, this.defaultResMemReq, this.defaultResCpuLim, this.defaultResMemLim, this.defaultResDisk].filter(Boolean).join(', '),
+                [
+                  this.defaultResCpuReq,
+                  this.defaultResMemReq,
+                  this.defaultResCpuLim,
+                  this.defaultResMemLim,
+                  this.defaultResDisk,
+                ]
+                  .filter(Boolean)
+                  .join(', '),
                 html`${this.renderEnvBadge('default_resources')}
-              <div class="form-grid">
-                <div class="form-field">
-                  <label>CPU Request</label>
-                  <sl-input
-                    value=${this.defaultResCpuReq}
-                    placeholder="e.g. 500m, 1"
-                    @sl-input=${(e: Event) => {
-                      this.defaultResCpuReq = (e.target as HTMLInputElement).value;
-                    }}
-                  ></sl-input>
-                </div>
-                <div class="form-field">
-                  <label>Memory Request</label>
-                  <sl-input
-                    value=${this.defaultResMemReq}
-                    placeholder="e.g. 512Mi, 1Gi"
-                    @sl-input=${(e: Event) => {
-                      this.defaultResMemReq = (e.target as HTMLInputElement).value;
-                    }}
-                  ></sl-input>
-                </div>
-                <div class="form-field">
-                  <label>CPU Limit</label>
-                  <sl-input
-                    value=${this.defaultResCpuLim}
-                    placeholder="e.g. 1, 2"
-                    @sl-input=${(e: Event) => {
-                      this.defaultResCpuLim = (e.target as HTMLInputElement).value;
-                    }}
-                  ></sl-input>
-                </div>
-                <div class="form-field">
-                  <label>Memory Limit</label>
-                  <sl-input
-                    value=${this.defaultResMemLim}
-                    placeholder="e.g. 1Gi, 2Gi"
-                    @sl-input=${(e: Event) => {
-                      this.defaultResMemLim = (e.target as HTMLInputElement).value;
-                    }}
-                  ></sl-input>
-                </div>
-                <div class="form-field full-width">
-                  <label>Disk</label>
-                  <sl-input
-                    value=${this.defaultResDisk}
-                    placeholder="e.g. 10Gi"
-                    @sl-input=${(e: Event) => {
-                      this.defaultResDisk = (e.target as HTMLInputElement).value;
-                    }}
-                  ></sl-input>
-                </div>
-              </div>`
+                  <div class="form-grid">
+                    <div class="form-field">
+                      <label>CPU Request</label>
+                      <sl-input
+                        value=${this.defaultResCpuReq}
+                        placeholder="e.g. 500m, 1"
+                        @sl-input=${(e: Event) => {
+                          this.defaultResCpuReq = (e.target as HTMLInputElement).value;
+                        }}
+                      ></sl-input>
+                    </div>
+                    <div class="form-field">
+                      <label>Memory Request</label>
+                      <sl-input
+                        value=${this.defaultResMemReq}
+                        placeholder="e.g. 512Mi, 1Gi"
+                        @sl-input=${(e: Event) => {
+                          this.defaultResMemReq = (e.target as HTMLInputElement).value;
+                        }}
+                      ></sl-input>
+                    </div>
+                    <div class="form-field">
+                      <label>CPU Limit</label>
+                      <sl-input
+                        value=${this.defaultResCpuLim}
+                        placeholder="e.g. 1, 2"
+                        @sl-input=${(e: Event) => {
+                          this.defaultResCpuLim = (e.target as HTMLInputElement).value;
+                        }}
+                      ></sl-input>
+                    </div>
+                    <div class="form-field">
+                      <label>Memory Limit</label>
+                      <sl-input
+                        value=${this.defaultResMemLim}
+                        placeholder="e.g. 1Gi, 2Gi"
+                        @sl-input=${(e: Event) => {
+                          this.defaultResMemLim = (e.target as HTMLInputElement).value;
+                        }}
+                      ></sl-input>
+                    </div>
+                    <div class="form-field full-width">
+                      <label>Disk</label>
+                      <sl-input
+                        value=${this.defaultResDisk}
+                        placeholder="e.g. 10Gi"
+                        @sl-input=${(e: Event) => {
+                          this.defaultResDisk = (e.target as HTMLInputElement).value;
+                        }}
+                      ></sl-input>
+                    </div>
+                  </div>`
               )}
             </sl-tab-panel>
           </sl-tab-group>
@@ -3134,7 +3188,10 @@ export class ScionPageAdminServerConfig extends LitElement {
                     }}
                     >Enable default scratchpad shared directory</sl-switch
                   >
-                  <span class="hint">When enabled, new projects automatically get a shared scratchpad directory for inter-agent communication.</span>
+                  <span class="hint"
+                    >When enabled, new projects automatically get a shared scratchpad directory for
+                    inter-agent communication.</span
+                  >
                 </div>
               </div>
             </div>
@@ -3223,12 +3280,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'server.hub.public_url',
               this.hubPublicUrl,
               html`${this.renderEnvBadge('server.hub.public_url')}<sl-input
-                value=${this.hubPublicUrl}
-                placeholder="https://hub.example.com"
-                @sl-input=${(e: Event) => {
-                  this.hubPublicUrl = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.hubPublicUrl}
+                  placeholder="https://hub.example.com"
+                  @sl-input=${(e: Event) => {
+                    this.hubPublicUrl = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
           <div class="form-field">
@@ -3268,12 +3325,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'server.hub.admin_emails',
               this.hubAdminEmails,
               html`${this.renderEnvBadge('server.hub.admin_emails')}<sl-input
-                value=${this.hubAdminEmails}
-                placeholder="admin@example.com, ops@example.com"
-                @sl-input=${(e: Event) => {
-                  this.hubAdminEmails = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.hubAdminEmails}
+                  placeholder="admin@example.com, ops@example.com"
+                  @sl-input=${(e: Event) => {
+                    this.hubAdminEmails = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
         </div>
@@ -3293,12 +3350,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'server.hub.soft_delete_retention',
               this.hubSoftDeleteRetention || '—',
               html`${this.renderEnvBadge('server.hub.soft_delete_retention')}<sl-input
-                value=${this.hubSoftDeleteRetention}
-                placeholder="72h"
-                @sl-input=${(e: Event) => {
-                  this.hubSoftDeleteRetention = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.hubSoftDeleteRetention}
+                  placeholder="72h"
+                  @sl-input=${(e: Event) => {
+                    this.hubSoftDeleteRetention = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
           <div class="form-field">
@@ -3306,12 +3363,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'server.hub.soft_delete_retain_files',
               this.hubSoftDeleteRetainFiles ? 'Enabled' : 'Disabled',
               html`${this.renderEnvBadge('server.hub.soft_delete_retain_files')}<sl-switch
-                ?checked=${this.hubSoftDeleteRetainFiles}
-                @sl-change=${(e: Event) => {
-                  this.hubSoftDeleteRetainFiles = (e.target as HTMLInputElement).checked;
-                }}
-                >Retain files on soft delete</sl-switch
-              >`
+                  ?checked=${this.hubSoftDeleteRetainFiles}
+                  @sl-change=${(e: Event) => {
+                    this.hubSoftDeleteRetainFiles = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Retain files on soft delete</sl-switch
+                >`
             )}
           </div>
           <div class="form-field">
@@ -3319,12 +3376,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'server.hub.auto_suspend_stalled',
               this.hubAutoSuspendStalled ? 'Enabled' : 'Disabled',
               html`${this.renderEnvBadge('server.hub.auto_suspend_stalled')}<sl-switch
-                ?checked=${this.hubAutoSuspendStalled}
-                @sl-change=${(e: Event) => {
-                  this.hubAutoSuspendStalled = (e.target as HTMLInputElement).checked;
-                }}
-                >Auto-suspend stalled agents</sl-switch
-              >`
+                  ?checked=${this.hubAutoSuspendStalled}
+                  @sl-change=${(e: Event) => {
+                    this.hubAutoSuspendStalled = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Auto-suspend stalled agents</sl-switch
+                >`
             )}
             <span class="hint"
               >When enabled, agents detected as stalled are automatically suspended (container
@@ -3340,12 +3397,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'server.hub.stalled_threshold',
               this.hubStalledThreshold || '5m (default)',
               html`${this.renderEnvBadge('server.hub.stalled_threshold')}<sl-input
-                value=${this.hubStalledThreshold}
-                placeholder="5m"
-                @sl-input=${(e: Event) => {
-                  this.hubStalledThreshold = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.hubStalledThreshold}
+                  placeholder="5m"
+                  @sl-input=${(e: Event) => {
+                    this.hubStalledThreshold = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
         </div>
@@ -3357,8 +3414,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private renderRuntimesProfilesTab() {
     return html`
-      ${this.renderRuntimesSection()}
-      ${this.renderProfilesSection()}
+      ${this.renderRuntimesSection()} ${this.renderProfilesSection()}
       ${this.renderHarnessConfigsSection()}
     `;
   }
@@ -3370,11 +3426,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     const runtimeReadOnly = this.readOnlyReason('runtimes');
     return html`
       <div class="section">
-        ${this.renderSectionHeader('Runtimes', 'runtimes')}
-        ${this.renderSectionMeta('runtimes')}
-        ${runtimeReadOnly
-          ? html`${this.renderReadOnlyBadge(runtimeReadOnly)}`
-          : nothing}
+        ${this.renderSectionHeader('Runtimes', 'runtimes')} ${this.renderSectionMeta('runtimes')}
+        ${runtimeReadOnly ? html`${this.renderReadOnlyBadge(runtimeReadOnly)}` : nothing}
         ${runtimeNames.length === 0
           ? html`<p class="hint">No runtimes configured.</p>`
           : runtimeNames.map((name) => this.renderRuntimeEntry(name, !!runtimeReadOnly))}
@@ -3393,7 +3446,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   size="small"
                   variant="default"
                   ?disabled=${!this.newRuntimeName.trim() ||
-                    hasOwn(this.runtimes, this.newRuntimeName.trim())}
+                  hasOwn(this.runtimes, this.newRuntimeName.trim())}
                   @click=${() => this.addRuntime()}
                 >
                   <sl-icon slot="prefix" name="plus-circle"></sl-icon>
@@ -3401,7 +3454,9 @@ export class ScionPageAdminServerConfig extends LitElement {
                 </sl-button>
               </div>
               ${hasOwn(this.runtimes, this.newRuntimeName.trim())
-                ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A runtime named "${this.newRuntimeName.trim()}" already exists.</small>`
+                ? html`<small class="hint" style="color:var(--sl-color-danger-600);"
+                    >A runtime named "${this.newRuntimeName.trim()}" already exists.</small
+                  >`
                 : nothing}
             `
           : nothing}
@@ -3474,7 +3529,11 @@ export class ScionPageAdminServerConfig extends LitElement {
                     value=${rt.context || ''}
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
-                      this.updateRuntimeField(name, 'context', (e.target as HTMLInputElement).value);
+                      this.updateRuntimeField(
+                        name,
+                        'context',
+                        (e.target as HTMLInputElement).value
+                      );
                     }}
                   ></sl-input>
                 </div>
@@ -3487,7 +3546,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                       this.updateRuntimeField(
                         name,
                         'namespace',
-                        (e.target as HTMLInputElement).value,
+                        (e.target as HTMLInputElement).value
                       );
                     }}
                   ></sl-input>
@@ -3511,7 +3570,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                       this.updateRuntimeBool(
                         name,
                         'list_all_namespaces',
-                        (e.target as HTMLInputElement).checked,
+                        (e.target as HTMLInputElement).checked
                       );
                     }}
                     >List all namespaces</sl-switch
@@ -3529,7 +3588,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                       this.updateRuntimeCloudRun(
                         name,
                         'project',
-                        (e.target as HTMLInputElement).value,
+                        (e.target as HTMLInputElement).value
                       );
                     }}
                   ></sl-input>
@@ -3544,7 +3603,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                       this.updateRuntimeCloudRun(
                         name,
                         'region',
-                        (e.target as HTMLInputElement).value,
+                        (e.target as HTMLInputElement).value
                       );
                     }}
                   ></sl-input>
@@ -3555,11 +3614,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
-  private updateRuntimeField(
-    name: string,
-    field: keyof V1RuntimeConfig,
-    value: string,
-  ): void {
+  private updateRuntimeField(name: string, field: keyof V1RuntimeConfig, value: string): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
     if (value) {
@@ -3590,7 +3645,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   private updateRuntimeBool(
     name: string,
     field: 'gke' | 'list_all_namespaces',
-    value: boolean,
+    value: boolean
   ): void {
     const updated = { ...this.runtimes };
     updated[name] = { ...updated[name], [field]: value };
@@ -3636,15 +3691,12 @@ export class ScionPageAdminServerConfig extends LitElement {
     const runtimeNames = Object.keys(this.runtimes);
     return html`
       <div class="section">
-        ${this.renderSectionHeader('Profiles', 'profiles')}
-        ${this.renderSectionMeta('profiles')}
-        ${profileReadOnly
-          ? html`${this.renderReadOnlyBadge(profileReadOnly)}`
-          : nothing}
+        ${this.renderSectionHeader('Profiles', 'profiles')} ${this.renderSectionMeta('profiles')}
+        ${profileReadOnly ? html`${this.renderReadOnlyBadge(profileReadOnly)}` : nothing}
         ${profileNames.length === 0
           ? html`<p class="hint">No profiles configured.</p>`
           : profileNames.map((name) =>
-              this.renderProfileEntry(name, runtimeNames, !!profileReadOnly),
+              this.renderProfileEntry(name, runtimeNames, !!profileReadOnly)
             )}
         ${!profileReadOnly
           ? html`
@@ -3661,7 +3713,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   size="small"
                   variant="default"
                   ?disabled=${!this.newProfileName.trim() ||
-                    hasOwn(this.profiles, this.newProfileName.trim())}
+                  hasOwn(this.profiles, this.newProfileName.trim())}
                   @click=${() => this.addProfile()}
                 >
                   <sl-icon slot="prefix" name="plus-circle"></sl-icon>
@@ -3669,7 +3721,9 @@ export class ScionPageAdminServerConfig extends LitElement {
                 </sl-button>
               </div>
               ${hasOwn(this.profiles, this.newProfileName.trim())
-                ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A profile named "${this.newProfileName.trim()}" already exists.</small>`
+                ? html`<small class="hint" style="color:var(--sl-color-danger-600);"
+                    >A profile named "${this.newProfileName.trim()}" already exists.</small
+                  >`
                 : nothing}
             `
           : nothing}
@@ -3706,9 +3760,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.updateProfileField(name, 'runtime', (e.target as HTMLSelectElement).value);
               }}
             >
-              ${runtimeNames.map(
-                (rt) => html`<sl-option value=${rt}>${rt}</sl-option>`,
-              )}
+              ${runtimeNames.map((rt) => html`<sl-option value=${rt}>${rt}</sl-option>`)}
             </sl-select>
           </div>
           <div class="form-field">
@@ -3721,7 +3773,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.updateProfileField(
                   name,
                   'image_registry',
-                  (e.target as HTMLInputElement).value,
+                  (e.target as HTMLInputElement).value
                 );
               }}
             ></sl-input>
@@ -3735,7 +3787,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.updateProfileField(
                   name,
                   'default_template',
-                  (e.target as HTMLInputElement).value,
+                  (e.target as HTMLInputElement).value
                 );
               }}
             ></sl-input>
@@ -3749,7 +3801,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.updateProfileField(
                   name,
                   'default_harness_config',
-                  (e.target as HTMLInputElement).value,
+                  (e.target as HTMLInputElement).value
                 );
               }}
             ></sl-input>
@@ -3761,7 +3813,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               placeholder="e.g. 500m"
               ?disabled=${readOnly}
               @sl-input=${(e: Event) => {
-                this.updateProfileResourceTier(name, 'requests', 'cpu', (e.target as HTMLInputElement).value);
+                this.updateProfileResourceTier(
+                  name,
+                  'requests',
+                  'cpu',
+                  (e.target as HTMLInputElement).value
+                );
               }}
             ></sl-input>
           </div>
@@ -3772,7 +3829,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               placeholder="e.g. 512Mi"
               ?disabled=${readOnly}
               @sl-input=${(e: Event) => {
-                this.updateProfileResourceTier(name, 'requests', 'memory', (e.target as HTMLInputElement).value);
+                this.updateProfileResourceTier(
+                  name,
+                  'requests',
+                  'memory',
+                  (e.target as HTMLInputElement).value
+                );
               }}
             ></sl-input>
           </div>
@@ -3783,7 +3845,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               placeholder="e.g. 2000m"
               ?disabled=${readOnly}
               @sl-input=${(e: Event) => {
-                this.updateProfileResourceTier(name, 'limits', 'cpu', (e.target as HTMLInputElement).value);
+                this.updateProfileResourceTier(
+                  name,
+                  'limits',
+                  'cpu',
+                  (e.target as HTMLInputElement).value
+                );
               }}
             ></sl-input>
           </div>
@@ -3794,7 +3861,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               placeholder="e.g. 4Gi"
               ?disabled=${readOnly}
               @sl-input=${(e: Event) => {
-                this.updateProfileResourceTier(name, 'limits', 'memory', (e.target as HTMLInputElement).value);
+                this.updateProfileResourceTier(
+                  name,
+                  'limits',
+                  'memory',
+                  (e.target as HTMLInputElement).value
+                );
               }}
             ></sl-input>
           </div>
@@ -3831,7 +3903,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     name: string,
     tier: 'requests' | 'limits',
     field: 'cpu' | 'memory',
-    value: string,
+    value: string
   ): void {
     const updated = { ...this.profiles };
     const profile = { ...updated[name] };
@@ -3870,7 +3942,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     updated: Record<string, V1ProfileConfig>,
     profile: V1ProfileConfig,
     name: string,
-    res: ResourceSpec,
+    res: ResourceSpec
   ): void {
     if (Object.keys(res).length > 0) {
       profile.resources = res;
@@ -3907,9 +3979,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Harness Configs', 'harness_configs')}
         ${this.renderSectionMeta('harness_configs')}
-        ${hcReadOnly
-          ? html`${this.renderReadOnlyBadge(hcReadOnly)}`
-          : nothing}
+        ${hcReadOnly ? html`${this.renderReadOnlyBadge(hcReadOnly)}` : nothing}
         ${configNames.length === 0
           ? html`<p class="hint">No harness configs configured.</p>`
           : configNames.map((name) => this.renderHarnessConfigEntry(name, !!hcReadOnly))}
@@ -3928,7 +3998,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   size="small"
                   variant="default"
                   ?disabled=${!this.newHarnessConfigName.trim() ||
-                    hasOwn(this.harnessConfigsMap, this.newHarnessConfigName.trim())}
+                  hasOwn(this.harnessConfigsMap, this.newHarnessConfigName.trim())}
                   @click=${() => this.addHarnessConfig()}
                 >
                   <sl-icon slot="prefix" name="plus-circle"></sl-icon>
@@ -3936,7 +4006,9 @@ export class ScionPageAdminServerConfig extends LitElement {
                 </sl-button>
               </div>
               ${hasOwn(this.harnessConfigsMap, this.newHarnessConfigName.trim())
-                ? html`<small class="hint" style="color:var(--sl-color-danger-600);">A config named "${this.newHarnessConfigName.trim()}" already exists.</small>`
+                ? html`<small class="hint" style="color:var(--sl-color-danger-600);"
+                    >A config named "${this.newHarnessConfigName.trim()}" already exists.</small
+                  >`
                 : nothing}
             `
           : nothing}
@@ -3969,13 +4041,17 @@ export class ScionPageAdminServerConfig extends LitElement {
             resize="auto"
             value=${rawStr}
             ?disabled=${readOnly}
-            style="font-family: monospace; font-size: 0.8125rem;${jsonError ? ' --sl-input-border-color: var(--sl-color-danger-600);' : ''}"
+            style="font-family: monospace; font-size: 0.8125rem;${jsonError
+              ? ' --sl-input-border-color: var(--sl-color-danger-600);'
+              : ''}"
             @sl-input=${(e: Event) => {
               this.updateHarnessConfigJson(name, (e.target as HTMLTextAreaElement).value);
             }}
           ></sl-textarea>
           ${jsonError
-            ? html`<small class="hint" style="color:var(--sl-color-danger-600);">Invalid JSON: ${jsonError}</small>`
+            ? html`<small class="hint" style="color:var(--sl-color-danger-600);"
+                >Invalid JSON: ${jsonError}</small
+              >`
             : nothing}
         </div>
       </sl-card>
@@ -4188,7 +4264,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             >
             ${this.renderFieldValue(
               'server.database.url',
-              this.dbUrl === '********' ? '********' : (this.dbUrl || '—'),
+              this.dbUrl === '********' ? '********' : this.dbUrl || '—',
               html`<sl-input
                 value=${this.dbUrl}
                 placeholder="Path or connection string"
@@ -4302,19 +4378,19 @@ export class ScionPageAdminServerConfig extends LitElement {
               'server.auth.user_access_mode',
               this.authUserAccessMode,
               html`${this.renderEnvBadge('server.auth.user_access_mode')}<sl-select
-                value=${this.authUserAccessMode}
-                @sl-change=${(e: Event) => {
-                  this.authUserAccessMode = (e.target as HTMLSelectElement).value;
-                }}
-              >
-                <sl-option value="open">Open (all authenticated users)</sl-option>
-                <sl-option value="domain_restricted"
-                  >Domain Restricted (authorized domains only)</sl-option
+                  value=${this.authUserAccessMode}
+                  @sl-change=${(e: Event) => {
+                    this.authUserAccessMode = (e.target as HTMLSelectElement).value;
+                  }}
                 >
-                <sl-option value="invite_only"
-                  >Invite Only (allow list + authorized domains)</sl-option
-                >
-              </sl-select>`
+                  <sl-option value="open">Open (all authenticated users)</sl-option>
+                  <sl-option value="domain_restricted"
+                    >Domain Restricted (authorized domains only)</sl-option
+                  >
+                  <sl-option value="invite_only"
+                    >Invite Only (allow list + authorized domains)</sl-option
+                  >
+                </sl-select>`
             )}
             ${this.authUserAccessMode === 'invite_only'
               ? html`<sl-alert variant="warning" open style="margin-top: 0.75rem">
@@ -4357,7 +4433,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             >
             ${this.renderFieldValue(
               'server.auth.dev_token',
-              this.authDevToken === '********' ? '********' : (this.authDevToken || '—'),
+              this.authDevToken === '********' ? '********' : this.authDevToken || '—',
               html`<sl-input
                 value=${this.authDevToken}
                 @sl-input=${(e: Event) => {
@@ -4375,12 +4451,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'server.auth.authorized_domains',
               this.authAuthorizedDomains || '—',
               html`${this.renderEnvBadge('server.auth.authorized_domains')}<sl-input
-                value=${this.authAuthorizedDomains}
-                placeholder="example.com, corp.example.com"
-                @sl-input=${(e: Event) => {
-                  this.authAuthorizedDomains = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.authAuthorizedDomains}
+                  placeholder="example.com, corp.example.com"
+                  @sl-input=${(e: Event) => {
+                    this.authAuthorizedDomains = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
         </div>
@@ -4444,12 +4520,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.cloud.enabled',
               this.telemetryCloudEnabled ? 'Enabled' : 'Disabled',
               html`${this.renderEnvBadge('telemetry.cloud.enabled')}<sl-switch
-                ?checked=${this.telemetryCloudEnabled}
-                @sl-change=${(e: Event) => {
-                  this.telemetryCloudEnabled = (e.target as HTMLInputElement).checked;
-                }}
-                >Enable Cloud Export</sl-switch
-              >`
+                  ?checked=${this.telemetryCloudEnabled}
+                  @sl-change=${(e: Event) => {
+                    this.telemetryCloudEnabled = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Enable Cloud Export</sl-switch
+                >`
             )}
           </div>
           <div class="form-field full-width">
@@ -4458,12 +4534,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.cloud.endpoint',
               this.telemetryCloudEndpoint || '—',
               html`${this.renderEnvBadge('telemetry.cloud.endpoint')}<sl-input
-                value=${this.telemetryCloudEndpoint}
-                placeholder="https://otel-collector.example.com:4317"
-                @sl-input=${(e: Event) => {
-                  this.telemetryCloudEndpoint = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.telemetryCloudEndpoint}
+                  placeholder="https://otel-collector.example.com:4317"
+                  @sl-input=${(e: Event) => {
+                    this.telemetryCloudEndpoint = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
           <div class="form-field">
@@ -4472,15 +4548,15 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.cloud.protocol',
               this.telemetryCloudProtocol || 'grpc',
               html`${this.renderEnvBadge('telemetry.cloud.protocol')}<sl-select
-                value=${this.telemetryCloudProtocol || 'grpc'}
-                @sl-change=${(e: Event) => {
-                  this.telemetryCloudProtocol = (e.target as HTMLSelectElement).value;
-                }}
-              >
-                <sl-option value="grpc">gRPC</sl-option>
-                <sl-option value="http/protobuf">HTTP/Protobuf</sl-option>
-                <sl-option value="http/json">HTTP/JSON</sl-option>
-              </sl-select>`
+                  value=${this.telemetryCloudProtocol || 'grpc'}
+                  @sl-change=${(e: Event) => {
+                    this.telemetryCloudProtocol = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="grpc">gRPC</sl-option>
+                  <sl-option value="http/protobuf">HTTP/Protobuf</sl-option>
+                  <sl-option value="http/json">HTTP/JSON</sl-option>
+                </sl-select>`
             )}
           </div>
           <div class="form-field">
@@ -4489,12 +4565,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.cloud.provider',
               this.telemetryCloudProvider || '—',
               html`${this.renderEnvBadge('telemetry.cloud.provider')}<sl-input
-                value=${this.telemetryCloudProvider}
-                placeholder="e.g., gcp"
-                @sl-input=${(e: Event) => {
-                  this.telemetryCloudProvider = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.telemetryCloudProvider}
+                  placeholder="e.g., gcp"
+                  @sl-input=${(e: Event) => {
+                    this.telemetryCloudProvider = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
           <div class="form-field">
@@ -4503,12 +4579,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.cloud.gcp_project_id',
               this.telemetryCloudGcpProjectId || '—',
               html`${this.renderEnvBadge('telemetry.cloud.gcp_project_id')}<sl-input
-                value=${this.telemetryCloudGcpProjectId}
-                placeholder="e.g., my-gcp-project"
-                @sl-input=${(e: Event) => {
-                  this.telemetryCloudGcpProjectId = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.telemetryCloudGcpProjectId}
+                  placeholder="e.g., my-gcp-project"
+                  @sl-input=${(e: Event) => {
+                    this.telemetryCloudGcpProjectId = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
           <div class="form-field">
@@ -4516,12 +4592,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.cloud.cloud_logging',
               this.telemetryCloudCloudLogging ? 'Enabled' : 'Disabled',
               html`${this.renderEnvBadge('telemetry.cloud.cloud_logging')}<sl-switch
-                ?checked=${this.telemetryCloudCloudLogging}
-                @sl-change=${(e: Event) => {
-                  this.telemetryCloudCloudLogging = (e.target as HTMLInputElement).checked;
-                }}
-                >Enable Cloud Logging</sl-switch
-              >`
+                  ?checked=${this.telemetryCloudCloudLogging}
+                  @sl-change=${(e: Event) => {
+                    this.telemetryCloudCloudLogging = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Enable Cloud Logging</sl-switch
+                >`
             )}
           </div>
         </div>
@@ -4535,12 +4611,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.hub.enabled',
               this.telemetryHubEnabled ? 'Enabled' : 'Disabled',
               html`${this.renderEnvBadge('telemetry.hub.enabled')}<sl-switch
-                ?checked=${this.telemetryHubEnabled}
-                @sl-change=${(e: Event) => {
-                  this.telemetryHubEnabled = (e.target as HTMLInputElement).checked;
-                }}
-                >Enable Hub Reporting</sl-switch
-              >`
+                  ?checked=${this.telemetryHubEnabled}
+                  @sl-change=${(e: Event) => {
+                    this.telemetryHubEnabled = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Enable Hub Reporting</sl-switch
+                >`
             )}
           </div>
           <div class="form-field">
@@ -4549,12 +4625,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.hub.report_interval',
               this.telemetryHubReportInterval || '—',
               html`${this.renderEnvBadge('telemetry.hub.report_interval')}<sl-input
-                value=${this.telemetryHubReportInterval}
-                placeholder="30s"
-                @sl-input=${(e: Event) => {
-                  this.telemetryHubReportInterval = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.telemetryHubReportInterval}
+                  placeholder="30s"
+                  @sl-input=${(e: Event) => {
+                    this.telemetryHubReportInterval = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
         </div>
@@ -4568,12 +4644,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.local.enabled',
               this.telemetryLocalEnabled ? 'Enabled' : 'Disabled',
               html`${this.renderEnvBadge('telemetry.local.enabled')}<sl-switch
-                ?checked=${this.telemetryLocalEnabled}
-                @sl-change=${(e: Event) => {
-                  this.telemetryLocalEnabled = (e.target as HTMLInputElement).checked;
-                }}
-                >Enable Local Output</sl-switch
-              >`
+                  ?checked=${this.telemetryLocalEnabled}
+                  @sl-change=${(e: Event) => {
+                    this.telemetryLocalEnabled = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Enable Local Output</sl-switch
+                >`
             )}
           </div>
           <div class="form-field">
@@ -4581,12 +4657,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.local.console',
               this.telemetryLocalConsole ? 'Enabled' : 'Disabled',
               html`${this.renderEnvBadge('telemetry.local.console')}<sl-switch
-                ?checked=${this.telemetryLocalConsole}
-                @sl-change=${(e: Event) => {
-                  this.telemetryLocalConsole = (e.target as HTMLInputElement).checked;
-                }}
-                >Console Output</sl-switch
-              >`
+                  ?checked=${this.telemetryLocalConsole}
+                  @sl-change=${(e: Event) => {
+                    this.telemetryLocalConsole = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Console Output</sl-switch
+                >`
             )}
           </div>
           <div class="form-field full-width">
@@ -4595,12 +4671,12 @@ export class ScionPageAdminServerConfig extends LitElement {
               'telemetry.local.file',
               this.telemetryLocalFile || '—',
               html`${this.renderEnvBadge('telemetry.local.file')}<sl-input
-                value=${this.telemetryLocalFile}
-                placeholder="/var/log/scion/telemetry.log"
-                @sl-input=${(e: Event) => {
-                  this.telemetryLocalFile = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+                  value=${this.telemetryLocalFile}
+                  placeholder="/var/log/scion/telemetry.log"
+                  @sl-input=${(e: Event) => {
+                    this.telemetryLocalFile = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
         </div>
@@ -4627,10 +4703,9 @@ export class ScionPageAdminServerConfig extends LitElement {
               <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
             </sl-select>
             <div class="help-text">
-              Controls whether GCP IAM actAs permission is verified when assigning
-              a service account to an agent. When "off", assignment is gated by
-              Hub policy only. When "enforce", the caller must also have
-              iam.serviceAccounts.actAs on the target service account.
+              Controls whether GCP IAM actAs permission is verified when assigning a service account
+              to an agent. When "off", assignment is gated by Hub policy only. When "enforce", the
+              caller must also have iam.serviceAccounts.actAs on the target service account.
             </div>
           </div>
           <div class="form-field">
@@ -4645,12 +4720,11 @@ export class ScionPageAdminServerConfig extends LitElement {
               <sl-option value="fail-closed">Fail Closed</sl-option>
             </sl-select>
             <div class="help-text">
-              Controls behavior when IAM deny policies cannot be fully evaluated
-              (e.g., the Hub service account lacks org-level permissions to read
-              deny policies). "Fail open" treats allow-granted results as allowed
-              even when deny evaluation is inconclusive. "Fail closed" denies
-              access when deny policies cannot be verified. Only applies when
-              IAM Check Mode is "enforce".
+              Controls behavior when IAM deny policies cannot be fully evaluated (e.g., the Hub
+              service account lacks org-level permissions to read deny policies). "Fail open" treats
+              allow-granted results as allowed even when deny evaluation is inconclusive. "Fail
+              closed" denies access when deny policies cannot be verified. Only applies when IAM
+              Check Mode is "enforce".
             </div>
           </div>
         </div>
@@ -4784,13 +4858,13 @@ export class ScionPageAdminServerConfig extends LitElement {
               'server.github_app.app_id',
               this.githubAppId ? String(this.githubAppId) : '—',
               html`${this.renderEnvBadge('server.github_app.app_id', 'server.github_app')}<sl-input
-                .value=${this.githubAppId ? String(this.githubAppId) : ''}
-                placeholder="e.g. 123456"
-                inputmode="numeric"
-                @sl-input=${(e: Event) => {
-                  this.githubAppId = parseInt((e.target as HTMLInputElement).value) || 0;
-                }}
-              ></sl-input>`
+                  .value=${this.githubAppId ? String(this.githubAppId) : ''}
+                  placeholder="e.g. 123456"
+                  inputmode="numeric"
+                  @sl-input=${(e: Event) => {
+                    this.githubAppId = parseInt((e.target as HTMLInputElement).value) || 0;
+                  }}
+                ></sl-input>`
             )}
           </div>
           <div class="form-field">
@@ -4801,13 +4875,16 @@ export class ScionPageAdminServerConfig extends LitElement {
             ${this.renderFieldValue(
               'server.github_app.api_base_url',
               this.githubAppApiBaseUrl || '—',
-              html`${this.renderEnvBadge('server.github_app.api_base_url', 'server.github_app')}<sl-input
-                .value=${this.githubAppApiBaseUrl}
-                placeholder="https://api.github.com"
-                @sl-input=${(e: Event) => {
-                  this.githubAppApiBaseUrl = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+              html`${this.renderEnvBadge(
+                  'server.github_app.api_base_url',
+                  'server.github_app'
+                )}<sl-input
+                  .value=${this.githubAppApiBaseUrl}
+                  placeholder="https://api.github.com"
+                  @sl-input=${(e: Event) => {
+                    this.githubAppApiBaseUrl = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
           <div class="form-field full-width">
@@ -4863,14 +4940,17 @@ export class ScionPageAdminServerConfig extends LitElement {
             ${this.renderFieldValue(
               'server.github_app.webhooks_enabled',
               this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('server.github_app.webhooks_enabled', 'server.github_app')}<sl-switch
-                .checked=${this.githubAppWebhooksEnabled}
-                @sl-change=${(e: Event) => {
-                  this.githubAppWebhooksEnabled = (e.target as HTMLInputElement).checked;
-                }}
-              >
-                ${this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled'}
-              </sl-switch>`
+              html`${this.renderEnvBadge(
+                  'server.github_app.webhooks_enabled',
+                  'server.github_app'
+                )}<sl-switch
+                  .checked=${this.githubAppWebhooksEnabled}
+                  @sl-change=${(e: Event) => {
+                    this.githubAppWebhooksEnabled = (e.target as HTMLInputElement).checked;
+                  }}
+                >
+                  ${this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled'}
+                </sl-switch>`
             )}
           </div>
           <div class="form-field full-width">
@@ -4881,13 +4961,16 @@ export class ScionPageAdminServerConfig extends LitElement {
             ${this.renderFieldValue(
               'server.github_app.installation_url',
               this.githubAppInstallationUrl || '—',
-              html`${this.renderEnvBadge('server.github_app.installation_url', 'server.github_app')}<sl-input
-                .value=${this.githubAppInstallationUrl}
-                placeholder="https://github.com/apps/your-app-name/installations/new"
-                @sl-input=${(e: Event) => {
-                  this.githubAppInstallationUrl = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+              html`${this.renderEnvBadge(
+                  'server.github_app.installation_url',
+                  'server.github_app'
+                )}<sl-input
+                  .value=${this.githubAppInstallationUrl}
+                  placeholder="https://github.com/apps/your-app-name/installations/new"
+                  @sl-input=${(e: Event) => {
+                    this.githubAppInstallationUrl = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
             )}
           </div>
         </div>

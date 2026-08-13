@@ -80,10 +80,13 @@ function validateGHShorthand(uri: string): string {
   if (qIdx >= 0) {
     const query = main.slice(qIdx + 1);
     main = main.slice(0, qIdx);
-    if (!query.startsWith('token=')) throw new Error('Invalid gh:// URI: only ?token=SECRET_NAME is supported');
+    if (!query.startsWith('token='))
+      throw new Error('Invalid gh:// URI: only ?token=SECRET_NAME is supported');
     const tokenName = query.slice('token='.length);
     if (!tokenName || !/^[A-Z][A-Z0-9_]*$/.test(tokenName)) {
-      throw new Error('Invalid gh:// URI: ?token= value must be an uppercase env-var name (e.g. SKILLS_TOKEN)');
+      throw new Error(
+        'Invalid gh:// URI: ?token= value must be an uppercase env-var name (e.g. SKILLS_TOKEN)'
+      );
     }
     tokenSuffix = '?' + query;
   }
@@ -91,13 +94,16 @@ function validateGHShorthand(uri: string): string {
   const atIdx = main.lastIndexOf('@');
   if (atIdx >= 0) {
     const ref = main.slice(atIdx + 1);
-    if (!ref || ref === '.' || ref === '..') throw new Error('Invalid gh:// URI: invalid ref (must not be empty, ".", or "..")');
+    if (!ref || ref === '.' || ref === '..')
+      throw new Error('Invalid gh:// URI: invalid ref (must not be empty, ".", or "..")');
     main = main.slice(0, atIdx);
     refSuffix = '@' + ref;
   }
   const parts = main.split('/');
   if (parts.length !== 3 || parts.some((p) => !p || p === '.' || p === '..')) {
-    throw new Error('Invalid gh:// URI: expected gh://owner/repo/skill-name[@ref][?token=SECRET_NAME]');
+    throw new Error(
+      'Invalid gh:// URI: expected gh://owner/repo/skill-name[@ref][?token=SECRET_NAME]'
+    );
   }
   return 'gh://' + main + refSuffix + tokenSuffix;
 }
@@ -115,32 +121,57 @@ function normalizeGitHubURL(uri: string): string {
   if (qIdx >= 0) {
     const query = rest.slice(qIdx + 1);
     rest = rest.slice(0, qIdx);
-    if (!query.startsWith('token=')) throw new Error('Invalid GitHub URL: only ?token=SECRET_NAME is supported');
+    if (!query.startsWith('token='))
+      throw new Error('Invalid GitHub URL: only ?token=SECRET_NAME is supported');
     const tokenName = query.slice('token='.length);
     if (!tokenName || !/^[A-Z][A-Z0-9_]*$/.test(tokenName)) {
-      throw new Error('Invalid GitHub URL: ?token= value must be an uppercase env-var name (e.g. SKILLS_TOKEN)');
+      throw new Error(
+        'Invalid GitHub URL: ?token= value must be an uppercase env-var name (e.g. SKILLS_TOKEN)'
+      );
     }
     tokenSuffix = '?' + query;
   }
   const segments = rest.split('/');
   const [owner, repo, keyword, ref, ...pathParts] = segments;
-  if (!owner || !repo || !keyword || !ref || owner === '.' || owner === '..' || repo === '.' || repo === '..' || ref === '.' || ref === '..') {
-    throw new Error('Invalid GitHub URL: expected https://github.com/owner/repo/tree/ref/path/to/skill');
+  if (
+    !owner ||
+    !repo ||
+    !keyword ||
+    !ref ||
+    owner === '.' ||
+    owner === '..' ||
+    repo === '.' ||
+    repo === '..' ||
+    ref === '.' ||
+    ref === '..'
+  ) {
+    throw new Error(
+      'Invalid GitHub URL: expected https://github.com/owner/repo/tree/ref/path/to/skill'
+    );
   }
   const kw = keyword.toLowerCase();
   let fullPath: string;
   if (kw === 'tree') {
     fullPath = pathParts.join('/');
-    if (!fullPath) throw new Error('Invalid GitHub URL: missing skill path after ref; example: .../tree/main/skills/my-skill');
+    if (!fullPath)
+      throw new Error(
+        'Invalid GitHub URL: missing skill path after ref; example: .../tree/main/skills/my-skill'
+      );
   } else if (kw === 'blob') {
     const filePath = pathParts.join('/');
     if (!filePath) throw new Error('Invalid GitHub URL: missing file path after ref');
     const lastSlash = filePath.lastIndexOf('/');
-    if (lastSlash < 0) throw new Error('Invalid GitHub URL: cannot determine skill directory from blob URL (no parent directory)');
+    if (lastSlash < 0)
+      throw new Error(
+        'Invalid GitHub URL: cannot determine skill directory from blob URL (no parent directory)'
+      );
     fullPath = filePath.slice(0, lastSlash);
-    if (!fullPath) throw new Error('Invalid GitHub URL: cannot determine skill directory from blob URL');
+    if (!fullPath)
+      throw new Error('Invalid GitHub URL: cannot determine skill directory from blob URL');
   } else {
-    throw new Error(`Invalid GitHub URL: expected /tree/ or /blob/ after owner/repo, got /${keyword}/`);
+    throw new Error(
+      `Invalid GitHub URL: expected /tree/ or /blob/ after owner/repo, got /${keyword}/`
+    );
   }
   // Use gh:// shorthand for skills/skill-name paths (standard layout).
   const pathSegs = fullPath.split('/');
@@ -545,9 +576,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
   private async addEntry(uri: string, skillAs: string, optional: boolean): Promise<void> {
     if (this.scope === 'hub') {
       // For hub: append to user_defined and PUT the full user_defined list
-      const userDefined = this.rows
-        .filter((r) => !r.readonly)
-        .map((r) => this.rowToSkillRef(r));
+      const userDefined = this.rows.filter((r) => !r.readonly).map((r) => this.rowToSkillRef(r));
       userDefined.push(this.buildSkillRef(uri, skillAs, optional));
       await this.putHubUserDefined(userDefined);
     } else {
@@ -636,9 +665,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
 
   private async reorder(newOrder: SkillRow[]): Promise<void> {
     if (this.scope === 'hub') {
-      const userDefined = newOrder
-        .filter((r) => !r.readonly)
-        .map((r) => this.rowToSkillRef(r));
+      const userDefined = newOrder.filter((r) => !r.readonly).map((r) => this.rowToSkillRef(r));
       await this.putHubUserDefined(userDefined);
     } else {
       const entries = newOrder.map((r, i) => ({
@@ -654,7 +681,9 @@ export class ScionInjectedSkillsPanel extends LitElement {
         body: JSON.stringify({ entries }),
       });
       if (!res.ok) {
-        throw new Error(await extractApiError(res, `Failed to reorder skills (HTTP ${res.status})`));
+        throw new Error(
+          await extractApiError(res, `Failed to reorder skills (HTTP ${res.status})`)
+        );
       }
     }
     await this.load();
@@ -690,7 +719,9 @@ export class ScionInjectedSkillsPanel extends LitElement {
       body: JSON.stringify({ user_defined: userDefined }),
     });
     if (!res.ok) {
-      throw new Error(await extractApiError(res, `Failed to update hub skills (HTTP ${res.status})`));
+      throw new Error(
+        await extractApiError(res, `Failed to update hub skills (HTTP ${res.status})`)
+      );
     }
   }
 
@@ -762,7 +793,9 @@ export class ScionInjectedSkillsPanel extends LitElement {
       );
       if (res.ok) {
         const data = (await res.json()) as { skills?: Skill[] } | Skill[];
-        this.dialogSkillResults = Array.isArray(data) ? data : (data as { skills?: Skill[] }).skills || [];
+        this.dialogSkillResults = Array.isArray(data)
+          ? data
+          : (data as { skills?: Skill[] }).skills || [];
       }
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return; // Stale request — discard
@@ -1088,7 +1121,6 @@ export class ScionInjectedSkillsPanel extends LitElement {
           : this.rows.length === 0
             ? this.renderEmpty()
             : this.renderTable()}
-
       ${this.renderDialog()} ${this.renderDiscoveryDialog()}
     `;
   }
@@ -1200,13 +1232,9 @@ export class ScionInjectedSkillsPanel extends LitElement {
           : nothing}
         <td>
           <div class="skill-info">
-            ${row.skillName
-              ? html`<span class="skill-name">${row.skillName}</span>`
-              : nothing}
+            ${row.skillName ? html`<span class="skill-name">${row.skillName}</span>` : nothing}
             ${this.renderMiddleTruncatedUri(row.uri)}
-            ${row.skillSlug
-              ? html`<span class="skill-uri">/${row.skillSlug}</span>`
-              : nothing}
+            ${row.skillSlug ? html`<span class="skill-uri">/${row.skillSlug}</span>` : nothing}
           </div>
           ${rowReadonly
             ? html`
@@ -1220,12 +1248,20 @@ export class ScionInjectedSkillsPanel extends LitElement {
         <td>
           ${row.as
             ? html`<span class="key-cell">${row.as}</span>`
-            : html`<span style="color: var(--scion-text-muted, #64748b); font-size: 0.8125rem;">—</span>`}
+            : html`<span style="color: var(--scion-text-muted, #64748b); font-size: 0.8125rem;"
+                >—</span
+              >`}
         </td>
         <td>
           ${row.optional
-            ? html`<sl-icon name="check-circle" style="color: var(--sl-color-success-600, #16a34a);"></sl-icon>`
-            : html`<sl-icon name="x-circle" style="color: var(--scion-text-muted, #64748b);"></sl-icon>`}
+            ? html`<sl-icon
+                name="check-circle"
+                style="color: var(--sl-color-success-600, #16a34a);"
+              ></sl-icon>`
+            : html`<sl-icon
+                name="x-circle"
+                style="color: var(--scion-text-muted, #64748b);"
+              ></sl-icon>`}
         </td>
         ${canEdit
           ? html`
@@ -1250,7 +1286,11 @@ export class ScionInjectedSkillsPanel extends LitElement {
 
   private async handleDeleteRow(row: SkillRow, rowIndex: number): Promise<void> {
     const label = row.skillName || row.uri;
-    if (!(await showConfirm(`Remove skill "${label}" from this ${this.scope === 'hub' ? 'hub' : this.scope === 'project' ? 'project' : 'profile'}?`))) {
+    if (
+      !(await showConfirm(
+        `Remove skill "${label}" from this ${this.scope === 'hub' ? 'hub' : this.scope === 'project' ? 'project' : 'profile'}?`
+      ))
+    ) {
       return;
     }
     // Guard against stale rowIndex: a concurrent drag-reorder between the click
@@ -1331,18 +1371,26 @@ export class ScionInjectedSkillsPanel extends LitElement {
                         ${this.dialogSkillResults.map(
                           (skill) => html`
                             <div
-                              class="search-result-item ${this.dialogSelectedSkill?.id === skill.id ? 'selected' : ''}"
+                              class="search-result-item ${this.dialogSelectedSkill?.id === skill.id
+                                ? 'selected'
+                                : ''}"
                               @click=${() => {
                                 this.dialogSelectedSkill = skill;
                               }}
                             >
-                              <sl-icon name="puzzle" style="color: var(--scion-primary, #3b82f6);"></sl-icon>
+                              <sl-icon
+                                name="puzzle"
+                                style="color: var(--scion-primary, #3b82f6);"
+                              ></sl-icon>
                               <div>
                                 <div>${skill.name}</div>
                                 <div class="skill-slug">${skill.slug}</div>
                               </div>
                               ${this.dialogSelectedSkill?.id === skill.id
-                                ? html`<sl-icon name="check-circle-fill" style="margin-left: auto; color: var(--scion-primary, #3b82f6);"></sl-icon>`
+                                ? html`<sl-icon
+                                    name="check-circle-fill"
+                                    style="margin-left: auto; color: var(--scion-primary, #3b82f6);"
+                                  ></sl-icon>`
                                 : nothing}
                             </div>
                           `
@@ -1350,9 +1398,10 @@ export class ScionInjectedSkillsPanel extends LitElement {
                       </div>
                     `
                   : this.dialogSkillQuery && !this.dialogSkillSearching
-                    ? html`<div class="no-results">No skills found matching "${this.dialogSkillQuery}"</div>`
+                    ? html`<div class="no-results">
+                        No skills found matching "${this.dialogSkillQuery}"
+                      </div>`
                     : nothing}
-
                 ${this.dialogSelectedSkill
                   ? html`
                       <div class="dialog-hint">
@@ -1426,9 +1475,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
             </span>
           </label>
 
-          ${this.dialogError
-            ? html`<div class="dialog-error">${this.dialogError}</div>`
-            : nothing}
+          ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
         </div>
 
         <sl-button

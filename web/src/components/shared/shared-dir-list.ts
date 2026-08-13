@@ -73,7 +73,9 @@ export class ScionSharedDirList extends LitElement {
       const response = await apiFetch(`${this.basePath}/shared-dirs`);
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const data = (await response.json()) as { sharedDirs?: SharedDir[] } | SharedDir[];
@@ -113,8 +115,7 @@ export class ScionSharedDirList extends LitElement {
     }
 
     if (!SLUG_PATTERN.test(name)) {
-      this.dialogError =
-        'Name must be lowercase alphanumeric with hyphens (e.g. "build-cache")';
+      this.dialogError = 'Name must be lowercase alphanumeric with hyphens (e.g. "build-cache")';
       return;
     }
 
@@ -140,7 +141,9 @@ export class ScionSharedDirList extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       this.closeDialog();
@@ -172,7 +175,9 @@ export class ScionSharedDirList extends LitElement {
       );
 
       if (!response.ok && response.status !== 204) {
-        throw new Error(await extractApiError(response, `Failed to delete (HTTP ${response.status})`));
+        throw new Error(
+          await extractApiError(response, `Failed to delete (HTTP ${response.status})`)
+        );
       }
 
       await this.loadSharedDirs();
@@ -193,7 +198,8 @@ export class ScionSharedDirList extends LitElement {
           <div class="section-header-info">
             <h2>Shared Directories</h2>
             <p>
-              Shared directories provide filesystem-level state sharing between agents in this project.
+              Shared directories provide filesystem-level state sharing between agents in this
+              project.
             </p>
           </div>
           <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
@@ -283,8 +289,8 @@ export class ScionSharedDirList extends LitElement {
         <sl-icon name="folder"></sl-icon>
         <h3>No Shared Directories</h3>
         <p>
-          Add shared directories to enable filesystem-level state sharing between agents
-          (e.g. build caches, artifacts, coordination files).
+          Add shared directories to enable filesystem-level state sharing between agents (e.g. build
+          caches, artifacts, coordination files).
         </p>
         <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -341,16 +347,14 @@ export class ScionSharedDirList extends LitElement {
               <span class="checkbox-text">
                 <span>Mount in workspace</span>
                 <span class="checkbox-description">
-                  Mount at /workspace/.scion-volumes/ instead of /scion-volumes/.
-                  Useful for caches that tools expect relative to the project root.
+                  Mount at /workspace/.scion-volumes/ instead of /scion-volumes/. Useful for caches
+                  that tools expect relative to the project root.
                 </span>
               </span>
             </label>
           </div>
 
-          ${this.dialogError
-            ? html`<div class="dialog-error">${this.dialogError}</div>`
-            : nothing}
+          ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
         </form>
 
         <sl-button

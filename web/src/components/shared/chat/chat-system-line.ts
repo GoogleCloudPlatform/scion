@@ -77,13 +77,9 @@ export class ScionChatSystemLine extends LitElement {
 
     return html`
       <div class="system-line">
-        ${iconName
-          ? html`<sl-icon name=${iconName}></sl-icon>`
-          : null}
+        ${iconName ? html`<sl-icon name=${iconName}></sl-icon>` : null}
         <span class="system-text">${this.message}</span>
-        ${timeStr
-          ? html`<span class="system-time">${timeStr}</span>`
-          : null}
+        ${timeStr ? html`<span class="system-time">${timeStr}</span>` : null}
       </div>
     `;
   }

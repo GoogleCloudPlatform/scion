@@ -87,7 +87,9 @@ export class ScionScheduledEventList extends LitElement {
       );
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const data = (await response.json()) as ListResponse;
@@ -283,7 +285,6 @@ export class ScionScheduledEventList extends LitElement {
                   </div>
                 `
               : this.renderTable()}
-
         ${this.renderDialog()}
       </div>
     `;
@@ -330,7 +331,6 @@ export class ScionScheduledEventList extends LitElement {
             </div>
           `
         : this.renderTable()}
-
       ${this.renderDialog()}
     `;
   }
@@ -413,9 +413,7 @@ export class ScionScheduledEventList extends LitElement {
         @sl-request-close=${this.closeDialog}
       >
         <form class="dialog-form" @submit=${this.handleCreate}>
-          ${this.dialogError
-            ? html`<div class="dialog-error">${this.dialogError}</div>`
-            : nothing}
+          ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
 
           <sl-input
             label="Target Agent"
@@ -429,7 +427,8 @@ export class ScionScheduledEventList extends LitElement {
             label="Message"
             placeholder="Message to send"
             .value=${this.dialogMessage}
-            @sl-input=${(e: Event) => (this.dialogMessage = (e.target as HTMLTextAreaElement).value)}
+            @sl-input=${(e: Event) =>
+              (this.dialogMessage = (e.target as HTMLTextAreaElement).value)}
             required
           ></sl-textarea>
 

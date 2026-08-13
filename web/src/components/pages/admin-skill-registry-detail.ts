@@ -44,7 +44,13 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
 
   // Edit mode
   @state() private editing = false;
-  @state() private editForm: Partial<{ endpoint: string; description: string; trustLevel: string; resolvePath: string; authToken: string }> = {};
+  @state() private editForm: Partial<{
+    endpoint: string;
+    description: string;
+    trustLevel: string;
+    resolvePath: string;
+    authToken: string;
+  }> = {};
   @state() private saving = false;
 
   // Pinned hashes
@@ -59,7 +65,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
   @state() private actionLoading: Record<string, boolean> = {};
 
   static override styles = css`
-    :host { display: block; }
+    :host {
+      display: block;
+    }
 
     .back-link {
       display: inline-flex;
@@ -70,7 +78,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       font-size: 0.875rem;
       margin-bottom: 1rem;
     }
-    .back-link:hover { color: var(--scion-primary, #3b82f6); }
+    .back-link:hover {
+      color: var(--scion-primary, #3b82f6);
+    }
 
     .header {
       display: flex;
@@ -121,7 +131,10 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
       gap: 1.5rem;
     }
-    .info-item { display: flex; flex-direction: column; }
+    .info-item {
+      display: flex;
+      flex-direction: column;
+    }
     .info-label {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
@@ -138,7 +151,8 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       font-size: 0.875rem;
     }
 
-    .type-badge, .trust-badge {
+    .type-badge,
+    .trust-badge {
       display: inline-flex;
       align-items: center;
       padding: 0.125rem 0.5rem;
@@ -159,7 +173,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       color: var(--sl-color-warning-700, #a16207);
     }
 
-    .edit-field { margin-bottom: 1rem; }
+    .edit-field {
+      margin-bottom: 1rem;
+    }
     .edit-field label {
       display: block;
       font-size: 0.75rem;
@@ -181,7 +197,10 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       border-radius: var(--scion-radius-lg, 0.75rem);
       overflow: hidden;
     }
-    .pin-table table { width: 100%; border-collapse: collapse; }
+    .pin-table table {
+      width: 100%;
+      border-collapse: collapse;
+    }
     .pin-table th {
       text-align: left;
       padding: 0.75rem 1rem;
@@ -200,7 +219,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       vertical-align: middle;
     }
-    .pin-table tr:last-child td { border-bottom: none; }
+    .pin-table tr:last-child td {
+      border-bottom: none;
+    }
 
     .empty-pins {
       text-align: center;
@@ -217,7 +238,10 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       padding: 4rem 2rem;
       color: var(--scion-text-muted, #64748b);
     }
-    .loading-state sl-spinner { font-size: 2rem; margin-bottom: 1rem; }
+    .loading-state sl-spinner {
+      font-size: 2rem;
+      margin-bottom: 1rem;
+    }
 
     .error-state {
       text-align: center;
@@ -232,10 +256,15 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       margin-bottom: 1rem;
     }
     .error-state h2 {
-      font-size: 1.25rem; font-weight: 600;
-      color: var(--scion-text, #1e293b); margin: 0 0 0.5rem 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.5rem 0;
     }
-    .error-state p { color: var(--scion-text-muted, #64748b); margin: 0 0 1rem 0; }
+    .error-state p {
+      color: var(--scion-text-muted, #64748b);
+      margin: 0 0 1rem 0;
+    }
     .error-details {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
@@ -293,7 +322,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     try {
       const res = await apiFetch(`/api/v1/skill-registries/${this.registryId}/pins`);
       if (res.ok) {
-        const data = (await res.json()) as { pins?: PinnedHash[]; items?: PinnedHash[] } | PinnedHash[];
+        const data = (await res.json()) as
+          | { pins?: PinnedHash[]; items?: PinnedHash[] }
+          | PinnedHash[];
         if (Array.isArray(data)) {
           this.pinnedHashes = data;
         } else {
@@ -321,7 +352,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       if (hours < 24) return `${hours}h ago`;
       const days = Math.floor(hours / 24);
       return `${days}d ago`;
-    } catch { return dateString; }
+    } catch {
+      return dateString;
+    }
   }
 
   // -- Edit mode --
@@ -348,9 +381,14 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     this.saving = true;
     try {
       const body: Record<string, unknown> = {};
-      if (this.editForm.endpoint !== undefined && this.editForm.endpoint !== this.registry.endpoint) body.endpoint = this.editForm.endpoint;
+      if (this.editForm.endpoint !== undefined && this.editForm.endpoint !== this.registry.endpoint)
+        body.endpoint = this.editForm.endpoint;
       if (this.editForm.description !== undefined) body.description = this.editForm.description;
-      if (this.editForm.trustLevel !== undefined && this.editForm.trustLevel !== this.registry.trustLevel) body.trustLevel = this.editForm.trustLevel;
+      if (
+        this.editForm.trustLevel !== undefined &&
+        this.editForm.trustLevel !== this.registry.trustLevel
+      )
+        body.trustLevel = this.editForm.trustLevel;
       if (this.editForm.resolvePath !== undefined) body.resolvePath = this.editForm.resolvePath;
       if (this.editForm.authToken) body.authToken = this.editForm.authToken;
 
@@ -404,7 +442,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     if (!(await showConfirm('Are you sure you want to delete this registry?'))) return;
     this.actionLoading = { ...this.actionLoading, delete: true };
     try {
-      const res = await apiFetch(`/api/v1/skill-registries/${this.registryId}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/v1/skill-registries/${this.registryId}`, {
+        method: 'DELETE',
+      });
       if (!res.ok) {
         throw new Error(await extractApiError(res, 'Failed to delete registry'));
       }
@@ -471,8 +511,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
         Back to Registries
       </a>
 
-      ${this.renderHeader()}
-      ${this.editing ? this.renderEditMode() : this.renderConfigCard()}
+      ${this.renderHeader()} ${this.editing ? this.renderEditMode() : this.renderConfigCard()}
       ${this.registry.trustLevel === 'pinned' ? this.renderPinnedSection() : nothing}
       ${this.renderPinDialog()}
     `;
@@ -539,7 +578,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
           </div>
           <div class="info-item">
             <span class="info-label">Trust Level</span>
-            <span class="info-value"><span class="trust-badge ${r.trustLevel}">${r.trustLevel}</span></span>
+            <span class="info-value"
+              ><span class="trust-badge ${r.trustLevel}">${r.trustLevel}</span></span
+            >
           </div>
           <div class="info-item">
             <span class="info-label">Status</span>
@@ -551,18 +592,22 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
               ></scion-status-badge>
             </span>
           </div>
-          ${r.description ? html`
-            <div class="info-item">
-              <span class="info-label">Description</span>
-              <span class="info-value">${r.description}</span>
-            </div>
-          ` : nothing}
-          ${r.resolvePath ? html`
-            <div class="info-item">
-              <span class="info-label">Resolve Path</span>
-              <span class="info-value mono">${r.resolvePath}</span>
-            </div>
-          ` : nothing}
+          ${r.description
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Description</span>
+                  <span class="info-value">${r.description}</span>
+                </div>
+              `
+            : nothing}
+          ${r.resolvePath
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Resolve Path</span>
+                  <span class="info-value mono">${r.resolvePath}</span>
+                </div>
+              `
+            : nothing}
           <div class="info-item">
             <span class="info-label">Created</span>
             <span class="info-value">${this.formatRelativeTime(r.created)}</span>
@@ -594,14 +639,24 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
           <label>Endpoint</label>
           <sl-input
             .value=${this.editForm.endpoint || ''}
-            @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, endpoint: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.editForm = {
+                ...this.editForm,
+                endpoint: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
           ></sl-input>
         </div>
         <div class="edit-field">
           <label>Trust Level</label>
           <sl-select
             .value=${this.editForm.trustLevel || 'trusted'}
-            @sl-change=${(e: Event) => { this.editForm = { ...this.editForm, trustLevel: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-change=${(e: Event) => {
+              this.editForm = {
+                ...this.editForm,
+                trustLevel: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
           >
             <sl-option value="trusted">Trusted</sl-option>
             <sl-option value="pinned">Pinned</sl-option>
@@ -611,7 +666,12 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
           <label>Description</label>
           <sl-textarea
             .value=${this.editForm.description || ''}
-            @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, description: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.editForm = {
+                ...this.editForm,
+                description: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
             rows="2"
             help-text="Once set, this field cannot be cleared."
           ></sl-textarea>
@@ -620,7 +680,12 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
           <label>Resolve Path</label>
           <sl-input
             .value=${this.editForm.resolvePath || ''}
-            @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, resolvePath: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.editForm = {
+                ...this.editForm,
+                resolvePath: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
             help-text="Once set, this field cannot be cleared."
           ></sl-input>
         </div>
@@ -629,15 +694,30 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
           <sl-input
             type="password"
             .value=${this.editForm.authToken || ''}
-            @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, authToken: (e.target as HTMLElement & { value: string }).value }; }}
+            @sl-input=${(e: Event) => {
+              this.editForm = {
+                ...this.editForm,
+                authToken: (e.target as HTMLElement & { value: string }).value,
+              };
+            }}
             toggle-password
           ></sl-input>
         </div>
         <div class="edit-actions">
-          <sl-button variant="primary" size="small" ?loading=${this.saving} @click=${() => this.saveEdit()}>
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.saving}
+            @click=${() => this.saveEdit()}
+          >
             Save
           </sl-button>
-          <sl-button variant="default" size="small" ?disabled=${this.saving} @click=${() => this.cancelEditing()}>
+          <sl-button
+            variant="default"
+            size="small"
+            ?disabled=${this.saving}
+            @click=${() => this.cancelEditing()}
+          >
             Cancel
           </sl-button>
         </div>
@@ -650,46 +730,76 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       <div class="card">
         <div class="card-title-row">
           <h3 class="card-title">Pinned Hashes</h3>
-          <sl-button size="small" variant="default" outline @click=${() => { this.pinDialogOpen = true; }}>
+          <sl-button
+            size="small"
+            variant="default"
+            outline
+            @click=${() => {
+              this.pinDialogOpen = true;
+            }}
+          >
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
             Pin Hash
           </sl-button>
         </div>
 
-        ${this.pinnedLoading ? html`
-          <div style="text-align: center; padding: 1rem;">
-            <sl-spinner></sl-spinner>
-          </div>
-        ` : this.pinnedHashes.length === 0 ? html`
-          <div class="empty-pins">
-            <p>No pinned hashes. Pin specific skill hashes to restrict which content is trusted from this registry.</p>
-          </div>
-        ` : html`
-          <div class="pin-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>URI</th>
-                  <th>Hash</th>
-                  <th style="text-align: right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${this.pinnedHashes.map((p) => html`
-                  <tr>
-                    <td style="font-family: var(--scion-font-mono, monospace); font-size: 0.875rem;">${p.uri}</td>
-                    <td><scion-hash-display .hash=${p.hash} max-width="20ch"></scion-hash-display></td>
-                    <td style="text-align: right">
-                      <sl-button size="small" variant="danger" outline @click=${() => this.handleUnpin(p.uri)}>
-                        Unpin
-                      </sl-button>
-                    </td>
-                  </tr>
-                `)}
-              </tbody>
-            </table>
-          </div>
-        `}
+        ${this.pinnedLoading
+          ? html`
+              <div style="text-align: center; padding: 1rem;">
+                <sl-spinner></sl-spinner>
+              </div>
+            `
+          : this.pinnedHashes.length === 0
+            ? html`
+                <div class="empty-pins">
+                  <p>
+                    No pinned hashes. Pin specific skill hashes to restrict which content is trusted
+                    from this registry.
+                  </p>
+                </div>
+              `
+            : html`
+                <div class="pin-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>URI</th>
+                        <th>Hash</th>
+                        <th style="text-align: right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${this.pinnedHashes.map(
+                        (p) => html`
+                          <tr>
+                            <td
+                              style="font-family: var(--scion-font-mono, monospace); font-size: 0.875rem;"
+                            >
+                              ${p.uri}
+                            </td>
+                            <td>
+                              <scion-hash-display
+                                .hash=${p.hash}
+                                max-width="20ch"
+                              ></scion-hash-display>
+                            </td>
+                            <td style="text-align: right">
+                              <sl-button
+                                size="small"
+                                variant="danger"
+                                outline
+                                @click=${() => this.handleUnpin(p.uri)}
+                              >
+                                Unpin
+                              </sl-button>
+                            </td>
+                          </tr>
+                        `
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              `}
       </div>
     `;
   }
@@ -699,14 +809,18 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       <sl-dialog
         label="Pin Hash"
         ?open=${this.pinDialogOpen}
-        @sl-after-hide=${() => { this.pinDialogOpen = false; }}
+        @sl-after-hide=${() => {
+          this.pinDialogOpen = false;
+        }}
       >
         <div class="form-field">
           <label>Skill URI</label>
           <sl-input
             placeholder="global:my-skill@1.0.0"
             .value=${this.pinUri}
-            @sl-input=${(e: Event) => { this.pinUri = (e.target as HTMLElement & { value: string }).value; }}
+            @sl-input=${(e: Event) => {
+              this.pinUri = (e.target as HTMLElement & { value: string }).value;
+            }}
           ></sl-input>
         </div>
         <div class="form-field">
@@ -714,10 +828,18 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
           <sl-input
             placeholder="sha256:abc123..."
             .value=${this.pinHash}
-            @sl-input=${(e: Event) => { this.pinHash = (e.target as HTMLElement & { value: string }).value; }}
+            @sl-input=${(e: Event) => {
+              this.pinHash = (e.target as HTMLElement & { value: string }).value;
+            }}
           ></sl-input>
         </div>
-        <sl-button slot="footer" variant="default" @click=${() => { this.pinDialogOpen = false; }}>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.pinDialogOpen = false;
+          }}
+        >
           Cancel
         </sl-button>
         <sl-button

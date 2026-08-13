@@ -67,6 +67,6 @@ export function dispatchPageTitle(element: HTMLElement, ...segments: string[]): 
       detail: { segments },
       bubbles: true,
       composed: true,
-    }),
+    })
   );
 }

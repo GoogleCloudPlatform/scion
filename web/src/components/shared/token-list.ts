@@ -45,7 +45,11 @@ interface AccessToken {
 
 const AVAILABLE_SCOPES = [
   { value: 'project:read', label: 'project:read', description: 'Read project metadata' },
-  { value: 'agent:dispatch', label: 'agent:dispatch', description: 'Dispatch agents (create + start)' },
+  {
+    value: 'agent:dispatch',
+    label: 'agent:dispatch',
+    description: 'Dispatch agents (create + start)',
+  },
   { value: 'agent:read', label: 'agent:read', description: 'Read agent status/metadata' },
   { value: 'agent:list', label: 'agent:list', description: 'List agents in the project' },
   { value: 'agent:create', label: 'agent:create', description: 'Create agents' },
@@ -54,7 +58,11 @@ const AVAILABLE_SCOPES = [
   { value: 'agent:delete', label: 'agent:delete', description: 'Delete agents' },
   { value: 'agent:message', label: 'agent:message', description: 'Send messages to agents' },
   { value: 'agent:attach', label: 'agent:attach', description: 'Attach to agent sessions' },
-  { value: 'agent:manage', label: 'agent:manage', description: 'All agent actions (convenience alias)' },
+  {
+    value: 'agent:manage',
+    label: 'agent:manage',
+    description: 'All agent actions (convenience alias)',
+  },
 ] as const;
 
 @customElement('scion-token-list')
@@ -345,7 +353,11 @@ export class ScionTokenList extends LitElement {
   // ── Revoke / Delete ────────────────────────────────────────────────
 
   private async handleRevoke(token: AccessToken): Promise<void> {
-    if (!(await showConfirm(`Revoke token "${token.name}"? It will no longer be usable for authentication.`))) {
+    if (
+      !(await showConfirm(
+        `Revoke token "${token.name}"? It will no longer be usable for authentication.`
+      ))
+    ) {
       return;
     }
 
@@ -489,8 +501,7 @@ export class ScionTokenList extends LitElement {
         </sl-button>
       </div>
       ${this.tokens.length === 0 ? this.renderEmpty() : this.renderTable()}
-      ${this.renderCreateDialog()}
-      ${this.renderRevealDialog()}
+      ${this.renderCreateDialog()} ${this.renderRevealDialog()}
     `;
   }
 
@@ -500,8 +511,8 @@ export class ScionTokenList extends LitElement {
         <sl-icon name="key"></sl-icon>
         <h3>No Access Tokens</h3>
         <p>
-          Create personal access tokens to authenticate CI/CD pipelines
-          and automation tools with your projects.
+          Create personal access tokens to authenticate CI/CD pipelines and automation tools with
+          your projects.
         </p>
         <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
           <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -543,7 +554,10 @@ export class ScionTokenList extends LitElement {
       <tr class=${status === 'revoked' ? 'revoked' : ''}>
         <td class="key-cell">
           <div class="key-info">
-            <div class="key-icon" style="background: var(--sl-color-primary-100, #dbeafe); color: var(--sl-color-primary-600, #2563eb);">
+            <div
+              class="key-icon"
+              style="background: var(--sl-color-primary-100, #dbeafe); color: var(--sl-color-primary-600, #2563eb);"
+            >
               <sl-icon name="key"></sl-icon>
             </div>
             <div>
@@ -564,9 +578,7 @@ export class ScionTokenList extends LitElement {
         </td>
         <td class="hide-mobile">
           <div class="scopes-cell">
-            ${token.scopes.map(
-              (scope) => html`<span class="scope-badge">${scope}</span>`
-            )}
+            ${token.scopes.map((scope) => html`<span class="scope-badge">${scope}</span>`)}
           </div>
         </td>
         <td class="hide-mobile">
@@ -631,10 +643,11 @@ export class ScionTokenList extends LitElement {
             }}
             required
           >
-
             ${this.projects.map(
               (project) =>
-                html`<sl-option value=${project.id}>${project.name || project.slug || project.id}</sl-option>`
+                html`<sl-option value=${project.id}
+                  >${project.name || project.slug || project.id}</sl-option
+                >`
             )}
           </sl-select>
 
@@ -672,9 +685,7 @@ export class ScionTokenList extends LitElement {
             <sl-option value="365">365 days (maximum)</sl-option>
           </sl-select>
 
-          ${this.createError
-            ? html`<div class="dialog-error">${this.createError}</div>`
-            : nothing}
+          ${this.createError ? html`<div class="dialog-error">${this.createError}</div>` : nothing}
         </form>
 
         <sl-button

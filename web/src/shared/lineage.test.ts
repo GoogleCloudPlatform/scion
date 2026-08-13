@@ -62,9 +62,9 @@ describe('buildLineageForest', () => {
 
     expect(roots).toHaveLength(1);
     expect(roots[0].agent.id).toBe('c1');
-    expect(roots[0].children.map(c => c.agent.id).sort()).toEqual(['e1', 't1']);
-    const tl = roots[0].children.find(c => c.agent.id === 't1')!;
-    expect(tl.children.map(c => c.agent.id)).toEqual(['h1']);
+    expect(roots[0].children.map((c) => c.agent.id).sort()).toEqual(['e1', 't1']);
+    const tl = roots[0].children.find((c) => c.agent.id === 't1')!;
+    expect(tl.children.map((c) => c.agent.id)).toEqual(['h1']);
     expect(tl.children[0].depth).toBe(2);
   });
 
@@ -72,8 +72,8 @@ describe('buildLineageForest', () => {
     const a = agent('a1', 'alpha', ['user-1']);
     const b = agent('b1', 'beta', ['user-2']);
     const roots = buildLineageForest([a, b]);
-    expect(roots.map(r => r.agent.id).sort()).toEqual(['a1', 'b1']);
-    expect(roots.every(r => r.depth === 0)).toBe(true);
+    expect(roots.map((r) => r.agent.id).sort()).toEqual(['a1', 'b1']);
+    expect(roots.every((r) => r.depth === 0)).toBe(true);
   });
 
   it('promotes agents whose parent is outside the set to roots', () => {
@@ -90,7 +90,7 @@ describe('buildLineageForest', () => {
     const roots = buildLineageForest([a, b]);
     const layout = layoutForest(roots);
     expect(layout.nodes).toHaveLength(2);
-    const ids = layout.nodes.map(n => n.agent.id).sort();
+    const ids = layout.nodes.map((n) => n.agent.id).sort();
     expect(ids).toEqual(['a1', 'b1']);
   });
 
@@ -110,7 +110,7 @@ describe('layoutForest', () => {
 
     const { nodes, edges } = layoutForest(buildLineageForest([parent, left, right]));
 
-    const byId = new Map(nodes.map(n => [n.agent.id, n]));
+    const byId = new Map(nodes.map((n) => [n.agent.id, n]));
     const leftX = byId.get('l1')!.px;
     const rightX = byId.get('r1')!.px;
     const parentX = byId.get('p1')!.px;
@@ -161,10 +161,10 @@ describe('pruneCollapsed', () => {
       new Set(['l1'])
     );
     const { nodes, edges } = layoutForest(forest);
-    const ids = nodes.map(n => n.agent.id).sort();
+    const ids = nodes.map((n) => n.agent.id).sort();
     expect(ids).toEqual(['l1', 'r1', 'r2']);
-    expect(edges.some(e => e.childId === 'lk')).toBe(false);
-    expect(edges.some(e => e.childId === 'r2')).toBe(true);
+    expect(edges.some((e) => e.childId === 'lk')).toBe(false);
+    expect(edges.some((e) => e.childId === 'r2')).toBe(true);
   });
 
   it('collapsing the root leaves only the root visible', () => {
@@ -172,7 +172,7 @@ describe('pruneCollapsed', () => {
     const kid = agent('k1', 'kid', ['user-1', 'r1']);
     const forest = pruneCollapsed(buildLineageForest([root, kid]), new Set(['r1']));
     const { nodes, edges } = layoutForest(forest);
-    expect(nodes.map(n => n.agent.id)).toEqual(['r1']);
+    expect(nodes.map((n) => n.agent.id)).toEqual(['r1']);
     expect(edges).toHaveLength(0);
   });
 });
@@ -194,7 +194,7 @@ describe('layoutForestWithUsers', () => {
     expect(users).toHaveLength(1);
     expect(users[0].id).toBe('user-1');
     expect(users[0].py).toBe(PAD);
-    const byId = new Map(nodes.map(n => [n.agent.id, n]));
+    const byId = new Map(nodes.map((n) => [n.agent.id, n]));
     expect(byId.get('a1')!.py).toBe(PAD + NODE_H + GAP_Y);
     expect(byId.get('c1')!.py).toBe(PAD + 2 * (NODE_H + GAP_Y));
   });
@@ -205,32 +205,32 @@ describe('layoutForestWithUsers', () => {
     const c = agent('c1', 'gamma', ['user-2']);
     const { nodes, users, edges } = layoutForestWithUsers(buildLineageForest([a, b, c]));
 
-    expect(users.map(u => u.id).sort()).toEqual(['user-1', 'user-2']);
-    const u1 = users.find(u => u.id === 'user-1')!;
-    const byId = new Map(nodes.map(n => [n.agent.id, n]));
+    expect(users.map((u) => u.id).sort()).toEqual(['user-1', 'user-2']);
+    const u1 = users.find((u) => u.id === 'user-1')!;
+    const byId = new Map(nodes.map((n) => [n.agent.id, n]));
     expect(u1.px).toBe((byId.get('a1')!.px + byId.get('b1')!.px) / 2);
 
-    const u1Edges = edges.filter(e => e.parentId === userKey('user-1'));
-    expect(u1Edges.map(e => e.childId).sort()).toEqual(['a1', 'b1']);
-    const u2Edges = edges.filter(e => e.parentId === userKey('user-2'));
-    expect(u2Edges.map(e => e.childId)).toEqual(['c1']);
+    const u1Edges = edges.filter((e) => e.parentId === userKey('user-1'));
+    expect(u1Edges.map((e) => e.childId).sort()).toEqual(['a1', 'b1']);
+    const u2Edges = edges.filter((e) => e.parentId === userKey('user-2'));
+    expect(u2Edges.map((e) => e.childId)).toEqual(['c1']);
   });
 
   it('keeps agent-to-agent edges alongside user edges', () => {
     const root = agent('r1', 'root', ['user-1']);
     const child = agent('k1', 'kid', ['user-1', 'r1']);
     const { edges } = layoutForestWithUsers(buildLineageForest([root, child]));
-    expect(edges.some(e => e.parentId === 'r1' && e.childId === 'k1')).toBe(true);
-    expect(edges.some(e => e.parentId === userKey('user-1') && e.childId === 'r1')).toBe(true);
+    expect(edges.some((e) => e.parentId === 'r1' && e.childId === 'k1')).toBe(true);
+    expect(edges.some((e) => e.parentId === userKey('user-1') && e.childId === 'r1')).toBe(true);
   });
 
   it('leaves roots without ancestry parentless but positioned', () => {
     const known = agent('a1', 'alpha', ['user-1']);
     const unknown = agent('u1', 'mystery');
     const { nodes, users, edges } = layoutForestWithUsers(buildLineageForest([known, unknown]));
-    expect(users.map(u => u.id)).toEqual(['user-1']);
-    expect(nodes.map(n => n.agent.id).sort()).toEqual(['a1', 'u1']);
-    expect(edges.filter(e => e.childId === 'u1')).toHaveLength(0);
+    expect(users.map((u) => u.id)).toEqual(['user-1']);
+    expect(nodes.map((n) => n.agent.id).sort()).toEqual(['a1', 'u1']);
+    expect(edges.filter((e) => e.childId === 'u1')).toHaveLength(0);
   });
 });
 
@@ -241,7 +241,7 @@ describe('transposeLayout', () => {
     const right = agent('r1', 'b-right', ['user-1', 'p1']);
 
     const layout = transposeLayout(layoutForest(buildLineageForest([parent, left, right])));
-    const byId = new Map(layout.nodes.map(n => [n.agent.id, n]));
+    const byId = new Map(layout.nodes.map((n) => [n.agent.id, n]));
 
     // Depth → x: root in the leftmost column, children one column right.
     expect(byId.get('p1')!.px).toBe(PAD);
@@ -260,10 +260,10 @@ describe('transposeLayout', () => {
     const right = agent('r1', 'b-right', ['user-1', 'p1']);
 
     const layout = transposeLayout(layoutForest(buildLineageForest([parent, left, right])));
-    const byId = new Map(layout.nodes.map(n => [n.agent.id, n]));
+    const byId = new Map(layout.nodes.map((n) => [n.agent.id, n]));
 
     expect(layout.edges).toHaveLength(2);
-    expect(layout.edges.map(e => `${e.parentId}->${e.childId}`).sort()).toEqual([
+    expect(layout.edges.map((e) => `${e.parentId}->${e.childId}`).sort()).toEqual([
       'p1->l1',
       'p1->r1',
     ]);
@@ -285,7 +285,9 @@ describe('transposeLayout', () => {
     const leafB = agent('lb', 'leaf-b', ['user-1', 'r1', 'm1']);
     const solo = agent('s1', 'solo', ['user-2']);
 
-    const layout = transposeLayout(layoutForest(buildLineageForest([root, mid, leafA, leafB, solo])));
+    const layout = transposeLayout(
+      layoutForest(buildLineageForest([root, mid, leafA, leafB, solo]))
+    );
     for (const n of layout.nodes) {
       expect(n.px).toBeGreaterThanOrEqual(PAD);
       expect(n.py).toBeGreaterThanOrEqual(PAD);
@@ -301,7 +303,7 @@ describe('transposeLayout', () => {
     const b = agent('b1', 'beta', ['user-1']);
 
     const layout = transposeLayout(layoutForestWithUsers(buildLineageForest([a, b])));
-    const byId = new Map(layout.nodes.map(n => [n.agent.id, n]));
+    const byId = new Map(layout.nodes.map((n) => [n.agent.id, n]));
 
     expect(layout.users).toHaveLength(1);
     const u = layout.users[0];
@@ -311,8 +313,8 @@ describe('transposeLayout', () => {
     expect(u.py).toBe((byId.get('a1')!.py + byId.get('b1')!.py) / 2);
 
     // User → root edges leave the user card's right edge.
-    const uEdges = layout.edges.filter(e => e.parentId === userKey('user-1'));
-    expect(uEdges.map(e => e.childId).sort()).toEqual(['a1', 'b1']);
+    const uEdges = layout.edges.filter((e) => e.parentId === userKey('user-1'));
+    expect(uEdges.map((e) => e.childId).sort()).toEqual(['a1', 'b1']);
     for (const e of uEdges) {
       expect(e.x1).toBe(u.px + NODE_W);
       expect(e.y1).toBe(u.py + NODE_H / 2);

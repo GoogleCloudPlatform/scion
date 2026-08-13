@@ -81,21 +81,24 @@ export class ScionScheduleList extends LitElement {
   @state() private detailSchedule: Schedule | null = null;
   @state() private detailOpen = false;
 
-  static override styles = [resourceStyles, css`
-    .detail-row {
-      padding: 0.375rem 0;
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      line-height: 1.5;
-    }
-    .detail-row strong {
-      display: inline-block;
-      min-width: 100px;
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 600;
-      font-size: 0.8125rem;
-    }
-  `];
+  static override styles = [
+    resourceStyles,
+    css`
+      .detail-row {
+        padding: 0.375rem 0;
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        line-height: 1.5;
+      }
+      .detail-row strong {
+        display: inline-block;
+        min-width: 100px;
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 600;
+        font-size: 0.8125rem;
+      }
+    `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -113,7 +116,9 @@ export class ScionScheduleList extends LitElement {
       );
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       const data = (await response.json()) as ListResponse;
@@ -371,9 +376,7 @@ export class ScionScheduleList extends LitElement {
                   </div>
                 `
               : this.renderTable()}
-
-        ${this.renderCreateDialog()}
-        ${this.renderDetailDialog()}
+        ${this.renderCreateDialog()} ${this.renderDetailDialog()}
       </div>
     `;
   }
@@ -419,9 +422,7 @@ export class ScionScheduleList extends LitElement {
             </div>
           `
         : this.renderTable()}
-
-      ${this.renderCreateDialog()}
-      ${this.renderDetailDialog()}
+      ${this.renderCreateDialog()} ${this.renderDetailDialog()}
     `;
   }
 
@@ -458,10 +459,20 @@ export class ScionScheduleList extends LitElement {
       <tr @click=${() => this.showDetail(sched)} style="cursor: pointer;">
         <td><strong>${sched.name}</strong></td>
         <td><span class="type-badge environment">${sched.eventType}</span></td>
-        <td><span class="meta-text" style="font-family: var(--scion-font-mono, monospace); font-size: 0.8125rem;">${sched.cronExpr}</span></td>
+        <td>
+          <span
+            class="meta-text"
+            style="font-family: var(--scion-font-mono, monospace); font-size: 0.8125rem;"
+            >${sched.cronExpr}</span
+          >
+        </td>
         <td><span class="meta-text">${nextRun}</span></td>
         <td><span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span></td>
-        <td class="hide-mobile"><span class="meta-text">${sched.runCount}${sched.errorCount > 0 ? ` (${sched.errorCount} err)` : ''}</span></td>
+        <td class="hide-mobile">
+          <span class="meta-text"
+            >${sched.runCount}${sched.errorCount > 0 ? ` (${sched.errorCount} err)` : ''}</span
+          >
+        </td>
         <td class="actions-cell" @click=${(e: Event) => e.stopPropagation()}>
           ${isActive
             ? html`
@@ -502,9 +513,7 @@ export class ScionScheduleList extends LitElement {
         @sl-request-close=${this.closeDialog}
       >
         <form class="dialog-form" @submit=${this.handleCreate}>
-          ${this.dialogError
-            ? html`<div class="dialog-error">${this.dialogError}</div>`
-            : nothing}
+          ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
 
           <sl-input
             label="Name"
@@ -526,15 +535,20 @@ export class ScionScheduleList extends LitElement {
           <sl-select
             label="Event Type"
             .value=${this.dialogEventType}
-            @sl-change=${(e: Event) => (this.dialogEventType = (e.target as HTMLSelectElement).value)}
+            @sl-change=${(e: Event) =>
+              (this.dialogEventType = (e.target as HTMLSelectElement).value)}
           >
             <sl-option value="message">Message</sl-option>
             <sl-option value="dispatch_agent">Dispatch Agent</sl-option>
           </sl-select>
 
           <sl-input
-            label=${this.dialogEventType === 'dispatch_agent' ? 'Agent Name (to create)' : 'Target Agent'}
-            placeholder=${this.dialogEventType === 'dispatch_agent' ? 'worker-1' : 'agent-name or all'}
+            label=${this.dialogEventType === 'dispatch_agent'
+              ? 'Agent Name (to create)'
+              : 'Target Agent'}
+            placeholder=${this.dialogEventType === 'dispatch_agent'
+              ? 'worker-1'
+              : 'agent-name or all'}
             .value=${this.dialogAgent}
             @sl-input=${(e: Event) => (this.dialogAgent = (e.target as HTMLInputElement).value)}
             required
@@ -546,7 +560,8 @@ export class ScionScheduleList extends LitElement {
                   label="Message"
                   placeholder="Message to send"
                   .value=${this.dialogMessage}
-                  @sl-input=${(e: Event) => (this.dialogMessage = (e.target as HTMLTextAreaElement).value)}
+                  @sl-input=${(e: Event) =>
+                    (this.dialogMessage = (e.target as HTMLTextAreaElement).value)}
                   required
                 ></sl-textarea>
 
@@ -559,7 +574,9 @@ export class ScionScheduleList extends LitElement {
                   />
                   <span class="checkbox-text">
                     <span>Interrupt agent</span>
-                    <span class="checkbox-description">Interrupt the agent's current task before delivering the message.</span>
+                    <span class="checkbox-description"
+                      >Interrupt the agent's current task before delivering the message.</span
+                    >
                   </span>
                 </label>
               `
@@ -568,21 +585,24 @@ export class ScionScheduleList extends LitElement {
                   label="Template"
                   placeholder="template-name (optional)"
                   .value=${this.dialogTemplate}
-                  @sl-input=${(e: Event) => (this.dialogTemplate = (e.target as HTMLInputElement).value)}
+                  @sl-input=${(e: Event) =>
+                    (this.dialogTemplate = (e.target as HTMLInputElement).value)}
                 ></sl-input>
 
                 <sl-textarea
                   label="Task / Prompt"
                   placeholder="Task for the agent (optional)"
                   .value=${this.dialogTask}
-                  @sl-input=${(e: Event) => (this.dialogTask = (e.target as HTMLTextAreaElement).value)}
+                  @sl-input=${(e: Event) =>
+                    (this.dialogTask = (e.target as HTMLTextAreaElement).value)}
                 ></sl-textarea>
 
                 <sl-input
                   label="Branch"
                   placeholder="feature-branch (optional)"
                   .value=${this.dialogBranch}
-                  @sl-input=${(e: Event) => (this.dialogBranch = (e.target as HTMLInputElement).value)}
+                  @sl-input=${(e: Event) =>
+                    (this.dialogBranch = (e.target as HTMLInputElement).value)}
                 ></sl-input>
               `}
         </form>
@@ -618,31 +638,61 @@ export class ScionScheduleList extends LitElement {
         @sl-request-close=${this.closeDetail}
       >
         <div class="dialog-form">
-          <div class="detail-row"><strong>ID:</strong> <span style="font-family: var(--scion-font-mono, monospace); font-size: 0.8125rem;">${sched.id}</span></div>
-          <div class="detail-row"><strong>Status:</strong> <span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span></div>
+          <div class="detail-row">
+            <strong>ID:</strong>
+            <span style="font-family: var(--scion-font-mono, monospace); font-size: 0.8125rem;"
+              >${sched.id}</span
+            >
+          </div>
+          <div class="detail-row">
+            <strong>Status:</strong>
+            <span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span>
+          </div>
           <div class="detail-row"><strong>Cron:</strong> ${sched.cronExpr}</div>
           <div class="detail-row"><strong>Event Type:</strong> ${sched.eventType}</div>
           <div class="detail-row"><strong>Target Agent:</strong> ${agent}</div>
           ${sched.eventType === 'message' && payloadDetails.message
-            ? html`<div class="detail-row"><strong>Message:</strong> ${payloadDetails.message}</div>`
+            ? html`<div class="detail-row">
+                <strong>Message:</strong> ${payloadDetails.message}
+              </div>`
             : nothing}
           ${sched.eventType === 'dispatch_agent' && payloadDetails.template
-            ? html`<div class="detail-row"><strong>Template:</strong> ${payloadDetails.template}</div>`
+            ? html`<div class="detail-row">
+                <strong>Template:</strong> ${payloadDetails.template}
+              </div>`
             : nothing}
           ${sched.eventType === 'dispatch_agent' && payloadDetails.task
             ? html`<div class="detail-row"><strong>Task:</strong> ${payloadDetails.task}</div>`
             : nothing}
           ${sched.nextRunAt
-            ? html`<div class="detail-row"><strong>Next Run:</strong> ${this.formatFutureTime(sched.nextRunAt)} (${new Date(sched.nextRunAt).toLocaleString()})</div>`
+            ? html`<div class="detail-row">
+                <strong>Next Run:</strong> ${this.formatFutureTime(sched.nextRunAt)}
+                (${new Date(sched.nextRunAt).toLocaleString()})
+              </div>`
             : nothing}
           ${sched.lastRunAt
-            ? html`<div class="detail-row"><strong>Last Run:</strong> ${this.formatRelativeTime(sched.lastRunAt)} (${sched.lastRunStatus || 'unknown'})</div>`
+            ? html`<div class="detail-row">
+                <strong>Last Run:</strong> ${this.formatRelativeTime(sched.lastRunAt)}
+                (${sched.lastRunStatus || 'unknown'})
+              </div>`
             : nothing}
-          <div class="detail-row"><strong>Run Count:</strong> ${sched.runCount} total${sched.errorCount > 0 ? `, ${sched.errorCount} errors` : ''}</div>
+          <div class="detail-row">
+            <strong>Run Count:</strong> ${sched.runCount}
+            total${sched.errorCount > 0 ? `, ${sched.errorCount} errors` : ''}
+          </div>
           ${sched.lastRunError
-            ? html`<div class="detail-row"><strong>Last Error:</strong> <span style="color: var(--sl-color-danger-600, #dc2626);">${sched.lastRunError}</span></div>`
+            ? html`<div class="detail-row">
+                <strong>Last Error:</strong>
+                <span style="color: var(--sl-color-danger-600, #dc2626);"
+                  >${sched.lastRunError}</span
+                >
+              </div>`
             : nothing}
-          <div class="detail-row"><strong>Created:</strong> ${this.formatRelativeTime(sched.createdAt)}${sched.createdBy ? ` by ${sched.createdBy}` : ''}</div>
+          <div class="detail-row">
+            <strong>Created:</strong> ${this.formatRelativeTime(sched.createdAt)}${sched.createdBy
+              ? ` by ${sched.createdBy}`
+              : ''}
+          </div>
         </div>
 
         <sl-button slot="footer" variant="default" @click=${this.closeDetail}>Close</sl-button>

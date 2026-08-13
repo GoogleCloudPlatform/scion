@@ -97,29 +97,27 @@ export class ScionPageProfileTokens extends LitElement {
     super.connectedCallback();
     this.checkGitHubApp();
   }
-private async checkGitHubApp(): Promise<void> {
-  try {
-    const [appRes, projectsRes] = await Promise.all([
-      apiFetch('/api/v1/github-app'),
-      apiFetch('/api/v1/projects?mine=true'),
-    ]);
+  private async checkGitHubApp(): Promise<void> {
+    try {
+      const [appRes, projectsRes] = await Promise.all([
+        apiFetch('/api/v1/github-app'),
+        apiFetch('/api/v1/projects?mine=true'),
+      ]);
 
-    if (!appRes.ok || !projectsRes.ok) return;
+      if (!appRes.ok || !projectsRes.ok) return;
 
-    const appData = (await appRes.json()) as GitHubAppInfo;
-    if (!appData.configured || !appData.installation_url) return;
+      const appData = (await appRes.json()) as GitHubAppInfo;
+      if (!appData.configured || !appData.installation_url) return;
 
-    const projectsData = (await projectsRes.json()) as { projects: Project[] };
-    const hasInstallation = (projectsData.projects || []).some(
-      (p) => p.githubInstallationId
-    );
-    if (hasInstallation) {
-      this.githubAppLink = appData.installation_url;
+      const projectsData = (await projectsRes.json()) as { projects: Project[] };
+      const hasInstallation = (projectsData.projects || []).some((p) => p.githubInstallationId);
+      if (hasInstallation) {
+        this.githubAppLink = appData.installation_url;
+      }
+    } catch {
+      // Non-fatal — the link is a convenience feature
     }
-  } catch {
-    // Non-fatal — the link is a convenience feature
   }
-}
 
   override render() {
     return html`
@@ -127,8 +125,8 @@ private async checkGitHubApp(): Promise<void> {
         <div class="page-header-info">
           <h1>Access Tokens</h1>
           <p>
-            Create and manage personal access tokens for CI/CD pipelines and automation.
-            Tokens are scoped to a specific project with limited permissions.
+            Create and manage personal access tokens for CI/CD pipelines and automation. Tokens are
+            scoped to a specific project with limited permissions.
           </p>
         </div>
       </div>
@@ -138,12 +136,7 @@ private async checkGitHubApp(): Promise<void> {
             <div class="github-app-card">
               <sl-icon name="github"></sl-icon>
               <span>Manage repository access and permissions for the GitHub App integration.</span>
-              <sl-button
-                size="small"
-                variant="default"
-                href=${this.githubAppLink}
-                target="_blank"
-              >
+              <sl-button size="small" variant="default" href=${this.githubAppLink} target="_blank">
                 <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
                 Configure GitHub App
               </sl-button>

@@ -26,6 +26,8 @@ var validVisibilityModes = map[string]bool{
 	"full":         true,
 }
 
+// DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON.
+//
 // handleChatPrefs handles GET and PUT /api/v1/chat/prefs.
 //
 // Query parameters (required):
@@ -37,6 +39,9 @@ var validVisibilityModes = map[string]bool{
 // GET returns the current prefs (or defaults if none saved).
 // PUT accepts {"visibility_mode": "conversation"|"verbose"|"full"} and
 // upserts the pref row.
+//
+// Writes to webchat_thread_prefs (wave-1 table). V2 does not call this
+// endpoint — visibility mode is not used in the v2 conversation view.
 func (s *Server) handleChatPrefs(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {

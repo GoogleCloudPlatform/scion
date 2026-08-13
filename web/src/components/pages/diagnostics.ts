@@ -236,9 +236,7 @@ export class ScionPageDiagnostics extends LitElement {
 
   private buildCloudLoggingUrl(severity: string): string {
     if (!this.gcpProjectId) return '';
-    const filterParts = [
-      `logName != "projects/${this.gcpProjectId}/logs/scion_request_log"`,
-    ];
+    const filterParts = [`logName != "projects/${this.gcpProjectId}/logs/scion_request_log"`];
     if (severity && severity !== 'DEFAULT') {
       filterParts.push(`severity >= ${severity}`);
     }
@@ -292,8 +290,18 @@ export class ScionPageDiagnostics extends LitElement {
   private renderStatusBanner() {
     const health = this.hubHealth;
     const status = health?.status || 'unknown';
-    const statusClass = status === 'ok' || status === 'healthy' ? 'healthy' : status === 'unknown' ? 'unknown' : 'unhealthy';
-    const statusLabel = status === 'ok' || status === 'healthy' ? 'Healthy' : status === 'unknown' ? 'Unknown' : status;
+    const statusClass =
+      status === 'ok' || status === 'healthy'
+        ? 'healthy'
+        : status === 'unknown'
+          ? 'unknown'
+          : 'unhealthy';
+    const statusLabel =
+      status === 'ok' || status === 'healthy'
+        ? 'Healthy'
+        : status === 'unknown'
+          ? 'Unknown'
+          : status;
 
     const cloudStatus = this.cloudLoggingChecked
       ? this.cloudLoggingAvailable
@@ -331,9 +339,7 @@ export class ScionPageDiagnostics extends LitElement {
             : nothing}
         </div>
         <div class="status-right">
-          <a class="health-link" @click=${() => this.handleNavClick('/health')}>
-            View Health →
-          </a>
+          <a class="health-link" @click=${() => this.handleNavClick('/health')}> View Health → </a>
         </div>
       </div>
     `;
@@ -362,8 +368,8 @@ export class ScionPageDiagnostics extends LitElement {
           Cloud Logging is not configured
         </h3>
         <p>
-          The diagnostics log viewer requires Google Cloud Logging to
-          aggregate logs from hub, broker, and agent components.
+          The diagnostics log viewer requires Google Cloud Logging to aggregate logs from hub,
+          broker, and agent components.
         </p>
         <p>To enable:</p>
         <ol>
@@ -372,8 +378,8 @@ export class ScionPageDiagnostics extends LitElement {
           <li>Ensure the service account has <code>roles/logging.viewer</code></li>
         </ol>
         <p class="degradation-note">
-          Individual agent logs are still available on each agent's
-          detail page via the broker log relay.
+          Individual agent logs are still available on each agent's detail page via the broker log
+          relay.
         </p>
       </div>
     `;

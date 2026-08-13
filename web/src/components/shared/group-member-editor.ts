@@ -67,7 +67,8 @@ export class ScionGroupMemberEditor extends LitElement {
 
   // User search autocomplete state
   @state() private userSearchQuery = '';
-  @state() private userSearchResults: Array<{ id: string; email: string; displayName: string }> = [];
+  @state() private userSearchResults: Array<{ id: string; email: string; displayName: string }> =
+    [];
   @state() private userSearchLoading = false;
   @state() private userSearchOpen = false;
   private userSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -435,9 +436,7 @@ export class ScionGroupMemberEditor extends LitElement {
     this.error = null;
 
     try {
-      const response = await apiFetch(
-        `/api/v1/groups/${encodeURIComponent(this.groupId)}/members`
-      );
+      const response = await apiFetch(`/api/v1/groups/${encodeURIComponent(this.groupId)}/members`);
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
@@ -494,11 +493,11 @@ export class ScionGroupMemberEditor extends LitElement {
     this.userSearchLoading = true;
     this.userSearchOpen = true;
     try {
-      const response = await apiFetch(
-        `/api/v1/users?search=${encodeURIComponent(query)}&limit=10`
-      );
+      const response = await apiFetch(`/api/v1/users?search=${encodeURIComponent(query)}&limit=10`);
       if (response.ok) {
-        const data = (await response.json()) as { users?: Array<{ id: string; email: string; displayName: string }> };
+        const data = (await response.json()) as {
+          users?: Array<{ id: string; email: string; displayName: string }>;
+        };
         this.userSearchResults = data.users || [];
       }
     } catch (err) {
@@ -536,11 +535,12 @@ export class ScionGroupMemberEditor extends LitElement {
     e.preventDefault();
 
     if (!this.addMemberInput.trim()) {
-      this.addMemberError = this.addMemberType === 'user'
-        ? 'Please search for and select a user'
-        : this.addMemberType === 'group'
-          ? 'Please select a group'
-          : 'Member ID is required';
+      this.addMemberError =
+        this.addMemberType === 'user'
+          ? 'Please search for and select a user'
+          : this.addMemberType === 'group'
+            ? 'Please select a group'
+            : 'Member ID is required';
       return;
     }
 
@@ -562,7 +562,9 @@ export class ScionGroupMemberEditor extends LitElement {
       );
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       this.closeAddDialog();
@@ -591,7 +593,9 @@ export class ScionGroupMemberEditor extends LitElement {
       );
 
       if (!response.ok && response.status !== 204) {
-        throw new Error(await extractApiError(response, `Failed to remove member (HTTP ${response.status})`));
+        throw new Error(
+          await extractApiError(response, `Failed to remove member (HTTP ${response.status})`)
+        );
       }
 
       await this.loadMembers();
@@ -666,10 +670,7 @@ export class ScionGroupMemberEditor extends LitElement {
           : nothing}
       </div>
 
-      ${this.error
-        ? html`<div class="error-state">${this.error}</div>`
-        : nothing}
-
+      ${this.error ? html`<div class="error-state">${this.error}</div>` : nothing}
       ${this.loading
         ? html`<div class="loading-state"><sl-spinner></sl-spinner> Loading members...</div>`
         : this.members.length === 0
@@ -685,9 +686,7 @@ export class ScionGroupMemberEditor extends LitElement {
         <div class="section-header">
           <div class="section-header-info">
             <h2>${this.sectionTitle} <span class="member-count">(${this.members.length})</span></h2>
-            ${this.sectionDescription
-              ? html`<p>${this.sectionDescription}</p>`
-              : nothing}
+            ${this.sectionDescription ? html`<p>${this.sectionDescription}</p>` : nothing}
           </div>
           ${!this.readOnly
             ? html`
@@ -699,10 +698,7 @@ export class ScionGroupMemberEditor extends LitElement {
             : nothing}
         </div>
 
-        ${this.error
-          ? html`<div class="error-state">${this.error}</div>`
-          : nothing}
-
+        ${this.error ? html`<div class="error-state">${this.error}</div>` : nothing}
         ${this.loading
           ? html`<div class="loading-state"><sl-spinner></sl-spinner> Loading members...</div>`
           : this.members.length === 0
@@ -749,7 +745,9 @@ export class ScionGroupMemberEditor extends LitElement {
             <div class="member-info">
               <span class="member-name">${displayName}</span>
               <span class="member-detail">
-                ${member.memberType}${showId ? html` &middot; <span class="member-id">${member.memberId}</span>` : nothing}
+                ${member.memberType}${showId
+                  ? html` &middot; <span class="member-id">${member.memberId}</span>`
+                  : nothing}
               </span>
             </div>
           </div>
@@ -797,17 +795,19 @@ export class ScionGroupMemberEditor extends LitElement {
   private renderAddDialog() {
     if (this.readOnly) return nothing;
 
-    const inputLabel = this.addMemberType === 'user'
-      ? 'User'
-      : this.addMemberType === 'group'
-        ? 'Group'
-        : 'Agent ID';
+    const inputLabel =
+      this.addMemberType === 'user'
+        ? 'User'
+        : this.addMemberType === 'group'
+          ? 'Group'
+          : 'Agent ID';
 
-    const inputHint = this.addMemberType === 'user'
-      ? 'Enter the user\'s email address'
-      : this.addMemberType === 'group'
-        ? 'Select a group to add as a member'
-        : 'Enter the agent ID';
+    const inputHint =
+      this.addMemberType === 'user'
+        ? "Enter the user's email address"
+        : this.addMemberType === 'group'
+          ? 'Select a group to add as a member'
+          : 'Enter the agent ID';
 
     return html`
       <sl-dialog
@@ -858,7 +858,10 @@ export class ScionGroupMemberEditor extends LitElement {
                     : this.availableGroups.length === 0
                       ? html`<sl-option value="" disabled>No groups available</sl-option>`
                       : this.availableGroups.map(
-                          (g) => html`<sl-option value=${g.id}>${g.name} <small>(${g.slug})</small></sl-option>`
+                          (g) =>
+                            html`<sl-option value=${g.id}
+                              >${g.name} <small>(${g.slug})</small></sl-option
+                            >`
                         )}
                 </sl-select>
               `
@@ -877,7 +880,9 @@ export class ScionGroupMemberEditor extends LitElement {
                       }}
                       @sl-blur=${() => {
                         // Delay to allow click on dropdown
-                        setTimeout(() => { this.userSearchOpen = false; }, 200);
+                        setTimeout(() => {
+                          this.userSearchOpen = false;
+                        }, 200);
                       }}
                       required
                     ></sl-input>
@@ -885,7 +890,9 @@ export class ScionGroupMemberEditor extends LitElement {
                       ? html`
                           <div class="user-search-dropdown">
                             ${this.userSearchLoading
-                              ? html`<div class="user-search-loading"><sl-spinner></sl-spinner> Searching...</div>`
+                              ? html`<div class="user-search-loading">
+                                  <sl-spinner></sl-spinner> Searching...
+                                </div>`
                               : this.userSearchResults.length === 0
                                 ? html`<div class="user-search-empty">No users found</div>`
                                 : this.userSearchResults.map(
@@ -897,7 +904,9 @@ export class ScionGroupMemberEditor extends LitElement {
                                           this.selectUser(user);
                                         }}
                                       >
-                                        <span class="user-name">${user.displayName || user.email}</span>
+                                        <span class="user-name"
+                                          >${user.displayName || user.email}</span
+                                        >
                                         ${user.displayName
                                           ? html`<span class="user-email">${user.email}</span>`
                                           : nothing}

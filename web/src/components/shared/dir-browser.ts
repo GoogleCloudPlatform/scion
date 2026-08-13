@@ -247,11 +247,13 @@ export class ScionDirBrowser extends LitElement {
 
   private selectCurrentPath(): void {
     this.selectedPath = this.currentPath;
-    this.dispatchEvent(new CustomEvent('path-selected', {
-      detail: { path: this.currentPath },
-      bubbles: true,
-      composed: true,
-    }));
+    this.dispatchEvent(
+      new CustomEvent('path-selected', {
+        detail: { path: this.currentPath },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private async handleNewFolder(): Promise<void> {
@@ -287,7 +289,7 @@ export class ScionDirBrowser extends LitElement {
   private get filteredEntries(): DirEntry[] {
     if (!this.filterText) return this.entries;
     const lower = this.filterText.toLowerCase();
-    return this.entries.filter(e => e.name.toLowerCase().includes(lower));
+    return this.entries.filter((e) => e.name.toLowerCase().includes(lower));
   }
 
   private onFilterInput(e: Event): void {
@@ -301,12 +303,12 @@ export class ScionDirBrowser extends LitElement {
     }
     if (e.key === 'Tab') {
       e.preventDefault();
-      const dirMatches = this.filteredEntries.filter(entry => entry.isDir);
+      const dirMatches = this.filteredEntries.filter((entry) => entry.isDir);
       if (dirMatches.length === 1) {
         this.filterText = '';
         void this.navigate(this.joinPath(this.currentPath, dirMatches[0].name));
       } else if (dirMatches.length > 1) {
-        const prefix = this.commonPrefix(dirMatches.map(d => d.name));
+        const prefix = this.commonPrefix(dirMatches.map((d) => d.name));
         if (prefix.length > this.filterText.length) {
           this.filterText = prefix;
         }
@@ -314,7 +316,7 @@ export class ScionDirBrowser extends LitElement {
       return;
     }
     if (e.key === 'Enter') {
-      const matches = this.filteredEntries.filter(entry => entry.isDir);
+      const matches = this.filteredEntries.filter((entry) => entry.isDir);
       if (matches.length === 1) {
         this.filterText = '';
         void this.navigate(this.joinPath(this.currentPath, matches[0].name));
@@ -347,10 +349,14 @@ export class ScionDirBrowser extends LitElement {
           <button class="breadcrumb-segment" @click=${() => void this.navigate('/')}>
             <sl-icon name="house"></sl-icon>
           </button>
-          ${segments.map((seg, i) => html`
-            <span class="breadcrumb-sep">/</span>
-            <button class="breadcrumb-segment" @click=${() => this.navigateToBreadcrumb(i)}>${seg}</button>
-          `)}
+          ${segments.map(
+            (seg, i) => html`
+              <span class="breadcrumb-sep">/</span>
+              <button class="breadcrumb-segment" @click=${() => this.navigateToBreadcrumb(i)}>
+                ${seg}
+              </button>
+            `
+          )}
           <sl-input
             class="filter-input"
             size="small"
@@ -361,68 +367,110 @@ export class ScionDirBrowser extends LitElement {
           ></sl-input>
         </div>
 
-        ${this.loading ? html`
-          <div class="loading-state"><sl-spinner></sl-spinner></div>
-        ` : this.error ? html`
-          <div class="empty-state">${this.error}</div>
-        ` : this.entries.length === 0 ? html`
-          <div class="empty-state">Empty directory</div>
-        ` : html`
-          ${this.entries.length > 5 ? html`
-            <div style="padding: 0.375rem 0.75rem; border-bottom: 1px solid var(--scion-border, #e2e8f0);">
-              <sl-input
-                size="small"
-                placeholder="Filter…"
-                clearable
-                .value=${this.filterText}
-                @sl-input=${this.onFilterInput}
-                @keydown=${this.onFilterKeydown}
-              >
-                <sl-icon slot="prefix" name="funnel"></sl-icon>
-              </sl-input>
-            </div>
-          ` : nothing}
-          <div class="entry-list">
-            ${!(segments.length === 0 || (segments.length === 1 && /^[a-zA-Z]:$/.test(segments[0]))) ? html`
-              <div class="entry" @click=${() => this.navigateUp()}>
-                <sl-icon name="arrow-up"></sl-icon>
-                <span class="name">..</span>
+        ${this.loading
+          ? html` <div class="loading-state"><sl-spinner></sl-spinner></div> `
+          : this.error
+            ? html` <div class="empty-state">${this.error}</div> `
+            : this.entries.length === 0
+              ? html` <div class="empty-state">Empty directory</div> `
+              : html`
+                  ${this.entries.length > 5
+                    ? html`
+                        <div
+                          style="padding: 0.375rem 0.75rem; border-bottom: 1px solid var(--scion-border, #e2e8f0);"
+                        >
+                          <sl-input
+                            size="small"
+                            placeholder="Filter…"
+                            clearable
+                            .value=${this.filterText}
+                            @sl-input=${this.onFilterInput}
+                            @keydown=${this.onFilterKeydown}
+                          >
+                            <sl-icon slot="prefix" name="funnel"></sl-icon>
+                          </sl-input>
+                        </div>
+                      `
+                    : nothing}
+                  <div class="entry-list">
+                    ${!(
+                      segments.length === 0 ||
+                      (segments.length === 1 && /^[a-zA-Z]:$/.test(segments[0]))
+                    )
+                      ? html`
+                          <div class="entry" @click=${() => this.navigateUp()}>
+                            <sl-icon name="arrow-up"></sl-icon>
+                            <span class="name">..</span>
+                          </div>
+                        `
+                      : nothing}
+                    ${this.filteredEntries.length === 0 && this.filterText
+                      ? html` <div class="empty-state">No matches for "${this.filterText}"</div> `
+                      : nothing}
+                    ${this.filteredEntries.map(
+                      (e) => html`
+                        <div
+                          class="entry ${e.isDir ? '' : 'is-file'}"
+                          @click=${() => this.onEntryClick(e)}
+                        >
+                          <sl-icon
+                            name=${e.isDir ? (e.isGit ? 'git' : 'folder') : 'file-earmark'}
+                          ></sl-icon>
+                          <span class="name">${e.name}</span>
+                          ${e.isGit ? html`<span class="badge">git</span>` : nothing}
+                        </div>
+                      `
+                    )}
+                  </div>
+                `}
+        ${this.newFolderMode
+          ? html`
+              <div class="new-folder-row">
+                <sl-input
+                  size="small"
+                  placeholder="New folder name"
+                  .value=${this.newFolderName}
+                  @sl-input=${(e: Event) => {
+                    this.newFolderName = (e.target as HTMLInputElement).value;
+                  }}
+                  @keydown=${(e: KeyboardEvent) => {
+                    if (e.key === 'Enter') void this.handleNewFolder();
+                  }}
+                ></sl-input>
+                <sl-button
+                  size="small"
+                  variant="primary"
+                  ?loading=${this.creatingFolder}
+                  @click=${() => void this.handleNewFolder()}
+                >
+                  Create
+                </sl-button>
+                <sl-button
+                  size="small"
+                  variant="default"
+                  @click=${() => {
+                    this.newFolderMode = false;
+                  }}
+                >
+                  Cancel
+                </sl-button>
               </div>
-            ` : nothing}
-            ${this.filteredEntries.length === 0 && this.filterText ? html`
-              <div class="empty-state">No matches for "${this.filterText}"</div>
-            ` : nothing}
-            ${this.filteredEntries.map(e => html`
-              <div class="entry ${e.isDir ? '' : 'is-file'}" @click=${() => this.onEntryClick(e)}>
-                <sl-icon name=${e.isDir ? (e.isGit ? 'git' : 'folder') : 'file-earmark'}></sl-icon>
-                <span class="name">${e.name}</span>
-                ${e.isGit ? html`<span class="badge">git</span>` : nothing}
-              </div>
-            `)}
-          </div>
-        `}
-
-        ${this.newFolderMode ? html`
-          <div class="new-folder-row">
-            <sl-input
-              size="small"
-              placeholder="New folder name"
-              .value=${this.newFolderName}
-              @sl-input=${(e: Event) => { this.newFolderName = (e.target as HTMLInputElement).value; }}
-              @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter') void this.handleNewFolder(); }}
-            ></sl-input>
-            <sl-button size="small" variant="primary" ?loading=${this.creatingFolder} @click=${() => void this.handleNewFolder()}>
-              Create
-            </sl-button>
-            <sl-button size="small" variant="default" @click=${() => { this.newFolderMode = false; }}>
-              Cancel
-            </sl-button>
-          </div>
-          ${this.newFolderError ? html`<div class="error-msg">${this.newFolderError}</div>` : nothing}
-        ` : nothing}
+              ${this.newFolderError
+                ? html`<div class="error-msg">${this.newFolderError}</div>`
+                : nothing}
+            `
+          : nothing}
 
         <div class="toolbar">
-          <sl-button size="small" variant="default" @click=${() => { this.newFolderMode = true; this.newFolderName = ''; this.newFolderError = null; }}>
+          <sl-button
+            size="small"
+            variant="default"
+            @click=${() => {
+              this.newFolderMode = true;
+              this.newFolderName = '';
+              this.newFolderError = null;
+            }}
+          >
             <sl-icon slot="prefix" name="folder-plus"></sl-icon>
             New folder
           </sl-button>

@@ -1165,7 +1165,9 @@ export class ScionPageSkillCreate extends LitElement {
                         <span class="file-name">${sf.path}</span>
                         <span class="file-meta">
                           ${this.formatFileSize(sf.file.size)}
-                          ${sf.path === 'SKILL.md' && this.hasSkillMd ? '-- from content above' : ''}
+                          ${sf.path === 'SKILL.md' && this.hasSkillMd
+                            ? '-- from content above'
+                            : ''}
                         </span>
                       </div>
                       ${sf.path === 'SKILL.md' && this.hasSkillMd
@@ -1259,8 +1261,7 @@ export class ScionPageSkillCreate extends LitElement {
     };
 
     const stepActive = (s: FlowState) => this.flowState === s;
-    const stepError = (s: FlowState) =>
-      this.flowState === 'error' && s === 'publishing';
+    const stepError = (s: FlowState) => this.flowState === 'error' && s === 'publishing';
 
     const stepClass = (s: FlowState) => {
       if (stepDone(s)) return 'progress-step done';
@@ -1304,16 +1305,12 @@ export class ScionPageSkillCreate extends LitElement {
                 <div class=${stepClass('creating')}>
                   ${stepIcon('creating')}
                   <span class="step-label">Creating skill...</span>
-                  <span class="step-status"
-                    >${stepDone('creating') ? 'done' : ''}</span
-                  >
+                  <span class="step-status">${stepDone('creating') ? 'done' : ''}</span>
                 </div>
                 <div class=${stepClass('publishing')}>
                   ${stepIcon('publishing')}
                   <span class="step-label">Uploading & publishing...</span>
-                  <span class="step-status"
-                    >${stepDone('publishing') ? 'done' : ''}</span
-                  >
+                  <span class="step-status">${stepDone('publishing') ? 'done' : ''}</span>
                 </div>
               </div>
 

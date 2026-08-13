@@ -85,7 +85,10 @@ export class ScionPageHome extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.removeEventListener(
+      'projects-updated',
+      this.boundOnProjectsUpdated as EventListener
+    );
   }
 
   private onAgentsUpdated(): void {
@@ -97,7 +100,7 @@ export class ScionPageHome extends LitElement {
   }
 
   private get activeAgentCount(): number {
-    return this.agents.filter(a => isAgentRunning(a)).length;
+    return this.agents.filter((a) => isAgentRunning(a)).length;
   }
 
   private async loadData(): Promise<void> {
@@ -112,7 +115,9 @@ export class ScionPageHome extends LitElement {
       if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
 
       if (agentsResp.ok) {
-        const data = (await agentsResp.json()) as { agents?: Agent[]; _capabilities?: Capabilities } | Agent[];
+        const data = (await agentsResp.json()) as
+          | { agents?: Agent[]; _capabilities?: Capabilities }
+          | Agent[];
         if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
         const agents = Array.isArray(data) ? data : data.agents || [];
         this.agents = agents;
@@ -120,7 +125,9 @@ export class ScionPageHome extends LitElement {
       }
 
       if (projectsResp.ok) {
-        const data = (await projectsResp.json()) as { projects?: Project[]; _capabilities?: Capabilities } | Project[];
+        const data = (await projectsResp.json()) as
+          | { projects?: Project[]; _capabilities?: Capabilities }
+          | Project[];
         if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
         const projects = Array.isArray(data) ? data : data.projects || [];
         this.projects = projects;
@@ -359,7 +366,9 @@ export class ScionPageHome extends LitElement {
         <div class="stat-card">
           <h3>Pending Invites</h3>
           <div class="stat-value">${this.inviteStats?.pendingInvites ?? '--'}</div>
-          <div class="stat-change">${this.inviteStats ? `${this.inviteStats.totalRedemptions} total redemptions` : ''}</div>
+          <div class="stat-change">
+            ${this.inviteStats ? `${this.inviteStats.totalRedemptions} total redemptions` : ''}
+          </div>
         </div>
         <div class="stat-card">
           <h3>Allow List</h3>
@@ -412,22 +421,32 @@ export class ScionPageHome extends LitElement {
         <h2 class="section-title">Recent Activity</h2>
         <div class="activity-list">
           ${this.inviteStats && this.inviteStats.recentRedemptions.length > 0
-            ? this.inviteStats.recentRedemptions.map(r => html`
-                <div class="activity-item">
-                  <div class="activity-icon">
-                    <sl-icon name="person-plus"></sl-icon>
+            ? this.inviteStats.recentRedemptions.map(
+                (r) => html`
+                  <div class="activity-item">
+                    <div class="activity-icon">
+                      <sl-icon name="person-plus"></sl-icon>
+                    </div>
+                    <div class="activity-content">
+                      <p class="activity-title">
+                        Invite <code>${r.codePrefix}...</code> redeemed
+                        (${r.useCount}/${r.maxUses > 0 ? r.maxUses : '∞'} uses)
+                      </p>
+                      <p class="activity-time">
+                        ${r.note ? r.note + ' • ' : ''}${this.formatRelativeTime(r.created)}
+                      </p>
+                    </div>
                   </div>
-                  <div class="activity-content">
-                    <p class="activity-title">Invite <code>${r.codePrefix}...</code> redeemed (${r.useCount}/${r.maxUses > 0 ? r.maxUses : '∞'} uses)</p>
-                    <p class="activity-time">${r.note ? r.note + ' • ' : ''}${this.formatRelativeTime(r.created)}</p>
-                  </div>
-                </div>
-              `)
+                `
+              )
             : html`
                 <div class="empty-state">
                   <sl-icon name="clock-history"></sl-icon>
                   <p>No recent activity to display.<br />Start by creating your first agent.</p>
-                  <a href="/agents/new" style="text-decoration: none; margin-top: 1rem; display: inline-block;">
+                  <a
+                    href="/agents/new"
+                    style="text-decoration: none; margin-top: 1rem; display: inline-block;"
+                  >
                     <sl-button variant="primary">
                       <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                       Create Agent

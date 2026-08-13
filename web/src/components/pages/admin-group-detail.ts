@@ -268,7 +268,9 @@ export class ScionPageAdminGroupDetail extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+        throw new Error(
+          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+        );
       }
 
       this.group = (await response.json()) as AdminGroup;
@@ -328,7 +330,9 @@ export class ScionPageAdminGroupDetail extends LitElement {
         <div class="header-info">
           <div class="header-title">
             <div class="group-icon ${this.group.groupType}">
-              <sl-icon name="${this.group.groupType === 'project_agents' ? 'cpu' : 'people'}"></sl-icon>
+              <sl-icon
+                name="${this.group.groupType === 'project_agents' ? 'cpu' : 'people'}"
+              ></sl-icon>
             </div>
             <h1>${this.group.name}</h1>
             <span class="type-badge ${this.group.groupType}">

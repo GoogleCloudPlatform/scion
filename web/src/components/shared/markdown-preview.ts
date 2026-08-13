@@ -68,10 +68,22 @@ export class ScionMarkdownPreview extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .preview-container h1 { font-size: 1.75rem; border-bottom: 1px solid var(--scion-border, #e2e8f0); padding-bottom: 0.3em; }
-    .preview-container h2 { font-size: 1.375rem; border-bottom: 1px solid var(--scion-border, #e2e8f0); padding-bottom: 0.3em; }
-    .preview-container h3 { font-size: 1.125rem; }
-    .preview-container h4 { font-size: 1rem; }
+    .preview-container h1 {
+      font-size: 1.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      padding-bottom: 0.3em;
+    }
+    .preview-container h2 {
+      font-size: 1.375rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      padding-bottom: 0.3em;
+    }
+    .preview-container h3 {
+      font-size: 1.125rem;
+    }
+    .preview-container h4 {
+      font-size: 1rem;
+    }
 
     .preview-container p {
       margin: 0 0 1em;

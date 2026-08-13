@@ -108,8 +108,7 @@ export class ScionQuickMessageDialog extends LitElement {
       // Success — close dialog
       this.close();
     } catch (err) {
-      this.sendError =
-        err instanceof Error ? err.message : 'Failed to send message';
+      this.sendError = err instanceof Error ? err.message : 'Failed to send message';
     } finally {
       this.sending = false;
     }
@@ -123,16 +122,10 @@ export class ScionQuickMessageDialog extends LitElement {
   }
 
   render() {
-    const label = this.agentName
-      ? `Message ${this.agentName}`
-      : 'Send Message';
+    const label = this.agentName ? `Message ${this.agentName}` : 'Send Message';
 
     return html`
-      <sl-dialog
-        label=${label}
-        ?open=${this.open}
-        @sl-request-close=${this.close}
-      >
+      <sl-dialog label=${label} ?open=${this.open} @sl-request-close=${this.close}>
         <div class="dialog-body">
           <sl-textarea
             placeholder="Type your message…"
@@ -144,17 +137,10 @@ export class ScionQuickMessageDialog extends LitElement {
             @keydown=${this.handleKeydown}
             ?disabled=${this.sending}
           ></sl-textarea>
-          ${this.sendError
-            ? html`<div class="dialog-error">${this.sendError}</div>`
-            : nothing}
+          ${this.sendError ? html`<div class="dialog-error">${this.sendError}</div>` : nothing}
         </div>
 
-        <sl-button
-          slot="footer"
-          variant="default"
-          @click=${this.close}
-          ?disabled=${this.sending}
-        >
+        <sl-button slot="footer" variant="default" @click=${this.close} ?disabled=${this.sending}>
           Cancel
         </sl-button>
         <sl-button

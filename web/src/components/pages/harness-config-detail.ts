@@ -275,9 +275,15 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       font-size: 0.75rem;
       font-weight: 500;
     }
-    .build-status-badge.running { color: var(--sl-color-primary-600); }
-    .build-status-badge.completed { color: var(--sl-color-success-600); }
-    .build-status-badge.failed { color: var(--sl-color-danger-600); }
+    .build-status-badge.running {
+      color: var(--sl-color-primary-600);
+    }
+    .build-status-badge.completed {
+      color: var(--sl-color-success-600);
+    }
+    .build-status-badge.failed {
+      color: var(--sl-color-danger-600);
+    }
 
     .source-url {
       display: inline-flex;
@@ -295,8 +301,12 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       font-size: 0.85rem;
       margin-top: 0.5rem;
     }
-    .reimport-status.success { color: var(--sl-color-success-600); }
-    .reimport-status.error { color: var(--sl-color-danger-600); }
+    .reimport-status.success {
+      color: var(--sl-color-success-600);
+    }
+    .reimport-status.error {
+      color: var(--sl-color-danger-600);
+    }
 
     .build-error {
       color: var(--sl-color-danger-600);
@@ -452,8 +462,12 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       border-radius: 50%;
       margin-right: 0.25rem;
     }
-    .reachable-dot.online { background: var(--sl-color-success-500); }
-    .reachable-dot.offline { background: var(--sl-color-neutral-400); }
+    .reachable-dot.online {
+      background: var(--sl-color-success-500);
+    }
+    .reachable-dot.offline {
+      background: var(--sl-color-neutral-400);
+    }
     .proxy-info-note {
       font-size: 0.8125rem;
       color: var(--sl-color-neutral-500);
@@ -543,7 +557,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
       this.harnessConfig = (await response.json()) as HarnessConfig;
-      this.hasDockerfile = this.harnessConfig.files?.some(f => f.path === 'Dockerfile') ?? false;
+      this.hasDockerfile = this.harnessConfig.files?.some((f) => f.path === 'Dockerfile') ?? false;
       dispatchPageTitle(
         this,
         this.harnessConfig.displayName || this.harnessConfig.name || this.harnessConfigId,
@@ -627,7 +641,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         )}
       </div>
 
-      ${this.renderHeader()} ${this.renderFilesSection()} ${this.renderImageSection()} ${this.renderBuildDialog()} ${this.renderBuildLog()} ${this.renderDeleteDialog()}
+      ${this.renderHeader()} ${this.renderFilesSection()} ${this.renderImageSection()}
+      ${this.renderBuildDialog()} ${this.renderBuildLog()} ${this.renderDeleteDialog()}
     `;
   }
 
@@ -643,29 +658,36 @@ export class ScionPageHarnessConfigDetail extends LitElement {
           <h1>${hc.displayName || hc.name}</h1>
           ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
           <div class="header-actions">
-            ${hc.sourceUrl ? html`
-              <sl-button
-                size="small"
-                variant="default"
-                @click=${this.startReimport}
-                ?disabled=${this.reimportRunning}
-                ?loading=${this.reimportRunning}
-              >
-                <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
-                Refresh from Source
-              </sl-button>
-            ` : nothing}
-            ${can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage') ? html`
-              <sl-button
-                size="small"
-                variant="danger"
-                outline
-                @click=${() => { this.deleteDialogOpen = true; this.deleteError = ''; }}
-              >
-                <sl-icon slot="prefix" name="trash"></sl-icon>
-                Delete
-              </sl-button>
-            ` : nothing}
+            ${hc.sourceUrl
+              ? html`
+                  <sl-button
+                    size="small"
+                    variant="default"
+                    @click=${this.startReimport}
+                    ?disabled=${this.reimportRunning}
+                    ?loading=${this.reimportRunning}
+                  >
+                    <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                    Refresh from Source
+                  </sl-button>
+                `
+              : nothing}
+            ${can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage')
+              ? html`
+                  <sl-button
+                    size="small"
+                    variant="danger"
+                    outline
+                    @click=${() => {
+                      this.deleteDialogOpen = true;
+                      this.deleteError = '';
+                    }}
+                  >
+                    <sl-icon slot="prefix" name="trash"></sl-icon>
+                    Delete
+                  </sl-button>
+                `
+              : nothing}
           </div>
         </div>
         ${hc.description ? html`<p class="resource-description">${hc.description}</p>` : ''}
@@ -679,13 +701,20 @@ export class ScionPageHarnessConfigDetail extends LitElement {
               ></span>`
             : ''}
           ${hc.sourceUrl
-            ? html`<span class="source-url">Source:
-                <a href=${hc.sourceUrl.replace(/^git\+/, '')} target="_blank" rel="noopener">${hc.sourceUrl}</a>
+            ? html`<span class="source-url"
+                >Source:
+                <a href=${hc.sourceUrl.replace(/^git\+/, '')} target="_blank" rel="noopener"
+                  >${hc.sourceUrl}</a
+                >
               </span>`
             : ''}
         </div>
-        ${this.reimportStatus ? html`<p class="reimport-status success">${this.reimportStatus}</p>` : ''}
-        ${this.reimportError ? html`<p class="reimport-status error">${this.reimportError}</p>` : ''}
+        ${this.reimportStatus
+          ? html`<p class="reimport-status success">${this.reimportStatus}</p>`
+          : ''}
+        ${this.reimportError
+          ? html`<p class="reimport-status error">${this.reimportError}</p>`
+          : ''}
       </div>
     `;
   }
@@ -756,12 +785,18 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     }
   }
 
-  private brokerRollup(broker: NonNullable<NonNullable<typeof this.imageStatus>['brokers']>[0]): { label: string; cssClass: string } {
+  private brokerRollup(broker: NonNullable<NonNullable<typeof this.imageStatus>['brokers']>[0]): {
+    label: string;
+    cssClass: string;
+  } {
     if (!broker.reachable) return { label: 'unreachable', cssClass: 'rollup-badge-unreachable' };
     if (broker.unsupported) return { label: 'needs upgrade', cssClass: 'rollup-badge-stale' };
-    if (broker.local_short?.exists && !broker.local_long?.exists) return { label: 'local build only', cssClass: 'rollup-badge-local-only' };
-    if (broker.local_long?.exists && broker.newer_in_registry) return { label: 'stale pull', cssClass: 'rollup-badge-stale' };
-    if ((broker.local_long?.exists && !broker.newer_in_registry) || broker.local_short?.exists) return { label: 'up-to-date', cssClass: 'rollup-badge-up-to-date' };
+    if (broker.local_short?.exists && !broker.local_long?.exists)
+      return { label: 'local build only', cssClass: 'rollup-badge-local-only' };
+    if (broker.local_long?.exists && broker.newer_in_registry)
+      return { label: 'stale pull', cssClass: 'rollup-badge-stale' };
+    if ((broker.local_long?.exists && !broker.newer_in_registry) || broker.local_short?.exists)
+      return { label: 'up-to-date', cssClass: 'rollup-badge-up-to-date' };
     return { label: 'missing', cssClass: 'rollup-badge-missing' };
   }
 
@@ -770,12 +805,12 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       <tr>
         <td class="image-entity-name">Registry</td>
         <td class="image-ref">${st?.registry?.image || '—'}</td>
-        <td class="image-hash">${st?.registry?.exists ? (st.registry.hash || '—') : ''}</td>
+        <td class="image-hash">${st?.registry?.exists ? st.registry.hash || '—' : ''}</td>
         <td>
           ${st
-            ? (st.registry?.exists
+            ? st.registry?.exists
               ? html`Available`
-              : html`<span class="not-found">Not found</span>`)
+              : html`<span class="not-found">Not found</span>`
             : html`<sl-spinner style="font-size: 0.75rem;"></sl-spinner> Checking...`}
         </td>
       </tr>
@@ -795,18 +830,28 @@ export class ScionPageHarnessConfigDetail extends LitElement {
           <h2>Images <span class="image-section-subtitle">Runtime: ${broker.broker_name}</span></h2>
           <table class="image-table">
             <thead>
-              <tr><th>Entity</th><th>Image</th><th>Hash</th><th>Status</th></tr>
+              <tr>
+                <th>Entity</th>
+                <th>Image</th>
+                <th>Hash</th>
+                <th>Status</th>
+              </tr>
             </thead>
             <tbody>
               ${this.renderRegistryRow(st)}
             </tbody>
           </table>
           <div class="proxy-info-note">
-            Runtime broker "${broker.broker_name}" is currently unreachable.
-            Local image state cannot be determined.
+            Runtime broker "${broker.broker_name}" is currently unreachable. Local image state
+            cannot be determined.
           </div>
           <div class="image-actions">
-            <sl-button size="small" variant="text" @click=${this.recheckImage} ?disabled=${this.imageActionRunning}>
+            <sl-button
+              size="small"
+              variant="text"
+              @click=${this.recheckImage}
+              ?disabled=${this.imageActionRunning}
+            >
               <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
               Re-check
             </sl-button>
@@ -821,51 +866,91 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         <h2>Images <span class="image-section-subtitle">Runtime: ${broker.broker_name}</span></h2>
         <table class="image-table">
           <thead>
-            <tr><th>Entity</th><th>Image</th><th>Hash</th><th>Status</th></tr>
+            <tr>
+              <th>Entity</th>
+              <th>Image</th>
+              <th>Hash</th>
+              <th>Status</th>
+            </tr>
           </thead>
           <tbody>
             ${this.renderRegistryRow(st)}
             <tr class=${src === 'local_short' ? 'active-row' : ''}>
               <td class="image-entity-name">Local Build</td>
               <td class="image-ref">${st?.image || image || '—'}</td>
-              <td class="image-hash">${broker.local_short?.exists ? (broker.local_short.hash || '—') : ''}</td>
+              <td class="image-hash">
+                ${broker.local_short?.exists ? broker.local_short.hash || '—' : ''}
+              </td>
               <td>
                 ${broker.local_short?.exists
-                  ? html`Available${src === 'local_short' ? html`<span class="active-badge">Active</span>` : nothing}`
+                  ? html`Available${src === 'local_short'
+                      ? html`<span class="active-badge">Active</span>`
+                      : nothing}`
                   : html`<span class="not-found">Not found</span>`}
               </td>
             </tr>
             <tr class=${src === 'local_long' ? 'active-row' : ''}>
               <td class="image-entity-name">Pulled</td>
               <td class="image-ref">${st?.registry?.image || '—'}</td>
-              <td class="image-hash">${broker.local_long?.exists ? (broker.local_long.hash || '—') : ''}</td>
+              <td class="image-hash">
+                ${broker.local_long?.exists ? broker.local_long.hash || '—' : ''}
+              </td>
               <td>
                 ${broker.local_long?.exists
-                  ? html`Available${src === 'local_long' ? html`<span class="active-badge">Active</span>` : nothing}
-                    ${broker.newer_in_registry ? html`<span class="newer-badge">Newer in registry</span>` : nothing}`
+                  ? html`Available${src === 'local_long'
+                      ? html`<span class="active-badge">Active</span>`
+                      : nothing}
+                    ${broker.newer_in_registry
+                      ? html`<span class="newer-badge">Newer in registry</span>`
+                      : nothing}`
                   : html`<span class="not-found">Not found</span>`}
               </td>
             </tr>
           </tbody>
         </table>
         <div class="image-actions">
-          ${this.hasDockerfile ? html`
-            <sl-button size="small" variant="primary" @click=${this.openBuildDialog} ?disabled=${this.buildRunning}>
-              <sl-icon slot="prefix" name="hammer"></sl-icon>
-              ${this.buildRunning ? 'Building...' : 'Build Image'}
-            </sl-button>
-          ` : nothing}
-          <sl-button size="small" variant="default" @click=${() => this.pullLatestImage(broker.broker_id)} ?disabled=${this.imageActionRunning}>
+          ${this.hasDockerfile
+            ? html`
+                <sl-button
+                  size="small"
+                  variant="primary"
+                  @click=${this.openBuildDialog}
+                  ?disabled=${this.buildRunning}
+                >
+                  <sl-icon slot="prefix" name="hammer"></sl-icon>
+                  ${this.buildRunning ? 'Building...' : 'Build Image'}
+                </sl-button>
+              `
+            : nothing}
+          <sl-button
+            size="small"
+            variant="default"
+            @click=${() => this.pullLatestImage(broker.broker_id)}
+            ?disabled=${this.imageActionRunning}
+          >
             <sl-icon slot="prefix" name="cloud-download"></sl-icon>
             Pull Latest
           </sl-button>
-          ${broker.local_short?.exists ? html`
-            <sl-button size="small" variant="warning" outline @click=${() => this.deleteLocalImage(broker.broker_id)} ?disabled=${this.imageActionRunning}>
-              <sl-icon slot="prefix" name="trash"></sl-icon>
-              Delete Local
-            </sl-button>
-          ` : nothing}
-          <sl-button size="small" variant="text" @click=${this.recheckImage} ?disabled=${this.imageActionRunning}>
+          ${broker.local_short?.exists
+            ? html`
+                <sl-button
+                  size="small"
+                  variant="warning"
+                  outline
+                  @click=${() => this.deleteLocalImage(broker.broker_id)}
+                  ?disabled=${this.imageActionRunning}
+                >
+                  <sl-icon slot="prefix" name="trash"></sl-icon>
+                  Delete Local
+                </sl-button>
+              `
+            : nothing}
+          <sl-button
+            size="small"
+            variant="text"
+            @click=${this.recheckImage}
+            ?disabled=${this.imageActionRunning}
+          >
             <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
             Re-check
           </sl-button>
@@ -894,32 +979,50 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         <h2>Images</h2>
         <table class="image-table">
           <thead>
-            <tr><th>Entity</th><th>Image</th><th>Hash</th><th>Status</th></tr>
+            <tr>
+              <th>Entity</th>
+              <th>Image</th>
+              <th>Hash</th>
+              <th>Status</th>
+            </tr>
           </thead>
           <tbody>
-            ${this.renderRegistryRow(st)}
-            ${brokers.map(b => this.renderBrokerRow(b, st))}
+            ${this.renderRegistryRow(st)} ${brokers.map((b) => this.renderBrokerRow(b, st))}
           </tbody>
         </table>
         <div class="image-actions">
-          ${this.hasDockerfile ? html`
-            <sl-button size="small" variant="primary" @click=${this.openBuildDialog} ?disabled=${this.buildRunning}>
-              <sl-icon slot="prefix" name="hammer"></sl-icon>
-              ${this.buildRunning ? 'Building...' : 'Build Image'}
-            </sl-button>
-          ` : nothing}
-          <sl-button size="small" variant="text" @click=${this.recheckImage} ?disabled=${this.imageActionRunning}>
+          ${this.hasDockerfile
+            ? html`
+                <sl-button
+                  size="small"
+                  variant="primary"
+                  @click=${this.openBuildDialog}
+                  ?disabled=${this.buildRunning}
+                >
+                  <sl-icon slot="prefix" name="hammer"></sl-icon>
+                  ${this.buildRunning ? 'Building...' : 'Build Image'}
+                </sl-button>
+              `
+            : nothing}
+          <sl-button
+            size="small"
+            variant="text"
+            @click=${this.recheckImage}
+            ?disabled=${this.imageActionRunning}
+          >
             <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
             Re-check
           </sl-button>
         </div>
-        ${proxyBrokers.length > 0 ? html`
-          <div class="proxy-info-note">
-            ${proxyBrokers.length} proxy broker${proxyBrokers.length > 1 ? 's' : ''}
-            (${proxyBrokers.map(p => p.broker_name).join(', ')}) —
-            images pulled by substrate at provision time.
-          </div>
-        ` : nothing}
+        ${proxyBrokers.length > 0
+          ? html`
+              <div class="proxy-info-note">
+                ${proxyBrokers.length} proxy broker${proxyBrokers.length > 1 ? 's' : ''}
+                (${proxyBrokers.map((p) => p.broker_name).join(', ')}) — images pulled by substrate
+                at provision time.
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -933,7 +1036,10 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     const src = broker.resolution_source || '';
 
     return html`
-      <tr class="broker-row ${expanded ? 'broker-row-expanded' : ''}" @click=${() => this.toggleBroker(broker.broker_id)}>
+      <tr
+        class="broker-row ${expanded ? 'broker-row-expanded' : ''}"
+        @click=${() => this.toggleBroker(broker.broker_id)}
+      >
         <td class="image-entity-name">
           <span class="broker-toggle">${expanded ? '▾' : '▸'}</span>
           <span class="reachable-dot ${broker.reachable ? 'online' : 'offline'}"></span>
@@ -941,47 +1047,95 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         </td>
         <td><span class="rollup-badge ${rollup.cssClass}">${rollup.label}</span></td>
         <td></td>
-        <td>${broker.resolved_image ? html`resolves: ${src === 'local_short' ? 'local build' : src === 'local_long' ? 'pulled' : src}` : ''}</td>
+        <td>
+          ${broker.resolved_image
+            ? html`resolves:
+              ${src === 'local_short' ? 'local build' : src === 'local_long' ? 'pulled' : src}`
+            : ''}
+        </td>
       </tr>
-      ${expanded && broker.reachable ? html`
-        <tr class="broker-detail-row">
-          <td class="image-entity-name">Local Build</td>
-          <td class="image-ref">${st?.image || '—'}</td>
-          <td class="image-hash">${broker.local_short?.exists ? (broker.local_short.hash || '—') : ''}</td>
-          <td>${broker.local_short?.exists
-            ? html`Available${src === 'local_short' ? html`<span class="active-badge">Active</span>` : nothing}`
-            : html`<span class="not-found">—</span>`}</td>
-        </tr>
-        <tr class="broker-detail-row">
-          <td class="image-entity-name">Pulled</td>
-          <td class="image-ref">${st?.registry?.image || '—'}</td>
-          <td class="image-hash">${broker.local_long?.exists ? (broker.local_long.hash || '—') : ''}</td>
-          <td>${broker.local_long?.exists
-            ? html`Available${src === 'local_long' ? html`<span class="active-badge">Active</span>` : nothing}
-              ${broker.newer_in_registry ? html`<span class="newer-badge">Newer in registry</span>` : nothing}`
-            : html`<span class="not-found">—</span>`}</td>
-        </tr>
-        <tr class="broker-detail-row">
-          <td colspan="4">
-            <div class="broker-actions">
-              <sl-button size="small" variant="default" @click=${(e: Event) => { e.stopPropagation(); void this.pullLatestImage(broker.broker_id); }} ?disabled=${this.imageActionRunning}>
-                <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-                Pull Latest
-              </sl-button>
-              ${broker.local_short?.exists ? html`
-                <sl-button size="small" variant="warning" outline @click=${(e: Event) => { e.stopPropagation(); void this.deleteLocalImage(broker.broker_id); }} ?disabled=${this.imageActionRunning}>
-                  <sl-icon slot="prefix" name="trash"></sl-icon>
-                  Delete Local
-                </sl-button>
-              ` : nothing}
-              <sl-button size="small" variant="text" @click=${(e: Event) => { e.stopPropagation(); void this.recheckImage(); }} ?disabled=${this.imageActionRunning}>
-                <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
-                Re-check
-              </sl-button>
-            </div>
-          </td>
-        </tr>
-      ` : nothing}
+      ${expanded && broker.reachable
+        ? html`
+            <tr class="broker-detail-row">
+              <td class="image-entity-name">Local Build</td>
+              <td class="image-ref">${st?.image || '—'}</td>
+              <td class="image-hash">
+                ${broker.local_short?.exists ? broker.local_short.hash || '—' : ''}
+              </td>
+              <td>
+                ${broker.local_short?.exists
+                  ? html`Available${src === 'local_short'
+                      ? html`<span class="active-badge">Active</span>`
+                      : nothing}`
+                  : html`<span class="not-found">—</span>`}
+              </td>
+            </tr>
+            <tr class="broker-detail-row">
+              <td class="image-entity-name">Pulled</td>
+              <td class="image-ref">${st?.registry?.image || '—'}</td>
+              <td class="image-hash">
+                ${broker.local_long?.exists ? broker.local_long.hash || '—' : ''}
+              </td>
+              <td>
+                ${broker.local_long?.exists
+                  ? html`Available${src === 'local_long'
+                      ? html`<span class="active-badge">Active</span>`
+                      : nothing}
+                    ${broker.newer_in_registry
+                      ? html`<span class="newer-badge">Newer in registry</span>`
+                      : nothing}`
+                  : html`<span class="not-found">—</span>`}
+              </td>
+            </tr>
+            <tr class="broker-detail-row">
+              <td colspan="4">
+                <div class="broker-actions">
+                  <sl-button
+                    size="small"
+                    variant="default"
+                    @click=${(e: Event) => {
+                      e.stopPropagation();
+                      void this.pullLatestImage(broker.broker_id);
+                    }}
+                    ?disabled=${this.imageActionRunning}
+                  >
+                    <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                    Pull Latest
+                  </sl-button>
+                  ${broker.local_short?.exists
+                    ? html`
+                        <sl-button
+                          size="small"
+                          variant="warning"
+                          outline
+                          @click=${(e: Event) => {
+                            e.stopPropagation();
+                            void this.deleteLocalImage(broker.broker_id);
+                          }}
+                          ?disabled=${this.imageActionRunning}
+                        >
+                          <sl-icon slot="prefix" name="trash"></sl-icon>
+                          Delete Local
+                        </sl-button>
+                      `
+                    : nothing}
+                  <sl-button
+                    size="small"
+                    variant="text"
+                    @click=${(e: Event) => {
+                      e.stopPropagation();
+                      void this.recheckImage();
+                    }}
+                    ?disabled=${this.imageActionRunning}
+                  >
+                    <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                    Re-check
+                  </sl-button>
+                </div>
+              </td>
+            </tr>
+          `
+        : nothing}
     `;
   }
 
@@ -994,22 +1148,31 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         <h2>Images</h2>
         <table class="image-table">
           <thead>
-            <tr><th>Entity</th><th>Image</th><th>Hash</th><th>Status</th></tr>
+            <tr>
+              <th>Entity</th>
+              <th>Image</th>
+              <th>Hash</th>
+              <th>Status</th>
+            </tr>
           </thead>
           <tbody>
             ${this.renderRegistryRow(st)}
           </tbody>
         </table>
         <div class="image-actions">
-          <sl-button size="small" variant="text" @click=${this.recheckImage} ?disabled=${this.imageActionRunning}>
+          <sl-button
+            size="small"
+            variant="text"
+            @click=${this.recheckImage}
+            ?disabled=${this.imageActionRunning}
+          >
             <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
             Re-check
           </sl-button>
         </div>
         <div class="proxy-info-note">
-          Agents on this hub run on proxy brokers.
-          Images are pulled by the substrate at provision time;
-          there is no node-local image state to inspect.
+          Agents on this hub run on proxy brokers. Images are pulled by the substrate at provision
+          time; there is no node-local image state to inspect.
         </div>
       </div>
     `;
@@ -1018,9 +1181,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   private async recheckImage(): Promise<void> {
     this.imageActionRunning = true;
     try {
-      const resp = await apiFetch(
-        `/api/v1/harness-configs/${this.harnessConfigId}/image-status`
-      );
+      const resp = await apiFetch(`/api/v1/harness-configs/${this.harnessConfigId}/image-status`);
       if (resp.ok) {
         this.imageStatus = await resp.json();
       } else {
@@ -1077,14 +1238,11 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     this.reimportError = '';
 
     try {
-      const response = await apiFetch(
-        `/api/v1/harness-configs/${this.harnessConfig.id}/reimport`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        },
-      );
+      const response = await apiFetch(`/api/v1/harness-configs/${this.harnessConfig.id}/reimport`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
 
       if (!response.ok) {
         const errMsg = await extractApiError(response, `HTTP ${response.status}`);
@@ -1094,10 +1252,12 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
       const result = await response.json();
       const count = result?.count ?? result?.harnessConfigs?.length ?? 0;
-      const failed: Array<{name: string; reason: string}> = result?.failed ?? [];
+      const failed: Array<{ name: string; reason: string }> = result?.failed ?? [];
 
       if (failed.length > 0) {
-        const reasons = failed.map((f: {name: string; reason: string}) => `${f.name}: ${f.reason}`).join('\n');
+        const reasons = failed
+          .map((f: { name: string; reason: string }) => `${f.name}: ${f.reason}`)
+          .join('\n');
         this.reimportError = `${failed.length} config(s) failed validation:\n${reasons}`;
         if (count > 0) {
           this.reimportStatus = `${count} config(s) updated, but some failed.`;
@@ -1135,11 +1295,19 @@ export class ScionPageHarnessConfigDetail extends LitElement {
           @sl-input=${(e: Event) => (this.buildTag = (e.target as HTMLInputElement).value)}
         ></sl-input>
         <br />
-        <sl-checkbox ?checked=${this.buildPush} @sl-change=${(e: Event) => (this.buildPush = (e.target as HTMLInputElement).checked)}>
+        <sl-checkbox
+          ?checked=${this.buildPush}
+          @sl-change=${(e: Event) => (this.buildPush = (e.target as HTMLInputElement).checked)}
+        >
           Push to registry after building
         </sl-checkbox>
         ${this.buildError ? html`<p class="build-error">${this.buildError}</p>` : nothing}
-        <sl-button slot="footer" variant="primary" @click=${this.startBuild} ?loading=${this.buildRunning}>
+        <sl-button
+          slot="footer"
+          variant="primary"
+          @click=${this.startBuild}
+          ?loading=${this.buildRunning}
+        >
           Build
         </sl-button>
         <sl-button slot="footer" variant="default" @click=${() => (this.buildDialogOpen = false)}>
@@ -1170,7 +1338,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
               push: this.buildPush ? 'true' : 'false',
             },
           }),
-        },
+        }
       );
 
       if (!response.ok) {
@@ -1215,7 +1383,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
     try {
       const resp = await apiFetch(
-        `/api/v1/admin/maintenance/operations/build-harness-config-image/runs/${this.buildRunId}`,
+        `/api/v1/admin/maintenance/operations/build-harness-config-image/runs/${this.buildRunId}`
       );
       if (!resp.ok) {
         this.buildPollErrors++;
@@ -1268,7 +1436,12 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   private renderBuildLog() {
     if (!this.buildLog && !this.buildRunning) return nothing;
 
-    const statusClass = this.buildStatus === 'completed' ? 'completed' : this.buildStatus === 'running' ? 'running' : 'failed';
+    const statusClass =
+      this.buildStatus === 'completed'
+        ? 'completed'
+        : this.buildStatus === 'running'
+          ? 'running'
+          : 'failed';
 
     return html`
       <div class="build-log-section">
@@ -1321,7 +1494,9 @@ export class ScionPageHarnessConfigDetail extends LitElement {
             variant="default"
             size="small"
             ?disabled=${this.deleteInProgress}
-            @click=${() => { this.deleteDialogOpen = false; }}
+            @click=${() => {
+              this.deleteDialogOpen = false;
+            }}
           >
             Cancel
           </sl-button>

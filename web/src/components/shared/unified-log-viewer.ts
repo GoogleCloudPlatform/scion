@@ -136,7 +136,9 @@ export class ScionUnifiedLogViewer extends LitElement {
       font-family: var(--scion-font-mono, monospace);
       cursor: pointer;
       border: 1px solid transparent;
-      transition: opacity 0.15s, border-color 0.15s;
+      transition:
+        opacity 0.15s,
+        border-color 0.15s;
       user-select: none;
     }
 
@@ -162,8 +164,13 @@ export class ScionUnifiedLogViewer extends LitElement {
     }
 
     @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
+      0%,
+      100% {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.3;
+      }
     }
 
     .reconnect-indicator {
@@ -241,12 +248,32 @@ export class ScionUnifiedLogViewer extends LitElement {
       line-height: 1.4;
     }
 
-    .sev-DEFAULT { background: var(--scion-neutral-100, #f1f5f9); color: var(--scion-neutral-500, #64748b); }
-    .sev-DEBUG { background: var(--scion-neutral-100, #f1f5f9); color: var(--scion-neutral-500, #64748b); opacity: 0.7; }
-    .sev-INFO { background: var(--scion-primary-50, #eff6ff); color: var(--scion-primary-700, #1d4ed8); }
-    .sev-WARNING { background: var(--scion-warning-50, #fffbeb); color: var(--scion-warning-700, #b45309); }
-    .sev-ERROR { background: var(--scion-danger-50, #fef2f2); color: var(--scion-danger-700, #b91c1c); }
-    .sev-CRITICAL { background: var(--scion-danger-100, #fee2e2); color: var(--scion-danger-800, #991b1b); font-weight: 700; }
+    .sev-DEFAULT {
+      background: var(--scion-neutral-100, #f1f5f9);
+      color: var(--scion-neutral-500, #64748b);
+    }
+    .sev-DEBUG {
+      background: var(--scion-neutral-100, #f1f5f9);
+      color: var(--scion-neutral-500, #64748b);
+      opacity: 0.7;
+    }
+    .sev-INFO {
+      background: var(--scion-primary-50, #eff6ff);
+      color: var(--scion-primary-700, #1d4ed8);
+    }
+    .sev-WARNING {
+      background: var(--scion-warning-50, #fffbeb);
+      color: var(--scion-warning-700, #b45309);
+    }
+    .sev-ERROR {
+      background: var(--scion-danger-50, #fef2f2);
+      color: var(--scion-danger-700, #b91c1c);
+    }
+    .sev-CRITICAL {
+      background: var(--scion-danger-100, #fee2e2);
+      color: var(--scion-danger-800, #991b1b);
+      font-weight: 700;
+    }
 
     .sub {
       color: var(--scion-text-secondary, #475569);
@@ -325,7 +352,8 @@ export class ScionUnifiedLogViewer extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-top: 0;
-      border-radius: 0 0 var(--sl-border-radius-medium, 0.5rem) var(--sl-border-radius-medium, 0.5rem);
+      border-radius: 0 0 var(--sl-border-radius-medium, 0.5rem)
+        var(--sl-border-radius-medium, 0.5rem);
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
     }
@@ -416,9 +444,7 @@ export class ScionUnifiedLogViewer extends LitElement {
 
     this.eventSource.addEventListener('log', (event: Event) => {
       try {
-        const entry = JSON.parse(
-          (event as MessageEvent).data
-        ) as DiagnosticLogEntry;
+        const entry = JSON.parse((event as MessageEvent).data) as DiagnosticLogEntry;
         this.mergeEntries([entry]);
 
         // Only count entries that pass current filters for the "new entries" banner
@@ -478,9 +504,7 @@ export class ScionUnifiedLogViewer extends LitElement {
           if (this.severity) params.set('severity', this.severity);
           // Entries are sorted oldest-first (ascending), so last element is the latest
           params.set('since', this.entries[this.entries.length - 1].timestamp);
-          const res = await apiFetch(
-            `/api/v1/admin/diagnostics/logs?${params}`
-          );
+          const res = await apiFetch(`/api/v1/admin/diagnostics/logs?${params}`);
           if (res.ok) {
             const data = (await res.json()) as DiagnosticsLogResponse;
             this.mergeEntries(data.entries);
@@ -620,8 +644,7 @@ export class ScionUnifiedLogViewer extends LitElement {
 
   private handleScroll(e: Event): void {
     const el = e.target as HTMLElement;
-    const atBottom =
-      el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_THRESHOLD;
 
     if (atBottom && !this.autoScroll) {
       this.autoScroll = true;
@@ -666,8 +689,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     // Compute filtered entries once and pass to both sub-renders to avoid double-filtering.
     const filteredEntries = this.getFilteredEntries();
     return html`
-      ${this.renderFilterBar()}
-      ${this.renderLogContainer(filteredEntries)}
+      ${this.renderFilterBar()} ${this.renderLogContainer(filteredEntries)}
       ${this.renderStatusBar(filteredEntries)}
     `;
   }
@@ -683,9 +705,14 @@ export class ScionUnifiedLogViewer extends LitElement {
             return html`
               <span
                 class="source-toggle ${enabled ? '' : 'disabled'}"
-                style="background: ${enabled ? config.bg : 'transparent'}; color: ${config.color}; border-color: ${enabled ? config.color + '40' : 'var(--scion-border, #e2e8f0)'};"
+                style="background: ${enabled
+                  ? config.bg
+                  : 'transparent'}; color: ${config.color}; border-color: ${enabled
+                  ? config.color + '40'
+                  : 'var(--scion-border, #e2e8f0)'};"
                 @click=${() => this.handleSourceToggle(src)}
-              >${config.badge}</span>
+                >${config.badge}</span
+              >
             `;
           })}
         </div>
@@ -718,7 +745,9 @@ export class ScionUnifiedLogViewer extends LitElement {
         ${this.streaming
           ? html`<span class="stream-indicator"><span class="stream-dot"></span>Live</span>`
           : this.reconnecting
-            ? html`<span class="reconnect-indicator"><sl-spinner style="font-size: 0.75rem;"></sl-spinner> Reconnecting...</span>`
+            ? html`<span class="reconnect-indicator"
+                ><sl-spinner style="font-size: 0.75rem;"></sl-spinner> Reconnecting...</span
+              >`
             : nothing}
         <sl-button size="small" variant="text" @click=${this.handleClear}>
           <sl-icon slot="prefix" name="trash"></sl-icon>
@@ -788,9 +817,7 @@ export class ScionUnifiedLogViewer extends LitElement {
         fractionalSecondDigits: 3,
       } as Intl.DateTimeFormatOptions);
       const subsystem =
-        (entry.jsonPayload?.['subsystem'] as string) ||
-        entry.labels?.['component'] ||
-        '';
+        (entry.jsonPayload?.['subsystem'] as string) || entry.labels?.['component'] || '';
       const isExpanded = this.expandedIds.has(entry.insertId);
 
       rows.push(html`
@@ -800,10 +827,9 @@ export class ScionUnifiedLogViewer extends LitElement {
           @click=${() => this.toggleExpand(entry.insertId)}
         >
           <span class="ts">${timeStr}</span>
-          <span
-            class="source-badge"
-            style="background: ${config.bg}; color: ${config.color};"
-          >${config.badge}</span>
+          <span class="source-badge" style="background: ${config.bg}; color: ${config.color};"
+            >${config.badge}</span
+          >
           <span class="sev sev-${entry.severity}">${entry.severity}</span>
           <span class="sub" title=${subsystem}>${subsystem}</span>
           <span class="msg" title=${entry.message}>${entry.message}</span>
@@ -830,24 +856,35 @@ export class ScionUnifiedLogViewer extends LitElement {
             ${fullTimestamp}
           </span>
           ${entry.logName
-            ? html`<span class="detail-meta-item"><span class="detail-meta-label">Log:</span> ${entry.logName}</span>`
+            ? html`<span class="detail-meta-item"
+                ><span class="detail-meta-label">Log:</span> ${entry.logName}</span
+              >`
             : nothing}
           ${entry.labels?.['agent_id']
-            ? html`<span class="detail-meta-item"><span class="detail-meta-label">Agent:</span> ${entry.labels['agent_id']}</span>`
+            ? html`<span class="detail-meta-item"
+                ><span class="detail-meta-label">Agent:</span> ${entry.labels['agent_id']}</span
+              >`
             : nothing}
           ${entry.labels?.['project_id']
-            ? html`<span class="detail-meta-item"><span class="detail-meta-label">Project:</span> ${entry.labels['project_id']}</span>`
+            ? html`<span class="detail-meta-item"
+                ><span class="detail-meta-label">Project:</span> ${entry.labels['project_id']}</span
+              >`
             : nothing}
           ${entry.labels?.['broker_id']
-            ? html`<span class="detail-meta-item"><span class="detail-meta-label">Broker:</span> ${entry.labels['broker_id']}</span>`
+            ? html`<span class="detail-meta-item"
+                ><span class="detail-meta-label">Broker:</span> ${entry.labels['broker_id']}</span
+              >`
             : nothing}
           ${this.gcpProjectId && entry.insertId
             ? html`
                 <a
                   class="detail-cloud-link"
-                  href="https://console.cloud.google.com/logs/query;query=insertId%3D%22${encodeURIComponent(entry.insertId)}%22?project=${this.gcpProjectId}"
+                  href="https://console.cloud.google.com/logs/query;query=insertId%3D%22${encodeURIComponent(
+                    entry.insertId
+                  )}%22?project=${this.gcpProjectId}"
                   target="_blank"
-                >View in Cloud Logging →</a>
+                  >View in Cloud Logging →</a
+                >
               `
             : nothing}
         </div>
@@ -859,9 +896,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     `;
   }
 
-  private buildDetailObject(
-    entry: DiagnosticLogEntry
-  ): Record<string, unknown> {
+  private buildDetailObject(entry: DiagnosticLogEntry): Record<string, unknown> {
     const obj: Record<string, unknown> = {
       timestamp: entry.timestamp,
       severity: entry.severity,
@@ -897,7 +932,10 @@ export class ScionUnifiedLogViewer extends LitElement {
 
     return html`
       <div class="status-bar">
-        <span>${streamState} · ${filtered.length} entries (${this.entries.length} total) · Buffer: ${this.entries.length}/${MAX_BUFFER}</span>
+        <span
+          >${streamState} · ${filtered.length} entries (${this.entries.length} total) · Buffer:
+          ${this.entries.length}/${MAX_BUFFER}</span
+        >
         <span>${scrollState}</span>
       </div>
     `;

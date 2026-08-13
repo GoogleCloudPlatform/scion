@@ -207,7 +207,9 @@ export class ScionProjectTemplateList extends LitElement {
       const response = await apiFetch('/api/v1/projects?limit=100');
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = (await response.json()) as { projects?: ProjectItem[] };
-      this.sourceProjects = (data.projects ?? []).slice().sort((a, b) => a.name.localeCompare(b.name));
+      this.sourceProjects = (data.projects ?? [])
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name));
     } catch (err) {
       this.createError = err instanceof Error ? err.message : 'Failed to load projects';
     } finally {
@@ -223,8 +225,8 @@ export class ScionProjectTemplateList extends LitElement {
   private onSourceProjectChange(e: Event): void {
     const oldSourceId = this.selectedSourceId;
     this.selectedSourceId = (e.target as HTMLSelectElement).value;
-    const oldProject = this.sourceProjects.find(p => p.id === oldSourceId);
-    const project = this.sourceProjects.find(p => p.id === this.selectedSourceId);
+    const oldProject = this.sourceProjects.find((p) => p.id === oldSourceId);
+    const project = this.sourceProjects.find((p) => p.id === this.selectedSourceId);
     if (project) {
       const oldDefaultName = oldProject ? `${oldProject.name} Template` : '';
       if (!this.newTemplateName || this.newTemplateName === oldDefaultName) {
@@ -408,22 +410,15 @@ export class ScionProjectTemplateList extends LitElement {
             </div>
           `
         : html`
-            <div class="template-list">
-              ${this.templates.map(t => this.renderTemplate(t))}
-            </div>
+            <div class="template-list">${this.templates.map((t) => this.renderTemplate(t))}</div>
           `}
-
-      ${this.renderCreateDialog()}
-      ${this.renderCreateFromDialog()}
-      ${this.renderRenameDialog()}
+      ${this.renderCreateDialog()} ${this.renderCreateFromDialog()} ${this.renderRenameDialog()}
       ${this.renderDeleteDialog()}
     `;
   }
 
   private renderTemplate(template: ProjectTemplate) {
-    const created = template.created
-      ? new Date(template.created).toLocaleDateString()
-      : '';
+    const created = template.created ? new Date(template.created).toLocaleDateString() : '';
     return html`
       <div class="template-row">
         <sl-icon class="template-icon" name="file-earmark-code"></sl-icon>
@@ -446,7 +441,10 @@ export class ScionProjectTemplateList extends LitElement {
                 Rename
               </sl-menu-item>
               <sl-divider></sl-divider>
-              <sl-menu-item class="menu-item-danger" @click=${() => this.openDeleteDialog(template)}>
+              <sl-menu-item
+                class="menu-item-danger"
+                @click=${() => this.openDeleteDialog(template)}
+              >
                 <sl-icon slot="prefix" name="trash"></sl-icon>
                 Delete
               </sl-menu-item>
@@ -482,7 +480,9 @@ export class ScionProjectTemplateList extends LitElement {
               >
                 ${this.sourceProjects.length === 0
                   ? html`<sl-option disabled value="">No projects available</sl-option>`
-                  : this.sourceProjects.map(p => html`<sl-option value=${p.id}>${p.name}</sl-option>`)}
+                  : this.sourceProjects.map(
+                      (p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`
+                    )}
               </sl-select>
             `}
         <sl-input
@@ -507,7 +507,9 @@ export class ScionProjectTemplateList extends LitElement {
             variant="primary"
             size="small"
             ?loading=${this.createLoading}
-            ?disabled=${this.createLoading || !this.selectedSourceId || !this.newTemplateName.trim()}
+            ?disabled=${this.createLoading ||
+            !this.selectedSourceId ||
+            !this.newTemplateName.trim()}
             @click=${() => this.confirmCreateTemplate()}
           >
             Create Template
@@ -539,7 +541,9 @@ export class ScionProjectTemplateList extends LitElement {
           @sl-input=${(e: Event) => (this.createFromName = (e.target as HTMLInputElement).value)}
           ?disabled=${this.createFromLoading}
         ></sl-input>
-        ${this.createFromError ? html`<div class="dialog-error">${this.createFromError}</div>` : nothing}
+        ${this.createFromError
+          ? html`<div class="dialog-error">${this.createFromError}</div>`
+          : nothing}
         <div slot="footer">
           <sl-button
             variant="default"

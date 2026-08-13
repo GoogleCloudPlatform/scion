@@ -122,7 +122,11 @@ export class ScionJsonBrowser extends LitElement {
     return this.renderValue(this.data, '', true);
   }
 
-  private renderValue(value: unknown, path: string, isRoot: boolean): TemplateResult | typeof nothing {
+  private renderValue(
+    value: unknown,
+    path: string,
+    isRoot: boolean
+  ): TemplateResult | typeof nothing {
     if (value === null || value === undefined) {
       return html`<span class="val-null">null</span>`;
     }
@@ -218,11 +222,7 @@ export class ScionJsonBrowser extends LitElement {
     `;
   }
 
-  private renderCompositeEntry(
-    key: string,
-    val: unknown,
-    path: string
-  ): TemplateResult {
+  private renderCompositeEntry(key: string, val: unknown, path: string): TemplateResult {
     const isOpen = this.expanded.has(path);
     const isArr = Array.isArray(val);
     const count = isArr ? (val as unknown[]).length : Object.keys(val as object).length;

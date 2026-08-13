@@ -29,6 +29,25 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { hashColor, getInitials } from './chat-avatar.js';
+
+/** Structured attachment reference from the W7 API. */
+export interface AttachmentRefInfo {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+
+/** Image MIME types rendered inline. */
+const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+/** Format file size for display. */
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 @customElement('scion-chat-message')
 export class ScionChatMessage extends LitElement {
@@ -51,6 +70,10 @@ export class ScionChatMessage extends LitElement {
   /** Agent slug for avatar generation. */
   @property()
   agentSlug = '';
+
+  /** Sender display name for v2 multi-sender rendering. */
+  @property()
+  senderName = '';
 
   /** Timestamp string. */
   @property()
@@ -88,9 +111,16 @@ export class ScionChatMessage extends LitElement {
   @property()
   dispatchFailureReason = '';
 
-  /** File attachment paths. */
+  /** File attachment paths (wave-1 agent-style). */
   @property({ type: Array })
   attachments: string[] = [];
+
+  /**
+   * Structured attachment refs (wave-2 W7).
+   * Each entry has {id, name, mime, size}.
+   */
+  @property({ type: Array })
+  attachmentRefs: AttachmentRefInfo[] = [];
 
   @state()
   private renderedHtml = '';
@@ -216,9 +246,15 @@ export class ScionChatMessage extends LitElement {
       margin-top: 0;
     }
 
-    .md-content h1 { font-size: 1.25rem; }
-    .md-content h2 { font-size: 1.125rem; }
-    .md-content h3 { font-size: 1rem; }
+    .md-content h1 {
+      font-size: 1.25rem;
+    }
+    .md-content h2 {
+      font-size: 1.125rem;
+    }
+    .md-content h3 {
+      font-size: 1rem;
+    }
 
     .md-content a {
       color: var(--sl-color-primary-600, #2563eb);
@@ -374,6 +410,67 @@ export class ScionChatMessage extends LitElement {
       font-size: 0.75rem;
     }
 
+    /* W7: Inline image attachments */
+    .attachment-images {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.375rem;
+    }
+
+    .attachment-image {
+      max-width: 320px;
+      max-height: 240px;
+      border-radius: 0.5rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      cursor: pointer;
+      object-fit: contain;
+      background: var(--scion-bg-subtle, #f8fafc);
+      transition: opacity 0.2s ease;
+    }
+
+    .attachment-image:hover {
+      opacity: 0.85;
+    }
+
+    /* W7: Download chips for non-image files */
+    .download-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.625rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      font-size: 0.75rem;
+      color: var(--scion-text, #1e293b);
+      cursor: pointer;
+      text-decoration: none;
+      transition: background 0.15s ease;
+    }
+
+    .download-chip:hover {
+      background: var(--scion-border, #e2e8f0);
+    }
+
+    .download-chip sl-icon {
+      font-size: 0.875rem;
+      color: var(--scion-primary, #3b82f6);
+    }
+
+    .download-chip .file-name {
+      font-weight: 500;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .download-chip .file-size {
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.6875rem;
+    }
+
     /* Verbose (recessed) rendering — no bubble, muted text, small label */
     .message-wrapper.verbose .bubble-content {
       background: none;
@@ -492,9 +589,8 @@ export class ScionChatMessage extends LitElement {
       btn.className = 'copy-btn';
       btn.textContent = 'Copy';
       btn.addEventListener('click', () => {
-        const code =
-          pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
-        navigator.clipboard.writeText(code);
+        const code = pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
+        void navigator.clipboard.writeText(code);
         btn.textContent = 'Copied!';
         setTimeout(() => {
           btn.textContent = 'Copy';
@@ -532,7 +628,9 @@ export class ScionChatMessage extends LitElement {
     return html`
       <div class="message-wrapper ${dirClass}${visClass}">
         ${this.showHeader && this.fromAgent
-          ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">${this.getInitials()}</div>`
+          ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
+              ${this.getInitials()}
+            </div>`
           : this.fromAgent
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
@@ -553,12 +651,8 @@ export class ScionChatMessage extends LitElement {
                 </div>
               `
             : nothing}
-          <div class="bubble-content">
-            ${this.renderBody()}
-          </div>
-          ${this.renderDeliveryState()}
-          ${this.renderBadges()}
-          ${this.renderAttachments()}
+          <div class="bubble-content">${this.renderBody()}</div>
+          ${this.renderDeliveryState()} ${this.renderBadges()} ${this.renderAttachments()}
         </div>
       </div>
     `;
@@ -636,6 +730,12 @@ export class ScionChatMessage extends LitElement {
   }
 
   private renderAttachments() {
+    // W7: Render structured attachment refs (v2 mode).
+    if (this.attachmentRefs && this.attachmentRefs.length > 0) {
+      return this.renderV2Attachments();
+    }
+
+    // Wave-1: Render file path chips.
     if (!this.attachments || this.attachments.length === 0) return nothing;
 
     return html`
@@ -654,6 +754,54 @@ export class ScionChatMessage extends LitElement {
     `;
   }
 
+  /** Render W7 structured attachments: inline images + download chips. */
+  private renderV2Attachments() {
+    const images = this.attachmentRefs.filter((a) => IMAGE_MIMES.has(a.mime));
+    const files = this.attachmentRefs.filter((a) => !IMAGE_MIMES.has(a.mime));
+
+    return html`
+      ${images.length > 0
+        ? html`
+            <div class="attachment-images">
+              ${images.map(
+                (img) => html`
+                  <a href="/api/v1/chat/attachments/${img.id}" target="_blank" rel="noopener">
+                    <img
+                      class="attachment-image"
+                      src="/api/v1/chat/attachments/${img.id}"
+                      alt=${img.name}
+                      title=${img.name}
+                      loading="lazy"
+                    />
+                  </a>
+                `
+              )}
+            </div>
+          `
+        : nothing}
+      ${files.length > 0
+        ? html`
+            <div class="attachments">
+              ${files.map(
+                (file) => html`
+                  <a
+                    class="download-chip"
+                    href="/api/v1/chat/attachments/${file.id}"
+                    download=${file.name}
+                    title="Download ${file.name}"
+                  >
+                    <sl-icon name="file-earmark-arrow-down"></sl-icon>
+                    <span class="file-name">${file.name}</span>
+                    <span class="file-size">${formatFileSize(file.size)}</span>
+                  </a>
+                `
+              )}
+            </div>
+          `
+        : nothing}
+    `;
+  }
+
   private formatTime(): string {
     if (!this.timestamp) return '';
     try {
@@ -668,24 +816,14 @@ export class ScionChatMessage extends LitElement {
     }
   }
 
-  /** Simple deterministic colour from the agent slug. */
+  /** Deterministic colour from the agent slug or sender name. */
   private getAvatarColor(): string {
-    const colors = [
-      '#3b82f6', '#8b5cf6', '#06b6d4', '#10b981',
-      '#f59e0b', '#ef4444', '#ec4899', '#6366f1',
-    ];
-    let hash = 0;
-    const s = this.agentSlug || this.sender || '';
-    for (let i = 0; i < s.length; i++) {
-      hash = s.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    return colors[Math.abs(hash) % colors.length];
+    return hashColor(this.agentSlug || this.sender || '');
   }
 
-  /** First two characters of the agent slug or sender name. */
+  /** Initials derived from the agent slug or sender name. */
   private getInitials(): string {
-    const s = this.agentSlug || this.sender || '';
-    return s.substring(0, 2);
+    return getInitials(this.agentSlug || this.sender || '');
   }
 
   /** Extract the file basename from a path. */

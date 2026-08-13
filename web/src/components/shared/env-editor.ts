@@ -66,11 +66,11 @@ export class ScionEnvEditor extends LitElement {
       width: 100%;
     }
 
-    .env-row.required sl-input[data-field="key"]::part(base) {
+    .env-row.required sl-input[data-field='key']::part(base) {
       border-left: 3px solid var(--sl-color-warning-500, #f59e0b);
     }
 
-    .env-row.missing sl-input[data-field="value"]::part(base) {
+    .env-row.missing sl-input[data-field='value']::part(base) {
       border-color: var(--sl-color-danger-500, #ef4444);
     }
 
