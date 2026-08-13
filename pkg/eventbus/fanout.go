@@ -29,6 +29,13 @@ const InProcessBusName = "inprocess"
 // NamedEventBus pairs an EventBus with a name and an observer flag.
 // Observer event buses are fire-and-forget: publish errors are logged but
 // not returned to the caller.
+//
+// Handler invocation contract: only the inprocess spoke invokes event
+// handlers. External spokes (plugin adapters, gRPC brokers) receive
+// subscription patterns so they can filter on the remote side, but they
+// discard the handler — inbound delivery happens via the hub API endpoint.
+// FanOutEventBus.Subscribe enforces this by passing nil to non-inprocess
+// spokes.
 type NamedEventBus struct {
 	Name     string
 	Bus      EventBus
@@ -66,7 +73,7 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 	copy(buses, f.buses)
 	f.mu.RUnlock()
 
-	if msg.Channel != "" {
+	if msg != nil && msg.Channel != "" {
 		if msg.Channel == InProcessBusName {
 			return fmt.Errorf("channel %q is reserved for internal use", InProcessBusName)
 		}
@@ -81,14 +88,12 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 			if channelKey == "" {
 				channelKey = buses[i].Name
 			}
-			if msg != nil && channelKey == msg.Channel {
+			if channelKey == msg.Channel {
 				target = &buses[i]
 			}
 		}
-		if target == nil {
-			return fmt.Errorf("no broker registered for channel %q", msg.Channel)
-		}
-
+		// Always publish to inproc first for persistence/SSE, even if the
+		// target channel spoke is missing.
 		var wg sync.WaitGroup
 		errs := make([]error, 2)
 		if inproc != nil {
@@ -100,19 +105,25 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 				}
 			}()
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := target.Bus.Publish(ctx, topic, msg); err != nil {
-				if target.Observer {
-					f.log.Error("channel publish failed (observer)",
-						"channel", msg.Channel, "topic", topic, "error", err)
-				} else {
-					errs[1] = fmt.Errorf("channel %q publish failed: %w", msg.Channel, err)
+		if target != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := target.Bus.Publish(ctx, topic, msg); err != nil {
+					if target.Observer {
+						f.log.Error("channel publish failed (observer)",
+							"channel", msg.Channel, "topic", topic, "error", err)
+					} else {
+						errs[1] = fmt.Errorf("channel %q publish failed: %w", msg.Channel, err)
+					}
 				}
-			}
-		}()
+			}()
+		}
 		wg.Wait()
+		if target == nil {
+			errs[1] = fmt.Errorf("no broker registered for channel %q", msg.Channel)
+			return errors.Join(errs...)
+		}
 		return errors.Join(errs...)
 	}
 
@@ -135,7 +146,11 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 	return errors.Join(errs...)
 }
 
-// Subscribe delegates to all child event buses.
+// Subscribe registers a handler for the given pattern across all spokes.
+// The handler is only installed on the inprocess spoke; external spokes
+// receive the pattern with a nil handler so they can set up remote-side
+// filtering without invoking callbacks locally. This prevents double
+// delivery and nil-handler panics on external spokes.
 func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
 	f.mu.RLock()
 	buses := make([]NamedEventBus, len(f.buses))
@@ -144,7 +159,15 @@ func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscr
 
 	subs := make([]Subscription, 0, len(buses))
 	for _, nb := range buses {
-		sub, err := nb.Bus.Subscribe(pattern, handler)
+		// Only the inprocess spoke invokes handlers. External spokes
+		// get the pattern for remote filtering but discard the handler.
+		h := handler
+		if nb.Name != InProcessBusName {
+			h = nil
+		} else if h == nil {
+			continue
+		}
+		sub, err := nb.Bus.Subscribe(pattern, h)
 		if err != nil {
 			f.log.Error("fan-out subscribe failed",
 				"bus", nb.Name, "pattern", pattern, "error", err)
@@ -253,8 +276,13 @@ func (f *FanOutEventBus) ReplaceSpoke(name string, newBus NamedEventBus) error {
 }
 
 // replaySubscriptions replays all existing subscriptions onto a spoke so it
-// receives the same event patterns as the other spokes.
+// receives the same event patterns as the other spokes. The handler is nil
+// because only the inprocess spoke invokes handlers — external spokes use
+// the pattern for remote-side filtering only.
 func (f *FanOutEventBus) replaySubscriptions(bus NamedEventBus) {
+	if bus.Name == InProcessBusName {
+		return
+	}
 	f.subMu.Lock()
 	subs := make([]string, len(f.subscriptions))
 	copy(subs, f.subscriptions)

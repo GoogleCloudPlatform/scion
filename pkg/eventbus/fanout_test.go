@@ -318,10 +318,11 @@ func TestFanOutEventBus_ChannelRoutingUnmatchedChannel(t *testing.T) {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 
-	// Unmatched channel fails fast — nothing is published.
+	// Even though the target channel is missing, inproc must still receive
+	// the message so it is persisted and streamed via SSE (bug #945 fix).
 	inproc.mu.Lock()
-	if len(inproc.published) != 0 {
-		t.Errorf("inprocess bus should not receive message on unmatched channel, got %d", len(inproc.published))
+	if len(inproc.published) != 1 {
+		t.Errorf("inprocess bus should receive message even on unmatched channel, got %d", len(inproc.published))
 	}
 	inproc.mu.Unlock()
 }
@@ -491,6 +492,128 @@ func TestFanOutEventBus_HasSpoke(t *testing.T) {
 	}
 	if fan.HasSpoke("") {
 		t.Error("expected HasSpoke('') = false")
+	}
+}
+
+// --- Bug fix tests ---
+
+func TestFanout_PublishNilMessageDoesNotPanic(t *testing.T) {
+	inproc := newStubEventBus()
+	external := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "external", Bus: external},
+	}, slog.Default())
+
+	// A nil message must not panic (bug #946). The publish should fan out
+	// to all spokes because msg.Channel is effectively "".
+	if err := fan.Publish(context.Background(), "test.topic", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	inproc.mu.Lock()
+	if len(inproc.published) != 1 {
+		t.Errorf("inprocess bus: expected 1 message, got %d", len(inproc.published))
+	}
+	inproc.mu.Unlock()
+
+	external.mu.Lock()
+	if len(external.published) != 1 {
+		t.Errorf("external bus: expected 1 message, got %d", len(external.published))
+	}
+	external.mu.Unlock()
+}
+
+func TestFanout_ChannelMissingStillPersistsToInproc(t *testing.T) {
+	inproc := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+	}, slog.Default())
+
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+	msg.Channel = "nonexistent"
+
+	err := fan.Publish(context.Background(), "test.topic", msg)
+	if err == nil {
+		t.Fatal("expected error for missing channel spoke")
+	}
+	if !strings.Contains(err.Error(), "no broker registered for channel") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Bug #945: inproc must receive the message for persistence/SSE
+	// even when the target channel spoke is not registered.
+	inproc.mu.Lock()
+	if len(inproc.published) != 1 {
+		t.Errorf("inprocess bus should still receive message, got %d", len(inproc.published))
+	}
+	inproc.mu.Unlock()
+}
+
+func TestFanout_SubscribeOnlyInvokesHandlerOnInprocess(t *testing.T) {
+	inproc := newStubEventBus()
+	external := newStubEventBus()
+
+	// Track what handler each spoke received.
+	var inprocHandler, externalHandler EventHandler
+	inproc.subscribeFunc = func(pattern string, handler EventHandler) (Subscription, error) {
+		inprocHandler = handler
+		return &stubSubscription{}, nil
+	}
+	external.subscribeFunc = func(pattern string, handler EventHandler) (Subscription, error) {
+		externalHandler = handler
+		return &stubSubscription{}, nil
+	}
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "external", Bus: external},
+	}, slog.Default())
+
+	realHandler := func(_ context.Context, _ string, _ *messages.StructuredMessage) {}
+	if _, err := fan.Subscribe("test.>", realHandler); err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+
+	// Bug #944: The inprocess spoke must receive the real handler.
+	if inprocHandler == nil {
+		t.Error("inprocess spoke should have received a non-nil handler")
+	}
+
+	// Bug #944: External spokes must receive nil (pattern-only subscription).
+	if externalHandler != nil {
+		t.Error("external spoke should have received a nil handler (pattern-only)")
+	}
+}
+
+func TestFanout_ReplaySubscriptionsPassesNilHandler(t *testing.T) {
+	inproc := newStubEventBus()
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+	}, slog.Default())
+
+	// Subscribe to establish a pattern.
+	if _, err := fan.Subscribe("events.>", func(_ context.Context, _ string, _ *messages.StructuredMessage) {}); err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+
+	// Add a new external spoke and verify it gets nil handler via replay.
+	newBus := newStubEventBus()
+	var replayedHandler EventHandler
+	newBus.subscribeFunc = func(pattern string, handler EventHandler) (Subscription, error) {
+		replayedHandler = handler
+		return &stubSubscription{}, nil
+	}
+
+	if err := fan.AddSpoke(NamedEventBus{Name: "new-spoke", Bus: newBus}); err != nil {
+		t.Fatalf("AddSpoke failed: %v", err)
+	}
+
+	// replaySubscriptions should pass nil to external spokes.
+	if replayedHandler != nil {
+		t.Error("replayed subscription to external spoke should have nil handler")
 	}
 }
 
