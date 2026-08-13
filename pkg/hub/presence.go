@@ -240,7 +240,7 @@ func (pm *PresenceManager) sweepLoop() {
 }
 
 // sweep checks all tracked users and transitions any that have exceeded
-// the active window to idle.
+// the active window to idle. It also evicts stale typing throttle entries.
 func (pm *PresenceManager) sweep() {
 	now := time.Now()
 
@@ -261,6 +261,20 @@ func (pm *PresenceManager) sweep() {
 			}{uid, entry.displayName, entry.projectIDs})
 		}
 	}
+
+	// Evict stale typing throttle entries (older than 2× typingThrottle).
+	typingEvictThreshold := 2 * typingThrottle
+	for convKey, convMap := range pm.typing {
+		for uid, te := range convMap {
+			if now.Sub(te.lastTyping) > typingEvictThreshold {
+				delete(convMap, uid)
+			}
+		}
+		if len(convMap) == 0 {
+			delete(pm.typing, convKey)
+		}
+	}
+
 	pm.mu.Unlock()
 
 	// Publish transitions outside the lock.

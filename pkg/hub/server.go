@@ -3246,6 +3246,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.lifecycleHookEvaluator.Stop()
 	}
 
+	// Stop presence manager before closing event publisher
+	if s.presenceManager != nil {
+		s.presenceManager.Stop()
+	}
+
 	// Close event publisher
 	if s.events != nil {
 		s.events.Close()
@@ -3302,6 +3307,10 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		}
 		if s.teamsLinkService != nil {
 			s.teamsLinkService.Close()
+		}
+		// Stop presence manager before closing event publisher
+		if s.presenceManager != nil {
+			s.presenceManager.Stop()
 		}
 		if s.events != nil {
 			s.events.Close()
