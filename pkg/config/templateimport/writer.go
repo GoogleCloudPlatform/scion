@@ -118,7 +118,7 @@ func updateScionAgentConfig(templateDir string, agent *ImportedAgent) error {
 		switch agent.Harness {
 		case "gemini":
 			harnessID = "gemini-cli"
-		// "claude" maps to "claude" — no translation needed.
+			// "claude" maps to "claude" — no translation needed.
 		}
 		cfg.DefaultHarnessConfig = harnessID
 	}
