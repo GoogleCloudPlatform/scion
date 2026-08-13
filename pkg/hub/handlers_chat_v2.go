@@ -678,6 +678,10 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	if len(mentionedAgents) > 0 {
 		// --- Agent-routed: explicit mentions ---
 		s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, mentionedAgents, mentionResults, now)
+		// Ensure DM registry rows exist so the DM appears in the rail.
+		if isDM {
+			s.ensureDMRegistered(ctx, key, user.ID())
+		}
 		return
 	}
 
@@ -690,6 +694,8 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			dmAgent, err := s.store.GetAgent(ctx, agentID)
 			if err == nil && dmAgent != nil {
 				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, nil, now)
+				// Ensure DM registry rows exist so the DM appears in the rail.
+				s.ensureDMRegistered(ctx, key, user.ID())
 				return
 			}
 		}
