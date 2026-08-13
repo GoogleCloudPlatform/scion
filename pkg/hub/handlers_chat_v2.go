@@ -12,6 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Wave-2 Native Chat Handlers
+//
+// This file implements the wave-2 chat API: spaces, shared threads, DMs,
+// members, presence, typing indicators, notifications, attachments, and search.
+//
+// Architecture overview:
+//
+//   - Spaces are derived from projects — there is no separate space entity.
+//     The space list is the set of projects the caller can ActionRead.
+//   - Threads (webchat_topic) are shared, multi-participant conversations
+//     within a space. Each space has an auto-created #general thread.
+//   - DMs are identified by a canonical pair key (dm:agent:<uuid>:user:<uuid>
+//     or dm:user:<uuid>:user:<uuid>) and are global, not project-scoped.
+//   - Messages are persisted in the existing messages table with ThreadID
+//     set to the topic UUID or DM key. Routing follows the three-tier model:
+//     explicit @mentions → mentioned agents, else thread default_agent → that
+//     agent, else no agent engaged (type:chat, human-to-human).
+//   - Real-time delivery uses SSE via the stateManager: project-scoped
+//     subjects for space threads, fan-out for DMs. Per-thread EventSource
+//     (wave-1) is replaced by a single multiplexed connection.
+//   - Storage uses the dual-dialect store (webchannel_store.go for SQLite,
+//     webchannel_store_postgres.go for Postgres) with new webchat_topic,
+//     webchat_read_state, webchat_user_prefs, and webchat_dm tables.
+//   - Wave-1 tables (webchat_thread, webchat_thread_prefs) remain in place
+//     but receive no new writes when the v2 flag is ON (write-stop).
+//
+// Feature flag: web.native_chat_v2 (default ON as of W9). When OFF, the
+// frontend falls back to the wave-1 UI and endpoints in handlers_chat.go.
+// The v2 API endpoints remain registered regardless of the flag state.
+
 package hub
 
 import (

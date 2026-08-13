@@ -23,11 +23,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON.
+//
 // handleChatThreads handles GET /api/v1/chat/threads.
 // Returns the thread rail for the authenticated user: a list of agents
 // they have conversed with, each with last-message preview and an
 // unread indicator. Reads from webchat_thread — no aggregate query
 // over the messages table (AC19a).
+//
+// Superseded by handleChatSpaces + handleListThreads in handlers_chat_v2.go.
 func (s *Server) handleChatThreads(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
@@ -164,8 +168,12 @@ func (s *Server) handleChatThreads(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, chatThreadsResponse{Threads: entries})
 }
 
+// DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON.
+//
 // handleChatThreadRoutes dispatches sub-routes under /api/v1/chat/threads/.
 // Currently handles POST /api/v1/chat/threads/{agentId}/read.
+//
+// Superseded by handleConversationRead in handlers_chat_v2.go.
 func (s *Server) handleChatThreadRoutes(w http.ResponseWriter, r *http.Request) {
 	// Parse: /api/v1/chat/threads/{agentId}/read
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/threads/")
@@ -205,6 +213,9 @@ func (s *Server) handleChatThreadRoutes(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// DEPRECATED(wave-1): Writes to webchat_thread (wave-1 table). V2 UI uses
+	// handleConversationRead which writes to webchat_read_state instead.
+	// When v2 flag is ON, the frontend never calls this endpoint.
 	if err := s.webChatStore.MarkThreadRead(r.Context(), user.ID(), projectID, agentID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to mark thread read"})
 		return

@@ -34,7 +34,7 @@ declare global {
  * Feature flags that are ON by default (Phase 5+).
  * These can still be disabled via server injection or localStorage override.
  */
-const DEFAULT_ON_FLAGS = new Set(['web.native_chat']);
+const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.native_chat_v2']);
 
 /**
  * Check whether a feature flag is enabled.
@@ -66,7 +66,8 @@ export function isFeatureEnabled(name: string): boolean {
 
 /**
  * Wave-2 native chat feature flag.
- * Default OFF — not in DEFAULT_ON_FLAGS.
- * Enable via server injection or localStorage: scion:feature:web.native_chat_v2
+ * Default ON (W9) — added to DEFAULT_ON_FLAGS for general availability.
+ * Disable via server injection or localStorage: scion:feature:web.native_chat_v2=false
+ * to fall back to wave-1 UI for rollback.
  */
 export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';

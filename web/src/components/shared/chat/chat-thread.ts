@@ -81,19 +81,23 @@ const TYPING_SEND_THROTTLE_MS = 4000;
 
 @customElement('scion-chat-thread')
 export class ScionChatThread extends LitElement {
+  // DEPRECATED(wave-1): agentId-based mode — remove after v2 is stable and flag is permanently ON.
   @property()
   agentId = '';
 
+  // DEPRECATED(wave-1): agentId-based mode — remove after v2 is stable and flag is permanently ON.
   @property()
   agentName = '';
 
   @property({ type: Boolean })
   canSend = false;
 
+  // DEPRECATED(wave-1): per-agent visibility mode — remove after v2 is stable and flag is permanently ON.
   @property()
   visibilityMode: VisibilityMode = 'conversation';
 
   /** Whether the visibility toggle is shown in the header. */
+  // DEPRECATED(wave-1): visibility toggle — remove after v2 is stable and flag is permanently ON.
   @property({ type: Boolean })
   showVisibilityToggle = false;
 
@@ -515,6 +519,7 @@ export class ScionChatThread extends LitElement {
     }
   }
 
+  // DEPRECATED(wave-1): agentId-based load path — remove after v2 is stable and flag is permanently ON.
   /** Load saved preferences first, then fetch history. */
   private async loadPrefsAndHistory(): Promise<void> {
     await this.loadPrefs();
@@ -641,6 +646,7 @@ export class ScionChatThread extends LitElement {
   // Data loading
   // ---------------------------------------------------------------------------
 
+  // DEPRECATED(wave-1): agentId-based load path — remove after v2 is stable and flag is permanently ON.
   private async initialLoad(): Promise<void> {
     this.loading = true;
     this.error = null;
@@ -685,6 +691,7 @@ export class ScionChatThread extends LitElement {
     }
   }
 
+  // DEPRECATED(wave-1): agentId-based history fetch — remove after v2 is stable and flag is permanently ON.
   private async fetchHistory(cursor?: string): Promise<void> {
     const currentId = this.fetchId;
     const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
@@ -782,6 +789,7 @@ export class ScionChatThread extends LitElement {
   // SSE Streaming
   // ---------------------------------------------------------------------------
 
+  // DEPRECATED(wave-1): agentId-based SSE stream — remove after v2 is stable and flag is permanently ON.
   private startStream(): void {
     if (!this.isConnected || this.eventSource || !this.agentId) return;
 
@@ -1210,6 +1218,7 @@ export class ScionChatThread extends LitElement {
   // Send message
   // ---------------------------------------------------------------------------
 
+  // DEPRECATED(wave-1): agentId-based send — remove after v2 is stable and flag is permanently ON.
   private async handleChatSend(e: CustomEvent<ChatSendDetail>): Promise<void> {
     const { text, plain, interrupt, mentions, onSuccess } = e.detail;
     if (!text || this.sending) return;

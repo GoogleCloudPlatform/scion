@@ -112,8 +112,13 @@ func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
-	// Wave-1 thread watermark — kept as fallback for legacy agent:<slug>
-	// messages (will be retired when wave-1 thread_id backfill completes).
+	// DEPRECATED(wave-1): Wave-1 thread watermark — writes to webchat_thread.
+	// Only fires for legacy agent:<slug> thread_ids (wave-1 messages). V2
+	// conversations always set ThreadID to a topic UUID or dm:... key, so
+	// they take the threadHandled=true path above and never reach here.
+	// This write-stop is architectural: when the v2 flag is ON the frontend
+	// uses v2 endpoints exclusively, and all new messages carry v2 thread_ids.
+	// Remove this block after wave-1 is permanently retired.
 	if !threadHandled {
 		now := time.Now().UTC()
 		if err := b.store.TouchThread(ctx, userID, projectID, agentID, "", now); err != nil {

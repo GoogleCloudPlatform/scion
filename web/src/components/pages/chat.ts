@@ -17,6 +17,24 @@
 /**
  * Chat page component — top-level chat mode.
  *
+ * Wave-2 Architecture (default, web.native_chat_v2 ON):
+ *
+ * This is the primary entry point for Native Chat. Wave-2 adds shared spaces
+ * (one per project), multi-participant threads, DMs (agent and human),
+ * a members sidebar with presence indicators, typing indicators,
+ * notifications, file attachments, and message search.
+ *
+ * Key design decisions:
+ * - **Dual-dialect store**: webchat_topic, webchat_read_state, webchat_dm,
+ *   webchat_user_prefs tables (SQLite + Postgres) for chat-specific state.
+ *   Messages live in the existing messages table with ThreadID as the routing key.
+ * - **One persistence path**: messages are persisted once via the hub's
+ *   inprocess spoke; the web channel bus only updates watermarks.
+ * - **SSE via stateManager**: a single multiplexed SSE connection per client
+ *   replaces per-thread EventSource streams. Events are project-scoped.
+ * - **Feature flag**: `web.native_chat_v2` (default ON as of W9). Setting
+ *   it OFF reverts to the wave-1 agent-per-thread UI for rollback safety.
+ *
  * Renders inside `<scion-chat-shell>` and supports two modes:
  *
  * **V1 (web.native_chat_v2 OFF):**
@@ -25,10 +43,10 @@
  * - `/chat/:agentId` opens the thread for that agent
  *
  * **V2 (web.native_chat_v2 ON):**
- * - Space rail (chat-space-rail) replacing agent-based thread rail
- * - Conversation view refactored to key-based
+ * - Space rail (chat-space-rail) with project grouping, threads, DMs
+ * - Conversation view keyed by conversationKey (topic UUID or DM key)
  * - Routes: `/chat`, `/chat/space/{projectId}`, `/chat/space/{projectId}/thread/{topicId}`, `/chat/dm/{key}`
- * - Members sidebar toggle (placeholder for W5)
+ * - Members sidebar with presence, typing indicators, search panel
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -51,6 +69,7 @@ const loadChatMembers = () => import('../shared/chat/chat-members.js');
 const loadChatSearch = () => import('../shared/chat/chat-search.js');
 
 // ---- V1 types ----
+// DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON.
 
 /** Shape of a thread entry from GET /api/v1/chat/threads */
 interface ChatThread {
@@ -428,7 +447,8 @@ export class ScionPageChat extends LitElement {
   }
 
   // =========================================================================
-  // V1 Methods (preserved for flag-off compat)
+  // DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON.
+  // V1 Methods — preserved for rollback when web.native_chat_v2 is OFF.
   // =========================================================================
 
   private handleUserMessage(): void {
@@ -945,7 +965,7 @@ export class ScionPageChat extends LitElement {
     return this.renderV1();
   }
 
-  // ---- V1 Render ----
+  // ---- DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON. ----
 
   private renderV1() {
     return html`
