@@ -50,6 +50,7 @@ type mockIntegrationManager struct {
 	configureCalls     []string
 	replaceConfigCalls []string
 	lastReplacedConfig map[string]string
+	restartCalls       []string
 	reconnectCalls     []string
 	updateCalls        []string
 	installCalls       []string
@@ -139,6 +140,11 @@ func (m *mockIntegrationManager) ReplaceBrokerConfig(name string, cfg map[string
 	for k, v := range cfg {
 		m.lastReplacedConfig[k] = v
 	}
+	return m.replaceConfigErr
+}
+
+func (m *mockIntegrationManager) RestartBrokerPlugin(name string, cfg map[string]string) error {
+	m.restartCalls = append(m.restartCalls, name)
 	return m.replaceConfigErr
 }
 
@@ -493,8 +499,8 @@ func TestRestartIntegration_OK(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	if len(mgr.replaceConfigCalls) != 1 || mgr.replaceConfigCalls[0] != "telegram" {
-		t.Errorf("expected ReplaceBrokerConfig call for telegram, got %v", mgr.replaceConfigCalls)
+	if len(mgr.restartCalls) != 1 || mgr.restartCalls[0] != "telegram" {
+		t.Errorf("expected RestartBrokerPlugin call for telegram, got %v", mgr.restartCalls)
 	}
 }
 

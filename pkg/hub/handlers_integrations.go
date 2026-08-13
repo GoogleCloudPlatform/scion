@@ -78,6 +78,7 @@ type IntegrationManager interface {
 	GetDeploymentMode(pluginType, name string) plugin.DeploymentMode
 	ConfigureBroker(name string, extra map[string]string) error
 	ReplaceBrokerConfig(name string, cfg map[string]string) error
+	RestartBrokerPlugin(name string, cfg map[string]string) error
 	Reconnect(pluginType, name string) error
 	BrokerHealthCheck(name string) (status, message string, details map[string]string, err error)
 	BrokerInfo(name string) (version, channelID string, capabilities []string, err error)
@@ -663,20 +664,25 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 	}
 	SettingsWriteMu.Unlock()
 
-	// reconfigureIntegration pushes new config to the running plugin process
-	// (via ReplaceBrokerConfig) without killing it, so the existing spoke's
-	// RPC connection remains valid — no refreshBrokerSpoke needed here.
-	// However the spoke may never have been added (e.g. first install before
-	// a full hub restart), so ensure it exists.
-	if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
+	// Resolve the latest config from file + secrets + hub wiring creds.
+	merged := s.resolveIntegrationMergedConfig(r.Context(), mgr, name)
+
+	// Full process restart: kill the old plugin process and start a new one
+	// with the resolved config. This ensures a fresh go-plugin handshake and
+	// new MuxBroker connections for host callbacks, fixing stale callback
+	// issues that arise when a plugin was initially started with incomplete
+	// config (e.g. first-time install before the user configures bot_token).
+	if err := mgr.RestartBrokerPlugin(name, merged); err != nil {
 		slog.Error("Failed to restart integration", "plugin", name, "error", err)
 		InternalError(w)
 		return
 	}
 
-	// Ensure the plugin is wired as a FanOut spoke — it may have been
-	// installed mid-session and never added at startup.
-	s.ensureBrokerSpoke(mgr, name)
+	// Replace the FanOut spoke with a fresh RPC connection to the restarted
+	// plugin process. The old spoke wraps a dead connection from the killed
+	// process. refreshBrokerSpoke replaces an existing spoke or adds a new
+	// one if none existed (e.g. first install before a full hub restart).
+	s.refreshBrokerSpoke(mgr, name)
 
 	// Post-restart validation: check that the plugin is wired into the FanOut.
 	warnings := s.validateIntegrationWiring(name)
@@ -1542,9 +1548,12 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	return creds
 }
 
-// reconfigureIntegration reloads config for a plugin and calls ConfigureBroker.
-// For self-managed plugins, it falls back to Reconnect on ConfigureBroker failure.
-func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationManager, name string) error {
+// resolveIntegrationMergedConfig builds the full merged config map for a plugin
+// by reading the config file, injecting secrets from the secret backend,
+// carrying over runtime keys, and applying hub wiring credentials. The returned
+// map is ready to be pushed to the plugin via ReplaceBrokerConfig or
+// RestartBrokerPlugin.
+func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr IntegrationManager, name string) map[string]string {
 	pluginCfg := mgr.GetPluginConfig("broker", name)
 
 	// Re-read config file if one is configured. Prefer the immutable
@@ -1565,7 +1574,7 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 	}
 	merged, err := config.ResolvePluginConfig(configFile, inlineToPass)
 	if err != nil {
-		slog.Error("Failed to resolve config for reconfigure", "plugin", name, "error", err)
+		slog.Error("Failed to resolve config for integration", "plugin", name, "error", err)
 		merged = make(map[string]string)
 	}
 
@@ -1609,6 +1618,15 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 	if configFile != "" {
 		merged["config_file"] = configFile
 	}
+
+	return merged
+}
+
+// reconfigureIntegration reloads config for a plugin and calls ReplaceBrokerConfig
+// to push new config to the running process without restarting it.
+// For self-managed plugins, it falls back to Reconnect on failure.
+func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationManager, name string) error {
+	merged := s.resolveIntegrationMergedConfig(ctx, mgr, name)
 
 	if err := mgr.ReplaceBrokerConfig(name, merged); err != nil {
 		if mgr.IsSelfManaged("broker", name) {
