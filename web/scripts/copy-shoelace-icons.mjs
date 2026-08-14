@@ -40,6 +40,7 @@ const USED_ICONS = [
   'arrow-clockwise',
   'arrow-counterclockwise',
   'bell-slash',
+  'arrow-down',
   'arrow-down-circle',
   'arrow-left',
   'arrow-right',

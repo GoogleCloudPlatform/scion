@@ -40,34 +40,53 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 /**
- * Fixed palette of 16 visually distinct avatar colours.
- * Guarantees that up to 16 agents in the same view have
- * distinguishable backgrounds, even with very short names.
+ * Fixed palette of 24 avatar colours, all legible under white text on a
+ * dark surface (lightness stays between 26% and 55%).
+ *
+ * Built from 12 base hues at 30° spacing, each in two tiers — a mid tier
+ * and a deeper, more saturated tier offset by 15° — so that entries which
+ * are adjacent in hue still differ clearly in lightness and saturation.
+ * The two tiers are interleaved so neighbouring indices are never
+ * near-identical either.
+ *
+ * A 24-entry palette does not make collisions impossible (any hash into a
+ * fixed palette collides once the member count grows), but it makes them
+ * far rarer for the 8–16 members typically visible in one sidebar.
  */
-const AVATAR_PALETTE = [
-  'hsl(0, 55%, 48%)',   // red
-  'hsl(24, 55%, 48%)',  // orange-red
-  'hsl(48, 55%, 44%)',  // amber
-  'hsl(120, 40%, 42%)', // green
-  'hsl(160, 45%, 42%)', // teal
-  'hsl(195, 55%, 44%)', // cyan
-  'hsl(220, 55%, 50%)', // blue
-  'hsl(255, 45%, 52%)', // indigo
-  'hsl(280, 45%, 50%)', // purple
-  'hsl(310, 45%, 48%)', // magenta
-  'hsl(340, 55%, 48%)', // pink
-  'hsl(80, 40%, 42%)',  // lime
-  'hsl(30, 60%, 44%)',  // orange
-  'hsl(180, 45%, 40%)', // dark-cyan
-  'hsl(200, 50%, 42%)', // steel-blue
-  'hsl(270, 50%, 48%)', // violet
+export const AVATAR_PALETTE = [
+  'hsl(0, 58%, 50%)',   // red
+  'hsl(15, 70%, 34%)',  // brick
+  'hsl(30, 58%, 44%)',  // orange
+  'hsl(45, 70%, 30%)',  // bronze
+  'hsl(60, 50%, 38%)',  // olive
+  'hsl(75, 62%, 26%)',  // dark olive
+  'hsl(90, 45%, 38%)',  // lime
+  'hsl(105, 60%, 26%)', // forest
+  'hsl(120, 42%, 38%)', // green
+  'hsl(135, 60%, 26%)', // deep green
+  'hsl(150, 45%, 38%)', // emerald
+  'hsl(165, 65%, 26%)', // deep emerald
+  'hsl(180, 48%, 38%)', // cyan
+  'hsl(195, 70%, 28%)', // deep cyan
+  'hsl(210, 55%, 45%)', // steel blue
+  'hsl(225, 70%, 38%)', // deep blue
+  'hsl(240, 55%, 55%)', // blue
+  'hsl(255, 65%, 42%)', // indigo
+  'hsl(270, 48%, 55%)', // violet
+  'hsl(285, 60%, 40%)', // deep violet
+  'hsl(300, 45%, 48%)', // magenta
+  'hsl(315, 60%, 34%)', // deep magenta
+  'hsl(330, 55%, 50%)', // pink
+  'hsl(345, 70%, 36%)', // crimson
 ];
 
 /**
  * Hash a string to a consistent avatar colour.
- * Uses FNV-1a (32-bit) for much better distribution than djb2
- * on short, similar names (e.g. "C1" vs "C2"), then indexes
- * into a fixed palette of visually distinct colours.
+ *
+ * Uses FNV-1a (32-bit), which distributes UUID seeds evenly across the
+ * palette. Callers should therefore seed this with a member UUID, not a
+ * display name — short similar names ("c1", "c2", "c34") carry too little
+ * entropy for any hash to separate reliably.
  */
 export function hashColor(str: string): string {
   let hash = 0x811c9dc5; // FNV offset basis
