@@ -1023,6 +1023,17 @@ func TestHandleSubscriptions_AgentBulkCreate(t *testing.T) {
 		assert.Equal(t, agent.ProjectID, sub.ProjectID)
 	}
 
+	// A project-scoped entry that also names an agent is malformed, and is
+	// skipped rather than stored as an ambiguous row.
+	reqs = []createSubscriptionRequest{
+		{Scope: "project", AgentID: tid("agent-watched"), ProjectID: agent.ProjectID, TriggerActivities: []string{"ERROR"}},
+	}
+	rec = doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions/bulk", reqs, token)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var skipped []store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&skipped))
+	assert.Empty(t, skipped)
+
 	// A foreign project anywhere in the batch fails the whole request rather
 	// than silently dropping the entry.
 	reqs = []createSubscriptionRequest{

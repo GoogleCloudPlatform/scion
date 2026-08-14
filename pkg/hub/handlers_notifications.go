@@ -141,8 +141,12 @@ func (s *Server) notificationCaller(ctx context.Context) (*notificationSubscribe
 // could file a subscription in its own project that watches a foreign agent and
 // receive that agent's activity transitions. User callers are unrestricted.
 //
+// cleared memoizes agent IDs already found to be in the caller's project, so a
+// bulk request costs one lookup per distinct watched agent rather than one per
+// entry. Pass nil when there is nothing to share.
+//
 // Returns false when a response has already been written.
-func (s *Server) agentMaySubscribe(w http.ResponseWriter, r *http.Request, caller *notificationSubscriber, req *createSubscriptionRequest) bool {
+func (s *Server) agentMaySubscribe(w http.ResponseWriter, r *http.Request, caller *notificationSubscriber, req *createSubscriptionRequest, cleared map[string]bool) bool {
 	if !caller.isAgent() {
 		return true
 	}
@@ -151,6 +155,9 @@ func (s *Server) agentMaySubscribe(w http.ResponseWriter, r *http.Request, calle
 		return false
 	}
 	if req.Scope != store.SubscriptionScopeAgent || req.AgentID == "" {
+		return true
+	}
+	if cleared[req.AgentID] {
 		return true
 	}
 	target, err := s.store.GetAgent(r.Context(), req.AgentID)
@@ -167,6 +174,9 @@ func (s *Server) agentMaySubscribe(w http.ResponseWriter, r *http.Request, calle
 	if target.ProjectID != caller.ProjectID {
 		Forbidden(w)
 		return false
+	}
+	if cleared != nil {
+		cleared[req.AgentID] = true
 	}
 	return true
 }
@@ -406,7 +416,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 		// Agent callers may only subscribe within their own project, and may
 		// only watch agents in it.
-		if !s.agentMaySubscribe(w, r, caller, &req) {
+		if !s.agentMaySubscribe(w, r, caller, &req, nil) {
 			return
 		}
 
@@ -568,17 +578,9 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "bad_request", "Empty request array", nil)
 			return
 		}
-		// Agent callers may only subscribe within their own project, and may
-		// only watch agents in it. An authorization denial fails the whole
-		// request rather than silently dropping entries the way malformed
-		// items are dropped below.
-		for i := range reqs {
-			if !s.agentMaySubscribe(w, r, caller, &reqs[i]) {
-				return
-			}
-		}
-
-		// Enforce subscription limit if configured
+		// Enforce subscription limit if configured. This runs before the
+		// authorization pass below so that an oversized batch is rejected on
+		// the count alone, rather than after one agent lookup per entry.
 		if s.config.MaxSubscriptionsPerUser > 0 {
 			existing, err := s.store.GetSubscriptionsForSubscriber(ctx, caller.Type, caller.ID)
 			if err != nil {
@@ -592,6 +594,17 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			}
 		}
 
+		// Agent callers may only subscribe within their own project, and may
+		// only watch agents in it. An authorization denial fails the whole
+		// request rather than silently dropping entries the way malformed
+		// items are dropped below.
+		cleared := make(map[string]bool)
+		for i := range reqs {
+			if !s.agentMaySubscribe(w, r, caller, &reqs[i], cleared) {
+				return
+			}
+		}
+
 		var results []store.NotificationSubscription
 		for _, req := range reqs {
 			if req.Scope != store.SubscriptionScopeAgent && req.Scope != store.SubscriptionScopeProject {
@@ -601,6 +614,13 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 				continue
 			}
 			if req.Scope == store.SubscriptionScopeAgent && req.AgentID == "" {
+				continue
+			}
+			// A project-scoped entry carrying an agentId is malformed the same
+			// way single create treats it; skipping keeps the stored row
+			// unambiguous rather than filing a project subscription that also
+			// names an agent.
+			if req.Scope == store.SubscriptionScopeProject && req.AgentID != "" {
 				continue
 			}
 			sub := &store.NotificationSubscription{
