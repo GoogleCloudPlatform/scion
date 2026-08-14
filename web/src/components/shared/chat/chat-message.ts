@@ -367,6 +367,15 @@ export class ScionChatMessage extends LitElement {
       font-weight: 500;
     }
 
+    .md-content .mention.clickable {
+      cursor: pointer;
+    }
+
+    .md-content .mention.clickable:hover {
+      background: rgba(59, 130, 246, 0.25);
+      text-decoration: underline;
+    }
+
     .md-content table {
       border-collapse: collapse;
       width: 100%;
@@ -655,14 +664,44 @@ export class ScionChatMessage extends LitElement {
   }
 
   /**
-   * Post-process rendered HTML to wrap @mentions in styled spans.
+   * Post-process rendered HTML to wrap @mentions in styled, clickable spans.
    * Only processes text content between HTML tags to avoid mangling attributes.
+   *
+   * The captured slug is limited to `[\w.-]` so it can never break out of the
+   * `data-mention` attribute it is interpolated into.
    */
   private styleMentions(htmlStr: string): string {
     return htmlStr.replace(/>([^<]+)</g, (_match, text: string) => {
-      const styled = text.replace(/@([\w.-]+)/g, '<span class="mention">@$1</span>');
+      const styled = text.replace(
+        /@([\w.-]+)/g,
+        '<span class="mention clickable" data-mention="$1">@$1</span>'
+      );
       return `>${styled}<`;
     });
+  }
+
+  /**
+   * Clicking an @mention asks the page to open a DM with that entity. The
+   * message itself cannot resolve the slug — only the page knows the member
+   * roster — so it just reports the slug and lets the page navigate.
+   */
+  private handleMentionClick(e: MouseEvent): void {
+    const target = (e.target as HTMLElement | null)?.closest('.mention[data-mention]');
+    if (!target) return;
+
+    const slug = target.getAttribute('data-mention');
+    if (!slug) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    this.dispatchEvent(
+      new CustomEvent('mention-click', {
+        bubbles: true,
+        composed: true,
+        detail: { slug },
+      })
+    );
   }
 
   override render() {
@@ -780,7 +819,11 @@ export class ScionChatMessage extends LitElement {
     if (this.plain || !this.renderedHtml) {
       return html`<div class="plain-text">${this.body}</div>`;
     }
-    return html`<div class="md-content" .innerHTML=${this.renderedHtml}></div>`;
+    return html`<div
+      class="md-content"
+      @click=${this.handleMentionClick}
+      .innerHTML=${this.renderedHtml}
+    ></div>`;
   }
 
   private renderBadges() {

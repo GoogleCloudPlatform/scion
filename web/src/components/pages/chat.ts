@@ -87,6 +87,33 @@ function realTimestamp(value?: string): string {
 }
 
 /**
+ * Breakpoint below which the three chat panels become swipeable screens.
+ * Mirrors the `max-width: 768px` media query in the component styles.
+ */
+const MOBILE_BREAKPOINT_PX = 768;
+
+/** A horizontal swipe must cover this many px to count as a flick. */
+const SWIPE_FLICK_PX = 50;
+
+/** A flick only counts if it completes within this many ms. */
+const SWIPE_FLICK_MS = 300;
+
+/** A slow drag counts as a swipe once it covers this many px. */
+const SWIPE_DRAG_PX = 100;
+
+/** A gesture is horizontal once it moves this many px sideways. */
+const SWIPE_AXIS_LOCK_PX = 10;
+
+/**
+ * Fold a mention slug onto the form the composer inserts: lowercased, with
+ * runs of whitespace as dashes. Lets `@my-agent` match a display name of
+ * "My Agent" as well as the agent's own slug.
+ */
+function normalizeMentionSlug(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, '-');
+}
+
+/**
  * Project a sidebar agent member onto the shared Agent shape so it can seed the
  * state manager's agent map. Only the fields SSE status deltas merge onto
  * matter — the map exists here purely to give those deltas a baseline.
@@ -213,6 +240,15 @@ export class ScionPageChat extends LitElement {
   private _presenceProjectIds: string[] = [];
   /** Slow fallback poll for what SSE does not cover (see FALLBACK_POLL_INTERVAL_MS). */
   private _fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Which of the three panels is on screen. Only meaningful under the mobile
+   * breakpoint — on desktop all three are visible and this is inert.
+   */
+  @state() private mobilePanel: 'left' | 'center' | 'right' = 'center';
+  private _touchStartX = 0;
+  private _touchStartY = 0;
+  private _touchStartTime = 0;
+  private _isSwiping = false;
 
   static override styles = css`
     :host {
@@ -326,7 +362,8 @@ export class ScionPageChat extends LitElement {
 
     /* ---- Shared layout ---- */
 
-    .thread-content {
+    .thread-content,
+    .v2-content {
       flex: 1;
       display: flex;
       flex-direction: column;
@@ -368,6 +405,17 @@ export class ScionPageChat extends LitElement {
     }
 
     /* ---- V2 Layout ---- */
+
+    /*
+     * The three panels live in one track so the mobile breakpoint can slide
+     * between them. On desktop the track is just a flex row filling the page.
+     */
+    .v2-panels {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      overflow: hidden;
+    }
 
     .v2-rail {
       width: 260px;
@@ -440,14 +488,13 @@ export class ScionPageChat extends LitElement {
     }
 
     @media (max-width: 768px) {
-      .thread-rail,
-      .v2-rail {
+      /* V1: one screen at a time, driven by the thread-open host class. */
+      .thread-rail {
         width: 100%;
         max-width: none;
       }
 
-      :host(.thread-open) .thread-rail,
-      :host(.thread-open) .v2-rail {
+      :host(.thread-open) .thread-rail {
         display: none;
       }
 
@@ -455,8 +502,46 @@ export class ScionPageChat extends LitElement {
         display: none;
       }
 
-      .v2-members {
-        display: none;
+      /*
+       * V2: the three panels become three screens on one sliding track,
+       * one viewport wide each, selected by swiping (see handleTouchEnd).
+       */
+      .v2-panels {
+        width: 300%;
+        transition: transform 0.3s ease;
+      }
+
+      .v2-panels[data-panel='left'] {
+        transform: translateX(0);
+      }
+
+      .v2-panels[data-panel='center'] {
+        transform: translateX(-33.3333%);
+      }
+
+      .v2-panels[data-panel='right'] {
+        transform: translateX(-66.6666%);
+      }
+
+      .v2-panels .v2-rail,
+      .v2-panels .v2-content,
+      .v2-panels .v2-members {
+        width: 33.3333%;
+        min-width: 0;
+        max-width: none;
+        flex: 0 0 33.3333%;
+      }
+
+      /* The members panel is a swipe target on mobile, so it stays in the
+         track even when the desktop toggle has collapsed it. */
+      .v2-panels .v2-members.collapsed {
+        display: flex;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .v2-panels {
+        transition: none;
       }
     }
   `;
@@ -1283,6 +1368,7 @@ export class ScionPageChat extends LitElement {
       peerKind: 'user',
     };
     this.classList.add('thread-open');
+    this.mobilePanel = 'center';
 
     // Update the URL with pushState to avoid page recreation flicker
     const base = import.meta.env.BASE_URL;
@@ -1304,6 +1390,8 @@ export class ScionPageChat extends LitElement {
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view
     this.classList.remove('thread-open');
+    // No conversation to show — put the mobile view back on the rail.
+    this.mobilePanel = 'left';
     // Navigate to bare /chat
     const base = import.meta.env.BASE_URL;
     const chatPath = '/chat';
@@ -1426,6 +1514,7 @@ export class ScionPageChat extends LitElement {
             peerKind: dm.peerKind,
           };
           this.classList.add('thread-open');
+          this.mobilePanel = 'center';
           dispatchPageTitle(this, peerName, 'Chat');
           return;
         }
@@ -1471,6 +1560,7 @@ export class ScionPageChat extends LitElement {
         peerKind,
       };
       this.classList.add('thread-open');
+      this.mobilePanel = 'center';
       dispatchPageTitle(this, displayName || 'DM', 'Chat');
       return;
     }
@@ -1851,7 +1941,84 @@ export class ScionPageChat extends LitElement {
     };
     if (!detail) return;
 
-    const dmKey = this.buildDMKey(detail.memberId, detail.memberKind);
+    this.openDM(detail.memberId, detail.memberKind, detail.displayName);
+  }
+
+  // ---- Mobile swipe navigation ----
+
+  private handleTouchStart(e: TouchEvent): void {
+    const touch = e.touches[0];
+    if (!touch) return;
+    this._touchStartX = touch.clientX;
+    this._touchStartY = touch.clientY;
+    this._touchStartTime = Date.now();
+    this._isSwiping = false;
+  }
+
+  private handleTouchMove(e: TouchEvent): void {
+    if (!this._touchStartTime) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+
+    const dx = touch.clientX - this._touchStartX;
+    const dy = touch.clientY - this._touchStartY;
+
+    // Horizontal only — a vertical drag is the message list scrolling.
+    if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > SWIPE_AXIS_LOCK_PX) {
+      this._isSwiping = true;
+    }
+  }
+
+  private handleTouchEnd(e: TouchEvent): void {
+    const wasSwiping = this._isSwiping;
+    const startX = this._touchStartX;
+    const elapsed = Date.now() - this._touchStartTime;
+    this._touchStartTime = 0;
+    this._isSwiping = false;
+
+    if (!wasSwiping || !this.isMobileViewport()) return;
+
+    const touch = e.changedTouches[0];
+    if (!touch) return;
+
+    const dx = touch.clientX - startX;
+    const isSwipe =
+      (Math.abs(dx) > SWIPE_FLICK_PX && elapsed < SWIPE_FLICK_MS) || Math.abs(dx) > SWIPE_DRAG_PX;
+    if (!isSwipe) return;
+
+    if (dx > 0) {
+      this.handleSwipeRight();
+    } else {
+      this.handleSwipeLeft();
+    }
+  }
+
+  /** Swiping right reveals the panel to the left of the current one. */
+  private handleSwipeRight(): void {
+    if (this.mobilePanel === 'center') {
+      this.mobilePanel = 'left';
+    } else if (this.mobilePanel === 'right') {
+      this.mobilePanel = 'center';
+    }
+  }
+
+  /** Swiping left reveals the panel to the right of the current one. */
+  private handleSwipeLeft(): void {
+    if (this.mobilePanel === 'center') {
+      this.mobilePanel = 'right';
+    } else if (this.mobilePanel === 'left') {
+      this.mobilePanel = 'center';
+    }
+  }
+
+  /** Are we under the breakpoint where panels behave as separate screens? */
+  private isMobileViewport(): boolean {
+    return window.innerWidth <= MOBILE_BREAKPOINT_PX;
+  }
+
+  /** Open the DM conversation with a member in the centre panel. */
+  private openDM(memberId: string, memberKind: 'user' | 'agent', displayName: string): void {
+    const dmKey = this.buildDMKey(memberId, memberKind);
     if (dmKey) {
       this.v2Conversation = {
         conversationKey: dmKey,
@@ -1860,11 +2027,12 @@ export class ScionPageChat extends LitElement {
         threadName: '',
         defaultAgent: '',
         isDM: true,
-        peerName: detail.displayName,
-        peerId: detail.memberId,
-        peerKind: detail.memberKind,
+        peerName: displayName,
+        peerId: memberId,
+        peerKind: memberKind,
       };
       this.classList.add('thread-open');
+      this.mobilePanel = 'center';
 
       // Update the URL with the full DM key so parseV2Route can use it directly.
       const dmPath = `/chat/dm/${encodeURIComponent(dmKey)}`;
@@ -1872,12 +2040,44 @@ export class ScionPageChat extends LitElement {
       const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + dmPath : dmPath;
       window.history.pushState({}, '', browserPath);
 
-      dispatchPageTitle(this, detail.displayName, 'Chat');
+      dispatchPageTitle(this, displayName, 'Chat');
       return;
     }
 
     // User ID not available — resolve via API
-    void this.resolveDMByPeerId(detail.memberId, detail.memberKind, detail.displayName);
+    void this.resolveDMByPeerId(memberId, memberKind, displayName);
+  }
+
+  /**
+   * Clicking an @mention in a message opens the DM with that entity. The slug
+   * is what the composer inserted: an agent slug, or a display name lowercased
+   * with spaces turned into dashes (see mention-autocomplete).
+   */
+  private handleMentionClick(e: CustomEvent): void {
+    const slug = (e.detail as { slug?: string } | null)?.slug;
+    if (!slug) return;
+
+    const wanted = normalizeMentionSlug(slug);
+
+    const agent = this.v2AgentMembers.find(
+      (a) =>
+        normalizeMentionSlug(a.slug || '') === wanted ||
+        normalizeMentionSlug(a.displayName) === wanted
+    );
+    if (agent) {
+      this.openDM(agent.id, 'agent', agent.displayName);
+      return;
+    }
+
+    const human = this.v2HumanMembers.find(
+      (h) =>
+        normalizeMentionSlug(h.displayName) === wanted ||
+        normalizeMentionSlug(h.email?.split('@')[0] || '') === wanted
+    );
+    if (human) {
+      this.openDM(human.id, 'user', human.displayName);
+    }
+    // Unknown mention (e.g. a stale name): leave the view as it is.
   }
 
   /**
@@ -1981,44 +2181,53 @@ export class ScionPageChat extends LitElement {
 
   private renderV2() {
     return html`
-      <div class="v2-rail">
-        ${this.v2SpaceRailLoaded
-          ? html`
-              <scion-chat-space-rail
-                selectedKey=${this.v2Conversation?.conversationKey || ''}
-                @thread-select=${this.handleThreadSelect}
-                @reset-view=${this.handleResetView}
-              ></scion-chat-space-rail>
-            `
-          : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
-      </div>
-
-      <div class="thread-content">
-        ${this.v2Conversation
-          ? this.renderV2Conversation()
-          : html`
-              <div class="empty-state">
-                <sl-icon name="chat-dots"></sl-icon>
-                <span class="title">Select a conversation</span>
-                <span class="subtitle">Choose a thread from the left, or click a member to start a DM</span>
-              </div>
-            `}
-      </div>
-
-      <div class="v2-members ${this.v2MembersExpanded ? '' : 'collapsed'}">
-        <div class="v2-members-header">
-          <span>Members</span>
+      <div
+        class="v2-panels"
+        data-panel=${this.mobilePanel}
+        @touchstart=${this.handleTouchStart}
+        @touchmove=${this.handleTouchMove}
+        @touchend=${this.handleTouchEnd}
+        @mention-click=${this.handleMentionClick}
+      >
+        <div class="v2-rail">
+          ${this.v2SpaceRailLoaded
+            ? html`
+                <scion-chat-space-rail
+                  selectedKey=${this.v2Conversation?.conversationKey || ''}
+                  @thread-select=${this.handleThreadSelect}
+                  @reset-view=${this.handleResetView}
+                ></scion-chat-space-rail>
+              `
+            : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
         </div>
-        <scion-chat-members
-          .humans=${this.v2HumanMembers}
-          .agents=${this.v2AgentMembers}
-          .typingUserIds=${this.v2TypingUserIds}
-          .unreadFromIds=${this.v2UnreadFromIds}
-          current-user-id="${this.pageData?.user?.id || ''}"
-          dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
-          @member-click=${this.handleMemberClick}
-          @reset-view=${this.handleResetView}
-        ></scion-chat-members>
+
+        <div class="v2-content">
+          ${this.v2Conversation
+            ? this.renderV2Conversation()
+            : html`
+                <div class="empty-state">
+                  <sl-icon name="chat-dots"></sl-icon>
+                  <span class="title">Select a conversation</span>
+                  <span class="subtitle">Choose a thread from the left, or click a member to start a DM</span>
+                </div>
+              `}
+        </div>
+
+        <div class="v2-members ${this.v2MembersExpanded ? '' : 'collapsed'}">
+          <div class="v2-members-header">
+            <span>Members</span>
+          </div>
+          <scion-chat-members
+            .humans=${this.v2HumanMembers}
+            .agents=${this.v2AgentMembers}
+            .typingUserIds=${this.v2TypingUserIds}
+            .unreadFromIds=${this.v2UnreadFromIds}
+            current-user-id="${this.pageData?.user?.id || ''}"
+            dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
+            @member-click=${this.handleMemberClick}
+            @reset-view=${this.handleResetView}
+          ></scion-chat-members>
+        </div>
       </div>
     `;
   }
