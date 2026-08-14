@@ -87,10 +87,10 @@ export class ScionChatInteragentMarker extends LitElement {
       background: rgba(148, 163, 184, 0.18);
     }
 
-    /* Expanded state — bordered container, left-aligned to match message bubbles */
+    /* Expanded state — bordered container, centered to match collapsed pill */
     .marker-expanded {
       max-width: min(70%, 600px);  /* match .bubble max-width in chat-message.ts */
-      margin-left: 1rem;  /* same left margin as message bubbles */
+      margin-left: auto;   /* centered */
       margin-right: auto;
       margin-top: 0.25rem;
       margin-bottom: 0.25rem;

@@ -151,6 +151,8 @@ export class ScionPageChat extends LitElement {
   @state() private v2TypingUserIds: string[] = [];
   /** Map of userId → expiry timer for typing indicators at page level. */
   private _typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** IDs of members with unread DM messages (for the unread dot on avatars). */
+  @state() private v2UnreadFromIds: string[] = [];
   /** Whether the search panel is visible. */
   @state() private v2SearchActive = false;
   /** Whether the search component has been lazy-loaded. */
@@ -159,6 +161,8 @@ export class ScionPageChat extends LitElement {
   private _presenceInterval: ReturnType<typeof setInterval> | null = null;
   /** Tracked project IDs for presence heartbeat. */
   private _presenceProjectIds: string[] = [];
+  /** Periodic member refresh interval (fallback for SSE agent updates). */
+  private _memberRefreshInterval: ReturnType<typeof setInterval> | null = null;
 
   static override styles = css`
     :host {
@@ -441,6 +445,11 @@ export class ScionPageChat extends LitElement {
       stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
       this.stopPresenceHeartbeat();
+      // Clean up member refresh interval
+      if (this._memberRefreshInterval) {
+        clearInterval(this._memberRefreshInterval);
+        this._memberRefreshInterval = null;
+      }
       // Clean up typing timers
       for (const timer of this._typingTimers.values()) {
         clearTimeout(timer);
@@ -626,6 +635,9 @@ export class ScionPageChat extends LitElement {
       void this.loadHubMembers();
     }
 
+    // Load unread DM peer IDs for the blue unread dot on member avatars
+    void this.loadUnreadDMPeers();
+
     // Subscribe to SSE events
     stateManager.addEventListener('chat-message-received', this._onChatMessage);
     stateManager.addEventListener('chat-topic-updated', this._onChatTopic);
@@ -635,6 +647,19 @@ export class ScionPageChat extends LitElement {
 
     // Listen for rail-loaded to set up the SSE scope with space IDs
     this.addEventListener('rail-loaded', this._onRailLoaded);
+
+    // Periodic member refresh as a fallback for SSE agent status updates.
+    // This ensures wobble and status badges update even if SSE events
+    // are delayed or the subscription doesn't match.
+    this._memberRefreshInterval = setInterval(() => {
+      if (this.v2Conversation?.projectId) {
+        void this.loadV2Members(this.v2Conversation.projectId);
+      } else {
+        void this.loadHubMembers();
+      }
+      // Also refresh unread DM state
+      void this.loadUnreadDMPeers();
+    }, 15000);
   }
 
   /** Called when the space rail finishes loading its data. Sets up the SSE scope. */
@@ -878,6 +903,7 @@ export class ScionPageChat extends LitElement {
 
     // /chat — no conversation selected, show hub-level members
     this.v2Conversation = null;
+    this.v2MembersExpanded = true; // Always show tray in base view (no header toggle available)
     this.classList.remove('thread-open');
     void this.loadHubMembers();
   }
@@ -1040,9 +1066,12 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleChatTopic(e: Event): void {
-    const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
-    const topicId = (detail?.id as string) || (detail?.topicId as string) || '';
-    const newDefault = (detail?.defaultAgent as string) ?? '';
+    const eventDetail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
+    // Unwrap the notifyWithData envelope: { state, data: { action, topic: {...} } }
+    const eventData = (eventDetail?.data ?? eventDetail) as Record<string, unknown> | undefined;
+    const topic = eventData?.topic as Record<string, unknown> | undefined;
+    const topicId = (topic?.id as string) || '';
+    const newDefault = (topic?.defaultAgent as string) ?? '';
 
     // If this is the currently-viewed conversation, update defaultAgent directly
     // and skip the rail reload to avoid the parseV2Route race that overwrites
@@ -1122,6 +1151,7 @@ export class ScionPageChat extends LitElement {
   /** Reset to the global /chat view (no conversation selected). */
   private handleResetView(): void {
     this.v2Conversation = null;
+    this.v2MembersExpanded = true; // Always show tray in base view
     this.classList.remove('thread-open');
     // Navigate to bare /chat
     const base = import.meta.env.BASE_URL;
@@ -1344,6 +1374,7 @@ export class ScionPageChat extends LitElement {
             status?: string;
             activity?: string;
             lastSeen?: string;
+            projectId?: string;
           }>;
         };
         this.v2AgentMembers = (agentData.agents || []).map((a) => ({
@@ -1354,6 +1385,7 @@ export class ScionPageChat extends LitElement {
           phase: a.phase || '',
           activity: a.activity || '',
           lastSeen: a.lastSeen || '',
+          projectId: a.projectId || '',
         }));
       }
 
@@ -1415,6 +1447,35 @@ export class ScionPageChat extends LitElement {
     }
   }
 
+  /**
+   * Fetch DM conversations and extract peer IDs with unread messages
+   * for the blue unread dot on member avatars.
+   */
+  private async loadUnreadDMPeers(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/chat/dms');
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        dms?: Array<{
+          peerId: string;
+          hasUnread: boolean;
+        }>;
+      };
+      const unreadIds = (data.dms || [])
+        .filter((dm) => dm.hasUnread)
+        .map((dm) => dm.peerId);
+      // Only update if changed to avoid unnecessary re-renders
+      if (
+        unreadIds.length !== this.v2UnreadFromIds.length ||
+        unreadIds.some((id, i) => id !== this.v2UnreadFromIds[i])
+      ) {
+        this.v2UnreadFromIds = unreadIds;
+      }
+    } catch {
+      // Non-critical — unread dots just won't show
+    }
+  }
+
   private async loadV2Members(projectId: string): Promise<void> {
     if (!projectId) return;
     try {
@@ -1438,6 +1499,7 @@ export class ScionPageChat extends LitElement {
             phase?: string;
             activity?: string;
             lastSeen?: string;
+            projectId?: string;
           }>;
           members?: SpaceMember[];
         };
@@ -1459,6 +1521,7 @@ export class ScionPageChat extends LitElement {
           phase: a.phase || '',
           activity: a.activity || '',
           lastSeen: a.lastSeen || '',
+          projectId: a.projectId || projectId,
         }));
         // Also populate the legacy v2Members for the thread component
         this.v2Members = [
@@ -1774,6 +1837,7 @@ export class ScionPageChat extends LitElement {
           .humans=${this.v2HumanMembers}
           .agents=${this.v2AgentMembers}
           .typingUserIds=${this.v2TypingUserIds}
+          .unreadFromIds=${this.v2UnreadFromIds}
           current-user-id="${this.pageData?.user?.id || ''}"
           dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
           @member-click=${this.handleMemberClick}
@@ -1784,12 +1848,15 @@ export class ScionPageChat extends LitElement {
   }
 
   /** Look up the project slug for an agent DM peer. */
-  private getAgentProjectSlug(_peerId: string): string {
-    // Check v2AgentMembers for project info — agents from the members endpoint
-    // belong to the currently-selected project. For hub-level agents, use the
-    // projectIdToSlug map if the agent has a projectId.
-    // Since the members endpoint doesn't include projectId, we derive it from
-    // the current conversation or the first known project.
+  private getAgentProjectSlug(peerId: string): string {
+    // First, check if the agent member has a projectId and resolve its slug
+    const agent = this.v2AgentMembers.find((a) => a.id === peerId);
+    if (agent?.projectId) {
+      const slug = this._projectIdToSlug.get(agent.projectId);
+      if (slug) return slug;
+    }
+
+    // Fallback: derive from the current conversation
     if (this.v2Conversation?.projectId) {
       return this._projectIdToSlug.get(this.v2Conversation.projectId) || '';
     }

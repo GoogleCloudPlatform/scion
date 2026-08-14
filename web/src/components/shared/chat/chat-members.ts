@@ -29,7 +29,8 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
+import type { PropertyValues } from 'lit';
 import './chat-avatar.js';
 import '../status-badge.js';
 
@@ -53,6 +54,7 @@ export interface ChatAgentMember {
   phase?: string;
   activity?: string;
   lastSeen?: string;
+  projectId?: string;
 }
 
 export type ChatMember = ChatHumanMember | ChatAgentMember;
@@ -85,6 +87,17 @@ export class ScionChatMembers extends LitElement {
   /** IDs of members currently typing — shows a dot overlay on their avatar. */
   @property({ type: Array })
   typingUserIds: string[] = [];
+
+  /** IDs of members with unread messages — shows a blue dot on their avatar. */
+  @property({ type: Array })
+  unreadFromIds: string[] = [];
+
+  /** Agent IDs that recently changed state — drives wobble animation. */
+  @state() private recentlyChangedAgents = new Set<string>();
+  /** Timers for clearing the recently-changed state after 2s. */
+  private _wobbleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Previous agent state snapshots for change detection. */
+  private _prevAgentStates = new Map<string, string>();
 
   static override styles = css`
     :host {
@@ -178,6 +191,19 @@ export class ScionChatMembers extends LitElement {
       font-style: italic;
     }
 
+    /* Unread indicator dot — top-left of avatar */
+    .unread-dot {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #3b82f6;
+      border: 2px solid var(--scion-bg, #1e293b);
+      z-index: 1;
+    }
+
     /* Typing indicator overlay on avatar */
     .avatar-wrapper {
       position: relative;
@@ -246,6 +272,42 @@ export class ScionChatMembers extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.removeEventListener('click', this._handleHostClick);
+    // Clean up wobble timers
+    for (const timer of this._wobbleTimers.values()) clearTimeout(timer);
+    this._wobbleTimers.clear();
+  }
+
+  override updated(changedProps: PropertyValues): void {
+    super.updated(changedProps);
+    if (changedProps.has('agents')) {
+      this.checkAgentStateChanges();
+    }
+  }
+
+  /** Compare current agent states against previous to detect changes for wobble. */
+  private checkAgentStateChanges(): void {
+    for (const a of this.agents) {
+      const currentState = `${a.phase}:${a.activity}`;
+      const prevState = this._prevAgentStates.get(a.id);
+
+      if (prevState !== undefined && prevState !== currentState) {
+        // State changed — start/restart wobble
+        this.recentlyChangedAgents.add(a.id);
+
+        // Clear existing timer
+        const existing = this._wobbleTimers.get(a.id);
+        if (existing) clearTimeout(existing);
+
+        // Set 2s timer to stop wobble
+        this._wobbleTimers.set(a.id, setTimeout(() => {
+          this.recentlyChangedAgents.delete(a.id);
+          this._wobbleTimers.delete(a.id);
+          this.requestUpdate();
+        }, 2000));
+      }
+
+      this._prevAgentStates.set(a.id, currentState);
+    }
   }
 
   /** Click on the host element itself (empty space) triggers a reset. */
@@ -292,6 +354,7 @@ export class ScionChatMembers extends LitElement {
   private renderHuman(m: ChatHumanMember) {
     const isActive = this.dmPeerId === m.id;
     const isTyping = this.typingUserIds.includes(m.id);
+    const hasUnread = this.unreadFromIds.includes(m.id);
     return html`
       <div
         class="member-item ${isActive ? 'active-peer' : ''}"
@@ -306,6 +369,7 @@ export class ScionChatMembers extends LitElement {
             size="28"
             presence-state="${m.presenceState || ''}"
           ></scion-chat-avatar>
+          ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
           ${isTyping
             ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
             : nothing}
@@ -335,16 +399,6 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
-  /** Determine whether an agent is actively working (for wobble animation). */
-  private isAgentActive(agent: ChatAgentMember): boolean {
-    const activity = (agent.activity || '').toLowerCase();
-    if (activity.includes('blocked') || activity.includes('waiting') || activity.includes('stalled') || activity.includes('completed')) {
-      return false;
-    }
-    const phase = (agent.phase || '').toLowerCase();
-    return phase === 'running' && (activity.includes('executing') || activity.includes('thinking') || activity.includes('working') || activity === '');
-  }
-
   /** Map an agent's phase/activity to a StatusType for the badge. */
   private resolveAgentStatus(a: ChatAgentMember): string {
     // The activity field carries the detailed operational state (e.g.
@@ -363,6 +417,7 @@ export class ScionChatMembers extends LitElement {
   private renderAgent(a: ChatAgentMember) {
     const isActive = this.dmPeerId === a.id;
     const isTyping = this.typingUserIds.includes(a.id);
+    const hasUnread = this.unreadFromIds.includes(a.id);
 
     // Build tooltip: activity detail (line 1) + last seen (line 2)
     const detailText = a.activity || a.phase || 'unknown';
@@ -376,8 +431,9 @@ export class ScionChatMembers extends LitElement {
         class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(a.id, 'agent', a.displayName)}
       >
-        <div class="avatar-wrapper ${this.isAgentActive(a) ? 'active' : ''}">
+        <div class="avatar-wrapper ${this.recentlyChangedAgents.has(a.id) ? 'active' : ''}">
           <scion-chat-avatar name="${a.slug || a.displayName}" color-seed="${a.id}" size="28"></scion-chat-avatar>
+          ${hasUnread ? html`<div class="unread-dot"></div>` : nothing}
           ${isTyping
             ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`
             : nothing}
