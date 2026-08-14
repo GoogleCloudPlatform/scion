@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,40 +26,135 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// notificationCaller resolves the notification subscriber identity of the
-// caller. Users subscribe under their user ID; agents subscribe under their
-// slug, matching the subscriber ID the dispatcher writes for agent
-// subscriptions (see notifications.go). Returns empty strings when the
-// request carries no identity, or when the calling agent has no agent record.
-func (s *Server) notificationCaller(ctx context.Context) (subscriberType, subscriberID string) {
-	if user := GetUserIdentityFromContext(ctx); user != nil {
-		return store.SubscriberTypeUser, user.ID()
+// notificationSubscriber identifies the caller of the notification endpoints.
+//
+// Users are global: their user ID is unique hub-wide. Agents are not — an agent
+// subscribes under its slug (matching the subscriber ID the dispatcher writes
+// for agent subscriptions, see notifications.go), and slugs are unique only
+// within a project (pkg/ent/schema/agent.go). The subscriber identity of an
+// agent is therefore the pair (ProjectID, ID), and every read and ownership
+// check for an agent caller must qualify by project — the store keys
+// notifications and subscriptions on (subscriberType, subscriberID) alone.
+type notificationSubscriber struct {
+	Type      string // store.SubscriberTypeUser or store.SubscriberTypeAgent
+	ID        string // user ID, or agent slug
+	ProjectID string // agent callers only; empty for users
+}
+
+// isAgent reports whether the caller is an agent.
+func (n *notificationSubscriber) isAgent() bool {
+	return n.Type == store.SubscriberTypeAgent
+}
+
+// ownsSubscription reports whether sub belongs to this caller.
+func (n *notificationSubscriber) ownsSubscription(sub *store.NotificationSubscription) bool {
+	if sub.SubscriberType != n.Type || sub.SubscriberID != n.ID {
+		return false
 	}
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		agent, err := s.store.GetAgent(ctx, agentIdent.ID())
-		if err != nil {
-			return "", ""
+	return !n.isAgent() || sub.ProjectID == n.ProjectID
+}
+
+// ownsNotification reports whether notif was addressed to this caller.
+func (n *notificationSubscriber) ownsNotification(notif *store.Notification) bool {
+	if notif.SubscriberType != n.Type || notif.SubscriberID != n.ID {
+		return false
+	}
+	return !n.isAgent() || notif.ProjectID == n.ProjectID
+}
+
+// scopeNotifications drops rows outside the caller's project. Agent slugs are
+// reused across projects, so a store lookup by subscriber ID alone can return
+// another project's rows.
+func (n *notificationSubscriber) scopeNotifications(notifs []store.Notification) []store.Notification {
+	if !n.isAgent() {
+		return notifs
+	}
+	scoped := make([]store.Notification, 0, len(notifs))
+	for _, notif := range notifs {
+		if notif.ProjectID == n.ProjectID {
+			scoped = append(scoped, notif)
 		}
-		return store.SubscriberTypeAgent, agent.Slug
 	}
-	return "", ""
+	return scoped
 }
 
-// isCallingAgent reports whether an agentId filter names the calling agent,
-// accepting either the agent's slug or its record ID.
-func (s *Server) isCallingAgent(ctx context.Context, agentID, callerSlug string) bool {
-	if agentID == callerSlug {
-		return true
+// scopeSubscriptions drops rows outside the caller's project, for the same
+// reason as scopeNotifications.
+func (n *notificationSubscriber) scopeSubscriptions(subs []store.NotificationSubscription) []store.NotificationSubscription {
+	if !n.isAgent() {
+		return subs
 	}
+	scoped := make([]store.NotificationSubscription, 0, len(subs))
+	for _, sub := range subs {
+		if sub.ProjectID == n.ProjectID {
+			scoped = append(scoped, sub)
+		}
+	}
+	return scoped
+}
+
+// notificationCaller resolves the notification subscriber identity of the
+// caller. Returns nil when the request carries no usable identity; returns an
+// error only when the identity could not be resolved because of a store
+// failure.
+func (s *Server) notificationCaller(ctx context.Context) (*notificationSubscriber, error) {
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		return &notificationSubscriber{Type: store.SubscriberTypeUser, ID: user.ID()}, nil
+	}
+
 	agentIdent := GetAgentIdentityFromContext(ctx)
-	return agentIdent != nil && agentID == agentIdent.ID()
+	if agentIdent == nil {
+		return nil, nil
+	}
+
+	// The slug is not on the token, so the agent record is needed to build the
+	// subscriber identity.
+	agent, err := s.store.GetAgent(ctx, agentIdent.ID())
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	// The token's project is what authorization is granted against; a record
+	// that disagrees with it must not be usable.
+	if agent.ProjectID != agentIdent.ProjectID() {
+		return nil, nil
+	}
+
+	return &notificationSubscriber{
+		Type:      store.SubscriberTypeAgent,
+		ID:        agent.Slug,
+		ProjectID: agent.ProjectID,
+	}, nil
 }
 
-// agentProjectAllowed reports whether an agent caller may act on the given
-// project. Non-agent callers are unaffected.
-func agentProjectAllowed(ctx context.Context, projectID string) bool {
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		return agentIdent.ProjectID() == projectID
+// resolveNotificationCaller resolves the caller and writes the failure response
+// itself. Returns nil when the request should not proceed.
+func (s *Server) resolveNotificationCaller(w http.ResponseWriter, r *http.Request) *notificationSubscriber {
+	caller, err := s.notificationCaller(r.Context())
+	if err != nil {
+		slog.Error("Failed to resolve notification caller identity", "error", err)
+		writeErrorFromErr(w, err, "")
+		return nil
+	}
+	if caller == nil {
+		Forbidden(w)
+		return nil
+	}
+	return caller
+}
+
+// checkAgentNotifyScope verifies that agent callers may modify notification
+// state. Returns true if the request should proceed, false if a 403 was
+// written. User callers are not affected.
+func checkAgentNotifyScope(w http.ResponseWriter, r *http.Request) bool {
+	if agentIdent := GetAgentIdentityFromContext(r.Context()); agentIdent != nil {
+		if !agentIdent.HasScope(ScopeAgentNotify) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Missing required scope: project:agent:notify", nil)
+			return false
+		}
 	}
 	return true
 }
@@ -66,19 +162,24 @@ func agentProjectAllowed(ctx context.Context, projectID string) bool {
 // handleNotifications handles GET /api/v1/notifications.
 // Lists notifications for the authenticated caller (user or agent).
 //
-// Without agentId: returns flat []Notification array (existing tray behavior).
-// With ?agentId=X: returns { userNotifications: [...], agentNotifications: [...] }.
-// Agent callers may only read their own notifications, so agentId must be
-// empty or identify the calling agent.
+// Response shape depends on the caller and the agentId filter:
+//   - user, no agentId: flat []Notification array (tray behavior).
+//   - user with ?agentId=X: { userNotifications: [...], agentNotifications: [...] }.
+//   - agent (with or without ?agentId=X): flat []Notification array of the
+//     notifications addressed to the calling agent, optionally narrowed to
+//     those about agent X. An agent never sees another subscriber's rows, so
+//     the combined shape has nothing to carry.
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
 
-	subType, subID := s.notificationCaller(r.Context())
-	if subType == "" {
-		Forbidden(w)
+	caller := s.resolveNotificationCaller(w, r)
+	if caller == nil {
+		return
+	}
+	if !checkAgentReadScope(w, r) {
 		return
 	}
 
@@ -87,35 +188,24 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 
 	agentID := r.URL.Query().Get("agentId")
 
-	if subType == store.SubscriberTypeAgent {
-		// Agents only ever see notifications addressed to themselves; the
-		// agentId filter may only name the caller.
-		if agentID != "" && !s.isCallingAgent(r.Context(), agentID, subID) {
-			Forbidden(w)
-			return
+	if caller.isAgent() || agentID == "" {
+		var notifs []store.Notification
+		var err error
+		if agentID == "" {
+			notifs, err = s.store.GetNotifications(r.Context(), caller.Type, caller.ID, onlyUnacknowledged)
+		} else {
+			notifs, err = s.store.GetNotificationsByAgent(r.Context(), agentID, caller.Type, caller.ID, onlyUnacknowledged)
 		}
-		notifs, err := s.store.GetNotifications(r.Context(), subType, subID, onlyUnacknowledged)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		writeJSON(w, http.StatusOK, notifs)
+		writeJSON(w, http.StatusOK, caller.scopeNotifications(notifs))
 		return
 	}
 
-	if agentID == "" {
-		// Existing behaviour: flat array of user notifications
-		notifs, err := s.store.GetNotifications(r.Context(), subType, subID, onlyUnacknowledged)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		writeJSON(w, http.StatusOK, notifs)
-		return
-	}
-
-	// Agent-scoped: return combined response
-	userNotifs, err := s.store.GetNotificationsByAgent(r.Context(), agentID, subType, subID, onlyUnacknowledged)
+	// User caller, agent-scoped: return combined response
+	userNotifs, err := s.store.GetNotificationsByAgent(r.Context(), agentID, caller.Type, caller.ID, onlyUnacknowledged)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -150,9 +240,17 @@ type agentNotificationsResponse struct {
 //   - POST /api/v1/notifications/subscriptions/bulk: Bulk create subscriptions
 //   - POST /api/v1/notifications/subscriptions/bulk-delete: Bulk delete subscriptions
 func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request) {
-	subType, subID := s.notificationCaller(r.Context())
-	if subType == "" {
-		Forbidden(w)
+	caller := s.resolveNotificationCaller(w, r)
+	if caller == nil {
+		return
+	}
+	// Reads need the standard project read scope; everything else here mutates
+	// notification state.
+	if r.Method == http.MethodGet {
+		if !checkAgentReadScope(w, r) {
+			return
+		}
+	} else if !checkAgentNotifyScope(w, r) {
 		return
 	}
 
@@ -160,34 +258,51 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 
 	// POST /api/v1/notifications/ack-all
 	if id == "ack-all" && r.Method == http.MethodPost {
-		if err := s.store.AcknowledgeAllNotifications(r.Context(), subType, subID); err != nil {
+		// AcknowledgeAllNotifications keys on the subscriber ID alone, which
+		// for an agent would span every project that reuses its slug. There is
+		// no project-scoped variant, so agents ack individually instead.
+		if caller.isAgent() {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"agent tokens must acknowledge notifications individually", nil)
+			return
+		}
+		if err := s.store.AcknowledgeAllNotifications(r.Context(), caller.Type, caller.ID); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		slog.Info("All notifications acknowledged", "subscriberType", subType, "subscriberID", subID)
+		slog.Info("All notifications acknowledged", "subscriberType", caller.Type, "subscriberID", caller.ID)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 
 	// Subscription routes: /api/v1/notifications/subscriptions[/...]
 	if id == "subscriptions" {
-		s.handleSubscriptionRoutes(w, r, subType, subID, action)
+		s.handleSubscriptionRoutes(w, r, caller, action)
 		return
 	}
 
 	// Subscription template routes: /api/v1/notifications/templates[/...]
 	if id == "templates" {
-		s.handleSubscriptionTemplateRoutes(w, r, subID, action)
+		s.handleSubscriptionTemplateRoutes(w, r, caller, action)
 		return
 	}
 
 	// POST /api/v1/notifications/{id}/ack
 	if id != "" && action == "ack" && r.Method == http.MethodPost {
-		if err := s.store.AcknowledgeNotification(r.Context(), id); err != nil {
-			writeErrorFromErr(w, err, "")
+		notif, err := s.store.GetNotification(r.Context(), id)
+		if err != nil {
+			writeErrorFromErr(w, err, "Notification")
 			return
 		}
-		slog.Info("Notification acknowledged", "notificationID", id, "subscriberType", subType, "subscriberID", subID)
+		if !caller.ownsNotification(notif) {
+			Forbidden(w)
+			return
+		}
+		if err := s.store.AcknowledgeNotification(r.Context(), id); err != nil {
+			writeErrorFromErr(w, err, "Notification")
+			return
+		}
+		slog.Info("Notification acknowledged", "notificationID", id, "subscriberType", caller.Type, "subscriberID", caller.ID)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
@@ -214,7 +329,7 @@ type updateSubscriptionRequest struct {
 }
 
 // handleSubscriptionRoutes handles CRUD for notification subscriptions.
-func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request, subscriberType, subscriberID, subID string) {
+func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request, caller *notificationSubscriber, subID string) {
 	ctx := r.Context()
 
 	switch {
@@ -248,19 +363,19 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			return
 		}
 		// Agent callers may only subscribe within their own project.
-		if !agentProjectAllowed(ctx, req.ProjectID) {
+		if caller.isAgent() && req.ProjectID != caller.ProjectID {
 			Forbidden(w)
 			return
 		}
 
 		// Enforce subscription limit if configured
 		if s.config.MaxSubscriptionsPerUser > 0 {
-			existing, err := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
+			existing, err := s.store.GetSubscriptionsForSubscriber(ctx, caller.Type, caller.ID)
 			if err != nil {
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			if len(existing) >= s.config.MaxSubscriptionsPerUser {
+			if len(caller.scopeSubscriptions(existing)) >= s.config.MaxSubscriptionsPerUser {
 				writeError(w, http.StatusConflict, "limit_exceeded",
 					fmt.Sprintf("Maximum subscription limit reached (%d)", s.config.MaxSubscriptionsPerUser), nil)
 				return
@@ -271,19 +386,19 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			ID:                api.NewUUID(),
 			Scope:             req.Scope,
 			AgentID:           req.AgentID,
-			SubscriberType:    subscriberType,
-			SubscriberID:      subscriberID,
+			SubscriberType:    caller.Type,
+			SubscriberID:      caller.ID,
 			ProjectID:         req.ProjectID,
 			TriggerActivities: req.TriggerActivities,
-			CreatedBy:         subscriberID,
+			CreatedBy:         caller.ID,
 		}
 
 		if err := s.store.CreateNotificationSubscription(ctx, sub); err != nil {
 			if err == store.ErrAlreadyExists {
 				// Idempotent: return existing subscription
-				existing, listErr := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
+				existing, listErr := s.store.GetSubscriptionsForSubscriber(ctx, caller.Type, caller.ID)
 				if listErr == nil {
-					for _, e := range existing {
+					for _, e := range caller.scopeSubscriptions(existing) {
 						if e.Scope == req.Scope && e.AgentID == req.AgentID && e.ProjectID == req.ProjectID {
 							writeJSON(w, http.StatusOK, e)
 							return
@@ -298,16 +413,17 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 
 		slog.Info("Subscription created",
-			"subscriptionID", sub.ID, "scope", sub.Scope, "subscriberType", subscriberType, "subscriberID", subscriberID)
+			"subscriptionID", sub.ID, "scope", sub.Scope, "subscriberType", caller.Type, "subscriberID", caller.ID)
 		writeJSON(w, http.StatusCreated, sub)
 
 	// GET /api/v1/notifications/subscriptions — List
 	case subID == "" && r.Method == http.MethodGet:
-		subs, err := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
+		subs, err := s.store.GetSubscriptionsForSubscriber(ctx, caller.Type, caller.ID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		subs = caller.scopeSubscriptions(subs)
 
 		// Apply optional filters
 		projectID := r.URL.Query().Get("projectId")
@@ -316,9 +432,6 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 		agentID := r.URL.Query().Get("agentId")
 		scope := r.URL.Query().Get("scope")
-		if scope == "project" {
-			scope = "project"
-		}
 
 		filtered := make([]store.NotificationSubscription, 0)
 		for _, sub := range subs {
@@ -354,7 +467,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeErrorFromErr(w, err, "Subscription")
 			return
 		}
-		if sub.SubscriberType != subscriberType || sub.SubscriberID != subscriberID {
+		if !caller.ownsSubscription(sub) {
 			Forbidden(w)
 			return
 		}
@@ -377,7 +490,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		// Return the updated subscription
 		sub.TriggerActivities = req.TriggerActivities
 		slog.Info("Subscription updated",
-			"subscriptionID", subID, "subscriberType", subscriberType, "subscriberID", subscriberID)
+			"subscriptionID", subID, "subscriberType", caller.Type, "subscriberID", caller.ID)
 		writeJSON(w, http.StatusOK, sub)
 
 	// DELETE /api/v1/notifications/subscriptions/{id} — Delete
@@ -388,7 +501,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeErrorFromErr(w, err, "Subscription")
 			return
 		}
-		if sub.SubscriberType != subscriberType || sub.SubscriberID != subscriberID {
+		if !caller.ownsSubscription(sub) {
 			Forbidden(w)
 			return
 		}
@@ -399,7 +512,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 
 		slog.Info("Subscription deleted",
-			"subscriptionID", subID, "subscriberType", subscriberType, "subscriberID", subscriberID)
+			"subscriptionID", subID, "subscriberType", caller.Type, "subscriberID", caller.ID)
 		w.WriteHeader(http.StatusNoContent)
 
 	// POST /api/v1/notifications/subscriptions/bulk — Bulk create
@@ -413,15 +526,26 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "bad_request", "Empty request array", nil)
 			return
 		}
+		// Agent callers may only subscribe within their own project. An
+		// authorization denial fails the whole request rather than silently
+		// dropping entries the way malformed items are dropped below.
+		if caller.isAgent() {
+			for _, req := range reqs {
+				if req.ProjectID != caller.ProjectID {
+					Forbidden(w)
+					return
+				}
+			}
+		}
 
 		// Enforce subscription limit if configured
 		if s.config.MaxSubscriptionsPerUser > 0 {
-			existing, err := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
+			existing, err := s.store.GetSubscriptionsForSubscriber(ctx, caller.Type, caller.ID)
 			if err != nil {
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			if len(existing)+len(reqs) > s.config.MaxSubscriptionsPerUser {
+			if len(caller.scopeSubscriptions(existing))+len(reqs) > s.config.MaxSubscriptionsPerUser {
 				writeError(w, http.StatusConflict, "limit_exceeded",
 					fmt.Sprintf("Bulk create would exceed subscription limit (%d)", s.config.MaxSubscriptionsPerUser), nil)
 				return
@@ -439,28 +563,23 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			if req.Scope == store.SubscriptionScopeAgent && req.AgentID == "" {
 				continue
 			}
-			// Agent callers may only subscribe within their own project.
-			if !agentProjectAllowed(ctx, req.ProjectID) {
-				continue
-			}
-
 			sub := &store.NotificationSubscription{
 				ID:                api.NewUUID(),
 				Scope:             req.Scope,
 				AgentID:           req.AgentID,
-				SubscriberType:    subscriberType,
-				SubscriberID:      subscriberID,
+				SubscriberType:    caller.Type,
+				SubscriberID:      caller.ID,
 				ProjectID:         req.ProjectID,
 				TriggerActivities: req.TriggerActivities,
-				CreatedBy:         subscriberID,
+				CreatedBy:         caller.ID,
 			}
 
 			if err := s.store.CreateNotificationSubscription(ctx, sub); err != nil {
 				if err == store.ErrAlreadyExists {
 					// Idempotent: find and return existing
-					existing, listErr := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
+					existing, listErr := s.store.GetSubscriptionsForSubscriber(ctx, caller.Type, caller.ID)
 					if listErr == nil {
-						for _, e := range existing {
+						for _, e := range caller.scopeSubscriptions(existing) {
 							if e.Scope == req.Scope && e.AgentID == req.AgentID && e.ProjectID == req.ProjectID {
 								results = append(results, e)
 								break
@@ -477,7 +596,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 
 		slog.Info("Bulk subscriptions created",
-			"count", len(results), "subscriberType", subscriberType, "subscriberID", subscriberID)
+			"count", len(results), "subscriberType", caller.Type, "subscriberID", caller.ID)
 		writeJSON(w, http.StatusCreated, results)
 
 	// POST /api/v1/notifications/subscriptions/bulk-delete — Bulk delete
@@ -500,7 +619,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			if err != nil {
 				continue
 			}
-			if sub.SubscriberType != subscriberType || sub.SubscriberID != subscriberID {
+			if !caller.ownsSubscription(sub) {
 				continue
 			}
 			if err := s.store.DeleteNotificationSubscription(ctx, id); err != nil {
@@ -510,7 +629,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 
 		slog.Info("Bulk subscriptions deleted",
-			"deleted", deleted, "requested", len(req.IDs), "subscriberType", subscriberType, "subscriberID", subscriberID)
+			"deleted", deleted, "requested", len(req.IDs), "subscriberType", caller.Type, "subscriberID", caller.ID)
 		writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
 
 	default:
@@ -543,8 +662,18 @@ func (r *createTemplateRequest) UnmarshalJSON(data []byte) error {
 }
 
 // handleSubscriptionTemplateRoutes handles CRUD for subscription templates.
-func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http.Request, subscriberID, templateID string) {
+//
+// Templates are a user-facing convenience with no project containment of their
+// own (CreatedBy is a bare ID, and list/delete are not project-scoped), and
+// agents have no use for them. Agent callers are refused outright rather than
+// admitted to a surface that cannot express their containment rules.
+func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http.Request, caller *notificationSubscriber, templateID string) {
 	ctx := r.Context()
+
+	if caller.isAgent() {
+		Forbidden(w)
+		return
+	}
 
 	switch {
 	// POST /api/v1/notifications/templates — Create
@@ -572,7 +701,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			Scope:             req.Scope,
 			TriggerActivities: req.TriggerActivities,
 			ProjectID:         req.ProjectID,
-			CreatedBy:         subscriberID,
+			CreatedBy:         caller.ID,
 		}
 
 		if err := s.store.CreateSubscriptionTemplate(ctx, tmpl); err != nil {
@@ -585,7 +714,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 		}
 
 		slog.Info("Subscription template created",
-			"templateID", tmpl.ID, "name", tmpl.Name, "createdBy", subscriberID)
+			"templateID", tmpl.ID, "name", tmpl.Name, "createdBy", caller.ID)
 		writeJSON(w, http.StatusCreated, tmpl)
 
 	// GET /api/v1/notifications/templates — List
@@ -608,7 +737,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			writeErrorFromErr(w, err, "Template")
 			return
 		}
-		if tmpl.CreatedBy != subscriberID {
+		if tmpl.CreatedBy != caller.ID {
 			Forbidden(w)
 			return
 		}
@@ -617,7 +746,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			return
 		}
 		slog.Info("Subscription template deleted",
-			"templateID", templateID, "createdBy", subscriberID)
+			"templateID", templateID, "createdBy", caller.ID)
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
