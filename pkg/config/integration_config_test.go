@@ -281,6 +281,30 @@ func TestResolvePluginConfig_SecretKeysStrippedWithConfigFile(t *testing.T) {
 	}
 }
 
+func TestResolvePluginConfig_SecretKeysStrippedFromConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plugin.yaml")
+	p, _ := NewYAMLConfigProvider(path)
+	if err := p.Save(context.Background(), map[string]string{
+		"bot_token":    "secret-from-file",
+		"inbound_mode": "poll",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ResolvePluginConfig(path, map[string]string{"mode": "plugin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := result["bot_token"]; ok {
+		t.Error("secret config key bot_token should be stripped from config file")
+	}
+	if result["inbound_mode"] != "poll" {
+		t.Errorf("file non-secret key should be present: got %q", result["inbound_mode"])
+	}
+}
+
 func TestResolvePluginConfig_BackendKeyNamesStrippedFromBothSources(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plugin.yaml")

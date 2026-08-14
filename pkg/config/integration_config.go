@@ -223,8 +223,8 @@ var backendSecretKeys = []string{
 // ResolvePluginConfig builds the config map for a plugin with consistent precedence.
 // If configFile is set, the file is the source of truth for non-wiring keys.
 // Inline config is only used for wiring keys or as fallback when no config_file exists.
-// Secret config keys (bot_token, signing_key, etc.) are always stripped from inline
-// config so that the secret backend takes precedence.
+// Secret config keys (bot_token, signing_key, etc.) are always stripped from both
+// inline and file config so that the secret backend takes precedence.
 func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map[string]string, error) {
 	// Build a clean copy of inline config with secret keys stripped.
 	cleanedInline := make(map[string]string, len(inlineConfig))
@@ -258,6 +258,13 @@ func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map
 	for _, sk := range backendSecretKeys {
 		delete(fileConfig, sk)
 		delete(fileConfig, strings.ToLower(sk))
+	}
+
+	// Strip secret config keys from file config (same treatment as inline config).
+	for k := range fileConfig {
+		if secretConfigKeys[k] {
+			delete(fileConfig, k)
+		}
 	}
 
 	// File is the base for non-wiring keys.
