@@ -712,7 +712,7 @@ func TestHandleNotifications_AgentCannotReachSameSlugInOtherProject(t *testing.T
 	// ack-all keys on subscriber ID alone, so it is refused for agents rather
 	// than silently acking every same-slug agent's notifications.
 	rec = doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/ack-all", nil, tokenA)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusNotImplemented, rec.Code)
 
 	// Project B's data survived intact.
 	storedSub, err := s.GetNotificationSubscription(ctx, subB.ID)
@@ -932,6 +932,66 @@ func TestHandleSubscriptions_AgentCannotSubscribeOtherProject(t *testing.T) {
 	}
 	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq, token)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestHandleSubscriptions_AgentCannotWatchOtherProjectAgent covers the subtler
+// half of project containment: the subscription is filed under the caller's own
+// project, but watches an agent in another one, which would relay that agent's
+// activity to the caller.
+func TestHandleSubscriptions_AgentCannotWatchOtherProjectAgent(t *testing.T) {
+	srv, s, _ := setupNotificationHandlerTest(t)
+	ctx := context.Background()
+
+	otherProject := &store.Project{
+		ID:   tid("project-watch-other"),
+		Name: "Watch Other Project",
+		Slug: "watch-other-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+
+	foreign := &store.Agent{
+		ID:        tid("agent-foreign-watched"),
+		Slug:      "foreign-watched-agent",
+		Name:      "Foreign Watched Agent",
+		ProjectID: otherProject.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, foreign))
+
+	agent, token := setupNotificationAgentCaller(t, srv, s, tid("project-notif-handler"), "watcher-agent")
+
+	// projectId is the caller's own — only the watched agent is foreign.
+	createReq := createSubscriptionRequest{
+		Scope:             "agent",
+		AgentID:           foreign.ID,
+		ProjectID:         agent.ProjectID,
+		TriggerActivities: []string{"COMPLETED"},
+	}
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	// Same via bulk, alongside an otherwise valid entry.
+	reqs := []createSubscriptionRequest{
+		{Scope: "project", ProjectID: agent.ProjectID, TriggerActivities: []string{"COMPLETED"}},
+		createReq,
+	}
+	rec = doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions/bulk", reqs, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	// An unknown agent is refused the same way, without confirming it is
+	// merely absent.
+	createReq.AgentID = tid("agent-does-not-exist")
+	rec = doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	stored, err := s.GetSubscriptionsForSubscriber(ctx, store.SubscriberTypeAgent, agent.Slug)
+	require.NoError(t, err)
+	assert.Empty(t, stored)
+
+	// Watching an agent in the caller's own project still works.
+	createReq.AgentID = tid("agent-watched")
+	rec = doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq, token)
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
 func TestHandleSubscriptions_AgentBulkCreate(t *testing.T) {

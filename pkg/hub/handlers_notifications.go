@@ -112,6 +112,10 @@ func (s *Server) notificationCaller(ctx context.Context) (*notificationSubscribe
 	agent, err := s.store.GetAgent(ctx, agentIdent.ID())
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			// A valid token for a deleted agent, or one issued for a record
+			// that never existed. Worth a line: it should not happen.
+			slog.Warn("Notification caller token names an unknown agent",
+				"agentID", agentIdent.ID(), "projectID", agentIdent.ProjectID())
 			return nil, nil
 		}
 		return nil, err
@@ -119,6 +123,8 @@ func (s *Server) notificationCaller(ctx context.Context) (*notificationSubscribe
 	// The token's project is what authorization is granted against; a record
 	// that disagrees with it must not be usable.
 	if agent.ProjectID != agentIdent.ProjectID() {
+		slog.Warn("Notification caller token project disagrees with the agent record",
+			"agentID", agentIdent.ID(), "tokenProjectID", agentIdent.ProjectID(), "agentProjectID", agent.ProjectID)
 		return nil, nil
 	}
 
@@ -127,6 +133,42 @@ func (s *Server) notificationCaller(ctx context.Context) (*notificationSubscribe
 		ID:        agent.Slug,
 		ProjectID: agent.ProjectID,
 	}, nil
+}
+
+// agentMaySubscribe reports whether an agent caller is allowed to create the
+// requested subscription. Both the project the subscription is filed under and
+// the agent it watches must belong to the caller's project — otherwise an agent
+// could file a subscription in its own project that watches a foreign agent and
+// receive that agent's activity transitions. User callers are unrestricted.
+//
+// Returns false when a response has already been written.
+func (s *Server) agentMaySubscribe(w http.ResponseWriter, r *http.Request, caller *notificationSubscriber, req *createSubscriptionRequest) bool {
+	if !caller.isAgent() {
+		return true
+	}
+	if req.ProjectID != caller.ProjectID {
+		Forbidden(w)
+		return false
+	}
+	if req.Scope != store.SubscriptionScopeAgent || req.AgentID == "" {
+		return true
+	}
+	target, err := s.store.GetAgent(r.Context(), req.AgentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Don't confirm or deny the existence of an agent the caller has
+			// no business naming.
+			Forbidden(w)
+			return false
+		}
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if target.ProjectID != caller.ProjectID {
+		Forbidden(w)
+		return false
+	}
+	return true
 }
 
 // resolveNotificationCaller resolves the caller and writes the failure response
@@ -262,7 +304,7 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 		// for an agent would span every project that reuses its slug. There is
 		// no project-scoped variant, so agents ack individually instead.
 		if caller.isAgent() {
-			writeError(w, http.StatusBadRequest, "bad_request",
+			writeError(w, http.StatusNotImplemented, "not_implemented",
 				"agent tokens must acknowledge notifications individually", nil)
 			return
 		}
@@ -362,9 +404,9 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "bad_request", "triggerActivities must be non-empty", nil)
 			return
 		}
-		// Agent callers may only subscribe within their own project.
-		if caller.isAgent() && req.ProjectID != caller.ProjectID {
-			Forbidden(w)
+		// Agent callers may only subscribe within their own project, and may
+		// only watch agents in it.
+		if !s.agentMaySubscribe(w, r, caller, &req) {
 			return
 		}
 
@@ -526,15 +568,13 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "bad_request", "Empty request array", nil)
 			return
 		}
-		// Agent callers may only subscribe within their own project. An
-		// authorization denial fails the whole request rather than silently
-		// dropping entries the way malformed items are dropped below.
-		if caller.isAgent() {
-			for _, req := range reqs {
-				if req.ProjectID != caller.ProjectID {
-					Forbidden(w)
-					return
-				}
+		// Agent callers may only subscribe within their own project, and may
+		// only watch agents in it. An authorization denial fails the whole
+		// request rather than silently dropping entries the way malformed
+		// items are dropped below.
+		for i := range reqs {
+			if !s.agentMaySubscribe(w, r, caller, &reqs[i]) {
+				return
 			}
 		}
 
