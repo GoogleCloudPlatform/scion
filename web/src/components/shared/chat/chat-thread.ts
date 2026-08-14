@@ -213,6 +213,12 @@ export class ScionChatThread extends LitElement {
   /** Read tracking: whether the tab is focused. */
   private _tabFocused = true;
 
+  /** Backfill single-flight guard: a backfill request is currently running. */
+  private _backfillInFlight = false;
+
+  /** Backfill single-flight guard: another backfill was requested while one was running. */
+  private _backfillPending = false;
+
   /** Focus/blur handlers for read tracking. */
   private _focusHandler = () => {
     this._tabFocused = true;
@@ -941,10 +947,12 @@ export class ScionChatThread extends LitElement {
 
   /** Handle v2 SSE chat message events. Only backfill if the event is for this conversation. */
   private handleV2ChatMessage(e: Event): void {
-    const detail = (e as CustomEvent).detail as {
-      data?: { threadId?: string; conversationKey?: string; topicId?: string };
-    };
-    const eventData = detail?.data;
+    type ChatEventData = { threadId?: string; conversationKey?: string; topicId?: string };
+    const detail = (e as CustomEvent).detail as
+      | ({ data?: ChatEventData } & ChatEventData)
+      | undefined;
+    // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
+    const eventData: ChatEventData | undefined = detail?.data ?? detail;
     if (eventData) {
       // Filter: only process events for this conversation
       const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
@@ -1005,8 +1013,29 @@ export class ScionChatThread extends LitElement {
     });
   }
 
+  /**
+   * Refetch the recent history window. Single-flighted: concurrent callers
+   * (a burst of SSE events) collapse into one trailing refetch.
+   */
   private async backfillV2(): Promise<void> {
     if (!this.conversationKey) return;
+    if (this._backfillInFlight) {
+      this._backfillPending = true;
+      return;
+    }
+    this._backfillInFlight = true;
+    try {
+      await this.runBackfillV2();
+    } finally {
+      this._backfillInFlight = false;
+      if (this._backfillPending) {
+        this._backfillPending = false;
+        void this.backfillV2();
+      }
+    }
+  }
+
+  private async runBackfillV2(): Promise<void> {
     const currentId = this.fetchId;
     const params = new URLSearchParams({
       limit: String(HISTORY_PAGE_SIZE),
@@ -1217,14 +1246,18 @@ export class ScionChatThread extends LitElement {
 
   private async advanceReadWatermark(messageId: string): Promise<void> {
     try {
-      await apiFetch(
+      // Field name must match the server contract in handleConversationRead.
+      const res = await apiFetch(
         `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/read`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ last_read_message_id: messageId }),
+          body: JSON.stringify({ messageId }),
         }
       );
+      if (!res.ok) {
+        console.warn('Failed to update read state:', res.status);
+      }
     } catch {
       // Non-critical
     }

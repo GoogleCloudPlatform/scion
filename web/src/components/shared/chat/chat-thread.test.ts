@@ -1,0 +1,172 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * Tests for <scion-chat-thread> v2 wiring against the server contract.
+ *
+ * Two invariants are load-bearing and were previously broken:
+ *  1. The read watermark POST body must use `messageId` — the field
+ *     `handleConversationRead` decodes. Any other name leaves the watermark
+ *     empty server-side and unread state never advances.
+ *  2. SSE `chat-message-received` events belong to every conversation the user
+ *     can see; the thread must only refetch for its own conversation, and
+ *     concurrent refetches must collapse into a single in-flight request.
+ */
+
+// @vitest-environment happy-dom
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+/** Stand-in for the global stateManager: only the EventTarget surface is used. */
+class FakeStateManager extends EventTarget {
+  currentScope: { type: string; userId: string } | null = null;
+}
+const fakeStateManager = new FakeStateManager();
+
+const apiFetch = vi.fn();
+
+vi.mock('../../../client/main.js', () => ({
+  get stateManager() {
+    return fakeStateManager;
+  },
+}));
+
+vi.mock('../../../client/api.js', () => ({
+  apiFetch: (...args: unknown[]) => apiFetch(...args) as unknown,
+  extractApiError: () => Promise.resolve('error'),
+}));
+
+await import('./chat-thread.js');
+type ScionChatThread = import('./chat-thread.js').ScionChatThread;
+
+const CONVERSATION_KEY = 'topic-1';
+
+/** An empty history response, the shape fetchHistoryV2/backfillV2 expect. */
+function emptyHistory(): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ items: [] }),
+  } as unknown as Response;
+}
+
+/** Mount a v2 thread with its initial history load already settled. */
+async function mount(): Promise<ScionChatThread> {
+  const el = document.createElement('scion-chat-thread') as ScionChatThread;
+  el.conversationKey = CONVERSATION_KEY;
+  document.body.appendChild(el);
+  await el.updateComplete;
+  await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+  apiFetch.mockClear();
+  return el;
+}
+
+/** Emit a chat-message-received event in the envelope stateManager uses. */
+function emitChatMessage(data: Record<string, unknown>): void {
+  fakeStateManager.dispatchEvent(
+    new CustomEvent('chat-message-received', { detail: { state: {}, data } })
+  );
+}
+
+/** How many history refetches were issued? */
+function historyCalls(): number {
+  return apiFetch.mock.calls.filter((c) => String(c[0]).includes('/messages?')).length;
+}
+
+describe('scion-chat-thread read watermark', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('posts the message id under the server-side field name', async () => {
+    const el = await mount();
+
+    await (
+      el as unknown as { advanceReadWatermark(id: string): Promise<void> }
+    ).advanceReadWatermark('msg-7');
+
+    const readCall = apiFetch.mock.calls.find((c) => String(c[0]).endsWith('/read'));
+    expect(readCall).toBeDefined();
+    const init = readCall?.[1] as RequestInit;
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ messageId: 'msg-7' });
+  });
+
+  it('warns when the server rejects the watermark update', async () => {
+    const el = await mount();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    apiFetch.mockResolvedValue({ ok: false, status: 400 } as unknown as Response);
+
+    await (
+      el as unknown as { advanceReadWatermark(id: string): Promise<void> }
+    ).advanceReadWatermark('msg-7');
+
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+describe('scion-chat-thread SSE message filtering', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('ignores events for other conversations', async () => {
+    await mount();
+
+    emitChatMessage({ threadId: 'some-other-topic', id: 'm1' });
+    await Promise.resolve();
+
+    expect(historyCalls()).toBe(0);
+  });
+
+  it('refetches history for its own conversation', async () => {
+    await mount();
+
+    emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm1' });
+    await vi.waitFor(() => expect(historyCalls()).toBe(1));
+  });
+
+  it('collapses a burst of events into one trailing refetch', async () => {
+    await mount();
+
+    // Hold the first refetch open so the following events arrive mid-flight.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    apiFetch.mockImplementationOnce(() => gate.then(() => emptyHistory()));
+
+    emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm1' });
+    emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm2' });
+    emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm3' });
+    expect(historyCalls()).toBe(1);
+
+    release();
+    // The three events yield the in-flight fetch plus a single trailing one.
+    await vi.waitFor(() => expect(historyCalls()).toBe(2));
+  });
+});
