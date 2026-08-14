@@ -2869,8 +2869,8 @@ func requireImageRegistryForBroker() error {
 //     the secret backend's lifecycle — rotation, auditing, scoped access — instead
 //     of leaving copies scattered across plaintext YAML on disk.
 //
-// When a secret key is present in both sources the inline value wins, matching
-// the merge precedence in config.LoadPluginConfigFile.
+// When a secret key is present in both sources the config file value wins — see
+// pluginSecretMigrationSource.
 //
 // Known limitation (no code change here — this is the existing precedence):
 // migrating a key out of a config file does not deactivate the file copy. Because
@@ -2891,10 +2891,7 @@ func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginNa
 
 	hubID := sb.HubID()
 	for _, m := range mappings {
-		val, source := inlineConfig[m.ConfigKey], "settings.yaml"
-		if val == "" {
-			val, source = fileConfig[m.ConfigKey], configFile
-		}
+		val, source := pluginSecretMigrationSource(m.ConfigKey, inlineConfig, fileConfig, configFile)
 		if val == "" {
 			continue
 		}
@@ -2923,6 +2920,23 @@ func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginNa
 		}
 		log.Printf("Migrated %s to secret backend for plugin %q — remove it from %s", m.ConfigKey, pluginName, source)
 	}
+}
+
+// pluginSecretMigrationSource picks which raw value to migrate for one secret
+// config key, and returns a label naming where it came from for logging.
+//
+// The per-plugin config file wins over inline config. That is the opposite of
+// config.LoadPluginConfigFile's merge order, and deliberately so: when
+// config_file is set, ResolvePluginConfig drops every secret config key from
+// inline config and takes the file's value, so the file holds the credential the
+// plugin is actually running on. Migrating the inline value instead would put a
+// different — possibly stale — credential in the backend, and the plugin would
+// silently switch to it once the operator cleaned the key out of the file.
+func pluginSecretMigrationSource(configKey string, inlineConfig, fileConfig map[string]string, configFile string) (value, source string) {
+	if v := fileConfig[configKey]; v != "" {
+		return v, configFile
+	}
+	return inlineConfig[configKey], "settings.yaml"
 }
 
 // loadPluginConfigFileForMigration reads the raw per-plugin YAML config file so

@@ -133,19 +133,21 @@ func TestMigrateInlineSecrets_FromInlineConfig(t *testing.T) {
 	}
 }
 
-func TestMigrateInlineSecrets_InlineWinsOverConfigFile(t *testing.T) {
+// When config_file is set, ResolvePluginConfig runs the plugin on the file's
+// value, so that is the credential the backend must receive.
+func TestMigrateInlineSecrets_ConfigFileWinsOverInline(t *testing.T) {
 	sb := newFakeSecretBackend()
-	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\nwebhook_secret: \"file-secret\"\n")
-	inline := map[string]string{"bot_token": "inline-token"}
+	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\n")
+	inline := map[string]string{"bot_token": "inline-token", "webhook_secret": "inline-secret"}
 
 	migrateInlineSecrets(context.Background(), sb, "telegram", inline, cfgFile)
 
-	if got := sb.values[config.SecretTelegramBotToken]; got != "inline-token" {
-		t.Errorf("expected inline value to win, got %q", got)
+	if got := sb.values[config.SecretTelegramBotToken]; got != "file-token" {
+		t.Errorf("expected config file value to win, got %q", got)
 	}
-	// Keys absent from inline config still migrate from the file.
-	if got := sb.values[config.SecretTelegramWebhookKey]; got != "file-secret" {
-		t.Errorf("expected webhook_secret from config file, got %q", got)
+	// Keys absent from the file still migrate from inline config.
+	if got := sb.values[config.SecretTelegramWebhookKey]; got != "inline-secret" {
+		t.Errorf("expected webhook_secret from inline config, got %q", got)
 	}
 }
 
@@ -206,5 +208,33 @@ func TestMigrateInlineSecrets_MalformedConfigFileFallsBackToInline(t *testing.T)
 	}
 	if !strings.Contains(out, "failed to read config file") {
 		t.Errorf("expected a warning about the unreadable config file, got log: %q", out)
+	}
+}
+
+// initPluginManager must run the migration for a plugin whose only raw config is
+// a config_file — the inline config map is nil in that case.
+func TestInitPluginManager_MigratesConfigFileOnlyPlugin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(globalDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfgFile := filepath.Join(globalDir, "scion-telegram.yaml")
+	if err := os.WriteFile(cfgFile, []byte("bot_token: \"file-only-token\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	settings := "server:\n  plugins:\n    broker:\n      telegram:\n        config_file: " + cfgFile + "\n"
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settings), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sb := newFakeSecretBackend()
+	captureLog(t, func() {
+		initPluginManager(context.Background(), sb, nil)
+	})
+
+	if got := sb.values[config.SecretTelegramBotToken]; got != "file-only-token" {
+		t.Errorf("expected config-file-only secret to be migrated, got %q", got)
 	}
 }
