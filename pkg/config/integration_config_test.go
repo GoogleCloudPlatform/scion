@@ -15,9 +15,12 @@
 package config
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -286,8 +289,9 @@ func TestResolvePluginConfig_SecretKeysStrippedFromConfigFile(t *testing.T) {
 	path := filepath.Join(dir, "plugin.yaml")
 	p, _ := NewYAMLConfigProvider(path)
 	if err := p.Save(context.Background(), map[string]string{
-		"bot_token":    "secret-from-file",
-		"inbound_mode": "poll",
+		"bot_token":          "secret-from-file",
+		"TELEGRAM_BOT_TOKEN": "backend-name-from-file",
+		"inbound_mode":       "poll",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -300,8 +304,45 @@ func TestResolvePluginConfig_SecretKeysStrippedFromConfigFile(t *testing.T) {
 	if _, ok := result["bot_token"]; ok {
 		t.Error("secret config key bot_token should be stripped from config file")
 	}
+	if _, ok := result["TELEGRAM_BOT_TOKEN"]; ok {
+		t.Error("backend secret key name should be stripped from config file")
+	}
 	if result["inbound_mode"] != "poll" {
 		t.Errorf("file non-secret key should be present: got %q", result["inbound_mode"])
+	}
+}
+
+func TestResolvePluginConfig_SecretKeysStrippedFromConfigFileWarns(t *testing.T) {
+	// A credential silently vanishing from the resolved config is the failure
+	// mode this warning exists to prevent — assert it actually fires.
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plugin.yaml")
+	p, _ := NewYAMLConfigProvider(path)
+	if err := p.Save(context.Background(), map[string]string{
+		"bot_token":    "secret-from-file",
+		"inbound_mode": "poll",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ResolvePluginConfig(path, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "level=WARN") || !strings.Contains(logged, "bot_token") {
+		t.Errorf("expected a WARN naming the stripped key, got: %s", logged)
+	}
+	if !strings.Contains(logged, path) {
+		t.Errorf("expected the warning to name the config file %q, got: %s", path, logged)
+	}
+	if strings.Contains(logged, "secret-from-file") {
+		t.Errorf("warning must not leak the credential value, got: %s", logged)
 	}
 }
 

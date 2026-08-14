@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	yamlv3 "gopkg.in/yaml.v3"
@@ -220,25 +221,43 @@ var backendSecretKeys = []string{
 	SecretA2AAPIKey,
 }
 
+// stripSecretKeys removes credential entries from a plugin config map, covering
+// both secret config keys ("bot_token") and backend secret key names
+// ("TELEGRAM_BOT_TOKEN"), so that the secret backend stays authoritative.
+// The map is modified in place; the removed key names are returned sorted.
+func stripSecretKeys(cfg map[string]string) []string {
+	var stripped []string
+	for k := range cfg {
+		if secretConfigKeys[k] {
+			stripped = append(stripped, k)
+			delete(cfg, k)
+		}
+	}
+	for _, sk := range backendSecretKeys {
+		for _, k := range []string{sk, strings.ToLower(sk)} {
+			if _, ok := cfg[k]; ok {
+				stripped = append(stripped, k)
+				delete(cfg, k)
+			}
+		}
+	}
+	slices.Sort(stripped)
+	return stripped
+}
+
 // ResolvePluginConfig builds the config map for a plugin with consistent precedence.
 // If configFile is set, the file is the source of truth for non-wiring keys.
 // Inline config is only used for wiring keys or as fallback when no config_file exists.
 // Secret config keys (bot_token, signing_key, etc.) are always stripped from both
 // inline and file config so that the secret backend takes precedence.
 func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map[string]string, error) {
-	// Build a clean copy of inline config with secret keys stripped.
+	// Build a clean copy of inline config with secret keys stripped; the
+	// caller's map must not be mutated.
 	cleanedInline := make(map[string]string, len(inlineConfig))
 	for k, v := range inlineConfig {
-		if secretConfigKeys[k] {
-			continue
-		}
 		cleanedInline[k] = v
 	}
-	// Also strip backend key names (same filtering applied to file config).
-	for _, sk := range backendSecretKeys {
-		delete(cleanedInline, sk)
-		delete(cleanedInline, strings.ToLower(sk))
-	}
+	stripSecretKeys(cleanedInline)
 
 	if configFile == "" {
 		return cleanedInline, nil
@@ -254,17 +273,12 @@ func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map
 		return nil, err
 	}
 
-	// Filter backend secret key names from file config.
-	for _, sk := range backendSecretKeys {
-		delete(fileConfig, sk)
-		delete(fileConfig, strings.ToLower(sk))
-	}
-
-	// Strip secret config keys from file config (same treatment as inline config).
-	for k := range fileConfig {
-		if secretConfigKeys[k] {
-			delete(fileConfig, k)
-		}
+	// Strip secret keys from file config (same treatment as inline config).
+	// Warn so that a credential disappearing from the resolved config is
+	// traceable to the strip rather than surfacing as "bot_token is required".
+	if stripped := stripSecretKeys(fileConfig); len(stripped) > 0 {
+		slog.Warn("secret keys ignored in plugin config file — store them in the secret backend instead",
+			"keys", stripped, "config_file", configFile)
 	}
 
 	// File is the base for non-wiring keys.
