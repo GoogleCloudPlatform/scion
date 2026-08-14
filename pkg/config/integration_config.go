@@ -254,14 +254,18 @@ var warnedFileSecrets sync.Map
 
 // warnStrippedFileSecretsOnce logs the stripped-secret warning the first time a
 // given config file yields a given set of stripped keys. A later edit that
-// introduces a different secret key warns again.
-func warnStrippedFileSecretsOnce(configFile string, stripped []string) {
-	key := configFile + "\x00" + strings.Join(stripped, ",")
+// introduces a different secret key warns again. resolvedPath must be the
+// provider's resolved path, so that tilde and relative spellings of one file
+// share a dedup key and log an unambiguous location.
+func warnStrippedFileSecretsOnce(resolvedPath string, stripped []string) {
+	key := resolvedPath + "\x00" + strings.Join(stripped, ",")
 	if _, seen := warnedFileSecrets.LoadOrStore(key, struct{}{}); seen {
 		return
 	}
-	slog.Warn("secret keys ignored in plugin config file — store them in the secret backend instead",
-		"keys", stripped, "config_file", configFile)
+	// Startup migration copies these into the secret backend, which is
+	// authoritative — the stale file copy is what needs removing.
+	slog.Warn("secret keys in plugin config file are ignored — the secret backend is authoritative; remove them from the config file",
+		"keys", stripped, "config_file", resolvedPath)
 }
 
 // ResolvePluginConfig builds the config map for a plugin with consistent precedence.
@@ -318,8 +322,10 @@ func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map
 		}
 	}
 	if len(deprecated) > 0 {
+		// Resolved path, matching the stripped-secret warning above — two lines
+		// about one file should not show two different config_file values.
 		slog.Warn("inline config keys ignored because config_file is set — move them to the config file",
-			"keys", deprecated, "config_file", configFile)
+			"keys", deprecated, "config_file", provider.Path())
 	}
 
 	return merged, nil
