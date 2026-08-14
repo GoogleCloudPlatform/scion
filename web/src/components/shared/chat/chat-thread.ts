@@ -275,6 +275,16 @@ export class ScionChatThread extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 0;
+      /*
+       * flex: 0 0 auto is load-bearing. As a flex item of .messages-scroll the
+       * list would otherwise shrink to the scroll container's height (the
+       * explicit min-height replaces the automatic minimum), and because the
+       * content is bottom-anchored with justify-content: flex-end the overflow
+       * lands past the block-START edge — which is unreachable, so the thread
+       * cannot be scrolled at all. Keeping the list at its content height makes
+       * the overflow land at the bottom, where the scrollbar can reach it.
+       */
+      flex: 0 0 auto;
       min-height: 100%;
       justify-content: flex-end;
     }
@@ -1690,6 +1700,11 @@ export class ScionChatThread extends LitElement {
           ? msg.senderId !== this.currentUserId
           : this.isSenderAgent(msg)
         : msg.senderId === this.agentId;
+      // Routing is a property of the AUTHOR, not of the viewer: every human
+      // message in a default-agent conversation was routed to that agent, and
+      // no agent message ever is. `isFromAgent` above only means "not mine",
+      // so it cannot be reused here.
+      const isAgentSender = this.isSenderAgent(msg);
       const senderDisplayName = this.isV2
         ? this.getSenderDisplayName(msg)
         : isFromAgent
@@ -1716,7 +1731,7 @@ export class ScionChatThread extends LitElement {
           dispatchFailureReason=${msg.dispatchFailureReason || ''}
           .attachments=${msg.attachments || []}
           .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
-          routedTo=${!isFromAgent && this.defaultAgent ? this.defaultAgent : ''}
+          routedTo=${!isAgentSender && this.defaultAgent ? this.defaultAgent : ''}
         ></scion-chat-message>
       `);
 

@@ -31,8 +31,29 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues } from 'lit';
+import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
 import './chat-avatar.js';
 import '../status-badge.js';
+
+/**
+ * Statuses that represent a settled agent. Entering one of these is the end of
+ * an activity burst, so the avatar must not wobble — it would otherwise draw
+ * the eye to an agent that has just gone quiet.
+ */
+const TERMINAL_STATUSES = new Set([
+  'blocked',
+  'completed',
+  'stalled',
+  'error',
+  'waiting_for_input',
+  'limits_exceeded',
+  'offline',
+  'stopped',
+  'suspended',
+]);
+
+/** How long an agent avatar wobbles after a state change. */
+const WOBBLE_DURATION_MS = 3000;
 
 /** A human member from the GET /chat/spaces/{id}/members endpoint. */
 export interface ChatHumanMember {
@@ -94,7 +115,7 @@ export class ScionChatMembers extends LitElement {
 
   /** Agent IDs that recently changed state — drives wobble animation. */
   @state() private recentlyChangedAgents = new Set<string>();
-  /** Timers for clearing the recently-changed state after 2s. */
+  /** Timers for clearing the recently-changed state after WOBBLE_DURATION_MS. */
   private _wobbleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Previous agent state snapshots for change detection. */
   private _prevAgentStates = new Map<string, string>();
@@ -246,7 +267,7 @@ export class ScionChatMembers extends LitElement {
     }
 
     .avatar-wrapper.active {
-      animation: agent-wobble 0.5s ease-in-out infinite;
+      animation: agent-wobble 0.8s ease-in-out infinite;
     }
 
     @keyframes typing-dot-bounce {
@@ -287,6 +308,9 @@ export class ScionChatMembers extends LitElement {
   /**
    * Compare current agent states against previous to detect changes for wobble.
    *
+   * A change into a terminal state stops the wobble instead of starting one —
+   * the agent has gone quiet and should not keep drawing attention.
+   *
    * `recentlyChangedAgents` must be REPLACED, never mutated in place: Lit
    * compares `@state()` values by reference, so `Set.add()` / `Set.delete()`
    * would not schedule a re-render and the wobble would never appear.
@@ -297,27 +321,42 @@ export class ScionChatMembers extends LitElement {
       const prevState = this._prevAgentStates.get(a.id);
 
       if (prevState !== undefined && prevState !== currentState) {
-        // State changed — start/restart wobble (new Set ⇒ Lit re-renders)
-        this.recentlyChangedAgents = new Set([...this.recentlyChangedAgents, a.id]);
-
-        // Clear existing timer
-        const existing = this._wobbleTimers.get(a.id);
-        if (existing) clearTimeout(existing);
-
-        // Set 2s timer to stop wobble
-        this._wobbleTimers.set(
-          a.id,
-          setTimeout(() => {
-            const next = new Set(this.recentlyChangedAgents);
-            next.delete(a.id);
-            this.recentlyChangedAgents = next;
-            this._wobbleTimers.delete(a.id);
-          }, 2000)
-        );
+        if (TERMINAL_STATUSES.has(this.resolveAgentStatus(a))) {
+          this.stopWobble(a.id);
+        } else {
+          this.startWobble(a.id);
+        }
       }
 
       this._prevAgentStates.set(a.id, currentState);
     }
+  }
+
+  /** Start (or restart) the wobble for an agent, ending after WOBBLE_DURATION_MS. */
+  private startWobble(agentId: string): void {
+    this.recentlyChangedAgents = new Set([...this.recentlyChangedAgents, agentId]);
+
+    const existing = this._wobbleTimers.get(agentId);
+    if (existing) clearTimeout(existing);
+
+    this._wobbleTimers.set(
+      agentId,
+      setTimeout(() => {
+        this.stopWobble(agentId);
+      }, WOBBLE_DURATION_MS)
+    );
+  }
+
+  /** Stop an in-flight wobble immediately. */
+  private stopWobble(agentId: string): void {
+    const timer = this._wobbleTimers.get(agentId);
+    if (timer) clearTimeout(timer);
+    this._wobbleTimers.delete(agentId);
+
+    if (!this.recentlyChangedAgents.has(agentId)) return;
+    const next = new Set(this.recentlyChangedAgents);
+    next.delete(agentId);
+    this.recentlyChangedAgents = next;
   }
 
   /** Click on the host element itself (empty space) triggers a reset. */
@@ -411,16 +450,12 @@ export class ScionChatMembers extends LitElement {
 
   /** Map an agent's phase/activity to a StatusType for the badge. */
   private resolveAgentStatus(a: ChatAgentMember): string {
-    // The activity field carries the detailed operational state (e.g.
-    // "blocked", "stalled"). Prefer it over the coarser phase when it
-    // maps to a known status.
-    if (a.activity) {
-      const lower = a.activity.toLowerCase();
-      if (lower.includes('blocked')) return 'blocked';
-      if (lower.includes('stalled')) return 'stalled';
-      if (lower.includes('completed')) return 'completed';
-      if (lower.includes('error')) return 'error';
-    }
+    // Mirror getAgentDisplayStatus (shared/types.ts) so the sidebar shows the
+    // same fine-grained state as the agent list: while an agent is running its
+    // activity ("thinking", "executing", "blocked", ...) is the real status;
+    // otherwise the phase is.
+    const activity = (a.activity || '').toLowerCase();
+    if (a.phase === 'running' && Object.hasOwn(ACTIVITY_DISPLAY, activity)) return activity;
     return a.phase || 'unknown';
   }
 

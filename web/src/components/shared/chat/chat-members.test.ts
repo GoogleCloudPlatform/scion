@@ -15,9 +15,12 @@
  */
 
 /**
- * Tests for the <scion-chat-members> wobble animation.
+ * Tests for the <scion-chat-members> status badge and wobble animation.
  *
- * An agent avatar wobbles for 2s whenever the agent's phase/activity changes.
+ * An agent avatar wobbles for 3s whenever the agent moves into a non-terminal
+ * state; moving into a terminal state (blocked, completed, stopped, ...) stops
+ * the wobble instead, because the agent has just gone quiet.
+ *
  * The wobble state lives in a `@state()` Set, which Lit compares by reference —
  * so it must be replaced, never mutated in place, or no re-render is scheduled
  * and the wobble is invisible.
@@ -54,6 +57,32 @@ function isWobbling(el: ScionChatMembers): boolean {
   return !!el.shadowRoot?.querySelector('.avatar-wrapper.active');
 }
 
+/** The status shown on the agent's badge. */
+function badgeStatus(el: ScionChatMembers): string | null {
+  return el.shadowRoot?.querySelector('scion-status-badge')?.getAttribute('status') ?? null;
+}
+
+describe('scion-chat-members status badge', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('shows the fine-grained activity while the agent is running', async () => {
+    const el = await mount([agent({ phase: 'running', activity: 'thinking' })]);
+    expect(badgeStatus(el)).toBe('thinking');
+  });
+
+  it('shows the phase when the agent is not running', async () => {
+    const el = await mount([agent({ phase: 'provisioning', activity: 'working' })]);
+    expect(badgeStatus(el)).toBe('provisioning');
+  });
+
+  it('falls back to the phase for an unrecognised activity', async () => {
+    const el = await mount([agent({ phase: 'running', activity: 'napping' })]);
+    expect(badgeStatus(el)).toBe('running');
+  });
+});
+
 describe('scion-chat-members wobble', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -69,7 +98,7 @@ describe('scion-chat-members wobble', () => {
     expect(isWobbling(el)).toBe(false);
 
     // Same agent, new activity — a new array so Lit sees the property change.
-    el.agents = [agent({ activity: 'blocked' })];
+    el.agents = [agent({ activity: 'thinking' })];
     await el.updateComplete;
     // The state change is detected in updated(); the resulting Set replacement
     // schedules a second render.
@@ -78,15 +107,45 @@ describe('scion-chat-members wobble', () => {
     expect(isWobbling(el)).toBe(true);
   });
 
-  it('re-renders without the wobble class once the 2s timer elapses', async () => {
+  it('re-renders without the wobble class once the 3s timer elapses', async () => {
     const el = await mount([agent()]);
 
-    el.agents = [agent({ phase: 'stopped' })];
+    el.agents = [agent({ activity: 'executing' })];
     await el.updateComplete;
     await el.updateComplete;
     expect(isWobbling(el)).toBe(true);
 
-    vi.advanceTimersByTime(2000);
+    vi.advanceTimersByTime(2999);
+    await el.updateComplete;
+    expect(isWobbling(el)).toBe(true);
+
+    vi.advanceTimersByTime(1);
+    await el.updateComplete;
+
+    expect(isWobbling(el)).toBe(false);
+  });
+
+  it('does not wobble when the agent enters a terminal state', async () => {
+    const el = await mount([agent()]);
+
+    el.agents = [agent({ phase: 'stopped', activity: '' })];
+    await el.updateComplete;
+    await el.updateComplete;
+
+    expect(isWobbling(el)).toBe(false);
+  });
+
+  it('stops an in-flight wobble as soon as a terminal state arrives', async () => {
+    const el = await mount([agent()]);
+
+    el.agents = [agent({ activity: 'thinking' })];
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(isWobbling(el)).toBe(true);
+
+    vi.advanceTimersByTime(500);
+    el.agents = [agent({ activity: 'blocked' })];
+    await el.updateComplete;
     await el.updateComplete;
 
     expect(isWobbling(el)).toBe(false);

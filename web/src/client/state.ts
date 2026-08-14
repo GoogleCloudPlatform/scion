@@ -242,9 +242,15 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // User-scoped chat events: user.{userId}.chat.dm
+    // User-scoped chat events: user.{userId}.chat.{dm|typing}
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
-      this.notifyWithData('chat-message-received', data);
+      // Human-to-human DMs have no project, so their typing events arrive on
+      // the user-scoped subject rather than project.{id}.chat.typing.
+      if (parts[3] === 'typing') {
+        this.notifyWithData('chat-typing-received', data);
+      } else {
+        this.notifyWithData('chat-message-received', data);
+      }
       return;
     }
 

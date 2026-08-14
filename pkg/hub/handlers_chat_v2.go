@@ -52,6 +52,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1823,17 +1824,28 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 	}
 
 	// --- Publish ephemeral typing event ---
+	displayName := user.DisplayName()
+	if displayName == "" {
+		displayName = user.Email()
+	}
+	evt := TypingEvent{
+		ThreadID:    key,
+		UserID:      user.ID(),
+		DisplayName: displayName,
+	}
 	if projectID != "" {
-		displayName := user.DisplayName()
-		if displayName == "" {
-			displayName = user.Email()
-		}
-		evt := TypingEvent{
-			ThreadID:    key,
-			UserID:      user.ID(),
-			DisplayName: displayName,
-		}
 		s.events.PublishRaw("project."+projectID+".chat.typing", evt)
+	}
+	if isDM {
+		// A human-to-human DM has no project, and even an agent DM only reaches
+		// subscribers of that project. Fan out to the participants' user-scoped
+		// subjects the same way DM messages do (see EventPublisher.PublishMessage).
+		for _, id := range dmUserParticipants(key) {
+			if id == user.ID() {
+				continue // don't echo the sender their own typing event
+			}
+			s.events.PublishRaw("user."+id+".chat.typing", evt)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -2046,6 +2058,27 @@ func isDMParticipant(key, userID string) bool {
 		return false
 	}
 	return parts[2] == userID || parts[4] == userID
+}
+
+// dmUserParticipants returns the user IDs named in a DM key, skipping the agent
+// side of an agent DM. Keys have the form dm:<kind>:<id>:<kind>:<id>.
+func dmUserParticipants(key string) []string {
+	parts := strings.Split(key, ":")
+	if len(parts) < 5 {
+		return nil
+	}
+	var ids []string
+	for _, i := range []int{1, 3} {
+		if parts[i] != "user" {
+			continue
+		}
+		id := parts[i+1]
+		if id == "" || slices.Contains(ids, id) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // resolveDMPeer extracts the peer's ID from a DM key given the caller's ID.

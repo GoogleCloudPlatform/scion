@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,32 @@ func TestIsDMParticipant(t *testing.T) {
 	for _, tt := range tests {
 		if got := isDMParticipant(tt.key, tt.userID); got != tt.want {
 			t.Errorf("isDMParticipant(%q, %q) = %v, want %v", tt.key, tt.userID, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dmUserParticipants tests
+// ---------------------------------------------------------------------------
+
+// Typing events for human-to-human DMs have no project to publish on, so they
+// fan out to each user participant's own subject. The agent side of an agent DM
+// has no user subject and must be skipped.
+func TestDMUserParticipants(t *testing.T) {
+	tests := []struct {
+		key  string
+		want []string
+	}{
+		{"dm:user:u1:user:u2", []string{"u1", "u2"}},
+		{"dm:agent:a1:user:u1", []string{"u1"}},
+		{"dm:user:u1:user:u1", []string{"u1"}},
+		{"dm:user:u1", nil},
+		{"topic-uuid", nil},
+	}
+	for _, tt := range tests {
+		got := dmUserParticipants(tt.key)
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("dmUserParticipants(%q) = %v, want %v", tt.key, got, tt.want)
 		}
 	}
 }

@@ -86,6 +86,76 @@ function historyCalls(): number {
   return apiFetch.mock.calls.filter((c) => String(c[0]).includes('/messages?')).length;
 }
 
+describe('scion-chat-thread route-to-agent indicator', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  /**
+   * Routing is a property of the author: every human message in a thread with a
+   * default agent was routed to that agent, whoever sent it. Agent replies were
+   * not routed anywhere.
+   */
+  it('marks all human messages as routed and no agent message', async () => {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'm1',
+              sender: 'me@example.com',
+              senderId: 'user-me',
+              msg: 'mine',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+            {
+              id: 'm2',
+              sender: 'them@example.com',
+              senderId: 'user-them',
+              msg: 'theirs',
+              createdAt: '2026-01-01T00:01:00Z',
+            },
+            {
+              id: 'm3',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              msg: 'reply',
+              createdAt: '2026-01-01T00:02:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.currentUserId = 'user-me';
+    el.defaultAgent = 'coder';
+    el.members = [
+      { id: 'user-me', kind: 'user', name: 'Me', email: 'me@example.com' },
+      { id: 'user-them', kind: 'user', name: 'Them', email: 'them@example.com' },
+      { id: 'agent-1', kind: 'agent', name: 'Coder', email: 'agent:coder' },
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await vi.waitFor(() => {
+      const rendered = el.shadowRoot?.querySelectorAll('scion-chat-message');
+      expect(rendered?.length).toBe(3);
+    });
+
+    const routed = Array.from(el.shadowRoot?.querySelectorAll('scion-chat-message') ?? []).map(
+      (m) => m.getAttribute('routedTo')
+    );
+    expect(routed).toEqual(['coder', 'coder', '']);
+  });
+});
+
 describe('scion-chat-thread read watermark', () => {
   beforeEach(() => {
     apiFetch.mockReset();
