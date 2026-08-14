@@ -24,11 +24,15 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import './notification-tray.js';
 import './inbox-tray.js';
 
 /** URL for the Scion documentation site, opened by the Help button. */
 const DOCS_URL = 'https://googlecloudplatform.github.io/scion/overview/';
+
+/** Feature flag gating the chat mode (and therefore the mode switch). */
+const NATIVE_CHAT_FLAG = 'web.native_chat';
 
 @customElement('scion-header')
 export class ScionHeader extends LitElement {
@@ -113,6 +117,27 @@ export class ScionHeader extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.5rem;
+    }
+
+    /* Chat ↔ dashboard mode switch */
+    .mode-switch {
+      display: flex;
+      align-items: center;
+      gap: 0.125rem;
+      padding: 0.125rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+    }
+
+    .mode-switch sl-icon-button::part(base) {
+      padding: 0.25rem 0.5rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .mode-switch sl-icon-button.active::part(base) {
+      background: var(--scion-primary, #3b82f6);
+      color: white;
+      border-radius: 0.375rem;
     }
 
     @media (max-width: 640px) {
@@ -268,6 +293,7 @@ export class ScionHeader extends LitElement {
       </div>
 
       <div class="header-right">
+        ${this.renderModeSwitch()}
         <div class="header-actions">
           <scion-inbox-tray .user=${this.user}></scion-inbox-tray>
           <scion-notification-tray .user=${this.user}></scion-notification-tray>
@@ -296,6 +322,53 @@ export class ScionHeader extends LitElement {
         <div class="user-section">${this.renderUserSection()}</div>
       </div>
     `;
+  }
+
+  /**
+   * Toggle between the dashboard and chat views. Chat is a peer view of the
+   * dashboard, so the switch lives in the header rather than in either
+   * sidebar — it is the one control present in both shells.
+   */
+  private renderModeSwitch() {
+    if (!isFeatureEnabled(NATIVE_CHAT_FLAG)) return '';
+
+    const path = this.currentPath || window.location.pathname;
+    const isChat = path.startsWith('/chat');
+
+    return html`
+      <div class="mode-switch" role="group" aria-label="Switch view">
+        <sl-tooltip content="Dashboard">
+          <sl-icon-button
+            name="house"
+            label="Dashboard"
+            class=${isChat ? '' : 'active'}
+            @click=${(): void => this.handleModeSwitch('/')}
+          ></sl-icon-button>
+        </sl-tooltip>
+        <sl-tooltip content="Chat">
+          <sl-icon-button
+            name="chat-dots"
+            label="Chat"
+            class=${isChat ? 'active' : ''}
+            @click=${(): void => this.handleModeSwitch('/chat')}
+          ></sl-icon-button>
+        </sl-tooltip>
+      </div>
+    `;
+  }
+
+  /**
+   * Navigate to the given mode. Uses the same nav-click event as the sidebar
+   * so the router handles it identically in both the app and chat shells.
+   */
+  private handleModeSwitch(path: string): void {
+    this.dispatchEvent(
+      new CustomEvent('nav-click', {
+        detail: { path },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private renderUserSection() {

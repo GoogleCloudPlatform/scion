@@ -115,30 +115,19 @@ export class ScionChatSpaceRail extends LitElement {
       background: var(--scion-surface, #ffffff);
     }
 
+    /*
+     * Section heading, styled like the dashboard nav's section titles
+     * ("OVERVIEW", "MANAGEMENT") so chat reads as a peer of the dashboard.
+     */
     .rail-header {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      padding: 0.75rem 1rem 0.5rem;
+      font-size: 0.6875rem;
       font-weight: 600;
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .rail-header a {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.75rem;
-      font-weight: 500;
-      color: var(--scion-primary, #3b82f6);
-      text-decoration: none;
-      cursor: pointer;
-    }
-
-    .rail-header a:hover {
-      text-decoration: underline;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .rail-body {
@@ -937,19 +926,7 @@ export class ScionChatSpaceRail extends LitElement {
 
   override render() {
     return html`
-      <div class="rail-header">
-        <span>Chat</span>
-        <a
-          href="/"
-          @click=${(e: Event) => {
-            e.preventDefault();
-            this.dispatchEvent(new CustomEvent('navigate-app', { bubbles: true, composed: true }));
-          }}
-        >
-          <sl-icon name="arrow-left"></sl-icon>
-          App
-        </a>
-      </div>
+      <div class="rail-header"><span>Project Spaces</span></div>
 
       ${this.loading
         ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
