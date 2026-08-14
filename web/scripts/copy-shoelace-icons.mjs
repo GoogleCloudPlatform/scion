@@ -52,6 +52,7 @@ const USED_ICONS = [
   'broadcast-pin',
   'building',
   'check2',
+  'check2-all',
   'chevron-down',
   'chevron-left',
   'chevron-right',

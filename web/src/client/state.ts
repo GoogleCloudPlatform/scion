@@ -67,7 +67,8 @@ export type StateEventType =
   | 'chat-message-received'
   | 'chat-topic-updated'
   | 'chat-presence-updated'
-  | 'chat-typing-received';
+  | 'chat-typing-received'
+  | 'chat-read-state-updated';
 
 export class StateManager extends EventTarget {
   private state: AppState = {
@@ -248,6 +249,9 @@ export class StateManager extends EventTarget {
       // the user-scoped subject rather than project.{id}.chat.typing.
       if (parts[3] === 'typing') {
         this.notifyWithData('chat-typing-received', data);
+      } else if (parts[3] === 'read-state') {
+        // A DM peer advanced their read watermark — drives the "seen" tick.
+        this.notifyWithData('chat-read-state-updated', data);
       } else {
         this.notifyWithData('chat-message-received', data);
       }

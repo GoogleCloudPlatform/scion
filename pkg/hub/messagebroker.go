@@ -463,11 +463,22 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// last_activity_at, but it runs before the ID exists — without this the
 	// unread indicator (last_message_id != last_read_message_id) never fires
 	// for agent replies.
-	if p.webChatStore != nil && strings.HasPrefix(storeMsg.ThreadID, "dm:") {
-		registerDMParticipants(ctx, p.webChatStore, storeMsg.ThreadID)
-		if err := p.webChatStore.TouchDMActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
-			p.log.Error("Failed to stamp DM watermark",
-				"thread_id", storeMsg.ThreadID, "error", err)
+	if p.webChatStore != nil && storeMsg.ThreadID != "" {
+		switch {
+		case strings.HasPrefix(storeMsg.ThreadID, "dm:"):
+			registerDMParticipants(ctx, p.webChatStore, storeMsg.ThreadID)
+			if err := p.webChatStore.TouchDMActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+				p.log.Error("Failed to stamp DM watermark",
+					"thread_id", storeMsg.ThreadID, "error", err)
+			}
+		case !strings.HasPrefix(storeMsg.ThreadID, "agent:"):
+			// Space topic. Same reasoning as DMs: the topic's unread dot is
+			// driven by last_message_id, and the spoke stamped only the
+			// activity timestamp.
+			if err := p.webChatStore.TouchTopicActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+				p.log.Error("Failed to stamp topic watermark",
+					"thread_id", storeMsg.ThreadID, "error", err)
+			}
 		}
 	}
 

@@ -79,6 +79,13 @@ const SYSTEM_MESSAGE_TYPES = new Set(['state-change', 'system']);
 /** Typing indicator expiry in ms. */
 const TYPING_EXPIRY_MS = 6000;
 
+/**
+ * How long the "Seen" indicator stays on screen after the peer read the
+ * message. Past this the delivery state is dropped entirely — a permanent
+ * receipt on every conversation is noise, not information.
+ */
+const SEEN_VISIBLE_MS = 5 * 60 * 1000;
+
 /** Typing send throttle in ms. */
 const TYPING_SEND_THROTTLE_MS = 4000;
 
@@ -192,6 +199,23 @@ export class ScionChatThread extends LitElement {
 
   /** Bound listener for v2 SSE typing events via stateManager. */
   private _v2TypingHandler = this.handleV2TypingEvent.bind(this);
+
+  /** Bound listener for v2 SSE read-state events (DM "seen" receipts). */
+  private _v2ReadStateHandler = this.handleV2ReadStateEvent.bind(this);
+
+  // ---- DM read receipt ("seen") state ----
+
+  /** The peer's read watermark in this DM: the last message they have read. */
+  @state() private peerReadMessageId = '';
+
+  /** When the peer's watermark last advanced, epoch ms. 0 = unknown. */
+  @state() private peerReadAt = 0;
+
+  /** Fires when the "Seen" indicator ages out, to drop it from the render. */
+  private _seenExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Last message ID POSTed to /read — suppresses redundant watermark writes. */
+  private _lastAdvancedMessageId = '';
 
   // ---- Typing indicator state ----
 
@@ -498,7 +522,10 @@ export class ScionChatThread extends LitElement {
     // Stop any active SSE listener
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
+    stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
 
+    // Clear read-receipt state — it belongs to the conversation we just left.
+    this.clearSeenState();
 
     // Clear message state
     this.messageMap.clear();
@@ -539,6 +566,8 @@ export class ScionChatThread extends LitElement {
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
+    stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+    this.clearSeenState();
     // Clean up typing timers
     for (const entry of this.typingUsers.values()) {
       clearTimeout(entry.timer);
@@ -682,6 +711,7 @@ export class ScionChatThread extends LitElement {
     if (this.isV2) {
       stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
       stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
+      stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     }
 
   }
@@ -888,6 +918,11 @@ export class ScionChatThread extends LitElement {
       if (this.isAgentDM) {
         void this.fetchInteragentExchanges();
       }
+      // Human DMs show a read receipt — seed it so "Seen" survives a reload
+      // instead of waiting for the peer's next watermark advance.
+      if (this.isHumanDM) {
+        void this.fetchPeerReadState();
+      }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
@@ -944,6 +979,7 @@ export class ScionChatThread extends LitElement {
   private startStreamV2(): void {
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
+    stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     // Capture current user ID from the stateManager scope for typing self-filter.
     const scope = stateManager.currentScope;
     if (scope && scope.type === 'chat') {
@@ -1088,6 +1124,116 @@ export class ScionChatThread extends LitElement {
   /** Whether this conversation is an agent DM (eligible for inter-agent markers). */
   private get isAgentDM(): boolean {
     return this.isDM && this.conversationKey.startsWith('dm:agent:');
+  }
+
+  /** Whether this is a human-to-human DM (the only place read receipts apply). */
+  private get isHumanDM(): boolean {
+    return this.isDM && this.conversationKey.startsWith('dm:user:');
+  }
+
+  // ---------------------------------------------------------------------------
+  // DM read receipts ("Seen")
+  // ---------------------------------------------------------------------------
+
+  /** Load the peer's read watermark for this DM. Best-effort. */
+  private async fetchPeerReadState(): Promise<void> {
+    const currentId = this.fetchId;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/read`
+      );
+      if (!res.ok || currentId !== this.fetchId) return;
+      const data = (await res.json()) as {
+        peerLastReadMessageId?: string;
+        peerLastReadAt?: string;
+      };
+      if (currentId !== this.fetchId || !data?.peerLastReadMessageId) return;
+      this.applyPeerReadState(data.peerLastReadMessageId, data.peerLastReadAt);
+    } catch {
+      // Non-critical: the receipt is decoration, not content.
+    }
+  }
+
+  /** Handle a peer's read-watermark advance arriving over SSE. */
+  private handleV2ReadStateEvent(e: Event): void {
+    type ReadStateData = { conversationKey?: string; messageId?: string; readAt?: string };
+    const detail = (e as CustomEvent).detail as
+      | ({ data?: ReadStateData } & ReadStateData)
+      | undefined;
+    const eventData: ReadStateData | undefined = detail?.data ?? detail;
+    if (!eventData?.messageId) return;
+    if (eventData.conversationKey !== this.conversationKey) return;
+    this.applyPeerReadState(eventData.messageId, eventData.readAt);
+  }
+
+  /** Record the peer watermark and arm the auto-hide timer. */
+  private applyPeerReadState(messageId: string, readAt?: string): void {
+    const parsed = readAt ? new Date(readAt).getTime() : NaN;
+    this.peerReadMessageId = messageId;
+    this.peerReadAt = Number.isNaN(parsed) ? Date.now() : parsed;
+
+    if (this._seenExpiryTimer) clearTimeout(this._seenExpiryTimer);
+    const remaining = this.peerReadAt + SEEN_VISIBLE_MS - Date.now();
+    if (remaining > 0) {
+      this._seenExpiryTimer = setTimeout(() => {
+        this._seenExpiryTimer = null;
+        this.requestUpdate();
+      }, remaining);
+    }
+  }
+
+  /** Drop all read-receipt state (conversation switch / teardown). */
+  private clearSeenState(): void {
+    this.peerReadMessageId = '';
+    this.peerReadAt = 0;
+    this._lastAdvancedMessageId = '';
+    if (this._seenExpiryTimer) {
+      clearTimeout(this._seenExpiryTimer);
+      this._seenExpiryTimer = null;
+    }
+  }
+
+  /**
+   * Whether the peer's watermark has reached this message.
+   *
+   * Message IDs are UUIDs, so they cannot be compared for ordering — the
+   * watermark message is looked up in the buffer and compared by timestamp.
+   * If it is not buffered (scrolled out of the window), we report "not seen"
+   * rather than guess.
+   */
+  /** ID of the newest message sent by the current user, '' if none. */
+  private lastOwnMessageId(): string {
+    if (!this.currentUserId) return '';
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const msg = this.messages[i];
+      if (msg.senderId === this.currentUserId && !SYSTEM_MESSAGE_TYPES.has(msg.type)) {
+        return msg.id;
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Delivery state to render for a message.
+   *
+   * Only the newest own message shows a receipt, and it disappears once the
+   * "Seen" indicator has aged out. Failures are the exception: they stay
+   * visible on every message, because a silently dropped message is exactly
+   * what the user needs to be told about.
+   */
+  private deliveryStateFor(msg: Message, lastOwnMessageId: string, seenExpired: boolean): string {
+    const dispatchState = msg.dispatchState || '';
+    if (!dispatchState || dispatchState === 'failed') return dispatchState;
+    if (msg.id !== lastOwnMessageId) return '';
+    if (seenExpired && this.isMessageSeen(msg)) return '';
+    return dispatchState;
+  }
+
+  private isMessageSeen(msg: Message): boolean {
+    if (!this.peerReadMessageId) return false;
+    const watermark = this.messageMap.get(this.peerReadMessageId);
+    if (!watermark) return false;
+    return new Date(msg.createdAt).getTime() <= new Date(watermark.createdAt).getTime();
   }
 
   /** Fetch inter-agent messages for inline markers. Stores the raw flat list. */
@@ -1255,6 +1401,12 @@ export class ScionChatThread extends LitElement {
   }
 
   private async advanceReadWatermark(messageId: string): Promise<void> {
+    // The watermark only moves forward and the scroll/focus triggers fire far
+    // more often than it changes; re-POSTing the same ID would also re-fan the
+    // read-state event out to the peer for nothing.
+    if (!messageId || messageId === this._lastAdvancedMessageId) return;
+    this._lastAdvancedMessageId = messageId;
+
     try {
       // Field name must match the server contract in handleConversationRead.
       const res = await apiFetch(
@@ -1266,10 +1418,24 @@ export class ScionChatThread extends LitElement {
         }
       );
       if (!res.ok) {
+        // Let the next trigger retry: the watermark did not actually move.
+        this._lastAdvancedMessageId = '';
         console.warn('Failed to update read state:', res.status);
+        return;
       }
+
+      // The rail and the DM list own their own unread badges and have no way
+      // to learn the watermark moved — tell them.
+      this.dispatchEvent(
+        new CustomEvent('read-state-updated', {
+          detail: { conversationKey: this.conversationKey, messageId },
+          bubbles: true,
+          composed: true,
+        })
+      );
     } catch {
       // Non-critical
+      this._lastAdvancedMessageId = '';
     }
   }
 
@@ -1623,6 +1789,11 @@ export class ScionChatThread extends LitElement {
     let iaIdx = 0;
     const hasIA = this.isAgentDM && iaMessages.length > 0;
 
+    // Delivery state is a property of the conversation's tail, not of every
+    // bubble: only the newest message this user sent carries it.
+    const lastOwnMessageId = this.lastOwnMessageId();
+    const seenExpired = this.peerReadAt > 0 && Date.now() - this.peerReadAt > SEEN_VISIBLE_MS;
+
     for (let mi = 0; mi < this.messages.length; mi++) {
       const msg = this.messages[mi];
       const d = new Date(msg.createdAt);
@@ -1727,7 +1898,8 @@ export class ScionChatThread extends LitElement {
           channel=${msg.channel || ''}
           visibility=${msg.visibility || 'normal'}
           messageType=${msg.type || ''}
-          dispatchState=${msg.dispatchState || ''}
+          dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
+          ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
           dispatchFailureReason=${msg.dispatchFailureReason || ''}
           .attachments=${msg.attachments || []}
           .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}

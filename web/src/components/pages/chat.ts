@@ -173,6 +173,7 @@ export class ScionPageChat extends LitElement {
   private _onRailLoaded = this.handleRailLoaded.bind(this);
   private _onAgentsUpdated = this._handleAgentsUpdated.bind(this);
   private _onScopeChanged = this._handleScopeChanged.bind(this);
+  private _onReadStateUpdated = this._handleReadStateUpdated.bind(this);
   /** Map from project slug → project ID for deep-link resolution. */
   private _slugToProjectId = new Map<string, string>();
   /** Map from project ID → project slug for URL generation. */
@@ -475,6 +476,7 @@ export class ScionPageChat extends LitElement {
       stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
       stateManager.removeEventListener('scope-changed', this._onScopeChanged);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
+      this.removeEventListener('read-state-updated', this._onReadStateUpdated);
       this.stopPresenceHeartbeat();
       // Clean up the fallback poll
       if (this._fallbackPollInterval) {
@@ -679,6 +681,10 @@ export class ScionPageChat extends LitElement {
 
     // Listen for rail-loaded to set up the SSE scope with space IDs
     this.addEventListener('rail-loaded', this._onRailLoaded);
+
+    // The open thread advances its own read watermark; the rail and the DM
+    // unread dots are separate components with no way to observe that.
+    this.addEventListener('read-state-updated', this._onReadStateUpdated);
 
     // Agent membership and status badges are SSE-driven: the chat scope
     // subscribes to `project.{spaceId}.agent.>`, which carries both lifecycle
@@ -1130,11 +1136,48 @@ export class ScionPageChat extends LitElement {
     }
 
     // Drop agents removed via SSE `deleted` events.
+    const deletedRefs = new Set<string>();
     for (const id of stateManager.getDeletedAgentIds()) {
+      const removed = byId.get(id);
+      if (removed?.slug) deletedRefs.add(removed.slug);
+      deletedRefs.add(id);
       byId.delete(id);
     }
 
     this.v2AgentMembers = Array.from(byId.values());
+
+    // A deleted agent cannot remain the thread default. The server clears the
+    // binding and emits topic-updated; this covers the open view even if that
+    // event is missed. defaultAgent holds a slug or an ID, so both are checked.
+    const conv = this.v2Conversation;
+    if (conv?.defaultAgent && deletedRefs.has(conv.defaultAgent)) {
+      this.v2Conversation = { ...conv, defaultAgent: '' };
+    }
+  }
+
+  /**
+   * A conversation's read watermark moved (dispatched by chat-thread after a
+   * successful POST). Clear the matching unread markers without a round trip,
+   * then re-sync from the server so a rejected write cannot leave the UI lying.
+   */
+  private _handleReadStateUpdated(e: Event): void {
+    const detail = (e as CustomEvent).detail as { conversationKey?: string } | undefined;
+    const key = detail?.conversationKey || '';
+    if (!key) return;
+
+    if (key.startsWith('dm:')) {
+      const peerId = this.v2Conversation?.peerId || '';
+      if (peerId && this.v2UnreadFromIds.includes(peerId)) {
+        this.v2UnreadFromIds = this.v2UnreadFromIds.filter((id) => id !== peerId);
+      }
+      void this.loadUnreadDMPeers();
+      return;
+    }
+
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+    rail?.markThreadRead(key);
   }
 
   private handleChatMessage(): void {

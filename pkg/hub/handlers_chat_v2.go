@@ -615,6 +615,50 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// ClearTopicDefaultAgent drops the default-agent binding from every topic in
+// the agent's project that points at it, and republishes each affected topic
+// so open clients stop offering a deleted agent as the thread's default.
+//
+// default_agent holds either an agent ID or a slug (the send path resolves
+// both), so both are matched. Best-effort: a failure here leaves a stale
+// default that the send path already tolerates by falling back to no agent.
+func (s *Server) ClearTopicDefaultAgent(ctx context.Context, agentID, agentSlug, projectID string) {
+	if projectID == "" || (agentID == "" && agentSlug == "") {
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return
+	}
+
+	topics, err := wcs.ListTopics(ctx, projectID)
+	if err != nil {
+		slog.Warn("Failed to list topics while clearing deleted agent default",
+			"project_id", projectID, "agent_id", agentID, "error", err)
+		return
+	}
+
+	cleared := ""
+	for _, t := range topics {
+		if t.DefaultAgent == "" {
+			continue
+		}
+		if t.DefaultAgent != agentID && t.DefaultAgent != agentSlug {
+			continue
+		}
+		if err := wcs.UpdateTopic(ctx, t.ID, TopicUpdate{DefaultAgent: &cleared}); err != nil {
+			slog.Warn("Failed to clear deleted agent as thread default",
+				"topic_id", t.ID, "agent_id", agentID, "error", err)
+			continue
+		}
+		t.DefaultAgent = ""
+		s.events.PublishChatTopicEvent(ctx, projectID, "updated", t)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Send Path (the core of W2)
 // ---------------------------------------------------------------------------
@@ -1362,9 +1406,21 @@ type interagentResponse struct {
 // Read Watermarks
 // ---------------------------------------------------------------------------
 
-// handleConversationRead handles POST /api/v1/chat/conversations/{key}/read.
+// chatReadStateResponse is the GET /read payload. For a human-to-human DM it
+// carries the peer's watermark so the sender can render "seen" on load,
+// without waiting for the next read-state SSE event.
+type chatReadStateResponse struct {
+	ConversationKey       string `json:"conversationKey"`
+	LastReadMessageID     string `json:"lastReadMessageId,omitempty"`
+	PeerLastReadMessageID string `json:"peerLastReadMessageId,omitempty"`
+	PeerLastReadAt        string `json:"peerLastReadAt,omitempty"`
+}
+
+// handleConversationRead handles GET and POST
+// /api/v1/chat/conversations/{key}/read. POST advances the caller's read
+// watermark; GET reports the caller's watermark and, for DMs, the peer's.
 func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, key string) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
@@ -1382,6 +1438,10 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	s.mu.RUnlock()
 
 	if wcs == nil {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, chatReadStateResponse{ConversationKey: key})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
@@ -1413,6 +1473,11 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	if r.Method == http.MethodGet {
+		s.writeConversationReadState(w, r, wcs, key, user.ID(), isDM)
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 	var body struct {
 		MessageID string `json:"messageId"`
@@ -1432,7 +1497,44 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Tell the DM peer their message has been seen. Best-effort: a dropped
+	// event only costs the sender a "seen" tick until their next reload.
+	s.events.PublishChatReadStateEvent(ctx, key, user.ID(), body.MessageID)
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// writeConversationReadState answers GET .../read. The peer fields are only
+// populated for human-to-human DMs — agent DMs have no peer watermark, and a
+// topic's read state is per-user with no single "peer" to report.
+func (s *Server) writeConversationReadState(
+	w http.ResponseWriter, r *http.Request, wcs WebChatStore, key, userID string, isDM bool,
+) {
+	ctx := r.Context()
+	resp := chatReadStateResponse{ConversationKey: key}
+
+	if rs, err := wcs.GetReadState(ctx, userID, key); err == nil && rs != nil {
+		resp.LastReadMessageID = rs.LastReadMessageID
+	}
+
+	if isDM {
+		for _, participantID := range dmUserParticipants(key) {
+			if participantID == userID {
+				continue
+			}
+			peerRS, err := wcs.GetReadState(ctx, participantID, key)
+			if err != nil || peerRS == nil {
+				continue
+			}
+			resp.PeerLastReadMessageID = peerRS.LastReadMessageID
+			if !peerRS.LastReadAt.IsZero() {
+				resp.PeerLastReadAt = peerRS.LastReadAt.UTC().Format(time.RFC3339Nano)
+			}
+			break
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleSpaceRead handles POST /api/v1/chat/spaces/{projectId}/read.

@@ -56,6 +56,8 @@ export interface ChatSpaceThread {
   defaultAgent?: string;
   lastActivityAt?: string;
   lastMessagePreview?: string;
+  /** Newest message in the thread — the watermark a "mark read" must set. */
+  lastMessageId?: string;
   hasUnread: boolean;
   hasUnreadMention: boolean;
 }
@@ -767,17 +769,50 @@ export class ScionChatSpaceRail extends LitElement {
 
   private async handleMarkRead(thread: ChatSpaceThread, projectId: string): Promise<void> {
     this.contextMenuTarget = null;
+    // The server requires the watermark to move to a specific message. Without
+    // an ID it rejects the request, and the dot comes back on the next reload.
+    if (!thread.lastMessageId) {
+      this.markThreadRead(thread.id);
+      return;
+    }
     try {
-      await apiFetch(`/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/read`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/read`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messageId: thread.lastMessageId }),
+        }
+      );
+      if (!res.ok) return;
       // Update locally
       this.updateThread(projectId, thread.id, { hasUnread: false, hasUnreadMention: false });
+      this.decrementSpaceUnread(projectId);
     } catch {
       // Non-critical
     }
+  }
+
+  /**
+   * Clear a thread's unread markers without talking to the server. Called when
+   * the thread view itself advanced the watermark — the rail has no other way
+   * to learn that happened.
+   */
+  markThreadRead(threadId: string): void {
+    for (const [projectId, threads] of this.threadsBySpace) {
+      const target = threads.find((t) => t.id === threadId);
+      if (!target || (!target.hasUnread && !target.hasUnreadMention)) continue;
+      this.updateThread(projectId, threadId, { hasUnread: false, hasUnreadMention: false });
+      this.decrementSpaceUnread(projectId);
+      return;
+    }
+  }
+
+  /** Drop one from a space's unread badge, floored at zero. */
+  private decrementSpaceUnread(projectId: string): void {
+    this.spaces = this.spaces.map((s) =>
+      s.projectId === projectId ? { ...s, unreadCount: Math.max(0, s.unreadCount - 1) } : s
+    );
   }
 
   private async handleMarkSpaceRead(projectId: string): Promise<void> {
@@ -794,6 +829,9 @@ export class ScionChatSpaceRail extends LitElement {
         threads.map((t) => ({ ...t, hasUnread: false, hasUnreadMention: false }))
       );
       this.threadsBySpace = newMap;
+      this.spaces = this.spaces.map((s) =>
+        s.projectId === projectId ? { ...s, unreadCount: 0, hasUnreadMention: false } : s
+      );
     } catch {
       // Non-critical
     }

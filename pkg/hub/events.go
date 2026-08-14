@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -50,6 +51,10 @@ type EventPublisher interface {
 	// deleted) on project.<projectID>.chat.topic so SSE subscribers can
 	// update the space rail in real time.
 	PublishChatTopicEvent(ctx context.Context, projectID string, action string, topic WebChatTopic)
+	// PublishChatReadStateEvent publishes a read-watermark advance to the other
+	// participants of a DM on user.<peerID>.chat.read-state so the sender can
+	// render "seen" without polling.
+	PublishChatReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -81,6 +86,7 @@ func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string
 func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)                   {}
 func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 }
+func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string) {}
 func (noopEventPublisher) PublishRaw(_ string, _ interface{}) {}
 func (noopEventPublisher) Close()                             {}
 
@@ -683,6 +689,30 @@ func (p *eventBuilder) PublishChatTopicEvent(_ context.Context, projectID string
 		Topic:  topic,
 	}
 	p.sink("project."+projectID+".chat.topic", evt)
+}
+
+// PublishChatReadStateEvent fans a read-watermark advance out to the OTHER
+// user participants of a DM on user.<peerID>.chat.read-state.
+//
+// Only DM keys are published. A thread watermark is per-user state that the
+// rest of the space has no use for, so broadcasting it on the project subject
+// would be pure noise — thread readers clear their own unread dot locally.
+func (p *eventBuilder) PublishChatReadStateEvent(_ context.Context, conversationKey, userID, messageID string) {
+	if !strings.HasPrefix(conversationKey, "dm:") {
+		return
+	}
+	evt := ChatReadStateEvent{
+		ConversationKey: conversationKey,
+		UserID:          userID,
+		MessageID:       messageID,
+		ReadAt:          time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+	}
+	for _, participantID := range dmUserParticipants(conversationKey) {
+		if participantID == userID {
+			continue
+		}
+		p.sink("user."+participantID+".chat.read-state", evt)
+	}
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

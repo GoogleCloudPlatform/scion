@@ -928,3 +928,70 @@ func TestPublishUserMessage_UserDM_BothSidesReceive(t *testing.T) {
 		}
 	}
 }
+
+// --- R17: DM read receipts ---
+
+func TestPublishChatReadStateEvent_ReachesPeerOnly(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	reader := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	peer := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	dmKey := "dm:user:" + reader + ":user:" + peer
+
+	chPeer, unsubPeer := pub.Subscribe("user." + peer + ".chat.read-state")
+	defer unsubPeer()
+	chSelf, unsubSelf := pub.Subscribe("user." + reader + ".chat.read-state")
+	defer unsubSelf()
+
+	pub.PublishChatReadStateEvent(context.Background(), dmKey, reader, "msg-7")
+
+	select {
+	case evt := <-chPeer:
+		if evt.Subject != "user."+peer+".chat.read-state" {
+			t.Errorf("expected subject user.%s.chat.read-state, got %s", peer, evt.Subject)
+		}
+		var payload ChatReadStateEvent
+		if err := json.Unmarshal(evt.Data, &payload); err != nil {
+			t.Fatalf("failed to unmarshal read-state event: %v", err)
+		}
+		if payload.ConversationKey != dmKey {
+			t.Errorf("expected conversationKey %s, got %s", dmKey, payload.ConversationKey)
+		}
+		if payload.UserID != reader {
+			t.Errorf("expected userId %s, got %s", reader, payload.UserID)
+		}
+		if payload.MessageID != "msg-7" {
+			t.Errorf("expected messageId msg-7, got %s", payload.MessageID)
+		}
+		if payload.ReadAt == "" {
+			t.Error("expected readAt to be populated")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for read-state event")
+	}
+
+	// The reader learns nothing from their own watermark.
+	select {
+	case evt := <-chSelf:
+		t.Fatalf("reader should not receive their own read-state event, got %s", evt.Subject)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestPublishChatReadStateEvent_IgnoresTopics(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	// A topic watermark is per-user state; nothing should be broadcast.
+	ch, unsub := pub.Subscribe(">")
+	defer unsub()
+
+	pub.PublishChatReadStateEvent(context.Background(), "topic-uuid-1", "user-1", "msg-1")
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("topic read state should not publish, got %s", evt.Subject)
+	case <-time.After(100 * time.Millisecond):
+	}
+}

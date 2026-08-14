@@ -115,6 +115,13 @@ export class ScionChatMessage extends LitElement {
   @property()
   dispatchFailureReason = '';
 
+  /**
+   * True when the DM peer's read watermark has reached this message. Replaces
+   * the single-check "Delivered" indicator with a double-check "Seen".
+   */
+  @property({ type: Boolean })
+  seen = false;
+
   /** Agent slug the message was routed to (shown in bubble header). */
   @property()
   routedTo = '';
@@ -585,6 +592,10 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-success-500, #22c55e);
     }
 
+    .delivery-state.seen sl-icon {
+      color: var(--scion-primary-500, #3b82f6);
+    }
+
     .delivery-state.failed {
       color: var(--scion-danger-600, #dc2626);
     }
@@ -738,12 +749,19 @@ export class ScionChatMessage extends LitElement {
           </div>
         `;
       case 'dispatched':
-        return html`
-          <div class="delivery-state dispatched">
-            <sl-icon name="check2"></sl-icon>
-            Delivered
-          </div>
-        `;
+        return this.seen
+          ? html`
+              <div class="delivery-state seen">
+                <sl-icon name="check2-all"></sl-icon>
+                Seen
+              </div>
+            `
+          : html`
+              <div class="delivery-state dispatched">
+                <sl-icon name="check2"></sl-icon>
+                Delivered
+              </div>
+            `;
       case 'failed':
         return html`
           <sl-tooltip content=${this.dispatchFailureReason || 'Delivery failed'} hoist>
