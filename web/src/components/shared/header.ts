@@ -107,6 +107,28 @@ export class ScionHeader extends LitElement {
       margin: 0;
     }
 
+    /*
+     * On the chat view the logo stands in for the page title, so it is sized
+     * to sit inline within the 60px header rather than as a sidebar block.
+     */
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .logo-icon {
+      font-size: 1.5rem;
+      line-height: 1;
+    }
+
+    .logo-text h1 {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 700;
+      color: var(--scion-text, #1e293b);
+    }
+
     .header-right {
       display: flex;
       align-items: center;
@@ -289,7 +311,16 @@ export class ScionHeader extends LitElement {
               </button>
             `
           : ''}
-        <h1 class="page-title">${this.pageTitle}</h1>
+        ${this.isChatView()
+          ? html`
+              <div class="logo">
+                <div class="logo-icon">🌱</div>
+                <div class="logo-text">
+                  <h1>Scion Chat</h1>
+                </div>
+              </div>
+            `
+          : html`<h1 class="page-title">${this.pageTitle}</h1>`}
       </div>
 
       <div class="header-right">
@@ -325,6 +356,16 @@ export class ScionHeader extends LitElement {
   }
 
   /**
+   * Whether the header is rendering above the chat view. The chat view has no
+   * sidebar of its own, so the header carries the Scion logo there in place of
+   * the page title.
+   */
+  private isChatView(): boolean {
+    const path = this.currentPath || window.location.pathname;
+    return path.startsWith('/chat');
+  }
+
+  /**
    * Toggle between the dashboard and chat views. Chat is a peer view of the
    * dashboard, so the switch lives in the header rather than in either
    * sidebar — it is the one control present in both shells.
@@ -332,8 +373,7 @@ export class ScionHeader extends LitElement {
   private renderModeSwitch() {
     if (!isFeatureEnabled(NATIVE_CHAT_FLAG)) return '';
 
-    const path = this.currentPath || window.location.pathname;
-    const isChat = path.startsWith('/chat');
+    const isChat = this.isChatView();
 
     return html`
       <div class="mode-switch" role="group" aria-label="Switch view">

@@ -221,52 +221,6 @@ export class ScionPageChat extends LitElement {
       overflow: hidden;
     }
 
-    /* ---- Sidebar logo (shared by both rails) ---- */
-
-    /*
-     * Mirrors the dashboard nav's logo block (nav.ts) so the chat view reads
-     * as a peer of the dashboard rather than a separate app.
-     */
-    .logo {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 1.25rem 1rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      flex-shrink: 0;
-    }
-
-    .logo-icon {
-      width: 2rem;
-      height: 2rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 1.5rem;
-      flex-shrink: 0;
-      line-height: 1;
-    }
-
-    .logo-text {
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    .logo-text h1 {
-      font-size: 1.125rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-      line-height: 1.2;
-    }
-
-    .logo-text span {
-      font-size: 0.6875rem;
-      color: var(--scion-text-muted, #64748b);
-      white-space: nowrap;
-    }
-
     /* ---- V1 Layout ---- */
 
     .thread-rail {
@@ -1952,28 +1906,11 @@ export class ScionPageChat extends LitElement {
     return this.renderV1();
   }
 
-  /**
-   * The Scion logo block that heads the sidebar, matching the dashboard's
-   * `<scion-nav>` logo (see nav.ts).
-   */
-  private renderRailLogo() {
-    return html`
-      <div class="logo">
-        <div class="logo-icon">🌱</div>
-        <div class="logo-text">
-          <h1>Scion</h1>
-          <span>Agent Orchestration</span>
-        </div>
-      </div>
-    `;
-  }
-
   // ---- DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON. ----
 
   private renderV1() {
     return html`
       <div class="thread-rail">
-        ${this.renderRailLogo()}
         <div class="rail-header"><span>Conversations</span></div>
         <div class="thread-list">
           ${this.loadingThreads
@@ -2045,7 +1982,6 @@ export class ScionPageChat extends LitElement {
   private renderV2() {
     return html`
       <div class="v2-rail">
-        ${this.renderRailLogo()}
         ${this.v2SpaceRailLoaded
           ? html`
               <scion-chat-space-rail
