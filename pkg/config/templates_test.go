@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -807,50 +808,60 @@ func TestGetTemplateChainInProject_ExistingDefaultIsNotReseeded(t *testing.T) {
 
 // Hydration is published atomically, so concurrent callers must each receive a
 // fully-seeded default template rather than one mid-write.
+//
+// The per-caller failure rate against the pre-fix implementation is only ~7%, so a
+// single 16-way trial detects a regression roughly one run in five. Repeating the
+// trial takes detection to reliable. The fresh HOME per trial is load-bearing:
+// reusing one HOME yields exactly one hydration no matter how many trials run.
 func TestGetTemplateChainInProject_ConcurrentHydration(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Chdir(tmpDir)
+	const trials = 20
+	for trial := 0; trial < trials; trial++ {
+		t.Run(fmt.Sprintf("trial-%d", trial), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("HOME", tmpDir)
+			t.Chdir(tmpDir)
 
-	const goroutines = 16
-	var wg sync.WaitGroup
-	var start sync.WaitGroup
-	errs := make([]error, goroutines)
-	chains := make([][]*Template, goroutines)
-	// The template contents must be observed inside the goroutine, immediately
-	// after the call returns: waiting until every goroutine has finished would
-	// let the slowest seeder complete the tree and mask a torn read.
-	statErrs := make([]error, goroutines)
+			const goroutines = 16
+			var wg sync.WaitGroup
+			var start sync.WaitGroup
+			errs := make([]error, goroutines)
+			chains := make([][]*Template, goroutines)
+			// The template contents must be observed inside the goroutine, immediately
+			// after the call returns: waiting until every goroutine has finished would
+			// let the slowest seeder complete the tree and mask a torn read.
+			statErrs := make([]error, goroutines)
 
-	start.Add(1)
-	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
-		go func(idx int) {
-			defer wg.Done()
-			start.Wait()
-			chain, err := GetTemplateChainInProject("default", "")
-			errs[idx] = err
-			chains[idx] = chain
-			if err == nil && len(chain) == 1 {
-				_, statErrs[idx] = os.Stat(filepath.Join(chain[0].Path, "home", ".tmux.conf"))
+			start.Add(1)
+			wg.Add(goroutines)
+			for i := 0; i < goroutines; i++ {
+				go func(idx int) {
+					defer wg.Done()
+					start.Wait()
+					chain, err := GetTemplateChainInProject("default", "")
+					errs[idx] = err
+					chains[idx] = chain
+					if err == nil && len(chain) == 1 {
+						_, statErrs[idx] = os.Stat(filepath.Join(chain[0].Path, "home", ".tmux.conf"))
+					}
+				}(i)
 			}
-		}(i)
-	}
-	start.Done()
-	wg.Wait()
+			start.Done()
+			wg.Wait()
 
-	for i := 0; i < goroutines; i++ {
-		if errs[i] != nil {
-			t.Errorf("goroutine %d: GetTemplateChainInProject failed: %v", i, errs[i])
-			continue
-		}
-		if len(chains[i]) != 1 {
-			t.Errorf("goroutine %d: expected 1 template, got %d", i, len(chains[i]))
-			continue
-		}
-		if statErrs[i] != nil {
-			t.Errorf("goroutine %d: hydrated default template missing .tmux.conf: %v", i, statErrs[i])
-		}
+			for i := 0; i < goroutines; i++ {
+				if errs[i] != nil {
+					t.Errorf("goroutine %d: GetTemplateChainInProject failed: %v", i, errs[i])
+					continue
+				}
+				if len(chains[i]) != 1 {
+					t.Errorf("goroutine %d: expected 1 template, got %d", i, len(chains[i]))
+					continue
+				}
+				if statErrs[i] != nil {
+					t.Errorf("goroutine %d: hydrated default template missing .tmux.conf: %v", i, statErrs[i])
+				}
+			}
+		})
 	}
 }
 

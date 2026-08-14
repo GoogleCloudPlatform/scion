@@ -430,12 +430,24 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 		util.Debugf("failed to prepare global templates dir: %v", mErr)
 		return nil, err
 	}
-	staging, tErr := os.MkdirTemp(globalDir, ".default-hydrate-")
+	// Stage outside globalDir: ListTemplates scans every directory entry there, so a
+	// staging dir leaked by a SIGKILL mid-seed would surface as a template forever.
+	// ~/.scion is on the same filesystem, so the publish rename stays atomic.
+	scionDir, sdErr := GetGlobalDir()
+	if sdErr != nil {
+		util.Debugf("failed to resolve scion dir for staging: %v", sdErr)
+		return nil, err
+	}
+	staging, tErr := os.MkdirTemp(scionDir, ".default-hydrate-")
 	if tErr != nil {
 		util.Debugf("failed to stage default template: %v", tErr)
 		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
+	// MkdirTemp creates 0700 and SeedAgnosticTemplate's MkdirAll is a no-op on an
+	// existing dir, so without this the published default diverges from every other
+	// seeding path, which yields 0755.
+	_ = os.Chmod(staging, 0755)
 
 	if sErr := SeedAgnosticTemplate(staging, false); sErr != nil {
 		util.Debugf("failed to hydrate embedded default template: %v", sErr)
