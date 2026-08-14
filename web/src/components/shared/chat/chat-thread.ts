@@ -993,7 +993,12 @@ export class ScionChatThread extends LitElement {
 
   /** Handle v2 SSE chat message events. Only backfill if the event is for this conversation. */
   private handleV2ChatMessage(e: Event): void {
-    type ChatEventData = { threadId?: string; conversationKey?: string; topicId?: string };
+    type ChatEventData = {
+      threadId?: string;
+      conversationKey?: string;
+      topicId?: string;
+      senderId?: string;
+    };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ChatEventData } & ChatEventData)
       | undefined;
@@ -1005,8 +1010,22 @@ export class ScionChatThread extends LitElement {
       if (eventKey && eventKey !== this.conversationKey) {
         return; // Not for this conversation
       }
+      // The sender finished typing the moment their message landed — drop the
+      // indicator now rather than waiting out TYPING_EXPIRY_MS.
+      this.clearTypingForUser(eventData.senderId);
     }
     void this.backfillV2();
+  }
+
+  /** Drop a user's typing indicator (and its expiry timer), if one is active. */
+  private clearTypingForUser(userId: string | undefined): void {
+    if (!userId) return;
+    const existing = this.typingUsers.get(userId);
+    if (!existing) return;
+    clearTimeout(existing.timer);
+    const updated = new Map(this.typingUsers);
+    updated.delete(userId);
+    this.typingUsers = updated;
   }
 
   /** Handle v2 SSE typing events. Only show for this conversation, and skip self. */

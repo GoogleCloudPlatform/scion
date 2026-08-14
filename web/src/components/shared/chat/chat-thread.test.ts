@@ -220,6 +220,41 @@ describe('scion-chat-thread SSE message filtering', () => {
     await vi.waitFor(() => expect(historyCalls()).toBe(1));
   });
 
+  /**
+   * The indicator is otherwise held for TYPING_EXPIRY_MS after the last typing
+   * event, so it lingers for seconds after the message it announced arrives.
+   */
+  it('clears the sender typing indicator when their message arrives', async () => {
+    const el = await mount();
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-typing-received', {
+        detail: { data: { threadId: CONVERSATION_KEY, userId: 'user-them', displayName: 'Them' } },
+      })
+    );
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.typing-indicator')).not.toBeNull();
+
+    emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm1', senderId: 'user-them' });
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.typing-indicator')).toBeNull();
+  });
+
+  it('leaves other users typing indicators alone', async () => {
+    const el = await mount();
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-typing-received', {
+        detail: { data: { threadId: CONVERSATION_KEY, userId: 'user-them', displayName: 'Them' } },
+      })
+    );
+    await el.updateComplete;
+
+    emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm1', senderId: 'user-other' });
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.typing-indicator')).not.toBeNull();
+  });
+
   it('collapses a burst of events into one trailing refetch', async () => {
     await mount();
 

@@ -1180,7 +1180,13 @@ export class ScionPageChat extends LitElement {
     rail?.markThreadRead(key);
   }
 
-  private handleChatMessage(): void {
+  private handleChatMessage(e: Event): void {
+    // The sender is done typing once their message arrives — clear the avatar
+    // overlay immediately instead of letting the 6s expiry run out.
+    const detail = (e as CustomEvent).detail as { data?: { senderId?: string } } | undefined;
+    const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
+    this.clearTypingForUser(eventData?.senderId as string | undefined);
+
     // A new message may create an unread DM or clear one — refresh the dots.
     void this.loadUnreadDMPeers();
 
@@ -1753,6 +1759,19 @@ export class ScionPageChat extends LitElement {
     // Add to typing list if not already present
     if (!this.v2TypingUserIds.includes(userId)) {
       this.v2TypingUserIds = [...this.v2TypingUserIds, userId];
+    }
+  }
+
+  /** Drop a user's typing overlay (and its expiry timer), if one is active. */
+  private clearTypingForUser(userId: string | undefined): void {
+    if (!userId) return;
+    const timer = this._typingTimers.get(userId);
+    if (timer) {
+      clearTimeout(timer);
+      this._typingTimers.delete(userId);
+    }
+    if (this.v2TypingUserIds.includes(userId)) {
+      this.v2TypingUserIds = this.v2TypingUserIds.filter((id) => id !== userId);
     }
   }
 
