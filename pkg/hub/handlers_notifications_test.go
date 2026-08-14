@@ -179,41 +179,17 @@ func TestHandleNotifications_AcknowledgeNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestHandleNotifications_RejectAgentToken(t *testing.T) {
-	srv, s, _ := setupNotificationHandlerTest(t)
-	ctx := context.Background()
+func TestHandleNotifications_RejectAnonymous(t *testing.T) {
+	srv, _, _ := setupNotificationHandlerTest(t)
 
-	// Create an agent and generate a token for it
-	project := &store.Project{
-		ID:   tid("project-agent-auth"),
-		Name: "Agent Auth Project",
-		Slug: "agent-auth-project",
-	}
-	_ = s.CreateProject(ctx, project)
-
-	agent := &store.Agent{
-		ID:        tid("agent-auth-test"),
-		Slug:      "auth-agent",
-		Name:      "Auth Agent",
-		ProjectID: project.ID,
-		Phase:     string(state.PhaseRunning),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
-	agentToken, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
-
-	// Try to access notifications with an agent token
+	// No identity at all: dev auth is bypassed by an (invalid) agent token.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/notifications", nil)
-	req.Header.Set("X-Scion-Agent-Token", agentToken)
+	req.Header.Set("X-Scion-Agent-Token", "not-a-valid-token")
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.NotEqual(t, http.StatusOK, rec.Code)
 }
 
 func TestHandleNotifications_MethodNotAllowed(t *testing.T) {
@@ -540,4 +516,202 @@ func TestHandleSubscriptions_DeleteNotFound(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/notifications/subscriptions/nonexistent-id", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// =============================================================================
+// Agent-caller Tests
+//
+// Agents authenticate with an agent token and subscribe under their slug, the
+// same subscriber ID the dispatcher writes for agent subscriptions.
+// =============================================================================
+
+// setupNotificationAgentCaller creates an agent in the given project and
+// returns it together with an agent token for authenticating as that agent.
+func setupNotificationAgentCaller(t *testing.T, srv *Server, s store.Store, projectID, slug string) (*store.Agent, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	agent := &store.Agent{
+		ID:        tid("agent-caller-" + slug),
+		Slug:      slug,
+		Name:      slug,
+		ProjectID: projectID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	tokenSvc := srv.GetAgentTokenService()
+	require.NotNil(t, tokenSvc)
+	token, err := tokenSvc.GenerateAgentToken(agent.ID, projectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	require.NoError(t, err)
+
+	return agent, token
+}
+
+func TestHandleNotifications_AgentListsOwnNotifications(t *testing.T) {
+	srv, s, _ := setupNotificationHandlerTest(t)
+	ctx := context.Background()
+
+	agent, token := setupNotificationAgentCaller(t, srv, s, tid("project-notif-handler"), "caller-agent")
+
+	agentSub := &store.NotificationSubscription{
+		ID:                api.NewUUID(),
+		Scope:             store.SubscriptionScopeAgent,
+		AgentID:           tid("agent-watched"),
+		SubscriberType:    store.SubscriberTypeAgent,
+		SubscriberID:      agent.Slug,
+		ProjectID:         tid("project-notif-handler"),
+		TriggerActivities: []string{"COMPLETED"},
+		CreatedAt:         time.Now(),
+		CreatedBy:         agent.Slug,
+	}
+	require.NoError(t, s.CreateNotificationSubscription(ctx, agentSub))
+
+	notif := &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: agentSub.ID,
+		AgentID:        tid("agent-watched"),
+		ProjectID:      tid("project-notif-handler"),
+		SubscriberType: store.SubscriberTypeAgent,
+		SubscriberID:   agent.Slug,
+		Status:         "COMPLETED",
+		Message:        "watched-agent has reached a state of COMPLETED",
+		CreatedAt:      time.Now(),
+	}
+	require.NoError(t, s.CreateNotification(ctx, notif))
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/notifications", nil, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var notifs []store.Notification
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&notifs))
+	require.Len(t, notifs, 1)
+	assert.Equal(t, notif.ID, notifs[0].ID)
+	assert.Equal(t, store.SubscriberTypeAgent, notifs[0].SubscriberType)
+}
+
+func TestHandleNotifications_AgentCannotReadOtherNotifications(t *testing.T) {
+	srv, s, _ := setupNotificationHandlerTest(t)
+
+	_, token := setupNotificationAgentCaller(t, srv, s, tid("project-notif-handler"), "nosy-agent")
+
+	// Filtering by another agent is refused; filtering by self is allowed.
+	rec := doRequestWithAgentToken(t, srv, http.MethodGet,
+		"/api/v1/notifications?agentId="+tid("agent-watched"), nil, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	rec = doRequestWithAgentToken(t, srv, http.MethodGet,
+		"/api/v1/notifications?agentId=nosy-agent", nil, token)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func TestHandleSubscriptions_AgentCreateAndList(t *testing.T) {
+	srv, s, _ := setupNotificationHandlerTest(t)
+
+	agent, token := setupNotificationAgentCaller(t, srv, s, tid("project-notif-handler"), "subscriber-agent")
+
+	createReq := createSubscriptionRequest{
+		Scope:             "agent",
+		AgentID:           tid("agent-watched"),
+		ProjectID:         tid("project-notif-handler"),
+		TriggerActivities: []string{"COMPLETED"},
+	}
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq, token)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var created store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	assert.Equal(t, store.SubscriberTypeAgent, created.SubscriberType)
+	assert.Equal(t, agent.Slug, created.SubscriberID)
+	assert.Equal(t, agent.Slug, created.CreatedBy)
+
+	// Listing returns only the agent's own subscriptions, not the user's.
+	rec = doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/notifications/subscriptions", nil, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var subs []store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&subs))
+	require.Len(t, subs, 1)
+	assert.Equal(t, created.ID, subs[0].ID)
+	assert.Equal(t, agent.Slug, subs[0].SubscriberID)
+}
+
+func TestHandleSubscriptions_AgentUpdateAndDeleteOwn(t *testing.T) {
+	srv, s, _ := setupNotificationHandlerTest(t)
+	ctx := context.Background()
+
+	_, token := setupNotificationAgentCaller(t, srv, s, tid("project-notif-handler"), "churn-agent")
+
+	createReq := createSubscriptionRequest{
+		Scope:             "project",
+		ProjectID:         tid("project-notif-handler"),
+		TriggerActivities: []string{"COMPLETED"},
+	}
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq, token)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var sub store.NotificationSubscription
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sub))
+	require.NotEmpty(t, sub.ID)
+
+	updateReq := updateSubscriptionRequest{TriggerActivities: []string{"COMPLETED", "STALLED"}}
+	rec = doRequestWithAgentToken(t, srv, http.MethodPatch, "/api/v1/notifications/subscriptions/"+sub.ID, updateReq, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	stored, err := s.GetNotificationSubscription(ctx, sub.ID)
+	require.NoError(t, err)
+	assert.Contains(t, stored.TriggerActivities, "STALLED")
+
+	rec = doRequestWithAgentToken(t, srv, http.MethodDelete, "/api/v1/notifications/subscriptions/"+sub.ID, nil, token)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	_, err = s.GetNotificationSubscription(ctx, sub.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestHandleSubscriptions_AgentCannotTouchOtherSubscriber(t *testing.T) {
+	srv, s, _ := setupNotificationHandlerTest(t)
+	ctx := context.Background()
+
+	_, token := setupNotificationAgentCaller(t, srv, s, tid("project-notif-handler"), "intruder-agent")
+
+	// The user subscription created by the test setup.
+	userSubs, err := s.GetSubscriptionsForSubscriber(ctx, store.SubscriberTypeUser, DevUserID)
+	require.NoError(t, err)
+	require.Len(t, userSubs, 1)
+	userSubID := userSubs[0].ID
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodDelete, "/api/v1/notifications/subscriptions/"+userSubID, nil, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	updateReq := updateSubscriptionRequest{TriggerActivities: []string{"ERROR"}}
+	rec = doRequestWithAgentToken(t, srv, http.MethodPatch, "/api/v1/notifications/subscriptions/"+userSubID, updateReq, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	// The user's subscription is untouched.
+	stored, err := s.GetNotificationSubscription(ctx, userSubID)
+	require.NoError(t, err)
+	assert.NotContains(t, stored.TriggerActivities, "ERROR")
+}
+
+func TestHandleSubscriptions_AgentCannotSubscribeOtherProject(t *testing.T) {
+	srv, s, _ := setupNotificationHandlerTest(t)
+	ctx := context.Background()
+
+	otherProject := &store.Project{
+		ID:   tid("project-other-notif"),
+		Name: "Other Project",
+		Slug: "other-notif-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+
+	_, token := setupNotificationAgentCaller(t, srv, s, tid("project-notif-handler"), "scoped-agent")
+
+	createReq := createSubscriptionRequest{
+		Scope:             "project",
+		ProjectID:         otherProject.ID,
+		TriggerActivities: []string{"COMPLETED"},
+	}
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/notifications/subscriptions", createReq, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }

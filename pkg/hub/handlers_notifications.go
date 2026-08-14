@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -24,19 +25,59 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// notificationCaller resolves the notification subscriber identity of the
+// caller. Users subscribe under their user ID; agents subscribe under their
+// slug, matching the subscriber ID the dispatcher writes for agent
+// subscriptions (see notifications.go). Returns empty strings when the
+// request carries no identity, or when the calling agent has no agent record.
+func (s *Server) notificationCaller(ctx context.Context) (subscriberType, subscriberID string) {
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		return store.SubscriberTypeUser, user.ID()
+	}
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		agent, err := s.store.GetAgent(ctx, agentIdent.ID())
+		if err != nil {
+			return "", ""
+		}
+		return store.SubscriberTypeAgent, agent.Slug
+	}
+	return "", ""
+}
+
+// isCallingAgent reports whether an agentId filter names the calling agent,
+// accepting either the agent's slug or its record ID.
+func (s *Server) isCallingAgent(ctx context.Context, agentID, callerSlug string) bool {
+	if agentID == callerSlug {
+		return true
+	}
+	agentIdent := GetAgentIdentityFromContext(ctx)
+	return agentIdent != nil && agentID == agentIdent.ID()
+}
+
+// agentProjectAllowed reports whether an agent caller may act on the given
+// project. Non-agent callers are unaffected.
+func agentProjectAllowed(ctx context.Context, projectID string) bool {
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		return agentIdent.ProjectID() == projectID
+	}
+	return true
+}
+
 // handleNotifications handles GET /api/v1/notifications.
-// Lists notifications for the authenticated user.
+// Lists notifications for the authenticated caller (user or agent).
 //
 // Without agentId: returns flat []Notification array (existing tray behavior).
 // With ?agentId=X: returns { userNotifications: [...], agentNotifications: [...] }.
+// Agent callers may only read their own notifications, so agentId must be
+// empty or identify the calling agent.
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
 
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
+	subType, subID := s.notificationCaller(r.Context())
+	if subType == "" {
 		Forbidden(w)
 		return
 	}
@@ -46,9 +87,25 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 
 	agentID := r.URL.Query().Get("agentId")
 
+	if subType == store.SubscriberTypeAgent {
+		// Agents only ever see notifications addressed to themselves; the
+		// agentId filter may only name the caller.
+		if agentID != "" && !s.isCallingAgent(r.Context(), agentID, subID) {
+			Forbidden(w)
+			return
+		}
+		notifs, err := s.store.GetNotifications(r.Context(), subType, subID, onlyUnacknowledged)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		writeJSON(w, http.StatusOK, notifs)
+		return
+	}
+
 	if agentID == "" {
 		// Existing behaviour: flat array of user notifications
-		notifs, err := s.store.GetNotifications(r.Context(), "user", user.ID(), onlyUnacknowledged)
+		notifs, err := s.store.GetNotifications(r.Context(), subType, subID, onlyUnacknowledged)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -58,7 +115,7 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Agent-scoped: return combined response
-	userNotifs, err := s.store.GetNotificationsByAgent(r.Context(), agentID, "user", user.ID(), onlyUnacknowledged)
+	userNotifs, err := s.store.GetNotificationsByAgent(r.Context(), agentID, subType, subID, onlyUnacknowledged)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -93,8 +150,8 @@ type agentNotificationsResponse struct {
 //   - POST /api/v1/notifications/subscriptions/bulk: Bulk create subscriptions
 //   - POST /api/v1/notifications/subscriptions/bulk-delete: Bulk delete subscriptions
 func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
+	subType, subID := s.notificationCaller(r.Context())
+	if subType == "" {
 		Forbidden(w)
 		return
 	}
@@ -103,24 +160,24 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 
 	// POST /api/v1/notifications/ack-all
 	if id == "ack-all" && r.Method == http.MethodPost {
-		if err := s.store.AcknowledgeAllNotifications(r.Context(), "user", user.ID()); err != nil {
+		if err := s.store.AcknowledgeAllNotifications(r.Context(), subType, subID); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		slog.Info("All notifications acknowledged", "userID", user.ID())
+		slog.Info("All notifications acknowledged", "subscriberType", subType, "subscriberID", subID)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 
 	// Subscription routes: /api/v1/notifications/subscriptions[/...]
 	if id == "subscriptions" {
-		s.handleSubscriptionRoutes(w, r, user, action)
+		s.handleSubscriptionRoutes(w, r, subType, subID, action)
 		return
 	}
 
 	// Subscription template routes: /api/v1/notifications/templates[/...]
 	if id == "templates" {
-		s.handleSubscriptionTemplateRoutes(w, r, user, action)
+		s.handleSubscriptionTemplateRoutes(w, r, subID, action)
 		return
 	}
 
@@ -130,7 +187,7 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		slog.Info("Notification acknowledged", "notificationID", id, "userID", user.ID())
+		slog.Info("Notification acknowledged", "notificationID", id, "subscriberType", subType, "subscriberID", subID)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
@@ -157,7 +214,7 @@ type updateSubscriptionRequest struct {
 }
 
 // handleSubscriptionRoutes handles CRUD for notification subscriptions.
-func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request, user UserIdentity, subID string) {
+func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request, subscriberType, subscriberID, subID string) {
 	ctx := r.Context()
 
 	switch {
@@ -190,10 +247,15 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "bad_request", "triggerActivities must be non-empty", nil)
 			return
 		}
+		// Agent callers may only subscribe within their own project.
+		if !agentProjectAllowed(ctx, req.ProjectID) {
+			Forbidden(w)
+			return
+		}
 
 		// Enforce subscription limit if configured
 		if s.config.MaxSubscriptionsPerUser > 0 {
-			existing, err := s.store.GetSubscriptionsForSubscriber(ctx, store.SubscriberTypeUser, user.ID())
+			existing, err := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
 			if err != nil {
 				writeErrorFromErr(w, err, "")
 				return
@@ -209,17 +271,17 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			ID:                api.NewUUID(),
 			Scope:             req.Scope,
 			AgentID:           req.AgentID,
-			SubscriberType:    store.SubscriberTypeUser,
-			SubscriberID:      user.ID(),
+			SubscriberType:    subscriberType,
+			SubscriberID:      subscriberID,
 			ProjectID:         req.ProjectID,
 			TriggerActivities: req.TriggerActivities,
-			CreatedBy:         user.ID(),
+			CreatedBy:         subscriberID,
 		}
 
 		if err := s.store.CreateNotificationSubscription(ctx, sub); err != nil {
 			if err == store.ErrAlreadyExists {
 				// Idempotent: return existing subscription
-				existing, listErr := s.store.GetSubscriptionsForSubscriber(ctx, store.SubscriberTypeUser, user.ID())
+				existing, listErr := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
 				if listErr == nil {
 					for _, e := range existing {
 						if e.Scope == req.Scope && e.AgentID == req.AgentID && e.ProjectID == req.ProjectID {
@@ -236,12 +298,12 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 
 		slog.Info("Subscription created",
-			"subscriptionID", sub.ID, "scope", sub.Scope, "userID", user.ID())
+			"subscriptionID", sub.ID, "scope", sub.Scope, "subscriberType", subscriberType, "subscriberID", subscriberID)
 		writeJSON(w, http.StatusCreated, sub)
 
 	// GET /api/v1/notifications/subscriptions — List
 	case subID == "" && r.Method == http.MethodGet:
-		subs, err := s.store.GetSubscriptionsForSubscriber(ctx, store.SubscriberTypeUser, user.ID())
+		subs, err := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -292,7 +354,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeErrorFromErr(w, err, "Subscription")
 			return
 		}
-		if sub.SubscriberType != store.SubscriberTypeUser || sub.SubscriberID != user.ID() {
+		if sub.SubscriberType != subscriberType || sub.SubscriberID != subscriberID {
 			Forbidden(w)
 			return
 		}
@@ -315,7 +377,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		// Return the updated subscription
 		sub.TriggerActivities = req.TriggerActivities
 		slog.Info("Subscription updated",
-			"subscriptionID", subID, "userID", user.ID())
+			"subscriptionID", subID, "subscriberType", subscriberType, "subscriberID", subscriberID)
 		writeJSON(w, http.StatusOK, sub)
 
 	// DELETE /api/v1/notifications/subscriptions/{id} — Delete
@@ -326,7 +388,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			writeErrorFromErr(w, err, "Subscription")
 			return
 		}
-		if sub.SubscriberType != store.SubscriberTypeUser || sub.SubscriberID != user.ID() {
+		if sub.SubscriberType != subscriberType || sub.SubscriberID != subscriberID {
 			Forbidden(w)
 			return
 		}
@@ -337,7 +399,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 
 		slog.Info("Subscription deleted",
-			"subscriptionID", subID, "userID", user.ID())
+			"subscriptionID", subID, "subscriberType", subscriberType, "subscriberID", subscriberID)
 		w.WriteHeader(http.StatusNoContent)
 
 	// POST /api/v1/notifications/subscriptions/bulk — Bulk create
@@ -354,7 +416,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 
 		// Enforce subscription limit if configured
 		if s.config.MaxSubscriptionsPerUser > 0 {
-			existing, err := s.store.GetSubscriptionsForSubscriber(ctx, store.SubscriberTypeUser, user.ID())
+			existing, err := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
 			if err != nil {
 				writeErrorFromErr(w, err, "")
 				return
@@ -377,22 +439,26 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			if req.Scope == store.SubscriptionScopeAgent && req.AgentID == "" {
 				continue
 			}
+			// Agent callers may only subscribe within their own project.
+			if !agentProjectAllowed(ctx, req.ProjectID) {
+				continue
+			}
 
 			sub := &store.NotificationSubscription{
 				ID:                api.NewUUID(),
 				Scope:             req.Scope,
 				AgentID:           req.AgentID,
-				SubscriberType:    store.SubscriberTypeUser,
-				SubscriberID:      user.ID(),
+				SubscriberType:    subscriberType,
+				SubscriberID:      subscriberID,
 				ProjectID:         req.ProjectID,
 				TriggerActivities: req.TriggerActivities,
-				CreatedBy:         user.ID(),
+				CreatedBy:         subscriberID,
 			}
 
 			if err := s.store.CreateNotificationSubscription(ctx, sub); err != nil {
 				if err == store.ErrAlreadyExists {
 					// Idempotent: find and return existing
-					existing, listErr := s.store.GetSubscriptionsForSubscriber(ctx, store.SubscriberTypeUser, user.ID())
+					existing, listErr := s.store.GetSubscriptionsForSubscriber(ctx, subscriberType, subscriberID)
 					if listErr == nil {
 						for _, e := range existing {
 							if e.Scope == req.Scope && e.AgentID == req.AgentID && e.ProjectID == req.ProjectID {
@@ -411,7 +477,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 
 		slog.Info("Bulk subscriptions created",
-			"count", len(results), "userID", user.ID())
+			"count", len(results), "subscriberType", subscriberType, "subscriberID", subscriberID)
 		writeJSON(w, http.StatusCreated, results)
 
 	// POST /api/v1/notifications/subscriptions/bulk-delete — Bulk delete
@@ -434,7 +500,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 			if err != nil {
 				continue
 			}
-			if sub.SubscriberType != store.SubscriberTypeUser || sub.SubscriberID != user.ID() {
+			if sub.SubscriberType != subscriberType || sub.SubscriberID != subscriberID {
 				continue
 			}
 			if err := s.store.DeleteNotificationSubscription(ctx, id); err != nil {
@@ -444,7 +510,7 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		}
 
 		slog.Info("Bulk subscriptions deleted",
-			"deleted", deleted, "requested", len(req.IDs), "userID", user.ID())
+			"deleted", deleted, "requested", len(req.IDs), "subscriberType", subscriberType, "subscriberID", subscriberID)
 		writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
 
 	default:
@@ -477,7 +543,7 @@ func (r *createTemplateRequest) UnmarshalJSON(data []byte) error {
 }
 
 // handleSubscriptionTemplateRoutes handles CRUD for subscription templates.
-func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http.Request, user UserIdentity, templateID string) {
+func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http.Request, subscriberID, templateID string) {
 	ctx := r.Context()
 
 	switch {
@@ -506,7 +572,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			Scope:             req.Scope,
 			TriggerActivities: req.TriggerActivities,
 			ProjectID:         req.ProjectID,
-			CreatedBy:         user.ID(),
+			CreatedBy:         subscriberID,
 		}
 
 		if err := s.store.CreateSubscriptionTemplate(ctx, tmpl); err != nil {
@@ -519,7 +585,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 		}
 
 		slog.Info("Subscription template created",
-			"templateID", tmpl.ID, "name", tmpl.Name, "userID", user.ID())
+			"templateID", tmpl.ID, "name", tmpl.Name, "createdBy", subscriberID)
 		writeJSON(w, http.StatusCreated, tmpl)
 
 	// GET /api/v1/notifications/templates — List
@@ -542,7 +608,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			writeErrorFromErr(w, err, "Template")
 			return
 		}
-		if tmpl.CreatedBy != user.ID() {
+		if tmpl.CreatedBy != subscriberID {
 			Forbidden(w)
 			return
 		}
@@ -551,7 +617,7 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 			return
 		}
 		slog.Info("Subscription template deleted",
-			"templateID", templateID, "userID", user.ID())
+			"templateID", templateID, "createdBy", subscriberID)
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
