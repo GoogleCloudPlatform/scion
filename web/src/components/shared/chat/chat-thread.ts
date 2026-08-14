@@ -56,14 +56,7 @@ interface MentionResult {
   error?: string;
 }
 
-/** A grouped exchange of inter-agent messages with a single peer agent. */
-interface InteragentExchange {
-  peerAgent: string;
-  peerAgentId: string;
-  messageCount: number;
-  firstMessageAt: string;
-  lastMessageAt: string;
-}
+/** Unused — replaced by flat interagentMessages array grouped inline. */
 
 /** Maximum messages kept in the buffer. */
 const MAX_BUFFER = 500;
@@ -176,11 +169,14 @@ export class ScionChatThread extends LitElement {
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
-  /** Inter-agent exchanges to render as inline markers in agent DMs. */
-  @state() private interagentExchanges: InteragentExchange[] = [];
+  /** Raw inter-agent messages to render as inline markers in agent DMs. */
+  @state() private interagentMessages: Message[] = [];
 
   /** Global expand/collapse state for all inter-agent markers. */
   @state() private interagentExpandAll = false;
+
+  /** Whether inter-agent markers are visible (eye toggle). */
+  @state() private interagentVisible = true;
 
   /** W7: Attachment refs keyed by message ID (from history endpoint + send response). */
   private v2AttachmentMap = new Map<string, import('./chat-message.js').AttachmentRefInfo[]>();
@@ -387,32 +383,26 @@ export class ScionChatThread extends LitElement {
     .interagent-toggle-bar {
       display: flex;
       align-items: center;
-      justify-content: flex-end;
+      gap: 0.5rem;
       padding: 0.25rem 1rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      border-bottom: 1px solid var(--scion-border, rgba(148, 163, 184, 0.15));
     }
 
-    .interagent-toggle-btn {
-      display: inline-flex;
+    .interagent-label {
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #64748b);
+      font-weight: 500;
+    }
+
+    .interagent-icons {
+      display: flex;
       align-items: center;
       gap: 0.25rem;
-      padding: 0.125rem 0.5rem;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.25rem;
-      background: var(--scion-surface, #ffffff);
+    }
+
+    .interagent-icons sl-icon-button::part(base) {
+      font-size: 0.875rem;
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.6875rem;
-      cursor: pointer;
-      transition: background 0.15s, color 0.15s;
-    }
-
-    .interagent-toggle-btn:hover {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text, #1e293b);
-    }
-
-    .interagent-toggle-btn sl-icon {
-      font-size: 0.75rem;
     }
 
     /* Typing indicator */
@@ -507,8 +497,9 @@ export class ScionChatThread extends LitElement {
     this.loadingOlder = false;
 
     // Clear inter-agent state
-    this.interagentExchanges = [];
+    this.interagentMessages = [];
     this.interagentExpandAll = false;
+    this.interagentVisible = true;
 
     // Clear typing state
     for (const entry of this.typingUsers.values()) {
@@ -1060,7 +1051,7 @@ export class ScionChatThread extends LitElement {
     return this.isDM && this.conversationKey.startsWith('dm:agent:');
   }
 
-  /** Fetch inter-agent messages and group them into exchanges. */
+  /** Fetch inter-agent messages for inline markers. Stores the raw flat list. */
   private async fetchInteragentExchanges(): Promise<void> {
     if (!this.isAgentDM || this.messages.length === 0) return;
 
@@ -1079,83 +1070,13 @@ export class ScionChatThread extends LitElement {
 
       const data = (await res.json()) as { messages?: Message[] };
       const msgs = data?.messages ?? [];
-      this.interagentExchanges = this.groupIntoExchanges(msgs);
+      // Store sorted flat list — grouping by DM gaps happens in renderMessages().
+      this.interagentMessages = [...msgs].sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      );
     } catch {
       // Non-critical
     }
-  }
-
-  /**
-   * Group a flat list of inter-agent messages into exchanges.
-   * Consecutive messages with the same peer agent are grouped together.
-   * The "peer agent" is whichever participant is NOT the DM agent.
-   */
-  private groupIntoExchanges(msgs: Message[]): InteragentExchange[] {
-    if (msgs.length === 0) return [];
-
-    // Extract the DM agent ID from the conversation key.
-    const parts = this.conversationKey.split(':');
-    const dmAgentId = parts.length >= 3 ? parts[2] : '';
-
-    // Sort by createdAt ascending.
-    const sorted = [...msgs].sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
-
-    const exchanges: InteragentExchange[] = [];
-    let currentPeerId = '';
-    let currentPeerName = '';
-    let currentCount = 0;
-    let currentFirst = '';
-    let currentLast = '';
-
-    for (const m of sorted) {
-      // Determine the peer (the agent that is NOT the DM agent).
-      let peerId: string;
-      let peerName: string;
-      if (m.senderId === dmAgentId) {
-        peerId = m.recipientId;
-        peerName = m.recipient.startsWith('agent:') ? m.recipient.slice(6) : m.recipient;
-      } else {
-        peerId = m.senderId;
-        peerName = m.sender.startsWith('agent:') ? m.sender.slice(6) : m.sender;
-      }
-
-      if (peerId === currentPeerId) {
-        // Same peer — extend the current exchange.
-        currentCount++;
-        currentLast = m.createdAt;
-      } else {
-        // New peer — flush the previous exchange if any.
-        if (currentCount > 0) {
-          exchanges.push({
-            peerAgent: currentPeerName,
-            peerAgentId: currentPeerId,
-            messageCount: currentCount,
-            firstMessageAt: currentFirst,
-            lastMessageAt: currentLast,
-          });
-        }
-        currentPeerId = peerId;
-        currentPeerName = peerName;
-        currentCount = 1;
-        currentFirst = m.createdAt;
-        currentLast = m.createdAt;
-      }
-    }
-
-    // Flush the last exchange.
-    if (currentCount > 0) {
-      exchanges.push({
-        peerAgent: currentPeerName,
-        peerAgentId: currentPeerId,
-        messageCount: currentCount,
-        firstMessageAt: currentFirst,
-        lastMessageAt: currentLast,
-      });
-    }
-
-    return exchanges;
   }
 
   /** Send a message in v2 mode. */
@@ -1515,18 +1436,36 @@ export class ScionChatThread extends LitElement {
     `;
   }
 
-  /** Render the global expand/collapse toggle for inter-agent markers. */
+  /** Render the toolbar with label + eye (show/hide) + expand/collapse icons. */
   private renderInteragentToggle() {
-    if (!this.isAgentDM || this.interagentExchanges.length === 0) return nothing;
+    if (!this.isAgentDM || this.interagentMessages.length === 0) return nothing;
 
     return html`
       <div class="interagent-toggle-bar">
-        <button class="interagent-toggle-btn" @click=${this.toggleAllInteragent}>
-          <sl-icon name=${this.interagentExpandAll ? 'arrows-collapse' : 'arrows-expand'}></sl-icon>
-          ${this.interagentExpandAll ? 'Collapse' : 'Expand'} agent messages
-        </button>
+        <span class="interagent-label">Agent-agent messages:</span>
+        <div class="interagent-icons">
+          <sl-tooltip content=${this.interagentVisible ? 'Hide' : 'Show'}>
+            <sl-icon-button
+              name=${this.interagentVisible ? 'eye' : 'eye-slash'}
+              label=${this.interagentVisible ? 'Hide agent messages' : 'Show agent messages'}
+              @click=${this.toggleInteragentVisibility}
+            ></sl-icon-button>
+          </sl-tooltip>
+          <sl-tooltip content=${this.interagentExpandAll ? 'Collapse all' : 'Expand all'}>
+            <sl-icon-button
+              name=${this.interagentExpandAll ? 'arrows-collapse' : 'arrows-expand'}
+              label=${this.interagentExpandAll ? 'Collapse all' : 'Expand all'}
+              @click=${this.toggleAllInteragent}
+            ></sl-icon-button>
+          </sl-tooltip>
+        </div>
       </div>
     `;
+  }
+
+  /** Toggle visibility of all inter-agent markers. */
+  private toggleInteragentVisibility(): void {
+    this.interagentVisible = !this.interagentVisible;
   }
 
   /** Toggle all inter-agent markers expanded/collapsed. */
@@ -1639,9 +1578,12 @@ export class ScionChatThread extends LitElement {
     let prevSender = '';
     let prevTimestamp = 0;
 
-    // Track which inter-agent exchanges have been inserted (by index).
-    let nextExchangeIdx = 0;
-    const hasExchanges = this.isAgentDM && this.interagentExchanges.length > 0;
+    // Pre-sort inter-agent messages by time for gap-based grouping.
+    const iaMessages = [...this.interagentMessages].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+    let iaIdx = 0;
+    const hasIA = this.isAgentDM && iaMessages.length > 0;
 
     for (let mi = 0; mi < this.messages.length; mi++) {
       const msg = this.messages[mi];
@@ -1652,26 +1594,24 @@ export class ScionChatThread extends LitElement {
         day: 'numeric',
       });
 
-      // Insert any inter-agent exchange markers that fall before this message.
-      if (hasExchanges) {
+      // Collect all inter-agent messages that fall before this DM message
+      // and insert ONE pill for the entire group.
+      if (hasIA) {
         const msgTime = d.getTime();
-        while (
-          nextExchangeIdx < this.interagentExchanges.length &&
-          new Date(this.interagentExchanges[nextExchangeIdx].firstMessageAt).getTime() < msgTime
-        ) {
-          const ex = this.interagentExchanges[nextExchangeIdx];
+        const pendingIA: Message[] = [];
+        while (iaIdx < iaMessages.length && new Date(iaMessages[iaIdx].createdAt).getTime() < msgTime) {
+          pendingIA.push(iaMessages[iaIdx]);
+          iaIdx++;
+        }
+        if (pendingIA.length > 0) {
           rows.push(html`
             <scion-chat-interagent-marker
-              peerAgent=${ex.peerAgent}
-              peerAgentId=${ex.peerAgentId}
-              .messageCount=${ex.messageCount}
-              conversationKey=${this.conversationKey}
-              timeStart=${ex.firstMessageAt}
-              timeEnd=${ex.lastMessageAt}
+              .messageCount=${pendingIA.length}
+              .messages=${pendingIA}
               ?global-expanded=${this.interagentExpandAll}
+              ?hidden=${!this.interagentVisible}
             ></scion-chat-interagent-marker>
           `);
-          nextExchangeIdx++;
           // Reset grouping after a marker so the next message shows its header.
           prevSender = '';
           prevTimestamp = 0;
@@ -1770,23 +1710,17 @@ export class ScionChatThread extends LitElement {
       prevTimestamp = msgTime;
     }
 
-    // Append any remaining exchanges that come after all DM messages.
-    if (hasExchanges) {
-      while (nextExchangeIdx < this.interagentExchanges.length) {
-        const ex = this.interagentExchanges[nextExchangeIdx];
-        rows.push(html`
-          <scion-chat-interagent-marker
-            peerAgent=${ex.peerAgent}
-            peerAgentId=${ex.peerAgentId}
-            .messageCount=${ex.messageCount}
-            conversationKey=${this.conversationKey}
-            timeStart=${ex.firstMessageAt}
-            timeEnd=${ex.lastMessageAt}
-            ?global-expanded=${this.interagentExpandAll}
-          ></scion-chat-interagent-marker>
-        `);
-        nextExchangeIdx++;
-      }
+    // Append any remaining inter-agent messages that come after all DM messages.
+    if (hasIA && iaIdx < iaMessages.length) {
+      const trailingIA = iaMessages.slice(iaIdx);
+      rows.push(html`
+        <scion-chat-interagent-marker
+          .messageCount=${trailingIA.length}
+          .messages=${trailingIA}
+          ?global-expanded=${this.interagentExpandAll}
+          ?hidden=${!this.interagentVisible}
+        ></scion-chat-interagent-marker>
+      `);
     }
 
     return rows;

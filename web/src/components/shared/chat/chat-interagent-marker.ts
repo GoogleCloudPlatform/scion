@@ -17,42 +17,27 @@
 /**
  * Inline collapsed inter-agent message marker.
  *
- * Renders a compact marker in the DM timeline showing that the DM agent
- * exchanged messages with another agent. Collapsed by default, it shows
- * a count + peer agent name. On expand it lazy-loads and displays the
+ * Renders a compact pill in the DM timeline showing that inter-agent
+ * messages occurred between two user-facing DM messages. Collapsed by
+ * default, it shows "(n agent-agent messages)". On expand it displays the
  * individual messages in a compact sender->recipient format.
+ *
+ * Messages are passed directly via the `.messages` property (no lazy loading).
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
-import { apiFetch } from '../../../client/api.js';
+import { customElement, property } from 'lit/decorators.js';
 import type { Message } from '../../../shared/types.js';
 
 @customElement('scion-chat-interagent-marker')
 export class ScionChatInteragentMarker extends LitElement {
-  /** Peer agent display name. */
-  @property()
-  peerAgent = '';
-
-  /** Peer agent UUID (for potential avatar colouring). */
-  @property()
-  peerAgentId = '';
-
-  /** Number of messages in this exchange. */
+  /** Number of messages in this group. */
   @property({ type: Number })
   messageCount = 0;
 
-  /** The DM conversation key (for fetching). */
-  @property()
-  conversationKey = '';
-
-  /** ISO timestamp of the first message in the exchange. */
-  @property()
-  timeStart = '';
-
-  /** ISO timestamp of the last message in the exchange. */
-  @property()
-  timeEnd = '';
+  /** The messages to display when expanded (passed directly from parent). */
+  @property({ type: Array })
+  messages: Message[] = [];
 
   /** Whether this marker is expanded (shows individual messages). */
   @property({ type: Boolean, reflect: true })
@@ -62,62 +47,67 @@ export class ScionChatInteragentMarker extends LitElement {
   @property({ type: Boolean, attribute: 'global-expanded' })
   globalExpanded = false;
 
-  /** The loaded messages (populated on first expand). */
-  @state()
-  private messages: Message[] = [];
-
-  /** Whether messages are currently being fetched. */
-  @state()
-  private loading = false;
-
-  /** Whether messages have been fetched at least once (cache). */
-  private fetched = false;
+  /** Whether this marker is hidden (eye toggle off). */
+  @property({ type: Boolean, reflect: true })
+  override hidden = false;
 
   static override styles = css`
     :host {
       display: block;
-      padding: 0.125rem 1rem;
     }
 
-    .marker {
-      display: flex;
-      flex-direction: column;
-      border-left: 2px solid var(--scion-border, #e2e8f0);
-      margin-left: 1rem;
-      padding-left: 0.75rem;
+    :host([hidden]) {
+      display: none;
     }
 
-    .marker-header {
+    /* Collapsed pill — full-width rounded badge/divider */
+    .marker-pill {
       display: flex;
       align-items: center;
+      justify-content: center;
       gap: 0.5rem;
+      padding: 0.375rem 1rem;
+      margin: 0.25rem 1rem;
+      background: rgba(148, 163, 184, 0.1);
+      border: 1px solid var(--scion-border, rgba(148, 163, 184, 0.2));
+      border-radius: 9999px;
       cursor: pointer;
-      padding: 0.25rem 0;
-      user-select: none;
-      color: var(--scion-text-muted, #64748b);
       font-size: 0.75rem;
-      transition: color 0.15s;
+      color: var(--scion-text-muted, #64748b);
+      transition: background 0.15s;
+      user-select: none;
     }
 
-    .marker-header:hover {
-      color: var(--scion-text, #1e293b);
+    .marker-pill:hover {
+      background: rgba(148, 163, 184, 0.18);
     }
 
-    .marker-count {
-      font-weight: 500;
-    }
-
-    .marker-header sl-icon {
+    .marker-pill sl-icon {
       font-size: 0.75rem;
       flex-shrink: 0;
     }
 
-    /* Expanded message list */
-    .interagent-messages {
+    /* Expanded state — card/panel style */
+    .marker-expanded {
+      margin: 0.25rem 1rem;
+      border: 1px solid var(--scion-border, rgba(148, 163, 184, 0.2));
+      border-radius: 0.5rem;
+      overflow: hidden;
+    }
+
+    .marker-expanded .marker-pill {
+      margin: 0;
+      border-radius: 0.5rem 0.5rem 0 0;
+      border: none;
+      border-bottom: 1px solid var(--scion-border, rgba(148, 163, 184, 0.15));
+    }
+
+    .marker-messages {
+      padding: 0.5rem 1rem;
+      background: rgba(148, 163, 184, 0.05);
       display: flex;
       flex-direction: column;
       gap: 0.125rem;
-      padding: 0.25rem 0 0.25rem 0;
     }
 
     .ia-msg {
@@ -155,19 +145,6 @@ export class ScionChatInteragentMarker extends LitElement {
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
     }
-
-    .loading-indicator {
-      display: flex;
-      align-items: center;
-      gap: 0.375rem;
-      padding: 0.25rem 0;
-      font-size: 0.6875rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .loading-indicator sl-spinner {
-      font-size: 0.75rem;
-    }
   `;
 
   override updated(changed: Map<string, unknown>): void {
@@ -176,9 +153,6 @@ export class ScionChatInteragentMarker extends LitElement {
       const wasGlobal = changed.get('globalExpanded') as boolean | undefined;
       if (wasGlobal !== undefined && wasGlobal !== this.globalExpanded) {
         this.expanded = this.globalExpanded;
-        if (this.expanded && !this.fetched) {
-          void this.fetchMessages();
-        }
       }
     }
   }
@@ -190,91 +164,39 @@ export class ScionChatInteragentMarker extends LitElement {
     return value;
   }
 
-  /** Toggle expanded state and lazy-load on first expand. */
+  /** Toggle expanded state — click anywhere on the pill. */
   private toggle(): void {
     this.expanded = !this.expanded;
-    if (this.expanded && !this.fetched) {
-      void this.fetchMessages();
-    }
-  }
-
-  /** Fetch inter-agent messages from the API for this exchange's time range. */
-  private async fetchMessages(): Promise<void> {
-    if (this.loading || this.fetched) return;
-    this.loading = true;
-
-    try {
-      const params = new URLSearchParams({ limit: '200' });
-      if (this.timeStart) {
-        // Subtract 1ms to ensure the first message is included (After is exclusive).
-        const afterDate = new Date(new Date(this.timeStart).getTime() - 1);
-        params.set('after', afterDate.toISOString());
-      }
-      if (this.timeEnd) {
-        // Add 1ms to ensure the last message is included (Before is exclusive).
-        const beforeDate = new Date(new Date(this.timeEnd).getTime() + 1);
-        params.set('before', beforeDate.toISOString());
-      }
-
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`
-      );
-
-      if (res.ok) {
-        const data = (await res.json()) as { messages?: Message[] };
-        const allMessages = data?.messages ?? [];
-        // Filter to only messages with this specific peer agent.
-        this.messages = allMessages.filter(
-          (m) =>
-            m.senderId === this.peerAgentId ||
-            m.recipientId === this.peerAgentId ||
-            m.sender === `agent:${this.peerAgent}` ||
-            m.recipient === `agent:${this.peerAgent}`
-        );
-        this.fetched = true;
-      }
-    } catch {
-      // Non-critical — leave messages empty.
-    } finally {
-      this.loading = false;
-    }
   }
 
   override render() {
-    return html`
-      <div class="marker">
-        <div class="marker-header" @click=${this.toggle}>
-          <span class="marker-count">
-            ${this.messageCount} message${this.messageCount !== 1 ? 's' : ''} with
-            ${this.peerAgent}
-          </span>
-          <sl-icon name=${this.expanded ? 'chevron-down' : 'chevron-right'}></sl-icon>
+    if (this.expanded) {
+      return html`
+        <div class="marker-expanded">
+          <div class="marker-pill" @click=${this.toggle}>
+            <sl-icon name="chevron-down"></sl-icon>
+            <span>(${this.messageCount} agent-agent message${this.messageCount !== 1 ? 's' : ''})</span>
+          </div>
+          ${this.renderMessages()}
         </div>
-        ${this.expanded ? this.renderExpanded() : nothing}
+      `;
+    }
+
+    return html`
+      <div class="marker-pill" @click=${this.toggle}>
+        <sl-icon name="chevron-right"></sl-icon>
+        <span>(${this.messageCount} agent-agent message${this.messageCount !== 1 ? 's' : ''})</span>
       </div>
     `;
   }
 
-  private renderExpanded() {
-    if (this.loading) {
-      return html`
-        <div class="loading-indicator">
-          <sl-spinner></sl-spinner>
-          <span>Loading messages...</span>
-        </div>
-      `;
-    }
-
+  private renderMessages() {
     if (this.messages.length === 0) {
-      return html`
-        <div class="loading-indicator">
-          <span>No messages loaded.</span>
-        </div>
-      `;
+      return nothing;
     }
 
     return html`
-      <div class="interagent-messages">
+      <div class="marker-messages">
         ${this.messages.map(
           (m) => html`
             <div class="ia-msg">
