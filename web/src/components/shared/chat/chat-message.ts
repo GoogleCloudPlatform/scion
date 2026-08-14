@@ -115,6 +115,10 @@ export class ScionChatMessage extends LitElement {
   @property()
   dispatchFailureReason = '';
 
+  /** Agent slug the message was routed to (shown in bubble header). */
+  @property()
+  routedTo = '';
+
   /** File attachment paths (wave-1 agent-style). */
   @property({ type: Array })
   attachments: string[] = [];
@@ -194,6 +198,12 @@ export class ScionChatMessage extends LitElement {
       font-size: 0.6875rem;
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
+    }
+
+    .routed-to {
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.6875rem;
+      font-weight: 400;
     }
 
     .bubble-content {
@@ -675,7 +685,19 @@ export class ScionChatMessage extends LitElement {
           ${this.showHeader && this.fromAgent && this.visibility !== 'verbose'
             ? html`
                 <div class="bubble-header">
-                  <span class="sender-name">${this.sender}</span>
+                  <span class="sender-name">${this.senderName || this.sender}</span>
+                  ${this.routedTo
+                    ? html`<span class="routed-to"> → 🤖 ${this.routedTo}</span>`
+                    : nothing}
+                  <span class="msg-time">${this.formatTime()}</span>
+                </div>
+              `
+            : nothing}
+          ${this.showHeader && !this.fromAgent && this.routedTo
+            ? html`
+                <div class="bubble-header">
+                  <span class="sender-name">${this.senderName || this.sender}</span>
+                  <span class="routed-to"> → 🤖 ${this.routedTo}</span>
                   <span class="msg-time">${this.formatTime()}</span>
                 </div>
               `

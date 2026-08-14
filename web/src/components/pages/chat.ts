@@ -142,6 +142,7 @@ export class ScionPageChat extends LitElement {
   private _onPresenceUpdated = this.handlePresenceUpdated.bind(this);
   private _onChatTyping = this.handleChatTyping.bind(this);
   private _onRailLoaded = this.handleRailLoaded.bind(this);
+  private _onAgentsUpdated = this._handleAgentsUpdated.bind(this);
   /** Map from project slug → project ID for deep-link resolution. */
   private _slugToProjectId = new Map<string, string>();
   /** Map from project ID → project slug for URL generation. */
@@ -437,6 +438,7 @@ export class ScionPageChat extends LitElement {
       stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
       stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
       stateManager.removeEventListener('chat-typing-received', this._onChatTyping);
+      stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
       this.stopPresenceHeartbeat();
       // Clean up typing timers
@@ -629,6 +631,7 @@ export class ScionPageChat extends LitElement {
     stateManager.addEventListener('chat-topic-updated', this._onChatTopic);
     stateManager.addEventListener('chat-presence-updated', this._onPresenceUpdated);
     stateManager.addEventListener('chat-typing-received', this._onChatTyping);
+    stateManager.addEventListener('agents-updated', this._onAgentsUpdated);
 
     // Listen for rail-loaded to set up the SSE scope with space IDs
     this.addEventListener('rail-loaded', this._onRailLoaded);
@@ -1015,6 +1018,15 @@ export class ScionPageChat extends LitElement {
     return [];
   }
 
+  /** Refresh the members list when project agents change (add/remove). */
+  private _handleAgentsUpdated(): void {
+    if (this.v2Conversation?.projectId) {
+      void this.loadV2Members(this.v2Conversation.projectId);
+    } else {
+      void this.loadHubMembers();
+    }
+  }
+
   private handleChatMessage(): void {
     // Debounce: reload the rail + backfill conversation
     if (this._refreshTimer) clearTimeout(this._refreshTimer);
@@ -1027,12 +1039,25 @@ export class ScionPageChat extends LitElement {
     }, 2000);
   }
 
-  private handleChatTopic(): void {
+  private handleChatTopic(e: Event): void {
     // Reload the rail when topics change
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
       | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
       | null;
     if (rail) void rail.reload();
+
+    // If the updated topic matches the current conversation, sync defaultAgent
+    const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
+    const topicId = (detail?.id as string) || (detail?.topicId as string) || '';
+    const newDefault = (detail?.defaultAgent as string) ?? '';
+    if (topicId && this.v2Conversation?.conversationKey === topicId) {
+      if (this.v2Conversation.defaultAgent !== newDefault) {
+        this.v2Conversation = {
+          ...this.v2Conversation,
+          defaultAgent: newDefault,
+        };
+      }
+    }
   }
 
   private handleThreadSelect(e: CustomEvent): void {
@@ -1754,14 +1779,40 @@ export class ScionPageChat extends LitElement {
     `;
   }
 
+  /** Look up the project slug for an agent DM peer. */
+  private getAgentProjectSlug(_peerId: string): string {
+    // Check v2AgentMembers for project info — agents from the members endpoint
+    // belong to the currently-selected project. For hub-level agents, use the
+    // projectIdToSlug map if the agent has a projectId.
+    // Since the members endpoint doesn't include projectId, we derive it from
+    // the current conversation or the first known project.
+    if (this.v2Conversation?.projectId) {
+      return this._projectIdToSlug.get(this.v2Conversation.projectId) || '';
+    }
+    // Fallback: check if we have a single project
+    if (this._projectIdToSlug.size === 1) {
+      return Array.from(this._projectIdToSlug.values())[0];
+    }
+    return '';
+  }
+
   private renderV2Conversation() {
     if (!this.v2Conversation) return nothing;
     const conv = this.v2Conversation;
+
+    // Look up the project slug for agent DMs
+    const agentProjectSlug = conv.isDM && conv.peerKind === 'agent' && conv.peerId
+      ? this.getAgentProjectSlug(conv.peerId)
+      : '';
 
     return html`
       ${conv.isDM && conv.peerName
         ? html`
             <div class="v2-thread-header">
+              ${conv.peerKind === 'agent' && agentProjectSlug
+                ? html`<sl-icon name="folder" style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b)"></sl-icon>
+                        <span style="font-size: 0.8125rem; color: var(--scion-text-muted, #64748b)">${agentProjectSlug}</span>`
+                : nothing}
               ${conv.peerKind === 'agent'
                 ? html`<span style="font-size: 0.875rem">🤖</span>`
                 : html`<sl-icon

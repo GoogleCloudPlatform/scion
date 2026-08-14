@@ -145,6 +145,7 @@ export class ScionChatMembers extends LitElement {
     }
 
 
+    .agent-terminal,
     .agent-popout {
       display: inline-flex;
       align-items: center;
@@ -155,12 +156,19 @@ export class ScionChatMembers extends LitElement {
       flex-shrink: 0;
     }
 
+    .member-item:hover .agent-terminal,
     .member-item:hover .agent-popout {
       opacity: 1;
     }
 
+    .agent-terminal:hover,
     .agent-popout:hover {
       color: var(--scion-primary, #3b82f6);
+    }
+
+    scion-status-badge {
+      transform: scale(0.85);
+      transform-origin: left center;
     }
 
     .empty-note {
@@ -336,11 +344,12 @@ export class ScionChatMembers extends LitElement {
     const isActive = this.dmPeerId === a.id;
     const isTyping = this.typingUserIds.includes(a.id);
 
-    // Build tooltip content: activity detail + last seen
+    // Build tooltip content: phase + full activity text + last seen
     const tooltipParts: string[] = [];
+    if (a.phase) tooltipParts.push(`Phase: ${a.phase}`);
     if (a.activity) tooltipParts.push(a.activity);
     if (a.lastSeen) tooltipParts.push(`Last seen: ${this.formatRelativeTime(a.lastSeen)}`);
-    const tooltipContent = tooltipParts.join('\n') || a.phase || 'unknown';
+    const tooltipContent = tooltipParts.join('\n') || 'unknown';
 
     const badgeStatus = this.resolveAgentStatus(a);
 
@@ -362,6 +371,15 @@ export class ScionChatMembers extends LitElement {
             size="small"
           ></scion-status-badge>
         </div>
+        <a
+          href="/agents/${a.id}/terminal"
+          target="_blank"
+          class="agent-terminal"
+          title="Open terminal"
+          @click=${(e: Event) => e.stopPropagation()}
+        >
+          <sl-icon name="terminal" style="font-size: 0.75rem;"></sl-icon>
+        </a>
         <a
           href="/agents/${a.id}"
           target="_blank"

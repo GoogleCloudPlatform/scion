@@ -1053,14 +1053,9 @@ export class ScionChatThread extends LitElement {
 
   /** Fetch inter-agent messages for inline markers. Stores the raw flat list. */
   private async fetchInteragentExchanges(): Promise<void> {
-    if (!this.isAgentDM || this.messages.length === 0) return;
-
-    const oldest = this.messages[0];
-    const newest = this.messages[this.messages.length - 1];
+    if (!this.isAgentDM) return;
 
     const params = new URLSearchParams({ limit: '200' });
-    if (oldest) params.set('after', oldest.createdAt);
-    if (newest) params.set('before', new Date(new Date(newest.createdAt).getTime() + 60000).toISOString());
 
     try {
       const res = await apiFetch(
@@ -1453,7 +1448,7 @@ export class ScionChatThread extends LitElement {
           </sl-tooltip>
           <sl-tooltip content=${this.interagentExpandAll ? 'Collapse all' : 'Expand all'}>
             <sl-icon-button
-              name=${this.interagentExpandAll ? 'chevron-contract' : 'chevron-expand'}
+              name=${this.interagentExpandAll ? 'chevron-up' : 'chevron-down'}
               label=${this.interagentExpandAll ? 'Collapse all' : 'Expand all'}
               @click=${this.toggleAllInteragent}
             ></sl-icon-button>
@@ -1688,6 +1683,7 @@ export class ScionChatThread extends LitElement {
           dispatchFailureReason=${msg.dispatchFailureReason || ''}
           .attachments=${msg.attachments || []}
           .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
+          routedTo=${!isFromAgent && this.defaultAgent ? this.defaultAgent : ''}
         ></scion-chat-message>
       `);
 
