@@ -323,9 +323,9 @@ model_aliases:
 ```
 
 ```yaml
-# ~/.scion/harness-configs/gemini/config.yaml
-harness: gemini
-image: scion-gemini:latest
+# ~/.scion/harness-configs/gemini-cli/config.yaml
+harness: gemini-cli
+image: scion-gemini-cli:latest
 model_aliases:
   small: gemini-flash-lite
   medium: gemini-flash

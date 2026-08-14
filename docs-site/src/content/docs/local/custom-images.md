@@ -19,7 +19,7 @@ Scion images are built in layers:
 core-base          System dependencies (Go, Node, Python, Git)
   └── scion-base   Scion CLI, sciontool binary, scion user, entrypoint
         ├── scion-claude     Claude Code harness
-        ├── scion-gemini     Gemini CLI harness
+        ├── scion-gemini-cli Gemini CLI harness
         ├── scion-opencode   OpenCode harness
         ├── scion-codex      Codex harness
         └── scion-hub        Scion hub server
@@ -132,7 +132,7 @@ When `image_registry` is set, Scion transforms the default image reference:
 | Default Image | `image_registry` | Resolved Image |
 | :--- | :--- | :--- |
 | `us-central1-docker.pkg.dev/.../scion-claude:latest` | `ghcr.io/myorg` | `ghcr.io/myorg/scion-claude:latest` |
-| `us-central1-docker.pkg.dev/.../scion-gemini:latest` | `ghcr.io/myorg` | `ghcr.io/myorg/scion-gemini:latest` |
+| `us-central1-docker.pkg.dev/.../scion-gemini-cli:latest` | `ghcr.io/myorg` | `ghcr.io/myorg/scion-gemini-cli:latest` |
 
 ### Setting It
 
@@ -204,7 +204,7 @@ Targets resolve to an ordered list of step IDs (one step per image):
 | :--- | :--- | :--- |
 | `core-base` | `core-base` | Foundation tools layer. |
 | `scion-base` | `scion-base` | Adds sciontool. Reuses existing `core-base:<tag>`. |
-| `harnesses` | `scion-claude`, `scion-gemini`, `scion-opencode`, `scion-codex` | Reuses existing `scion-base:<tag>`. |
+| `harnesses` | `scion-claude`, `scion-gemini-cli`, `scion-opencode`, `scion-codex` | Reuses existing `scion-base:<tag>`. |
 | `hub` | `scion-hub` | Hub server image. Reuses existing `scion-base:<tag>`. |
 | `common` (default) | `scion-base` + harnesses + hub | Skips `core-base`. Most common rebuild. |
 | `all` | Full DAG | Rebuilds everything from `core-base`. |

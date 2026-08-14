@@ -56,13 +56,13 @@ Harness Configs define *what* agent harness runs, with what configurations. They
 ```yaml
 harness_configs:
   gemini:
-    harness: gemini
-    image: "us-central1-docker.pkg.dev/.../scion-gemini:latest"
+    harness: gemini-cli
+    image: "us-central1-docker.pkg.dev/.../scion-gemini-cli:latest"
     user: scion
     
   gemini-dev:
-    harness: gemini
-    image: "gemini:local-dev"
+    harness: gemini-cli
+    image: "gemini-cli:local-dev"
     env:
       DEBUG: "true"
 ```
@@ -87,7 +87,7 @@ For development, you might want to mount a local directory (like a shared librar
 ```yaml
 harness_configs:
   gemini-with-lib:
-    harness: gemini
+    harness: gemini-cli
     volumes:
       - source: "/Users/me/code/shared-lib"
         target: "/home/scion/shared-lib"

@@ -14,13 +14,20 @@ In the Web Dashboard, the **Inbox Tray** provides a centralized view of all mess
 
 ## Native Web Chat
 
-Scion features an interactive, top-level **Native Web Chat** interface in the Web Dashboard (enabled via the `web.native_chat` feature flag). Rather than being isolated inside a single tab, chat is promoted to a top-level workspace view (a fourth `ShellType` in the SPA) that provides a cohesive environment for real-time collaboration with all agents in your project.
+Scion features an interactive, top-level **Native Web Chat** interface in the Web Dashboard (enabled via the `web.native_chat` feature flag). Rather than being isolated inside a single tab, chat is promoted to a top-level workspace view (a fourth `ShellType` in the SPA) that provides a cohesive environment for real-time collaboration with all agents and team members.
 
 ### Core Layout & Navigation
 
-- **The Thread Rail**: A left-hand navigation sidebar that lists all active chat threads. Unread badges ("unread dots") update in real-time as messages arrive, instantly alerting you to agents requiring attention.
+- **Project-Scoped Spaces & Shared Threads**: Chat is organized into distinct spaces scoped to specific Projects. Within a project-scoped space, users and agents participate in shared discussion threads, creating focused hubs of collaboration.
+- **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports 1-on-1 Direct Messages. This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, unified consolidated thread per participant pair.
+- **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message.
+- **The Thread Rail**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. Unread badges ("unread dots") update in real-time as messages arrive, instantly alerting you to new activity requiring attention.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
-- **Zero-Reload Navigation**: Move between threads, project views, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
+- **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
+- **Attachments, Search & Notifications**:
+  - **Attachments**: The chat composer supports file and image uploads, allowing users to send documents or visual context directly to threads.
+  - **Search**: Built-in chat search lets you quickly query across historical messages and active threads to find crucial context.
+  - **Notifications**: Integrated chat-specific notifications, including native browser push notifications and persistent unread counts, ensure you stay informed of incoming messages.
 
 ### Three-State Visibility Filtering
 
@@ -38,6 +45,7 @@ When writing instructions, you can easily pull other agents into the thread:
 - **Autocomplete Popup**: Typing `@` in the chat input opens a dropdown list of active agents in the project. The list supports fuzzy-matching as you type, and full keyboard navigation (arrow keys to select, `Enter` to insert).
 - **Code-Fence Guard**: The mention autocomplete is smart — it automatically disables itself when typing inside Markdown code fences (e.g., ` ``` ` blocks) so code snippets don't trigger unwanted dropdowns.
 - **Fan-Out Restrictions**: For platform stability, a single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
+- **Composer Default-Agent Disambiguation**: When sending messages in collaborative project spaces with multiple active agents, typing a message without an explicit target or `@-mention` triggers a smart disambiguation interface. This guides the user to select which agent the message should target (or fall back to the project's configured default agent), keeping routing unambiguous and conversations clear.
 
 ### Cross-Channel Coherence
 
