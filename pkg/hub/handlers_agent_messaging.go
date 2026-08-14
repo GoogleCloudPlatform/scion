@@ -460,6 +460,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				structuredMsg.Sender = "agent:" + agentIdent.ID()
 			}
 		}
+		// Backfill SenderID from auth context when the client set Sender
+		// but omitted SenderID (e.g. CLI-originated agent-to-agent messages).
+		// Without this, inter-agent message queries by ParticipantID miss
+		// messages where the agent was the sender.
+		if structuredMsg.SenderID == "" {
+			if user := GetUserIdentityFromContext(ctx); user != nil {
+				structuredMsg.SenderID = user.ID()
+			} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+				structuredMsg.SenderID = agentIdent.ID()
+			}
+		}
 		// Default version, timestamp and type when the client omits them
 		// (e.g. the web UI sends a minimal structured_message).
 		if structuredMsg.Version == 0 {

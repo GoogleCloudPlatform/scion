@@ -31,6 +31,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import './chat-avatar.js';
+import '../status-badge.js';
 
 /** A human member from the GET /chat/spaces/{id}/members endpoint. */
 export interface ChatHumanMember {
@@ -143,69 +144,6 @@ export class ScionChatMembers extends LitElement {
       color: var(--scion-text-muted, #94a3b8);
     }
 
-    .agent-status {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 0.6875rem;
-      color: var(--scion-text-muted, #94a3b8);
-    }
-
-    .agent-status .dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-
-    .dot.running {
-      background: #22c55e;
-    }
-
-    .dot.idle {
-      background: #f59e0b;
-    }
-
-    .dot.stopped {
-      background: #94a3b8;
-    }
-
-    .dot.error {
-      background: #ef4444;
-    }
-
-    .agent-status-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 0.5625rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      padding: 1px 6px;
-      border-radius: 9999px;
-      line-height: 1.25rem;
-    }
-
-    .agent-status-badge.running {
-      background: rgba(34, 197, 94, 0.12);
-      color: #16a34a;
-    }
-
-    .agent-status-badge.idle {
-      background: rgba(245, 158, 11, 0.12);
-      color: #d97706;
-    }
-
-    .agent-status-badge.stopped {
-      background: rgba(148, 163, 184, 0.12);
-      color: #64748b;
-    }
-
-    .agent-status-badge.error {
-      background: rgba(239, 68, 68, 0.12);
-      color: #dc2626;
-    }
 
     .agent-popout {
       display: inline-flex;
@@ -379,8 +317,22 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
+  /** Map an agent's phase/activity to a StatusType for the badge. */
+  private resolveAgentStatus(a: ChatAgentMember): string {
+    // The activity field carries the detailed operational state (e.g.
+    // "blocked", "stalled"). Prefer it over the coarser phase when it
+    // maps to a known status.
+    if (a.activity) {
+      const lower = a.activity.toLowerCase();
+      if (lower.includes('blocked')) return 'blocked';
+      if (lower.includes('stalled')) return 'stalled';
+      if (lower.includes('completed')) return 'completed';
+      if (lower.includes('error')) return 'error';
+    }
+    return a.phase || 'unknown';
+  }
+
   private renderAgent(a: ChatAgentMember) {
-    const dotClass = this.agentDotClass(a.phase || '');
     const isActive = this.dmPeerId === a.id;
     const isTyping = this.typingUserIds.includes(a.id);
 
@@ -389,6 +341,8 @@ export class ScionChatMembers extends LitElement {
     if (a.activity) tooltipParts.push(a.activity);
     if (a.lastSeen) tooltipParts.push(`Last seen: ${this.formatRelativeTime(a.lastSeen)}`);
     const tooltipContent = tooltipParts.join('\n') || a.phase || 'unknown';
+
+    const badgeStatus = this.resolveAgentStatus(a);
 
     const agentRow = html`
       <div
@@ -403,7 +357,10 @@ export class ScionChatMembers extends LitElement {
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
-          <span class="agent-status-badge ${dotClass}">${a.phase || 'unknown'}</span>
+          <scion-status-badge
+            status=${badgeStatus}
+            size="small"
+          ></scion-status-badge>
         </div>
         <a
           href="/agents/${a.id}"
@@ -439,21 +396,6 @@ export class ScionChatMembers extends LitElement {
     const diffDays = Math.floor(diffHrs / 24);
     if (diffDays < 7) return `${diffDays}d ago`;
     return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
-  }
-
-  private agentDotClass(phase: string): string {
-    switch (phase) {
-      case 'running':
-        return 'running';
-      case 'idle':
-      case 'waiting':
-        return 'idle';
-      case 'error':
-      case 'failed':
-        return 'error';
-      default:
-        return 'stopped';
-    }
   }
 
   private handleMemberClick(id: string, kind: 'user' | 'agent', displayName: string) {

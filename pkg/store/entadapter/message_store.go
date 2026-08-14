@@ -277,6 +277,9 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 			message.SenderIDEQ(filter.ParticipantID),
 		))
 	}
+	if filter.Sender != "" {
+		query.Where(message.SenderEQ(filter.Sender))
+	}
 	if filter.OnlyUnread {
 		query.Where(message.ReadEQ(false))
 	}

@@ -60,14 +60,18 @@ export class ScionChatInteragentMarker extends LitElement {
       display: none;
     }
 
-    /* Collapsed pill — full-width rounded badge/divider */
+    /* Collapsed pill — centered compact badge */
     .marker-pill {
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 0.5rem;
+      max-width: 40%;
+      margin-left: auto;
+      margin-right: auto;
       padding: 0.375rem 1rem;
-      margin: 0.25rem 1rem;
+      margin-top: 0.25rem;
+      margin-bottom: 0.25rem;
       background: rgba(148, 163, 184, 0.1);
       border: 1px solid var(--scion-border, rgba(148, 163, 184, 0.2));
       border-radius: 9999px;
@@ -76,6 +80,7 @@ export class ScionChatInteragentMarker extends LitElement {
       color: var(--scion-text-muted, #64748b);
       transition: background 0.15s;
       user-select: none;
+      text-align: center;
     }
 
     .marker-pill:hover {
@@ -83,31 +88,27 @@ export class ScionChatInteragentMarker extends LitElement {
     }
 
     .marker-pill sl-icon {
-      font-size: 0.75rem;
+      font-size: 0.625rem;
       flex-shrink: 0;
     }
 
-    /* Expanded state — card/panel style */
+    /* Expanded state — bordered container, centered */
     .marker-expanded {
-      margin: 0.25rem 1rem;
-      border: 1px solid var(--scion-border, rgba(148, 163, 184, 0.2));
-      border-radius: 0.5rem;
-      overflow: hidden;
-    }
-
-    .marker-expanded .marker-pill {
-      margin: 0;
-      border-radius: 0.5rem 0.5rem 0 0;
-      border: none;
-      border-bottom: 1px solid var(--scion-border, rgba(148, 163, 184, 0.15));
-    }
-
-    .marker-messages {
+      max-width: 75%;
+      margin-left: auto;
+      margin-right: auto;
+      margin-top: 0.25rem;
+      margin-bottom: 0.25rem;
       padding: 0.5rem 1rem;
       background: rgba(148, 163, 184, 0.05);
-      display: flex;
-      flex-direction: column;
-      gap: 0.125rem;
+      border: 2px solid var(--scion-border, rgba(148, 163, 184, 0.2));
+      border-radius: 0.5rem;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .marker-expanded:hover {
+      background: rgba(148, 163, 184, 0.1);
     }
 
     .ia-msg {
@@ -172,42 +173,32 @@ export class ScionChatInteragentMarker extends LitElement {
   override render() {
     if (this.expanded) {
       return html`
-        <div class="marker-expanded">
-          <div class="marker-pill" @click=${this.toggle}>
-            <sl-icon name="chevron-down"></sl-icon>
-            <span>(${this.messageCount} agent-agent message${this.messageCount !== 1 ? 's' : ''})</span>
+        <sl-tooltip content="Click to collapse">
+          <div class="marker-expanded" @click=${this.toggle}>
+            ${this.messages.length > 0
+              ? this.messages.map(
+                  (m) => html`
+                    <div class="ia-msg">
+                      <span class="ia-sender">${this.formatParticipant(m.sender)}</span>
+                      <span class="ia-arrow">&rarr;</span>
+                      <span class="ia-recipient">${this.formatParticipant(m.recipient)}</span>:
+                      <span class="ia-body">${m.msg}</span>
+                    </div>
+                  `
+                )
+              : nothing}
           </div>
-          ${this.renderMessages()}
-        </div>
+        </sl-tooltip>
       `;
     }
 
     return html`
-      <div class="marker-pill" @click=${this.toggle}>
-        <sl-icon name="chevron-right"></sl-icon>
-        <span>(${this.messageCount} agent-agent message${this.messageCount !== 1 ? 's' : ''})</span>
-      </div>
-    `;
-  }
-
-  private renderMessages() {
-    if (this.messages.length === 0) {
-      return nothing;
-    }
-
-    return html`
-      <div class="marker-messages">
-        ${this.messages.map(
-          (m) => html`
-            <div class="ia-msg">
-              <span class="ia-sender">${this.formatParticipant(m.sender)}</span>
-              <span class="ia-arrow">&rarr;</span>
-              <span class="ia-recipient">${this.formatParticipant(m.recipient)}</span>:
-              <span class="ia-body">${m.msg}</span>
-            </div>
-          `
-        )}
-      </div>
+      <sl-tooltip content="Click to expand">
+        <div class="marker-pill" @click=${this.toggle}>
+          <sl-icon name="chevron-right" style="font-size: 0.625rem"></sl-icon>
+          (${this.messageCount} agent-agent message${this.messageCount !== 1 ? 's' : ''})
+        </div>
+      </sl-tooltip>
     `;
   }
 }

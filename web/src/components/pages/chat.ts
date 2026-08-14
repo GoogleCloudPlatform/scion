@@ -386,7 +386,7 @@ export class ScionPageChat extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
-    .v2-thread-header .members-btn {
+    .v2-thread-header .header-actions {
       margin-left: auto;
     }
 
@@ -1740,13 +1740,6 @@ export class ScionPageChat extends LitElement {
       <div class="v2-members ${this.v2MembersExpanded ? '' : 'collapsed'}">
         <div class="v2-members-header">
           <span>Members</span>
-          <sl-icon-button
-            name="x-lg"
-            label="Close"
-            @click=${() => {
-              this.v2MembersExpanded = false;
-            }}
-          ></sl-icon-button>
         </div>
         <scion-chat-members
           .humans=${this.v2HumanMembers}
@@ -1769,25 +1762,31 @@ export class ScionPageChat extends LitElement {
       ${conv.isDM && conv.peerName
         ? html`
             <div class="v2-thread-header">
-              <sl-icon
-                name=${conv.peerKind === 'agent' ? 'cpu' : 'person'}
-                style="font-size: 0.875rem; color: var(--scion-text-muted)"
-              ></sl-icon>
+              ${conv.peerKind === 'agent'
+                ? html`<span style="font-size: 0.875rem">🤖</span>`
+                : html`<sl-icon
+                    name="person"
+                    style="font-size: 0.875rem; color: var(--scion-text-muted)"
+                  ></sl-icon>`}
               <span>${conv.peerName}</span>
-              <sl-icon-button
-                class="members-btn"
-                name="search"
-                label="Search messages"
-                @click=${() => void this.openSearch()}
-              ></sl-icon-button>
-              <sl-icon-button
-                class="members-btn"
-                name="people"
-                label="Toggle members"
-                @click=${() => {
-                  this.v2MembersExpanded = !this.v2MembersExpanded;
-                }}
-              ></sl-icon-button>
+              <div class="header-actions" style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;">
+                <sl-tooltip content="Search messages">
+                  <sl-icon-button
+                    name="search"
+                    label="Search messages"
+                    @click=${() => void this.openSearch()}
+                  ></sl-icon-button>
+                </sl-tooltip>
+                <sl-tooltip content="Show/Hide members">
+                  <sl-icon-button
+                    name="people"
+                    label="Show/Hide members"
+                    @click=${() => {
+                      this.v2MembersExpanded = !this.v2MembersExpanded;
+                    }}
+                  ></sl-icon-button>
+                </sl-tooltip>
+              </div>
             </div>
           `
         : conv.threadName
@@ -1798,27 +1797,28 @@ export class ScionPageChat extends LitElement {
                 ${conv.defaultAgent
                   ? html`
                       <sl-tooltip content="Default agent: ${conv.defaultAgent}">
-                        <sl-icon
-                          name="cpu"
-                          style="font-size: 0.75rem; color: var(--scion-text-muted)"
-                        ></sl-icon>
+                        <span>🤖</span>
                       </sl-tooltip>
                     `
                   : nothing}
-                <sl-icon-button
-                  class="members-btn"
-                  name="search"
-                  label="Search messages"
-                  @click=${() => void this.openSearch()}
-                ></sl-icon-button>
-                <sl-icon-button
-                  class="members-btn"
-                  name="people"
-                  label="Toggle members"
-                  @click=${() => {
-                    this.v2MembersExpanded = !this.v2MembersExpanded;
-                  }}
-                ></sl-icon-button>
+                <div class="header-actions" style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;">
+                  <sl-tooltip content="Search messages">
+                    <sl-icon-button
+                      name="search"
+                      label="Search messages"
+                      @click=${() => void this.openSearch()}
+                    ></sl-icon-button>
+                  </sl-tooltip>
+                  <sl-tooltip content="Show/Hide members">
+                    <sl-icon-button
+                      name="people"
+                      label="Show/Hide members"
+                      @click=${() => {
+                        this.v2MembersExpanded = !this.v2MembersExpanded;
+                      }}
+                    ></sl-icon-button>
+                  </sl-tooltip>
+                </div>
               </div>
             `
           : nothing}

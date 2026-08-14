@@ -1259,6 +1259,16 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	}
 
 	ctx := r.Context()
+
+	// Look up the agent to get its slug — needed for matching legacy
+	// messages where SenderID was not populated (only the Sender text
+	// field like "agent:<slug>" was set).
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || agent == nil {
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []store.Message{}})
+		return
+	}
+
 	q := r.URL.Query()
 
 	// Parse optional time-range bounds.
@@ -1281,14 +1291,16 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// Query messages where the DM agent is a participant.
+	opts := store.ListOptions{
+		Limit: limit,
+	}
+
+	// Query 1: messages where the DM agent's UUID appears in sender_id
+	// or recipient_id.
 	filter := store.MessageFilter{
 		ParticipantID: agentID,
 		Before:        before,
 		After:         after,
-	}
-	opts := store.ListOptions{
-		Limit: limit,
 	}
 
 	result, err := s.store.ListMessages(ctx, filter, opts)
@@ -1297,12 +1309,41 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Filter to keep only agent-to-agent messages (both sender and recipient
-	// are agents). This excludes user↔agent messages from the DM itself.
-	filtered := make([]store.Message, 0, len(result.Items))
+	// Query 2 (backward-compat): messages where the agent was the sender
+	// but sender_id was empty (legacy CLI-originated messages stored the
+	// slug in the Sender text field only). This catches the "sent-by"
+	// direction that ParticipantID misses for older data.
+	agentSender := "agent:" + agent.Slug
+	senderFilter := store.MessageFilter{
+		Sender: agentSender,
+		Before: before,
+		After:  after,
+	}
+	senderResult, err := s.store.ListMessages(ctx, senderFilter, opts)
+	if err != nil {
+		// Non-fatal: proceed with the first query's results.
+		slog.Error("Failed to fetch sender-based inter-agent messages", "error", err)
+		senderResult = &store.ListResult[store.Message]{}
+	}
+
+	// Merge and deduplicate by message ID, keeping only agent-to-agent
+	// messages (both sender and recipient are agents).
+	seen := make(map[string]bool, len(result.Items))
+	filtered := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
 	for _, m := range result.Items {
 		if strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:") {
-			filtered = append(filtered, m)
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				filtered = append(filtered, m)
+			}
+		}
+	}
+	for _, m := range senderResult.Items {
+		if strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:") {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				filtered = append(filtered, m)
+			}
 		}
 	}
 

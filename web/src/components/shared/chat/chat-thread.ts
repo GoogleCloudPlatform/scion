@@ -1453,7 +1453,7 @@ export class ScionChatThread extends LitElement {
           </sl-tooltip>
           <sl-tooltip content=${this.interagentExpandAll ? 'Collapse all' : 'Expand all'}>
             <sl-icon-button
-              name=${this.interagentExpandAll ? 'arrows-collapse' : 'arrows-expand'}
+              name=${this.interagentExpandAll ? 'chevron-contract' : 'chevron-expand'}
               label=${this.interagentExpandAll ? 'Collapse all' : 'Expand all'}
               @click=${this.toggleAllInteragent}
             ></sl-icon-button>
