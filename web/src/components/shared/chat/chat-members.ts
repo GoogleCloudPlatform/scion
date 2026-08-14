@@ -76,6 +76,10 @@ export interface ChatAgentMember {
   activity?: string;
   lastSeen?: string;
   projectId?: string;
+  /** Freeform status detail — what the agent detail page shows as "Detail". */
+  detailMessage?: string;
+  /** When the agent last changed state (not the heartbeat in `lastSeen`). */
+  lastActivityEvent?: string;
 }
 
 export type ChatMember = ChatHumanMember | ChatAgentMember;
@@ -203,6 +207,17 @@ export class ScionChatMembers extends LitElement {
     scion-status-badge {
       transform: scale(0.85);
       transform-origin: left center;
+    }
+
+    /*
+     * The agent tooltip is two lines (detail + updated time) joined by a
+     * newline. Shoelace's tooltip body collapses whitespace by default, so
+     * the break has to be opted into.
+     */
+    sl-tooltip::part(body) {
+      white-space: pre-line;
+      text-align: left;
+      max-width: 260px;
     }
 
     .empty-note {
@@ -464,10 +479,14 @@ export class ScionChatMembers extends LitElement {
     const isTyping = this.typingUserIds.includes(a.id);
     const hasUnread = this.unreadFromIds.includes(a.id);
 
-    // Build tooltip: activity detail (line 1) + last seen (line 2)
-    const detailText = a.activity || a.phase || 'unknown';
-    const lastSeenText = a.lastSeen ? `Last seen: ${this.formatRelativeTime(a.lastSeen)}` : '';
-    const tooltipContent = lastSeenText ? `${detailText}\n${lastSeenText}` : detailText;
+    // Build tooltip: status detail (line 1) + updated time (line 2). The
+    // detail message is the same text the agent detail page shows, and
+    // "Updated" is the last state change — matching the agent list's column,
+    // not the `lastSeen` heartbeat.
+    const detailText = a.detailMessage || a.activity || a.phase || 'unknown';
+    const updated = a.lastActivityEvent ? this.formatRelativeTime(a.lastActivityEvent) : '';
+    const updatedText = updated ? `Updated: ${updated}` : '';
+    const tooltipContent = updatedText ? `${detailText}\n${updatedText}` : detailText;
 
     const badgeStatus = this.resolveAgentStatus(a);
 

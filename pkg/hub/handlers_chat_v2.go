@@ -1750,9 +1750,16 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 				Phase:       a.Phase,
 				Activity:    a.Activity,
 				ProjectID:   a.ProjectID,
+				Message:     a.Message,
 			}
 			if !a.LastSeen.IsZero() {
 				entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
+			}
+			switch {
+			case !a.LastActivityEvent.IsZero():
+				entry.LastActivityEvent = a.LastActivityEvent.UTC().Format(time.RFC3339)
+			case !a.Updated.IsZero():
+				entry.LastActivityEvent = a.Updated.UTC().Format(time.RFC3339)
 			}
 			agents = append(agents, entry)
 		}
@@ -2578,6 +2585,15 @@ type chatMemberEntry struct {
 	// never reported in.
 	LastSeen  string `json:"lastSeen,omitempty"`
 	ProjectID string `json:"projectId,omitempty"`
+	// Message is the agent's freeform status detail — the text the agent
+	// detail page shows under "Detail" (e.g. "Waiting for user decision").
+	// Named to match store.Agent so /api/v1/agents and this endpoint can be
+	// consumed by the same client mapping.
+	Message string `json:"message,omitempty"`
+	// LastActivityEvent is when the agent last changed state, RFC3339, with
+	// the record's update time as a fallback. Distinct from LastSeen, which
+	// is a heartbeat and moves even when nothing happened.
+	LastActivityEvent string `json:"lastActivityEvent,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

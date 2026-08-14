@@ -78,6 +78,15 @@ const loadChatSearch = () => import('../shared/chat/chat-search.js');
 const FALLBACK_POLL_INTERVAL_MS = 60_000;
 
 /**
+ * Normalise a Hub timestamp: Go marshals a zero time as year 0001 rather than
+ * omitting it, and rendering that as a date would be worse than showing
+ * nothing. Returns '' for absent or zero timestamps.
+ */
+function realTimestamp(value?: string): string {
+  return value && !value.startsWith('0001') ? value : '';
+}
+
+/**
  * Project a sidebar agent member onto the shared Agent shape so it can seed the
  * state manager's agent map. Only the fields SSE status deltas merge onto
  * matter — the map exists here purely to give those deltas a baseline.
@@ -94,7 +103,17 @@ function agentMemberToAgent(
     activity: (m.activity || '') as NonNullable<Agent['activity']>,
     slug: m.slug || '',
     lastSeen: m.lastSeen || '',
+    ...(m.detailMessage ? { detail: { message: m.detailMessage } } : {}),
+    lastActivityEvent: m.lastActivityEvent || '',
   };
+}
+
+/**
+ * The status detail an agent last reported. SSE deltas carry it nested under
+ * `detail`; the REST list endpoints carry it flattened as `message`.
+ */
+function agentDetailMessage(a: { detail?: { message?: string }; message?: string }): string {
+  return a.detail?.message || a.message || '';
 }
 
 // ---- V1 types ----
@@ -1132,6 +1151,12 @@ export class ScionPageChat extends LitElement {
         activity: agent.activity || '',
         lastSeen: agent.lastSeen || existing?.lastSeen || '',
         projectId: agent.projectId || existing?.projectId || scopeProjectId,
+        detailMessage: agentDetailMessage(agent) || existing?.detailMessage || '',
+        lastActivityEvent:
+          realTimestamp(agent.lastActivityEvent) ||
+          realTimestamp(agent.updated) ||
+          existing?.lastActivityEvent ||
+          '',
       });
     }
 
@@ -1517,7 +1542,11 @@ export class ScionPageChat extends LitElement {
             phase?: string;
             status?: string;
             activity?: string;
+            message?: string;
+            detail?: { message?: string };
             lastSeen?: string;
+            lastActivityEvent?: string;
+            updated?: string;
             projectId?: string;
           }>;
         };
@@ -1530,6 +1559,8 @@ export class ScionPageChat extends LitElement {
           activity: a.activity || '',
           lastSeen: a.lastSeen || '',
           projectId: a.projectId || '',
+          detailMessage: agentDetailMessage(a),
+          lastActivityEvent: realTimestamp(a.lastActivityEvent) || realTimestamp(a.updated),
         }));
         // Seed the shared agent map so SSE status deltas have a baseline to
         // merge onto — otherwise they are buffered and never notify.
@@ -1646,7 +1677,9 @@ export class ScionPageChat extends LitElement {
             slug?: string;
             phase?: string;
             activity?: string;
+            message?: string;
             lastSeen?: string;
+            lastActivityEvent?: string;
             projectId?: string;
           }>;
           members?: SpaceMember[];
@@ -1670,6 +1703,8 @@ export class ScionPageChat extends LitElement {
           activity: a.activity || '',
           lastSeen: a.lastSeen || '',
           projectId: a.projectId || projectId,
+          detailMessage: agentDetailMessage(a),
+          lastActivityEvent: realTimestamp(a.lastActivityEvent),
         }));
         // Seed the shared agent map so SSE status deltas have a baseline to
         // merge onto — otherwise they are buffered and never notify.

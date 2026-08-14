@@ -1020,6 +1020,98 @@ func TestChatV2_Members(t *testing.T) {
 	}
 }
 
+// The members sidebar tooltip shows the agent's status detail and the time of
+// its last state change, so both have to survive the trip through this
+// endpoint — the heartbeat in lastSeen is not a substitute for either.
+func TestChatV2_Members_AgentDetailAndActivityTime(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("members-detail"), Name: "members-detail", Slug: "members-detail", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	activityAt := time.Now().Add(-30 * time.Minute).UTC().Truncate(time.Second)
+	agent := &store.Agent{
+		ID:                tid("members-detail-agent"),
+		ProjectID:         proj.ID,
+		Name:              "Helper Bot",
+		Slug:              "helper-bot",
+		Phase:             "running",
+		Activity:          "blocked",
+		Message:           "Waiting for user decision on c34",
+		LastSeen:          time.Now().UTC(),
+		LastActivityEvent: activityAt,
+		OwnerID:           DevUserID,
+		CreatedBy:         DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/members", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMembersResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(resp.Agents))
+	}
+	got := resp.Agents[0]
+	if got.Message != "Waiting for user decision on c34" {
+		t.Errorf("message = %q, want the agent's status detail", got.Message)
+	}
+	if want := activityAt.Format(time.RFC3339); got.LastActivityEvent != want {
+		t.Errorf("lastActivityEvent = %q, want %q", got.LastActivityEvent, want)
+	}
+}
+
+// An agent that has never reported an activity event still needs an updated
+// time, otherwise the tooltip loses its second line entirely.
+func TestChatV2_Members_LastActivityEventFallsBackToUpdated(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("members-fallback"), Name: "members-fallback", Slug: "members-fallback", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:        tid("members-fallback-agent"),
+		ProjectID: proj.ID,
+		Name:      "Fresh Bot",
+		Slug:      "fresh-bot",
+		Phase:     "created",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/members", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMembersResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(resp.Agents))
+	}
+	if resp.Agents[0].LastActivityEvent == "" {
+		t.Error("lastActivityEvent should fall back to the agent's updated time")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DM key validation tests
 // ---------------------------------------------------------------------------

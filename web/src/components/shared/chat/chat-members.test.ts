@@ -83,6 +83,46 @@ describe('scion-chat-members status badge', () => {
   });
 });
 
+describe('scion-chat-members agent tooltip', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  /** The content bound onto the agent row's tooltip. */
+  function tooltipContent(el: ScionChatMembers): string {
+    const tip = el.shadowRoot?.querySelector('sl-tooltip') as { content?: string } | null;
+    return tip?.content ?? '';
+  }
+
+  it('shows the status detail message, not the bare activity word', async () => {
+    const el = await mount([
+      agent({ activity: 'blocked', detailMessage: 'Waiting for user decision on c34' }),
+    ]);
+    expect(tooltipContent(el)).toContain('Waiting for user decision on c34');
+    expect(tooltipContent(el).split('\n')[0]).toBe('Waiting for user decision on c34');
+  });
+
+  it('falls back to the activity when no detail message was reported', async () => {
+    const el = await mount([agent({ activity: 'thinking' })]);
+    expect(tooltipContent(el)).toBe('thinking');
+  });
+
+  it('shows the last activity event as the updated time', async () => {
+    const tenMinAgo = new Date(Date.now() - 10 * 60_000).toISOString();
+    const el = await mount([
+      agent({ detailMessage: 'Running tests', lastActivityEvent: tenMinAgo, lastSeen: '' }),
+    ]);
+    expect(tooltipContent(el)).toBe('Running tests\nUpdated: 10 min ago');
+  });
+
+  it('ignores the heartbeat time — only the activity event drives "Updated"', async () => {
+    const el = await mount([
+      agent({ detailMessage: 'Running tests', lastSeen: new Date().toISOString() }),
+    ]);
+    expect(tooltipContent(el)).toBe('Running tests');
+  });
+});
+
 describe('scion-chat-members wobble', () => {
   beforeEach(() => {
     vi.useFakeTimers();
