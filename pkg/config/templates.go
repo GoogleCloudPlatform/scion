@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -398,6 +399,14 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 // this the default template — and the common home files it carries (.tmux.conf,
 // .zshrc, .gitconfig) — would be silently dropped from every template chain.
 // Seeding never overwrites existing files, so user customizations are preserved.
+//
+// Hydration is published atomically: the embedded copy is seeded into a staging
+// directory and renamed into place, so concurrent callers never observe a
+// partially-seeded default template. defaultHydrationMu de-duplicates hydration
+// within the process (broker creates run up to 20-ways concurrent); the staging
+// directory plus rename covers cross-process races.
+var defaultHydrationMu sync.Mutex
+
 func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	tpl, err := FindTemplateInProjectPath("default", projectPath)
 	if err == nil {
@@ -408,9 +417,34 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	if gErr != nil {
 		return nil, err
 	}
-	if sErr := SeedAgnosticTemplate(filepath.Join(globalDir, "default"), false); sErr != nil {
+
+	defaultHydrationMu.Lock()
+	defer defaultHydrationMu.Unlock()
+
+	// Another goroutine may have hydrated while we waited.
+	if tpl, rErr := FindTemplateInProjectPath("default", projectPath); rErr == nil {
+		return tpl, nil
+	}
+
+	if mErr := os.MkdirAll(globalDir, 0755); mErr != nil {
+		util.Debugf("failed to prepare global templates dir: %v", mErr)
+		return nil, err
+	}
+	staging, tErr := os.MkdirTemp(globalDir, ".default-hydrate-")
+	if tErr != nil {
+		util.Debugf("failed to stage default template: %v", tErr)
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+
+	if sErr := SeedAgnosticTemplate(staging, false); sErr != nil {
 		util.Debugf("failed to hydrate embedded default template: %v", sErr)
 		return nil, err
+	}
+	// Atomic publish. ENOTEMPTY/EEXIST means another process won the race — fine,
+	// the retry below picks up their copy.
+	if rErr := os.Rename(staging, filepath.Join(globalDir, "default")); rErr != nil {
+		util.Debugf("failed to publish hydrated default template: %v", rErr)
 	}
 
 	return FindTemplateInProjectPath("default", projectPath)
@@ -421,29 +455,28 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
 func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
+	if name == "default" {
+		tpl, err := findOrHydrateDefaultTemplate(projectPath)
+		if err != nil {
+			// When the default template cannot be resolved, proceed without it
+			// (e.g. hub-dispatched agents on brokers with no local templates)
+			return nil, nil
+		}
+		return []*Template{tpl}, nil
+	}
+
 	var chain []*Template
 
 	// For non-default templates, prepend the default template as a base layer
-	if name != "default" {
-		defaultTpl, err := findOrHydrateDefaultTemplate(projectPath)
-		if err == nil {
-			chain = append(chain, defaultTpl)
-		}
-		// If the default template cannot be resolved, proceed without it
+	defaultTpl, err := findOrHydrateDefaultTemplate(projectPath)
+	if err == nil {
+		chain = append(chain, defaultTpl)
 	}
+	// If the default template cannot be resolved, proceed without it
 
 	tpl, err := FindTemplateInProjectPath(name, projectPath)
 	if err != nil {
-		if name == "default" {
-			tpl, err = findOrHydrateDefaultTemplate(projectPath)
-			if err != nil {
-				// When the default template cannot be resolved, proceed without it
-				// (e.g. hub-dispatched agents on brokers with no local templates)
-				return chain, nil
-			}
-		} else {
-			return nil, err
-		}
+		return nil, err
 	}
 	chain = append(chain, tpl)
 
