@@ -254,6 +254,12 @@ func TestResolvePluginConfig_SecretKeysStrippedFromInline(t *testing.T) {
 	if result["mode"] != "plugin" {
 		t.Errorf("wiring key should be preserved: got %q", result["mode"])
 	}
+	// Callers pass live maps (entry.Config from in-memory settings). Stripping
+	// the original would erase the credential from settings and risk writing
+	// the loss back to settings.yaml.
+	if _, ok := inline["bot_token"]; !ok {
+		t.Error("ResolvePluginConfig must not mutate the caller's inline map")
+	}
 }
 
 func TestResolvePluginConfig_SecretKeysStrippedWithConfigFile(t *testing.T) {
@@ -343,6 +349,16 @@ func TestResolvePluginConfig_SecretKeysStrippedFromConfigFileWarns(t *testing.T)
 	}
 	if strings.Contains(logged, "secret-from-file") {
 		t.Errorf("warning must not leak the credential value, got: %s", logged)
+	}
+
+	// ResolvePluginConfig runs on request-serving paths; repeat calls must not
+	// let a client drive unbounded log volume.
+	buf.Reset()
+	if _, err := ResolvePluginConfig(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("repeat resolve should not warn again, got: %s", buf.String())
 	}
 }
 

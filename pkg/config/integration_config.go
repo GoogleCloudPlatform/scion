@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -221,11 +222,12 @@ var backendSecretKeys = []string{
 	SecretA2AAPIKey,
 }
 
-// stripSecretKeys removes credential entries from a plugin config map, covering
-// both secret config keys ("bot_token") and backend secret key names
+// stripSecretKeysInPlace removes credential entries from a plugin config map,
+// covering both secret config keys ("bot_token") and backend secret key names
 // ("TELEGRAM_BOT_TOKEN"), so that the secret backend stays authoritative.
 // The map is modified in place; the removed key names are returned sorted.
-func stripSecretKeys(cfg map[string]string) []string {
+// Callers holding a map they do not own must pass a copy.
+func stripSecretKeysInPlace(cfg map[string]string) []string {
 	var stripped []string
 	for k := range cfg {
 		if secretConfigKeys[k] {
@@ -245,6 +247,23 @@ func stripSecretKeys(cfg map[string]string) []string {
 	return stripped
 }
 
+// warnedFileSecrets records which (config file, stripped keys) combinations have
+// already been warned about. ResolvePluginConfig runs on request-serving paths,
+// so warning on every call would let a client drive unbounded log volume.
+var warnedFileSecrets sync.Map
+
+// warnStrippedFileSecretsOnce logs the stripped-secret warning the first time a
+// given config file yields a given set of stripped keys. A later edit that
+// introduces a different secret key warns again.
+func warnStrippedFileSecretsOnce(configFile string, stripped []string) {
+	key := configFile + "\x00" + strings.Join(stripped, ",")
+	if _, seen := warnedFileSecrets.LoadOrStore(key, struct{}{}); seen {
+		return
+	}
+	slog.Warn("secret keys ignored in plugin config file — store them in the secret backend instead",
+		"keys", stripped, "config_file", configFile)
+}
+
 // ResolvePluginConfig builds the config map for a plugin with consistent precedence.
 // If configFile is set, the file is the source of truth for non-wiring keys.
 // Inline config is only used for wiring keys or as fallback when no config_file exists.
@@ -257,7 +276,7 @@ func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map
 	for k, v := range inlineConfig {
 		cleanedInline[k] = v
 	}
-	stripSecretKeys(cleanedInline)
+	stripSecretKeysInPlace(cleanedInline)
 
 	if configFile == "" {
 		return cleanedInline, nil
@@ -276,9 +295,8 @@ func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map
 	// Strip secret keys from file config (same treatment as inline config).
 	// Warn so that a credential disappearing from the resolved config is
 	// traceable to the strip rather than surfacing as "bot_token is required".
-	if stripped := stripSecretKeys(fileConfig); len(stripped) > 0 {
-		slog.Warn("secret keys ignored in plugin config file — store them in the secret backend instead",
-			"keys", stripped, "config_file", configFile)
+	if stripped := stripSecretKeysInPlace(fileConfig); len(stripped) > 0 {
+		warnStrippedFileSecretsOnce(configFile, stripped)
 	}
 
 	// File is the base for non-wiring keys.
