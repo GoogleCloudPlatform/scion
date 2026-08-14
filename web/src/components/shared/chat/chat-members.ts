@@ -213,6 +213,16 @@ export class ScionChatMembers extends LitElement {
       animation-delay: 0.4s;
     }
 
+    @keyframes agent-wobble {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(15%); }
+      75% { transform: translateX(-15%); }
+    }
+
+    .avatar-wrapper.active {
+      animation: agent-wobble 0.5s ease-in-out infinite;
+    }
+
     @keyframes typing-dot-bounce {
       0%,
       60%,
@@ -325,6 +335,16 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
+  /** Determine whether an agent is actively working (for wobble animation). */
+  private isAgentActive(agent: ChatAgentMember): boolean {
+    const activity = (agent.activity || '').toLowerCase();
+    if (activity.includes('blocked') || activity.includes('waiting') || activity.includes('stalled') || activity.includes('completed')) {
+      return false;
+    }
+    const phase = (agent.phase || '').toLowerCase();
+    return phase === 'running' && (activity.includes('executing') || activity.includes('thinking') || activity.includes('working') || activity === '');
+  }
+
   /** Map an agent's phase/activity to a StatusType for the badge. */
   private resolveAgentStatus(a: ChatAgentMember): string {
     // The activity field carries the detailed operational state (e.g.
@@ -344,12 +364,10 @@ export class ScionChatMembers extends LitElement {
     const isActive = this.dmPeerId === a.id;
     const isTyping = this.typingUserIds.includes(a.id);
 
-    // Build tooltip content: phase + full activity text + last seen
-    const tooltipParts: string[] = [];
-    if (a.phase) tooltipParts.push(`Phase: ${a.phase}`);
-    if (a.activity) tooltipParts.push(a.activity);
-    if (a.lastSeen) tooltipParts.push(`Last seen: ${this.formatRelativeTime(a.lastSeen)}`);
-    const tooltipContent = tooltipParts.join('\n') || 'unknown';
+    // Build tooltip: activity detail (line 1) + last seen (line 2)
+    const detailText = a.activity || a.phase || 'unknown';
+    const lastSeenText = a.lastSeen ? `Last seen: ${this.formatRelativeTime(a.lastSeen)}` : '';
+    const tooltipContent = lastSeenText ? `${detailText}\n${lastSeenText}` : detailText;
 
     const badgeStatus = this.resolveAgentStatus(a);
 
@@ -358,7 +376,7 @@ export class ScionChatMembers extends LitElement {
         class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(a.id, 'agent', a.displayName)}
       >
-        <div class="avatar-wrapper">
+        <div class="avatar-wrapper ${this.isAgentActive(a) ? 'active' : ''}">
           <scion-chat-avatar name="${a.slug || a.displayName}" color-seed="${a.id}" size="28"></scion-chat-avatar>
           ${isTyping
             ? html`<div class="typing-overlay"><span></span><span></span><span></span></div>`

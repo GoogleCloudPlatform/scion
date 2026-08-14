@@ -1040,16 +1040,13 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleChatTopic(e: Event): void {
-    // Reload the rail when topics change
-    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
-      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
-      | null;
-    if (rail) void rail.reload();
-
-    // If the updated topic matches the current conversation, sync defaultAgent
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const topicId = (detail?.id as string) || (detail?.topicId as string) || '';
     const newDefault = (detail?.defaultAgent as string) ?? '';
+
+    // If this is the currently-viewed conversation, update defaultAgent directly
+    // and skip the rail reload to avoid the parseV2Route race that overwrites
+    // defaultAgent on subsequent changes, and to prevent sidebar flash.
     if (topicId && this.v2Conversation?.conversationKey === topicId) {
       if (this.v2Conversation.defaultAgent !== newDefault) {
         this.v2Conversation = {
@@ -1057,7 +1054,14 @@ export class ScionPageChat extends LitElement {
           defaultAgent: newDefault,
         };
       }
+      return;
     }
+
+    // For other topic changes (rename, delete, etc.), reload rail
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+    if (rail) void rail.reload();
   }
 
   private handleThreadSelect(e: CustomEvent): void {

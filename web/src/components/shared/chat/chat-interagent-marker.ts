@@ -87,15 +87,10 @@ export class ScionChatInteragentMarker extends LitElement {
       background: rgba(148, 163, 184, 0.18);
     }
 
-    .marker-pill sl-icon {
-      font-size: 0.625rem;
-      flex-shrink: 0;
-    }
-
-    /* Expanded state — bordered container, centered */
+    /* Expanded state — bordered container, left-aligned to match message bubbles */
     .marker-expanded {
-      max-width: 75%;
-      margin-left: auto;
+      max-width: min(70%, 600px);  /* match .bubble max-width in chat-message.ts */
+      margin-left: 1rem;  /* same left margin as message bubbles */
       margin-right: auto;
       margin-top: 0.25rem;
       margin-bottom: 0.25rem;
@@ -195,8 +190,7 @@ export class ScionChatInteragentMarker extends LitElement {
     return html`
       <sl-tooltip content="Click to expand">
         <div class="marker-pill" @click=${this.toggle}>
-          <sl-icon name="chevron-right" style="font-size: 0.625rem"></sl-icon>
-          (${this.messageCount} agent-agent message${this.messageCount !== 1 ? 's' : ''})
+          ${this.messageCount} agent-agent message${this.messageCount !== 1 ? 's' : ''}
         </div>
       </sl-tooltip>
     `;
