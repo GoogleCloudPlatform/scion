@@ -1069,14 +1069,16 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	// Publish SSE event.
 	s.events.PublishUserMessage(ctx, storeMsg)
 
+	// For DMs, ensure DM registry rows exist for both participants. This must
+	// precede the watermark update: touchConversationActivity is a plain
+	// UPDATE and would affect zero rows on the first message of a DM.
+	if isDM && wcs != nil {
+		s.ensureDMRegistered(ctx, key, user.ID())
+	}
+
 	// Update conversation watermark.
 	if wcs != nil {
 		s.touchConversationActivity(ctx, key, storeMsg.ID)
-	}
-
-	// For DMs, ensure DM registry rows exist for both participants.
-	if isDM && wcs != nil {
-		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
 	// --- W6: Chat notifications ---
@@ -1637,14 +1639,19 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{Limit: 200})
 	if err == nil {
 		for _, a := range agentList.Items {
-			agents = append(agents, chatMemberEntry{
+			entry := chatMemberEntry{
 				ID:          a.ID,
 				Kind:        "agent",
 				DisplayName: a.Name,
 				Slug:        a.Slug,
 				Phase:       a.Phase,
 				Activity:    a.Activity,
-			})
+				ProjectID:   a.ProjectID,
+			}
+			if !a.LastSeen.IsZero() {
+				entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
+			}
+			agents = append(agents, entry)
 		}
 	}
 	if agents == nil {
@@ -2111,6 +2118,17 @@ func (s *Server) ensureDMRegistered(ctx context.Context, key, callerID string) {
 	wcs := s.webChatStore
 	s.mu.RUnlock()
 
+	registerDMParticipants(ctx, wcs, key)
+}
+
+// registerDMParticipants upserts one webchat_dm row per participant of a DM
+// conversation key (dm:<kind1>:<id1>:<kind2>:<id2>). It is a no-op for a nil
+// store or a malformed key.
+//
+// Registration must happen before any TouchDMActivity call: TouchDMActivity is
+// a plain UPDATE and silently affects zero rows when the registry rows do not
+// exist yet — which is the case when an agent is the first to speak in a DM.
+func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
 	if wcs == nil {
 		return
 	}
@@ -2421,6 +2439,10 @@ type chatMemberEntry struct {
 	Phase         string `json:"phase,omitempty"`
 	Activity      string `json:"activity,omitempty"`
 	PresenceState string `json:"presenceState,omitempty"`
+	// Agent-only fields. LastSeen is RFC3339; empty when the agent has
+	// never reported in.
+	LastSeen  string `json:"lastSeen,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

@@ -52,7 +52,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Capabilities } from '../../shared/types.js';
+import type { PageData, Capabilities, Agent } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, stateManager } from '../../client/main.js';
@@ -67,6 +67,35 @@ const loadSpaceRail = () => import('../shared/chat/chat-space-rail.js');
 const loadChatMembers = () => import('../shared/chat/chat-members.js');
 // Lazy-load the search component only when v2 is active
 const loadChatSearch = () => import('../shared/chat/chat-search.js');
+
+/**
+ * Slow fallback poll for the members sidebar.
+ *
+ * Agent membership and status are SSE-driven (`project.{id}.agent.>`), so this
+ * is not the update path for them — it only covers what SSE does not carry
+ * (unread DM state, human space membership) and re-syncs after a missed event.
+ */
+const FALLBACK_POLL_INTERVAL_MS = 60_000;
+
+/**
+ * Project a sidebar agent member onto the shared Agent shape so it can seed the
+ * state manager's agent map. Only the fields SSE status deltas merge onto
+ * matter — the map exists here purely to give those deltas a baseline.
+ */
+function agentMemberToAgent(
+  m: import('../shared/chat/chat-members.js').ChatAgentMember
+): Agent {
+  return {
+    id: m.id,
+    name: m.displayName,
+    projectId: m.projectId || '',
+    template: '',
+    phase: (m.phase || '') as Agent['phase'],
+    activity: (m.activity || '') as NonNullable<Agent['activity']>,
+    slug: m.slug || '',
+    lastSeen: m.lastSeen || '',
+  };
+}
 
 // ---- V1 types ----
 // DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON.
@@ -143,6 +172,7 @@ export class ScionPageChat extends LitElement {
   private _onChatTyping = this.handleChatTyping.bind(this);
   private _onRailLoaded = this.handleRailLoaded.bind(this);
   private _onAgentsUpdated = this._handleAgentsUpdated.bind(this);
+  private _onScopeChanged = this._handleScopeChanged.bind(this);
   /** Map from project slug → project ID for deep-link resolution. */
   private _slugToProjectId = new Map<string, string>();
   /** Map from project ID → project slug for URL generation. */
@@ -161,8 +191,8 @@ export class ScionPageChat extends LitElement {
   private _presenceInterval: ReturnType<typeof setInterval> | null = null;
   /** Tracked project IDs for presence heartbeat. */
   private _presenceProjectIds: string[] = [];
-  /** Periodic member refresh interval (fallback for SSE agent updates). */
-  private _memberRefreshInterval: ReturnType<typeof setInterval> | null = null;
+  /** Slow fallback poll for what SSE does not cover (see FALLBACK_POLL_INTERVAL_MS). */
+  private _fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
 
   static override styles = css`
     :host {
@@ -443,12 +473,13 @@ export class ScionPageChat extends LitElement {
       stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
       stateManager.removeEventListener('chat-typing-received', this._onChatTyping);
       stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
+      stateManager.removeEventListener('scope-changed', this._onScopeChanged);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
       this.stopPresenceHeartbeat();
-      // Clean up member refresh interval
-      if (this._memberRefreshInterval) {
-        clearInterval(this._memberRefreshInterval);
-        this._memberRefreshInterval = null;
+      // Clean up the fallback poll
+      if (this._fallbackPollInterval) {
+        clearInterval(this._fallbackPollInterval);
+        this._fallbackPollInterval = null;
       }
       // Clean up typing timers
       for (const timer of this._typingTimers.values()) {
@@ -644,22 +675,28 @@ export class ScionPageChat extends LitElement {
     stateManager.addEventListener('chat-presence-updated', this._onPresenceUpdated);
     stateManager.addEventListener('chat-typing-received', this._onChatTyping);
     stateManager.addEventListener('agents-updated', this._onAgentsUpdated);
+    stateManager.addEventListener('scope-changed', this._onScopeChanged);
 
     // Listen for rail-loaded to set up the SSE scope with space IDs
     this.addEventListener('rail-loaded', this._onRailLoaded);
 
-    // Periodic member refresh as a fallback for SSE agent status updates.
-    // This ensures wobble and status badges update even if SSE events
-    // are delayed or the subscription doesn't match.
-    this._memberRefreshInterval = setInterval(() => {
+    // Agent membership and status badges are SSE-driven: the chat scope
+    // subscribes to `project.{spaceId}.agent.>`, which carries both lifecycle
+    // (created/deleted) and status (phase/activity) events. See
+    // _handleAgentsUpdated.
+    //
+    // Two things have no SSE event of their own — unread DM state, and human
+    // membership of a space — so a slow fallback poll covers them and
+    // re-syncs the member list if an SSE event was ever missed. Unread state
+    // is additionally refreshed on every inbound chat message.
+    this._fallbackPollInterval = setInterval(() => {
+      void this.loadUnreadDMPeers();
       if (this.v2Conversation?.projectId) {
         void this.loadV2Members(this.v2Conversation.projectId);
       } else {
         void this.loadHubMembers();
       }
-      // Also refresh unread DM state
-      void this.loadUnreadDMPeers();
-    }, 15000);
+    }, FALLBACK_POLL_INTERVAL_MS);
   }
 
   /** Called when the space rail finishes loading its data. Sets up the SSE scope. */
@@ -1044,16 +1081,66 @@ export class ScionPageChat extends LitElement {
     return [];
   }
 
-  /** Refresh the members list when project agents change (add/remove). */
-  private _handleAgentsUpdated(): void {
-    if (this.v2Conversation?.projectId) {
-      void this.loadV2Members(this.v2Conversation.projectId);
-    } else {
-      void this.loadHubMembers();
+  /**
+   * Update the members sidebar from SSE agent events.
+   *
+   * The chat scope subscribes to `project.{spaceId}.agent.>`, which the state
+   * manager routes through handleAgentEvent for every agent subject —
+   * `created` and `deleted` (membership) as well as `status` (phase/activity).
+   * All three land here as `agents-updated`, so this rebuilds the agent member
+   * list from the shared agent map rather than re-fetching over REST.
+   *
+   * The REST loaders seed that map (stateManager.seedAgents) so status deltas
+   * have a baseline to merge onto — without a baseline the state manager
+   * buffers the delta and never notifies.
+   */
+  /**
+   * setScope clears the shared agent map, and the chat scope is only set once
+   * the rail reports its space IDs — which can land after the members have
+   * already loaded and seeded. Re-seed so SSE status deltas keep a baseline.
+   */
+  private _handleScopeChanged(): void {
+    if (this.v2AgentMembers.length > 0) {
+      stateManager.seedAgents(this.v2AgentMembers.map(agentMemberToAgent));
     }
   }
 
+  private _handleAgentsUpdated(): void {
+    // Only adopt agents belonging to the current view: the open conversation's
+    // project, or every space the user can see in the base view.
+    const scopeProjectId = this.v2Conversation?.projectId || '';
+    const inScope = (projectId: string): boolean =>
+      scopeProjectId ? projectId === scopeProjectId : true;
+
+    const byId = new Map(this.v2AgentMembers.map((a) => [a.id, a]));
+
+    for (const agent of stateManager.getAgents()) {
+      const existing = byId.get(agent.id);
+      if (!existing && !inScope(agent.projectId || '')) continue;
+      byId.set(agent.id, {
+        id: agent.id,
+        kind: 'agent' as const,
+        displayName: agent.name || agent.slug || agent.id,
+        slug: agent.slug || existing?.slug || '',
+        phase: agent.phase || '',
+        activity: agent.activity || '',
+        lastSeen: agent.lastSeen || existing?.lastSeen || '',
+        projectId: agent.projectId || existing?.projectId || scopeProjectId,
+      });
+    }
+
+    // Drop agents removed via SSE `deleted` events.
+    for (const id of stateManager.getDeletedAgentIds()) {
+      byId.delete(id);
+    }
+
+    this.v2AgentMembers = Array.from(byId.values());
+  }
+
   private handleChatMessage(): void {
+    // A new message may create an unread DM or clear one — refresh the dots.
+    void this.loadUnreadDMPeers();
+
     // Debounce: reload the rail + backfill conversation
     if (this._refreshTimer) clearTimeout(this._refreshTimer);
     this._refreshTimer = setTimeout(() => {
@@ -1351,6 +1438,14 @@ export class ScionPageChat extends LitElement {
             status?: string;
           }>;
         };
+        // /api/v1/users carries no presence state. Preserve whatever
+        // refreshHubMemberPresence() (or an SSE presence event) already
+        // merged in, otherwise the periodic poll would blank out every
+        // presence indicator in the base chat view.
+        const currentPresence = new Map<string, 'active' | 'idle'>();
+        for (const h of this.v2HumanMembers) {
+          if (h.presenceState) currentPresence.set(h.id, h.presenceState);
+        }
         this.v2HumanMembers = (userData.users || [])
           .filter((u) => u.status !== 'disabled')
           .map((u) => ({
@@ -1360,7 +1455,7 @@ export class ScionPageChat extends LitElement {
             email: u.email || '',
             avatarUrl: u.avatarUrl || '',
             role: u.role || '',
-            presenceState: '' as const,
+            presenceState: currentPresence.get(u.id) || ('' as const),
           }));
       }
 
@@ -1387,6 +1482,9 @@ export class ScionPageChat extends LitElement {
           lastSeen: a.lastSeen || '',
           projectId: a.projectId || '',
         }));
+        // Seed the shared agent map so SSE status deltas have a baseline to
+        // merge onto — otherwise they are buffered and never notify.
+        stateManager.seedAgents(this.v2AgentMembers.map(agentMemberToAgent));
       }
 
       // Also populate legacy v2Members for thread @-mention support
@@ -1425,18 +1523,19 @@ export class ScionPageChat extends LitElement {
       };
       if (!data.humans?.length) return;
 
-      // Build a lookup of userId → presenceState
+      // Build a lookup of userId → presenceState. Members present in the
+      // response are authoritative — including those with no presence, so a
+      // user who went offline loses their indicator instead of keeping a
+      // stale one.
       const presenceMap = new Map<string, 'active' | 'idle' | ''>();
       for (const h of data.humans) {
-        if (h.presenceState) {
-          presenceMap.set(h.id, h.presenceState);
-        }
+        presenceMap.set(h.id, h.presenceState || '');
       }
 
       // Merge presence into existing hub members
       const updated = this.v2HumanMembers.map((m) => {
         const ps = presenceMap.get(m.id);
-        return ps ? { ...m, presenceState: ps } : m;
+        return ps !== undefined && ps !== m.presenceState ? { ...m, presenceState: ps } : m;
       });
 
       if (updated.some((m, i) => m.presenceState !== this.v2HumanMembers[i].presenceState)) {
@@ -1523,6 +1622,9 @@ export class ScionPageChat extends LitElement {
           lastSeen: a.lastSeen || '',
           projectId: a.projectId || projectId,
         }));
+        // Seed the shared agent map so SSE status deltas have a baseline to
+        // merge onto — otherwise they are buffered and never notify.
+        stateManager.seedAgents(this.v2AgentMembers.map(agentMemberToAgent));
         // Also populate the legacy v2Members for the thread component
         this.v2Members = [
           ...(data.humans || []).map((h) => ({

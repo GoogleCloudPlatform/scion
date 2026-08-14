@@ -481,6 +481,45 @@ func TestWebChannelBus_Publish_DMThread(t *testing.T) {
 	require.Equal(t, 0, count, "DM thread_id should NOT touch webchat_thread")
 }
 
+// When an agent is the first to speak in a DM, no webchat_dm rows exist yet.
+// TouchDMActivity is a plain UPDATE, so Publish must register the participants
+// first or the DM never appears in the rail and never shows as unread.
+func TestWebChannelBus_Publish_DMThread_RegistersMissingRows(t *testing.T) {
+	store, db := newTestWebChatStore(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	dmKey := "dm:agent:agent-uuid-1:user:user1"
+
+	bus := NewWebChannelBus(slog.Default(), store)
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		SenderID:  "agent-uuid-1",
+		Recipient: "user:alice",
+		Msg:       "agent speaks first",
+		Type:      messages.TypeInstruction,
+		Channel:   "web",
+		ThreadID:  dmKey,
+	}
+
+	require.NoError(t, bus.Publish(ctx, "scion.project.proj1.user.user1.messages", msg))
+
+	// Both participant rows must exist, each pointing at the other peer.
+	dms, err := store.ListDMs(ctx, "user1")
+	require.NoError(t, err)
+	require.Len(t, dms, 1, "user side of the DM should be registered")
+	require.Equal(t, "agent-uuid-1", dms[0].PeerID)
+	require.Equal(t, "agent", dms[0].PeerKind)
+
+	dms, err = store.ListDMs(ctx, "agent-uuid-1")
+	require.NoError(t, err)
+	require.Len(t, dms, 1, "agent side of the DM should be registered")
+	require.Equal(t, "user1", dms[0].PeerID)
+	require.Equal(t, "user", dms[0].PeerKind)
+}
+
 func TestWebChannelBus_Publish_LegacyAgentThread(t *testing.T) {
 	store, db := newTestWebChatStore(t)
 	defer db.Close() //nolint:errcheck

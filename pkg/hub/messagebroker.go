@@ -51,6 +51,11 @@ type MessageBrokerProxy struct {
 	log           *slog.Logger
 	messageLog    *slog.Logger
 	chatNotifier  *ChatNotifier // W6: DM notification trigger for agent replies (nil-safe)
+	// webChatStore is used only to stamp the DM watermark with the
+	// store-assigned message ID after persistence — the web channel spoke
+	// cannot do it because the ID does not exist until deliverToUser runs.
+	// Nil-safe.
+	webChatStore WebChatStore
 
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
@@ -451,6 +456,19 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
+	}
+
+	// Stamp the DM watermark with the store-assigned message ID. The web
+	// channel spoke already registered the participant rows and bumped
+	// last_activity_at, but it runs before the ID exists — without this the
+	// unread indicator (last_message_id != last_read_message_id) never fires
+	// for agent replies.
+	if p.webChatStore != nil && strings.HasPrefix(storeMsg.ThreadID, "dm:") {
+		registerDMParticipants(ctx, p.webChatStore, storeMsg.ThreadID)
+		if err := p.webChatStore.TouchDMActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+			p.log.Error("Failed to stamp DM watermark",
+				"thread_id", storeMsg.ThreadID, "error", err)
+		}
 	}
 
 	// Publish SSE event so connected browser clients receive real-time inbox updates.

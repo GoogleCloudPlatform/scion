@@ -82,10 +82,17 @@ func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages
 	// StructuredMessage has no ID field — the store-assigned ID is only
 	// available after deliverToUser persists the message on the inprocess
 	// spoke, which runs concurrently. TouchTopicActivity / TouchDMActivity
-	// accept empty messageID gracefully (update only last_activity_at).
+	// accept empty messageID gracefully (update only last_activity_at);
+	// deliverToUser re-touches the DM watermark with the real message ID
+	// once the row exists, which is what drives the unread indicator.
 	threadHandled := false
 	if msg.ThreadID != "" {
 		if strings.HasPrefix(msg.ThreadID, "dm:") {
+			// Registry rows may not exist yet when the agent speaks first in
+			// a DM. TouchDMActivity is a plain UPDATE, so register the
+			// participants before touching or the write is a silent no-op.
+			registerDMParticipants(ctx, b.store, msg.ThreadID)
+
 			// DM thread — update both participant rows.
 			if err := b.store.TouchDMActivity(ctx, msg.ThreadID, ""); err != nil {
 				b.log.Error("Failed to update DM activity",

@@ -692,6 +692,11 @@ DO UPDATE SET
 // ---------------------------------------------------------------------------
 
 // UpsertDM upserts a participant row for a DM conversation.
+//
+// An empty LastMessageID means "unknown", not "clear it": registration
+// callers (ensureDMRegistered) never carry a message ID, and overwriting the
+// stored watermark with NULL would break the unread indicator, which compares
+// last_message_id against the reader's watermark.
 func (s *pgWebChatStore) UpsertDM(ctx context.Context, dm WebChatDM) error {
 	const query = `
 INSERT INTO webchat_dm (conversation_key, participant_id, peer_id, peer_kind, last_message_id, last_activity_at)
@@ -700,8 +705,8 @@ ON CONFLICT (participant_id, conversation_key)
 DO UPDATE SET
     peer_id = EXCLUDED.peer_id,
     peer_kind = EXCLUDED.peer_kind,
-    last_message_id = EXCLUDED.last_message_id,
-    last_activity_at = EXCLUDED.last_activity_at
+    last_message_id = COALESCE(EXCLUDED.last_message_id, webchat_dm.last_message_id),
+    last_activity_at = COALESCE(EXCLUDED.last_activity_at, webchat_dm.last_activity_at)
 `
 	var lastMsgID interface{}
 	if dm.LastMessageID != "" {

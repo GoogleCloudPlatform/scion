@@ -284,26 +284,36 @@ export class ScionChatMembers extends LitElement {
     }
   }
 
-  /** Compare current agent states against previous to detect changes for wobble. */
+  /**
+   * Compare current agent states against previous to detect changes for wobble.
+   *
+   * `recentlyChangedAgents` must be REPLACED, never mutated in place: Lit
+   * compares `@state()` values by reference, so `Set.add()` / `Set.delete()`
+   * would not schedule a re-render and the wobble would never appear.
+   */
   private checkAgentStateChanges(): void {
     for (const a of this.agents) {
       const currentState = `${a.phase}:${a.activity}`;
       const prevState = this._prevAgentStates.get(a.id);
 
       if (prevState !== undefined && prevState !== currentState) {
-        // State changed — start/restart wobble
-        this.recentlyChangedAgents.add(a.id);
+        // State changed — start/restart wobble (new Set ⇒ Lit re-renders)
+        this.recentlyChangedAgents = new Set([...this.recentlyChangedAgents, a.id]);
 
         // Clear existing timer
         const existing = this._wobbleTimers.get(a.id);
         if (existing) clearTimeout(existing);
 
         // Set 2s timer to stop wobble
-        this._wobbleTimers.set(a.id, setTimeout(() => {
-          this.recentlyChangedAgents.delete(a.id);
-          this._wobbleTimers.delete(a.id);
-          this.requestUpdate();
-        }, 2000));
+        this._wobbleTimers.set(
+          a.id,
+          setTimeout(() => {
+            const next = new Set(this.recentlyChangedAgents);
+            next.delete(a.id);
+            this.recentlyChangedAgents = next;
+            this._wobbleTimers.delete(a.id);
+          }, 2000)
+        );
       }
 
       this._prevAgentStates.set(a.id, currentState);
