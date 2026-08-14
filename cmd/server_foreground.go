@@ -1212,7 +1212,7 @@ func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.C
 // safe because all guarded boot migrations are idempotent: each one checks
 // whether its work has already been done (e.g. MigrateStorageOnFirstBoot
 // checks for existing namespaced objects, BootstrapBundledResources uses
-// SkipIfAnyExist, migrateInlineSecrets checks for existing secret values)
+// SkipIfAnyExist, migratePluginSecrets checks for existing secret values)
 // and no-ops if so. The winning replica does the work; the others skip it
 // here and will see the completed state on their next access.
 func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryLockKey, label string, fn func()) {
@@ -2565,14 +2565,14 @@ func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend, 
 	pluginsCfg := scionplugin.PluginsConfig{
 		Broker: make(map[string]scionplugin.PluginEntry),
 	}
-	// Migrate inline secrets under advisory lock to prevent concurrent replicas
-	// from racing the one-shot migration (audit finding C6).
+	// Migrate plugin secrets under advisory lock to prevent concurrent replicas
+	// from racing the one-shot migration (audit finding C6). The lock key stays
+	// LockInlineSecretsMigration: it is a persisted name, and renaming it would
+	// stop replicas on different versions from excluding each other.
 	if secretBackend != nil {
-		runWithAdvisoryLock(ctx, dataStore, store.LockInlineSecretsMigration, "inline secrets migration", func() {
+		runWithAdvisoryLock(ctx, dataStore, store.LockInlineSecretsMigration, "plugin secrets migration", func() {
 			for name, entry := range vs.Server.Plugins.Broker {
-				if entry.Config != nil || entry.ConfigFile != "" {
-					migrateInlineSecrets(ctx, secretBackend, name, entry.Config, entry.ConfigFile)
-				}
+				migratePluginSecrets(ctx, secretBackend, name, entry.Config, entry.ConfigFile)
 			}
 		})
 	}
@@ -2854,7 +2854,7 @@ func requireImageRegistryForBroker() error {
 		"See image-build/README.md for instructions on building and pushing images")
 }
 
-// migrateInlineSecrets performs a one-shot migration of secret config keys found
+// migratePluginSecrets performs a one-shot migration of secret config keys found
 // in the raw plugin config into the secret backend. Both sources of raw config
 // are considered: the inline map in settings.yaml and the per-plugin YAML file
 // referenced by config_file.
@@ -2881,7 +2881,13 @@ func requireImageRegistryForBroker() error {
 // value. The log line below tells them which file to clean up; note that it prints
 // configFile as written in settings.yaml, so a relative or "~/"-prefixed path is
 // shown unresolved.
-func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginName string, inlineConfig map[string]string, configFile string) {
+//
+// The same divergence bites in the other direction: the migration never refreshes
+// a secret that already exists in the backend, so an operator who rotates the
+// credential in the config file and later removes the key — as the log advises —
+// drops the plugin back onto the stale backend value. Whichever copy the operator
+// stops maintaining, the two must be reconciled by hand.
+func migratePluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginName string, inlineConfig map[string]string, configFile string) {
 	mappings, ok := config.PluginSecretKeyMap[pluginName]
 	if !ok {
 		return
@@ -2940,7 +2946,7 @@ func pluginSecretMigrationSource(configKey string, inlineConfig, fileConfig map[
 }
 
 // loadPluginConfigFileForMigration reads the raw per-plugin YAML config file so
-// migrateInlineSecrets can see secrets that live only in that file. A missing
+// migratePluginSecrets can see secrets that live only in that file. A missing
 // file yields an empty map; any load failure is logged and treated as empty so
 // migration still proceeds for inline config.
 func loadPluginConfigFileForMigration(pluginName, configFile string) map[string]string {
