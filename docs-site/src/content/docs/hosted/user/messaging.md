@@ -19,7 +19,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 ### Core Layout & Navigation
 
 - **Project-Scoped Spaces & Shared Threads**: Chat is organized into distinct spaces scoped to specific Projects. Within a project-scoped space, users and agents participate in shared discussion threads, creating focused hubs of collaboration.
-- **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports 1-on-1 Direct Messages. This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, unified consolidated thread per participant pair.
+- **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports 1-on-1 Direct Messages. This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
 - **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message.
 - **The Thread Rail**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. Unread badges ("unread dots") update in real-time as messages arrive, instantly alerting you to new activity requiring attention.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
