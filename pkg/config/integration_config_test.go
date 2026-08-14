@@ -362,6 +362,42 @@ func TestResolvePluginConfig_SecretKeysStrippedFromConfigFileWarns(t *testing.T)
 	}
 }
 
+func TestResolvePluginConfig_StrippedSecretWarningDedupesByResolvedPath(t *testing.T) {
+	// "~/.scion/plugin.yaml", "plugin.yaml" and the absolute path all name the
+	// same file; the warning should fire once, against the resolved path.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, GlobalDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(dir, "plugin.yaml")
+	p, _ := NewYAMLConfigProvider(abs)
+	if err := p.Save(context.Background(), map[string]string{
+		"bot_token": "secret-from-file",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	for _, spelling := range []string{abs, "~/" + GlobalDir + "/plugin.yaml", "plugin.yaml"} {
+		if _, err := ResolvePluginConfig(spelling, nil); err != nil {
+			t.Fatalf("resolve %q: %v", spelling, err)
+		}
+	}
+
+	if got := strings.Count(buf.String(), "level=WARN"); got != 1 {
+		t.Errorf("expected exactly 1 warning across path spellings, got %d: %s", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), abs) {
+		t.Errorf("warning should name the resolved path %q, got: %s", abs, buf.String())
+	}
+}
+
 func TestResolvePluginConfig_BackendKeyNamesStrippedFromBothSources(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plugin.yaml")

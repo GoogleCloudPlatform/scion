@@ -296,7 +296,9 @@ func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map
 	// Warn so that a credential disappearing from the resolved config is
 	// traceable to the strip rather than surfacing as "bot_token is required".
 	if stripped := stripSecretKeysInPlace(fileConfig); len(stripped) > 0 {
-		warnStrippedFileSecretsOnce(configFile, stripped)
+		// provider.Path() is the resolved path — tilde and relative forms of the
+		// same file must not warn twice or log an ambiguous location.
+		warnStrippedFileSecretsOnce(provider.Path(), stripped)
 	}
 
 	// File is the base for non-wiring keys.
