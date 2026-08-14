@@ -663,6 +663,42 @@ func TestHandleNotifications_AgentFiltersByAgentID(t *testing.T) {
 	assert.Equal(t, aboutOther.ID, filtered[0].ID)
 }
 
+// TestHandleNotifications_AgentIDMustBeInCallerProject pins the containment
+// check on ?agentId=: an agent caller may only name an agent in its own
+// project, and an agent that does not exist is refused the same way so the
+// response is not an existence oracle.
+func TestHandleNotifications_AgentIDMustBeInCallerProject(t *testing.T) {
+	srv, s, _ := setupNotificationHandlerTest(t)
+	ctx := context.Background()
+
+	projectB := &store.Project{
+		ID:   tid("project-notif-agentid-b"),
+		Name: "Project B",
+		Slug: "project-notif-agentid-b",
+	}
+	require.NoError(t, s.CreateProject(ctx, projectB))
+
+	foreign := &store.Agent{
+		ID:        tid("agent-foreign-subject"),
+		Slug:      "foreign-subject-agent",
+		Name:      "Foreign Subject Agent",
+		ProjectID: projectB.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, foreign))
+
+	agent, token := setupNotificationAgentCaller(t, srv, s, tid("project-notif-handler"), "containment-agent")
+	newAgentSubscription(t, s, agent.ProjectID, agent.Slug)
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodGet,
+		"/api/v1/notifications?agentId="+foreign.ID, nil, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	rec = doRequestWithAgentToken(t, srv, http.MethodGet,
+		"/api/v1/notifications?agentId="+tid("agent-never-created"), nil, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
 // TestHandleNotifications_AgentCannotReachSameSlugInOtherProject is the
 // regression test for the cross-project leak: agent slugs are unique per
 // project, so subscriber ID alone cannot distinguish two "shared-slug" agents.

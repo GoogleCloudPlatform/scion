@@ -160,11 +160,25 @@ func (s *Server) agentMaySubscribe(w http.ResponseWriter, r *http.Request, calle
 	if cleared[req.AgentID] {
 		return true
 	}
-	target, err := s.store.GetAgent(r.Context(), req.AgentID)
+	if !s.agentTargetInProject(w, r, caller, req.AgentID) {
+		return false
+	}
+	if cleared != nil {
+		cleared[req.AgentID] = true
+	}
+	return true
+}
+
+// agentTargetInProject reports whether agentID names an agent in the caller's
+// project. An agent that does not exist draws the same 403 as one in another
+// project, so the answer never confirms or denies the existence of an agent the
+// caller has no business naming.
+//
+// Returns false when a response has already been written.
+func (s *Server) agentTargetInProject(w http.ResponseWriter, r *http.Request, caller *notificationSubscriber, agentID string) bool {
+	target, err := s.store.GetAgent(r.Context(), agentID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			// Don't confirm or deny the existence of an agent the caller has
-			// no business naming.
 			Forbidden(w)
 			return false
 		}
@@ -174,9 +188,6 @@ func (s *Server) agentMaySubscribe(w http.ResponseWriter, r *http.Request, calle
 	if target.ProjectID != caller.ProjectID {
 		Forbidden(w)
 		return false
-	}
-	if cleared != nil {
-		cleared[req.AgentID] = true
 	}
 	return true
 }
@@ -246,6 +257,12 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		if agentID == "" {
 			notifs, err = s.store.GetNotifications(r.Context(), caller.Type, caller.ID, onlyUnacknowledged)
 		} else {
+			// An agent may only name an agent in its own project. The rows
+			// returned are scoped either way, but the query itself should not
+			// reach across the project boundary.
+			if caller.isAgent() && !s.agentTargetInProject(w, r, caller, agentID) {
+				return
+			}
 			notifs, err = s.store.GetNotificationsByAgent(r.Context(), agentID, caller.Type, caller.ID, onlyUnacknowledged)
 		}
 		if err != nil {
