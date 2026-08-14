@@ -2570,8 +2570,8 @@ func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend, 
 	if secretBackend != nil {
 		runWithAdvisoryLock(ctx, dataStore, store.LockInlineSecretsMigration, "inline secrets migration", func() {
 			for name, entry := range vs.Server.Plugins.Broker {
-				if entry.Config != nil {
-					migrateInlineSecrets(ctx, secretBackend, name, entry.Config)
+				if entry.Config != nil || entry.ConfigFile != "" {
+					migrateInlineSecrets(ctx, secretBackend, name, entry.Config, entry.ConfigFile)
 				}
 			}
 		})
@@ -2855,20 +2855,30 @@ func requireImageRegistryForBroker() error {
 }
 
 // migrateInlineSecrets performs a one-shot migration of secret config keys found
-// in the raw inline settings.yaml config into the secret backend. This prevents
-// existing users who followed the Telegram/Discord READMEs (which have
-// bot_token directly in settings.yaml) from losing their credentials when
-// ResolvePluginConfig strips inline secrets.
-func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginName string, inlineConfig map[string]string) {
+// in the raw plugin config into the secret backend. Both sources of raw config
+// are considered: the inline map in settings.yaml and the per-plugin YAML file
+// referenced by config_file. This prevents existing users who followed the
+// Telegram/Discord READMEs (which have bot_token directly in settings.yaml or in
+// the per-plugin config file) from losing their credentials when
+// ResolvePluginConfig strips secrets from both sources.
+//
+// When a secret key is present in both sources the inline value wins, matching
+// the merge precedence in config.LoadPluginConfigFile.
+func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginName string, inlineConfig map[string]string, configFile string) {
 	mappings, ok := config.PluginSecretKeyMap[pluginName]
 	if !ok {
 		return
 	}
 
+	fileConfig := loadPluginConfigFileForMigration(pluginName, configFile)
+
 	hubID := sb.HubID()
 	for _, m := range mappings {
-		val, has := inlineConfig[m.ConfigKey]
-		if !has || val == "" {
+		val, source := inlineConfig[m.ConfigKey], "settings.yaml"
+		if val == "" {
+			val, source = fileConfig[m.ConfigKey], configFile
+		}
+		if val == "" {
 			continue
 		}
 		existing, err := sb.Get(ctx, m.SecretKey, store.ScopeHub, hubID)
@@ -2886,14 +2896,30 @@ func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginNa
 			InjectionMode: "as_needed",
 			Scope:         store.ScopeHub,
 			ScopeID:       hubID,
-			Description:   fmt.Sprintf("Auto-migrated from inline config for plugin %s", pluginName),
+			Description:   fmt.Sprintf("Auto-migrated from %s for plugin %s", source, pluginName),
 		})
 		if err != nil {
-			log.Printf("Warning: failed to migrate inline secret %s for plugin %q: %v", m.ConfigKey, pluginName, err)
+			log.Printf("Warning: failed to migrate secret %s for plugin %q: %v", m.ConfigKey, pluginName, err)
 			continue
 		}
-		log.Printf("Migrated inline %s to secret backend for plugin %q — remove it from settings.yaml", m.ConfigKey, pluginName)
+		log.Printf("Migrated %s to secret backend for plugin %q — remove it from %s", m.ConfigKey, pluginName, source)
 	}
+}
+
+// loadPluginConfigFileForMigration reads the raw per-plugin YAML config file so
+// migrateInlineSecrets can see secrets that live only in that file. A missing
+// file yields an empty map; any load failure is logged and treated as empty so
+// migration still proceeds for inline config.
+func loadPluginConfigFileForMigration(pluginName, configFile string) map[string]string {
+	if configFile == "" {
+		return nil
+	}
+	fileConfig, err := config.LoadPluginConfigFile(configFile, nil)
+	if err != nil {
+		log.Printf("Warning: failed to read config file %q for plugin %q during secret migration: %v", configFile, pluginName, err)
+		return nil
+	}
+	return fileConfig
 }
 
 // stripSecretKeys returns a copy of the config map with all secret config keys removed.
