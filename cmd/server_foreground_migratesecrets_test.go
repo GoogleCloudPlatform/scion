@@ -15,9 +15,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -28,23 +31,19 @@ import (
 // fakeSecretBackend is an in-memory secret.SecretBackend for migration tests.
 // Only Get, Set and HubID are exercised by migrateInlineSecrets.
 type fakeSecretBackend struct {
-	hubID   string
-	values  map[string]string
-	getErr  error
-	setErrs map[string]error
-	sets    int
+	hubID        string
+	values       map[string]string
+	descriptions map[string]string
+	sets         int
 }
 
 func newFakeSecretBackend() *fakeSecretBackend {
-	return &fakeSecretBackend{hubID: "hub-1", values: map[string]string{}, setErrs: map[string]error{}}
+	return &fakeSecretBackend{hubID: "hub-1", values: map[string]string{}, descriptions: map[string]string{}}
 }
 
 func (f *fakeSecretBackend) HubID() string { return f.hubID }
 
 func (f *fakeSecretBackend) Get(_ context.Context, name, _, _ string) (*secret.SecretWithValue, error) {
-	if f.getErr != nil {
-		return nil, f.getErr
-	}
 	v, ok := f.values[name]
 	if !ok {
 		return nil, store.ErrNotFound
@@ -53,10 +52,8 @@ func (f *fakeSecretBackend) Get(_ context.Context, name, _, _ string) (*secret.S
 }
 
 func (f *fakeSecretBackend) Set(_ context.Context, in *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
-	if err := f.setErrs[in.Name]; err != nil {
-		return false, nil, err
-	}
 	f.sets++
+	f.descriptions[in.Name] = in.Description
 	_, existed := f.values[in.Name]
 	f.values[in.Name] = in.Value
 	return !existed, &secret.SecretMeta{Name: in.Name}, nil
@@ -86,6 +83,17 @@ func writePluginConfigFile(t *testing.T, contents string) string {
 	return path
 }
 
+// captureLog collects everything written to the standard logger while fn runs.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+	fn()
+	return buf.String()
+}
+
 func TestMigrateInlineSecrets_FromConfigFile(t *testing.T) {
 	sb := newFakeSecretBackend()
 	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\ninbound_mode: \"webhook\"\n")
@@ -94,6 +102,23 @@ func TestMigrateInlineSecrets_FromConfigFile(t *testing.T) {
 
 	if got := sb.values[config.SecretTelegramBotToken]; got != "file-token" {
 		t.Errorf("expected bot_token from config file to be migrated, got %q", got)
+	}
+}
+
+// The secret description must name the config file without exposing the host
+// path, which would leak the operator's username and directory layout.
+func TestMigrateInlineSecrets_DescriptionOmitsHostPath(t *testing.T) {
+	sb := newFakeSecretBackend()
+	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\n")
+
+	migrateInlineSecrets(context.Background(), sb, "telegram", nil, cfgFile)
+
+	desc := sb.descriptions[config.SecretTelegramBotToken]
+	if !strings.Contains(desc, "scion-telegram.yaml") {
+		t.Errorf("expected description to name the config file, got %q", desc)
+	}
+	if strings.Contains(desc, filepath.Dir(cfgFile)) {
+		t.Errorf("description must not contain the host path, got %q", desc)
 	}
 }
 
@@ -164,11 +189,22 @@ func TestMigrateInlineSecrets_UnknownPluginNoOp(t *testing.T) {
 
 func TestMigrateInlineSecrets_MalformedConfigFileFallsBackToInline(t *testing.T) {
 	sb := newFakeSecretBackend()
-	cfgFile := writePluginConfigFile(t, "bot_token: [unterminated\n")
+	// bot_token appears only in the file, webhook_secret only inline: if the file
+	// parsed, bot_token would migrate too.
+	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\nwebhook_secret: [unterminated\n")
+	inline := map[string]string{"webhook_secret": "inline-secret"}
 
-	migrateInlineSecrets(context.Background(), sb, "telegram", map[string]string{"bot_token": "inline-token"}, cfgFile)
+	out := captureLog(t, func() {
+		migrateInlineSecrets(context.Background(), sb, "telegram", inline, cfgFile)
+	})
 
-	if got := sb.values[config.SecretTelegramBotToken]; got != "inline-token" {
+	if got := sb.values[config.SecretTelegramWebhookKey]; got != "inline-secret" {
 		t.Errorf("malformed config file should not block inline migration, got %q", got)
+	}
+	if got, ok := sb.values[config.SecretTelegramBotToken]; ok {
+		t.Errorf("unparseable config file must yield no file values, got %q", got)
+	}
+	if !strings.Contains(out, "failed to read config file") {
+		t.Errorf("expected a warning about the unreadable config file, got log: %q", out)
 	}
 }

@@ -2857,13 +2857,30 @@ func requireImageRegistryForBroker() error {
 // migrateInlineSecrets performs a one-shot migration of secret config keys found
 // in the raw plugin config into the secret backend. Both sources of raw config
 // are considered: the inline map in settings.yaml and the per-plugin YAML file
-// referenced by config_file. This prevents existing users who followed the
-// Telegram/Discord READMEs (which have bot_token directly in settings.yaml or in
-// the per-plugin config file) from losing their credentials when
-// ResolvePluginConfig strips secrets from both sources.
+// referenced by config_file.
+//
+// The two sources need migrating for different reasons:
+//
+//   - Inline settings.yaml: ResolvePluginConfig strips secret config keys
+//     (bot_token, signing_key, ...) from inline config, so without migration the
+//     credential never reaches the plugin.
+//   - Per-plugin config file: these keys are NOT stripped and do reach the plugin,
+//     so nothing breaks today. Migrating them puts every plugin credential under
+//     the secret backend's lifecycle — rotation, auditing, scoped access — instead
+//     of leaving copies scattered across plaintext YAML on disk.
 //
 // When a secret key is present in both sources the inline value wins, matching
 // the merge precedence in config.LoadPluginConfigFile.
+//
+// Known limitation (no code change here — this is the existing precedence):
+// migrating a key out of a config file does not deactivate the file copy. Because
+// injectPluginSecretsIntoConfig only fills in keys the merged config leaves empty,
+// a value still present in the config file continues to win over the backend copy,
+// which stays inert until the operator removes the key from the file. An operator
+// who later rotates the secret in the backend will keep running on the stale file
+// value. The log line below tells them which file to clean up; note that it prints
+// configFile as written in settings.yaml, so a relative or "~/"-prefixed path is
+// shown unresolved.
 func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginName string, inlineConfig map[string]string, configFile string) {
 	mappings, ok := config.PluginSecretKeyMap[pluginName]
 	if !ok {
@@ -2896,7 +2913,9 @@ func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginNa
 			InjectionMode: "as_needed",
 			Scope:         store.ScopeHub,
 			ScopeID:       hubID,
-			Description:   fmt.Sprintf("Auto-migrated from %s for plugin %s", source, pluginName),
+			// Only the file name goes into backend metadata — a full host path
+			// would leak the operator's username and directory layout.
+			Description: fmt.Sprintf("Auto-migrated from %s for plugin %s", filepath.Base(source), pluginName),
 		})
 		if err != nil {
 			log.Printf("Warning: failed to migrate secret %s for plugin %q: %v", m.ConfigKey, pluginName, err)
