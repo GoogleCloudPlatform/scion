@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -393,6 +392,30 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	return nil, fmt.Errorf("template %s not found", name)
 }
 
+// findOrHydrateDefaultTemplate resolves the default template, seeding it from the
+// embedded copy into the global templates directory when it is absent from the
+// filesystem. Broker instances have no seeded ~/.scion/templates/default, so without
+// this the default template — and the common home files it carries (.tmux.conf,
+// .zshrc, .gitconfig) — would be silently dropped from every template chain.
+// Seeding never overwrites existing files, so user customizations are preserved.
+func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
+	tpl, err := FindTemplateInProjectPath("default", projectPath)
+	if err == nil {
+		return tpl, nil
+	}
+
+	globalDir, gErr := GetGlobalTemplatesDir()
+	if gErr != nil {
+		return nil, err
+	}
+	if sErr := SeedAgnosticTemplate(filepath.Join(globalDir, "default"), false); sErr != nil {
+		util.Debugf("failed to hydrate embedded default template: %v", sErr)
+		return nil, err
+	}
+
+	return FindTemplateInProjectPath("default", projectPath)
+}
+
 // GetTemplateChainInProject returns a list of templates in inheritance order,
 // using a specific project path for template resolution instead of CWD.
 // For non-default templates, the default template is automatically prepended
@@ -402,27 +425,25 @@ func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
 
 	// For non-default templates, prepend the default template as a base layer
 	if name != "default" {
-		defaultTpl, err := FindTemplateInProjectPath("default", projectPath)
+		defaultTpl, err := findOrHydrateDefaultTemplate(projectPath)
 		if err == nil {
 			chain = append(chain, defaultTpl)
 		}
-		// If default template is not found, proceed without it
+		// If the default template cannot be resolved, proceed without it
 	}
 
 	tpl, err := FindTemplateInProjectPath(name, projectPath)
 	if err != nil {
 		if name == "default" {
-			// The default template was not found locally. This produces an
-			// empty template chain, which means no template home files
-			// (.tmux.conf, .zshrc, .gitconfig) will be copied into the agent
-			// home. ProvisionAgent falls back to embedded defaults, but log
-			// the miss so the resolution gap is visible.
-			slog.Warn("default template not found — template chain is empty; "+
-				"agent home will use embedded defaults only",
-				"projectPath", projectPath, "error", err)
-			return chain, nil
+			tpl, err = findOrHydrateDefaultTemplate(projectPath)
+			if err != nil {
+				// When the default template cannot be resolved, proceed without it
+				// (e.g. hub-dispatched agents on brokers with no local templates)
+				return chain, nil
+			}
+		} else {
+			return nil, err
 		}
-		return nil, err
 	}
 	chain = append(chain, tpl)
 
