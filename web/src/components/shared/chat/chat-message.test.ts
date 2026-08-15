@@ -273,6 +273,33 @@ describe('scion-chat-message attachment previews', () => {
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
+  it('expands an image into the overlay rather than a new tab', async () => {
+    const el = await mountAttachments([
+      { id: 'att-img', name: 'shot.png', mime: 'image/png', size: 2048 },
+    ]);
+
+    // No anchor around the thumbnail — the click stays in the page.
+    expect(el.shadowRoot?.querySelector('.attachment-images a')).toBeNull();
+    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+
+    const button = el.shadowRoot?.querySelector('.image-expand') as HTMLElement;
+    expect(button.querySelector('img.attachment-image')?.getAttribute('src')).toBe(
+      '/api/v1/chat/attachments/att-img'
+    );
+
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+
+    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview');
+    expect(dialog?.getAttribute('label')).toBe('shot.png');
+    expect(dialog?.querySelector('img.full-image')?.getAttribute('src')).toBe(
+      '/api/v1/chat/attachments/att-img'
+    );
+    // Images are rendered by the browser; nothing is fetched as text.
+    expect(editorIn(dialog)).toBeNull();
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
   it('reports a failed fetch inside the preview instead of an empty editor', async () => {
     apiFetchMock.mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve('') });
     const el = await mountAttachments([

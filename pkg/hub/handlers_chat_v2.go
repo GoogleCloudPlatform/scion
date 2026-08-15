@@ -928,11 +928,21 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		// hub-local path is sent, which host-process agents can still read.
 		s.mu.RLock()
 		as := s.attachmentStore
+		wcs := s.webChatStore
 		s.mu.RUnlock()
 		if localAS, ok := as.(*LocalDiskAttachmentStore); ok {
 			staging := s.resolveAttachmentStaging(ctx, projectID)
 			for _, ref := range attachmentRefs {
-				hostPath := localAS.FilePath(projectID, ref.ID, ref.Name)
+				// A file lives under the project it was uploaded to, which is not
+				// this message's project when it was uploaded from a DM — those
+				// uploads carry no project at all.
+				storedIn := projectID
+				if wcs != nil {
+					if meta, err := wcs.GetAttachment(ctx, ref.ID); err == nil && meta != nil {
+						storedIn = meta.ProjectID
+					}
+				}
+				hostPath := localAS.FilePath(storedIn, ref.ID, ref.Name)
 				agentPath := hostPath
 				if staging != nil {
 					staged, err := staging.stage(hostPath, ref.ID, ref.Name)
@@ -1915,8 +1925,7 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 			Forbidden(w)
 			return
 		}
-		// Resolve project from DM key for SSE fan-out.
-		projectID = resolveProjectFromDMKey(ctx, s, key)
+		// No project fan-out for DMs — see the publish below.
 	} else {
 		// Topic key: look up topic to get project ID and check access.
 		if wcs == nil {
@@ -1962,9 +1971,12 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 		s.events.PublishRaw("project."+projectID+".chat.typing", evt)
 	}
 	if isDM {
-		// A human-to-human DM has no project, and even an agent DM only reaches
-		// subscribers of that project. Fan out to the participants' user-scoped
-		// subjects the same way DM messages do (see EventPublisher.PublishMessage).
+		// A DM never reaches a project subject: only the two participants care,
+		// and a project publish would both echo the typist their own indicator
+		// (they subscribe to their own spaces) and leak a private conversation's
+		// activity to the rest of the space. Fan out to the participants'
+		// user-scoped subjects the same way DM messages do (see
+		// EventPublisher.PublishMessage).
 		for _, id := range dmUserParticipants(key) {
 			if id == user.ID() {
 				continue // don't echo the sender their own typing event
@@ -2665,7 +2677,9 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Require project_id parameter for authz.
+	// project_id scopes the upload to a space. DMs belong to no space, so it is
+	// optional: an upload without one is stored project-less and reachable only
+	// through the messages that reference it.
 	projectID := r.FormValue("project_id")
 	if projectID == "" {
 		// Try multipart form value.
@@ -2673,19 +2687,19 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 			projectID = r.FormValue("project_id")
 		}
 	}
-	if projectID == "" {
-		ValidationError(w, "project_id is required", nil)
-		return
-	}
 
-	// Authorize: user must have read access to the project (same as sending messages).
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		NotFound(w, "Project")
-		return
-	}
-	if !s.authorize(w, r, projectResource(project), ActionRead) {
-		return
+	// Authorize: user must have read access to the project (same as sending
+	// messages). A project-less upload has nothing to authorize against beyond
+	// the authenticated identity the handler already established.
+	if projectID != "" {
+		project, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			NotFound(w, "Project")
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionRead) {
+			return
+		}
 	}
 
 	// Parse multipart form (limit total to MaxAttachmentSize * MaxAttachmentsPerMessage).
@@ -2796,14 +2810,19 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Authorize: user must have read access to the project.
-	project, err := s.store.GetProject(ctx, meta.ProjectID)
-	if err != nil {
-		NotFound(w, "Project")
-		return
-	}
-	if !s.authorize(w, r, projectResource(project), ActionRead) {
-		return
+	// Authorize: user must have read access to the project. An attachment
+	// uploaded from a DM has no project (see handleAttachmentUpload); the
+	// authenticated identity plus the unguessable attachment ID is all there is
+	// to check, so the download proceeds.
+	if meta.ProjectID != "" {
+		project, err := s.store.GetProject(ctx, meta.ProjectID)
+		if err != nil {
+			NotFound(w, "Project")
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionRead) {
+			return
+		}
 	}
 
 	// Get file from storage.

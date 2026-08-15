@@ -643,6 +643,21 @@ export class ScionChatMessage extends LitElement {
       margin-top: 0.375rem;
     }
 
+    /* The image is the button: no chrome of its own, just a focus ring. */
+    .image-expand {
+      display: inline-flex;
+      padding: 0;
+      border: none;
+      background: none;
+      cursor: pointer;
+      border-radius: 0.5rem;
+    }
+
+    .image-expand:focus-visible {
+      outline: 2px solid var(--scion-primary-600, #2563eb);
+      outline-offset: 2px;
+    }
+
     .attachment-image {
       max-width: 320px;
       max-height: 240px;
@@ -792,6 +807,15 @@ export class ScionChatMessage extends LitElement {
 
     .full-preview .preview-placeholder {
       padding: 2rem;
+    }
+
+    /* Fit the whole image in the panel rather than scrolling it. */
+    .full-preview .full-image {
+      display: block;
+      margin: 0 auto;
+      max-width: 100%;
+      max-height: 75vh;
+      object-fit: contain;
     }
 
     /* Verbose (recessed) rendering — no bubble, muted text, small label */
@@ -1214,15 +1238,20 @@ export class ScionChatMessage extends LitElement {
             <div class="attachment-images">
               ${images.map(
                 (img) => html`
-                  <a href="/api/v1/chat/attachments/${img.id}" target="_blank" rel="noopener">
+                  <button
+                    type="button"
+                    class="image-expand"
+                    title="${img.name} — click to expand"
+                    aria-label="Expand ${img.name}"
+                    @click=${() => this.openFullPreview(img)}
+                  >
                     <img
                       class="attachment-image"
-                      src="/api/v1/chat/attachments/${img.id}"
+                      src=${attachmentURL(img.id)}
                       alt=${img.name}
-                      title=${img.name}
                       loading="lazy"
                     />
-                  </a>
+                  </button>
                 `
               )}
             </div>
@@ -1321,7 +1350,9 @@ export class ScionChatMessage extends LitElement {
           if (e.target === e.currentTarget) this.expanded = null;
         }}
       >
-        ${this.renderPreviewBody(ref, this.previews.get(ref.id), true)}
+        ${IMAGE_MIMES.has(ref.mime)
+          ? html`<img class="full-image" src=${attachmentURL(ref.id)} alt=${ref.name} />`
+          : this.renderPreviewBody(ref, this.previews.get(ref.id), true)}
         <sl-button slot="footer" href=${attachmentURL(ref.id)} download=${ref.name}>
           <sl-icon slot="prefix" name="download"></sl-icon>
           Download
@@ -1333,7 +1364,11 @@ export class ScionChatMessage extends LitElement {
   /** Open the overlay, fetching the content if the slice has not yet. */
   private openFullPreview(ref: AttachmentRefInfo): void {
     this.expanded = ref;
-    void this.loadPreview(ref.id);
+    // An image is shown by the browser straight from its URL; only text
+    // previews need the body pulled down.
+    if (!IMAGE_MIMES.has(ref.mime)) {
+      void this.loadPreview(ref.id);
+    }
   }
 
   private formatTime(): string {

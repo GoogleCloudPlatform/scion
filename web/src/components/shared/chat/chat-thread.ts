@@ -228,7 +228,7 @@ export class ScionChatThread extends LitElement {
   /** Last time we sent a typing event (for client-side throttle). */
   private _lastTypingSent = 0;
 
-  /** Current user ID (derived from stateManager scope). */
+  /** Current user ID, cached from the stateManager scope once it exists. */
   private _currentUserId = '';
 
   /** Read tracking: debounce timer for advancing watermark. */
@@ -980,7 +980,7 @@ export class ScionChatThread extends LitElement {
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
-    // Capture current user ID from the stateManager scope for typing self-filter.
+    // Seed the typing self-filter. The scope may not exist yet — see selfUserId.
     const scope = stateManager.currentScope;
     if (scope && scope.type === 'chat') {
       this._currentUserId = scope.userId;
@@ -989,6 +989,25 @@ export class ScionChatThread extends LitElement {
         this.currentUserId = scope.userId;
       }
     }
+  }
+
+  /**
+   * Who "self" is, for filtering out our own echoed events.
+   *
+   * The chat scope is only configured once the space rail reports its space
+   * IDs, which lands after a thread mounted from a cold load has already
+   * subscribed — so resolve it lazily, and fall back to the ID the page passes
+   * down. Without this a DM opened directly showed the user their own
+   * "X is typing…".
+   */
+  private selfUserId(): string {
+    if (!this._currentUserId) {
+      const scope = stateManager.currentScope;
+      if (scope && scope.type === 'chat' && scope.userId) {
+        this._currentUserId = scope.userId;
+      }
+    }
+    return this._currentUserId || this.currentUserId;
   }
 
   /** Handle v2 SSE chat message events. Only backfill if the event is for this conversation. */
@@ -1044,7 +1063,7 @@ export class ScionChatThread extends LitElement {
     if (threadId !== this.conversationKey) return;
 
     // Don't show own typing indicator
-    if (userId === this._currentUserId) return;
+    if (userId === this.selfUserId()) return;
 
     // Clear existing timer for this user if any
     const existing = this.typingUsers.get(userId);

@@ -275,3 +275,68 @@ describe('scion-chat-thread SSE message filtering', () => {
     await vi.waitFor(() => expect(historyCalls()).toBe(2));
   });
 });
+
+/**
+ * A DM mounted from a cold load subscribes before the space rail has
+ * configured the chat scope, so the scope is not where the thread can learn
+ * who it is — and the user was shown their own "X is typing…".
+ */
+describe('scion-chat-thread typing self-filter', () => {
+  /** Mount a v2 thread, optionally with the user ID the page passes down. */
+  async function mountAs(currentUserId: string): Promise<ScionChatThread> {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.currentUserId = currentUserId;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    return el;
+  }
+
+  function emitTyping(userId: string): void {
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-typing-received', {
+        detail: { data: { threadId: CONVERSATION_KEY, userId, displayName: 'Me' } },
+      })
+    );
+  }
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+    fakeStateManager.currentScope = null;
+  });
+
+  afterEach(() => {
+    fakeStateManager.currentScope = null;
+    document.body.innerHTML = '';
+  });
+
+  it('falls back to the page-supplied user ID when no scope exists', async () => {
+    const el = await mountAs('user-me');
+
+    emitTyping('user-me');
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.typing-indicator')).toBeNull();
+  });
+
+  it('picks up the scope user ID when the scope lands after mount', async () => {
+    const el = await mountAs('');
+    fakeStateManager.currentScope = { type: 'chat', userId: 'user-me' };
+
+    emitTyping('user-me');
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.typing-indicator')).toBeNull();
+  });
+
+  it('still shows the peer typing', async () => {
+    const el = await mountAs('user-me');
+
+    emitTyping('user-them');
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.typing-indicator')).not.toBeNull();
+  });
+});

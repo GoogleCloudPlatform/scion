@@ -879,9 +879,9 @@ export class ScionPageChat extends LitElement {
     // is additionally refreshed on every inbound chat message.
     this._fallbackPollInterval = setInterval(() => {
       void this.loadUnreadDMPeers();
-      // A DM carries no project ID, so re-syncing here would silently swap the
-      // space-scoped member list the user was just looking at for the global
-      // one. Leave the sidebar on whatever the previous view loaded.
+      // A DM has no membership of its own, so re-syncing here would silently
+      // swap the member list the user was just looking at. Leave the sidebar on
+      // whatever the previous view loaded.
       if (this.v2Conversation?.isDM) return;
       if (this.v2Conversation?.projectId) {
         void this.loadV2Members(this.v2Conversation.projectId);
@@ -1010,7 +1010,7 @@ export class ScionPageChat extends LitElement {
         // Legacy DM key format (e.g. dm:agent:UUID:user:UUID) — use directly
         this.v2Conversation = {
           conversationKey: segment,
-          projectId: '',
+          projectId: this.inheritedProjectId(),
           projectSlug: '',
           threadName: '',
           defaultAgent: '',
@@ -1045,7 +1045,7 @@ export class ScionPageChat extends LitElement {
 
           this.v2Conversation = {
             conversationKey: dmKey,
-            projectId: '',
+            projectId: this.inheritedProjectId(),
             projectSlug: '',
             threadName: '',
             defaultAgent: '',
@@ -1620,7 +1620,7 @@ export class ScionPageChat extends LitElement {
           const peerName = dm.peerName || dm.peerSlug || dm.peerEmail || displayName || dm.peerId;
           this.v2Conversation = {
             conversationKey: dm.conversationKey,
-            projectId: '',
+            projectId: this.inheritedProjectId(),
             projectSlug: '',
             threadName: '',
             defaultAgent: '',
@@ -1666,7 +1666,7 @@ export class ScionPageChat extends LitElement {
     if (key) {
       this.v2Conversation = {
         conversationKey: key,
-        projectId: '',
+        projectId: this.inheritedProjectId(),
         projectSlug: '',
         threadName: '',
         defaultAgent: '',
@@ -2155,7 +2155,7 @@ export class ScionPageChat extends LitElement {
     if (dmKey) {
       this.v2Conversation = {
         conversationKey: dmKey,
-        projectId: '',
+        projectId: this.inheritedProjectId(),
         projectSlug: '',
         threadName: '',
         defaultAgent: '',
@@ -2226,6 +2226,17 @@ export class ScionPageChat extends LitElement {
     }
     const ids = [peerId, userId].sort();
     return `dm:user:${ids[0]}:user:${ids[1]}`;
+  }
+
+  /**
+   * The project a DM inherits: the one the user was already looking at when
+   * they opened it. A DM belongs to no space, but its attachments still have
+   * to be stored somewhere, and a project-scoped upload is what puts the file
+   * where an agent in that space can read it. Empty on a cold load straight
+   * into a DM, which the upload endpoint accepts.
+   */
+  private inheritedProjectId(): string {
+    return this.v2Conversation?.projectId || '';
   }
 
   // =========================================================================
