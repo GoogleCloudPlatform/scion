@@ -2966,6 +2966,57 @@ func TestProxyAuthMiddleware_ExistingSession_PicksUpUIPromotion(t *testing.T) {
 	assert.True(t, sessionUpdated, "session cookie should be re-set after UI promotion")
 }
 
+func TestProxyAuthMiddleware_ExistingSession_SuspendedUserRejected(t *testing.T) {
+	// Suspending a user through the admin UI must take effect on their next
+	// request rather than at session expiry: the session cookie lives for 24h,
+	// so without the store check a suspended user would keep full web access
+	// for the rest of that window.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "user@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		AdminEmails:        []string{},
+	})
+	ws.SetStore(st)
+
+	handler := ws.Handler()
+
+	// First request: provisions the user and establishes the session.
+	req1 := httptest.NewRequest("GET", "/projects", nil)
+	req1.Header.Set("Accept", "text/html")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+
+	require.NotEqual(t, http.StatusForbidden, rec1.Code, "active user should not be rejected")
+	cookies := rec1.Result().Cookies()
+	require.NotEmpty(t, cookies, "session cookie should be set")
+
+	// Admin suspends the user through the UI (writes to the store).
+	created, err := st.GetUserByEmail(context.Background(), "user@example.com")
+	require.NoError(t, err)
+	created.Status = "suspended"
+	require.NoError(t, st.UpdateUser(context.Background(), created))
+
+	// Replaying the still-valid session cookie must now be rejected.
+	req2 := httptest.NewRequest("GET", "/projects", nil)
+	req2.Header.Set("Accept", "text/html")
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	assert.Equal(t, http.StatusForbidden, rec2.Code, "suspended user should be rejected with 403")
+}
+
 func TestProxyAuthMiddleware_ExistingSession_NoUpdateWhenRoleUnchanged(t *testing.T) {
 	// When the session role already matches the expected role, the session
 	// should NOT be re-saved (no Set-Cookie header emitted).

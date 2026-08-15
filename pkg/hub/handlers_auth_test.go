@@ -448,6 +448,54 @@ func TestAuthRefreshRoleReevaluation(t *testing.T) {
 			t.Fatalf("expected status 403 for suspended user, got %d: %s", rec.Code, rec.Body.String())
 		}
 	})
+
+	t.Run("store error degrades to config-only role", func(t *testing.T) {
+		// A transient store failure must not let the token's own role claim
+		// stand in for the stored role: the refresh chain rotates, so trusting
+		// claims.Role here would let a stale admin renew itself indefinitely.
+		// The handler falls back to config-only evaluation instead.
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_store_error"),
+			Email:   "store-error@example.com",
+			Role:    "admin",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		// Token carries the admin role the user currently holds in the store.
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, "admin", ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		// The lookup now fails for a reason other than "not found" — a DB blip
+		// rather than an offboarded user.
+		srv.store = &failingUserLookupStore{Store: s, err: errors.New("database is locked")}
+
+		if role := refresh(t, srv, refreshToken); role != "member" {
+			t.Errorf("expected refreshed token role 'member' (config-only fallback), got %q", role)
+		}
+	})
+}
+
+// failingUserLookupStore wraps a store and makes the by-email user lookup fail
+// with a non-ErrNotFound error, simulating a transient database failure.
+type failingUserLookupStore struct {
+	store.Store
+	err error
+}
+
+func (f *failingUserLookupStore) GetUserByEmail(context.Context, string) (*store.User, error) {
+	return nil, f.err
 }
 
 func TestAuthValidate(t *testing.T) {
