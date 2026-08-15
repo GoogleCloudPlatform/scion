@@ -922,12 +922,28 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 		// For agent dispatch: pass container-visible file paths in Attachments
 		// (same pattern as Discord plugin — agents receive []string of paths).
+		// The attachment store lives on the hub host, which agent containers
+		// cannot read, so each file is staged into the project's scratchpad
+		// shared dir first. Staging is best-effort: when it is unavailable the
+		// hub-local path is sent, which host-process agents can still read.
 		s.mu.RLock()
 		as := s.attachmentStore
 		s.mu.RUnlock()
 		if localAS, ok := as.(*LocalDiskAttachmentStore); ok {
+			staging := s.resolveAttachmentStaging(ctx, projectID)
 			for _, ref := range attachmentRefs {
-				msg.Attachments = append(msg.Attachments, localAS.FilePath(projectID, ref.ID, ref.Name))
+				hostPath := localAS.FilePath(projectID, ref.ID, ref.Name)
+				agentPath := hostPath
+				if staging != nil {
+					staged, err := staging.stage(hostPath, ref.ID, ref.Name)
+					if err != nil {
+						s.messageLog.Error("Failed to stage attachment for agent",
+							"attachment", ref.ID, "error", err)
+					} else {
+						agentPath = staged
+					}
+				}
+				msg.Attachments = append(msg.Attachments, agentPath)
 			}
 		}
 	}
