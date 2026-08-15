@@ -1509,6 +1509,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					default:
 						// Transient read failure — keep the status quo (see
 						// the storedRole comment above).
+						ws.logger().Warn("Proxy auth: user lookup failed, falling back to session role",
+							"email", email, "error", err)
 					}
 				}
 				expectedRole := determineUserRole(email, ws.config.AdminEmails, storedRole)

@@ -488,7 +488,10 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		// Persist the role change
 		if user != nil && user.Role != role {
 			user.Role = role
-			_ = s.store.UpdateUser(r.Context(), user)
+			if err := s.store.UpdateUser(r.Context(), user); err != nil {
+				slog.Error("Failed to persist role change on token refresh",
+					"email", claims.Email, "error", err)
+			}
 		}
 	}
 
