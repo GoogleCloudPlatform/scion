@@ -300,6 +300,51 @@ describe('scion-chat-message attachment previews', () => {
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
+  it('gives an image thumbnail an expand and a download action', async () => {
+    const el = await mountAttachments([
+      { id: 'att-img', name: 'shot.png', mime: 'image/png', size: 2048 },
+    ]);
+
+    const actions = el.shadowRoot?.querySelector('.image-preview-wrapper .image-actions');
+    expect(actions).not.toBeNull();
+
+    const download = actions?.querySelector('sl-icon-button[name="download"]');
+    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-img');
+    expect(download?.getAttribute('download')).toBe('shot.png');
+
+    // The toolbar's expand opens the same overlay the thumbnail does.
+    const expand = actions?.querySelector(
+      'sl-icon-button[name="arrows-angle-expand"]'
+    ) as HTMLElement;
+    expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+
+    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview');
+    expect(dialog?.getAttribute('label')).toBe('shot.png');
+    expect(dialog?.querySelector('img.full-image')?.getAttribute('src')).toBe(
+      '/api/v1/chat/attachments/att-img'
+    );
+  });
+
+  it('closes the overlay when it is dismissed, so a click outside ends it', async () => {
+    const el = await mountAttachments([
+      { id: 'att-img', name: 'shot.png', mime: 'image/png', size: 2048 },
+    ]);
+
+    const button = el.shadowRoot?.querySelector('.image-expand') as HTMLElement;
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+
+    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview') as HTMLElement;
+    expect(dialog).not.toBeNull();
+
+    // sl-dialog closes itself on an overlay click and reports sl-after-hide.
+    dialog.dispatchEvent(new CustomEvent('sl-after-hide', { bubbles: true, composed: true }));
+    await settle(el);
+
+    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+  });
+
   it('reports a failed fetch inside the preview instead of an empty editor', async () => {
     apiFetchMock.mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve('') });
     const el = await mountAttachments([

@@ -233,6 +233,18 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// W7: Record the attached files as chat attachments so they render in web
+	// chat. The refs ride along in the message metadata because the linkage row
+	// needs a message ID, which only exists once the message is persisted —
+	// below on the direct path, or in the broker's deliverToUser.
+	attachmentRefs := s.ingestAgentAttachments(ctx, agent.ProjectID, agent.ID, req.Attachments)
+	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
+		if structuredMsg.Metadata == nil {
+			structuredMsg.Metadata = make(map[string]string, 1)
+		}
+		structuredMsg.Metadata[attachmentsMetadataKey] = encoded
+	}
+
 	// Route through broker when available; otherwise persist and publish
 	// directly. The broker's deliverToUser callback handles persistence
 	// and SSE, so doing both here would create duplicate messages.
@@ -253,6 +265,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 				"Failed to persist message", nil)
 			return
 		}
+		// W7: Link before publishing so a client that refetches on the SSE
+		// event already sees the attachments.
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		linkAttachmentRefs(ctx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		s.events.PublishUserMessage(ctx, storeMsg)
 		if s.channelRegistry != nil && s.channelRegistry.Len() > 0 {
 			s.channelRegistry.Dispatch(ctx, structuredMsg)

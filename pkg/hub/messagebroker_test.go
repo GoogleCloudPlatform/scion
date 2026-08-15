@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"sync"
 	"testing"
@@ -971,5 +972,73 @@ func TestContainsSuffix(t *testing.T) {
 		if got != tt.match {
 			t.Errorf("containsSuffix(%q, %q) = %v, want %v", tt.subject, tt.suffix, got, tt.match)
 		}
+	}
+}
+
+// An agent's attachments are recorded before the message is published; the
+// broker path is where they gain the message ID that ties them to a thread.
+func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	meta := AttachmentMeta{
+		ID:         api.NewUUID(),
+		ProjectID:  projectID,
+		Filename:   "shot.png",
+		MimeType:   "image/png",
+		Size:       12,
+		UploadedBy: "agent-uuid-123",
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := wcs.CreateAttachment(ctx, meta); err != nil {
+		t.Fatalf("CreateAttachment: %v", err)
+	}
+	encoded, ok := attachmentRefsMetadata([]AttachmentRef{{
+		ID: meta.ID, Name: meta.Filename, MimeType: meta.MimeType, Size: meta.Size,
+	}})
+	if !ok {
+		t.Fatal("expected refs to encode")
+	}
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = b.Close() }()
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	proxy.webChatStore = wcs
+
+	msg := messages.NewInstruction("agent:sending-agent", "user:bob", "here is the screenshot")
+	msg.SenderID = "agent-uuid-123"
+	msg.RecipientID = "user-bob-id"
+	msg.Metadata = map[string]string{attachmentsMetadataKey: encoded}
+
+	proxy.deliverToUser(ctx, projectID, "project."+projectID+".user.message", msg)
+
+	result, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: "user-bob-id"}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message, got %d", len(result.Items))
+	}
+
+	linked, err := wcs.GetAttachmentsByMessage(ctx, result.Items[0].ID)
+	if err != nil {
+		t.Fatalf("GetAttachmentsByMessage: %v", err)
+	}
+	if len(linked) != 1 || linked[0].ID != meta.ID {
+		t.Fatalf("expected the attachment to be linked to the delivered message, got %+v", linked)
 	}
 }

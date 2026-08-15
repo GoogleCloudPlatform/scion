@@ -918,7 +918,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			msg.Metadata = make(map[string]string)
 		}
 		refsJSON, _ := json.Marshal(attachmentRefs)
-		msg.Metadata["attachments"] = string(refsJSON)
+		msg.Metadata[attachmentsMetadataKey] = string(refsJSON)
 
 		// For agent dispatch: pass container-visible file paths in Attachments
 		// (same pattern as Discord plugin — agents receive []string of paths).

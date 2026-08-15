@@ -135,44 +135,56 @@ func validStagingComponent(s string) error {
 // remote runtime broker holds the agents' volumes). Callers fall back to the
 // hub-local path, which is what agents running as host processes read.
 func (s *Server) resolveAttachmentStaging(ctx context.Context, projectID string) *attachmentStaging {
-	if projectID == "" {
+	hostPath, inWorkspace := s.sharedDirHostPath(ctx, projectID, attachmentSharedDirName)
+	if hostPath == "" {
 		return nil
+	}
+	return newAttachmentStaging(hostPath, inWorkspace)
+}
+
+// sharedDirHostPath resolves the host-side directory backing one of a project's
+// shared dirs, along with the shared dir's in-workspace flag. It returns an
+// empty path when the project does not declare the shared dir or no directory
+// backing it exists on this machine.
+func (s *Server) sharedDirHostPath(ctx context.Context, projectID, name string) (string, bool) {
+	if projectID == "" {
+		return "", false
 	}
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil || project == nil {
-		return nil
+		return "", false
 	}
 
 	inWorkspace := false
 	found := false
 	for _, sd := range project.SharedDirs {
-		if sd.Name == attachmentSharedDirName {
+		if sd.Name == name {
 			inWorkspace = sd.InWorkspace
 			found = true
 			break
 		}
 	}
 	if !found {
-		return nil
+		return "", false
 	}
 
 	// Preferred: the hub's own resolution, which follows the project's .scion
 	// marker or a co-located broker's local path.
 	var candidates []string
-	if res, err := s.resolveSharedDirPath(ctx, project, attachmentSharedDirName); err == nil && res != nil && res.Path != "" {
+	if res, err := s.resolveSharedDirPath(ctx, project, name); err == nil && res != nil && res.Path != "" {
 		candidates = append(candidates, res.Path)
 	}
 	// Fallback: the conventional project-configs layout, the same computation
 	// the Discord and Telegram brokers use to stage their downloads.
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		candidates = append(candidates,
-			config.SharedDirHostPath(home, project.Slug, project.ID, attachmentSharedDirName))
+			config.SharedDirHostPath(home, project.Slug, project.ID, name))
 	}
 
 	for _, c := range candidates {
 		if info, err := os.Stat(c); err == nil && info.IsDir() {
-			return newAttachmentStaging(c, inWorkspace)
+			return c, inWorkspace
 		}
 	}
-	return nil
+	return "", false
 }

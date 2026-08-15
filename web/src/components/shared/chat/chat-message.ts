@@ -24,6 +24,7 @@
  * - Code blocks: monospace, horizontal scroll, copy button (no syntax highlighting)
  * - Attachments: chip showing basename, full path on hover, NOT clickable
  * - Text/code attachments: a short read-only preview slice with expand + download
+ * - Image attachments: an inline thumbnail with a hover expand + download toolbar
  * - Badges: urgent, broadcasted, channel provenance
  */
 
@@ -643,6 +644,48 @@ export class ScionChatMessage extends LitElement {
       margin-top: 0.375rem;
     }
 
+    /* Holds the thumbnail's hover toolbar over the image itself. */
+    .image-preview-wrapper {
+      position: relative;
+      display: inline-flex;
+    }
+
+    .image-actions {
+      position: absolute;
+      top: 0.25rem;
+      right: 0.25rem;
+      display: flex;
+      gap: 0.125rem;
+      padding: 0.0625rem;
+      border-radius: 0.375rem;
+      background: rgba(15, 23, 42, 0.65);
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+
+    /* Keyboard users reach the toolbar by tab, which never fires hover. */
+    .image-preview-wrapper:hover .image-actions,
+    .image-preview-wrapper:focus-within .image-actions {
+      opacity: 1;
+    }
+
+    /* A touch screen has no hover state to reveal the toolbar with. */
+    @media (hover: none) {
+      .image-actions {
+        opacity: 1;
+      }
+    }
+
+    .image-actions sl-icon-button::part(base) {
+      padding: 0.25rem;
+      font-size: 0.875rem;
+      color: #ffffff;
+    }
+
+    .image-actions sl-icon-button::part(base):hover {
+      color: var(--scion-neutral-200, #e2e8f0);
+    }
+
     /* The image is the button: no chrome of its own, just a focus ring. */
     .image-expand {
       display: inline-flex;
@@ -1238,20 +1281,35 @@ export class ScionChatMessage extends LitElement {
             <div class="attachment-images">
               ${images.map(
                 (img) => html`
-                  <button
-                    type="button"
-                    class="image-expand"
-                    title="${img.name} — click to expand"
-                    aria-label="Expand ${img.name}"
-                    @click=${() => this.openFullPreview(img)}
-                  >
-                    <img
-                      class="attachment-image"
-                      src=${attachmentURL(img.id)}
-                      alt=${img.name}
-                      loading="lazy"
-                    />
-                  </button>
+                  <div class="image-preview-wrapper">
+                    <button
+                      type="button"
+                      class="image-expand"
+                      title="${img.name} — click to expand"
+                      aria-label="Expand ${img.name}"
+                      @click=${() => this.openFullPreview(img)}
+                    >
+                      <img
+                        class="attachment-image"
+                        src=${attachmentURL(img.id)}
+                        alt=${img.name}
+                        loading="lazy"
+                      />
+                    </button>
+                    <div class="image-actions">
+                      <sl-icon-button
+                        name="arrows-angle-expand"
+                        label="Expand ${img.name}"
+                        @click=${() => this.openFullPreview(img)}
+                      ></sl-icon-button>
+                      <sl-icon-button
+                        name="download"
+                        label="Download ${img.name}"
+                        href=${attachmentURL(img.id)}
+                        download=${img.name}
+                      ></sl-icon-button>
+                    </div>
+                  </div>
                 `
               )}
             </div>

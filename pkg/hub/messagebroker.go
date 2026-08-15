@@ -51,10 +51,10 @@ type MessageBrokerProxy struct {
 	log           *slog.Logger
 	messageLog    *slog.Logger
 	chatNotifier  *ChatNotifier // W6: DM notification trigger for agent replies (nil-safe)
-	// webChatStore is used only to stamp the DM watermark with the
-	// store-assigned message ID after persistence — the web channel spoke
-	// cannot do it because the ID does not exist until deliverToUser runs.
-	// Nil-safe.
+	// webChatStore is used for the two things that need the store-assigned
+	// message ID: stamping the DM watermark and linking the message's
+	// attachments. Neither can happen in the web channel spoke, because the ID
+	// does not exist until deliverToUser runs. Nil-safe.
 	webChatStore WebChatStore
 
 	mu                  sync.Mutex
@@ -457,6 +457,11 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
 	}
+
+	// W7: Link the sender's attachments, recorded before publish, to the message
+	// row created here — the ID they need exists nowhere else. Done before the
+	// SSE event so a client refetching on it already sees them.
+	linkAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, parseAttachmentRefs(msg.Metadata), p.log)
 
 	// Stamp the DM watermark with the store-assigned message ID. The web
 	// channel spoke already registered the participant rows and bumped
