@@ -194,6 +194,7 @@ env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_
     --role-arn "$ROLE_ARN" \
     --role-session-name "$SESSION_NAME" \
     --web-identity-token "$GCP_TOKEN" \
+    --region us-east-1 \
     --query '{Version: `1`,
               AccessKeyId: Credentials.AccessKeyId,
               SecretAccessKey: Credentials.SecretAccessKey,
@@ -215,9 +216,11 @@ Create or update your `~/.aws/config` file in the agent to define a federated pr
 
 ```ini
 [profile gcp-federated]
-credential_process = /home/gemini/bin/aws-federated-creds.sh
+credential_process = /home/USER/bin/aws-federated-creds.sh
 region = us-east-1
 ```
+
+Replace `USER` with the container user for your harness (e.g., `gemini` for Gemini CLI, `user` for Claude Code).
 
 #### 3. Verify Authenticated Access
 
