@@ -61,6 +61,12 @@ import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
 
+/** Detail payload for the `sa-list-changed` CustomEvent. */
+export interface SAListChangedDetail {
+  action: 'registered' | 'verified' | 'minted' | 'deleted';
+  account: GCPServiceAccount;
+}
+
 @customElement('scion-gcp-service-account-list')
 export class ScionGCPServiceAccountList extends LitElement {
   /** 'project' for a Scion project's own accounts, 'hub' for hub-scoped ones. */
@@ -254,6 +260,21 @@ export class ScionGCPServiceAccountList extends LitElement {
     return can(this.listCapabilities, 'mint');
   }
 
+  /**
+   * Dispatches a bubbling `sa-list-changed` event so parent components can
+   * react to registration, verification, minting, or deletion of a service
+   * account without a full page reload.
+   */
+  private dispatchSAChange(detail: SAListChangedDetail): void {
+    this.dispatchEvent(
+      new CustomEvent('sa-list-changed', {
+        bubbles: true,
+        composed: true,
+        detail,
+      })
+    );
+  }
+
   private async loadAccounts(): Promise<void> {
     this.loading = true;
     this.error = null;
@@ -336,8 +357,15 @@ export class ScionGCPServiceAccountList extends LitElement {
         );
       }
 
+      // Parse the minted SA from the response before any other consumption.
+      const mintedSA = (await response.json().catch(() => null)) as GCPServiceAccount | null;
+
       this.closeMintDialog();
       await this.loadAccounts();
+
+      if (mintedSA?.id) {
+        this.dispatchSAChange({ action: 'minted', account: mintedSA });
+      }
     } catch (err) {
       console.error('Failed to mint service account:', err);
       this.mintDialogError = err instanceof Error ? err.message : 'Failed to mint service account';
@@ -405,14 +433,19 @@ export class ScionGCPServiceAccountList extends LitElement {
         );
       }
 
-      // Check if auto-verification failed after registration
-      const data = (await response.json().catch(() => ({}))) as {
+      // Parse the created SA (and verification metadata) before any other
+      // consumption — response.json() can only be read once.
+      const data = (await response.json().catch(() => ({}))) as GCPServiceAccount & {
         verificationFailed?: boolean;
         verificationDetails?: { hubServiceAccountEmail?: string; targetEmail?: string };
       };
 
       this.closeDialog();
       await this.loadAccounts();
+
+      if (data.id) {
+        this.dispatchSAChange({ action: 'registered', account: data });
+      }
 
       if (data.verificationFailed) {
         this.verifyFailedHubEmail = data.verificationDetails?.hubServiceAccountEmail || '';
@@ -456,7 +489,14 @@ export class ScionGCPServiceAccountList extends LitElement {
         return;
       }
 
+      // Parse the updated SA from the verify response before reloading.
+      const updatedSA = (await response.json().catch(() => null)) as GCPServiceAccount | null;
+
       await this.loadAccounts();
+
+      if (updatedSA?.id) {
+        this.dispatchSAChange({ action: 'verified', account: updatedSA });
+      }
     } catch (err) {
       console.error('Failed to verify service account:', err);
       this.verifyFailedHubEmail = '';
@@ -491,6 +531,7 @@ export class ScionGCPServiceAccountList extends LitElement {
       }
 
       await this.loadAccounts();
+      this.dispatchSAChange({ action: 'deleted', account });
     } catch (err) {
       console.error('Failed to delete service account:', err);
       showToast(err instanceof Error ? err.message : 'Failed to delete');

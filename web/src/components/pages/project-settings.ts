@@ -46,6 +46,7 @@ import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
 import '../shared/group-member-editor.js';
 import '../shared/gcp-service-account-list.js';
+import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';
 import '../shared/scheduled-event-list.js';
 import '../shared/subscription-manager.js';
 import '../shared/schedule-list.js';
@@ -1167,6 +1168,38 @@ export class ScionPageProjectSettings extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load GCP service accounts:', err);
+    }
+  }
+
+  /**
+   * Handles `sa-list-changed` events from `<scion-gcp-service-account-list>`.
+   * Updates the local `gcpServiceAccounts` state used by the "Default Service
+   * Account" dropdown so it reflects additions, verifications, and deletions
+   * without requiring a full page reload.
+   */
+  private handleSAListChanged(e: CustomEvent<SAListChangedDetail>): void {
+    const { action, account } = e.detail;
+
+    if (action === 'deleted') {
+      this.gcpServiceAccounts = this.gcpServiceAccounts.filter((sa) => sa.id !== account.id);
+      // Clear the default SA selection if the deleted account was selected.
+      if (this.configDefaultGCPIdentitySAID === account.id) {
+        this.configDefaultGCPIdentitySAID = '';
+      }
+      return;
+    }
+
+    // Only add verified accounts to the dropdown
+    if (!account.verified) return;
+
+    // Dedupe by id — replace if exists, append if new
+    const exists = this.gcpServiceAccounts.some((sa) => sa.id === account.id);
+    if (exists) {
+      this.gcpServiceAccounts = this.gcpServiceAccounts.map((sa) =>
+        sa.id === account.id ? account : sa
+      );
+    } else {
+      this.gcpServiceAccounts = [...this.gcpServiceAccounts, account];
     }
   }
 
@@ -2420,6 +2453,7 @@ export class ScionPageProjectSettings extends LitElement {
             <scion-gcp-service-account-list
               scope="project"
               scopeId=${this.projectId}
+              @sa-list-changed=${this.handleSAListChanged}
             ></scion-gcp-service-account-list>
           </sl-tab-panel>
 
