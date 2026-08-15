@@ -49,6 +49,48 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/**
+ * Spans of rendered markdown that @mention styling must step over: code
+ * regions, whose text is literal, and HTML tags, whose attributes must not be
+ * mangled. `<pre>` is listed before `<code>` so a `<pre><code>` fence is
+ * consumed as one region. Whatever falls *between* matches is text content.
+ *
+ * Tags are matched as `<[^>]+>` — safe because the input is DOMPurify output,
+ * which escapes any `>` appearing inside an attribute value.
+ */
+const MENTION_SKIP_REGION = '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
+
+/**
+ * Wrap @mentions in styled, clickable spans.
+ *
+ * The captured slug is limited to `[\w.-]` so it can never break out of the
+ * `data-mention` attribute it is interpolated into.
+ */
+function styleMentionsInText(text: string): string {
+  return text.replace(
+    /@([\w.-]+)/g,
+    '<span class="mention clickable" data-mention="$1">@$1</span>'
+  );
+}
+
+/**
+ * Post-process rendered markdown to make @mentions clickable, leaving code
+ * blocks and inline code untouched — an `@name` inside a fence is literal
+ * text, not a reference to anyone.
+ */
+function styleMentions(htmlStr: string): string {
+  // Built per call so the running `lastIndex` is never shared between renders.
+  const skip = new RegExp(MENTION_SKIP_REGION, 'gi');
+  let out = '';
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = skip.exec(htmlStr)) !== null) {
+    out += styleMentionsInText(htmlStr.slice(cursor, match.index)) + match[0];
+    cursor = match.index + match[0].length;
+  }
+  return out + styleMentionsInText(htmlStr.slice(cursor));
+}
+
 @customElement('scion-chat-message')
 export class ScionChatMessage extends LitElement {
   /** The message body text. */
@@ -656,28 +698,11 @@ export class ScionChatMessage extends LitElement {
     try {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
-      this.renderedHtml = this.styleMentions(renderer.render(this.body));
+      this.renderedHtml = styleMentions(renderer.render(this.body));
     } catch {
       if (taskId !== this.renderTaskId) return;
       this.renderedHtml = '';
     }
-  }
-
-  /**
-   * Post-process rendered HTML to wrap @mentions in styled, clickable spans.
-   * Only processes text content between HTML tags to avoid mangling attributes.
-   *
-   * The captured slug is limited to `[\w.-]` so it can never break out of the
-   * `data-mention` attribute it is interpolated into.
-   */
-  private styleMentions(htmlStr: string): string {
-    return htmlStr.replace(/>([^<]+)</g, (_match, text: string) => {
-      const styled = text.replace(
-        /@([\w.-]+)/g,
-        '<span class="mention clickable" data-mention="$1">@$1</span>'
-      );
-      return `>${styled}<`;
-    });
   }
 
   /**

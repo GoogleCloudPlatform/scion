@@ -27,12 +27,17 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { vi } from 'vitest';
 
-// A trivial stand-in for marked + DOMPurify: paragraph-wraps the body so the
-// mention post-processing has tags to work between.
+// A stand-in for marked + DOMPurify. It reproduces the shapes the mention
+// post-processing has to cope with — paragraphs, fenced code, inline code and
+// links — without pulling the real parser into the test.
 vi.mock('../../../utils/markdown.js', () => ({
   getMarkdownRenderer: () =>
     Promise.resolve({
-      render: (markdown: string) => `<p>${markdown}</p>`,
+      render: (markdown: string) =>
+        `<p>${markdown
+          .replace(/```([\s\S]*?)```/g, '</p><pre><code>$1</code></pre><p>')
+          .replace(/`([^`]+)`/g, '<code>$1</code>')
+          .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" title="see $1">$1</a>')}</p>`,
     }),
 }));
 
@@ -84,6 +89,39 @@ describe('scion-chat-message @mentions', () => {
     mentions(el)[0].dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
 
     expect(seen).toEqual(['coder']);
+  });
+
+  it('leaves @mentions inside a fenced code block as literal text', async () => {
+    const el = await mount('run this:\n```\ngit commit --author @coder\n```\nthanks @lead');
+
+    // Only the mention outside the fence is a reference to anyone.
+    expect(mentions(el).map((m) => m.getAttribute('data-mention'))).toEqual(['lead']);
+
+    const pre = el.shadowRoot?.querySelector('.md-content pre');
+    expect(pre?.querySelector('.mention')).toBeNull();
+    expect(pre?.textContent).toContain('git commit --author @coder');
+  });
+
+  it('leaves @mentions inside an inline code span as literal text', async () => {
+    const el = await mount('pass `--to @coder` when you ping @lead');
+
+    expect(mentions(el).map((m) => m.getAttribute('data-mention'))).toEqual(['lead']);
+    expect(el.shadowRoot?.querySelector('.md-content code')?.textContent).toBe('--to @coder');
+  });
+
+  it('does not rewrite @mentions sitting inside tag attributes', async () => {
+    const el = await mount('see [the docs](https://example.com/@coder)');
+
+    expect(mentions(el)).toHaveLength(0);
+    const link = el.shadowRoot?.querySelector('.md-content a');
+    expect(link?.getAttribute('href')).toBe('https://example.com/@coder');
+    expect(link?.getAttribute('title')).toBe('see the docs');
+  });
+
+  it('styles a mention that opens the message body', async () => {
+    const el = await mount('@lead please review');
+
+    expect(mentions(el).map((m) => m.getAttribute('data-mention'))).toEqual(['lead']);
   });
 
   it('stays silent when the click misses a mention', async () => {
