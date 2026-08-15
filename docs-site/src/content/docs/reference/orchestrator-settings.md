@@ -121,8 +121,8 @@ Named configurations for agent harnesses. This replaces the legacy `harnesses` m
 ```yaml
 harness_configs:
   gemini:
-    harness: gemini
-    image: "us-central1-docker.pkg.dev/.../scion-gemini:latest"
+    harness: gemini-cli
+    image: "us-central1-docker.pkg.dev/.../scion-gemini-cli:latest"
     user: scion
     model: "gemini-1.5-pro"
   
@@ -135,7 +135,7 @@ harness_configs:
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `harness` | string | **Required**. The harness type (e.g., `gemini`, `claude`, `opencode`). |
+| `harness` | string | **Required**. The harness type (e.g., `gemini-cli`, `claude`, `opencode`). |
 | `image` | string | Container image to use. |
 | `user` | string | Unix username inside the container. |
 | `model` | string | Default model identifier. |

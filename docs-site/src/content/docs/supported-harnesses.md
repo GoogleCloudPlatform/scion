@@ -14,11 +14,11 @@ projection, and MCP configuration across all bundles. See
 [Harness-Specific Settings](/scion/reference/harness-settings/) for how bundles are packaged and
 managed.
 
-`claude` and `gemini` are installed by default. `opencode`, `codex`, `copilot`, `hermes`, and
+`claude` and `gemini-cli` are installed by default. `opencode`, `codex`, `copilot`, `hermes`, and
 `antigravity` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
 :::
 
-## 1. Gemini CLI (`gemini`)
+## 1. Gemini CLI (`gemini-cli`)
 
 The default harness for interacting with Google's Gemini models via the `gemini` CLI tool.
 
@@ -248,7 +248,7 @@ The following table summarizes the capabilities supported by each agent harness 
 * **Enqueue**: Ability to send messages to the agent while it's running (supported via the built-in Tmux session).
 * **Hooks**: Support for lifecycle hooks (e.g., `SessionStart`, `AfterTool`).
 * **OpenTelemetry**: Specific events vary by harness and native emitter schema.
-* **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). The `gemini` harness has full support via `~/.gemini/system_prompt.md`. ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file: `AGENTS.md` for Hermes, `GEMINI.md` for Antigravity, and `copilot-instructions.md` for Copilot.
+* **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). The `gemini-cli` harness has full support via `~/.gemini/system_prompt.md`. ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file: `AGENTS.md` for Hermes, `GEMINI.md` for Antigravity, and `copilot-instructions.md` for Copilot.
 * **Auth types**: The universal auth types (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`) each harness accepts. Set an explicit type with `--harness-auth` or `auth_selectedType`; otherwise Scion auto-detects. See [Harness Authentication](/scion/local/agent-credentials/).
     * ¹ **Copilot** authenticates with a **GitHub token** (`COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`) under the `api-key` type, not an LLM-provider key.
     * ² **Antigravity**'s `oauth-token` default type is a **file-based** OAuth token (`AGY_TOKEN` at `~/.gemini/antigravity-cli/antigravity-oauth-token`), captured under the auth-file capability — it does not accept a raw injected OAuth token the way Claude does.

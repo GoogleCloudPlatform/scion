@@ -182,6 +182,8 @@ To support complete infrastructure configuration directly from the Web Dashboard
 
 In highly available (HA) Postgres deployments, all configurations edited through this tab are stored in the database's `hub_settings` table as whole-map JSONB documents. This ensures edits propagate immediately to all replicas, support optimistic locking (CAS), and are never silently dropped or ignored on server PUT actions.
 
+Furthermore, these database-backed settings are wired directly into the runtime broker consumption path. During agent dispatch, both the Scion Hub and the Runtime Broker resolve runtime execution environments and resource profiles dynamically from these persisted database settings. This eliminates the need to distribute or maintain on-disk configuration files (such as local `settings.yaml` files) on individual broker nodes, ensuring a centralized, real-time control plane.
+
 #### Navigation Updates
 
 - **Message Broker Integration**: The Message Broker configuration has been consolidated and moved from the General tab to the **Hub Server** tab, grouping external integrations and network-bound transports in one logical place.
