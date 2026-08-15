@@ -15,9 +15,12 @@
 package config
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -251,6 +254,12 @@ func TestResolvePluginConfig_SecretKeysStrippedFromInline(t *testing.T) {
 	if result["mode"] != "plugin" {
 		t.Errorf("wiring key should be preserved: got %q", result["mode"])
 	}
+	// Callers pass live maps (entry.Config from in-memory settings). Stripping
+	// the original would erase the credential from settings and risk writing
+	// the loss back to settings.yaml.
+	if _, ok := inline["bot_token"]; !ok {
+		t.Error("ResolvePluginConfig must not mutate the caller's inline map")
+	}
 }
 
 func TestResolvePluginConfig_SecretKeysStrippedWithConfigFile(t *testing.T) {
@@ -278,6 +287,114 @@ func TestResolvePluginConfig_SecretKeysStrippedWithConfigFile(t *testing.T) {
 	}
 	if result["inbound_mode"] != "poll" {
 		t.Errorf("file non-wiring key should be present: got %q", result["inbound_mode"])
+	}
+}
+
+func TestResolvePluginConfig_SecretKeysStrippedFromConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plugin.yaml")
+	p, _ := NewYAMLConfigProvider(path)
+	if err := p.Save(context.Background(), map[string]string{
+		"bot_token":          "secret-from-file",
+		"TELEGRAM_BOT_TOKEN": "backend-name-from-file",
+		"inbound_mode":       "poll",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ResolvePluginConfig(path, map[string]string{"mode": "plugin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := result["bot_token"]; ok {
+		t.Error("secret config key bot_token should be stripped from config file")
+	}
+	if _, ok := result["TELEGRAM_BOT_TOKEN"]; ok {
+		t.Error("backend secret key name should be stripped from config file")
+	}
+	if result["inbound_mode"] != "poll" {
+		t.Errorf("file non-secret key should be present: got %q", result["inbound_mode"])
+	}
+}
+
+func TestResolvePluginConfig_SecretKeysStrippedFromConfigFileWarns(t *testing.T) {
+	// A credential silently vanishing from the resolved config is the failure
+	// mode this warning exists to prevent — assert it actually fires.
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plugin.yaml")
+	p, _ := NewYAMLConfigProvider(path)
+	if err := p.Save(context.Background(), map[string]string{
+		"bot_token":    "secret-from-file",
+		"inbound_mode": "poll",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ResolvePluginConfig(path, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "level=WARN") || !strings.Contains(logged, "bot_token") {
+		t.Errorf("expected a WARN naming the stripped key, got: %s", logged)
+	}
+	if !strings.Contains(logged, path) {
+		t.Errorf("expected the warning to name the config file %q, got: %s", path, logged)
+	}
+	if strings.Contains(logged, "secret-from-file") {
+		t.Errorf("warning must not leak the credential value, got: %s", logged)
+	}
+
+	// ResolvePluginConfig runs on request-serving paths; repeat calls must not
+	// let a client drive unbounded log volume.
+	buf.Reset()
+	if _, err := ResolvePluginConfig(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("repeat resolve should not warn again, got: %s", buf.String())
+	}
+}
+
+func TestResolvePluginConfig_StrippedSecretWarningDedupesByResolvedPath(t *testing.T) {
+	// "~/.scion/plugin.yaml", "plugin.yaml" and the absolute path all name the
+	// same file; the warning should fire once, against the resolved path.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, GlobalDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(dir, "plugin.yaml")
+	p, _ := NewYAMLConfigProvider(abs)
+	if err := p.Save(context.Background(), map[string]string{
+		"bot_token": "secret-from-file",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	for _, spelling := range []string{abs, "~/" + GlobalDir + "/plugin.yaml", "plugin.yaml"} {
+		if _, err := ResolvePluginConfig(spelling, nil); err != nil {
+			t.Fatalf("resolve %q: %v", spelling, err)
+		}
+	}
+
+	if got := strings.Count(buf.String(), "level=WARN"); got != 1 {
+		t.Errorf("expected exactly 1 warning across path spellings, got %d: %s", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), abs) {
+		t.Errorf("warning should name the resolved path %q, got: %s", abs, buf.String())
 	}
 }
 
