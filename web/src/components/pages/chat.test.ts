@@ -30,6 +30,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { render, type TemplateResult } from 'lit';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -56,6 +57,24 @@ function createPage(): any {
     { id: 'user-1', kind: 'user', displayName: 'Ada Lovelace', email: 'ada@example.com' },
   ];
   return el;
+}
+
+/**
+ * A page instance parked on the conversation panel — the state mobile reaches
+ * once a thread or DM has been opened. The panel default is the rail, so the
+ * swipe tests that start mid-track have to say so explicitly.
+ */
+function createPageOnConversation(): any {
+  const el = createPage();
+  el.mobilePanel = 'center';
+  return el;
+}
+
+/** Render a template on its own so header fragments can be queried. */
+function renderToFragment(tpl: TemplateResult): HTMLElement {
+  const host = document.createElement('div');
+  render(tpl, host);
+  return host;
 }
 
 /** Fire a mention click at the page as the message component would. */
@@ -134,6 +153,61 @@ describe('chat page — @mention click opens a DM', () => {
   });
 });
 
+describe('chat page — mobile panel default and header navigation', () => {
+  it('starts on the space rail so a conversation can be picked', () => {
+    expect(createPage().mobilePanel).toBe('left');
+  });
+
+  it('returns to the rail when the route clears the conversation', () => {
+    const el = createPageOnConversation();
+    window.history.replaceState({}, '', '/chat');
+
+    el.parseV2Route();
+
+    expect(el.v2Conversation).toBeNull();
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('opens the conversation panel for a deep-linked DM', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-1:user:user-me');
+
+    el.parseV2Route();
+
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('renders a back button that returns to the rail', () => {
+    const el = createPageOnConversation();
+    const back = renderToFragment(el.renderMobileBackButton()).querySelector('.mobile-back');
+
+    expect(back?.getAttribute('name')).toBe('chevron-left');
+    back?.dispatchEvent(new Event('click'));
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('renders a members button that opens the members panel', () => {
+    const el = createPageOnConversation();
+    const members = renderToFragment(el.renderMembersButtons()).querySelector('.mobile-members');
+
+    expect(members?.getAttribute('name')).toBe('people');
+    members?.dispatchEvent(new Event('click'));
+    expect(el.mobilePanel).toBe('right');
+  });
+
+  it('keeps the desktop members toggle separate from the mobile one', () => {
+    const el = createPageOnConversation();
+    el.v2MembersExpanded = true;
+    const frag = renderToFragment(el.renderMembersButtons());
+
+    frag.querySelector('.desktop-members sl-icon-button')?.dispatchEvent(new Event('click'));
+
+    expect(el.v2MembersExpanded).toBe(false);
+    // The desktop toggle must not move the mobile track.
+    expect(el.mobilePanel).toBe('center');
+  });
+});
+
 describe('chat page — mobile swipe navigation', () => {
   beforeAll(() => {
     (window as any).innerWidth = 400;
@@ -145,7 +219,7 @@ describe('chat page — mobile swipe navigation', () => {
 
   it('swipes right from the conversation to the rail, and back left', () => {
     vi.useFakeTimers();
-    const el = createPage();
+    const el = createPageOnConversation();
 
     swipe(el, { dx: 120 });
     expect(el.mobilePanel).toBe('left');
@@ -156,7 +230,7 @@ describe('chat page — mobile swipe navigation', () => {
 
   it('swipes left from the conversation to the members panel, and back right', () => {
     vi.useFakeTimers();
-    const el = createPage();
+    const el = createPageOnConversation();
 
     swipe(el, { dx: -120 });
     expect(el.mobilePanel).toBe('right');
@@ -180,18 +254,18 @@ describe('chat page — mobile swipe navigation', () => {
 
   it('accepts a short fast flick but not a short slow drag', () => {
     vi.useFakeTimers();
-    const flick = createPage();
+    const flick = createPageOnConversation();
     swipe(flick, { dx: 60, durationMs: 150 });
     expect(flick.mobilePanel).toBe('left');
 
-    const slow = createPage();
+    const slow = createPageOnConversation();
     swipe(slow, { dx: 60, durationMs: 900 });
     expect(slow.mobilePanel).toBe('center');
   });
 
   it('ignores a mostly vertical drag — that is the message list scrolling', () => {
     vi.useFakeTimers();
-    const el = createPage();
+    const el = createPageOnConversation();
 
     swipe(el, { dx: 120, dy: 200 });
 
@@ -201,7 +275,7 @@ describe('chat page — mobile swipe navigation', () => {
   it('ignores swipes on desktop viewports', () => {
     vi.useFakeTimers();
     (window as any).innerWidth = 1400;
-    const el = createPage();
+    const el = createPageOnConversation();
 
     swipe(el, { dx: 200 });
 

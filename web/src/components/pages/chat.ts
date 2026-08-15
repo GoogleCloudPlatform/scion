@@ -243,8 +243,12 @@ export class ScionPageChat extends LitElement {
   /**
    * Which of the three panels is on screen. Only meaningful under the mobile
    * breakpoint — on desktop all three are visible and this is inert.
+   *
+   * Defaults to the rail: with no conversation open the centre panel is just
+   * an empty state, and the rail is the only way to pick a conversation.
+   * Anything that opens a conversation switches this to 'center'.
    */
-  @state() private mobilePanel: 'left' | 'center' | 'right' = 'center';
+  @state() private mobilePanel: 'left' | 'center' | 'right' = 'left';
   private _touchStartX = 0;
   private _touchStartY = 0;
   private _touchStartTime = 0;
@@ -487,7 +491,36 @@ export class ScionPageChat extends LitElement {
       margin-left: auto;
     }
 
+    /*
+     * Mobile-only header controls. On a narrow viewport the three panels are
+     * a swipe track, so the header needs explicit affordances for moving
+     * between them; the desktop members toggle is meaningless there because
+     * the tray is always mounted in the track.
+     */
+    .mobile-back,
+    .mobile-members,
+    .empty-state .subtitle.mobile-only {
+      display: none;
+    }
+
     @media (max-width: 768px) {
+      .mobile-back,
+      .mobile-members {
+        display: inline-flex;
+      }
+
+      .desktop-members {
+        display: none;
+      }
+
+      .empty-state .subtitle.desktop-only {
+        display: none;
+      }
+
+      .empty-state .subtitle.mobile-only {
+        display: inline;
+      }
+
       /* V1: one screen at a time, driven by the thread-open host class. */
       .thread-rail {
         width: 100%;
@@ -915,6 +948,7 @@ export class ScionPageChat extends LitElement {
         peerKind: 'user',
       };
       this.classList.add('thread-open');
+      this.mobilePanel = 'center';
       void this.loadV2Members(projectId);
       if (!existingDefault) {
         void this.fetchThreadDefaultAgent(topicId);
@@ -958,6 +992,7 @@ export class ScionPageChat extends LitElement {
       }
 
       this.classList.add('thread-open');
+      this.mobilePanel = 'center';
       dispatchPageTitle(this, 'DM', 'Chat');
 
       if (segment.startsWith('dm:')) {
@@ -1043,6 +1078,7 @@ export class ScionPageChat extends LitElement {
           peerKind: 'user',
         };
         this.classList.add('thread-open');
+        this.mobilePanel = 'center';
         void this.loadV2Members(projectId);
         if (!existingDefault) {
           void this.fetchThreadDefaultAgent(threadId);
@@ -1085,6 +1121,8 @@ export class ScionPageChat extends LitElement {
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view (no header toggle available)
     this.classList.remove('thread-open');
+    // No conversation to show — put the mobile view back on the rail.
+    this.mobilePanel = 'left';
     void this.loadHubMembers();
   }
 
@@ -1111,6 +1149,7 @@ export class ScionPageChat extends LitElement {
       peerKind: 'user',
     };
     this.classList.add('thread-open');
+    this.mobilePanel = 'center';
     void this.loadV2Members(projectId);
     if (!existingDefault) {
       void this.fetchThreadDefaultAgent(threadId);
@@ -1190,6 +1229,7 @@ export class ScionPageChat extends LitElement {
         peerId: '',
         peerKind: 'user',
       };
+      this.mobilePanel = 'center';
       void this.loadV2Members(projectId);
       dispatchPageTitle(this, `#${general.name}`, 'Chat');
       // Update URL to include the thread
@@ -2247,7 +2287,10 @@ export class ScionPageChat extends LitElement {
                 <div class="empty-state">
                   <sl-icon name="chat-dots"></sl-icon>
                   <span class="title">Select a conversation</span>
-                  <span class="subtitle">Choose a thread from the left, or click a member to start a DM</span>
+                  <span class="subtitle desktop-only"
+                    >Choose a thread from the left, or click a member to start a DM</span
+                  >
+                  <span class="subtitle mobile-only">Choose a thread to start chatting</span>
                 </div>
               `}
         </div>
@@ -2291,6 +2334,50 @@ export class ScionPageChat extends LitElement {
     return '';
   }
 
+  /**
+   * Back chevron shown only on mobile, where the space rail is off-screen and
+   * otherwise reachable only by an undiscoverable swipe.
+   */
+  private renderMobileBackButton() {
+    return html`
+      <sl-icon-button
+        class="mobile-back"
+        name="chevron-left"
+        label="Back"
+        @click=${() => {
+          this.mobilePanel = 'left';
+        }}
+      ></sl-icon-button>
+    `;
+  }
+
+  /**
+   * Members control for the conversation header. On desktop it collapses the
+   * members tray; on mobile the tray is a swipe panel, so the button slides
+   * the track to it instead.
+   */
+  private renderMembersButtons() {
+    return html`
+      <sl-tooltip class="desktop-members" content="Show/Hide members">
+        <sl-icon-button
+          name="people"
+          label="Show/Hide members"
+          @click=${() => {
+            this.v2MembersExpanded = !this.v2MembersExpanded;
+          }}
+        ></sl-icon-button>
+      </sl-tooltip>
+      <sl-icon-button
+        class="mobile-members"
+        name="people"
+        label="Members"
+        @click=${() => {
+          this.mobilePanel = 'right';
+        }}
+      ></sl-icon-button>
+    `;
+  }
+
   private renderV2Conversation() {
     if (!this.v2Conversation) return nothing;
     const conv = this.v2Conversation;
@@ -2304,6 +2391,7 @@ export class ScionPageChat extends LitElement {
       ${conv.isDM && conv.peerName
         ? html`
             <div class="v2-thread-header">
+              ${this.renderMobileBackButton()}
               ${conv.peerKind === 'agent' && agentProjectSlug
                 ? html`<sl-icon name="folder" style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b)"></sl-icon>
                         <span style="font-size: 0.8125rem; color: var(--scion-text-muted, #64748b)">${agentProjectSlug}</span>`
@@ -2323,21 +2411,14 @@ export class ScionPageChat extends LitElement {
                     @click=${() => void this.openSearch()}
                   ></sl-icon-button>
                 </sl-tooltip>
-                <sl-tooltip content="Show/Hide members">
-                  <sl-icon-button
-                    name="people"
-                    label="Show/Hide members"
-                    @click=${() => {
-                      this.v2MembersExpanded = !this.v2MembersExpanded;
-                    }}
-                  ></sl-icon-button>
-                </sl-tooltip>
+                ${this.renderMembersButtons()}
               </div>
             </div>
           `
         : conv.threadName
           ? html`
               <div class="v2-thread-header">
+                ${this.renderMobileBackButton()}
                 <span class="hash">#</span>
                 <span>${conv.threadName}</span>
                 ${conv.defaultAgent
@@ -2355,15 +2436,7 @@ export class ScionPageChat extends LitElement {
                       @click=${() => void this.openSearch()}
                     ></sl-icon-button>
                   </sl-tooltip>
-                  <sl-tooltip content="Show/Hide members">
-                    <sl-icon-button
-                      name="people"
-                      label="Show/Hide members"
-                      @click=${() => {
-                        this.v2MembersExpanded = !this.v2MembersExpanded;
-                      }}
-                    ></sl-icon-button>
-                  </sl-tooltip>
+                  ${this.renderMembersButtons()}
                 </div>
               </div>
             `
