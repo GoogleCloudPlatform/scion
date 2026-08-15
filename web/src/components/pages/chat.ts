@@ -503,37 +503,70 @@ export class ScionPageChat extends LitElement {
       }
 
       /*
-       * V2: the three panels become three screens on one sliding track,
-       * one viewport wide each, selected by swiping (see handleTouchEnd).
+       * V2: each panel is absolutely positioned at one viewport wide and
+       * translated into or out of view based on data-panel. A 300%-wide
+       * sliding track does not survive the nested flex ancestors
+       * (:host inside chat-shell inside app-shell), which force the width
+       * back down and reveal all three panels at once.
        */
       .v2-panels {
-        /* Override the base 'flex: 1' — a flex-basis of 0 grown to the
-           parent's width would otherwise beat 'width: 300%', collapsing the
-           track back to one viewport and showing all three panels at once. */
-        flex: 0 0 300%;
-        width: 300%;
-        transition: transform 0.3s ease;
-      }
-
-      .v2-panels[data-panel='left'] {
-        transform: translateX(0);
-      }
-
-      .v2-panels[data-panel='center'] {
-        transform: translateX(-33.3333%);
-      }
-
-      .v2-panels[data-panel='right'] {
-        transform: translateX(-66.6666%);
+        position: relative;
+        /* 'overflow: hidden' comes from the base rule and clips the
+           off-screen panels. */
       }
 
       .v2-panels .v2-rail,
       .v2-panels .v2-content,
       .v2-panels .v2-members {
-        width: 33.3333%;
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
         min-width: 0;
         max-width: none;
-        flex: 0 0 33.3333%;
+        flex: none;
+        transition: transform 0.3s ease;
+        overflow-y: auto;
+      }
+
+      /* ---- Left panel active ---- */
+      .v2-panels[data-panel='left'] .v2-rail {
+        transform: translateX(0);
+      }
+
+      .v2-panels[data-panel='left'] .v2-content {
+        transform: translateX(100%);
+      }
+
+      .v2-panels[data-panel='left'] .v2-members {
+        transform: translateX(200%);
+      }
+
+      /* ---- Center panel active ---- */
+      .v2-panels[data-panel='center'] .v2-rail {
+        transform: translateX(-100%);
+      }
+
+      .v2-panels[data-panel='center'] .v2-content {
+        transform: translateX(0);
+      }
+
+      .v2-panels[data-panel='center'] .v2-members {
+        transform: translateX(100%);
+      }
+
+      /* ---- Right panel active ---- */
+      .v2-panels[data-panel='right'] .v2-rail {
+        transform: translateX(-200%);
+      }
+
+      .v2-panels[data-panel='right'] .v2-content {
+        transform: translateX(-100%);
+      }
+
+      .v2-panels[data-panel='right'] .v2-members {
+        transform: translateX(0);
       }
 
       /* The members panel is a swipe target on mobile, so it stays in the
@@ -544,7 +577,9 @@ export class ScionPageChat extends LitElement {
     }
 
     @media (prefers-reduced-motion: reduce) {
-      .v2-panels {
+      .v2-panels .v2-rail,
+      .v2-panels .v2-content,
+      .v2-panels .v2-members {
         transition: none;
       }
     }
