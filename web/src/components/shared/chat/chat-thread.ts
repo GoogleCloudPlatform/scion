@@ -1145,6 +1145,11 @@ export class ScionChatThread extends LitElement {
     return this.isDM && this.conversationKey.startsWith('dm:agent:');
   }
 
+  /** Whether there are inter-agent markers to render in this conversation. */
+  private get hasInteragentMessages(): boolean {
+    return this.isAgentDM && this.interagentMessages.length > 0;
+  }
+
   /** Whether this is a human-to-human DM (the only place read receipts apply). */
   private get isHumanDM(): boolean {
     return this.isDM && this.conversationKey.startsWith('dm:user:');
@@ -1661,7 +1666,7 @@ export class ScionChatThread extends LitElement {
 
   /** Render the toolbar with label + eye (show/hide) + expand/collapse icons. */
   private renderInteragentToggle() {
-    if (!this.isAgentDM || this.interagentMessages.length === 0) return nothing;
+    if (!this.hasInteragentMessages) return nothing;
 
     return html`
       <div class="interagent-toggle-bar">
@@ -1764,7 +1769,10 @@ export class ScionChatThread extends LitElement {
       `;
     }
 
-    if (this.messages.length === 0) {
+    // A conversation with no direct messages is not necessarily empty: an agent
+    // DM can carry inter-agent exchanges, which renderMessages() emits as
+    // markers. Only show the empty state when there is nothing at all to render.
+    if (this.messages.length === 0 && !this.hasInteragentMessages) {
       return html`
         <div class="state-msg">
           <sl-icon name="chat-dots"></sl-icon>
@@ -1806,7 +1814,7 @@ export class ScionChatThread extends LitElement {
       (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
     );
     let iaIdx = 0;
-    const hasIA = this.isAgentDM && iaMessages.length > 0;
+    const hasIA = this.hasInteragentMessages;
 
     // Delivery state is a property of the conversation's tail, not of every
     // bubble: only the newest message this user sent carries it.

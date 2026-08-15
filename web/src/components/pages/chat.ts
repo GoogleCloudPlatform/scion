@@ -879,6 +879,10 @@ export class ScionPageChat extends LitElement {
     // is additionally refreshed on every inbound chat message.
     this._fallbackPollInterval = setInterval(() => {
       void this.loadUnreadDMPeers();
+      // A DM carries no project ID, so re-syncing here would silently swap the
+      // space-scoped member list the user was just looking at for the global
+      // one. Leave the sidebar on whatever the previous view loaded.
+      if (this.v2Conversation?.isDM) return;
       if (this.v2Conversation?.projectId) {
         void this.loadV2Members(this.v2Conversation.projectId);
       } else {
@@ -2105,9 +2109,25 @@ export class ScionPageChat extends LitElement {
     }
   }
 
+  /**
+   * Drop focus so iOS retracts the software keyboard. The composer input lives
+   * several shadow roots down, and `document.activeElement` only reports the
+   * outermost host, so descend to the real focused element before blurring.
+   */
+  private dismissKeyboard(): void {
+    let el = document.activeElement as HTMLElement | null;
+    while (el?.shadowRoot?.activeElement) {
+      el = el.shadowRoot.activeElement as HTMLElement;
+    }
+    el?.blur?.();
+  }
+
   /** Swiping right reveals the panel to the left of the current one. */
   private handleSwipeRight(): void {
     if (this.mobilePanel === 'center') {
+      // Leaving the composer behind: the keyboard would otherwise stay up and
+      // cover the panel being swiped in.
+      this.dismissKeyboard();
       this.mobilePanel = 'left';
     } else if (this.mobilePanel === 'right') {
       this.mobilePanel = 'center';
@@ -2117,6 +2137,7 @@ export class ScionPageChat extends LitElement {
   /** Swiping left reveals the panel to the right of the current one. */
   private handleSwipeLeft(): void {
     if (this.mobilePanel === 'center') {
+      this.dismissKeyboard();
       this.mobilePanel = 'right';
     } else if (this.mobilePanel === 'left') {
       this.mobilePanel = 'center';
@@ -2381,6 +2402,7 @@ export class ScionPageChat extends LitElement {
         name="chevron-left"
         label="Back"
         @click=${() => {
+          this.dismissKeyboard();
           this.mobilePanel = target;
         }}
       ></sl-icon-button>
@@ -2408,6 +2430,7 @@ export class ScionPageChat extends LitElement {
         name="people"
         label="Members"
         @click=${() => {
+          this.dismissKeyboard();
           this.mobilePanel = 'right';
         }}
       ></sl-icon-button>
