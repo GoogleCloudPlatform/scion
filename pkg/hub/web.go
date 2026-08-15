@@ -1476,7 +1476,16 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			email, _ := session.Values[sessKeyUserEmail].(string)
 			if email != "" {
 				currentRole, _ := session.Values[sessKeyUserRole].(string)
-				expectedRole := determineUserRole(email, ws.config.AdminEmails)
+				// The stored role is the source of truth: it carries UI-granted
+				// promotions (and demotions) that the config list knows nothing
+				// about. Fall back to the session role if it can't be read.
+				storedRole := currentRole
+				if ws.store != nil {
+					if u, err := ws.store.GetUserByEmail(r.Context(), email); err == nil {
+						storedRole = u.Role
+					}
+				}
+				expectedRole := determineUserRole(email, ws.config.AdminEmails, storedRole)
 				if currentRole == expectedRole {
 					// Role unchanged — inject user into context and proceed
 					// without saving session (avoids redundant write).
@@ -1563,7 +1572,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			// User not found — create new user
-			role := determineUserRole(proxyUser.Email, ws.config.AdminEmails)
+			role := determineUserRole(proxyUser.Email, ws.config.AdminEmails, "")
 			user = &store.User{
 				ID:          generateID(),
 				Email:       proxyUser.Email,
@@ -1593,7 +1602,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				user.DisplayName = proxyUser.DisplayName
 			}
 			// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
-			if newRole := determineUserRole(proxyUser.Email, ws.config.AdminEmails); user.Role != newRole {
+			if newRole := determineUserRole(proxyUser.Email, ws.config.AdminEmails, user.Role); user.Role != newRole {
 				ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", user.Role, "new_role", newRole)
 				user.Role = newRole
 			}
@@ -1847,7 +1856,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
-		role := determineUserRole(userInfo.Email, ws.config.AdminEmails)
+		role := determineUserRole(userInfo.Email, ws.config.AdminEmails, "")
 		user = &store.User{
 			ID:          generateID(),
 			Email:       userInfo.Email,
@@ -1884,7 +1893,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				user.AvatarURL = userInfo.AvatarURL
 			}
 			user.LastLogin = time.Now()
-			user.Role = determineUserRole(userInfo.Email, ws.config.AdminEmails)
+			user.Role = determineUserRole(userInfo.Email, ws.config.AdminEmails, user.Role)
 			// Log the activation via slog (WebServer does not have a structured
 			// audit logger; the hub.Server audit path covers API/CLI auth).
 			ws.logger().Info("invite audit: user_activated", "email", userInfo.Email, "user_id", user.ID)
@@ -1898,7 +1907,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				user.DisplayName = userInfo.DisplayName
 			}
 			// Re-evaluate admin status on every login
-			newRole := determineUserRole(userInfo.Email, ws.config.AdminEmails)
+			newRole := determineUserRole(userInfo.Email, ws.config.AdminEmails, user.Role)
 			if user.Role != newRole {
 				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", user.Role, "new_role", newRole)
 				user.Role = newRole

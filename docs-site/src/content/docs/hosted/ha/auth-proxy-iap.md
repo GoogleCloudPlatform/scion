@@ -116,7 +116,7 @@ Provisioning in proxy mode works identically to OAuth — lazy, allow-list-gated
 - **`open`**: any verified email is allowed.
 - **`domain_restricted`**: email domain must be in `authorized_domains`.
 - **`invite_only`**: email must be pre-registered (via admin invite-code flow).
-- Emails in `admin_emails` are always allowed and auto-promoted to admin role.
+- Emails in `admin_emails` are always allowed and auto-promoted to admin role. The list only promotes: removing an email from it does not demote a user who is already an admin — use the admin UI to demote.
 - If not permitted, the request returns **403**.
 - Suspended users are rejected even though IAP authenticates them upstream.
 
