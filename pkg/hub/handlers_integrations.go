@@ -1322,6 +1322,13 @@ func installedPluginSettingsEntry(name string) *config.V1PluginEntry {
 // map that server startup builds — file settings, secret-backend secrets, and
 // hub wiring credentials — so the plugin's Configure call succeeds on load.
 func (s *Server) activateInstalledIntegration(ctx context.Context, mgr IntegrationManager, name string, entry *config.V1PluginEntry) error {
+	// Every current caller checks entry before calling, but the signature
+	// accepts a pointer, so fail loudly rather than panicking deep inside the
+	// activation sequence if a future one forgets.
+	if entry == nil {
+		return fmt.Errorf("cannot activate integration %q: entry is nil", name)
+	}
+
 	// Migrate raw credentials into the secret backend before
 	// ResolvePluginConfig strips them, mirroring what the server boot path
 	// does in initPluginManager. Without this, a plugin installed and

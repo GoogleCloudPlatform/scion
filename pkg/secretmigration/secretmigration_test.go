@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,14 +100,35 @@ func writeConfigFile(t *testing.T, name, contents string) string {
 	return path
 }
 
-// captureLog collects everything slog writes while fn runs. The default slog
-// handler routes through the standard logger, so redirecting that captures both.
+// captureLog collects everything the code under test logs while fn runs, via
+// either slog or the standard logger.
+//
+// Redirecting slog explicitly rather than relying on its default handler
+// routing through the standard logger means the capture keeps working if this
+// package's logging is reconfigured. Note the format that implies: assertions
+// see slog's text form (`level=WARN msg="..." key=value`), not the standard
+// logger's.
+//
+// slog.SetDefault has the side effect of rewiring the standard logger's output
+// and clearing its flags, so all three are snapshotted and restored together —
+// restoring them in the wrong order leaves log.Flags() at 0 for the rest of the
+// run. This mutates process-global state, so callers must not use t.Parallel.
 func captureLog(t *testing.T, fn func()) string {
 	t.Helper()
 	var buf bytes.Buffer
-	prev := log.Writer()
+
+	prevDefault := slog.Default()
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	defer func() {
+		slog.SetDefault(prevDefault)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	}()
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	log.SetOutput(&buf)
-	defer log.SetOutput(prev)
+
 	fn()
 	return buf.String()
 }
@@ -306,6 +328,12 @@ func TestMigratePluginSecrets_MalformedConfigFileStillMigratesInline(t *testing.
 	}
 	if !strings.Contains(out, "failed to read config file") {
 		t.Errorf("expected a warning about the unreadable config file, got log: %q", out)
+	}
+	// `level=WARN` is the slog text handler's form and is absent from the
+	// standard logger's, so this also proves captureLog's slog redirection is
+	// what caught the line rather than the default routing happening to work.
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("expected the line to be logged at WARN via slog, got log: %q", out)
 	}
 	// The operator needs the path to know which file to fix, so the warning
 	// carries the full path even though the backend description does not.

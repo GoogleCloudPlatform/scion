@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -180,6 +181,27 @@ func TestActivateInstalledIntegration_NoSecretBackendIsNoOp(t *testing.T) {
 	}
 	if len(mgr.loadOneCalls) != 1 {
 		t.Errorf("expected the plugin to be loaded once, got %v", mgr.loadOneCalls)
+	}
+}
+
+// A nil entry must be rejected up front rather than panicking part-way through
+// activation, which could leave the plugin manager holding partial state.
+func TestActivateInstalledIntegration_NilEntryReturnsError(t *testing.T) {
+	sb := newMigrationSecretBackend()
+	srv, mgr := newActivationServer(t, sb)
+
+	err := srv.activateInstalledIntegration(context.Background(), mgr, "telegram", nil)
+	if err == nil {
+		t.Fatal("expected an error for a nil entry, got nil")
+	}
+	if !strings.Contains(err.Error(), "telegram") {
+		t.Errorf("error = %q, want it to name the integration", err)
+	}
+	if len(mgr.loadOneCalls) != 0 {
+		t.Errorf("expected no load attempt for a nil entry, got %v", mgr.loadOneCalls)
+	}
+	if len(sb.sets) != 0 {
+		t.Errorf("expected no backend writes for a nil entry, got %+v", sb.sets)
 	}
 }
 
