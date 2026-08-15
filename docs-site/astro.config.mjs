@@ -35,6 +35,7 @@ const hostedUserGuide = {
 		{ label: 'Scheduling & Events', slug: 'hosted/user/scheduling' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
 		{ label: 'A2A Protocol Bridge', slug: 'hosted/user/a2a-bridge' },
+		{ label: 'AWS Federation', slug: 'hosted/user/aws-federation' },
 	],
 };
 
