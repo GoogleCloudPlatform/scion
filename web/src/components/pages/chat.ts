@@ -507,6 +507,10 @@ export class ScionPageChat extends LitElement {
        * one viewport wide each, selected by swiping (see handleTouchEnd).
        */
       .v2-panels {
+        /* Override the base 'flex: 1' — a flex-basis of 0 grown to the
+           parent's width would otherwise beat 'width: 300%', collapsing the
+           track back to one viewport and showing all three panels at once. */
+        flex: 0 0 300%;
         width: 300%;
         transition: transform 0.3s ease;
       }
