@@ -202,6 +202,10 @@ Binding a GCP Service Account to an agent on a Hub requires satisfying two autho
    - Results are cached (60s TTL for allows, 10s TTL for denies) to optimize performance.
 :::
 
+:::tip[Cross-Cloud Identity: AWS Access via GCP Federation]
+When an agent is assigned a GCP Service Account identity, it can also use Google's built-in workload identity federation to securely access AWS resources (such as Amazon S3, Amazon Bedrock, or DynamoDB) without managing static AWS access keys or secrets. For a complete configuration and troubleshooting guide, see the [AWS Federation Guide](/scion/hosted/user/aws-federation/).
+:::
+
 Alternatively, to use an ADC file secret:
 ```bash
 # 1. Upload the ADC credential file (written to ~/.config/gcloud/application_default_credentials.json in container)
