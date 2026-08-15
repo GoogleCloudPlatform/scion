@@ -22,6 +22,19 @@ import (
 type PublicSettingsResponse struct {
 	TelemetryEnabled       bool `json:"telemetryEnabled"`
 	AutoExposePortsEnabled bool `json:"autoExposePortsEnabled"`
+	// NativeChatEnabled mirrors the server.native_chat.enabled toggle so the
+	// web UI can hide chat without needing admin rights to read the config.
+	NativeChatEnabled bool `json:"nativeChatEnabled"`
+}
+
+// nativeChatEnabled reports whether the built-in chat feature is active.
+// Chat shipped default-on, so an absent config means enabled; only an
+// explicit server.native_chat.enabled: false turns it off.
+func (s *Server) nativeChatEnabled() bool {
+	if s.config.NativeChatEnabled == nil {
+		return true
+	}
+	return *s.config.NativeChatEnabled
 }
 
 func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
@@ -43,5 +56,6 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, PublicSettingsResponse{
 		TelemetryEnabled:       telemetryEnabled,
 		AutoExposePortsEnabled: autoExposePortsEnabled,
+		NativeChatEnabled:      s.nativeChatEnabled(),
 	})
 }

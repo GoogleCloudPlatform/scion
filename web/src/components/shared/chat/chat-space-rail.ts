@@ -21,13 +21,13 @@
  *   - Spaces section: one per project the user can access
  *   - Each space is collapsible (chevron toggle)
  *   - Under each space: thread list (#general first, pinned, then sorted)
- *   - DM section below spaces
  *
  * Data sources:
  *   - GET /api/v1/chat/spaces — visible spaces with unread rollup
  *   - GET /api/v1/chat/spaces/{projectId}/threads — threads per space
- *   - GET /api/v1/chat/dms — DM conversations
  *   - GET /api/v1/chat/prefs — user preferences (sort mode, custom order)
+ *
+ * DMs are accessed via member-click in the members sidebar (chat-members).
  *
  * Interactions: thread select, context menu, create thread, sorting, DnD.
  */
@@ -35,13 +35,14 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
-import { hashColor, getInitials } from './chat-avatar.js';
+import { showConfirm } from '../confirm-dialog.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
 export interface ChatSpace {
   projectId: string;
   projectName: string;
+  projectSlug: string;
   unreadCount: number;
   hasUnreadMention: boolean;
 }
@@ -55,20 +56,10 @@ export interface ChatSpaceThread {
   defaultAgent?: string;
   lastActivityAt?: string;
   lastMessagePreview?: string;
+  /** Newest message in the thread — the watermark a "mark read" must set. */
+  lastMessageId?: string;
   hasUnread: boolean;
   hasUnreadMention: boolean;
-}
-
-/** A DM conversation. */
-export interface ChatDM {
-  conversationKey: string;
-  peerName: string;
-  peerId: string;
-  peerKind: 'user' | 'agent';
-  peerAvatarUrl?: string;
-  lastMessagePreview?: string;
-  lastActivityAt?: string;
-  hasUnread: boolean;
 }
 
 /** User preferences for rail display. */
@@ -78,20 +69,16 @@ interface RailPrefs {
   spaceOrder: string[] | undefined;
 }
 
+/** Viewport width at or below which the chat panels are separate screens. */
+const MOBILE_BREAKPOINT_PX = 768;
+
 /** Event detail for thread selection. */
 export interface ThreadSelectDetail {
   conversationKey: string;
   projectId: string;
+  projectSlug: string;
   threadName: string;
   defaultAgent: string;
-}
-
-/** Event detail for DM selection. */
-export interface DMSelectDetail {
-  conversationKey: string;
-  peerName: string;
-  peerId: string;
-  peerKind: 'user' | 'agent';
 }
 
 @customElement('scion-chat-space-rail')
@@ -102,7 +89,6 @@ export class ScionChatSpaceRail extends LitElement {
 
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
-  @state() private dms: ChatDM[] = [];
   @state() private collapsedSpaces = new Set<string>();
   @state() private loading = true;
   @state() private prefs: RailPrefs = {
@@ -120,7 +106,8 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private contextMenuPos = { x: 0, y: 0 };
   @state() private renamingThread: string | null = null;
   @state() private renameValue = '';
-  @state() private dmSectionCollapsed = false;
+  /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
+  @state() private spaceFilter: 'all' | 'unread' = 'all';
 
   static override styles = css`
     :host {
@@ -131,30 +118,19 @@ export class ScionChatSpaceRail extends LitElement {
       background: var(--scion-surface, #ffffff);
     }
 
+    /*
+     * Section heading, styled like the dashboard nav's section titles
+     * ("OVERVIEW", "MANAGEMENT") so chat reads as a peer of the dashboard.
+     */
     .rail-header {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      padding: 0.75rem 1rem 0.5rem;
+      font-size: 0.6875rem;
       font-weight: 600;
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .rail-header a {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.75rem;
-      font-weight: 500;
-      color: var(--scion-primary, #3b82f6);
-      text-decoration: none;
-      cursor: pointer;
-    }
-
-    .rail-header a:hover {
-      text-decoration: underline;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .rail-body {
@@ -235,6 +211,24 @@ export class ScionChatSpaceRail extends LitElement {
       padding: 0.125rem;
     }
 
+    .space-actions sl-menu {
+      min-width: 120px;
+      padding: 0.125rem 0;
+    }
+
+    .space-actions sl-menu-item::part(base) {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.5rem;
+    }
+
+    .space-actions sl-menu-item::part(label) {
+      font-size: 0.75rem;
+    }
+
+    .space-actions sl-menu-item sl-icon {
+      font-size: 0.75rem;
+    }
+
     /* Thread items */
     .thread-list {
       padding-left: 0;
@@ -311,61 +305,21 @@ export class ScionChatSpaceRail extends LitElement {
     .create-thread sl-input::part(base) {
       font-size: 0.8125rem;
       min-height: 1.75rem;
+      background: var(--scion-surface-raised, #ffffff);
+      border-color: var(--scion-border, #e2e8f0);
     }
 
-    /* DM section */
-    .dm-section {
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-      margin-top: 0.25rem;
-      padding-top: 0.25rem;
-    }
-
-    .dm-item {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.375rem 0.75rem 0.375rem 1rem;
-      cursor: pointer;
-      font-size: 0.8125rem;
+    .create-thread sl-input::part(input) {
       color: var(--scion-text, #1e293b);
-      transition: background 0.1s;
     }
 
-    .dm-item:hover {
-      background: var(--scion-bg-subtle, #f1f5f9);
+    .rename-input::part(input) {
+      color: var(--scion-text, #1e293b);
     }
 
-    .dm-item.selected {
-      background: var(--scion-primary-50, #eff6ff);
-      font-weight: 600;
-    }
-
-    .dm-avatar {
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 0.625rem;
-      font-weight: 600;
-      color: #fff;
-      flex-shrink: 0;
-    }
-
-    .dm-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .dm-name {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .dm-name.unread {
-      font-weight: 700;
+    .rename-input::part(base) {
+      background: var(--scion-surface-raised, #ffffff);
+      border-color: var(--scion-border, #e2e8f0);
     }
 
     /* Context menu */
@@ -411,6 +365,68 @@ export class ScionChatSpaceRail extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    /* Filter + sort toolbar */
+    .rail-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .filter-toggle {
+      display: inline-flex;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
+      overflow: hidden;
+      flex: 1;
+    }
+
+    .filter-toggle button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.125rem;
+      height: 1.5rem;
+      border: none;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      padding: 0 0.5rem;
+      font-size: 0.6875rem;
+      font-family: inherit;
+      font-weight: 500;
+      transition: all 150ms ease;
+      white-space: nowrap;
+      flex: 1;
+      justify-content: center;
+    }
+
+    .filter-toggle button:not(:last-child) {
+      border-right: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .filter-toggle button:hover:not(.active) {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .filter-toggle button.active {
+      background: var(--scion-primary, #3b82f6);
+      color: white;
+    }
+
+    .filter-toggle button sl-icon {
+      font-size: 0.6875rem;
+    }
+
+    .sort-btn {
+      flex-shrink: 0;
+    }
+
+    .sort-btn::part(base) {
+      font-size: 0.75rem;
+      padding: 0.125rem;
+    }
+
     /* Sort dropdown */
     .sort-selector {
       padding: 0.375rem 0.75rem;
@@ -430,10 +446,45 @@ export class ScionChatSpaceRail extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Restore persisted filter/sort from localStorage
+    const savedFilter = localStorage.getItem('scion-chat-space-filter');
+    if (savedFilter === 'unread') this.spaceFilter = 'unread';
     void this.loadData();
     // Close context menu on outside click
     this._outsideClickHandler = this.handleOutsideClick.bind(this);
     document.addEventListener('click', this._outsideClickHandler);
+  }
+
+  override updated(changedProperties: Map<string, unknown>): void {
+    // Auto-expand the space containing the selected thread (deep-link support)
+    if (changedProperties.has('selectedKey') && this.selectedKey) {
+      this.expandSpaceForSelectedKey();
+    }
+  }
+
+  /**
+   * Expand a space without selecting a thread in it. Mobile space navigation
+   * stops here: the point is to show the thread list, not to open a thread.
+   */
+  expandSpace(projectId: string): void {
+    if (!this.collapsedSpaces.has(projectId)) return;
+    const next = new Set(this.collapsedSpaces);
+    next.delete(projectId);
+    this.collapsedSpaces = next;
+  }
+
+  /** Expand the space that contains the currently selected thread. */
+  private expandSpaceForSelectedKey(): void {
+    for (const space of this.spaces) {
+      const threads = this.threadsBySpace.get(space.projectId) || [];
+      const hasThread = threads.some((t) => t.id === this.selectedKey);
+      if (hasThread && this.collapsedSpaces.has(space.projectId)) {
+        const newSet = new Set(this.collapsedSpaces);
+        newSet.delete(space.projectId);
+        this.collapsedSpaces = newSet;
+        break;
+      }
+    }
   }
 
   override disconnectedCallback(): void {
@@ -464,13 +515,20 @@ export class ScionChatSpaceRail extends LitElement {
   private async loadData(): Promise<void> {
     this.loading = true;
     try {
-      await Promise.all([this.loadSpaces(), this.loadDMs(), this.loadPrefs()]);
+      await Promise.all([this.loadSpaces(), this.loadPrefs()]);
     } finally {
       this.loading = false;
       // Notify parent that rail data is ready (for SSE scope setup)
       this.dispatchEvent(
         new CustomEvent('rail-loaded', {
-          detail: { spaceIds: this.getSpaceIds() },
+          detail: {
+            spaceIds: this.getSpaceIds(),
+            spaces: this.spaces.map((s) => ({
+              projectId: s.projectId,
+              projectSlug: s.projectSlug,
+              projectName: s.projectName,
+            })),
+          },
           bubbles: true,
           composed: true,
         })
@@ -478,14 +536,42 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  /** Track whether spaces have been loaded at least once. */
+  private _initialLoadDone = false;
+
+  /** Track known space IDs so we can collapse only truly new spaces on reload. */
+  private _knownSpaceIds = new Set<string>();
+
   private async loadSpaces(): Promise<void> {
     try {
       const res = await apiFetch('/api/v1/chat/spaces');
       if (res.ok) {
         const data = (await res.json()) as { spaces?: ChatSpace[] };
         this.spaces = data.spaces || [];
+        const newSpaceIds = new Set(this.spaces.map((s) => s.projectId));
+        if (!this._initialLoadDone) {
+          // Collapse all spaces by default on first load — user expands explicitly
+          this.collapsedSpaces = new Set(newSpaceIds);
+          this._initialLoadDone = true;
+        } else {
+          // Preserve existing collapsed/expanded state on reload.
+          // Remove stale entries for spaces that no longer exist.
+          const updated = new Set([...this.collapsedSpaces].filter((id) => newSpaceIds.has(id)));
+          // Collapse any brand-new spaces the user hasn't seen yet.
+          for (const id of newSpaceIds) {
+            if (!this._knownSpaceIds.has(id)) {
+              updated.add(id);
+            }
+          }
+          this.collapsedSpaces = updated;
+        }
+        this._knownSpaceIds = newSpaceIds;
         // Load threads for each space
         await Promise.all(this.spaces.map((s) => this.loadThreads(s.projectId)));
+        // Auto-expand the space containing the selected thread (deep-link on first load)
+        if (this.selectedKey) {
+          this.expandSpaceForSelectedKey();
+        }
       }
     } catch {
       // Silently fail
@@ -500,18 +586,6 @@ export class ScionChatSpaceRail extends LitElement {
         const newMap = new Map(this.threadsBySpace);
         newMap.set(projectId, data.threads || []);
         this.threadsBySpace = newMap;
-      }
-    } catch {
-      // Silently fail
-    }
-  }
-
-  private async loadDMs(): Promise<void> {
-    try {
-      const res = await apiFetch('/api/v1/chat/dms');
-      if (res.ok) {
-        const data = (await res.json()) as { dms?: ChatDM[] };
-        this.dms = data.dms || [];
       }
     } catch {
       // Silently fail
@@ -634,12 +708,25 @@ export class ScionChatSpaceRail extends LitElement {
   // Actions
   // ---------------------------------------------------------------------------
 
+  /** Clicking empty area of the rail body resets to global view. */
+  private handleRailBodyClick(e: MouseEvent): void {
+    // Only fire when the click target is the rail-body itself (empty space)
+    const target = e.target as HTMLElement;
+    if (target === e.currentTarget) {
+      this.dispatchEvent(
+        new CustomEvent('reset-view', { bubbles: true, composed: true })
+      );
+    }
+  }
+
   private handleThreadClick(thread: ChatSpaceThread, projectId: string): void {
+    const space = this.spaces.find((s) => s.projectId === projectId);
     this.dispatchEvent(
       new CustomEvent<ThreadSelectDetail>('thread-select', {
         detail: {
           conversationKey: thread.id,
           projectId,
+          projectSlug: space?.projectSlug || '',
           threadName: thread.name,
           defaultAgent: thread.defaultAgent || '',
         },
@@ -663,32 +750,24 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  /** Are we under the breakpoint where the rail is a screen of its own? */
+  private isMobileViewport(): boolean {
+    return window.innerWidth <= MOBILE_BREAKPOINT_PX;
+  }
+
   private handleCollapsedSpaceClick(space: ChatSpace): void {
-    // If collapsed, clicking opens #general
+    // On desktop the rail sits beside the conversation, so opening #general
+    // costs the user nothing. On mobile selecting a thread slides the rail
+    // off-screen, which would hide the thread list the tap was asking to
+    // see — there the expansion is all this does.
+    this.expandSpace(space.projectId);
+    if (this.isMobileViewport()) return;
+
     const threads = this.threadsBySpace.get(space.projectId) || [];
     const general = threads.find((t) => t.isGeneral);
     if (general) {
-      // Expand and select #general
-      const newSet = new Set(this.collapsedSpaces);
-      newSet.delete(space.projectId);
-      this.collapsedSpaces = newSet;
       this.handleThreadClick(general, space.projectId);
     }
-  }
-
-  private handleDMClick(dm: ChatDM): void {
-    this.dispatchEvent(
-      new CustomEvent<DMSelectDetail>('dm-select', {
-        detail: {
-          conversationKey: dm.conversationKey,
-          peerName: dm.peerName,
-          peerId: dm.peerId,
-          peerKind: dm.peerKind,
-        },
-        bubbles: true,
-        composed: true,
-      })
-    );
   }
 
   private handleContextMenu(e: MouseEvent, thread: ChatSpaceThread, projectId: string): void {
@@ -700,17 +779,50 @@ export class ScionChatSpaceRail extends LitElement {
 
   private async handleMarkRead(thread: ChatSpaceThread, projectId: string): Promise<void> {
     this.contextMenuTarget = null;
+    // The server requires the watermark to move to a specific message. Without
+    // an ID it rejects the request, and the dot comes back on the next reload.
+    if (!thread.lastMessageId) {
+      this.markThreadRead(thread.id);
+      return;
+    }
     try {
-      await apiFetch(`/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/read`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/read`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messageId: thread.lastMessageId }),
+        }
+      );
+      if (!res.ok) return;
       // Update locally
       this.updateThread(projectId, thread.id, { hasUnread: false, hasUnreadMention: false });
+      this.decrementSpaceUnread(projectId);
     } catch {
       // Non-critical
     }
+  }
+
+  /**
+   * Clear a thread's unread markers without talking to the server. Called when
+   * the thread view itself advanced the watermark — the rail has no other way
+   * to learn that happened.
+   */
+  markThreadRead(threadId: string): void {
+    for (const [projectId, threads] of this.threadsBySpace) {
+      const target = threads.find((t) => t.id === threadId);
+      if (!target || (!target.hasUnread && !target.hasUnreadMention)) continue;
+      this.updateThread(projectId, threadId, { hasUnread: false, hasUnreadMention: false });
+      this.decrementSpaceUnread(projectId);
+      return;
+    }
+  }
+
+  /** Drop one from a space's unread badge, floored at zero. */
+  private decrementSpaceUnread(projectId: string): void {
+    this.spaces = this.spaces.map((s) =>
+      s.projectId === projectId ? { ...s, unreadCount: Math.max(0, s.unreadCount - 1) } : s
+    );
   }
 
   private async handleMarkSpaceRead(projectId: string): Promise<void> {
@@ -727,6 +839,9 @@ export class ScionChatSpaceRail extends LitElement {
         threads.map((t) => ({ ...t, hasUnread: false, hasUnreadMention: false }))
       );
       this.threadsBySpace = newMap;
+      this.spaces = this.spaces.map((s) =>
+        s.projectId === projectId ? { ...s, unreadCount: 0, hasUnreadMention: false } : s
+      );
     } catch {
       // Non-critical
     }
@@ -745,7 +860,7 @@ export class ScionChatSpaceRail extends LitElement {
       return;
     }
     try {
-      await apiFetch(`/api/v1/chat/threads/${encodeURIComponent(this.renamingThread)}`, {
+      await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(this.renamingThread)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: this.renameValue.trim() }),
@@ -760,9 +875,14 @@ export class ScionChatSpaceRail extends LitElement {
   private async handleDeleteThread(thread: ChatSpaceThread, projectId: string): Promise<void> {
     this.contextMenuTarget = null;
     if (thread.isGeneral) return;
-    if (!confirm(`Delete #${thread.name}? This cannot be undone.`)) return;
+    const confirmed = await showConfirm(`Delete #${thread.name}? This cannot be undone.`, {
+      title: 'Delete Thread',
+      confirmText: 'Delete',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
     try {
-      await apiFetch(`/api/v1/chat/threads/${encodeURIComponent(thread.id)}`, {
+      await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(thread.id)}`, {
         method: 'DELETE',
       });
       // Remove locally
@@ -827,35 +947,99 @@ export class ScionChatSpaceRail extends LitElement {
 
   override render() {
     return html`
-      <div class="rail-header">
-        <span>Chat</span>
-        <a
-          href="/"
-          @click=${(e: Event) => {
-            e.preventDefault();
-            this.dispatchEvent(new CustomEvent('navigate-app', { bubbles: true, composed: true }));
-          }}
-        >
-          <sl-icon name="arrow-left"></sl-icon>
-          App
-        </a>
-      </div>
+      <div class="rail-header"><span>Project Spaces</span></div>
 
       ${this.loading
         ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
-        : html` <div class="rail-body">${this.renderSpaces()} ${this.renderDMs()}</div> `}
+        : html`
+            ${this.renderToolbar()}
+            <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
+          `}
       ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
     `;
   }
 
-  private renderSpaces() {
+  /** Render the filter + sort toolbar below the rail header. */
+  private renderToolbar() {
+    return html`
+      <div class="rail-toolbar">
+        <div class="filter-toggle">
+          <button
+            class=${this.spaceFilter === 'all' ? 'active' : ''}
+            @click=${() => this.setSpaceFilter('all')}
+          >
+            All
+          </button>
+          <button
+            class=${this.spaceFilter === 'unread' ? 'active' : ''}
+            @click=${() => this.setSpaceFilter('unread')}
+          >
+            <sl-icon name="envelope"></sl-icon>
+            Unread
+          </button>
+        </div>
+        <sl-dropdown>
+          <sl-icon-button
+            slot="trigger"
+            name="sort-down"
+            class="sort-btn"
+            label="Sort spaces"
+          ></sl-icon-button>
+          <sl-menu @sl-select=${this.handleSortSelect}>
+            <sl-menu-label>Sort spaces</sl-menu-label>
+            <sl-menu-item value="activity" ?checked=${this.prefs.spaceSortMode === 'activity'}>
+              Recent activity
+            </sl-menu-item>
+            <sl-menu-item value="alpha" ?checked=${this.prefs.spaceSortMode === 'alpha'}>
+              Alphabetical
+            </sl-menu-item>
+          </sl-menu>
+        </sl-dropdown>
+      </div>
+    `;
+  }
+
+  /** Set space filter and persist to localStorage. */
+  private setSpaceFilter(filter: 'all' | 'unread'): void {
+    if (this.spaceFilter === filter) return;
+    this.spaceFilter = filter;
+    if (filter === 'all') {
+      localStorage.removeItem('scion-chat-space-filter');
+    } else {
+      localStorage.setItem('scion-chat-space-filter', filter);
+    }
+  }
+
+  /** Handle sort mode selection from the dropdown. */
+  private handleSortSelect(e: Event): void {
+    const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+    const item = detail?.item;
+    const value = item?.getAttribute('value');
+    if (value === 'activity' || value === 'alpha') {
+      void this.savePrefs({ spaceSortMode: value });
+    }
+  }
+
+  /** Get filtered spaces based on current filter. */
+  private getFilteredSpaces(): ChatSpace[] {
     const sorted = this.getSortedSpaces();
-    if (sorted.length === 0) {
+    if (this.spaceFilter === 'unread') {
+      return sorted.filter((s) => s.unreadCount > 0 || s.hasUnreadMention);
+    }
+    return sorted;
+  }
+
+  private renderSpaces() {
+    const filtered = this.getFilteredSpaces();
+    if (filtered.length === 0) {
+      if (this.spaceFilter === 'unread') {
+        return html`<div class="loading-state" style="font-size: 0.8125rem">All caught up!</div>`;
+      }
       return html`<div class="loading-state" style="font-size: 0.8125rem">
         No spaces available
       </div>`;
     }
-    return sorted.map((space) => this.renderSpace(space));
+    return filtered.map((space) => this.renderSpace(space));
   }
 
   private renderSpace(space: ChatSpace) {
@@ -873,20 +1057,33 @@ export class ScionChatSpaceRail extends LitElement {
         >
           <sl-icon name="chevron-down" class="chevron ${isCollapsed ? 'collapsed' : ''}"></sl-icon>
           <span class="space-name">${space.projectName}</span>
-          <div class="space-actions">
+          <div class="space-actions" @click=${(e: Event) => e.stopPropagation()}>
             ${space.hasUnreadMention
               ? html`<span class="mention-badge">@</span>`
               : space.unreadCount > 0
                 ? html`<span class="unread-badge">${space.unreadCount}</span>`
                 : nothing}
-            <sl-icon-button
-              name="plus-lg"
-              label="Create thread"
-              @click=${(e: Event) => {
-                e.stopPropagation();
-                this.startCreateThread(space.projectId);
-              }}
-            ></sl-icon-button>
+            <sl-dropdown>
+              <sl-icon-button
+                slot="trigger"
+                name="three-dots-vertical"
+                label="Space actions"
+              ></sl-icon-button>
+              <sl-menu
+                @sl-select=${(e: Event) => {
+                  const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
+                  const value = detail?.item?.getAttribute('value');
+                  if (value === 'new-thread') {
+                    this.startCreateThread(space.projectId);
+                  }
+                }}
+              >
+                <sl-menu-item value="new-thread">
+                  <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                  New thread
+                </sl-menu-item>
+              </sl-menu>
+            </sl-dropdown>
           </div>
         </div>
         ${!isCollapsed
@@ -975,53 +1172,6 @@ export class ScionChatSpaceRail extends LitElement {
           }}
           style="flex: 1"
         ></sl-input>
-      </div>
-    `;
-  }
-
-  private renderDMs() {
-    if (this.dms.length === 0) return nothing;
-
-    return html`
-      <div class="dm-section">
-        <div
-          class="space-header"
-          @click=${() => {
-            this.dmSectionCollapsed = !this.dmSectionCollapsed;
-          }}
-        >
-          <sl-icon
-            name="chevron-down"
-            class="chevron ${this.dmSectionCollapsed ? 'collapsed' : ''}"
-          ></sl-icon>
-          <span class="space-name">Direct Messages</span>
-        </div>
-        ${!this.dmSectionCollapsed ? this.dms.map((dm) => this.renderDM(dm)) : nothing}
-      </div>
-    `;
-  }
-
-  private renderDM(dm: ChatDM) {
-    const isSelected = dm.conversationKey === this.selectedKey;
-    const avatarColor = hashColor(dm.peerId);
-    const initials = getInitials(dm.peerName);
-    const icon = dm.peerKind === 'agent' ? 'cpu' : 'person';
-
-    return html`
-      <div class="dm-item ${isSelected ? 'selected' : ''}" @click=${() => this.handleDMClick(dm)}>
-        <div class="dm-avatar" style="background: ${avatarColor}">${initials}</div>
-        <div class="dm-info">
-          <span class="dm-name ${dm.hasUnread ? 'unread' : ''}">
-            <sl-icon name="${icon}" style="font-size: 0.6875rem; vertical-align: -1px"></sl-icon>
-            ${dm.peerName}
-          </span>
-        </div>
-        ${dm.hasUnread
-          ? html`<span
-              class="unread-dot"
-              style="width: 6px; height: 6px; border-radius: 50%; background: var(--scion-primary, #3b82f6); flex-shrink: 0;"
-            ></span>`
-          : nothing}
       </div>
     `;
   }

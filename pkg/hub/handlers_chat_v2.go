@@ -52,6 +52,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -226,6 +227,8 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		s.handleConversationRead(w, r, key)
 	case "typing":
 		s.handleConversationTyping(w, r, key)
+	case "interagent":
+		s.handleConversationInteragent(w, r, key)
 	default:
 		http.NotFound(w, r)
 	}
@@ -244,6 +247,8 @@ func (s *Server) handleChatTopicRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.Method {
+	case http.MethodGet:
+		s.handleTopicGet(w, r, topicID)
 	case http.MethodPatch:
 		s.handleTopicPatch(w, r, topicID)
 	case http.MethodDelete:
@@ -431,6 +436,42 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	writeJSON(w, http.StatusCreated, topic)
 }
 
+// handleTopicGet handles GET /api/v1/chat/topics/{topicId}.
+func (s *Server) handleTopicGet(w http.ResponseWriter, r *http.Request, topicID string) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	topic, err := wcs.GetTopic(r.Context(), topicID)
+	if err != nil || topic == nil {
+		NotFound(w, "Thread")
+		return
+	}
+
+	// Authorize project access.
+	project, err := s.store.GetProject(r.Context(), topic.ProjectID)
+	if err != nil {
+		NotFound(w, "Project")
+		return
+	}
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	writeJSON(w, http.StatusOK, topic)
+}
+
 // handleTopicPatch handles PATCH /api/v1/chat/topics/{topicId}.
 func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicID string) {
 	user := GetUserIdentityFromContext(r.Context())
@@ -572,6 +613,50 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 	s.events.PublishChatTopicEvent(r.Context(), topic.ProjectID, "deleted", *topic)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ClearTopicDefaultAgent drops the default-agent binding from every topic in
+// the agent's project that points at it, and republishes each affected topic
+// so open clients stop offering a deleted agent as the thread's default.
+//
+// default_agent holds either an agent ID or a slug (the send path resolves
+// both), so both are matched. Best-effort: a failure here leaves a stale
+// default that the send path already tolerates by falling back to no agent.
+func (s *Server) ClearTopicDefaultAgent(ctx context.Context, agentID, agentSlug, projectID string) {
+	if projectID == "" || (agentID == "" && agentSlug == "") {
+		return
+	}
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return
+	}
+
+	topics, err := wcs.ListTopics(ctx, projectID)
+	if err != nil {
+		slog.Warn("Failed to list topics while clearing deleted agent default",
+			"project_id", projectID, "agent_id", agentID, "error", err)
+		return
+	}
+
+	cleared := ""
+	for _, t := range topics {
+		if t.DefaultAgent == "" {
+			continue
+		}
+		if t.DefaultAgent != agentID && t.DefaultAgent != agentSlug {
+			continue
+		}
+		if err := wcs.UpdateTopic(ctx, t.ID, TopicUpdate{DefaultAgent: &cleared}); err != nil {
+			slog.Warn("Failed to clear deleted agent as thread default",
+				"topic_id", t.ID, "agent_id", agentID, "error", err)
+			continue
+		}
+		t.DefaultAgent = ""
+		s.events.PublishChatTopicEvent(ctx, projectID, "updated", t)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -763,8 +848,13 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		// Check if topic has a default_agent.
 		topic, err := wcs.GetTopic(ctx, key)
 		if err == nil && topic != nil && topic.DefaultAgent != "" {
-			// Resolve the default agent.
-			defaultAgent, err := s.store.GetAgent(ctx, topic.DefaultAgent)
+			// Resolve the default agent. The default_agent field stores either
+			// a slug (from /default command) or a UUID, so try both lookups.
+			defaultAgent, err := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
+			if err != nil || defaultAgent == nil {
+				// Fall back to lookup by ID in case the value is a UUID.
+				defaultAgent, err = s.store.GetAgent(ctx, topic.DefaultAgent)
+			}
 			if err == nil && defaultAgent != nil {
 				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, attachmentRefs, now)
 				return
@@ -790,6 +880,14 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 
 	primaryAgent := agents[0]
 
+	// Determine message type: explicit @mentions use type:mention so every
+	// mentioned agent receives the same type. Default-agent and DM-implicit
+	// routing (mentionResults == nil) keeps type:instruction.
+	msgType := messages.TypeInstruction
+	if mentionResults != nil {
+		msgType = messages.TypeMention
+	}
+
 	// Build the structured message for the primary agent.
 	msg := &messages.StructuredMessage{
 		Version:     messages.Version,
@@ -799,9 +897,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		Recipient:   "agent:" + primaryAgent.Slug,
 		RecipientID: primaryAgent.ID,
 		Msg:         content,
-		Type:        messages.TypeInstruction,
+		Type:        msgType,
 		Channel:     "web",
 		ThreadID:    key,
+	}
+
+	// For @-mention routing, add mention metadata so the agent sees the same
+	// envelope shape as fan-out recipients.
+	if mentionResults != nil {
+		msg.Metadata = map[string]string{
+			"mention_source":   "user:" + senderLabel,
+			"mention_position": "body",
+		}
 	}
 
 	// W7: Add attachment metadata and file paths for agent dispatch.
@@ -811,21 +918,47 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			msg.Metadata = make(map[string]string)
 		}
 		refsJSON, _ := json.Marshal(attachmentRefs)
-		msg.Metadata["attachments"] = string(refsJSON)
+		msg.Metadata[attachmentsMetadataKey] = string(refsJSON)
 
 		// For agent dispatch: pass container-visible file paths in Attachments
 		// (same pattern as Discord plugin — agents receive []string of paths).
+		// The attachment store lives on the hub host, which agent containers
+		// cannot read, so each file is staged into the project's scratchpad
+		// shared dir first. Staging is best-effort: when it is unavailable the
+		// hub-local path is sent, which host-process agents can still read.
 		s.mu.RLock()
 		as := s.attachmentStore
+		wcs := s.webChatStore
 		s.mu.RUnlock()
 		if localAS, ok := as.(*LocalDiskAttachmentStore); ok {
+			staging := s.resolveAttachmentStaging(ctx, projectID)
 			for _, ref := range attachmentRefs {
-				msg.Attachments = append(msg.Attachments, localAS.FilePath(projectID, ref.ID, ref.Name))
+				// A file lives under the project it was uploaded to, which is not
+				// this message's project when it was uploaded from a DM — those
+				// uploads carry no project at all.
+				storedIn := projectID
+				if wcs != nil {
+					if meta, err := wcs.GetAttachment(ctx, ref.ID); err == nil && meta != nil {
+						storedIn = meta.ProjectID
+					}
+				}
+				hostPath := localAS.FilePath(storedIn, ref.ID, ref.Name)
+				agentPath := hostPath
+				if staging != nil {
+					staged, err := staging.stage(hostPath, ref.ID, ref.Name)
+					if err != nil {
+						s.messageLog.Error("Failed to stage attachment for agent",
+							"attachment", ref.ID, "error", err)
+					} else {
+						agentPath = staged
+					}
+				}
+				msg.Attachments = append(msg.Attachments, agentPath)
 			}
 		}
 	}
 
-	// Persist the instruction message.
+	// Persist the message.
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
 		ProjectID:     projectID,
@@ -834,7 +967,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		Recipient:     msg.Recipient,
 		RecipientID:   msg.RecipientID,
 		Msg:           content,
-		Type:          messages.TypeInstruction,
+		Type:          msgType,
 		AgentID:       primaryAgent.ID,
 		Channel:       "web",
 		ThreadID:      key,
@@ -976,17 +1109,18 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	}
 
 	storeMsg := &store.Message{
-		ID:          api.NewUUID(),
-		ProjectID:   msgProjectID,
-		Sender:      "user:" + senderLabel,
-		SenderID:    user.ID(),
-		Recipient:   recipient,
-		RecipientID: recipientID,
-		Msg:         content,
-		Type:        messages.TypeChat,
-		Channel:     "web",
-		ThreadID:    key,
-		CreatedAt:   now,
+		ID:            api.NewUUID(),
+		ProjectID:     msgProjectID,
+		Sender:        "user:" + senderLabel,
+		SenderID:      user.ID(),
+		Recipient:     recipient,
+		RecipientID:   recipientID,
+		Msg:           content,
+		Type:          messages.TypeChat,
+		Channel:       "web",
+		ThreadID:      key,
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     now,
 	}
 
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
@@ -1006,14 +1140,16 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	// Publish SSE event.
 	s.events.PublishUserMessage(ctx, storeMsg)
 
+	// For DMs, ensure DM registry rows exist for both participants. This must
+	// precede the watermark update: touchConversationActivity is a plain
+	// UPDATE and would affect zero rows on the first message of a DM.
+	if isDM && wcs != nil {
+		s.ensureDMRegistered(ctx, key, user.ID())
+	}
+
 	// Update conversation watermark.
 	if wcs != nil {
 		s.touchConversationActivity(ctx, key, storeMsg.ID)
-	}
-
-	// For DMs, ensure DM registry rows exist for both participants.
-	if isDM && wcs != nil {
-		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
 	// --- W6: Chat notifications ---
@@ -1156,12 +1292,161 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 }
 
 // ---------------------------------------------------------------------------
+// Inter-Agent Messages
+// ---------------------------------------------------------------------------
+
+// handleConversationInteragent handles GET /api/v1/chat/conversations/{key}/interagent.
+// Returns inter-agent messages exchanged by the DM agent with other agents,
+// optionally scoped to a time range. Only valid for agent DMs.
+func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	// Only agent DMs are supported.
+	if !strings.HasPrefix(key, "dm:agent:") {
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []store.Message{}})
+		return
+	}
+	if !validDMKey(key) {
+		BadRequest(w, "invalid DM key format")
+		return
+	}
+	if !isDMParticipant(key, user.ID()) {
+		Forbidden(w)
+		return
+	}
+
+	// Extract the agent UUID from the DM key.
+	agentID := parseAgentDMKey(key)
+	if agentID == "" {
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []store.Message{}})
+		return
+	}
+
+	ctx := r.Context()
+
+	// Look up the agent to get its slug — needed for matching legacy
+	// messages where SenderID was not populated (only the Sender text
+	// field like "agent:<slug>" was set).
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || agent == nil {
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []store.Message{}})
+		return
+	}
+
+	q := r.URL.Query()
+
+	// Parse optional time-range bounds.
+	var after, before time.Time
+	if v := q.Get("after"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			after = t
+		}
+	}
+	if v := q.Get("before"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			before = t
+		}
+	}
+
+	limit := 200
+	if l := q.Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+
+	opts := store.ListOptions{
+		Limit: limit,
+	}
+
+	// Query 1: messages where the DM agent's UUID appears in sender_id
+	// or recipient_id.
+	filter := store.MessageFilter{
+		ParticipantID: agentID,
+		Before:        before,
+		After:         after,
+	}
+
+	result, err := s.store.ListMessages(ctx, filter, opts)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch inter-agent messages", nil)
+		return
+	}
+
+	// Query 2 (backward-compat): messages where the agent was the sender
+	// but sender_id was empty (legacy CLI-originated messages stored the
+	// slug in the Sender text field only). This catches the "sent-by"
+	// direction that ParticipantID misses for older data.
+	agentSender := "agent:" + agent.Slug
+	senderFilter := store.MessageFilter{
+		Sender: agentSender,
+		Before: before,
+		After:  after,
+	}
+	senderResult, err := s.store.ListMessages(ctx, senderFilter, opts)
+	if err != nil {
+		// Non-fatal: proceed with the first query's results.
+		slog.Error("Failed to fetch sender-based inter-agent messages", "error", err)
+		senderResult = &store.ListResult[store.Message]{}
+	}
+
+	// Merge and deduplicate by message ID, keeping only agent-to-agent
+	// messages (both sender and recipient are agents).
+	seen := make(map[string]bool, len(result.Items))
+	filtered := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
+	for _, m := range result.Items {
+		if strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:") {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				filtered = append(filtered, m)
+			}
+		}
+	}
+	for _, m := range senderResult.Items {
+		if strings.HasPrefix(m.Sender, "agent:") && strings.HasPrefix(m.Recipient, "agent:") {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				filtered = append(filtered, m)
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, interagentResponse{Messages: filtered})
+}
+
+// interagentResponse is the response for the interagent endpoint.
+type interagentResponse struct {
+	Messages []store.Message `json:"messages"`
+}
+
+// ---------------------------------------------------------------------------
 // Read Watermarks
 // ---------------------------------------------------------------------------
 
-// handleConversationRead handles POST /api/v1/chat/conversations/{key}/read.
+// chatReadStateResponse is the GET /read payload. For a human-to-human DM it
+// carries the peer's watermark so the sender can render "seen" on load,
+// without waiting for the next read-state SSE event.
+type chatReadStateResponse struct {
+	ConversationKey       string `json:"conversationKey"`
+	LastReadMessageID     string `json:"lastReadMessageId,omitempty"`
+	PeerLastReadMessageID string `json:"peerLastReadMessageId,omitempty"`
+	PeerLastReadAt        string `json:"peerLastReadAt,omitempty"`
+}
+
+// handleConversationRead handles GET and POST
+// /api/v1/chat/conversations/{key}/read. POST advances the caller's read
+// watermark; GET reports the caller's watermark and, for DMs, the peer's.
 func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, key string) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
@@ -1179,6 +1464,10 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	s.mu.RUnlock()
 
 	if wcs == nil {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, chatReadStateResponse{ConversationKey: key})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
@@ -1210,6 +1499,11 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	if r.Method == http.MethodGet {
+		s.writeConversationReadState(w, r, wcs, key, user.ID(), isDM)
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 	var body struct {
 		MessageID string `json:"messageId"`
@@ -1229,7 +1523,44 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Tell the DM peer their message has been seen. Best-effort: a dropped
+	// event only costs the sender a "seen" tick until their next reload.
+	s.events.PublishChatReadStateEvent(ctx, key, user.ID(), body.MessageID)
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// writeConversationReadState answers GET .../read. The peer fields are only
+// populated for human-to-human DMs — agent DMs have no peer watermark, and a
+// topic's read state is per-user with no single "peer" to report.
+func (s *Server) writeConversationReadState(
+	w http.ResponseWriter, r *http.Request, wcs WebChatStore, key, userID string, isDM bool,
+) {
+	ctx := r.Context()
+	resp := chatReadStateResponse{ConversationKey: key}
+
+	if rs, err := wcs.GetReadState(ctx, userID, key); err == nil && rs != nil {
+		resp.LastReadMessageID = rs.LastReadMessageID
+	}
+
+	if isDM {
+		for _, participantID := range dmUserParticipants(key) {
+			if participantID == userID {
+				continue
+			}
+			peerRS, err := wcs.GetReadState(ctx, participantID, key)
+			if err != nil || peerRS == nil {
+				continue
+			}
+			resp.PeerLastReadMessageID = peerRS.LastReadMessageID
+			if !peerRS.LastReadAt.IsZero() {
+				resp.PeerLastReadAt = peerRS.LastReadAt.UTC().Format(time.RFC3339Nano)
+			}
+			break
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleSpaceRead handles POST /api/v1/chat/spaces/{projectId}/read.
@@ -1437,14 +1768,26 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{Limit: 200})
 	if err == nil {
 		for _, a := range agentList.Items {
-			agents = append(agents, chatMemberEntry{
+			entry := chatMemberEntry{
 				ID:          a.ID,
 				Kind:        "agent",
 				DisplayName: a.Name,
 				Slug:        a.Slug,
 				Phase:       a.Phase,
 				Activity:    a.Activity,
-			})
+				ProjectID:   a.ProjectID,
+				Message:     a.Message,
+			}
+			if !a.LastSeen.IsZero() {
+				entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
+			}
+			switch {
+			case !a.LastActivityEvent.IsZero():
+				entry.LastActivityEvent = a.LastActivityEvent.UTC().Format(time.RFC3339)
+			case !a.Updated.IsZero():
+				entry.LastActivityEvent = a.Updated.UTC().Format(time.RFC3339)
+			}
+			agents = append(agents, entry)
 		}
 	}
 	if agents == nil {
@@ -1582,8 +1925,7 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 			Forbidden(w)
 			return
 		}
-		// Resolve project from DM key for SSE fan-out.
-		projectID = resolveProjectFromDMKey(ctx, s, key)
+		// No project fan-out for DMs — see the publish below.
 	} else {
 		// Topic key: look up topic to get project ID and check access.
 		if wcs == nil {
@@ -1616,17 +1958,31 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 	}
 
 	// --- Publish ephemeral typing event ---
+	displayName := user.DisplayName()
+	if displayName == "" {
+		displayName = user.Email()
+	}
+	evt := TypingEvent{
+		ThreadID:    key,
+		UserID:      user.ID(),
+		DisplayName: displayName,
+	}
 	if projectID != "" {
-		displayName := user.DisplayName()
-		if displayName == "" {
-			displayName = user.Email()
-		}
-		evt := TypingEvent{
-			ThreadID:    key,
-			UserID:      user.ID(),
-			DisplayName: displayName,
-		}
 		s.events.PublishRaw("project."+projectID+".chat.typing", evt)
+	}
+	if isDM {
+		// A DM never reaches a project subject: only the two participants care,
+		// and a project publish would both echo the typist their own indicator
+		// (they subscribe to their own spaces) and leak a private conversation's
+		// activity to the rest of the space. Fan out to the participants'
+		// user-scoped subjects the same way DM messages do (see
+		// EventPublisher.PublishMessage).
+		for _, id := range dmUserParticipants(key) {
+			if id == user.ID() {
+				continue // don't echo the sender their own typing event
+			}
+			s.events.PublishRaw("user."+id+".chat.typing", evt)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -1841,6 +2197,27 @@ func isDMParticipant(key, userID string) bool {
 	return parts[2] == userID || parts[4] == userID
 }
 
+// dmUserParticipants returns the user IDs named in a DM key, skipping the agent
+// side of an agent DM. Keys have the form dm:<kind>:<id>:<kind>:<id>.
+func dmUserParticipants(key string) []string {
+	parts := strings.Split(key, ":")
+	if len(parts) < 5 {
+		return nil
+	}
+	var ids []string
+	for _, i := range []int{1, 3} {
+		if parts[i] != "user" {
+			continue
+		}
+		id := parts[i+1]
+		if id == "" || slices.Contains(ids, id) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // resolveDMPeer extracts the peer's ID from a DM key given the caller's ID.
 // The caller can be either a user or an agent.
 func resolveDMPeer(key, callerID string) (peerEmail, peerID string) {
@@ -1911,6 +2288,17 @@ func (s *Server) ensureDMRegistered(ctx context.Context, key, callerID string) {
 	wcs := s.webChatStore
 	s.mu.RUnlock()
 
+	registerDMParticipants(ctx, wcs, key)
+}
+
+// registerDMParticipants upserts one webchat_dm row per participant of a DM
+// conversation key (dm:<kind1>:<id1>:<kind2>:<id2>). It is a no-op for a nil
+// store or a malformed key.
+//
+// Registration must happen before any TouchDMActivity call: TouchDMActivity is
+// a plain UPDATE and silently affects zero rows when the registry rows do not
+// exist yet — which is the case when an agent is the first to speak in a DM.
+func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
 	if wcs == nil {
 		return
 	}
@@ -2221,6 +2609,19 @@ type chatMemberEntry struct {
 	Phase         string `json:"phase,omitempty"`
 	Activity      string `json:"activity,omitempty"`
 	PresenceState string `json:"presenceState,omitempty"`
+	// Agent-only fields. LastSeen is RFC3339; empty when the agent has
+	// never reported in.
+	LastSeen  string `json:"lastSeen,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
+	// Message is the agent's freeform status detail — the text the agent
+	// detail page shows under "Detail" (e.g. "Waiting for user decision").
+	// Named to match store.Agent so /api/v1/agents and this endpoint can be
+	// consumed by the same client mapping.
+	Message string `json:"message,omitempty"`
+	// LastActivityEvent is when the agent last changed state, RFC3339, with
+	// the record's update time as a fallback. Distinct from LastSeen, which
+	// is a heartbeat and moves even when nothing happened.
+	LastActivityEvent string `json:"lastActivityEvent,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -2276,7 +2677,9 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Require project_id parameter for authz.
+	// project_id scopes the upload to a space. DMs belong to no space, so it is
+	// optional: an upload without one is stored project-less and reachable only
+	// through the messages that reference it.
 	projectID := r.FormValue("project_id")
 	if projectID == "" {
 		// Try multipart form value.
@@ -2284,19 +2687,19 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 			projectID = r.FormValue("project_id")
 		}
 	}
-	if projectID == "" {
-		ValidationError(w, "project_id is required", nil)
-		return
-	}
 
-	// Authorize: user must have read access to the project (same as sending messages).
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		NotFound(w, "Project")
-		return
-	}
-	if !s.authorize(w, r, projectResource(project), ActionRead) {
-		return
+	// Authorize: user must have read access to the project (same as sending
+	// messages). A project-less upload has nothing to authorize against beyond
+	// the authenticated identity the handler already established.
+	if projectID != "" {
+		project, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			NotFound(w, "Project")
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionRead) {
+			return
+		}
 	}
 
 	// Parse multipart form (limit total to MaxAttachmentSize * MaxAttachmentsPerMessage).
@@ -2407,14 +2810,19 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Authorize: user must have read access to the project.
-	project, err := s.store.GetProject(ctx, meta.ProjectID)
-	if err != nil {
-		NotFound(w, "Project")
-		return
-	}
-	if !s.authorize(w, r, projectResource(project), ActionRead) {
-		return
+	// Authorize: user must have read access to the project. An attachment
+	// uploaded from a DM has no project (see handleAttachmentUpload); the
+	// authenticated identity plus the unguessable attachment ID is all there is
+	// to check, so the download proceeds.
+	if meta.ProjectID != "" {
+		project, err := s.store.GetProject(ctx, meta.ProjectID)
+		if err != nil {
+			NotFound(w, "Project")
+			return
+		}
+		if !s.authorize(w, r, projectResource(project), ActionRead) {
+			return
+		}
 	}
 
 	// Get file from storage.

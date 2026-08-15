@@ -865,6 +865,8 @@ func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
 		"server.hub.cors",
 		"server.message_broker",
 		"server.plugins",
+		"server.native_chat",
+		"server.native_chat.enabled",
 	}
 
 	_, l0, unclassified := ClassifyKeys(layer0Keys)

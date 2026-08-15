@@ -2333,6 +2333,10 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
+	// A deleted agent must not remain a thread's default — the binding would
+	// route new messages at an agent that no longer exists.
+	s.ClearTopicDefaultAgent(ctx, agent.ID, agent.Slug, agent.ProjectID)
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

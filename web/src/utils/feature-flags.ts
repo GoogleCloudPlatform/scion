@@ -65,6 +65,21 @@ export function isFeatureEnabled(name: string): boolean {
 }
 
 /**
+ * Override a feature flag from the server-published settings.
+ *
+ * Writes into the same `window.__SCION_FEATURES__` bag the Go template uses,
+ * so the value takes precedence over both the localStorage dev override and
+ * the compiled default. Call this at boot, before any routing decision.
+ *
+ * @param name - Dot-separated flag name (e.g. "web.native_chat")
+ * @param enabled - The server-authoritative value
+ */
+export function setFeatureFlag(name: string, enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, [name]: enabled };
+}
+
+/**
  * Wave-2 native chat feature flag.
  * Default ON (W9) — added to DEFAULT_ON_FLAGS for general availability.
  * Disable via server injection or localStorage: scion:feature:web.native_chat_v2=false

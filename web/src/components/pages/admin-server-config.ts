@@ -124,6 +124,11 @@ interface V1MessageBrokerConfig {
   type?: string;
 }
 
+interface V1NativeChatConfig {
+  /** Absent means enabled — native chat is default-on. */
+  enabled?: boolean;
+}
+
 interface V1GitHubAppConfig {
   app_id?: number;
   api_base_url?: string;
@@ -144,6 +149,7 @@ interface V1ServerConfig {
   secrets?: V1SecretsConfig;
   notification_channels?: V1NotificationChannelConfig[];
   message_broker?: V1MessageBrokerConfig;
+  native_chat?: V1NativeChatConfig;
   github_app?: V1GitHubAppConfig;
 }
 
@@ -536,6 +542,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Message Broker
   @state() private messageBrokerEnabled = false;
   @state() private messageBrokerType = '';
+
+  // Native Chat — default ON, matching the server's absent-means-enabled rule.
+  @state() private nativeChatEnabled = true;
 
   // GitHub App
   @state() private githubAppConfigured = false;
@@ -1510,6 +1519,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.messageBrokerEnabled = srv.message_broker.enabled || false;
         this.messageBrokerType = srv.message_broker.type || '';
       }
+
+      // Native Chat — an absent section or an absent key means enabled.
+      this.nativeChatEnabled = srv.native_chat?.enabled ?? true;
     }
 
     // Telemetry
@@ -1740,7 +1752,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (Object.keys(auth).length > 0) server.auth = auth;
 
-    // Broker, database, storage, secrets, message_broker — all Layer-0, omitted
+    // Broker, database, storage, secrets, message_broker, native_chat —
+    // all Layer-0, omitted
 
     // Preserve notification channels and GitHub App from raw config
     // (server.oauth is Layer-0 / secrets stack — excluded from DB payload)
@@ -1957,6 +1970,11 @@ export class ScionPageAdminServerConfig extends LitElement {
         enabled: this.messageBrokerEnabled,
         type: ok('server.message_broker.type') ? this.messageBrokerType || undefined : undefined,
       };
+    }
+
+    // Native Chat
+    if (ok('server.native_chat.enabled')) {
+      server.native_chat = { enabled: this.nativeChatEnabled };
     }
 
     // Preserve notification channels, OAuth, and GitHub App from raw config
@@ -3238,6 +3256,33 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  private renderNativeChatSection() {
+    return html`
+      <div class="section">
+        <h3 class="section-title">Native Chat</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            ${this.renderFieldValue(
+              'server.native_chat.enabled',
+              this.nativeChatEnabled ? 'Enabled' : 'Disabled',
+              html`<sl-switch
+                ?checked=${this.nativeChatEnabled}
+                @sl-change=${(e: Event) => {
+                  this.nativeChatEnabled = (e.target as HTMLInputElement).checked;
+                }}
+                >Enable native chat</sl-switch
+              >`
+            )}
+            <span class="hint"
+              >When enabled, the chat interface is available in the web UI and the chat API
+              endpoints are active. Requires a server restart to take effect.</span
+            >
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   private renderHubServerTab() {
     return html`
       <div class="section">
@@ -3407,6 +3452,8 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
         </div>
       </div>
+
+      ${this.renderNativeChatSection()} ${this.renderMessageBrokerSection()}
     `;
   }
 
@@ -4470,8 +4517,6 @@ export class ScionPageAdminServerConfig extends LitElement {
         </p>
         ${this.renderOAuthDisplay()}
       </div>
-
-      ${this.renderMessageBrokerSection()}
     `;
   }
 

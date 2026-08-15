@@ -65,6 +65,8 @@ var layer0Prefixes = []string{
 	// Messaging/plugins
 	"server.message_broker",
 	"server.plugins",
+	// Native chat — routes are registered at startup, so toggling it needs a restart.
+	"server.native_chat",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0

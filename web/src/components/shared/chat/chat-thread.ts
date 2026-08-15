@@ -47,6 +47,7 @@ import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
 import './chat-visibility-toggle.js';
+import './chat-interagent-marker.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
@@ -54,6 +55,8 @@ interface MentionResult {
   status: string;
   error?: string;
 }
+
+/** Unused — replaced by flat interagentMessages array grouped inline. */
 
 /** Maximum messages kept in the buffer. */
 const MAX_BUFFER = 500;
@@ -75,6 +78,13 @@ const SYSTEM_MESSAGE_TYPES = new Set(['state-change', 'system']);
 
 /** Typing indicator expiry in ms. */
 const TYPING_EXPIRY_MS = 6000;
+
+/**
+ * How long the "Seen" indicator stays on screen after the peer read the
+ * message. Past this the delivery state is dropped entirely — a permanent
+ * receipt on every conversation is noise, not information.
+ */
+const SEEN_VISIBLE_MS = 5 * 60 * 1000;
 
 /** Typing send throttle in ms. */
 const TYPING_SEND_THROTTLE_MS = 4000;
@@ -130,6 +140,10 @@ export class ScionChatThread extends LitElement {
   @property({ type: Boolean })
   isDM = false;
 
+  /** Current user ID for own-message detection (v2 mode). */
+  @property()
+  currentUserId = '';
+
   /** DM peer name (v2 mode). */
   @property()
   peerName = '';
@@ -153,7 +167,6 @@ export class ScionChatThread extends LitElement {
   @state() private messageMap = new Map<string, Message>();
   @state() private loading = false;
   @state() private error: string | null = null;
-  @state() private streaming = false;
   @state() private sending = false;
   @state() private sendError: string | null = null;
   @state() private pinnedToBottom = true;
@@ -162,6 +175,15 @@ export class ScionChatThread extends LitElement {
   @state() private loaded = false;
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
+
+  /** Raw inter-agent messages to render as inline markers in agent DMs. */
+  @state() private interagentMessages: Message[] = [];
+
+  /** Global expand/collapse state for all inter-agent markers. */
+  @state() private interagentExpandAll = false;
+
+  /** Whether inter-agent markers are visible (eye toggle). */
+  @state() private interagentVisible = true;
 
   /** W7: Attachment refs keyed by message ID (from history endpoint + send response). */
   private v2AttachmentMap = new Map<string, import('./chat-message.js').AttachmentRefInfo[]>();
@@ -178,6 +200,23 @@ export class ScionChatThread extends LitElement {
   /** Bound listener for v2 SSE typing events via stateManager. */
   private _v2TypingHandler = this.handleV2TypingEvent.bind(this);
 
+  /** Bound listener for v2 SSE read-state events (DM "seen" receipts). */
+  private _v2ReadStateHandler = this.handleV2ReadStateEvent.bind(this);
+
+  // ---- DM read receipt ("seen") state ----
+
+  /** The peer's read watermark in this DM: the last message they have read. */
+  @state() private peerReadMessageId = '';
+
+  /** When the peer's watermark last advanced, epoch ms. 0 = unknown. */
+  @state() private peerReadAt = 0;
+
+  /** Fires when the "Seen" indicator ages out, to drop it from the render. */
+  private _seenExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Last message ID POSTed to /read — suppresses redundant watermark writes. */
+  private _lastAdvancedMessageId = '';
+
   // ---- Typing indicator state ----
 
   /** Map of userId -> { displayName, timer } for active typing indicators. */
@@ -189,7 +228,7 @@ export class ScionChatThread extends LitElement {
   /** Last time we sent a typing event (for client-side throttle). */
   private _lastTypingSent = 0;
 
-  /** Current user ID (derived from stateManager scope). */
+  /** Current user ID, cached from the stateManager scope once it exists. */
   private _currentUserId = '';
 
   /** Read tracking: debounce timer for advancing watermark. */
@@ -197,6 +236,12 @@ export class ScionChatThread extends LitElement {
 
   /** Read tracking: whether the tab is focused. */
   private _tabFocused = true;
+
+  /** Backfill single-flight guard: a backfill request is currently running. */
+  private _backfillInFlight = false;
+
+  /** Backfill single-flight guard: another backfill was requested while one was running. */
+  private _backfillPending = false;
 
   /** Focus/blur handlers for read tracking. */
   private _focusHandler = () => {
@@ -240,24 +285,6 @@ export class ScionChatThread extends LitElement {
       gap: 0.375rem;
     }
 
-    .stream-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--scion-success-500, #22c55e);
-      animation: pulse 1.5s ease-in-out infinite;
-    }
-
-    @keyframes pulse {
-      0%,
-      100% {
-        opacity: 1;
-      }
-      50% {
-        opacity: 0.3;
-      }
-    }
-
     /* Message scroll area */
     .messages-scroll {
       flex: 1;
@@ -272,6 +299,16 @@ export class ScionChatThread extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 0;
+      /*
+       * flex: 0 0 auto is load-bearing. As a flex item of .messages-scroll the
+       * list would otherwise shrink to the scroll container's height (the
+       * explicit min-height replaces the automatic minimum), and because the
+       * content is bottom-anchored with justify-content: flex-end the overflow
+       * lands past the block-START edge — which is unreachable, so the thread
+       * cannot be scrolled at all. Keeping the list at its content height makes
+       * the overflow land at the bottom, where the scrollbar can reach it.
+       */
+      flex: 0 0 auto;
       min-height: 100%;
       justify-content: flex-end;
     }
@@ -382,6 +419,32 @@ export class ScionChatThread extends LitElement {
       font-weight: 600;
     }
 
+    /* Inter-agent toggle bar */
+    .interagent-toggle-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.25rem 1rem;
+      border-bottom: 1px solid var(--scion-border, rgba(148, 163, 184, 0.15));
+    }
+
+    .interagent-label {
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #64748b);
+      font-weight: 500;
+    }
+
+    .interagent-icons {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .interagent-icons sl-icon-button::part(base) {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     /* Typing indicator */
     .typing-indicator {
       display: flex;
@@ -459,7 +522,10 @@ export class ScionChatThread extends LitElement {
     // Stop any active SSE listener
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
-    this.streaming = false;
+    stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+
+    // Clear read-receipt state — it belongs to the conversation we just left.
+    this.clearSeenState();
 
     // Clear message state
     this.messageMap.clear();
@@ -472,6 +538,11 @@ export class ScionChatThread extends LitElement {
     this.sendError = null;
     this.pinnedToBottom = true;
     this.loadingOlder = false;
+
+    // Clear inter-agent state
+    this.interagentMessages = [];
+    this.interagentExpandAll = false;
+    this.interagentVisible = true;
 
     // Clear typing state
     for (const entry of this.typingUsers.values()) {
@@ -495,6 +566,8 @@ export class ScionChatThread extends LitElement {
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
+    stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+    this.clearSeenState();
     // Clean up typing timers
     for (const entry of this.typingUsers.values()) {
       clearTimeout(entry.timer);
@@ -638,8 +711,9 @@ export class ScionChatThread extends LitElement {
     if (this.isV2) {
       stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
       stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
+      stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     }
-    this.streaming = false;
+
   }
 
   // ---------------------------------------------------------------------------
@@ -757,9 +831,7 @@ export class ScionChatThread extends LitElement {
 
   private mergeMessages(newMessages: Message[]): void {
     for (const msg of newMessages) {
-      if (!this.messageMap.has(msg.id)) {
-        this.messageMap.set(msg.id, msg);
-      }
+      this.messageMap.set(msg.id, msg);
     }
 
     // Sort ascending by createdAt (oldest first for chat display)
@@ -795,7 +867,6 @@ export class ScionChatThread extends LitElement {
 
     const url = `/api/v1/agents/${encodeURIComponent(this.agentId)}/messages/stream`;
     this.eventSource = new EventSource(url);
-    this.streaming = true;
 
     this.eventSource.addEventListener('message', (event: Event) => {
       try {
@@ -843,6 +914,15 @@ export class ScionChatThread extends LitElement {
       // Set up read tracking
       window.addEventListener('focus', this._focusHandler);
       window.addEventListener('blur', this._blurHandler);
+      // Fetch inter-agent exchanges for agent DMs (non-blocking).
+      if (this.isAgentDM) {
+        void this.fetchInteragentExchanges();
+      }
+      // Human DMs show a read receipt — seed it so "Seen" survives a reload
+      // instead of waiting for the peer's next watermark advance.
+      if (this.isHumanDM) {
+        void this.fetchPeerReadState();
+      }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
@@ -872,10 +952,7 @@ export class ScionChatThread extends LitElement {
       items?: Message[];
       messages?: Message[];
       nextCursor?: string;
-      messageAttachments?: Record<
-        string,
-        import('./chat-message.js').AttachmentRefInfo[]
-      >;
+      messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
     };
 
     const items = data?.items ?? data?.messages ?? [];
@@ -902,28 +979,72 @@ export class ScionChatThread extends LitElement {
   private startStreamV2(): void {
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
-    // Capture current user ID from the stateManager scope for typing self-filter.
+    stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+    // Seed the typing self-filter. The scope may not exist yet — see selfUserId.
     const scope = stateManager.currentScope;
     if (scope && scope.type === 'chat') {
       this._currentUserId = scope.userId;
+      // Also populate currentUserId if not set from the parent.
+      if (!this.currentUserId && scope.userId) {
+        this.currentUserId = scope.userId;
+      }
     }
-    this.streaming = true;
+  }
+
+  /**
+   * Who "self" is, for filtering out our own echoed events.
+   *
+   * The chat scope is only configured once the space rail reports its space
+   * IDs, which lands after a thread mounted from a cold load has already
+   * subscribed — so resolve it lazily, and fall back to the ID the page passes
+   * down. Without this a DM opened directly showed the user their own
+   * "X is typing…".
+   */
+  private selfUserId(): string {
+    if (!this._currentUserId) {
+      const scope = stateManager.currentScope;
+      if (scope && scope.type === 'chat' && scope.userId) {
+        this._currentUserId = scope.userId;
+      }
+    }
+    return this._currentUserId || this.currentUserId;
   }
 
   /** Handle v2 SSE chat message events. Only backfill if the event is for this conversation. */
   private handleV2ChatMessage(e: Event): void {
-    const detail = (e as CustomEvent).detail as {
-      data?: { threadId?: string; conversationKey?: string; topicId?: string };
+    type ChatEventData = {
+      threadId?: string;
+      conversationKey?: string;
+      topicId?: string;
+      senderId?: string;
     };
-    const eventData = detail?.data;
+    const detail = (e as CustomEvent).detail as
+      | ({ data?: ChatEventData } & ChatEventData)
+      | undefined;
+    // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
+    const eventData: ChatEventData | undefined = detail?.data ?? detail;
     if (eventData) {
       // Filter: only process events for this conversation
       const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
       if (eventKey && eventKey !== this.conversationKey) {
         return; // Not for this conversation
       }
+      // The sender finished typing the moment their message landed — drop the
+      // indicator now rather than waiting out TYPING_EXPIRY_MS.
+      this.clearTypingForUser(eventData.senderId);
     }
     void this.backfillV2();
+  }
+
+  /** Drop a user's typing indicator (and its expiry timer), if one is active. */
+  private clearTypingForUser(userId: string | undefined): void {
+    if (!userId) return;
+    const existing = this.typingUsers.get(userId);
+    if (!existing) return;
+    clearTimeout(existing.timer);
+    const updated = new Map(this.typingUsers);
+    updated.delete(userId);
+    this.typingUsers = updated;
   }
 
   /** Handle v2 SSE typing events. Only show for this conversation, and skip self. */
@@ -942,7 +1063,7 @@ export class ScionChatThread extends LitElement {
     if (threadId !== this.conversationKey) return;
 
     // Don't show own typing indicator
-    if (userId === this._currentUserId) return;
+    if (userId === this.selfUserId()) return;
 
     // Clear existing timer for this user if any
     const existing = this.typingUsers.get(userId);
@@ -976,8 +1097,29 @@ export class ScionChatThread extends LitElement {
     });
   }
 
+  /**
+   * Refetch the recent history window. Single-flighted: concurrent callers
+   * (a burst of SSE events) collapse into one trailing refetch.
+   */
   private async backfillV2(): Promise<void> {
     if (!this.conversationKey) return;
+    if (this._backfillInFlight) {
+      this._backfillPending = true;
+      return;
+    }
+    this._backfillInFlight = true;
+    try {
+      await this.runBackfillV2();
+    } finally {
+      this._backfillInFlight = false;
+      if (this._backfillPending) {
+        this._backfillPending = false;
+        void this.backfillV2();
+      }
+    }
+  }
+
+  private async runBackfillV2(): Promise<void> {
     const currentId = this.fetchId;
     const params = new URLSearchParams({
       limit: String(HISTORY_PAGE_SIZE),
@@ -993,10 +1135,7 @@ export class ScionChatThread extends LitElement {
     const data = (await res.json()) as {
       items?: Message[];
       messages?: Message[];
-      messageAttachments?: Record<
-        string,
-        import('./chat-message.js').AttachmentRefInfo[]
-      >;
+      messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
     };
     const items = data?.items ?? data?.messages ?? [];
 
@@ -1014,6 +1153,155 @@ export class ScionChatThread extends LitElement {
     }
     // Advance read watermark if applicable
     this.maybeAdvanceReadWatermark();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Inter-agent exchange loading
+  // ---------------------------------------------------------------------------
+
+  /** Whether this conversation is an agent DM (eligible for inter-agent markers). */
+  private get isAgentDM(): boolean {
+    return this.isDM && this.conversationKey.startsWith('dm:agent:');
+  }
+
+  /** Whether there are inter-agent markers to render in this conversation. */
+  private get hasInteragentMessages(): boolean {
+    return this.isAgentDM && this.interagentMessages.length > 0;
+  }
+
+  /** Whether this is a human-to-human DM (the only place read receipts apply). */
+  private get isHumanDM(): boolean {
+    return this.isDM && this.conversationKey.startsWith('dm:user:');
+  }
+
+  // ---------------------------------------------------------------------------
+  // DM read receipts ("Seen")
+  // ---------------------------------------------------------------------------
+
+  /** Load the peer's read watermark for this DM. Best-effort. */
+  private async fetchPeerReadState(): Promise<void> {
+    const currentId = this.fetchId;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/read`
+      );
+      if (!res.ok || currentId !== this.fetchId) return;
+      const data = (await res.json()) as {
+        peerLastReadMessageId?: string;
+        peerLastReadAt?: string;
+      };
+      if (currentId !== this.fetchId || !data?.peerLastReadMessageId) return;
+      this.applyPeerReadState(data.peerLastReadMessageId, data.peerLastReadAt);
+    } catch {
+      // Non-critical: the receipt is decoration, not content.
+    }
+  }
+
+  /** Handle a peer's read-watermark advance arriving over SSE. */
+  private handleV2ReadStateEvent(e: Event): void {
+    type ReadStateData = { conversationKey?: string; messageId?: string; readAt?: string };
+    const detail = (e as CustomEvent).detail as
+      | ({ data?: ReadStateData } & ReadStateData)
+      | undefined;
+    const eventData: ReadStateData | undefined = detail?.data ?? detail;
+    if (!eventData?.messageId) return;
+    if (eventData.conversationKey !== this.conversationKey) return;
+    this.applyPeerReadState(eventData.messageId, eventData.readAt);
+  }
+
+  /** Record the peer watermark and arm the auto-hide timer. */
+  private applyPeerReadState(messageId: string, readAt?: string): void {
+    const parsed = readAt ? new Date(readAt).getTime() : NaN;
+    this.peerReadMessageId = messageId;
+    this.peerReadAt = Number.isNaN(parsed) ? Date.now() : parsed;
+
+    if (this._seenExpiryTimer) clearTimeout(this._seenExpiryTimer);
+    const remaining = this.peerReadAt + SEEN_VISIBLE_MS - Date.now();
+    if (remaining > 0) {
+      this._seenExpiryTimer = setTimeout(() => {
+        this._seenExpiryTimer = null;
+        this.requestUpdate();
+      }, remaining);
+    }
+  }
+
+  /** Drop all read-receipt state (conversation switch / teardown). */
+  private clearSeenState(): void {
+    this.peerReadMessageId = '';
+    this.peerReadAt = 0;
+    this._lastAdvancedMessageId = '';
+    if (this._seenExpiryTimer) {
+      clearTimeout(this._seenExpiryTimer);
+      this._seenExpiryTimer = null;
+    }
+  }
+
+  /**
+   * Whether the peer's watermark has reached this message.
+   *
+   * Message IDs are UUIDs, so they cannot be compared for ordering — the
+   * watermark message is looked up in the buffer and compared by timestamp.
+   * If it is not buffered (scrolled out of the window), we report "not seen"
+   * rather than guess.
+   */
+  /** ID of the newest message sent by the current user, '' if none. */
+  private lastOwnMessageId(): string {
+    if (!this.currentUserId) return '';
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const msg = this.messages[i];
+      if (msg.senderId === this.currentUserId && !SYSTEM_MESSAGE_TYPES.has(msg.type)) {
+        return msg.id;
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Delivery state to render for a message.
+   *
+   * Only the newest own message shows a receipt, and it disappears once the
+   * "Seen" indicator has aged out. Failures are the exception: they stay
+   * visible on every message, because a silently dropped message is exactly
+   * what the user needs to be told about.
+   */
+  private deliveryStateFor(msg: Message, lastOwnMessageId: string, seenExpired: boolean): string {
+    const dispatchState = msg.dispatchState || '';
+    if (!dispatchState || dispatchState === 'failed') return dispatchState;
+    if (msg.id !== lastOwnMessageId) return '';
+    if (seenExpired && this.isMessageSeen(msg)) return '';
+    return dispatchState;
+  }
+
+  private isMessageSeen(msg: Message): boolean {
+    if (!this.peerReadMessageId) return false;
+    const watermark = this.messageMap.get(this.peerReadMessageId);
+    if (!watermark) return false;
+    return new Date(msg.createdAt).getTime() <= new Date(watermark.createdAt).getTime();
+  }
+
+  /** Fetch inter-agent messages for inline markers. Stores the raw flat list. */
+  private async fetchInteragentExchanges(): Promise<void> {
+    if (!this.isAgentDM) return;
+
+    const params = new URLSearchParams({ limit: '200' });
+    const currentId = this.fetchId;
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`
+      );
+      if (!res.ok || currentId !== this.fetchId) return;
+
+      const data = (await res.json()) as { messages?: Message[] };
+      if (currentId !== this.fetchId) return;
+      const msgs = data?.messages ?? [];
+      // Store sorted flat list — grouping by DM gaps happens in renderMessages().
+      this.interagentMessages = [...msgs].sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      );
+    } catch {
+      // Non-critical
+    }
   }
 
   /** Send a message in v2 mode. */
@@ -1083,12 +1371,12 @@ export class ScionChatThread extends LitElement {
     try {
       const body: Record<string, unknown> = {};
       if (arg === 'clear') {
-        body.default_agent = null;
+        body.defaultAgent = '';
       } else {
-        body.default_agent = arg;
+        body.defaultAgent = arg;
       }
       const res = await apiFetch(
-        `/api/v1/chat/threads/${encodeURIComponent(this.conversationKey)}`,
+        `/api/v1/chat/topics/${encodeURIComponent(this.conversationKey)}`,
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -1097,6 +1385,41 @@ export class ScionChatThread extends LitElement {
       );
       if (res.ok) {
         this.defaultAgent = arg === 'clear' ? '' : arg;
+        this.dispatchEvent(
+          new CustomEvent('default-agent-changed', {
+            detail: { defaultAgent: this.defaultAgent },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
+  /** Handle default-agent-change from the composer dropdown. */
+  private async handleDefaultAgentChange(e: CustomEvent<{ defaultAgent: string }>): Promise<void> {
+    const newDefault = e.detail.defaultAgent;
+    if (!this.conversationKey || this.isDM) return;
+    const currentId = this.fetchId;
+
+    try {
+      const body: Record<string, unknown> = {
+        defaultAgent: newDefault,
+      };
+      const res = await apiFetch(
+        `/api/v1/chat/topics/${encodeURIComponent(this.conversationKey)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      );
+      // A conversation switch mid-flight makes this response irrelevant: the
+      // default agent now belongs to a topic we are no longer showing.
+      if (res.ok && currentId === this.fetchId) {
+        this.defaultAgent = newDefault;
         this.dispatchEvent(
           new CustomEvent('default-agent-changed', {
             detail: { defaultAgent: this.defaultAgent },
@@ -1126,17 +1449,50 @@ export class ScionChatThread extends LitElement {
   }
 
   private async advanceReadWatermark(messageId: string): Promise<void> {
+    // The watermark only moves forward and the scroll/focus triggers fire far
+    // more often than it changes; re-POSTing the same ID would also re-fan the
+    // read-state event out to the peer for nothing.
+    if (!messageId || messageId === this._lastAdvancedMessageId) return;
+    this._lastAdvancedMessageId = messageId;
+
+    // Pin both to the conversation this POST is for: a switch mid-flight makes
+    // the response belong to a thread we are no longer showing.
+    const currentId = this.fetchId;
+    const conversationKey = this.conversationKey;
+
     try {
-      await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/read`,
+      // Field name must match the server contract in handleConversationRead.
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(conversationKey)}/read`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ last_read_message_id: messageId }),
+          body: JSON.stringify({ messageId }),
         }
+      );
+      if (currentId !== this.fetchId) return;
+
+      if (!res.ok) {
+        // Let the next trigger retry: the watermark did not actually move.
+        this._lastAdvancedMessageId = '';
+        console.warn('Failed to update read state:', res.status);
+        return;
+      }
+
+      // The rail and the DM list own their own unread badges and have no way
+      // to learn the watermark moved — tell them.
+      this.dispatchEvent(
+        new CustomEvent('read-state-updated', {
+          detail: { conversationKey, messageId },
+          bubbles: true,
+          composed: true,
+        })
       );
     } catch {
       // Non-critical
+      if (currentId === this.fetchId) {
+        this._lastAdvancedMessageId = '';
+      }
     }
   }
 
@@ -1212,6 +1568,26 @@ export class ScionChatThread extends LitElement {
   private handleJumpToLatest(): void {
     this.pinnedToBottom = true;
     this.scrollToBottom();
+  }
+
+  /** Focus the composer textarea when clicking the message area background. */
+  private handleMessageAreaClick(e: MouseEvent): void {
+    const target = e.target as HTMLElement;
+    // Don't steal focus from interactive elements or message content
+    if (
+      target.closest(
+        'a, button, input, textarea, sl-menu-item, sl-dropdown, scion-chat-message, scion-chat-system-line, scion-chat-interagent-marker'
+      )
+    ) {
+      return;
+    }
+    const composer = this.shadowRoot?.querySelector('scion-chat-composer');
+    if (composer) {
+      const slTextarea = (composer as LitElement).shadowRoot?.querySelector('sl-textarea');
+      if (slTextarea) {
+        (slTextarea as HTMLElement).focus();
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1301,7 +1677,9 @@ export class ScionChatThread extends LitElement {
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderStreamBar()} ${this.renderContent()} ${this.renderTypingIndicator()}
+        ${this.renderStreamBar()}
+        ${this.renderInteragentToggle()}
+        ${this.renderContent()} ${this.renderTypingIndicator()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         <scion-chat-composer
           ?disabled=${this.sending}
@@ -1313,9 +1691,47 @@ export class ScionChatThread extends LitElement {
           .projectId=${this.projectId}
           @chat-send=${this.handleChatSendV2}
           @chat-typing=${() => this.sendTypingEvent()}
+          @default-agent-change=${this.handleDefaultAgentChange}
         ></scion-chat-composer>
       </div>
     `;
+  }
+
+  /** Render the toolbar with label + eye (show/hide) + expand/collapse icons. */
+  private renderInteragentToggle() {
+    if (!this.hasInteragentMessages) return nothing;
+
+    return html`
+      <div class="interagent-toggle-bar">
+        <span class="interagent-label">Agent-agent messages:</span>
+        <div class="interagent-icons">
+          <sl-tooltip content=${this.interagentVisible ? 'Hide' : 'Show'}>
+            <sl-icon-button
+              name=${this.interagentVisible ? 'eye' : 'eye-slash'}
+              label=${this.interagentVisible ? 'Hide agent messages' : 'Show agent messages'}
+              @click=${this.toggleInteragentVisibility}
+            ></sl-icon-button>
+          </sl-tooltip>
+          <sl-tooltip content=${this.interagentExpandAll ? 'Collapse all' : 'Expand all'}>
+            <sl-icon-button
+              name=${this.interagentExpandAll ? 'chevron-up' : 'chevron-down'}
+              label=${this.interagentExpandAll ? 'Collapse all' : 'Expand all'}
+              @click=${this.toggleAllInteragent}
+            ></sl-icon-button>
+          </sl-tooltip>
+        </div>
+      </div>
+    `;
+  }
+
+  /** Toggle visibility of all inter-agent markers. */
+  private toggleInteragentVisibility(): void {
+    this.interagentVisible = !this.interagentVisible;
+  }
+
+  /** Toggle all inter-agent markers expanded/collapsed. */
+  private toggleAllInteragent(): void {
+    this.interagentExpandAll = !this.interagentExpandAll;
   }
 
   /** Render the typing indicator below messages, above the composer. */
@@ -1341,13 +1757,11 @@ export class ScionChatThread extends LitElement {
   }
 
   private renderStreamBar() {
-    // Show the bar when streaming OR when the toggle is visible (they share the row).
-    if (!this.streaming && !this.showVisibilityToggle) return nothing;
+    // Show the bar only when the visibility toggle is visible.
+    if (!this.showVisibilityToggle) return nothing;
     return html`
       <div class="stream-bar">
-        <span class="stream-indicator">
-          ${this.streaming ? html`<span class="stream-dot"></span> Live` : nothing}
-        </span>
+        <span class="stream-indicator"></span>
         ${this.showVisibilityToggle
           ? html`
               <scion-chat-visibility-toggle
@@ -1388,7 +1802,10 @@ export class ScionChatThread extends LitElement {
       `;
     }
 
-    if (this.messages.length === 0) {
+    // A conversation with no direct messages is not necessarily empty: an agent
+    // DM can carry inter-agent exchanges, which renderMessages() emits as
+    // markers. Only show the empty state when there is nothing at all to render.
+    if (this.messages.length === 0 && !this.hasInteragentMessages) {
       return html`
         <div class="state-msg">
           <sl-icon name="chat-dots"></sl-icon>
@@ -1398,7 +1815,7 @@ export class ScionChatThread extends LitElement {
     }
 
     return html`
-      <div class="messages-scroll" @scroll=${this.handleScroll}>
+      <div class="messages-scroll" @scroll=${this.handleScroll} @click=${this.handleMessageAreaClick}>
         <div class="messages-list">
           ${this.loadingOlder
             ? html`<div class="loading-older"><sl-spinner></sl-spinner></div>`
@@ -1425,13 +1842,50 @@ export class ScionChatThread extends LitElement {
     let prevSender = '';
     let prevTimestamp = 0;
 
-    for (const msg of this.messages) {
+    // Pre-sort inter-agent messages by time for gap-based grouping.
+    const iaMessages = [...this.interagentMessages].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+    let iaIdx = 0;
+    const hasIA = this.hasInteragentMessages;
+
+    // Delivery state is a property of the conversation's tail, not of every
+    // bubble: only the newest message this user sent carries it.
+    const lastOwnMessageId = this.lastOwnMessageId();
+    const seenExpired = this.peerReadAt > 0 && Date.now() - this.peerReadAt > SEEN_VISIBLE_MS;
+
+    for (let mi = 0; mi < this.messages.length; mi++) {
+      const msg = this.messages[mi];
       const d = new Date(msg.createdAt);
       const dateStr = d.toLocaleDateString('en', {
         year: 'numeric',
         month: 'short',
         day: 'numeric',
       });
+
+      // Collect all inter-agent messages that fall before this DM message
+      // and insert ONE pill for the entire group.
+      if (hasIA) {
+        const msgTime = d.getTime();
+        const pendingIA: Message[] = [];
+        while (iaIdx < iaMessages.length && new Date(iaMessages[iaIdx].createdAt).getTime() < msgTime) {
+          pendingIA.push(iaMessages[iaIdx]);
+          iaIdx++;
+        }
+        if (pendingIA.length > 0) {
+          rows.push(html`
+            <scion-chat-interagent-marker
+              .messageCount=${pendingIA.length}
+              .messages=${pendingIA}
+              ?global-expanded=${this.interagentExpandAll}
+              ?hidden=${!this.interagentVisible}
+            ></scion-chat-interagent-marker>
+          `);
+          // Reset grouping after a marker so the next message shows its header.
+          prevSender = '';
+          prevTimestamp = 0;
+        }
+      }
 
       // Date divider
       if (dateStr !== lastDate) {
@@ -1469,8 +1923,19 @@ export class ScionChatThread extends LitElement {
       const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
       const showHeader = !sameSender || !withinWindow;
 
-      // In v2 mode, determine if from agent by checking sender against known members
-      const isFromAgent = this.isV2 ? this.isSenderAgent(msg) : msg.senderId === this.agentId;
+      // In v2 mode, use currentUserId to determine own vs. others' messages.
+      // Own messages (fromAgent=false): right-aligned, no header/avatar.
+      // Others' messages — both users and agents (fromAgent=true): left-aligned with header/avatar.
+      const isFromAgent = this.isV2
+        ? this.currentUserId
+          ? msg.senderId !== this.currentUserId
+          : this.isSenderAgent(msg)
+        : msg.senderId === this.agentId;
+      // Routing is a property of the AUTHOR, not of the viewer: every human
+      // message in a default-agent conversation was routed to that agent, and
+      // no agent message ever is. `isFromAgent` above only means "not mine",
+      // so it cannot be reused here.
+      const isAgentSender = this.isSenderAgent(msg);
       const senderDisplayName = this.isV2
         ? this.getSenderDisplayName(msg)
         : isFromAgent
@@ -1481,21 +1946,24 @@ export class ScionChatThread extends LitElement {
         <scion-chat-message
           body=${msg.msg}
           sender=${msg.sender}
+          senderId=${msg.senderId || ''}
           senderName=${senderDisplayName}
           ?fromAgent=${isFromAgent}
           ?plain=${msg.plain ?? false}
           agentSlug=${isFromAgent ? senderDisplayName : ''}
           timestamp=${msg.createdAt}
-          ?showHeader=${showHeader}
+          .showHeader=${showHeader}
           ?urgent=${msg.urgent ?? false}
           ?broadcasted=${msg.broadcasted ?? false}
           channel=${msg.channel || ''}
           visibility=${msg.visibility || 'normal'}
           messageType=${msg.type || ''}
-          dispatchState=${msg.dispatchState || ''}
+          dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
+          ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
           dispatchFailureReason=${msg.dispatchFailureReason || ''}
           .attachments=${msg.attachments || []}
           .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
+          routedTo=${!isAgentSender && this.defaultAgent ? this.defaultAgent : ''}
         ></scion-chat-message>
       `);
 
@@ -1516,6 +1984,19 @@ export class ScionChatThread extends LitElement {
 
       prevSender = msg.sender;
       prevTimestamp = msgTime;
+    }
+
+    // Append any remaining inter-agent messages that come after all DM messages.
+    if (hasIA && iaIdx < iaMessages.length) {
+      const trailingIA = iaMessages.slice(iaIdx);
+      rows.push(html`
+        <scion-chat-interagent-marker
+          .messageCount=${trailingIA.length}
+          .messages=${trailingIA}
+          ?global-expanded=${this.interagentExpandAll}
+          ?hidden=${!this.interagentVisible}
+        ></scion-chat-interagent-marker>
+      `);
     }
 
     return rows;

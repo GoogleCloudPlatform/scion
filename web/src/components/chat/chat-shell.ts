@@ -85,6 +85,11 @@ export class ScionChatShell extends LitElement {
       flex-direction: row;
     }
 
+    .content-v2 ::slotted(*) {
+      flex: 1;
+      min-width: 0;
+    }
+
     .content-v2 .rail-panel {
       width: 260px;
       min-width: 200px;

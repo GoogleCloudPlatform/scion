@@ -21,6 +21,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +52,32 @@ func TestIsDMParticipant(t *testing.T) {
 	for _, tt := range tests {
 		if got := isDMParticipant(tt.key, tt.userID); got != tt.want {
 			t.Errorf("isDMParticipant(%q, %q) = %v, want %v", tt.key, tt.userID, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dmUserParticipants tests
+// ---------------------------------------------------------------------------
+
+// Typing events for human-to-human DMs have no project to publish on, so they
+// fan out to each user participant's own subject. The agent side of an agent DM
+// has no user subject and must be skipped.
+func TestDMUserParticipants(t *testing.T) {
+	tests := []struct {
+		key  string
+		want []string
+	}{
+		{"dm:user:u1:user:u2", []string{"u1", "u2"}},
+		{"dm:agent:a1:user:u1", []string{"u1"}},
+		{"dm:user:u1:user:u1", []string{"u1"}},
+		{"dm:user:u1", nil},
+		{"topic-uuid", nil},
+	}
+	for _, tt := range tests {
+		got := dmUserParticipants(tt.key)
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("dmUserParticipants(%q) = %v, want %v", tt.key, got, tt.want)
 		}
 	}
 }
@@ -992,6 +1020,98 @@ func TestChatV2_Members(t *testing.T) {
 	}
 }
 
+// The members sidebar tooltip shows the agent's status detail and the time of
+// its last state change, so both have to survive the trip through this
+// endpoint — the heartbeat in lastSeen is not a substitute for either.
+func TestChatV2_Members_AgentDetailAndActivityTime(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("members-detail"), Name: "members-detail", Slug: "members-detail", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	activityAt := time.Now().Add(-30 * time.Minute).UTC().Truncate(time.Second)
+	agent := &store.Agent{
+		ID:                tid("members-detail-agent"),
+		ProjectID:         proj.ID,
+		Name:              "Helper Bot",
+		Slug:              "helper-bot",
+		Phase:             "running",
+		Activity:          "blocked",
+		Message:           "Waiting for user decision on c34",
+		LastSeen:          time.Now().UTC(),
+		LastActivityEvent: activityAt,
+		OwnerID:           DevUserID,
+		CreatedBy:         DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/members", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMembersResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(resp.Agents))
+	}
+	got := resp.Agents[0]
+	if got.Message != "Waiting for user decision on c34" {
+		t.Errorf("message = %q, want the agent's status detail", got.Message)
+	}
+	if want := activityAt.Format(time.RFC3339); got.LastActivityEvent != want {
+		t.Errorf("lastActivityEvent = %q, want %q", got.LastActivityEvent, want)
+	}
+}
+
+// An agent that has never reported an activity event still needs an updated
+// time, otherwise the tooltip loses its second line entirely.
+func TestChatV2_Members_LastActivityEventFallsBackToUpdated(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("members-fallback"), Name: "members-fallback", Slug: "members-fallback", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:        tid("members-fallback-agent"),
+		ProjectID: proj.ID,
+		Name:      "Fresh Bot",
+		Slug:      "fresh-bot",
+		Phase:     "created",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/members", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatMembersResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(resp.Agents))
+	}
+	if resp.Agents[0].LastActivityEvent == "" {
+		t.Error("lastActivityEvent should fall back to the agent's updated time")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DM key validation tests
 // ---------------------------------------------------------------------------
@@ -1169,9 +1289,9 @@ func TestChatV2_Send_Mention_AgentReceives(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// With a resolved mention, message should be type "instruction" (agent-routed).
-	if resp.Type != messages.TypeInstruction {
-		t.Errorf("expected type %q (mention-routed), got %q", messages.TypeInstruction, resp.Type)
+	// With a resolved @mention, message should be type "mention" (not "instruction").
+	if resp.Type != messages.TypeMention {
+		t.Errorf("expected type %q (mention-routed), got %q", messages.TypeMention, resp.Type)
 	}
 	// Mentions should be populated.
 	if len(resp.Mentions) == 0 {
@@ -1409,9 +1529,9 @@ func TestChatV2_Send_AgentDM_MentionTakesPrecedence(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// Should be type:instruction (agent-routed via mention).
-	if resp.Type != messages.TypeInstruction {
-		t.Errorf("mention-takes-precedence: expected type %q, got %q", messages.TypeInstruction, resp.Type)
+	// Should be type:mention (agent-routed via @mention).
+	if resp.Type != messages.TypeMention {
+		t.Errorf("mention-takes-precedence: expected type %q, got %q", messages.TypeMention, resp.Type)
 	}
 	// Mentions should include the mentioned agent.
 	if len(resp.Mentions) == 0 {
@@ -1873,5 +1993,170 @@ func TestChatSearch_MethodNotAllowed(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/search?q=hello", nil)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405 for POST, got %d", rec.Code)
+	}
+}
+
+// R17: GET .../read reports the DM peer's watermark so the sender can render
+// the "Seen" receipt on load rather than waiting for the next SSE event.
+func TestChatV2_ConversationReadState_ReportsPeerWatermark(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	peerID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	key := "dm:user:" + peerID + ":user:" + DevUserID
+
+	if err := wcs.SetReadState(ctx, peerID, key, "msg-9"); err != nil {
+		t.Fatalf("SetReadState(peer): %v", err)
+	}
+	if err := wcs.SetReadState(ctx, DevUserID, key, "msg-11"); err != nil {
+		t.Fatalf("SetReadState(self): %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/chat/conversations/"+url.PathEscape(key)+"/read", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatReadStateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.PeerLastReadMessageID != "msg-9" {
+		t.Errorf("expected peerLastReadMessageId msg-9, got %q", resp.PeerLastReadMessageID)
+	}
+	if resp.LastReadMessageID != "msg-11" {
+		t.Errorf("expected lastReadMessageId msg-11, got %q", resp.LastReadMessageID)
+	}
+	if resp.PeerLastReadAt == "" {
+		t.Error("expected peerLastReadAt to be populated")
+	}
+}
+
+// A topic has no "peer" watermark to report — only the caller's own.
+func TestChatV2_ConversationReadState_TopicHasNoPeer(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("read-state"), Name: "read-state", Slug: "read-state", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        "topic-read-state",
+		ProjectID: proj.ID,
+		Name:      "readable",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if err := wcs.SetReadState(ctx, DevUserID, "topic-read-state", "msg-3"); err != nil {
+		t.Fatalf("SetReadState: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/chat/conversations/topic-read-state/read", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatReadStateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.LastReadMessageID != "msg-3" {
+		t.Errorf("expected lastReadMessageId msg-3, got %q", resp.LastReadMessageID)
+	}
+	if resp.PeerLastReadMessageID != "" {
+		t.Errorf("topic should have no peer watermark, got %q", resp.PeerLastReadMessageID)
+	}
+}
+
+// R17: a deleted agent must not linger as a thread's default — new messages
+// would be routed at an agent that no longer exists.
+func TestChatV2_ClearTopicDefaultAgent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("clear-default"), Name: "clear-default", Slug: "clear-default", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	agentID := "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	topics := []struct {
+		id           string
+		defaultAgent string
+	}{
+		{"topic-by-slug", "coder"},
+		{"topic-by-id", agentID},
+		{"topic-other", "reviewer"},
+	}
+	for _, tc := range topics {
+		if err := wcs.CreateTopic(ctx, WebChatTopic{
+			ID:           tc.id,
+			ProjectID:    proj.ID,
+			Name:         tc.id,
+			DefaultAgent: tc.defaultAgent,
+			CreatedBy:    "dev",
+			CreatedAt:    time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", tc.id, err)
+		}
+	}
+
+	srv.ClearTopicDefaultAgent(ctx, agentID, "coder", proj.ID)
+
+	for _, id := range []string{"topic-by-slug", "topic-by-id"} {
+		got, err := wcs.GetTopic(ctx, id)
+		if err != nil || got == nil {
+			t.Fatalf("GetTopic(%s): %v", id, err)
+		}
+		if got.DefaultAgent != "" {
+			t.Errorf("%s: expected default agent cleared, got %q", id, got.DefaultAgent)
+		}
+	}
+
+	other, err := wcs.GetTopic(ctx, "topic-other")
+	if err != nil || other == nil {
+		t.Fatalf("GetTopic(topic-other): %v", err)
+	}
+	if other.DefaultAgent != "reviewer" {
+		t.Errorf("unrelated topic default changed: got %q", other.DefaultAgent)
 	}
 }

@@ -22,3 +22,14 @@ type TopicEvent struct {
 	Action string       `json:"action"` // "created", "updated", "deleted"
 	Topic  WebChatTopic `json:"topic"`
 }
+
+// ChatReadStateEvent is published on user.<peerID>.chat.read-state when a DM
+// participant advances their read watermark. The peer's client uses it to
+// render the "seen" indicator on the messages it sent.
+type ChatReadStateEvent struct {
+	ConversationKey string `json:"conversationKey"`
+	// UserID is the reader — the participant whose watermark moved.
+	UserID    string `json:"userId"`
+	MessageID string `json:"messageId"`
+	ReadAt    string `json:"readAt"`
+}

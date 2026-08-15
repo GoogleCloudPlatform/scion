@@ -39,14 +39,62 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
-/** Hash a string to a consistent HSL colour. */
+/**
+ * Fixed palette of 24 avatar colours, all legible under white text on a
+ * dark surface (lightness stays between 26% and 55%).
+ *
+ * Built from 12 base hues at 30° spacing, each in two tiers — a mid tier
+ * and a deeper, more saturated tier offset by 15° — so that entries which
+ * are adjacent in hue still differ clearly in lightness and saturation.
+ * The two tiers are interleaved so neighbouring indices are never
+ * near-identical either.
+ *
+ * A 24-entry palette does not make collisions impossible (any hash into a
+ * fixed palette collides once the member count grows), but it makes them
+ * far rarer for the 8–16 members typically visible in one sidebar.
+ */
+export const AVATAR_PALETTE = [
+  'hsl(0, 58%, 50%)',   // red
+  'hsl(15, 70%, 34%)',  // brick
+  'hsl(30, 58%, 44%)',  // orange
+  'hsl(45, 70%, 30%)',  // bronze
+  'hsl(60, 50%, 38%)',  // olive
+  'hsl(75, 62%, 26%)',  // dark olive
+  'hsl(90, 45%, 38%)',  // lime
+  'hsl(105, 60%, 26%)', // forest
+  'hsl(120, 42%, 38%)', // green
+  'hsl(135, 60%, 26%)', // deep green
+  'hsl(150, 45%, 38%)', // emerald
+  'hsl(165, 65%, 26%)', // deep emerald
+  'hsl(180, 48%, 38%)', // cyan
+  'hsl(195, 70%, 28%)', // deep cyan
+  'hsl(210, 55%, 45%)', // steel blue
+  'hsl(225, 70%, 38%)', // deep blue
+  'hsl(240, 55%, 55%)', // blue
+  'hsl(255, 65%, 42%)', // indigo
+  'hsl(270, 48%, 55%)', // violet
+  'hsl(285, 60%, 40%)', // deep violet
+  'hsl(300, 45%, 48%)', // magenta
+  'hsl(315, 60%, 34%)', // deep magenta
+  'hsl(330, 55%, 50%)', // pink
+  'hsl(345, 70%, 36%)', // crimson
+];
+
+/**
+ * Hash a string to a consistent avatar colour.
+ *
+ * Uses FNV-1a (32-bit), which distributes UUID seeds evenly across the
+ * palette. Callers should therefore seed this with a member UUID, not a
+ * display name — short similar names ("c1", "c2", "c34") carry too little
+ * entropy for any hash to separate reliably.
+ */
 export function hashColor(str: string): string {
-  let hash = 0;
+  let hash = 0x811c9dc5; // FNV offset basis
   for (let i = 0; i < str.length; i++) {
-    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193); // FNV prime
   }
-  const hue = ((hash % 360) + 360) % 360;
-  return `hsl(${hue}, 55%, 48%)`;
+  return AVATAR_PALETTE[(hash >>> 0) % AVATAR_PALETTE.length];
 }
 
 /** Extract initials from a display name. */
@@ -60,9 +108,17 @@ export function getInitials(name: string): string {
 
 @customElement('scion-chat-avatar')
 export class ScionChatAvatar extends LitElement {
-  /** Display name used for initials and colour hashing. */
+  /** Display name used for initials (and colour hashing when colorSeed is unset). */
   @property()
   name = '';
+
+  /**
+   * Optional seed string for colour hashing — typically the member's UUID.
+   * When set, colour is derived from this value instead of `name`,
+   * avoiding collisions for short similar display names.
+   */
+  @property({ attribute: 'color-seed' })
+  colorSeed = '';
 
   /** Optional image URL; when set, renders an <img> instead of initials. */
   @property({ attribute: 'avatar-url' })
@@ -127,7 +183,7 @@ export class ScionChatAvatar extends LitElement {
     const dotSize = Math.max(8, Math.round(s * 0.3));
 
     const hasImage = this.avatarUrl && this.avatarUrl.length > 0;
-    const bg = hasImage ? 'transparent' : hashColor(this.name);
+    const bg = hasImage ? 'transparent' : hashColor(this.colorSeed || this.name);
     const initials = getInitials(this.name);
 
     return html`

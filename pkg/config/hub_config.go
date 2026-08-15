@@ -458,6 +458,10 @@ type GlobalConfig struct {
 	// node-local behavior. Populated from server.workspace_storage in settings.yaml.
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"-" yaml:"-" koanf:"-"`
 
+	// NativeChat controls the built-in chat feature. Nil (absent) means
+	// enabled. Populated from server.native_chat in settings.yaml.
+	NativeChat *V1NativeChatConfig `json:"-" yaml:"-" koanf:"-"`
+
 	// Federation settings for hub-hub authentication
 	Federation FederationConfig `json:"federation,omitempty" yaml:"federation,omitempty" koanf:"federation"`
 
@@ -902,6 +906,7 @@ var snakeCaseFields = map[string]string{
 	"logformat":               "log_format",
 	"loglevel":                "log_level",
 	"messagebroker":           "message_broker",
+	"nativechat":              "native_chat",
 	"readtimeout":             "read_timeout",
 	"workspacestorage":        "workspace_storage",
 	"writetimeout":            "write_timeout",
@@ -1003,7 +1008,7 @@ var serverSubKeys = map[string]bool{
 	"workspace_storage": true, "secrets": true,
 	"log_level": true, "log_format": true,
 	"notification_channels": true, "message_broker": true,
-	"plugins": true, "github_app": true,
+	"native_chat": true, "plugins": true, "github_app": true,
 	"mode": true, "env": true,
 }
 

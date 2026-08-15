@@ -298,6 +298,9 @@
   --scion-primary-active: var(--scion-primary-500);
   --scion-primary-text: var(--scion-neutral-900);
 
+  /* Primary tint for backgrounds (selected items, user bubbles) */
+  --scion-primary-50: rgba(59, 130, 246, 0.15);
+
   /* Backgrounds - dark mode */
   --scion-bg: var(--scion-neutral-900);
   --scion-bg-subtle: var(--scion-neutral-800);
@@ -405,6 +408,7 @@
     /* Apply dark theme colors when system prefers dark and user hasn't forced light */
     --scion-primary: var(--scion-primary-400);
     --scion-primary-hover: var(--scion-primary-300);
+    --scion-primary-50: rgba(59, 130, 246, 0.15);
     --scion-bg: var(--scion-neutral-900);
     --scion-bg-subtle: var(--scion-neutral-800);
     --scion-surface: var(--scion-neutral-800);

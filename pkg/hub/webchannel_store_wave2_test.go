@@ -564,6 +564,41 @@ func TestWave2_DM_UpsertAndList(t *testing.T) {
 	require.Equal(t, "u1", dms[0].PeerID)
 }
 
+// Re-registering a DM (which carries no message ID) must not clear the
+// watermark: the unread indicator compares last_message_id against the
+// reader's watermark, so wiping it makes every DM look read.
+func TestWave2_DM_Upsert_PreservesLastMessageID(t *testing.T) {
+	store, db := newTestWebChatStoreV2(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	key := "dm:agent:a1:user:u1"
+
+	require.NoError(t, store.UpsertDM(ctx, WebChatDM{
+		ConversationKey: key,
+		ParticipantID:   "u1",
+		PeerID:          "a1",
+		PeerKind:        "agent",
+		LastMessageID:   "msg-1",
+		LastActivityAt:  time.Now().UTC(),
+	}))
+
+	// Registration-style upsert: no message ID.
+	require.NoError(t, store.UpsertDM(ctx, WebChatDM{
+		ConversationKey: key,
+		ParticipantID:   "u1",
+		PeerID:          "a1",
+		PeerKind:        "agent",
+		LastActivityAt:  time.Now().UTC(),
+	}))
+
+	dms, err := store.ListDMs(ctx, "u1")
+	require.NoError(t, err)
+	require.Len(t, dms, 1)
+	require.Equal(t, "msg-1", dms[0].LastMessageID,
+		"re-registering a DM must not clear last_message_id")
+}
+
 func TestWave2_DM_TouchActivity(t *testing.T) {
 	store, db := newTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck

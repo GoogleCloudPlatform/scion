@@ -344,6 +344,10 @@ type V1ServerConfig struct {
 	// enabling topic-based subscriptions and broadcast fan-out at the Hub level.
 	MessageBroker *V1MessageBrokerConfig `json:"message_broker,omitempty" yaml:"message_broker,omitempty" koanf:"message_broker"`
 
+	// NativeChat controls the built-in chat feature (web chat UI and the
+	// /api/v1/chat/* endpoints). Absent means enabled — chat shipped default-on.
+	NativeChat *V1NativeChatConfig `json:"native_chat,omitempty" yaml:"native_chat,omitempty" koanf:"native_chat"`
+
 	// Plugins configures external plugin loading for message brokers.
 	// Plugins run as separate processes using hashicorp/go-plugin.
 	Plugins *V1PluginsConfig `json:"plugins,omitempty" yaml:"plugins,omitempty" koanf:"plugins"`
@@ -443,6 +447,25 @@ type V1MessageBrokerConfig struct {
 	// When non-empty, all listed plugins run concurrently via FanOutBroker.
 	// Falls back to Type (singular) for backward compatibility.
 	Types []string `json:"types,omitempty" yaml:"types,omitempty" koanf:"types"`
+}
+
+// V1NativeChatConfig configures the built-in native chat feature.
+type V1NativeChatConfig struct {
+	// Enabled controls whether the chat UI and the /api/v1/chat/* endpoints
+	// are available. Nil (absent) means enabled: chat shipped default-on, so
+	// an operator must opt out explicitly. A pointer is required to tell
+	// "absent" apart from an explicit false — see EnabledSetting.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+}
+
+// EnabledSetting returns the tri-state toggle: nil when the operator expressed
+// no preference (callers must read that as enabled — chat is default-on),
+// otherwise the explicit setting. Safe to call on a nil config.
+func (nc *V1NativeChatConfig) EnabledSetting() *bool {
+	if nc == nil {
+		return nil
+	}
+	return nc.Enabled
 }
 
 // V1PluginsConfig configures external plugin loading for message brokers.
@@ -1623,6 +1646,11 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.WorkspaceStorage != nil {
 		v1.WorkspaceStorage.ApplyNFSDefaults()
 		gc.WorkspaceStorage = v1.WorkspaceStorage
+	}
+
+	// Native chat — thread into GlobalConfig so the hub can gate chat routes.
+	if v1.NativeChat != nil {
+		gc.NativeChat = v1.NativeChat
 	}
 
 	// GitHub App

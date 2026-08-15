@@ -209,6 +209,15 @@ server:
   #   type: "inprocess"
 
   # -------------------------------------------------------------------------
+  # Layer 0 — Native Chat (restart required)
+  # -------------------------------------------------------------------------
+  # Controls the built-in chat: the web chat UI and the /api/v1/chat/*
+  # endpoints. Omitting this section leaves chat enabled; set enabled to
+  # false to turn the feature off entirely.
+  # native_chat:
+  #   enabled: true
+
+  # -------------------------------------------------------------------------
   # Layer 0 — Plugins (restart required)
   # -------------------------------------------------------------------------
   # plugins:

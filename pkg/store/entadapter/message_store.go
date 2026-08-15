@@ -277,6 +277,9 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 			message.SenderIDEQ(filter.ParticipantID),
 		))
 	}
+	if filter.Sender != "" {
+		query.Where(message.SenderEQ(filter.Sender))
+	}
 	if filter.OnlyUnread {
 		query.Where(message.ReadEQ(false))
 	}
@@ -328,6 +331,9 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	}
 	if !filter.Before.IsZero() {
 		query.Where(message.CreatedLT(filter.Before))
+	}
+	if !filter.After.IsZero() {
+		query.Where(message.CreatedGT(filter.After))
 	}
 
 	// totalCount represents the total number of messages matching the base
