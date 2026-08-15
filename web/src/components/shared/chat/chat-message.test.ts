@@ -15,11 +15,14 @@
  */
 
 /**
- * Tests for clickable @mentions in <scion-chat-message>.
+ * Tests for <scion-chat-message>: clickable @mentions and attachment previews.
  *
  * Rendered mentions carry the slug in `data-mention` and report a click as a
  * composed `mention-click` event — the message cannot resolve a slug itself,
  * only the chat page knows the member roster.
+ *
+ * Text attachments render as a short read-only editor slice fetched from the
+ * attachment endpoint; everything else stays a download chip.
  */
 
 // @vitest-environment happy-dom
@@ -41,8 +44,20 @@ vi.mock('../../../utils/markdown.js', () => ({
     }),
 }));
 
+// The real editor pulls the CodeMirror bundle in on connect; the preview
+// tests only care about what the message hands it.
+vi.mock('../code-editor.js', () => ({
+  getLanguageFromPath: (path: string) => (path.endsWith('.go') ? 'go' : 'plaintext'),
+}));
+
+const apiFetchMock = vi.fn();
+vi.mock('../../../client/api.js', () => ({
+  apiFetch: (path: string, options?: RequestInit) => apiFetchMock(path, options),
+}));
+
 await import('./chat-message.js');
 type ScionChatMessage = import('./chat-message.js').ScionChatMessage;
+type AttachmentRefInfo = import('./chat-message.js').AttachmentRefInfo;
 
 /** Mount a message and wait for the async markdown render to land. */
 async function mount(body: string): Promise<ScionChatMessage> {
@@ -133,5 +148,139 @@ describe('scion-chat-message @mentions', () => {
     content.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
 
     expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+describe('scion-chat-message attachment previews', () => {
+  /** Mount a message carrying attachment refs and let the preview fetch land. */
+  async function mountAttachments(refs: AttachmentRefInfo[]): Promise<ScionChatMessage> {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.attachmentRefs = refs;
+    document.body.appendChild(el);
+    await settle(el);
+    return el;
+  }
+
+  /** Drain the fetch microtasks and the renders they trigger. */
+  async function settle(el: ScionChatMessage): Promise<void> {
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+  }
+
+  function editorIn(root: ParentNode | null | undefined): HTMLElement | null {
+    return root?.querySelector('scion-code-editor') ?? null;
+  }
+
+  function respondWith(text: string): void {
+    apiFetchMock.mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve(text) });
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    apiFetchMock.mockReset();
+    // Without an observer the component fetches straight away, which is the
+    // path these tests exercise.
+    vi.stubGlobal('IntersectionObserver', undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.body.innerHTML = '';
+  });
+
+  it('previews a text attachment as a read-only editor slice', async () => {
+    respondWith('package main\n\nfunc main() {}\n');
+    const el = await mountAttachments([
+      { id: 'att-go', name: 'main.go', mime: 'text/plain', size: 42 },
+    ]);
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/v1/chat/attachments/att-go', undefined);
+
+    const preview = el.shadowRoot?.querySelector('.attachment-preview');
+    expect(preview?.querySelector('.preview-filename')?.textContent).toBe('main.go');
+
+    const editor = editorIn(preview);
+    expect(editor).not.toBeNull();
+    expect(editor?.hasAttribute('readonly')).toBe(true);
+    expect(editor?.getAttribute('language')).toBe('go');
+    expect((editor as unknown as { content: string }).content).toBe(
+      'package main\n\nfunc main() {}\n'
+    );
+  });
+
+  it('clips the slice to the first lines of the file', async () => {
+    const lines = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
+    respondWith(lines.join('\n'));
+    const el = await mountAttachments([
+      { id: 'att-long', name: 'notes.txt', mime: 'text/plain', size: 600 },
+    ]);
+
+    const editor = editorIn(el.shadowRoot?.querySelector('.attachment-preview'));
+    const shown = (editor as unknown as { content: string }).content.split('\n');
+    expect(shown).toHaveLength(40);
+    expect(shown[39]).toBe('line 40');
+  });
+
+  it('expands to an overlay holding the whole file', async () => {
+    const lines = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
+    respondWith(lines.join('\n'));
+    const el = await mountAttachments([
+      { id: 'att-expand', name: 'notes.txt', mime: 'text/plain', size: 600 },
+    ]);
+
+    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+
+    const expand = el.shadowRoot?.querySelector(
+      'sl-icon-button[name="arrows-angle-expand"]'
+    ) as HTMLElement;
+    expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+
+    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview');
+    expect(dialog?.getAttribute('label')).toBe('notes.txt');
+    expect((editorIn(dialog) as unknown as { content: string }).content.split('\n')).toHaveLength(
+      60
+    );
+    expect(dialog?.querySelector('sl-button')?.getAttribute('href')).toBe(
+      '/api/v1/chat/attachments/att-expand'
+    );
+  });
+
+  it('offers a download link beside every preview', async () => {
+    respondWith('hello');
+    const el = await mountAttachments([
+      { id: 'att-dl', name: 'hello.txt', mime: 'text/plain', size: 5 },
+    ]);
+
+    const download = el.shadowRoot?.querySelector(
+      '.preview-actions sl-icon-button[name="download"]'
+    );
+    expect(download?.getAttribute('href')).toBe('/api/v1/chat/attachments/att-dl');
+    expect(download?.getAttribute('download')).toBe('hello.txt');
+  });
+
+  it('leaves binary and oversized attachments as download chips', async () => {
+    const el = await mountAttachments([
+      { id: 'att-zip', name: 'bundle.zip', mime: 'application/zip', size: 1024 },
+      { id: 'att-pdf', name: 'report.pdf', mime: 'application/pdf', size: 1024 },
+      { id: 'att-huge', name: 'huge.log', mime: 'text/plain', size: 5 * 1024 * 1024 },
+    ]);
+
+    expect(el.shadowRoot?.querySelectorAll('.attachment-preview')).toHaveLength(0);
+    expect(el.shadowRoot?.querySelectorAll('.download-chip')).toHaveLength(3);
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed fetch inside the preview instead of an empty editor', async () => {
+    apiFetchMock.mockResolvedValue({ ok: false, status: 404, text: () => Promise.resolve('') });
+    const el = await mountAttachments([
+      { id: 'att-gone', name: 'gone.txt', mime: 'text/plain', size: 12 },
+    ]);
+
+    const preview = el.shadowRoot?.querySelector('.attachment-preview');
+    expect(editorIn(preview)).toBeNull();
+    expect(preview?.querySelector('.preview-placeholder.error')?.textContent).toContain('404');
   });
 });

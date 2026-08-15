@@ -23,13 +23,17 @@
  * - Markdown content via the shared utility (or preformatted for plain:true)
  * - Code blocks: monospace, horizontal scroll, copy button (no syntax highlighting)
  * - Attachments: chip showing basename, full path on hover, NOT clickable
+ * - Text/code attachments: a short read-only preview slice with expand + download
  * - Badges: urgent, broadcasted, channel provenance
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
+import '../code-editor.js';
 
 /** Structured attachment reference from the W7 API. */
 export interface AttachmentRefInfo {
@@ -41,6 +45,131 @@ export interface AttachmentRefInfo {
 
 /** Image MIME types rendered inline. */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+/** Non-`text/*` MIME types whose bytes are still text. */
+const TEXT_MIMES = new Set([
+  'application/json',
+  'application/toml',
+  'application/xml',
+  'application/x-yaml',
+  'application/yaml',
+]);
+
+/**
+ * Extensions treated as text even when the MIME type does not say so — a
+ * browser labels plenty of code files `application/octet-stream`.
+ */
+const TEXT_EXTENSIONS = new Set([
+  '.bash',
+  '.cfg',
+  '.conf',
+  '.css',
+  '.csv',
+  '.env',
+  '.go',
+  '.html',
+  '.ini',
+  '.js',
+  '.json',
+  '.jsx',
+  '.log',
+  '.md',
+  '.py',
+  '.rs',
+  '.sh',
+  '.sql',
+  '.toml',
+  '.ts',
+  '.tsx',
+  '.txt',
+  '.xml',
+  '.yaml',
+  '.yml',
+]);
+
+/** Largest attachment fetched for an inline preview, in bytes. */
+const PREVIEW_MAX_BYTES = 512 * 1024;
+
+/** Lines handed to the collapsed slice — the rest needs the overlay. */
+const PREVIEW_MAX_LINES = 40;
+
+/** Lines that fit in the 200px slice; beyond this the edge is faded. */
+const PREVIEW_VISIBLE_LINES = 9;
+
+/** Lowercase extension including the dot, or '' when the name has none. */
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+/**
+ * True when an attachment holds text small enough to preview inline. Oversized
+ * files stay download-only: a preview must not pull megabytes into the thread.
+ */
+export function isTextPreviewable(ref: AttachmentRefInfo): boolean {
+  if (IMAGE_MIMES.has(ref.mime) || ref.size > PREVIEW_MAX_BYTES) return false;
+  const mime = ref.mime.split(';')[0].trim().toLowerCase();
+  if (mime.startsWith('text/') || TEXT_MIMES.has(mime)) return true;
+  return TEXT_EXTENSIONS.has(extensionOf(ref.name));
+}
+
+/** First `max` lines of `text`, used for the collapsed slice. */
+function firstLines(text: string, max: number): string {
+  const lines = text.split('\n');
+  return lines.length <= max ? text : lines.slice(0, max).join('\n');
+}
+
+/** Load state of one attachment preview. */
+interface PreviewState {
+  status: 'loading' | 'ready' | 'error';
+  text?: string;
+  error?: string;
+}
+
+/**
+ * Fetched attachment bodies keyed by attachment ID. Shared across message
+ * instances so scrolling back to a message costs nothing, and bounded so a
+ * long-lived thread cannot grow it without limit.
+ */
+const CONTENT_CACHE_LIMIT = 40;
+const contentCache = new Map<string, string>();
+const contentInFlight = new Map<string, Promise<string>>();
+
+/** Fetch an attachment body as text, de-duplicating concurrent requests. */
+async function fetchAttachmentText(id: string): Promise<string> {
+  const cached = contentCache.get(id);
+  if (cached !== undefined) return cached;
+
+  let pending = contentInFlight.get(id);
+  if (!pending) {
+    pending = (async () => {
+      const res = await apiFetch(attachmentURL(id));
+      if (!res.ok) throw new Error(`Preview unavailable (HTTP ${res.status})`);
+      return res.text();
+    })();
+    contentInFlight.set(id, pending);
+  }
+
+  try {
+    const text = await pending;
+    if (contentCache.size >= CONTENT_CACHE_LIMIT) {
+      // A Map iterates in insertion order, so the first key is the oldest.
+      for (const oldest of contentCache.keys()) {
+        contentCache.delete(oldest);
+        break;
+      }
+    }
+    contentCache.set(id, text);
+    return text;
+  } finally {
+    contentInFlight.delete(id);
+  }
+}
+
+/** Download/preview URL for an attachment. */
+function attachmentURL(id: string): string {
+  return `/api/v1/chat/attachments/${encodeURIComponent(id)}`;
+}
 
 /** Format file size for display. */
 function formatFileSize(bytes: number): string {
@@ -182,7 +311,18 @@ export class ScionChatMessage extends LitElement {
   @state()
   private renderedHtml = '';
 
+  /** Preview load state per attachment ID. Replaced, never mutated. */
+  @state()
+  private previews: ReadonlyMap<string, PreviewState> = new Map();
+
+  /** Attachment shown in the full-height overlay, if any. */
+  @state()
+  private expanded: AttachmentRefInfo | null = null;
+
   private renderTaskId = 0;
+
+  private previewObserver: IntersectionObserver | null = null;
+  private observedPreviews = new WeakSet<Element>();
 
   static override styles = css`
     :host {
@@ -556,6 +696,104 @@ export class ScionChatMessage extends LitElement {
       font-size: 0.6875rem;
     }
 
+    /* Inline code/text previews for non-image attachments */
+    .attachment-preview {
+      margin-top: 0.375rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      overflow: hidden;
+      background: var(--scion-surface, #ffffff);
+    }
+
+    .preview-header {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.125rem 0.25rem 0.125rem 0.5rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .preview-filename {
+      flex: 1;
+      min-width: 0;
+      font-family: var(--scion-font-mono, 'SF Mono', 'Fira Code', monospace);
+      font-size: 0.75rem;
+      color: var(--scion-text, #1e293b);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .preview-size {
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #64748b);
+      white-space: nowrap;
+    }
+
+    .preview-actions {
+      display: flex;
+      gap: 0.125rem;
+    }
+
+    .preview-actions sl-icon-button::part(base) {
+      padding: 0.25rem;
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    /*
+     * The card already draws a frame, so the editor's own border is hidden by
+     * blanking the custom property it reads.
+     */
+    .preview-body {
+      position: relative;
+      max-height: 200px;
+      overflow: hidden;
+      --scion-border: transparent;
+      --scion-radius: 0;
+    }
+
+    /* Fade the clipped edge so it reads as "there is more below". */
+    .preview-body.clipped::after {
+      content: '';
+      position: absolute;
+      inset: auto 0 0 0;
+      height: 2.5rem;
+      background: linear-gradient(transparent, var(--scion-surface, #ffffff));
+      pointer-events: none;
+    }
+
+    .preview-placeholder {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .preview-placeholder sl-spinner {
+      font-size: 0.875rem;
+    }
+
+    .preview-placeholder.error {
+      color: var(--scion-danger-600, #dc2626);
+    }
+
+    .full-preview::part(panel) {
+      width: 90vw;
+      max-width: 900px;
+    }
+
+    .full-preview::part(body) {
+      padding-top: 0;
+    }
+
+    .full-preview .preview-placeholder {
+      padding: 2rem;
+    }
+
     /* Verbose (recessed) rendering — no bubble, muted text, small label */
     .message-wrapper.verbose .bubble-content {
       background: none;
@@ -661,6 +899,13 @@ export class ScionChatMessage extends LitElement {
     void this.renderContent();
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.previewObserver?.disconnect();
+    this.previewObserver = null;
+    this.observedPreviews = new WeakSet();
+  }
+
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('body') || changed.has('plain')) {
       void this.renderContent();
@@ -668,6 +913,67 @@ export class ScionChatMessage extends LitElement {
     if (changed.has('renderedHtml')) {
       this.injectCopyButtons();
     }
+    this.observePreviews();
+  }
+
+  /**
+   * Watch each preview slice and fetch its content once it nears the viewport.
+   * A long thread would otherwise download every attached file on load.
+   * Without an IntersectionObserver (older engines, tests) the content is
+   * fetched straight away.
+   */
+  private observePreviews(): void {
+    const nodes = this.shadowRoot?.querySelectorAll<HTMLElement>('.attachment-preview[data-id]');
+    if (!nodes || nodes.length === 0) return;
+
+    if (typeof IntersectionObserver !== 'function') {
+      nodes.forEach((node) => {
+        const id = node.dataset.id;
+        if (id) void this.loadPreview(id);
+      });
+      return;
+    }
+
+    if (!this.previewObserver) {
+      this.previewObserver = new IntersectionObserver(
+        (entries, observer) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            observer.unobserve(entry.target);
+            const id = (entry.target as HTMLElement).dataset.id;
+            if (id) void this.loadPreview(id);
+          }
+        },
+        { rootMargin: '200px' }
+      );
+    }
+
+    nodes.forEach((node) => {
+      if (this.observedPreviews.has(node)) return;
+      this.observedPreviews.add(node);
+      this.previewObserver?.observe(node);
+    });
+  }
+
+  /** Fetch one attachment's text, recording load state for the template. */
+  private async loadPreview(id: string): Promise<void> {
+    if (this.previews.has(id)) return;
+    this.setPreview(id, { status: 'loading' });
+    try {
+      const text = await fetchAttachmentText(id);
+      this.setPreview(id, { status: 'ready', text });
+    } catch (err) {
+      this.setPreview(id, {
+        status: 'error',
+        error: err instanceof Error ? err.message : 'Preview unavailable',
+      });
+    }
+  }
+
+  private setPreview(id: string, state: PreviewState): void {
+    const next = new Map(this.previews);
+    next.set(id, state);
+    this.previews = next;
   }
 
   /** Inject copy buttons on all code blocks inside rendered markdown. */
@@ -781,6 +1087,7 @@ export class ScionChatMessage extends LitElement {
           ${this.renderDeliveryState()} ${this.renderBadges()} ${this.renderAttachments()}
         </div>
       </div>
+      ${this.renderFullPreview()}
     `;
   }
 
@@ -891,10 +1198,15 @@ export class ScionChatMessage extends LitElement {
     `;
   }
 
-  /** Render W7 structured attachments: inline images + download chips. */
+  /**
+   * Render W7 structured attachments: inline images, code previews for text
+   * files, and download chips for everything else.
+   */
   private renderV2Attachments() {
     const images = this.attachmentRefs.filter((a) => IMAGE_MIMES.has(a.mime));
-    const files = this.attachmentRefs.filter((a) => !IMAGE_MIMES.has(a.mime));
+    const rest = this.attachmentRefs.filter((a) => !IMAGE_MIMES.has(a.mime));
+    const previewable = rest.filter(isTextPreviewable);
+    const files = rest.filter((a) => !isTextPreviewable(a));
 
     return html`
       ${images.length > 0
@@ -916,6 +1228,7 @@ export class ScionChatMessage extends LitElement {
             </div>
           `
         : nothing}
+      ${previewable.map((file) => this.renderCodePreview(file))}
       ${files.length > 0
         ? html`
             <div class="attachments">
@@ -937,6 +1250,90 @@ export class ScionChatMessage extends LitElement {
           `
         : nothing}
     `;
+  }
+
+  /** A short read-only slice of a text attachment, with expand + download. */
+  private renderCodePreview(ref: AttachmentRefInfo) {
+    const state = this.previews.get(ref.id);
+    // Only fade the bottom edge when the file really does run past the slice.
+    const clipped =
+      state?.status === 'ready' && (state.text ?? '').split('\n').length > PREVIEW_VISIBLE_LINES;
+    return html`
+      <div class="attachment-preview" data-id=${ref.id}>
+        <div class="preview-header">
+          <span class="preview-filename" title=${ref.name}>${ref.name}</span>
+          <span class="preview-size">${formatFileSize(ref.size)}</span>
+          <div class="preview-actions">
+            <sl-icon-button
+              name="arrows-angle-expand"
+              label="Expand ${ref.name}"
+              @click=${() => this.openFullPreview(ref)}
+            ></sl-icon-button>
+            <sl-icon-button
+              name="download"
+              label="Download ${ref.name}"
+              href=${attachmentURL(ref.id)}
+              download=${ref.name}
+            ></sl-icon-button>
+          </div>
+        </div>
+        <div class="preview-body ${clipped ? 'clipped' : ''}">
+          ${this.renderPreviewBody(ref, state)}
+        </div>
+      </div>
+    `;
+  }
+
+  /** Editor, spinner or error for one preview, depending on load state. */
+  private renderPreviewBody(ref: AttachmentRefInfo, state: PreviewState | undefined, full = false) {
+    if (!state || state.status === 'loading') {
+      return html`
+        <div class="preview-placeholder">
+          <sl-spinner></sl-spinner>
+          Loading preview…
+        </div>
+      `;
+    }
+    if (state.status === 'error') {
+      return html`<div class="preview-placeholder error">${state.error}</div>`;
+    }
+    const text = state.text ?? '';
+    return html`
+      <scion-code-editor
+        .content=${full ? text : firstLines(text, PREVIEW_MAX_LINES)}
+        language=${getLanguageFromPath(ref.name)}
+        readonly
+      ></scion-code-editor>
+    `;
+  }
+
+  /** Full-height overlay for the expanded attachment, when one is open. */
+  private renderFullPreview() {
+    const ref = this.expanded;
+    if (!ref) return nothing;
+
+    return html`
+      <sl-dialog
+        class="full-preview"
+        open
+        label=${ref.name}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target === e.currentTarget) this.expanded = null;
+        }}
+      >
+        ${this.renderPreviewBody(ref, this.previews.get(ref.id), true)}
+        <sl-button slot="footer" href=${attachmentURL(ref.id)} download=${ref.name}>
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Download
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  /** Open the overlay, fetching the content if the slice has not yet. */
+  private openFullPreview(ref: AttachmentRefInfo): void {
+    this.expanded = ref;
+    void this.loadPreview(ref.id);
   }
 
   private formatTime(): string {

@@ -49,6 +49,7 @@ const USED_ICONS = [
   'arrow-return-right',
   'arrow-right-circle',
   'arrow-up',
+  'arrows-angle-expand',
   'bar-chart',
   'bell',
   'box-arrow-in-right',
