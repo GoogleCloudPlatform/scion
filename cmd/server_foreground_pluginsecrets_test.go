@@ -30,14 +30,12 @@ import (
 // fakeSecretBackend is an in-memory secret.SecretBackend for migration tests.
 // Only Get, Set and HubID are exercised by secretmigration.MigratePluginSecrets.
 type fakeSecretBackend struct {
-	hubID        string
-	values       map[string]string
-	descriptions map[string]string
-	sets         int
+	hubID  string
+	values map[string]string
 }
 
 func newFakeSecretBackend() *fakeSecretBackend {
-	return &fakeSecretBackend{hubID: "hub-1", values: map[string]string{}, descriptions: map[string]string{}}
+	return &fakeSecretBackend{hubID: "hub-1", values: map[string]string{}}
 }
 
 func (f *fakeSecretBackend) HubID() string { return f.hubID }
@@ -51,8 +49,6 @@ func (f *fakeSecretBackend) Get(_ context.Context, name, _, _ string) (*secret.S
 }
 
 func (f *fakeSecretBackend) Set(_ context.Context, in *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
-	f.sets++
-	f.descriptions[in.Name] = in.Description
 	_, existed := f.values[in.Name]
 	f.values[in.Name] = in.Value
 	return !existed, &secret.SecretMeta{Name: in.Name}, nil
