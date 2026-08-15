@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -222,6 +223,20 @@ func TestGetIntegration_DoesNotMigrateSecrets(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
+
+	// Positive assertion first: chat_id is a non-secret key that only exists in
+	// the config file, so seeing it proves the handler actually resolved the
+	// file. Without this the no-write assertion below could pass simply because
+	// the read path never ran.
+	var detail IntegrationDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := detail.Settings["chat_id"]; got != "42" {
+		t.Fatalf("chat_id in response = %q, want %q — the config file was not "+
+			"resolved, so the no-write assertion below proves nothing", got, "42")
+	}
+
 	if len(sb.sets) != 0 {
 		t.Errorf("GET must not write to the secret backend, got %+v", sb.sets)
 	}
@@ -239,8 +254,15 @@ func TestLoadTeamsConfig_DoesNotMigrateSecrets(t *testing.T) {
 	}
 	mgr.plugins["teams"] = map[string]string{"config_file": configFile}
 
-	if _, err := srv.loadTeamsConfig(); err != nil {
+	cfg, err := srv.loadTeamsConfig()
+	if err != nil {
 		t.Fatalf("loadTeamsConfig: %v", err)
+	}
+	// Positive assertion first: without it this test would pass vacuously if
+	// loadTeamsConfig stopped reading the config file at all.
+	if got := cfg["app_id"]; got != "abc" {
+		t.Fatalf("app_id = %q, want %q — the config file was not read, so the "+
+			"no-write assertion below proves nothing", got, "abc")
 	}
 	if len(sb.sets) != 0 {
 		t.Errorf("manifest generation must not write to the secret backend, got %+v", sb.sets)
