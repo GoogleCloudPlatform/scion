@@ -645,6 +645,29 @@ func TestDetermineUserRole(t *testing.T) {
 			currentRole: "admin",
 			expected:    "admin",
 		},
+		{
+			// Regression: config must not rewrite a UI-set viewer to member.
+			name:        "viewer is preserved",
+			email:       "viewer@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "viewer",
+			expected:    "viewer",
+		},
+		{
+			name:        "viewer with empty admin emails is preserved",
+			email:       "viewer@example.com",
+			adminEmails: nil,
+			currentRole: "viewer",
+			expected:    "viewer",
+		},
+		{
+			// Config always promotes, even over an established role.
+			name:        "viewer in admin emails is promoted to admin",
+			email:       "viewer@example.com",
+			adminEmails: []string{"viewer@example.com"},
+			currentRole: "viewer",
+			expected:    "admin",
+		},
 	}
 
 	for _, tc := range tests {

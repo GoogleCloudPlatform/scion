@@ -1478,10 +1478,22 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				currentRole, _ := session.Values[sessKeyUserRole].(string)
 				// The stored role is the source of truth: it carries UI-granted
 				// promotions (and demotions) that the config list knows nothing
-				// about. Fall back to the session role if it can't be read.
+				// about. If it can't be read we deliberately fall back to the
+				// session role, preserving the status quo rather than extending
+				// privilege: unlike a refresh token, the session cookie is not
+				// re-minted here, so a transient read failure cannot lengthen
+				// the life of a stale role.
 				storedRole := currentRole
+				// A nil store is fatal further down this middleware (see the
+				// check before proxy provisioning), but this branch returns
+				// before reaching it, so the guard is load-bearing here.
 				if ws.store != nil {
 					if u, err := ws.store.GetUserByEmail(r.Context(), email); err == nil {
+						if u.Status == "suspended" {
+							ws.logger().Warn("Proxy auth: session user is suspended", "email", email, "user_id", u.ID)
+							http.Error(w, "access denied: user account is suspended", http.StatusForbidden)
+							return
+						}
 						storedRole = u.Role
 					}
 				}

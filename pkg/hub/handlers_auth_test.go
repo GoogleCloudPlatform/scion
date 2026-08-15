@@ -331,6 +331,123 @@ func TestAuthRefreshRoleReevaluation(t *testing.T) {
 			t.Errorf("expected refreshed token role 'member', got %q", role)
 		}
 	})
+
+	t.Run("UI-set viewer keeps viewer role", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_viewer"),
+			Email:   "viewer@example.com",
+			Role:    "viewer",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		if role := refresh(t, srv, refreshToken); role != "viewer" {
+			t.Errorf("expected refreshed token role 'viewer', got %q", role)
+		}
+
+		stored, err := s.GetUserByEmail(ctx, user.Email)
+		if err != nil {
+			t.Fatalf("user not found: %v", err)
+		}
+		if stored.Role != "viewer" {
+			t.Errorf("expected stored role 'viewer', got %q", stored.Role)
+		}
+	})
+
+	t.Run("deleted admin cannot refresh into admin", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_deleted"),
+			Email:   "deleted-admin@example.com",
+			Role:    "admin",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		// Token carries the admin role the user held before offboarding.
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, "admin", ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		if err := s.DeleteUser(ctx, user.ID); err != nil {
+			t.Fatalf("failed to delete user: %v", err)
+		}
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh",
+			AuthRefreshRequest{RefreshToken: refreshToken})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected status 401 for deleted user, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		// Belt and braces: even if the handler were changed to keep issuing
+		// tokens, it must never hand back the admin role from the claim.
+		if rec.Code == http.StatusOK {
+			var resp AuthRefreshResponse
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			claims, err := srv.userTokenService.ValidateUserToken(resp.AccessToken)
+			if err != nil {
+				t.Fatalf("failed to validate refreshed access token: %v", err)
+			}
+			if claims.Role == "admin" {
+				t.Error("deleted user retained admin role from the JWT claim")
+			}
+		}
+	})
+
+	t.Run("suspended user cannot refresh", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_suspended"),
+			Email:   "suspended@example.com",
+			Role:    "admin",
+			Status:  "suspended",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, "admin", ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh",
+			AuthRefreshRequest{RefreshToken: refreshToken})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected status 403 for suspended user, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestAuthValidate(t *testing.T) {

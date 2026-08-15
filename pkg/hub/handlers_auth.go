@@ -451,16 +451,38 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 
 	// Re-evaluate admin status on token refresh. The stored role is the source
 	// of truth for UI-granted promotions; admin_emails can only add to it.
+	//
+	// storedRole deliberately starts empty rather than at claims.Role: if the
+	// store cannot be read we fall back to config-only evaluation instead of
+	// trusting the token's own role claim, which would let a stale admin claim
+	// renew itself indefinitely through the rotating refresh chain.
 	role := claims.Role
-	currentRole := role
+	storedRole := ""
 	var user *store.User
 	if s.store != nil {
-		if u, err := s.store.GetUserByEmail(r.Context(), claims.Email); err == nil {
+		u, err := s.store.GetUserByEmail(r.Context(), claims.Email)
+		switch {
+		case err == nil:
 			user = u
-			currentRole = u.Role
+			storedRole = u.Role
+		case errors.Is(err, store.ErrNotFound):
+			// The user no longer exists — refuse to mint a new token pair.
+			slog.Warn("Refresh rejected: user no longer exists", "email", claims.Email)
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+				"invalid refresh token", nil)
+			return
+		default:
+			slog.Warn("Refresh: user lookup failed, falling back to config-only role",
+				"email", claims.Email, "error", err)
 		}
 	}
-	if newRole := s.getUserRole(claims.Email, currentRole); role != newRole {
+	if user != nil && user.Status == "suspended" {
+		slog.Warn("Refresh rejected: user is suspended", "email", claims.Email, "user_id", user.ID)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"user account is suspended", nil)
+		return
+	}
+	if newRole := s.getUserRole(claims.Email, storedRole); role != newRole {
 		slog.Info("User role changed on token refresh", "email", claims.Email, "old_role", role, "new_role", newRole)
 		role = newRole
 		// Persist the role change
@@ -1399,10 +1421,11 @@ func isEmailAuthorized(email string, authorizedDomains []string, adminEmails []s
 // role they currently hold.
 //
 // The adminEmails config list is additive-only: it acts as a floor, not a
-// ceiling. A user is "admin" if their email is in adminEmails OR if they are
-// already an admin (for example, promoted through the admin UI). Config can
-// therefore promote a user, but it never demotes one — demotion is an explicit
-// admin action through the UI/API.
+// ceiling. A user is "admin" if their email is in adminEmails, so config always
+// promotes. Otherwise any role the user already holds is preserved verbatim —
+// including "viewer" and any role added in future — so config never demotes or
+// rewrites a role set through the admin UI/API. Only a user with no stored role
+// (that is, one that does not exist yet) defaults to "member".
 //
 // currentRole is the user's role as stored in the database; pass "" for a user
 // that does not exist yet.
@@ -1413,8 +1436,8 @@ func determineUserRole(email string, adminEmails []string, currentRole string) s
 			return "admin"
 		}
 	}
-	if currentRole == "admin" {
-		return "admin"
+	if currentRole != "" {
+		return currentRole
 	}
 	return "member"
 }
