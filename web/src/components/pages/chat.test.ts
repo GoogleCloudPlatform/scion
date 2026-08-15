@@ -31,6 +31,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { render, type TemplateResult } from 'lit';
+import { apiFetch } from '../../client/api.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -75,6 +76,20 @@ function renderToFragment(tpl: TemplateResult): HTMLElement {
   const host = document.createElement('div');
   render(tpl, host);
   return host;
+}
+
+/**
+ * Answer the topic detail endpoint with a thread's metadata. Every other
+ * request the route parse fires (members, agents) gets an empty object.
+ */
+function serveTopic(topic: { name?: string; defaultAgent?: string }): void {
+  vi.mocked(apiFetch).mockImplementation((path: string) =>
+    Promise.resolve(
+      new Response(path.startsWith('/api/v1/chat/topics/') ? JSON.stringify(topic) : '{}', {
+        status: 200,
+      })
+    )
+  );
 }
 
 /** Fire a mention click at the page as the message component would. */
@@ -205,6 +220,72 @@ describe('chat page — mobile panel default and header navigation', () => {
     expect(el.v2MembersExpanded).toBe(false);
     // The desktop toggle must not move the mobile track.
     expect(el.mobilePanel).toBe('center');
+  });
+
+  it('gives the members panel a back button to the conversation', () => {
+    const el = createPage();
+    el.mobilePanel = 'right';
+    const back = renderToFragment(el.renderMobileBackButton('center')).querySelector('.mobile-back');
+
+    back?.dispatchEvent(new Event('click'));
+
+    expect(el.mobilePanel).toBe('center');
+  });
+});
+
+describe('chat page — deep-linked thread header', () => {
+  /** Open /chat/<slug>/<threadId> with the slug already resolved. */
+  function deepLinkToThread(el: any): void {
+    el._slugToProjectId.set('chat-test', 'proj-1');
+    window.history.replaceState({}, '', '/chat/chat-test/topic-1');
+    el.parseV2Route();
+  }
+
+  it('renders the header before the thread name has resolved', () => {
+    serveTopic({});
+    const el = createPage();
+    deepLinkToThread(el);
+    expect(el.v2Conversation.threadName).toBe('');
+
+    const header = renderToFragment(el.renderV2Conversation()).querySelector('.v2-thread-header');
+
+    // No name yet, but the way out of the conversation must still be there.
+    expect(header).not.toBeNull();
+    expect(header?.querySelector('.mobile-back')).not.toBeNull();
+  });
+
+  it('fills the thread name in from the topic endpoint', async () => {
+    serveTopic({ name: 'general', defaultAgent: 'coder-one' });
+    const el = createPage();
+
+    deepLinkToThread(el);
+
+    await vi.waitFor(() => expect(el.v2Conversation.threadName).toBe('general'));
+    expect(el.v2Conversation.defaultAgent).toBe('coder-one');
+    const header = renderToFragment(el.renderV2Conversation()).querySelector('.v2-thread-header');
+    expect(header?.textContent).toContain('general');
+  });
+
+  it('keeps a resolved name across a re-parse of the same route', async () => {
+    serveTopic({ name: 'general' });
+    const el = createPage();
+    deepLinkToThread(el);
+    await vi.waitFor(() => expect(el.v2Conversation.threadName).toBe('general'));
+
+    // The rail finishing its load re-parses the route.
+    el.parseV2Route();
+
+    expect(el.v2Conversation.threadName).toBe('general');
+  });
+
+  it('renders the header for a DM whose peer has not resolved yet', () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/dm/dm:agent:agent-9:user:user-me');
+
+    el.parseV2Route();
+
+    const header = renderToFragment(el.renderV2Conversation()).querySelector('.v2-thread-header');
+    expect(header).not.toBeNull();
   });
 });
 

@@ -69,6 +69,9 @@ interface RailPrefs {
   spaceOrder: string[] | undefined;
 }
 
+/** Viewport width at or below which the chat panels are separate screens. */
+const MOBILE_BREAKPOINT_PX = 768;
+
 /** Event detail for thread selection. */
 export interface ThreadSelectDetail {
   conversationKey: string;
@@ -459,6 +462,17 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  /**
+   * Expand a space without selecting a thread in it. Mobile space navigation
+   * stops here: the point is to show the thread list, not to open a thread.
+   */
+  expandSpace(projectId: string): void {
+    if (!this.collapsedSpaces.has(projectId)) return;
+    const next = new Set(this.collapsedSpaces);
+    next.delete(projectId);
+    this.collapsedSpaces = next;
+  }
+
   /** Expand the space that contains the currently selected thread. */
   private expandSpaceForSelectedKey(): void {
     for (const space of this.spaces) {
@@ -736,15 +750,22 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  /** Are we under the breakpoint where the rail is a screen of its own? */
+  private isMobileViewport(): boolean {
+    return window.innerWidth <= MOBILE_BREAKPOINT_PX;
+  }
+
   private handleCollapsedSpaceClick(space: ChatSpace): void {
-    // If collapsed, clicking opens #general
+    // On desktop the rail sits beside the conversation, so opening #general
+    // costs the user nothing. On mobile selecting a thread slides the rail
+    // off-screen, which would hide the thread list the tap was asking to
+    // see — there the expansion is all this does.
+    this.expandSpace(space.projectId);
+    if (this.isMobileViewport()) return;
+
     const threads = this.threadsBySpace.get(space.projectId) || [];
     const general = threads.find((t) => t.isGeneral);
     if (general) {
-      // Expand and select #general
-      const newSet = new Set(this.collapsedSpaces);
-      newSet.delete(space.projectId);
-      this.collapsedSpaces = newSet;
       this.handleThreadClick(general, space.projectId);
     }
   }

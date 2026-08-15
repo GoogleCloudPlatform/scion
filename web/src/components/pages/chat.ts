@@ -176,6 +176,12 @@ interface V2ConversationState {
   peerKind: 'user' | 'agent';
 }
 
+/** The parts of a thread that a URL does not carry and have to be resolved. */
+interface ThreadMeta {
+  threadName: string;
+  defaultAgent: string;
+}
+
 interface SpaceMember {
   id: string;
   name: string;
@@ -452,7 +458,7 @@ export class ScionPageChat extends LitElement {
     .v2-members-header {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      gap: 0.25rem;
       padding: 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       font-size: 0.8125rem;
@@ -933,15 +939,13 @@ export class ScionPageChat extends LitElement {
         navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topicId)}`);
         return;
       }
-      const existingDefault = this.v2Conversation?.conversationKey === topicId
-        ? this.v2Conversation.defaultAgent
-        : '';
+      const known = this.knownThreadMeta(topicId);
       this.v2Conversation = {
         conversationKey: topicId,
         projectId,
         projectSlug: '',
-        threadName: '',
-        defaultAgent: existingDefault,
+        threadName: known.threadName,
+        defaultAgent: known.defaultAgent,
         isDM: false,
         peerName: '',
         peerId: '',
@@ -950,10 +954,7 @@ export class ScionPageChat extends LitElement {
       this.classList.add('thread-open');
       this.mobilePanel = 'center';
       void this.loadV2Members(projectId);
-      if (!existingDefault) {
-        void this.fetchThreadDefaultAgent(topicId);
-      }
-      dispatchPageTitle(this, 'Thread', 'Chat');
+      this.applyThreadMeta(topicId, known);
       return;
     }
 
@@ -1063,15 +1064,13 @@ export class ScionPageChat extends LitElement {
       // Resolve slug → projectId (may need async API call on cold load)
       const projectId = this._slugToProjectId.get(segment1);
       if (projectId) {
-        const existingDefault = this.v2Conversation?.conversationKey === threadId
-          ? this.v2Conversation.defaultAgent
-          : '';
+        const known = this.knownThreadMeta(threadId);
         this.v2Conversation = {
           conversationKey: threadId,
           projectId,
           projectSlug: segment1,
-          threadName: '',
-          defaultAgent: existingDefault,
+          threadName: known.threadName,
+          defaultAgent: known.defaultAgent,
           isDM: false,
           peerName: '',
           peerId: '',
@@ -1080,10 +1079,7 @@ export class ScionPageChat extends LitElement {
         this.classList.add('thread-open');
         this.mobilePanel = 'center';
         void this.loadV2Members(projectId);
-        if (!existingDefault) {
-          void this.fetchThreadDefaultAgent(threadId);
-        }
-        dispatchPageTitle(this, 'Thread', 'Chat');
+        this.applyThreadMeta(threadId, known);
       } else {
         // Slug not yet in cache — resolve via API (deep-link cold load)
         void this.resolveSlugAndOpenThread(segment1, threadId);
@@ -1134,15 +1130,13 @@ export class ScionPageChat extends LitElement {
     const projectId = await this.resolveProjectBySlug(slug);
     if (!projectId) return;
 
-    const existingDefault = this.v2Conversation?.conversationKey === threadId
-      ? this.v2Conversation.defaultAgent
-      : '';
+    const known = this.knownThreadMeta(threadId);
     this.v2Conversation = {
       conversationKey: threadId,
       projectId,
       projectSlug: slug,
-      threadName: '',
-      defaultAgent: existingDefault,
+      threadName: known.threadName,
+      defaultAgent: known.defaultAgent,
       isDM: false,
       peerName: '',
       peerId: '',
@@ -1151,10 +1145,7 @@ export class ScionPageChat extends LitElement {
     this.classList.add('thread-open');
     this.mobilePanel = 'center';
     void this.loadV2Members(projectId);
-    if (!existingDefault) {
-      void this.fetchThreadDefaultAgent(threadId);
-    }
-    dispatchPageTitle(this, 'Thread', 'Chat');
+    this.applyThreadMeta(threadId, known);
   }
 
   /**
@@ -1200,8 +1191,8 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Select a space by slug: wait for the rail to be available, then
-   * ask it to open #general for the given project.
+   * Select a space by slug: wait for the rail to be available, then open
+   * #general for the given project — or, on mobile, just expand the space.
    */
   private async selectSpaceBySlug(slug: string, projectId: string): Promise<void> {
     // The rail may not have loaded yet; wait for it
@@ -1211,6 +1202,17 @@ export class ScionPageChat extends LitElement {
 
     if (!rail) {
       // Rail not mounted yet — the rail-loaded handler will re-parse the route
+      return;
+    }
+
+    // On mobile the rail is a screen of its own, so opening a space expands it
+    // in place. Dropping the user into #general would slide the rail — and the
+    // thread list they came to choose from — off-screen.
+    if (this.isMobileViewport()) {
+      rail.expandSpace(projectId);
+      this.mobilePanel = 'left';
+      void this.loadV2Members(projectId);
+      dispatchPageTitle(this, slug, 'Chat');
       return;
     }
 
@@ -1482,28 +1484,53 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Fetch the defaultAgent for a thread from the topic detail endpoint.
-   * Called on first load of a thread (not on re-parse of the same thread).
+   * Thread metadata already resolved for this conversation. A URL only
+   * carries the topic ID, so parseV2Route rebuilds the conversation from
+   * scratch on every re-parse (the rail loading triggers one) — without
+   * carrying the name and default agent forward they would be dropped and
+   * re-fetched each time.
    */
-  private async fetchThreadDefaultAgent(conversationKey: string): Promise<void> {
+  private knownThreadMeta(conversationKey: string): ThreadMeta {
+    const conv = this.v2Conversation;
+    if (!conv || conv.isDM || conv.conversationKey !== conversationKey) {
+      return { threadName: '', defaultAgent: '' };
+    }
+    return { threadName: conv.threadName, defaultAgent: conv.defaultAgent };
+  }
+
+  /** Title the page for a thread and fetch whatever the route did not carry. */
+  private applyThreadMeta(conversationKey: string, known: ThreadMeta): void {
+    dispatchPageTitle(this, known.threadName ? `#${known.threadName}` : 'Thread', 'Chat');
+    if (!known.threadName || !known.defaultAgent) {
+      void this.fetchThreadDetails(conversationKey);
+    }
+  }
+
+  /**
+   * Fetch a thread's name and default agent from the topic detail endpoint.
+   * Deep links, reloads and Forward arrive with only the topic ID in the URL,
+   * so this is the only source of the name the header renders.
+   */
+  private async fetchThreadDetails(conversationKey: string): Promise<void> {
     try {
       const res = await apiFetch(
         `/api/v1/chat/topics/${encodeURIComponent(conversationKey)}`
       );
-      if (res.ok) {
-        const data = (await res.json()) as { defaultAgent?: string };
-        if (
-          this.v2Conversation?.conversationKey === conversationKey &&
-          data.defaultAgent
-        ) {
-          this.v2Conversation = {
-            ...this.v2Conversation,
-            defaultAgent: data.defaultAgent,
-          };
-        }
+      if (!res.ok) return;
+      const data = (await res.json()) as { name?: string; defaultAgent?: string };
+      const conv = this.v2Conversation;
+      // The user may have moved on while the request was in flight.
+      if (!conv || conv.conversationKey !== conversationKey) return;
+      this.v2Conversation = {
+        ...conv,
+        threadName: data.name || conv.threadName,
+        defaultAgent: data.defaultAgent || conv.defaultAgent,
+      };
+      if (data.name) {
+        dispatchPageTitle(this, `#${data.name}`, 'Chat');
       }
     } catch {
-      // Non-critical — thread will work without a default agent
+      // Non-critical — the thread still works without its metadata
     }
   }
 
@@ -2297,6 +2324,7 @@ export class ScionPageChat extends LitElement {
 
         <div class="v2-members ${this.v2MembersExpanded ? '' : 'collapsed'}">
           <div class="v2-members-header">
+            ${this.renderMobileBackButton('center')}
             <span>Members</span>
           </div>
           <scion-chat-members
@@ -2335,17 +2363,19 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Back chevron shown only on mobile, where the space rail is off-screen and
-   * otherwise reachable only by an undiscoverable swipe.
+   * Back chevron shown only on mobile, where the neighbouring panels are
+   * off-screen and otherwise reachable only by an undiscoverable swipe.
+   * The conversation header steps back to the rail; the members header
+   * steps back to the conversation.
    */
-  private renderMobileBackButton() {
+  private renderMobileBackButton(target: 'left' | 'center' = 'left') {
     return html`
       <sl-icon-button
         class="mobile-back"
         name="chevron-left"
         label="Back"
         @click=${() => {
-          this.mobilePanel = 'left';
+          this.mobilePanel = target;
         }}
       ></sl-icon-button>
     `;
@@ -2387,11 +2417,15 @@ export class ScionPageChat extends LitElement {
       ? this.getAgentProjectSlug(conv.peerId)
       : '';
 
+    // The header renders for every open conversation, not only once the name
+    // has resolved: on a deep link or reload the name arrives from the topic
+    // endpoint a moment later, and until then the back / search / members
+    // controls are the only way out of the conversation on mobile.
     return html`
-      ${conv.isDM && conv.peerName
-        ? html`
-            <div class="v2-thread-header">
-              ${this.renderMobileBackButton()}
+      <div class="v2-thread-header">
+        ${this.renderMobileBackButton()}
+        ${conv.isDM
+          ? html`
               ${conv.peerKind === 'agent' && agentProjectSlug
                 ? html`<sl-icon name="folder" style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b)"></sl-icon>
                         <span style="font-size: 0.8125rem; color: var(--scion-text-muted, #64748b)">${agentProjectSlug}</span>`
@@ -2403,44 +2437,30 @@ export class ScionPageChat extends LitElement {
                     style="font-size: 0.875rem; color: var(--scion-text-muted)"
                   ></sl-icon>`}
               <span>${conv.peerName}</span>
-              <div class="header-actions" style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;">
-                <sl-tooltip content="Search messages">
-                  <sl-icon-button
-                    name="search"
-                    label="Search messages"
-                    @click=${() => void this.openSearch()}
-                  ></sl-icon-button>
-                </sl-tooltip>
-                ${this.renderMembersButtons()}
-              </div>
-            </div>
-          `
-        : conv.threadName
-          ? html`
-              <div class="v2-thread-header">
-                ${this.renderMobileBackButton()}
-                <span class="hash">#</span>
-                <span>${conv.threadName}</span>
-                ${conv.defaultAgent
-                  ? html`
-                      <sl-tooltip content="Default agent: ${conv.defaultAgent}">
-                        <span>🤖</span>
-                      </sl-tooltip>
-                    `
-                  : nothing}
-                <div class="header-actions" style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;">
-                  <sl-tooltip content="Search messages">
-                    <sl-icon-button
-                      name="search"
-                      label="Search messages"
-                      @click=${() => void this.openSearch()}
-                    ></sl-icon-button>
-                  </sl-tooltip>
-                  ${this.renderMembersButtons()}
-                </div>
-              </div>
             `
-          : nothing}
+          : html`
+              ${conv.threadName
+                ? html`<span class="hash">#</span><span>${conv.threadName}</span>`
+                : nothing}
+              ${conv.defaultAgent
+                ? html`
+                    <sl-tooltip content="Default agent: ${conv.defaultAgent}">
+                      <span>🤖</span>
+                    </sl-tooltip>
+                  `
+                : nothing}
+            `}
+        <div class="header-actions" style="display: flex; align-items: center; gap: 0.25rem; margin-left: auto;">
+          <sl-tooltip content="Search messages">
+            <sl-icon-button
+              name="search"
+              label="Search messages"
+              @click=${() => void this.openSearch()}
+            ></sl-icon-button>
+          </sl-tooltip>
+          ${this.renderMembersButtons()}
+        </div>
+      </div>
       ${this.v2SearchActive && this.v2SearchLoaded
         ? html`
             <scion-chat-search
