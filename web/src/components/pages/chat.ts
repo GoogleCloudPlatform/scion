@@ -993,11 +993,15 @@ export class ScionPageChat extends LitElement {
       }
 
       // Guard: don't overwrite a valid DM key with a malformed one.
+      // A bare peer ID is a legitimate DM URL (resolveDMByPeerId turns it into a
+      // key), so it must pass the guard alongside full DM keys.
       const dmKeyRegex = /^dm:(user|agent):[0-9a-f-]{36}:(user|agent):[0-9a-f-]{36}$/;
+      const peerIdRegex = /^[0-9a-f-]{36}$/i;
       if (
         this.v2Conversation?.isDM &&
         dmKeyRegex.test(this.v2Conversation.conversationKey) &&
-        !dmKeyRegex.test(segment)
+        !dmKeyRegex.test(segment) &&
+        !peerIdRegex.test(segment)
       ) {
         return;
       }

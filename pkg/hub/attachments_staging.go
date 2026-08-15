@@ -110,7 +110,9 @@ func (a *attachmentStaging) stage(srcPath, id, filename string) (string, error) 
 	}
 	defer func() { _ = src.Close() }()
 
-	if _, err := io.Copy(dst, io.LimitReader(src, MaxAttachmentSize)); err != nil {
+	// No LimitReader: the size ceiling is enforced at upload time, and capping
+	// the copy here would silently truncate an already-accepted attachment.
+	if _, err := io.Copy(dst, src); err != nil {
 		_ = os.Remove(destPath)
 		return "", fmt.Errorf("copy attachment: %w", err)
 	}

@@ -1284,14 +1284,16 @@ export class ScionChatThread extends LitElement {
     if (!this.isAgentDM) return;
 
     const params = new URLSearchParams({ limit: '200' });
+    const currentId = this.fetchId;
 
     try {
       const res = await apiFetch(
         `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`
       );
-      if (!res.ok) return;
+      if (!res.ok || currentId !== this.fetchId) return;
 
       const data = (await res.json()) as { messages?: Message[] };
+      if (currentId !== this.fetchId) return;
       const msgs = data?.messages ?? [];
       // Store sorted flat list — grouping by DM gaps happens in renderMessages().
       this.interagentMessages = [...msgs].sort(
@@ -1400,6 +1402,7 @@ export class ScionChatThread extends LitElement {
   private async handleDefaultAgentChange(e: CustomEvent<{ defaultAgent: string }>): Promise<void> {
     const newDefault = e.detail.defaultAgent;
     if (!this.conversationKey || this.isDM) return;
+    const currentId = this.fetchId;
 
     try {
       const body: Record<string, unknown> = {
@@ -1413,7 +1416,9 @@ export class ScionChatThread extends LitElement {
           body: JSON.stringify(body),
         }
       );
-      if (res.ok) {
+      // A conversation switch mid-flight makes this response irrelevant: the
+      // default agent now belongs to a topic we are no longer showing.
+      if (res.ok && currentId === this.fetchId) {
         this.defaultAgent = newDefault;
         this.dispatchEvent(
           new CustomEvent('default-agent-changed', {
@@ -1450,16 +1455,23 @@ export class ScionChatThread extends LitElement {
     if (!messageId || messageId === this._lastAdvancedMessageId) return;
     this._lastAdvancedMessageId = messageId;
 
+    // Pin both to the conversation this POST is for: a switch mid-flight makes
+    // the response belong to a thread we are no longer showing.
+    const currentId = this.fetchId;
+    const conversationKey = this.conversationKey;
+
     try {
       // Field name must match the server contract in handleConversationRead.
       const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/read`,
+        `/api/v1/chat/conversations/${encodeURIComponent(conversationKey)}/read`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messageId }),
         }
       );
+      if (currentId !== this.fetchId) return;
+
       if (!res.ok) {
         // Let the next trigger retry: the watermark did not actually move.
         this._lastAdvancedMessageId = '';
@@ -1471,14 +1483,16 @@ export class ScionChatThread extends LitElement {
       // to learn the watermark moved — tell them.
       this.dispatchEvent(
         new CustomEvent('read-state-updated', {
-          detail: { conversationKey: this.conversationKey, messageId },
+          detail: { conversationKey, messageId },
           bubbles: true,
           composed: true,
         })
       );
     } catch {
       // Non-critical
-      this._lastAdvancedMessageId = '';
+      if (currentId === this.fetchId) {
+        this._lastAdvancedMessageId = '';
+      }
     }
   }
 

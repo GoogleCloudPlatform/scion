@@ -192,6 +192,40 @@ describe('scion-chat-thread read watermark', () => {
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
+
+  /**
+   * The POST outlives the conversation it was issued for. Announcing its
+   * completion afterwards moves the unread badge of a thread the user already
+   * left, so a response that lands after a switch must be dropped.
+   */
+  it('drops a watermark response that lands after a conversation switch', async () => {
+    const el = await mount();
+
+    let settleRead!: (res: Response) => void;
+    apiFetch.mockImplementation((url: string) =>
+      String(url).endsWith('/read')
+        ? new Promise<Response>((resolve) => {
+            settleRead = resolve;
+          })
+        : Promise.resolve(emptyHistory())
+    );
+
+    const updated = vi.fn();
+    el.addEventListener('read-state-updated', updated);
+
+    const pending = (
+      el as unknown as { advanceReadWatermark(id: string): Promise<void> }
+    ).advanceReadWatermark('msg-7');
+
+    // Switch away while the POST is in flight.
+    el.conversationKey = 'topic-2';
+    await el.updateComplete;
+
+    settleRead({ ok: true, status: 200 } as unknown as Response);
+    await pending;
+
+    expect(updated).not.toHaveBeenCalled();
+  });
 });
 
 describe('scion-chat-thread SSE message filtering', () => {
