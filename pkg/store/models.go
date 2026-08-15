@@ -1733,14 +1733,14 @@ type MessageFilter struct {
 	// the sender_id UUID column), this matches the human-readable
 	// sender label. Useful for finding messages from agents that were
 	// persisted before SenderID was reliably populated.
-	Sender    string
-	OnlyUnread    bool      // Only unread messages
-	Type          string    // Filter by message type
-	Channel       string    // Filter by channel (e.g. "web", "discord")
-	ThreadID      string    // Filter by thread_id (wave-2 conversation key)
-	Visibility    []string  // Filter to listed visibility levels
-	Before        time.Time // Upper bound for created_at (exclusive)
-	After         time.Time // Lower bound for created_at (exclusive)
+	Sender     string
+	OnlyUnread bool      // Only unread messages
+	Type       string    // Filter by message type
+	Channel    string    // Filter by channel (e.g. "web", "discord")
+	ThreadID   string    // Filter by thread_id (wave-2 conversation key)
+	Visibility []string  // Filter to listed visibility levels
+	Before     time.Time // Upper bound for created_at (exclusive)
+	After      time.Time // Lower bound for created_at (exclusive)
 }
 
 // =============================================================================

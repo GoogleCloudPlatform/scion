@@ -87,8 +87,8 @@ func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)      
 func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 }
 func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string) {}
-func (noopEventPublisher) PublishRaw(_ string, _ interface{}) {}
-func (noopEventPublisher) Close()                             {}
+func (noopEventPublisher) PublishRaw(_ string, _ interface{})                          {}
+func (noopEventPublisher) Close()                                                      {}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
