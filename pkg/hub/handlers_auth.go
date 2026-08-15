@@ -476,7 +476,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 				"email", claims.Email, "error", err)
 		}
 	}
-	if user != nil && user.Status == "suspended" {
+	if user != nil && user.Status == store.UserStatusSuspended {
 		slog.Warn("Refresh rejected: user is suspended", "email", claims.Email, "user_id", user.ID)
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"user account is suspended", nil)
@@ -492,8 +492,15 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Prefer the freshly-read user's ID: on delete-and-recreate of the same
+	// email, the token's ID refers to the dead record.
+	userID := claims.UserID
+	if user != nil {
+		userID = user.ID
+	}
+
 	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		claims.UserID, claims.Email, claims.DisplayName, role, claims.ClientType,
+		userID, claims.Email, claims.DisplayName, role, claims.ClientType,
 	)
 	if err != nil {
 		InternalError(w)

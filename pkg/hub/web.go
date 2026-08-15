@@ -1488,13 +1488,27 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				// check before proxy provisioning), but this branch returns
 				// before reaching it, so the guard is load-bearing here.
 				if ws.store != nil {
-					if u, err := ws.store.GetUserByEmail(r.Context(), email); err == nil {
-						if u.Status == "suspended" {
+					u, err := ws.store.GetUserByEmail(r.Context(), email)
+					switch {
+					case err == nil:
+						if u.Status == store.UserStatusSuspended {
 							ws.logger().Warn("Proxy auth: session user is suspended", "email", email, "user_id", u.ID)
 							http.Error(w, "access denied: user account is suspended", http.StatusForbidden)
 							return
 						}
 						storedRole = u.Role
+					case errors.Is(err, store.ErrNotFound):
+						// Definitive answer: the account is gone. Unlike a
+						// transient read failure, this must not fall back to
+						// the session role — that would let a deleted user
+						// keep a UI-granted admin role for the remaining life
+						// of their session cookie.
+						ws.logger().Warn("Proxy auth: session user no longer exists", "email", email)
+						http.Error(w, "access denied: user account no longer exists", http.StatusForbidden)
+						return
+					default:
+						// Transient read failure — keep the status quo (see
+						// the storedRole comment above).
 					}
 				}
 				expectedRole := determineUserRole(email, ws.config.AdminEmails, storedRole)
