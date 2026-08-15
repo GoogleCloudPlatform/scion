@@ -567,6 +567,12 @@ export class ScionPageChat extends LitElement {
         flex: none;
         transition: transform 0.3s ease;
         overflow-y: auto;
+        /* The global '* { box-sizing: border-box }' does not cross the shadow
+           boundary, so these panels default to content-box: the desktop
+           border-right/border-left would add 1px on top of the full-viewport
+           width and push content off the left edge on iOS Safari. */
+        box-sizing: border-box;
+        border: 0;
       }
 
       /* ---- Left panel active ---- */
