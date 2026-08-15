@@ -586,3 +586,97 @@ func TestIsEmailAuthorized(t *testing.T) {
 		})
 	}
 }
+
+func TestDetermineUserRole(t *testing.T) {
+	tests := []struct {
+		name        string
+		email       string
+		adminEmails []string
+		currentRole string
+		expected    string
+	}{
+		{
+			name:        "in admin emails is admin",
+			email:       "admin@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "member",
+			expected:    "admin",
+		},
+		{
+			name:        "in admin emails promotes new user",
+			email:       "admin@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "",
+			expected:    "admin",
+		},
+		{
+			name:        "admin emails match is case insensitive",
+			email:       "Admin@Example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "",
+			expected:    "admin",
+		},
+		{
+			name:        "not in admin emails and member stays member",
+			email:       "user@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "member",
+			expected:    "member",
+		},
+		{
+			name:        "new user with no admin emails is member",
+			email:       "user@example.com",
+			adminEmails: nil,
+			currentRole: "",
+			expected:    "member",
+		},
+		{
+			// Regression: config must never demote a UI-promoted admin.
+			name:        "not in admin emails but already admin stays admin",
+			email:       "ui-admin@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "admin",
+			expected:    "admin",
+		},
+		{
+			name:        "already admin with empty admin emails stays admin",
+			email:       "ui-admin@example.com",
+			adminEmails: nil,
+			currentRole: "admin",
+			expected:    "admin",
+		},
+		{
+			// Regression: config must not rewrite a UI-set viewer to member.
+			name:        "viewer is preserved",
+			email:       "viewer@example.com",
+			adminEmails: []string{"admin@example.com"},
+			currentRole: "viewer",
+			expected:    "viewer",
+		},
+		{
+			name:        "viewer with empty admin emails is preserved",
+			email:       "viewer@example.com",
+			adminEmails: nil,
+			currentRole: "viewer",
+			expected:    "viewer",
+		},
+		{
+			// Config always promotes, even over an established role.
+			name:        "viewer in admin emails is promoted to admin",
+			email:       "viewer@example.com",
+			adminEmails: []string{"viewer@example.com"},
+			currentRole: "viewer",
+			expected:    "admin",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := determineUserRole(tc.email, tc.adminEmails, tc.currentRole)
+			if got != tc.expected {
+				t.Errorf("determineUserRole(%q, %v, %q) = %q, expected %q",
+					tc.email, tc.adminEmails, tc.currentRole, got, tc.expected)
+			}
+		})
+	}
+}

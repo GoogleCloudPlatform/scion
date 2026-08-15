@@ -2631,13 +2631,14 @@ func TestProxyAuthMiddleware_ExistingSession_SkipsVerification(t *testing.T) {
 	_ = callCount
 }
 
-func TestProxyAuthMiddleware_DemotesAdminWhenRemovedFromList(t *testing.T) {
-	// An existing admin user whose email is no longer in AdminEmails
-	// should be demoted to "member" on next proxy-authenticated request.
+func TestProxyAuthMiddleware_KeepsAdminWhenNotInList(t *testing.T) {
+	// AdminEmails is additive-only: an existing admin user whose email is not
+	// in AdminEmails (e.g. promoted through the admin UI) keeps the admin role
+	// on the next proxy-authenticated request.
 	mockAuth := &mockProxyAuthenticator{
 		user: &ProxyUserInfo{
 			Subject: "99",
-			Email:   "former-admin@example.com",
+			Email:   "ui-admin@example.com",
 			Domain:  "example.com",
 		},
 	}
@@ -2646,7 +2647,7 @@ func TestProxyAuthMiddleware_DemotesAdminWhenRemovedFromList(t *testing.T) {
 	// Pre-create user as admin
 	adminUser := &store.User{
 		ID:      "u-admin-proxy",
-		Email:   "former-admin@example.com",
+		Email:   "ui-admin@example.com",
 		Role:    "admin",
 		Status:  "active",
 		Created: time.Now(),
@@ -2656,7 +2657,7 @@ func TestProxyAuthMiddleware_DemotesAdminWhenRemovedFromList(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode:           "proxy",
 		ProxyAuthenticator: mockAuth,
-		// AdminEmails does NOT include former-admin@example.com
+		// AdminEmails does NOT include ui-admin@example.com
 		AdminEmails: []string{"other-admin@example.com"},
 	})
 	ws.SetStore(st)
@@ -2667,11 +2668,11 @@ func TestProxyAuthMiddleware_DemotesAdminWhenRemovedFromList(t *testing.T) {
 
 	ws.Handler().ServeHTTP(rec, req)
 
-	// Verify user was demoted
-	updated, err := st.GetUserByEmail(context.Background(), "former-admin@example.com")
+	// Verify user kept the admin role
+	updated, err := st.GetUserByEmail(context.Background(), "ui-admin@example.com")
 	assert.NoError(t, err)
-	assert.Equal(t, "member", updated.Role,
-		"admin user should be demoted to member when removed from admin emails list")
+	assert.Equal(t, "admin", updated.Role,
+		"admin_emails must not demote an admin granted through the UI")
 }
 
 func TestProxyAuthMiddleware_PromotesToAdminWhenAddedToList(t *testing.T) {
@@ -2784,10 +2785,10 @@ func TestProxyAuthMiddleware_ExistingSession_ReEvaluatesRoleOnPromotion(t *testi
 	assert.True(t, sessionUpdated, "session cookie should be re-set after role change")
 }
 
-func TestProxyAuthMiddleware_ExistingSession_ReEvaluatesRoleOnDemotion(t *testing.T) {
+func TestProxyAuthMiddleware_ExistingSession_ReEvaluatesRoleOnUIDemotion(t *testing.T) {
 	// A user with an existing session (role=admin) should be demoted to
-	// member when their email is removed from AdminEmails — even though
-	// the session already exists.
+	// member when an admin demotes them through the UI — even though the
+	// session already exists. Config removal alone never demotes.
 	mockAuth := &mockProxyAuthenticator{
 		user: &ProxyUserInfo{
 			Subject: "12345",
@@ -2822,8 +2823,10 @@ func TestProxyAuthMiddleware_ExistingSession_ReEvaluatesRoleOnDemotion(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, "admin", created.Role)
 
-	// Now remove user from admin list (simulates config change)
+	// Remove from the config list AND demote through the UI (explicit action).
 	ws.config.AdminEmails = []string{}
+	created.Role = "member"
+	require.NoError(t, st.UpdateUser(context.Background(), created))
 
 	// Second request: re-uses the session cookie
 	req2 := httptest.NewRequest("GET", "/projects", nil)
@@ -2849,6 +2852,238 @@ func TestProxyAuthMiddleware_ExistingSession_ReEvaluatesRoleOnDemotion(t *testin
 		}
 	}
 	assert.True(t, sessionUpdated, "session cookie should be re-set after role demotion")
+}
+
+func TestProxyAuthMiddleware_ExistingSession_KeepsRoleWhenRemovedFromList(t *testing.T) {
+	// Removing an email from AdminEmails must not demote a user who is admin
+	// in the store: the session keeps the admin role.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "admin@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		AdminEmails:        []string{"admin@example.com"},
+	})
+	ws.SetStore(st)
+
+	handler := ws.Handler()
+
+	// First request: creates session with role=admin
+	req1 := httptest.NewRequest("GET", "/projects", nil)
+	req1.Header.Set("Accept", "text/html")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+
+	cookies := rec1.Result().Cookies()
+	require.NotEmpty(t, cookies, "session cookie should be set")
+
+	created, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	require.NoError(t, err)
+	require.Equal(t, "admin", created.Role)
+
+	// Config change only — no UI demotion.
+	ws.config.AdminEmails = []string{}
+
+	req2 := httptest.NewRequest("GET", "/projects", nil)
+	req2.Header.Set("Accept", "text/html")
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	// Role unchanged, so the session must not be re-written.
+	for _, c := range rec2.Result().Cookies() {
+		assert.NotEqual(t, webSessionName, c.Name,
+			"session should not be re-saved when the role is unchanged")
+	}
+
+	unchanged, err := st.GetUserByEmail(context.Background(), "admin@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "admin", unchanged.Role, "stored role should stay admin")
+}
+
+func TestProxyAuthMiddleware_ExistingSession_PicksUpUIPromotion(t *testing.T) {
+	// A user promoted to admin through the UI while holding a session should
+	// see the new role on their next request: the store is the source of truth.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "user@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		AdminEmails:        []string{},
+	})
+	ws.SetStore(st)
+
+	handler := ws.Handler()
+
+	// First request: creates session with role=member
+	req1 := httptest.NewRequest("GET", "/projects", nil)
+	req1.Header.Set("Accept", "text/html")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+
+	cookies := rec1.Result().Cookies()
+	require.NotEmpty(t, cookies, "session cookie should be set")
+
+	created, err := st.GetUserByEmail(context.Background(), "user@example.com")
+	require.NoError(t, err)
+	require.Equal(t, "member", created.Role)
+
+	// Admin promotes the user through the UI (writes to the store).
+	created.Role = "admin"
+	require.NoError(t, st.UpdateUser(context.Background(), created))
+
+	req2 := httptest.NewRequest("GET", "/projects", nil)
+	req2.Header.Set("Accept", "text/html")
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	var sessionUpdated bool
+	for _, c := range rec2.Result().Cookies() {
+		if c.Name == webSessionName {
+			sessionUpdated = true
+			break
+		}
+	}
+	assert.True(t, sessionUpdated, "session cookie should be re-set after UI promotion")
+}
+
+func TestProxyAuthMiddleware_ExistingSession_SuspendedUserRejected(t *testing.T) {
+	// Suspending a user through the admin UI must take effect on their next
+	// request rather than at session expiry: the session cookie lives for 24h,
+	// so without the store check a suspended user would keep full web access
+	// for the rest of that window.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "user@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		AdminEmails:        []string{},
+	})
+	ws.SetStore(st)
+
+	handler := ws.Handler()
+
+	// First request: provisions the user and establishes the session.
+	req1 := httptest.NewRequest("GET", "/projects", nil)
+	req1.Header.Set("Accept", "text/html")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+
+	require.NotEqual(t, http.StatusForbidden, rec1.Code, "active user should not be rejected")
+	cookies := rec1.Result().Cookies()
+	require.NotEmpty(t, cookies, "session cookie should be set")
+
+	// Admin suspends the user through the UI (writes to the store).
+	created, err := st.GetUserByEmail(context.Background(), "user@example.com")
+	require.NoError(t, err)
+	created.Status = "suspended"
+	require.NoError(t, st.UpdateUser(context.Background(), created))
+
+	// Replaying the still-valid session cookie must now be rejected.
+	req2 := httptest.NewRequest("GET", "/projects", nil)
+	req2.Header.Set("Accept", "text/html")
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	assert.Equal(t, http.StatusForbidden, rec2.Code, "suspended user should be rejected with 403")
+}
+
+func TestProxyAuthMiddleware_ExistingSession_DeletedUserRejected(t *testing.T) {
+	// Deleting a user must take effect on their next request. Because the
+	// stored role is now the source of truth, a deleted user whose session
+	// cookie carries a UI-granted admin role would otherwise keep that role
+	// for the remaining life of the cookie — the ordinary offboarding path.
+	// ErrNotFound is a definitive answer, not the transient read failure that
+	// justifies falling back to the session role.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "user@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		AdminEmails:        []string{}, // not an admin by config
+	})
+	ws.SetStore(st)
+
+	handler := ws.Handler()
+
+	// First request: provisions the user as member and establishes the session.
+	req1 := httptest.NewRequest("GET", "/projects", nil)
+	req1.Header.Set("Accept", "text/html")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+
+	require.NotEqual(t, http.StatusForbidden, rec1.Code, "active user should not be rejected")
+	cookies := rec1.Result().Cookies()
+	require.NotEmpty(t, cookies, "session cookie should be set")
+
+	// Admin promotes the user through the UI, so the session picks up admin.
+	created, err := st.GetUserByEmail(context.Background(), "user@example.com")
+	require.NoError(t, err)
+	created.Role = "admin"
+	require.NoError(t, st.UpdateUser(context.Background(), created))
+
+	req2 := httptest.NewRequest("GET", "/projects", nil)
+	req2.Header.Set("Accept", "text/html")
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	adminCookies := rec2.Result().Cookies()
+	require.NotEmpty(t, adminCookies, "session should be re-set with the admin role")
+
+	// The user is offboarded: deleted from the store entirely.
+	delete(st.users, created.ID)
+	_, err = st.GetUserByEmail(context.Background(), "user@example.com")
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	// Replaying the still-valid admin session cookie must now be rejected.
+	req3 := httptest.NewRequest("GET", "/projects", nil)
+	req3.Header.Set("Accept", "text/html")
+	for _, c := range adminCookies {
+		req3.AddCookie(c)
+	}
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, req3)
+
+	assert.Equal(t, http.StatusForbidden, rec3.Code, "deleted user should be rejected with 403")
 }
 
 func TestProxyAuthMiddleware_ExistingSession_NoUpdateWhenRoleUnchanged(t *testing.T) {

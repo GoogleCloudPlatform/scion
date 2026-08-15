@@ -201,6 +201,303 @@ func TestAuthMe(t *testing.T) {
 	}
 }
 
+// TestAuthRefreshRoleReevaluation covers the role re-evaluation that happens on
+// every token refresh. The admin_emails config is additive-only: it promotes,
+// but it never demotes a user who holds admin in the store.
+func TestAuthRefreshRoleReevaluation(t *testing.T) {
+	refresh := func(t *testing.T, srv *Server, refreshToken string) string {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh",
+			AuthRefreshRequest{RefreshToken: refreshToken})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp AuthRefreshResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		claims, err := srv.userTokenService.ValidateUserToken(resp.AccessToken)
+		if err != nil {
+			t.Fatalf("failed to validate refreshed access token: %v", err)
+		}
+		return claims.Role
+	}
+
+	t.Run("UI-promoted admin keeps admin role", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		// User is admin in the store (promoted via the admin UI) but is not
+		// listed in admin_emails.
+		user := &store.User{
+			ID:      tid("user_ui_admin"),
+			Email:   "ui-admin@example.com",
+			Role:    "admin",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		if role := refresh(t, srv, refreshToken); role != "admin" {
+			t.Errorf("expected refreshed token role 'admin', got %q", role)
+		}
+
+		stored, err := s.GetUserByEmail(ctx, user.Email)
+		if err != nil {
+			t.Fatalf("user not found: %v", err)
+		}
+		if stored.Role != "admin" {
+			t.Errorf("expected stored role 'admin', got %q", stored.Role)
+		}
+	})
+
+	t.Run("admin emails promotes member on refresh", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_promoted"),
+			Email:   "promoted@example.com",
+			Role:    "member",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = []string{"promoted@example.com"}
+
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		if role := refresh(t, srv, refreshToken); role != "admin" {
+			t.Errorf("expected refreshed token role 'admin', got %q", role)
+		}
+
+		stored, err := s.GetUserByEmail(ctx, user.Email)
+		if err != nil {
+			t.Fatalf("user not found: %v", err)
+		}
+		if stored.Role != "admin" {
+			t.Errorf("expected stored role 'admin', got %q", stored.Role)
+		}
+	})
+
+	t.Run("UI demotion is reflected in refreshed token", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_demoted"),
+			Email:   "demoted@example.com",
+			Role:    "admin",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		// Token still carries the stale "admin" role.
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, "admin", ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		// Explicit demotion through the admin UI/API.
+		user.Role = "member"
+		if err := s.UpdateUser(ctx, user); err != nil {
+			t.Fatalf("failed to demote user: %v", err)
+		}
+
+		if role := refresh(t, srv, refreshToken); role != "member" {
+			t.Errorf("expected refreshed token role 'member', got %q", role)
+		}
+	})
+
+	t.Run("UI-set viewer keeps viewer role", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_viewer"),
+			Email:   "viewer@example.com",
+			Role:    "viewer",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		if role := refresh(t, srv, refreshToken); role != "viewer" {
+			t.Errorf("expected refreshed token role 'viewer', got %q", role)
+		}
+
+		stored, err := s.GetUserByEmail(ctx, user.Email)
+		if err != nil {
+			t.Fatalf("user not found: %v", err)
+		}
+		if stored.Role != "viewer" {
+			t.Errorf("expected stored role 'viewer', got %q", stored.Role)
+		}
+	})
+
+	t.Run("deleted admin cannot refresh into admin", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_deleted"),
+			Email:   "deleted-admin@example.com",
+			Role:    "admin",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		// Token carries the admin role the user held before offboarding.
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, "admin", ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		if err := s.DeleteUser(ctx, user.ID); err != nil {
+			t.Fatalf("failed to delete user: %v", err)
+		}
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh",
+			AuthRefreshRequest{RefreshToken: refreshToken})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected status 401 for deleted user, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		// Belt and braces: even if the handler were changed to keep issuing
+		// tokens, it must never hand back the admin role from the claim.
+		if rec.Code == http.StatusOK {
+			var resp AuthRefreshResponse
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			claims, err := srv.userTokenService.ValidateUserToken(resp.AccessToken)
+			if err != nil {
+				t.Fatalf("failed to validate refreshed access token: %v", err)
+			}
+			if claims.Role == "admin" {
+				t.Error("deleted user retained admin role from the JWT claim")
+			}
+		}
+	})
+
+	t.Run("suspended user cannot refresh", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_suspended"),
+			Email:   "suspended@example.com",
+			Role:    "admin",
+			Status:  "suspended",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, "admin", ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh",
+			AuthRefreshRequest{RefreshToken: refreshToken})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected status 403 for suspended user, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("store error degrades to config-only role", func(t *testing.T) {
+		// A transient store failure must not let the token's own role claim
+		// stand in for the stored role: the refresh chain rotates, so trusting
+		// claims.Role here would let a stale admin renew itself indefinitely.
+		// The handler falls back to config-only evaluation instead.
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		user := &store.User{
+			ID:      tid("user_store_error"),
+			Email:   "store-error@example.com",
+			Role:    "admin",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, user); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		// Token carries the admin role the user currently holds in the store.
+		_, refreshToken, _, err := srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, "admin", ClientTypeWeb,
+		)
+		if err != nil {
+			t.Fatalf("failed to generate tokens: %v", err)
+		}
+
+		// The lookup now fails for a reason other than "not found" — a DB blip
+		// rather than an offboarded user.
+		srv.store = &failingUserLookupStore{Store: s, err: errors.New("database is locked")}
+
+		if role := refresh(t, srv, refreshToken); role != "member" {
+			t.Errorf("expected refreshed token role 'member' (config-only fallback), got %q", role)
+		}
+	})
+}
+
+// failingUserLookupStore wraps a store and makes the by-email user lookup fail
+// with a non-ErrNotFound error, simulating a transient database failure.
+type failingUserLookupStore struct {
+	store.Store
+	err error
+}
+
+func (f *failingUserLookupStore) GetUserByEmail(context.Context, string) (*store.User, error) {
+	return nil, f.err
+}
+
 func TestAuthValidate(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -640,13 +937,16 @@ func TestProvisionUser(t *testing.T) {
 		}
 	})
 
-	t.Run("demotes admin to member when removed from admin emails", func(t *testing.T) {
+	// admin_emails is additive-only: it can promote a user to admin but must
+	// never demote one. A user promoted through the admin UI (or an admin whose
+	// email was removed from the config) keeps their role across logins.
+	t.Run("keeps admin role when not in admin emails", func(t *testing.T) {
 		srv, s := testServer(t)
 
-		// Pre-create user as admin
+		// Pre-create user as admin (e.g. promoted via the admin UI)
 		original := &store.User{
 			ID:      generateID(),
-			Email:   "former-admin@example.com",
+			Email:   "ui-admin@example.com",
 			Role:    "admin",
 			Status:  "active",
 			Created: time.Now(),
@@ -658,23 +958,82 @@ func TestProvisionUser(t *testing.T) {
 		// Admin emails list does NOT include this user
 		srv.config.AdminEmails = []string{"other-admin@example.com"}
 
-		info := &ExternalUserInfo{Email: "former-admin@example.com"}
+		info := &ExternalUserInfo{Email: "ui-admin@example.com"}
+		user, err := srv.provisionUser(ctx, info)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if user.Role != "admin" {
+			t.Errorf("expected role 'admin' to be retained, got %q", user.Role)
+		}
+
+		// Verify persisted in store
+		stored, err := s.GetUserByEmail(ctx, "ui-admin@example.com")
+		if err != nil {
+			t.Fatalf("user not found in store: %v", err)
+		}
+		if stored.Role != "admin" {
+			t.Errorf("expected stored role 'admin', got %q", stored.Role)
+		}
+	})
+
+	t.Run("keeps member role when not in admin emails", func(t *testing.T) {
+		srv, s := testServer(t)
+
+		original := &store.User{
+			ID:      generateID(),
+			Email:   "plain-member@example.com",
+			Role:    "member",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, original); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+
+		srv.config.AdminEmails = []string{"other-admin@example.com"}
+
+		info := &ExternalUserInfo{Email: "plain-member@example.com"}
 		user, err := srv.provisionUser(ctx, info)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
 		if user.Role != "member" {
-			t.Errorf("expected role 'member' after demotion, got %q", user.Role)
+			t.Errorf("expected role 'member', got %q", user.Role)
+		}
+	})
+
+	t.Run("respects UI demotion of a config-less admin", func(t *testing.T) {
+		srv, s := testServer(t)
+
+		original := &store.User{
+			ID:      generateID(),
+			Email:   "demoted@example.com",
+			Role:    "admin",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, original); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+		srv.config.AdminEmails = nil
+
+		// Explicit demotion through the admin UI/API writes "member" to the DB.
+		original.Role = "member"
+		if err := s.UpdateUser(ctx, original); err != nil {
+			t.Fatalf("failed to demote user: %v", err)
 		}
 
-		// Verify persisted in store
-		stored, err := s.GetUserByEmail(ctx, "former-admin@example.com")
+		info := &ExternalUserInfo{Email: "demoted@example.com"}
+		user, err := srv.provisionUser(ctx, info)
 		if err != nil {
-			t.Fatalf("user not found in store: %v", err)
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if stored.Role != "member" {
-			t.Errorf("expected stored role 'member', got %q", stored.Role)
+
+		if user.Role != "member" {
+			t.Errorf("expected demotion to stick, got role %q", user.Role)
 		}
 	})
 

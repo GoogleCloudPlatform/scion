@@ -449,20 +449,61 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Re-evaluate admin status on token refresh
+	// Re-evaluate admin status on token refresh. The stored role is the source
+	// of truth for UI-granted promotions; admin_emails can only add to it.
+	//
+	// storedRole deliberately starts empty rather than at claims.Role: if the
+	// store cannot be read we fall back to config-only evaluation instead of
+	// trusting the token's own role claim, which would let a stale admin claim
+	// renew itself indefinitely through the rotating refresh chain.
 	role := claims.Role
-	if newRole := s.getUserRole(claims.Email); role != newRole {
+	storedRole := ""
+	var user *store.User
+	if s.store != nil {
+		u, err := s.store.GetUserByEmail(r.Context(), claims.Email)
+		switch {
+		case err == nil:
+			user = u
+			storedRole = u.Role
+		case errors.Is(err, store.ErrNotFound):
+			// The user no longer exists — refuse to mint a new token pair.
+			slog.Warn("Refresh rejected: user no longer exists", "email", claims.Email)
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+				"invalid refresh token", nil)
+			return
+		default:
+			slog.Warn("Refresh: user lookup failed, falling back to config-only role",
+				"email", claims.Email, "error", err)
+		}
+	}
+	if user != nil && user.Status == store.UserStatusSuspended {
+		slog.Warn("Refresh rejected: user is suspended", "email", claims.Email, "user_id", user.ID)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"user account is suspended", nil)
+		return
+	}
+	if newRole := s.getUserRole(claims.Email, storedRole); role != newRole {
 		slog.Info("User role changed on token refresh", "email", claims.Email, "old_role", role, "new_role", newRole)
 		role = newRole
 		// Persist the role change
-		if user, err := s.store.GetUserByEmail(r.Context(), claims.Email); err == nil && user.Role != role {
+		if user != nil && user.Role != role {
 			user.Role = role
-			_ = s.store.UpdateUser(r.Context(), user)
+			if err := s.store.UpdateUser(r.Context(), user); err != nil {
+				slog.Error("Failed to persist role change on token refresh",
+					"email", claims.Email, "error", err)
+			}
 		}
 	}
 
+	// Prefer the freshly-read user's ID: on delete-and-recreate of the same
+	// email, the token's ID refers to the dead record.
+	userID := claims.UserID
+	if user != nil {
+		userID = user.ID
+	}
+
 	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		claims.UserID, claims.Email, claims.DisplayName, role, claims.ClientType,
+		userID, claims.Email, claims.DisplayName, role, claims.ClientType,
 	)
 	if err != nil {
 		InternalError(w)
@@ -1210,7 +1251,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			Email:       info.Email,
 			DisplayName: info.DisplayName,
 			AvatarURL:   info.AvatarURL,
-			Role:        s.getUserRole(info.Email),
+			Role:        s.getUserRole(info.Email, ""),
 			Status:      "active",
 			Created:     time.Now(),
 			LastLogin:   time.Now(),
@@ -1236,7 +1277,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 				user.AvatarURL = info.AvatarURL
 			}
 			user.LastLogin = time.Now()
-			user.Role = s.getUserRole(info.Email)
+			user.Role = s.getUserRole(info.Email, user.Role)
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, info.Email, "", user.ID, info.Email, nil)
 		} else {
 			// Update last login and backfill profile
@@ -1248,7 +1289,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 				user.DisplayName = info.DisplayName
 			}
 			// Re-evaluate admin status on every login
-			if newRole := s.getUserRole(info.Email); user.Role != newRole {
+			if newRole := s.getUserRole(info.Email, user.Role); user.Role != newRole {
 				slog.Info("User role changed on login", "email", info.Email, "old_role", user.Role, "new_role", newRole)
 				user.Role = newRole
 			}
@@ -1386,21 +1427,34 @@ func isEmailAuthorized(email string, authorizedDomains []string, adminEmails []s
 	return false
 }
 
-// determineUserRole returns the role for a user based on their email.
-// Returns "admin" if the email is in the adminEmails list, otherwise "member".
-func determineUserRole(email string, adminEmails []string) string {
+// determineUserRole returns the role for a user based on their email and the
+// role they currently hold.
+//
+// The adminEmails config list is additive-only: it acts as a floor, not a
+// ceiling. A user is "admin" if their email is in adminEmails, so config always
+// promotes. Otherwise any role the user already holds is preserved verbatim —
+// including "viewer" and any role added in future — so config never demotes or
+// rewrites a role set through the admin UI/API. Only a user with no stored role
+// (that is, one that does not exist yet) defaults to "member".
+//
+// currentRole is the user's role as stored in the database; pass "" for a user
+// that does not exist yet.
+func determineUserRole(email string, adminEmails []string, currentRole string) string {
 	emailLower := strings.ToLower(email)
 	for _, adminEmail := range adminEmails {
 		if strings.ToLower(adminEmail) == emailLower {
 			return "admin"
 		}
 	}
+	if currentRole != "" {
+		return currentRole
+	}
 	return "member"
 }
 
 // (s *Server) getUserRole is a convenience method to determine role using server config.
-func (s *Server) getUserRole(email string) string {
-	return determineUserRole(email, s.config.AdminEmails)
+func (s *Server) getUserRole(email, currentRole string) string {
+	return determineUserRole(email, s.config.AdminEmails, currentRole)
 }
 
 // handleInviteRedeem handles POST /api/v1/auth/invite/redeem.
