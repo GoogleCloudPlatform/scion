@@ -462,6 +462,19 @@ func (s *NotificationStore) GetNotificationsByAgent(ctx context.Context, agentID
 	return notifsToStore(rows), nil
 }
 
+// GetNotification returns a single notification by ID.
+func (s *NotificationStore) GetNotification(ctx context.Context, id string) (*store.Notification, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.client.Notification.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entNotifToStore(row), nil
+}
+
 // AcknowledgeNotification marks a notification as acknowledged.
 func (s *NotificationStore) AcknowledgeNotification(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
