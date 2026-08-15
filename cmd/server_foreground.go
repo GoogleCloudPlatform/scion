@@ -1562,6 +1562,8 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		OIDCConfig:              cfg.OIDC,
 		Federation:              cfg.Federation,
 		WorkspaceStorageConfig:  cfg.WorkspaceStorage,
+		// nil (no server.native_chat section) means enabled — chat is default-on.
+		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 	}
 
 	// In hosted mode every replica must share the same session secret for

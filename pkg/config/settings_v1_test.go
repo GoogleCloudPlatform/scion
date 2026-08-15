@@ -4620,3 +4620,63 @@ func boolPtr(b bool) *bool {
 func intPtr(i int) *int {
 	return &i
 }
+
+// TestNativeChatConfig_Tristate pins the default-on contract: native chat
+// shipped enabled, so only an explicit "enabled: false" may turn it off. A
+// missing section or a missing key must not silently disable the feature.
+func TestNativeChatConfig_Tristate(t *testing.T) {
+	enabled, disabled := true, false
+
+	tests := []struct {
+		name string
+		cfg  *V1NativeChatConfig
+		want *bool
+	}{
+		{"absent section", nil, nil},
+		{"absent key", &V1NativeChatConfig{}, nil},
+		{"explicit true", &V1NativeChatConfig{Enabled: &enabled}, &enabled},
+		{"explicit false", &V1NativeChatConfig{Enabled: &disabled}, &disabled},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.cfg.EnabledSetting())
+		})
+	}
+}
+
+// TestNativeChatConfig_YAMLRoundTrip verifies that an explicit disable
+// survives a marshal/unmarshal cycle. With a plain bool the "false" would be
+// dropped by omitempty and read back as enabled — the pointer prevents that.
+func TestNativeChatConfig_YAMLRoundTrip(t *testing.T) {
+	disabled := false
+	in := &V1ServerConfig{NativeChat: &V1NativeChatConfig{Enabled: &disabled}}
+
+	data, err := yaml.Marshal(in)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "native_chat")
+
+	var out V1ServerConfig
+	require.NoError(t, yaml.Unmarshal(data, &out))
+	require.NotNil(t, out.NativeChat)
+	require.NotNil(t, out.NativeChat.Enabled)
+	assert.False(t, *out.NativeChat.Enabled)
+}
+
+// TestNativeChatConfig_ThreadedToGlobalConfig ensures the hub can actually
+// read the toggle: it is carried from the versioned settings into GlobalConfig,
+// which is what the hub server config is built from.
+func TestNativeChatConfig_ThreadedToGlobalConfig(t *testing.T) {
+	disabled := false
+
+	gc := ConvertV1ServerToGlobalConfig(&V1ServerConfig{
+		NativeChat: &V1NativeChatConfig{Enabled: &disabled},
+	})
+	require.NotNil(t, gc.NativeChat)
+	require.NotNil(t, gc.NativeChat.EnabledSetting())
+	assert.False(t, *gc.NativeChat.EnabledSetting())
+
+	// No section configured — the hub sees "no preference" and defaults on.
+	gcDefault := ConvertV1ServerToGlobalConfig(&V1ServerConfig{})
+	assert.Nil(t, gcDefault.NativeChat.EnabledSetting())
+}

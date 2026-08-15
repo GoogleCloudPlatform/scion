@@ -268,6 +268,13 @@ type ServerConfig struct {
 	// configured durable mount instead of the node-local home directory.
 	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
 	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
+
+	// NativeChatEnabled controls whether the built-in chat feature is active:
+	// the /api/v1/chat/* routes are registered and the web UI is told to show
+	// the chat interface. Nil means enabled — chat shipped default-on, so an
+	// operator must opt out explicitly via server.native_chat.enabled.
+	// Read through Server.nativeChatEnabled(), never directly.
+	NativeChatEnabled *bool
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -3509,24 +3516,30 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/messages/", s.handleMessageRoutes)
 	s.mux.HandleFunc("/api/v1/message-channels", s.handleMessageChannels)
 
-	// Chat thread prefs (Phase 3 — visibility mode persistence)
-	s.mux.HandleFunc("/api/v1/chat/prefs", s.handleChatPrefs)
+	// Native chat endpoints. Registration is gated on server.native_chat.enabled,
+	// so disabling the feature makes every /api/v1/chat/* path 404 rather than
+	// leaving a live API behind a hidden UI. This is a startup-time gate:
+	// flipping the toggle requires a hub restart (same as the message broker).
+	if s.nativeChatEnabled() {
+		// Chat thread prefs (Phase 3 — visibility mode persistence)
+		s.mux.HandleFunc("/api/v1/chat/prefs", s.handleChatPrefs)
 
-	// Chat thread endpoints (Phase 5 — thread rail, legacy)
-	s.mux.HandleFunc("/api/v1/chat/threads", s.handleChatThreads)
-	s.mux.HandleFunc("/api/v1/chat/threads/", s.handleChatThreadRoutes)
+		// Chat thread endpoints (Phase 5 — thread rail, legacy)
+		s.mux.HandleFunc("/api/v1/chat/threads", s.handleChatThreads)
+		s.mux.HandleFunc("/api/v1/chat/threads/", s.handleChatThreadRoutes)
 
-	// Wave-2 chat endpoints (conversation REST API)
-	s.mux.HandleFunc("/api/v1/chat/spaces", s.handleChatSpaces)
-	s.mux.HandleFunc("/api/v1/chat/spaces/", s.handleChatSpaceRoutes)
-	s.mux.HandleFunc("/api/v1/chat/conversations/", s.handleChatConversationRoutes)
-	s.mux.HandleFunc("/api/v1/chat/topics/", s.handleChatTopicRoutes)
-	s.mux.HandleFunc("/api/v1/chat/dms", s.handleChatDMs)
-	s.mux.HandleFunc("/api/v1/chat/user-prefs", s.handleChatUserPrefs)
-	s.mux.HandleFunc("/api/v1/chat/presence", s.handleChatPresence)
-	s.mux.HandleFunc("/api/v1/chat/search", s.handleChatSearch)
-	s.mux.HandleFunc("/api/v1/chat/attachments", s.handleChatAttachments)
-	s.mux.HandleFunc("/api/v1/chat/attachments/", s.handleChatAttachmentByID)
+		// Wave-2 chat endpoints (conversation REST API)
+		s.mux.HandleFunc("/api/v1/chat/spaces", s.handleChatSpaces)
+		s.mux.HandleFunc("/api/v1/chat/spaces/", s.handleChatSpaceRoutes)
+		s.mux.HandleFunc("/api/v1/chat/conversations/", s.handleChatConversationRoutes)
+		s.mux.HandleFunc("/api/v1/chat/topics/", s.handleChatTopicRoutes)
+		s.mux.HandleFunc("/api/v1/chat/dms", s.handleChatDMs)
+		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.handleChatUserPrefs)
+		s.mux.HandleFunc("/api/v1/chat/presence", s.handleChatPresence)
+		s.mux.HandleFunc("/api/v1/chat/search", s.handleChatSearch)
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.handleChatAttachments)
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.handleChatAttachmentByID)
+	}
 
 	// WebSocket control channel endpoint for Runtime Brokers
 	s.mux.HandleFunc("/api/v1/runtime-brokers/connect", s.handleRuntimeBrokerConnect)

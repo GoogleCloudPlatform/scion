@@ -872,6 +872,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		if srv.MessageBroker != nil && !isZeroStruct(srv.MessageBroker) {
 			keys = append(keys, "server.message_broker")
 		}
+		// native_chat carries a *bool, so an explicit "enabled: false" is a
+		// non-zero struct and still reaches the Layer-0 rejection below —
+		// unlike a plain bool, which would look like an absent UI artifact.
+		if srv.NativeChat != nil && !isZeroStruct(srv.NativeChat) {
+			keys = append(keys, "server.native_chat")
+		}
 		if srv.Plugins != nil && !isZeroStruct(srv.Plugins) {
 			keys = append(keys, "server.plugins")
 		}
