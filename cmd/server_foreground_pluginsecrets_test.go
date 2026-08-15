@@ -20,7 +20,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -29,16 +28,14 @@ import (
 )
 
 // fakeSecretBackend is an in-memory secret.SecretBackend for migration tests.
-// Only Get, Set and HubID are exercised by migratePluginSecrets.
+// Only Get, Set and HubID are exercised by secretmigration.MigratePluginSecrets.
 type fakeSecretBackend struct {
-	hubID        string
-	values       map[string]string
-	descriptions map[string]string
-	sets         int
+	hubID  string
+	values map[string]string
 }
 
 func newFakeSecretBackend() *fakeSecretBackend {
-	return &fakeSecretBackend{hubID: "hub-1", values: map[string]string{}, descriptions: map[string]string{}}
+	return &fakeSecretBackend{hubID: "hub-1", values: map[string]string{}}
 }
 
 func (f *fakeSecretBackend) HubID() string { return f.hubID }
@@ -52,8 +49,6 @@ func (f *fakeSecretBackend) Get(_ context.Context, name, _, _ string) (*secret.S
 }
 
 func (f *fakeSecretBackend) Set(_ context.Context, in *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
-	f.sets++
-	f.descriptions[in.Name] = in.Description
 	_, existed := f.values[in.Name]
 	f.values[in.Name] = in.Value
 	return !existed, &secret.SecretMeta{Name: in.Name}, nil
@@ -73,16 +68,6 @@ func (f *fakeSecretBackend) Resolve(context.Context, string, string, string, *se
 	return nil, nil
 }
 
-// writePluginConfigFile writes a per-plugin YAML config file and returns its path.
-func writePluginConfigFile(t *testing.T, contents string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "scion-telegram.yaml")
-	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
-		t.Fatalf("write config file: %v", err)
-	}
-	return path
-}
-
 // captureLog collects everything written to the standard logger while fn runs.
 func captureLog(t *testing.T, fn func()) string {
 	t.Helper()
@@ -92,150 +77,6 @@ func captureLog(t *testing.T, fn func()) string {
 	defer log.SetOutput(prev)
 	fn()
 	return buf.String()
-}
-
-func TestMigratePluginSecrets_FromConfigFile(t *testing.T) {
-	sb := newFakeSecretBackend()
-	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\ninbound_mode: \"webhook\"\n")
-
-	migratePluginSecrets(context.Background(), sb, "telegram", nil, cfgFile)
-
-	if got := sb.values[config.SecretTelegramBotToken]; got != "file-token" {
-		t.Errorf("expected bot_token from config file to be migrated, got %q", got)
-	}
-}
-
-// The secret description must name the config file without exposing the host
-// path, which would leak the operator's username and directory layout.
-func TestMigratePluginSecrets_DescriptionOmitsHostPath(t *testing.T) {
-	sb := newFakeSecretBackend()
-	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\n")
-
-	migratePluginSecrets(context.Background(), sb, "telegram", nil, cfgFile)
-
-	desc := sb.descriptions[config.SecretTelegramBotToken]
-	if !strings.Contains(desc, "scion-telegram.yaml") {
-		t.Errorf("expected description to name the config file, got %q", desc)
-	}
-	if strings.Contains(desc, filepath.Dir(cfgFile)) {
-		t.Errorf("description must not contain the host path, got %q", desc)
-	}
-}
-
-func TestMigratePluginSecrets_FromInlineConfig(t *testing.T) {
-	sb := newFakeSecretBackend()
-	inline := map[string]string{"bot_token": "inline-token"}
-
-	migratePluginSecrets(context.Background(), sb, "telegram", inline, "")
-
-	if got := sb.values[config.SecretTelegramBotToken]; got != "inline-token" {
-		t.Errorf("expected inline bot_token to be migrated, got %q", got)
-	}
-}
-
-// When config_file is set, ResolvePluginConfig runs the plugin on the file's
-// value, so that is the credential the backend must receive.
-func TestMigratePluginSecrets_ConfigFileWinsOverInline(t *testing.T) {
-	sb := newFakeSecretBackend()
-	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\n")
-	inline := map[string]string{"bot_token": "inline-token", "webhook_secret": "inline-secret"}
-
-	migratePluginSecrets(context.Background(), sb, "telegram", inline, cfgFile)
-
-	if got := sb.values[config.SecretTelegramBotToken]; got != "file-token" {
-		t.Errorf("expected config file value to win, got %q", got)
-	}
-	// Keys absent from the file still migrate from inline config.
-	if got := sb.values[config.SecretTelegramWebhookKey]; got != "inline-secret" {
-		t.Errorf("expected webhook_secret from inline config, got %q", got)
-	}
-}
-
-// An empty value in the config file is not a value — inline is used instead.
-func TestMigratePluginSecrets_EmptyConfigFileValueFallsBackToInline(t *testing.T) {
-	sb := newFakeSecretBackend()
-	cfgFile := writePluginConfigFile(t, "bot_token: \"\"\n")
-	inline := map[string]string{"bot_token": "inline-token"}
-
-	migratePluginSecrets(context.Background(), sb, "telegram", inline, cfgFile)
-
-	if got := sb.values[config.SecretTelegramBotToken]; got != "inline-token" {
-		t.Errorf("expected fallback to inline value, got %q", got)
-	}
-}
-
-// Backend-style key names (TELEGRAM_BOT_TOKEN) are stripped from file config by
-// LoadPluginConfigFile, so they are not a migration source — only the plugin
-// config key (bot_token) is.
-func TestMigratePluginSecrets_IgnoresBackendKeyNameInConfigFile(t *testing.T) {
-	sb := newFakeSecretBackend()
-	cfgFile := writePluginConfigFile(t, config.SecretTelegramBotToken+": \"backend-style-token\"\n")
-
-	migratePluginSecrets(context.Background(), sb, "telegram", nil, cfgFile)
-
-	if sb.sets != 0 {
-		t.Errorf("expected no migration from a backend-style key, got %d Set calls", sb.sets)
-	}
-}
-
-func TestMigratePluginSecrets_MissingConfigFile(t *testing.T) {
-	sb := newFakeSecretBackend()
-	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
-	inline := map[string]string{"bot_token": "inline-token"}
-
-	migratePluginSecrets(context.Background(), sb, "telegram", inline, missing)
-
-	if got := sb.values[config.SecretTelegramBotToken]; got != "inline-token" {
-		t.Errorf("missing config file should not block inline migration, got %q", got)
-	}
-}
-
-func TestMigratePluginSecrets_DoesNotOverwriteExisting(t *testing.T) {
-	sb := newFakeSecretBackend()
-	sb.values[config.SecretTelegramBotToken] = "already-migrated"
-	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\n")
-
-	migratePluginSecrets(context.Background(), sb, "telegram", map[string]string{"bot_token": "inline-token"}, cfgFile)
-
-	if got := sb.values[config.SecretTelegramBotToken]; got != "already-migrated" {
-		t.Errorf("existing secret must not be overwritten, got %q", got)
-	}
-	if sb.sets != 0 {
-		t.Errorf("expected no Set calls, got %d", sb.sets)
-	}
-}
-
-func TestMigratePluginSecrets_UnknownPluginNoOp(t *testing.T) {
-	sb := newFakeSecretBackend()
-	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\n")
-
-	migratePluginSecrets(context.Background(), sb, "not-a-known-plugin", map[string]string{"bot_token": "x"}, cfgFile)
-
-	if sb.sets != 0 {
-		t.Errorf("expected no migration for unknown plugin, got %d Set calls", sb.sets)
-	}
-}
-
-func TestMigratePluginSecrets_MalformedConfigFileFallsBackToInline(t *testing.T) {
-	sb := newFakeSecretBackend()
-	// bot_token appears only in the file, webhook_secret only inline: if the file
-	// parsed, bot_token would migrate too.
-	cfgFile := writePluginConfigFile(t, "bot_token: \"file-token\"\nwebhook_secret: [unterminated\n")
-	inline := map[string]string{"webhook_secret": "inline-secret"}
-
-	out := captureLog(t, func() {
-		migratePluginSecrets(context.Background(), sb, "telegram", inline, cfgFile)
-	})
-
-	if got := sb.values[config.SecretTelegramWebhookKey]; got != "inline-secret" {
-		t.Errorf("malformed config file should not block inline migration, got %q", got)
-	}
-	if got, ok := sb.values[config.SecretTelegramBotToken]; ok {
-		t.Errorf("unparseable config file must yield no file values, got %q", got)
-	}
-	if !strings.Contains(out, "failed to read config file") {
-		t.Errorf("expected a warning about the unreadable config file, got log: %q", out)
-	}
 }
 
 // initPluginManager must run the migration for a plugin whose only raw config is

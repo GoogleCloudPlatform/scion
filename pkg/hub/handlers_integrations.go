@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/secretmigration"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -1321,6 +1322,20 @@ func installedPluginSettingsEntry(name string) *config.V1PluginEntry {
 // map that server startup builds — file settings, secret-backend secrets, and
 // hub wiring credentials — so the plugin's Configure call succeeds on load.
 func (s *Server) activateInstalledIntegration(ctx context.Context, mgr IntegrationManager, name string, entry *config.V1PluginEntry) error {
+	// Every current caller checks entry before calling, but the signature
+	// accepts a pointer, so fail loudly rather than panicking deep inside the
+	// activation sequence if a future one forgets.
+	if entry == nil {
+		return fmt.Errorf("cannot activate integration %q: entry is nil", name)
+	}
+
+	// Migrate raw credentials into the secret backend before
+	// ResolvePluginConfig strips them, mirroring what the server boot path
+	// does in initPluginManager. Without this, a plugin installed and
+	// activated without a restart loses any secret its operator put in
+	// settings.yaml. A nil backend is a no-op.
+	secretmigration.MigratePluginSecrets(ctx, s.GetSecretBackend(), name, entry.Config, entry.ConfigFile)
+
 	merged, err := config.ResolvePluginConfig(entry.ConfigFile, entry.Config)
 	if err != nil {
 		slog.Warn("Failed to resolve config file for plugin activation", "plugin", name, "error", err)

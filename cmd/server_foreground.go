@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/secretmigration"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -1212,7 +1213,8 @@ func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.C
 // safe because all guarded boot migrations are idempotent: each one checks
 // whether its work has already been done (e.g. MigrateStorageOnFirstBoot
 // checks for existing namespaced objects, BootstrapBundledResources uses
-// SkipIfAnyExist, migratePluginSecrets checks for existing secret values)
+// SkipIfAnyExist, secretmigration.MigratePluginSecrets checks for existing
+// secret values)
 // and no-ops if so. The winning replica does the work; the others skip it
 // here and will see the completed state on their next access.
 func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryLockKey, label string, fn func()) {
@@ -2572,7 +2574,7 @@ func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend, 
 	if secretBackend != nil {
 		runWithAdvisoryLock(ctx, dataStore, store.LockInlineSecretsMigration, "plugin secrets migration", func() {
 			for name, entry := range vs.Server.Plugins.Broker {
-				migratePluginSecrets(ctx, secretBackend, name, entry.Config, entry.ConfigFile)
+				secretmigration.MigratePluginSecrets(ctx, secretBackend, name, entry.Config, entry.ConfigFile)
 			}
 		})
 	}
@@ -2852,113 +2854,6 @@ func requireImageRegistryForBroker() error {
 		"  Option 1: scion config set --global image_registry <your-registry>\n" +
 		"  Option 2: export SCION_IMAGE_REGISTRY=<your-registry>\n\n" +
 		"See image-build/README.md for instructions on building and pushing images")
-}
-
-// migratePluginSecrets performs a one-shot migration of secret config keys found
-// in the raw plugin config into the secret backend. Both sources of raw config
-// are considered: the inline map in settings.yaml and the per-plugin YAML file
-// referenced by config_file.
-//
-// The two sources need migrating for different reasons:
-//
-//   - Inline settings.yaml: ResolvePluginConfig strips secret config keys
-//     (bot_token, signing_key, ...) from inline config, so without migration the
-//     credential never reaches the plugin.
-//   - Per-plugin config file: these keys are NOT stripped and do reach the plugin,
-//     so nothing breaks today. Migrating them puts every plugin credential under
-//     the secret backend's lifecycle — rotation, auditing, scoped access — instead
-//     of leaving copies scattered across plaintext YAML on disk.
-//
-// When a secret key is present in both sources the config file value wins — see
-// pluginSecretMigrationSource.
-//
-// Known limitation (no code change here — this is the existing precedence):
-// migrating a key out of a config file does not deactivate the file copy. Because
-// injectPluginSecretsIntoConfig only fills in keys the merged config leaves empty,
-// a value still present in the config file continues to win over the backend copy,
-// which stays inert until the operator removes the key from the file. An operator
-// who later rotates the secret in the backend will keep running on the stale file
-// value. The log line below tells them which file to clean up; note that it prints
-// configFile as written in settings.yaml, so a relative or "~/"-prefixed path is
-// shown unresolved.
-//
-// The same divergence bites in the other direction: the migration never refreshes
-// a secret that already exists in the backend, so an operator who rotates the
-// credential in the config file and later removes the key — as the log advises —
-// drops the plugin back onto the stale backend value. Whichever copy the operator
-// stops maintaining, the two must be reconciled by hand.
-func migratePluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginName string, inlineConfig map[string]string, configFile string) {
-	mappings, ok := config.PluginSecretKeyMap[pluginName]
-	if !ok {
-		return
-	}
-
-	fileConfig := loadPluginConfigFileForMigration(pluginName, configFile)
-
-	hubID := sb.HubID()
-	for _, m := range mappings {
-		val, source := pluginSecretMigrationSource(m.ConfigKey, inlineConfig, fileConfig, configFile)
-		if val == "" {
-			continue
-		}
-		existing, err := sb.Get(ctx, m.SecretKey, store.ScopeHub, hubID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			log.Printf("Warning: failed to check secret backend for %s (plugin %q), skipping migration: %v", m.ConfigKey, pluginName, err)
-			continue
-		}
-		if existing != nil && existing.Value != "" {
-			continue
-		}
-		_, _, err = sb.Set(ctx, &secret.SetSecretInput{
-			Name:          m.SecretKey,
-			Value:         val,
-			SecretType:    secret.TypeVariable,
-			InjectionMode: "as_needed",
-			Scope:         store.ScopeHub,
-			ScopeID:       hubID,
-			// Only the file name goes into backend metadata — a full host path
-			// would leak the operator's username and directory layout.
-			Description: fmt.Sprintf("Auto-migrated from %s for plugin %s", filepath.Base(source), pluginName),
-		})
-		if err != nil {
-			log.Printf("Warning: failed to migrate secret %s for plugin %q: %v", m.ConfigKey, pluginName, err)
-			continue
-		}
-		log.Printf("Migrated %s to secret backend for plugin %q — remove it from %s", m.ConfigKey, pluginName, source)
-	}
-}
-
-// pluginSecretMigrationSource picks which raw value to migrate for one secret
-// config key, and returns a label naming where it came from for logging.
-//
-// The per-plugin config file wins over inline config. That is the opposite of
-// config.LoadPluginConfigFile's merge order, and deliberately so: when
-// config_file is set, ResolvePluginConfig drops every secret config key from
-// inline config and takes the file's value, so the file holds the credential the
-// plugin is actually running on. Migrating the inline value instead would put a
-// different — possibly stale — credential in the backend, and the plugin would
-// silently switch to it once the operator cleaned the key out of the file.
-func pluginSecretMigrationSource(configKey string, inlineConfig, fileConfig map[string]string, configFile string) (value, source string) {
-	if v := fileConfig[configKey]; v != "" {
-		return v, configFile
-	}
-	return inlineConfig[configKey], "settings.yaml"
-}
-
-// loadPluginConfigFileForMigration reads the raw per-plugin YAML config file so
-// migratePluginSecrets can see secrets that live only in that file. A missing
-// file yields an empty map; any load failure is logged and treated as empty so
-// migration still proceeds for inline config.
-func loadPluginConfigFileForMigration(pluginName, configFile string) map[string]string {
-	if configFile == "" {
-		return nil
-	}
-	fileConfig, err := config.LoadPluginConfigFile(configFile, nil)
-	if err != nil {
-		log.Printf("Warning: failed to read config file %q for plugin %q during secret migration: %v", configFile, pluginName, err)
-		return nil
-	}
-	return fileConfig
 }
 
 // stripSecretKeys returns a copy of the config map with all secret config keys removed.
