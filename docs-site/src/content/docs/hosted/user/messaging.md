@@ -19,15 +19,18 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 ### Core Layout & Navigation
 
 - **Project-Scoped Spaces & Shared Threads**: Chat is organized into distinct spaces scoped to specific Projects. Within a project-scoped space, users and agents participate in shared discussion threads, creating focused hubs of collaboration.
-- **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports 1-on-1 Direct Messages. This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
+- **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats, backed by deep DM routing and persistence fixes. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
 - **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message.
-- **The Thread Rail**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. Unread badges ("unread dots") update in real-time as messages arrive, instantly alerting you to new activity requiring attention.
+- **The Thread Rail & Mobile Swipe Navigation**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. On mobile viewports, the rail supports native **swipe gestures** for fluid, app-like drawer navigation.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
+- **Markdown & Rich Rendering**: Chat messages support fully-featured real-time **Markdown rendering** inside chat bubbles (including syntax-highlighted code fences, tables, and nested lists) for highly readable development chats.
+- **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers.
 - **Attachments, Search & Notifications**:
-  - **Attachments**: The chat composer supports file and image uploads, allowing users to send documents or visual context directly to threads.
+  - **Attachments & Image Overlay**: The chat composer supports file and image uploads, allowing users to send documents or visual context directly to threads. Uploaded images feature an interactive, full-screen **image overlay viewer** with smooth zoom controls.
   - **Search**: Built-in chat search lets you quickly query across historical messages and active threads to find crucial context.
   - **Notifications**: Integrated chat-specific notifications, including native browser push notifications and persistent unread counts, ensure you stay informed of incoming messages.
+- **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
 
 ### Three-State Visibility Filtering
 
@@ -142,10 +145,15 @@ When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user
 * **Parent Agent Role**: If you are the parent agent that created the waiting agent, you may be the intended respondent. Use `scion message agent:<name>` to reply with the answer.
 * **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to `input-needed` notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send an explicit `instruction` instead.
 
-### 3. Subscription Management and the `--notify` Deprecation
+### 3. Subscription Management and Agent Self-Service
 
 * **Automatic Subscription**: The `--notify` flag on `scion start` is **deprecated**. When you start a sub-agent, Scion automatically registers your subscription via creation ancestry.
 * **Explicit Messaging Subscription**: Use the `--notify` flag on `scion message` only when you need to subscribe to notifications from a peer agent that you did *not* create.
+* **Agent Self-Service Subscriptions**: Running agents in Hosted mode are empowered to programmatically manage their own notification subscriptions. Previously restricted to administrative users (returning a `403 Forbidden` for agents), agents with appropriate API credentials can now perform the following operations:
+  - **CRUD Operations**: Live agents can list, create, update, and delete their own subscriptions via the Hub API or client utilities.
+  - **Identity Qualification**: To prevent cross-project security leaks, every subscription request is qualified by the agent's specific `(project, slug)` coordinates.
+  - **Granular Scopes**: Authorization gates require the agent token to hold the `project:read` scope for reading subscriptions and the `project:agent:notify` scope for writing (creating, updating, or deleting) subscriptions.
+  - **Ownership Constraints**: Acknowledging notifications or modifying/deleting existing subscriptions strictly requires ownership validation, meaning an agent can only modify or acknowledge subscriptions that target or belong to itself.
 
 ### 4. Sleep Anti-Pattern & Polling
 

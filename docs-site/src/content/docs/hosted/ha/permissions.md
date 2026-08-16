@@ -145,6 +145,7 @@ To make the service account lifecycle transparent and auditable for users and ad
 - **Tiered Role Badges**: The agents list and agent detail pages display visible role badges (`none`, `readonly`, `baseline`, or `full`) highlighting the active execution role of each running container.
 - **GCP Identity Card**: The agent detail view features an interactive **GCP Identity Card**. In all authentication modes, it displays the bound service account email, verification status (e.g. `verified` or `failed`), and the corresponding GCP project ID.
 - **Service Account Status Manager**: Within project settings, owners can view registered service accounts, check their live Policy Troubleshooter verification status, and manually trigger verification probes.
+- **Zero-Reload Service Account Dropdown Sync**: The UI dispatches custom events (`sa-list-changed`) across components upon SA registration, verification, minting, or deletion, instantly updating default service account selection dropdowns without a full-page reload, and automatically clears the default SA selection if the selected SA is deleted.
 
 ---
 
@@ -174,7 +175,7 @@ Agents are assigned one of four named roles, each mapping to a fixed set of JWT 
 | :--- | :--- | :--- |
 | `none` | *None* | No access to the Hub API (runs with no authorization claims). |
 | `readonly` | `project:read` | Can view and query project state, but cannot report status, register port forwards, or manage other agents. |
-| `baseline` | `project:read`<br>`agent:status:update`<br>`agent:token:refresh`<br>`project:agent:notify`<br>`agent:port:forward` | Standard execution permissions. Allows the agent to report progress, refresh its token, register reverse-proxied port forwards, and send notifications. |
+| `baseline` | `project:read`<br>`agent:status:update`<br>`agent:token:refresh`<br>`project:agent:notify`<br>`agent:port:forward` | Standard execution permissions. Allows the agent to report progress, refresh its token, register reverse-proxied port forwards, send notifications, and manage its own notification subscriptions. |
 | `full` | *All baseline scopes* +<br>`project:agent:create`<br>`project:agent:lifecycle`<br>`project:secret:read` | Complete agent control. Allows spawning child (sub) agents, managing their lifecycles, and reading project-scoped secrets from the secret backend. |
 
 #### Two-Gate Authority Lattice

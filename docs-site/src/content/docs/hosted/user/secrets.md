@@ -314,6 +314,14 @@ When GCP Secret Manager is configured, Scion uses a **hybrid storage** model:
 
 ## Technical Details
 
+### Automatic Plugin Secret Migration & Safety (Hub Integrations)
+
+For external messaging integrations (such as Discord, Telegram, or Google Chat) that run as Hub-level message broker plugins, Scion implements an automatic, secure secret migration and stripping pipeline to keep sensitive bot tokens and API keys out of plaintext configuration files:
+
+- **Automatic One-Shot Migration**: When starting up or activating a plugin (e.g., via the runtime activation path in `activateInstalledIntegration`), the Hub automatically scans the integration's configuration—including per-plugin external configuration files and inline config blocks. Any discovered secret keys are automatically migrated into the configured secure **Secrets Backend** (such as GCP Secret Manager).
+- **Copy-Before-Strip Safety**: After migrating the secrets, Scion strips the raw values in-place from the integration's file-based and inline configurations (`stripSecretKeysInPlace`) using a secure copy-before-strip helper to avoid any risk of partial writes or configuration corruption, while deduplicating warning logs.
+- **Boot and Activation Consistency**: This migration-and-strip sequence runs consistently during both the Hub's boot-up routine and dynamic runtime integration activation, ensuring that secrets are never stored or exposed in plaintext configs.
+
 ### Resolution Hierarchy
 When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub. The Hub merges secret values in this order (last one wins for the same key):
 1. Hub Secrets (global defaults)
