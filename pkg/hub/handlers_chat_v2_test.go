@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -2158,5 +2159,131 @@ func TestChatV2_ClearTopicDefaultAgent(t *testing.T) {
 	}
 	if other.DefaultAgent != "reviewer" {
 		t.Errorf("unrelated topic default changed: got %q", other.DefaultAgent)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// History pagination (#1027)
+// ---------------------------------------------------------------------------
+
+// seedHistoryMessages inserts n web-channel messages into the given thread,
+// one second apart so the keyset ordering (created DESC, id DESC) is stable.
+// It returns the message contents in chronological order (oldest first).
+func seedHistoryMessages(t *testing.T, s store.Store, projectID, threadID string, n int) []string {
+	t.Helper()
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Duration(n) * time.Second)
+	contents := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		content := fmt.Sprintf("message-%03d", i)
+		msg := &store.Message{
+			ID:        tid(threadID + "-msg-" + content),
+			ProjectID: projectID,
+			Sender:    "user:dev",
+			SenderID:  DevUserID,
+			Recipient: "thread:" + threadID,
+			Msg:       content,
+			Type:      messages.TypeChat,
+			Channel:   "web",
+			ThreadID:  threadID,
+			CreatedAt: base.Add(time.Duration(i) * time.Second),
+		}
+		if err := s.CreateMessage(ctx, msg); err != nil {
+			t.Fatalf("CreateMessage(%s): %v", content, err)
+		}
+		contents = append(contents, content)
+	}
+	return contents
+}
+
+// The client sends the pagination cursor as ?cursor= (chat-thread.ts
+// fetchHistoryV2). When the handler read a different parameter the cursor was
+// silently dropped and every page returned the same newest window, so
+// scrollback never advanced past the first page (#1027). Paginating twice is
+// the only way to catch that: a single-page assertion passes either way.
+func TestChatV2_History_CursorPaginatesToOlderMessages(t *testing.T) {
+	srv, s, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	topicID := tid("topic-history-paginate")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "history-paginate",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// More than one default page (50) so a second page must exist.
+	const total = 120
+	seedHistoryMessages(t, s, proj.ID, topicID, total)
+
+	fetch := func(cursor string) chatHistoryResponse {
+		t.Helper()
+		path := "/api/v1/chat/conversations/" + topicID + "/messages?limit=50"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		rec := doRequest(t, srv, http.MethodGet, path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: expected 200, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+		var resp chatHistoryResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp
+	}
+
+	first := fetch("")
+	if len(first.Messages) != 50 {
+		t.Fatalf("first page: got %d messages, want 50", len(first.Messages))
+	}
+	if first.NextCursor == "" {
+		t.Fatalf("first page: expected a nextCursor with %d messages seeded", total)
+	}
+	// Newest first: the last seeded message heads the first page.
+	if got, want := first.Messages[0].Msg, fmt.Sprintf("message-%03d", total-1); got != want {
+		t.Errorf("first page head = %q, want %q", got, want)
+	}
+
+	second := fetch(first.NextCursor)
+	if len(second.Messages) != 50 {
+		t.Fatalf("second page: got %d messages, want 50", len(second.Messages))
+	}
+
+	// The second page must be disjoint from the first...
+	firstIDs := make(map[string]bool, len(first.Messages))
+	for _, m := range first.Messages {
+		firstIDs[m.ID] = true
+	}
+	for _, m := range second.Messages {
+		if firstIDs[m.ID] {
+			t.Fatalf("second page repeats message %q from the first page — cursor was ignored", m.Msg)
+		}
+	}
+
+	// ...and strictly older than it.
+	oldestOnFirst := first.Messages[len(first.Messages)-1].CreatedAt
+	newestOnSecond := second.Messages[0].CreatedAt
+	if !newestOnSecond.Before(oldestOnFirst) {
+		t.Errorf("second page is not older: newest=%s, oldest on first page=%s", newestOnSecond, oldestOnFirst)
+	}
+	if got, want := second.Messages[0].Msg, fmt.Sprintf("message-%03d", total-51); got != want {
+		t.Errorf("second page head = %q, want %q", got, want)
+	}
+
+	// A third page walks the tail: 120 seeded, 100 consumed, 20 left.
+	third := fetch(second.NextCursor)
+	if len(third.Messages) != 20 {
+		t.Fatalf("third page: got %d messages, want 20", len(third.Messages))
+	}
+	if got, want := third.Messages[len(third.Messages)-1].Msg, "message-000"; got != want {
+		t.Errorf("third page tail = %q, want %q (oldest message unreachable)", got, want)
+	}
+	if third.NextCursor != "" {
+		t.Errorf("third page: expected no nextCursor, got %q", third.NextCursor)
 	}
 }
