@@ -387,7 +387,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
     - `delete <token-id>`: Permanently delete a token.
 - `scion hub status`: Show the current Hub connection status.
-- `scion hub notifications`: Retrieve a list of recent system notifications and agent alerts.
+- `scion hub notifications`: **Deprecated**. This command has been moved to the top-level `scion notifications` command group.
 - `scion hub link`: Link the current local project to the Hub.
 - `scion hub unlink`: Unlink the current project from the Hub locally.
 - `scion hub projects`: List all projects registered on the Hub.
@@ -411,6 +411,25 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--name`, `--script`, `--description`.
     - `activate <id-or-slug>`: Mark an archived hook as active (archives any currently active hub-scoped hook).
     - `delete <id-or-slug>` (alias `rm`, `remove`): Delete an archived hook. Active hooks cannot be deleted.
+
+## Notification Management
+
+### `scion notifications`
+
+Manages notifications and notification subscriptions. Requires Hub mode.
+
+- `scion notifications`: List your recent unacknowledged notifications.
+    - Flags: `--all` (include acknowledged notifications), `--json` (format output as JSON).
+- `scion notifications ack [id]`: Acknowledge one or all notifications.
+    - Flags: `--all` (acknowledge all unacknowledged notifications).
+- `scion notifications subscribe`: Subscribe to notifications for a specific agent or all agents in a project.
+    - Flags: `--agent <name-or-id>` (subscribe to specific agent), `--project <name>` (specify project, inferred from context if omitted), `--triggers <triggers>` (comma-separated list of trigger activities, default: `COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED`).
+- `scion notifications unsubscribe <id>`: Remove a subscription.
+    - Flags: `--all` (remove all subscriptions in the project), `--project <name>`.
+- `scion notifications update <id>`: Update a subscription's trigger activities.
+    - Flags: `--triggers <triggers>` (comma-separated list of triggers).
+- `scion notifications subscriptions`: List your active notification subscriptions.
+    - Flags: `--project <name>` (filter by project), `--json` (format output as JSON).
 
 ## Infrastructure
 

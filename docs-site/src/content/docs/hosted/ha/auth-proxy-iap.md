@@ -116,9 +116,9 @@ Provisioning in proxy mode works identically to OAuth — lazy, allow-list-gated
 - **`open`**: any verified email is allowed.
 - **`domain_restricted`**: email domain must be in `authorized_domains`.
 - **`invite_only`**: email must be pre-registered (via admin invite-code flow).
-- Emails in `admin_emails` are always allowed and auto-promoted to admin role. The list only promotes: removing an email from it does not demote a user who is already an admin — use the admin UI to demote.
-- If not permitted, the request returns **403**.
-- Suspended users are rejected even though IAP authenticates them upstream.
+- **Additive-Only `admin_emails` Floor**: Emails in the `admin_emails` configuration are granted the `admin` role automatically. This setting is strictly additive (acts as a floor, not a ceiling): it never overwrites or demotes roles that have been explicitly promoted or changed via the Admin UI/API, which are stored in the database and preserved verbatim across logins/refreshes.
+- If not permitted, the request returns **403**. Deleted users are rejected with **401** or **403**, and suspended users are rejected with **403** (even though upstream IAP may authenticate them).
+- **Database-Backed Token Refresh**: The token refresh endpoint reads the user's active role directly from the database rather than relying on stale session cache, ensuring UI-based role promotions take effect immediately.
 
 A **60-second resolution cache** (keyed by verified email) avoids a database lookup on every request. The JWT signature is verified on every request — only the provisioning/store lookup is cached.
 
