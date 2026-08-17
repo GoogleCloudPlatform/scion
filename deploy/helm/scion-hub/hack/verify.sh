@@ -448,6 +448,13 @@ expect_render_failure \
   --set 'hub.extraEnv[0].value=/tmp'
 
 expect_render_failure \
+  "hub.extraEnv rejects a literal that looks like secret material" \
+  "looks like secret material" \
+  "${BASE[@]}" \
+  --set 'hub.extraEnv[0].name=SOME_API_TOKEN' \
+  --set 'hub.extraEnv[0].value=abc123'
+
+expect_render_failure \
   "config.existingSecret with config.extra" \
   "config.existingSecret is set together with inline settings values" \
   "${BASE[@]}" \
@@ -510,6 +517,36 @@ expect_render_failure \
   "acknowledgeOAuthUnlanded" \
   "${BASE[@]}" \
   --set auth.mode=oauth
+
+# --------------------------------------------------------------------------
+step "renders that must succeed"
+# --------------------------------------------------------------------------
+# The positive twins for the guards above. A guard that rejects everything is
+# not a guard, and the secret-name check in particular is one bad regex away
+# from blocking the correct way to pass a secret.
+if out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" \
+    --set 'hub.extraEnv[0].name=SOME_API_TOKEN' \
+    --set 'hub.extraEnv[0].valueFrom.secretKeyRef.name=my-secret' \
+    --set 'hub.extraEnv[0].valueFrom.secretKeyRef.key=token' 2>&1); then
+  if grep -q 'secretKeyRef' <<<"$out"; then
+    pass "hub.extraEnv accepts a secret-named variable delivered by secretKeyRef"
+  else
+    fail "the secretKeyRef entry rendered but did not reach the manifest"
+  fi
+else
+  fail "hub.extraEnv rejected a secret-named variable delivered by secretKeyRef, which is the correct shape"
+  printf '          %s\n' "$(tr '\n' ' ' <<<"$out" | cut -c1-300)"
+fi
+
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" \
+    --set 'hub.extraEnv[0].name=SCION_SERVER_ADMIN_MODE_NOTE' \
+    --set 'hub.extraEnv[0].value=harmless' >/dev/null 2>&1; then
+  pass "hub.extraEnv accepts an ordinary variable"
+else
+  fail "hub.extraEnv rejected an ordinary variable - the prefix guard is too broad"
+fi
 
 # --------------------------------------------------------------------------
 printf '\n'

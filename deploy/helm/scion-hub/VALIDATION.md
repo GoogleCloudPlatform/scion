@@ -211,3 +211,116 @@ exist outside a cluster.
       `touch` a file under the mounted path as the hub's uid) and confirm
       `ls -n` on the share shows the new files owned by the numeric `nfs.uid` /
       `nfs.gid` configured in `values.yaml` -- not `0:0`, and not `root:root`.
+
+### Configuration intake (`settings.yaml`)
+
+The rendered content is fully covered by `hack/verify.sh` and `golden/` — the
+file shape, the preflight keys in both auth modes, the deep merge, the absent
+environment variables — and none of that needs a cluster. What needs a cluster
+is everything about *delivery*: whether the mount lands, whether the hub can
+read it, and what the hub does when it tries to write it.
+
+#### 1. The hub can read the mounted settings file
+
+The single most likely delivery failure, and the one that does not announce
+itself. A Secret volume is projected `root:root` regardless of the pod's
+`securityContext`, and the hub runs as a non-root uid — so the file's mode is
+load-bearing. The chart projects `0444`.
+
+    kubectl exec <hub-pod> -- ls -l /home/scion/.scion/settings.yaml
+    kubectl exec <hub-pod> -- head -5 /home/scion/.scion/settings.yaml
+
+Pass: the mode is `-r--r--r--`, and the hub's own logs show it loaded the
+configuration — the hub ID it reports matches `hub.hubId`, and the database
+driver it reports matches `database.driver`.
+
+**Fail looks like a configuration error, not a permissions error.** An unreadable
+settings file does not produce "permission denied" anywhere the operator will
+look. The hub starts on its defaults and then fails the hosted preflight naming
+a missing key — sending you to a settings file that is, in fact, correct. If you
+are debugging a preflight failure that names a key you can see in the Secret,
+check the mode first.
+
+Do not fix a permissions problem here by adding `fsGroup`. It is pod-wide, so it
+grants the group to every sidecar as well, and it makes the kubelet apply
+recursive ownership changes to mounted volumes — which becomes a startup hazard
+once the workspace share is an NFS mount.
+
+#### 2. `$HOME/.scion` is writable and the settings file is not
+
+    kubectl exec <hub-pod> -- touch /home/scion/.scion/probe && echo dir-writable
+    kubectl exec <hub-pod> -- ls -d /home/scion/.scion/storage
+    kubectl exec <hub-pod> -- sh -c '>> /home/scion/.scion/settings.yaml' ; echo $?
+
+Pass: the directory accepts a write, `storage/` exists, and the append to
+`settings.yaml` fails. The directory is the hub's whole state directory —
+`storage/`, `templates/` and `scion-token` all live in it — so a read-only
+directory breaks the hub for reasons unrelated to configuration. Only the one
+file is read-only.
+
+#### 3. What silently does not persist, until ptone/scion#1091
+
+The mount stops the hub from rewriting `settings.yaml`, which is the point: those
+writes are pod-local, and `syncHubSettings` re-seeds shared database state from
+the pod-local file on every boot, so a replica that can write this file can
+promote its own divergence into shared truth. Refusing the write prevents that.
+
+The cost is that several operations now do nothing, and mostly say so quietly.
+Confirm each, and record what the operator actually sees:
+
+- **The GitHub App configuration `PUT` returns HTTP 200 and does not persist.**
+  Verify it: configure a GitHub App through the API, get the 200, then read the
+  configuration back and restart the pod. Expected: the setting is not there.
+  This is the worst of the set because the success response is unqualified.
+- **Integration settings writes log a warning and swallow the error.** One of
+  these paths returns HTTP 500 to the caller while the server continues. Find
+  which, and record the message.
+- **The startup write logs a warning and continues.** Confirm the pod still
+  reaches ready.
+
+Pass: every one of these is soft. Nothing crashloops, nothing panics, nothing is
+corrupted, and no two replicas end up disagreeing. **Fail** — and this is the
+outcome that would reopen the mount decision — is any of them terminating the
+process, or any two replicas reporting different configuration.
+
+This is a behaviour change and in one respect it reads as a regression: with a
+writable file these writes succeeded, appeared to work, and were silently lost at
+the next pod replacement. They now never take effect. That is the better failure
+— consistent beats intermittent, and nothing can diverge — but only if operators
+are told, which is what this section and the corresponding `NOTES.txt` section
+are for. Both carry the issue number so this reads as temporary, which it is.
+
+#### 4. `helm upgrade` with a changed configuration actually takes effect
+
+A `subPath` mount is bound when the container starts and is frozen for the
+container's lifetime; the kubelet's periodic refresh of Secret volumes does not
+reach through one. The chart therefore annotates the pod with a checksum of the
+rendered Secret so that a configuration change rolls the pods.
+
+Change something visible in `config.extra` — `server.log_level`, say — and run
+`helm upgrade`.
+
+Pass: the pods are replaced and the new value is in effect.
+
+**Fail is the quiet one:** the upgrade reports success, the Secret is updated,
+and the running hub keeps the old configuration indefinitely, until some
+unrelated event restarts the pods and the change takes effect at a time nobody
+chose. If you see that, the checksum annotation is missing or is being computed
+over something that did not change.
+
+Under `config.existingSecret` the chart deliberately renders no such annotation —
+it does not own the file and cannot checksum it. Editing that Secret is expected
+*not* to roll the pods; restart them yourself.
+
+#### 5. `schema_version` and the migration rename
+
+Not runnable as a positive test — the point is that nothing happens. Worth
+knowing while you are in here: the hub auto-migrates a settings file whose format
+it cannot detect, the detector keys on `schema_version`, and the migration
+replaces the file with `os.Rename`, which returns `EBUSY` against a bind mount.
+The chart always renders `schema_version: "1"`, and `hack/verify.sh` enforces it
+under the name `migration-rename-hazard` across every values permutation.
+
+If you supply your own file through `config.existingSecret`, it must carry
+`schema_version`. If a hub ever fails with a rename or `EBUSY` error on the
+settings path, this is why.

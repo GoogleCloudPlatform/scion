@@ -1698,6 +1698,17 @@ loudly.
 {{- if or (eq $name "HOME") (eq $name "KUBECONFIG") (eq $name "SCION_SERVER_BASE_URL") (eq $name "SCION_REQUIRE_STABLE_SIGNING_KEY") }}
 {{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and a duplicate entry in the container's env list shadows the value from envFrom in a way that is easy to miss." $name) }}
 {{- end }}
+{{- /*
+The same rule the argument guard applies to argv, applied to env. A literal
+value here is stored in the Deployment and readable by anyone who can read the
+object - which is a wider set of people than can read a Secret, and a set that
+grows every time somebody is granted "just read access to the workloads".
+valueFrom.secretKeyRef is untouched by this: it carries a reference, not the
+material.
+*/}}
+{{- if and (hasKey $entry "value") (regexMatch "(?i)(secret|password|token|credential|api_?key)" $name) }}
+{{- fail (printf "hub.extraEnv sets %s to a literal value, and the name looks like secret material. A literal env value lives in the Deployment object, readable by anyone with pod read access. Use valueFrom.secretKeyRef instead." $name) }}
+{{- end }}
 {{- end }}
 {{- end }}
 
