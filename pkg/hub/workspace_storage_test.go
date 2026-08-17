@@ -80,6 +80,20 @@ func TestWorkspaceWriteBlocked_CloudRunVolumeOnCloudRun(t *testing.T) {
 	assert.False(t, srv.workspaceWriteBlocked())
 }
 
+func TestWorkspaceWriteBlocked_GKESharedVolumeOnCloudRun(t *testing.T) {
+	srv, _ := testServer(t)
+	t.Setenv("K_SERVICE", "hub-service")
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{
+			VolumeName:  "workspace-vol",
+			PVClaimName: "scion-workspaces",
+		},
+	}
+	assert.False(t, srv.workspaceWriteBlocked())
+}
+
 func TestWorkspaceWriteBlocked_NotOnCloudRun(t *testing.T) {
 	srv, _ := testServer(t)
 
