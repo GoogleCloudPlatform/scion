@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -120,8 +122,10 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := GetUserIdentityFromContext(ctx)
 	userID := ""
+	updatedBy := ""
 	if user != nil {
 		userID = user.ID()
+		updatedBy = user.Email()
 	}
 
 	// Store sensitive fields via secrets backend
@@ -163,8 +167,24 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.GitHubAppConfig
 	s.mu.Unlock()
 
-	// Persist non-sensitive config to settings.yaml (best-effort — in-memory and secrets are already saved)
-	if err := s.persistGitHubAppConfig(cfg); err != nil {
+	// Persist the non-sensitive config. In Postgres mode the durable home for
+	// these fields is the DB-owned `github_app` opsettings section; writing only
+	// to settings.yaml loses the change on restart (ephemeral filesystems) and
+	// lets any later ApplySnapshot revert it to the stale DB value. File/SQLite
+	// mode has no OperationalSettings service, so settings.yaml remains the
+	// durable home and the write stays best-effort.
+	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
+		// A failed DB write is fatal to the request even though the in-memory
+		// config and the secrets are already committed: the DB is the sole
+		// durable store, so the next refreshAndApply reverts the value. Reporting
+		// 200 here would re-create the very bug this path exists to fix.
+		if err := s.persistGitHubAppConfigToDB(ctx, ops, cfg, updatedBy); err != nil {
+			slog.Error("Failed to persist GitHub App config to DB", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to persist GitHub App configuration", nil)
+			return
+		}
+	} else if err := s.persistGitHubAppConfig(cfg); err != nil {
 		slog.Warn("Failed to persist GitHub App config to settings.yaml (in-memory config updated successfully)", "error", err)
 	}
 
@@ -243,6 +263,48 @@ func (s *Server) loadGitHubAppSecret(ctx context.Context, name string) (string, 
 
 	// Fallback: read directly from the database
 	return s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+}
+
+// persistGitHubAppConfigToDB writes the non-sensitive GitHub App configuration
+// to the DB-owned `github_app` opsettings section (Postgres mode). The error is
+// returned rather than swallowed: in Postgres mode the DB is the only durable
+// store for these fields, so a failed write silently loses the change at the
+// next refresh and the caller must be told.
+func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *OperationalSettings, cfg GitHubAppServerConfig, updatedBy string) error {
+	// WebhooksEnabled is a *bool in the section so an explicit false is
+	// distinguishable from an omitted field; cfg always carries a resolved value.
+	webhooksEnabled := cfg.WebhooksEnabled
+
+	// The update request has no private_key_path field, so the in-memory value
+	// is the only source for it — and it is empty until ApplySnapshot loads the
+	// github_app block, which it skips entirely while app_id is 0. An operator
+	// who pre-staged the path in settings.yaml before creating the App would
+	// otherwise have it overwritten with "" by this first write. Fall back to
+	// the merged snapshot, which sees the path regardless of app_id.
+	privateKeyPath := cfg.PrivateKeyPath
+	if privateKeyPath == "" {
+		privateKeyPath = ops.Snapshot().GitHubPrivateKeyPath
+	}
+
+	doc := &opsettings.GitHubAppSettings{
+		AppID:           cfg.AppID,
+		APIBaseURL:      cfg.APIBaseURL,
+		WebhooksEnabled: &webhooksEnabled,
+		InstallationURL: cfg.InstallationURL,
+		PrivateKeyPath:  privateKeyPath,
+	}
+
+	docBytes, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal github_app section: %w", err)
+	}
+
+	// expectedRevision -1 is last-writer-wins: this endpoint takes a partial
+	// update and carries no revision from the client.
+	if _, err := ops.Update(ctx, "github_app", json.RawMessage(docBytes), updatedBy, -1, "managed"); err != nil {
+		return fmt.Errorf("update github_app section: %w", err)
+	}
+	return nil
 }
 
 // persistGitHubAppConfig writes the non-sensitive GitHub App configuration
