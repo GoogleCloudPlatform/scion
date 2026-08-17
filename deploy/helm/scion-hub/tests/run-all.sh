@@ -104,9 +104,9 @@ set -u -o pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-EXPECTED_SCRIPTS=4
-EXPECTED_ASSERTIONS=107   # 106 + chart-integrity.sh's base-url channel tripwire.
-EXPECTED_FILES=6        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
+EXPECTED_SCRIPTS=5
+EXPECTED_ASSERTIONS=153   # 107 + 46 from rbac-collision.sh, the cluster-scoped name fixture.
+EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
 # present and could never notice that something is absent.
@@ -115,7 +115,22 @@ SCRIPTS=(
   update-strategy.sh    #  4 - the updateStrategy derivation
   render-guards.sh      # 46 - every other render-time refusal
   chart-integrity.sh    # 26 - .helmignore breadth, the packaged file set, base-url
+  rbac-collision.sh     # 46 - the cluster-scoped RBAC name, and two pinned residuals
 )
+
+# 🛑 rbac-collision.sh IS NOT AN "ALL GREEN MEANS ALL FIXED" SCRIPT, AND THE LINE
+# THAT WIRES IT IN IS THE WORST PLACE TO LEAVE THAT UNSAID. Several of its
+# forty-six assertions PIN DEFECTS THAT ARE STILL PRESENT - arm (o) for C4 and
+# arm (q) for C5, two live Criticals this change does NOT fix. They are written
+# to PASS WHILE THE DEFECT EXISTS and to go RED when it is fixed.
+#
+# So a green run of that script means "the chart names objects as measured", NOT
+# "the cluster-scoped naming is sound". Whoever fixes C4 or C5 will see red here
+# and must DELETE the corresponding arm in that same diff, not repair it.
+#
+# This note is duplicated from that script's own header on purpose. A reader who
+# trusts the single summary line at the bottom of this file is exactly the reader
+# who will never open the header, and the summary line cannot carry a caveat.
 
 # NAMED EXCEPTIONS. Present in this directory, deliberately NOT run from here and
 # deliberately NOT part of EXPECTED_ASSERTIONS. Stated as a list rather than left

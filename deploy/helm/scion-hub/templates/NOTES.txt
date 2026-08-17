@@ -93,3 +93,97 @@ WARNING: replicaCount is {{ .Values.replicaCount }}.
   fails - roughly (N-1)/N of attempts. Load balancer session affinity does not
   fix this: it pins a client to a pod, not to the pod holding the channel.
 {{- end }}
+{{ if and .Values.rbac.create .Values.runtime.listAllNamespaces -}}
+{{- $current := include "scion-hub.clusterRoleName" . -}}
+{{- $legacy := include "scion-hub.clusterRoleNameLegacy" . -}}
+{{- if ne $current $legacy }}
+{{/*
+  Renders ONLY when this release's cluster-scoped name changed, which happens
+  exactly when the old code truncated it. Installs that were never truncated
+  render nothing here, because for them nothing was renamed and there is no
+  orphan. See scion-hub.clusterRoleNameLegacy in _helpers.tpl.
+
+  ON THE "NO .Values IN NOTES" RULE: the two strings below are object names, and
+  naming the leftover object is the entire point of this block - an operator
+  cannot delete an object we decline to name. When fullnameOverride is set the
+  name is derived from it, so this technically prints a .Values-derived string.
+  It is metadata.name of an object already present in every rendered manifest
+  and in the cluster, not a credential, and it is not in the class the rule
+  protects. Nothing else here reads .Values.
+*/}}
+ACTION REQUIRED: THIS RELEASE'S CLUSTER-SCOPED RBAC OBJECTS HAVE BEEN RENAMED
+
+  Chart versions up to 0.1.0 could give two releases in different namespaces the
+  SAME ClusterRole and ClusterRoleBinding name, because the namespace was cut
+  off the end by a length limit. Those objects carry cluster-wide secrets
+  get/list/create/delete and pods/exec create. This release fixes the naming.
+
+  This release now uses:   {{ $current }}
+  It previously used:      {{ $legacy }}
+
+  IF THIS RELEASE HAS BEEN INSTALLED BEFORE, THE OLD OBJECTS STILL EXIST. Helm
+  does not delete them on upgrade when you apply rendered manifests, and this
+  chart cannot delete them for you. Their permissions remain live.
+
+  DO NOT DELETE THEM YET. The old name is SHARED with every other release that
+  was colliding with this one - not necessarily one other release, but every
+  release whose namespace was cut to the same text, which can be several. It may
+  still be the working ClusterRoleBinding of an install that has not upgraded.
+  Deleting it would strip that install's permissions while its pods keep
+  running, and nothing in your terminal would tell you a second release was
+  affected.
+
+  NO COMMAND BELOW CAN TELL YOU HOW MANY RELEASES SHARE IT. The object records
+  which install applied last; it does not record the others, and they leave no
+  trace on it. So this is not something the chart knows and you can look up - it
+  is not recoverable from the object at all. The only sound check is your own
+  inventory of the releases you have installed from this chart.
+
+  DO NOT IDENTIFY IT BY LABEL SELECTOR. This works, which is the problem:
+
+      kubectl get clusterrolebinding -l app.kubernetes.io/instance={{ .Release.Name }}
+
+  returns both the old and the new object, and dropping the new name leaves
+  exactly one plausible thing to delete. But every colliding release carries
+  IDENTICAL labels - including that one, because the releases collide precisely
+  by sharing a name - so the object it hands you may belong to several installs.
+  The selector cannot tell you that. It will show you one object either way.
+
+  1. Find out which namespace currently owns the old object. Since the labels
+     cannot distinguish the colliding installs, the subject is the only field
+     that can:
+
+       kubectl get clusterrolebinding {{ $legacy }} \
+         -o jsonpath='{.subjects[0].namespace}'
+
+     If that prints nothing, the object is already gone and you are done.
+
+     THIS TELLS YOU WHO APPLIED LAST. IT DOES NOT TELL YOU WHO ELSE IS USING IT.
+     Seeing your own namespace here does not mean you are the only user, and it
+     does not by itself make the object safe to delete.
+
+  2. Upgrade every release that shared the old name. Step 1 cannot enumerate
+     them for you; work from your own list of installs of this chart. The object
+     is an orphan only once every one of them is on this chart version or later.
+
+  3. Then, and only then, delete the BINDING - and only the binding:
+
+       kubectl delete clusterrolebinding {{ $legacy }}
+
+  LEAVE THE ClusterRole OF THE SAME NAME IN PLACE. Do not delete it, now or
+  later. A ClusterRole that nothing binds grants nothing, so leaving it costs
+  you nothing, and it is the one object here with no safety check available:
+
+    - It has NO field that distinguishes the installs sharing it. Not a
+      namespace, not a subject - a ClusterRole has no subjects at all. Its
+      labels and its entire rules block are byte-identical for every install of
+      this chart, so nothing on it can tell you who else is using it.
+    - RUNNING THE STEP 1 COMMAND AGAINST IT PRINTS NOTHING, and that empty
+      output does not mean "unused". It means the field does not exist on this
+      kind. If you read it as "no subjects, safe to delete", you will revoke
+      the cluster-scoped authority of every install still binding it.
+    - Recovery is not automatic. roleRef is immutable, so a broken binding
+      cannot be repaired by pointing it elsewhere; the ClusterRole has to be
+      recreated under the same name.
+{{- end }}
+{{- end }}
