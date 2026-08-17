@@ -201,6 +201,14 @@ export class ScionChatComposer extends LitElement {
       this.focusTextarea();
     }
     if (changedProperties.has('conversationKey')) {
+      // Save the draft for the OLD conversation immediately before switching.
+      const oldKey = changedProperties.get('conversationKey') as string;
+      if (oldKey) {
+        this.flushDraft(oldKey);
+      }
+      // Reset text so stale content from the old conversation is not carried over.
+      this.text = '';
+      this.runeCount = 0;
       this.restoreDraft();
     }
   }
@@ -573,10 +581,8 @@ export class ScionChatComposer extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    if (this._draftTimer !== null) {
-      clearTimeout(this._draftTimer);
-      this._draftTimer = null;
-    }
+    // Flush any pending draft so it is not lost when the component unmounts.
+    this.flushDraft(this.conversationKey);
   }
 
   /** Restore a draft from localStorage for the current conversationKey. */
@@ -622,6 +628,28 @@ export class ScionChatComposer extends LitElement {
     if (!this.conversationKey) return;
     try {
       localStorage.removeItem(`scion-chat-draft-${this.conversationKey}`);
+    } catch {
+      // localStorage may throw in private browsing mode — silently ignore.
+    }
+  }
+
+  /**
+   * Immediately persist the current draft text under the given key.
+   * Cancels any pending debounced save so it is not double-written. (#1152)
+   */
+  private flushDraft(key: string): void {
+    if (this._draftTimer !== null) {
+      clearTimeout(this._draftTimer);
+      this._draftTimer = null;
+    }
+    if (!key) return;
+    try {
+      const storageKey = `scion-chat-draft-${key}`;
+      if (this.text) {
+        localStorage.setItem(storageKey, this.text);
+      } else {
+        localStorage.removeItem(storageKey);
+      }
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
     }
@@ -925,6 +953,12 @@ export class ScionChatComposer extends LitElement {
   /** Update live mention override based on @mentions in the text. */
   private updateLiveMentionOverride(): void {
     if (!this.conversationMode || this.conversationMode === 'dm') {
+      this.liveMentionOverride = '';
+      return;
+    }
+    // When no default agent is explicitly set, @-mentions should not affect the
+    // destination chip — there is nothing to "override". (#1151)
+    if (!this.defaultAgent) {
       this.liveMentionOverride = '';
       return;
     }
