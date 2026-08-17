@@ -203,10 +203,19 @@ fi
 # wherever it sits. That includes a stray editor backup or a downloaded binary,
 # and that is intended - the answer is one line in a list, and the alternative is
 # a directory nobody can make a statement about.
-for s in "${SCRIPTS[@]}" "${NOT_RUN_HERE[@]}" "${NOT_EXECUTABLE[@]}"; do
+#
+# NOT_EXECUTABLE is currently empty, and the +/- expansions below are a
+# prophylactic for that, not a fix for an observed failure: on the bash this
+# suite has been run against (5.2.15) an empty array under `set -u` expands
+# without error at both sites, and that was measured. Older bash is reported to
+# treat it as unbound; that is documentation, not something measured here, and
+# no interpreter available to this project can exhibit it. The guarded forms are
+# output-identical to the unguarded ones whether the array is empty or not, so
+# they cost nothing and remove the question.
+for s in "${SCRIPTS[@]}" "${NOT_RUN_HERE[@]}" ${NOT_EXECUTABLE[@]+"${NOT_EXECUTABLE[@]}"}; do
   [ -f "${HERE}/${s}" ] || note "enumerated but not present on disk: ${s}"
 done
-known=" ${SCRIPTS[*]} ${NOT_RUN_HERE[*]} ${NOT_EXECUTABLE[*]} run-all.sh "
+known=" ${SCRIPTS[*]} ${NOT_RUN_HERE[*]} ${NOT_EXECUTABLE[*]-} run-all.sh "
 on_disk=0
 while IFS= read -r found; do
   on_disk=$((on_disk + 1))
