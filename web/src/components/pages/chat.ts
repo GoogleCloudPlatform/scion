@@ -1847,10 +1847,13 @@ export class ScionPageChat extends LitElement {
         dms?: Array<{
           peerId: string;
           hasUnread: boolean;
+          muted?: boolean;
         }>;
       };
+      // A muted DM raises no dot: muting is the user saying "stop telling me
+      // about this", and the avatar dot is the telling (#1029).
       const unreadIds = (data.dms || [])
-        .filter((dm) => dm.hasUnread)
+        .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
       // Only update if changed to avoid unnecessary re-renders
       if (

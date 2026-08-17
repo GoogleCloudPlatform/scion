@@ -135,6 +135,16 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, t := range topics {
 				rs, ok := readMap[t.ID]
+				// A muted thread is silent all the way up: it contributes
+				// nothing to the space badge, so muting every unread thread in
+				// a space clears the badge instead of leaving the space
+				// shouting about threads the user asked to be quiet (#1029).
+				// Mentions are covered by the same rule — the rail already
+				// hides the mention dot on a muted thread, and a rollup that
+				// disagreed with it would put two numbers on screen.
+				if ok && rs.Muted {
+					continue
+				}
 				if !ok || rs.LastReadMessageID == "" || (t.LastMessageID != "" && t.LastMessageID != rs.LastReadMessageID) {
 					if t.LastMessageID != "" {
 						unreadCount++
@@ -1569,10 +1579,15 @@ func (s *Server) writeConversationReadState(
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// authorizeConversationAccess authorizes the caller for a conversation key,
-// applying the same rule the read path uses: a DM is readable by its
-// participants, a topic by anyone with read access to its project. It writes
-// the error response itself and returns false when access is refused.
+// authorizeConversationAccess authorizes the caller for a conversation key: a
+// DM is reachable by its participants, a topic by anyone with read access to
+// its project. It writes the error response itself and returns false when
+// access is refused.
+//
+// The read, mute and pin handlers all call this rather than each carrying a
+// copy. They have to agree — you should not be able to mute a conversation you
+// cannot read — and three copies of the same twenty lines agree only until
+// someone edits one of them.
 func (s *Server) authorizeConversationAccess(
 	w http.ResponseWriter, r *http.Request, wcs WebChatStore, key, userID string,
 ) bool {

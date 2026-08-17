@@ -122,6 +122,86 @@ describe('space rail — mute toggle', () => {
   });
 });
 
+/**
+ * The space badge is a server-side rollup that skips muted threads, so every
+ * local adjustment the rail makes has to skip them too. Getting this wrong is
+ * invisible until the counts drift apart.
+ */
+describe('space rail — space badge follows mute', () => {
+  /** The rail's copy of the space badge. */
+  function badge(el: any): number {
+    return el.spaces.find((s: any) => s.projectId === SPACE.projectId).unreadCount;
+  }
+
+  it('takes an unread thread out of the badge when it is muted', async () => {
+    const el = createRail([thread({ hasUnread: true })]);
+    apiFetchMock.mockResolvedValue(new Response(JSON.stringify({ muted: true }), { status: 200 }));
+
+    await el.handleToggleMute(thread({ hasUnread: true }), SPACE.projectId);
+
+    expect(badge(el)).toBe(0);
+  });
+
+  it('puts it back when the thread is unmuted', async () => {
+    const el = createRail([thread({ hasUnread: true, muted: true })]);
+    el.spaces = [{ ...SPACE, unreadCount: 0 }];
+    apiFetchMock.mockResolvedValue(new Response(JSON.stringify({ muted: false }), { status: 200 }));
+
+    await el.handleToggleMute(thread({ hasUnread: true, muted: true }), SPACE.projectId);
+
+    expect(badge(el)).toBe(1);
+  });
+
+  it('restores the badge when the mute is rolled back', async () => {
+    const el = createRail([thread({ hasUnread: true })]);
+    apiFetchMock.mockResolvedValue(new Response('{}', { status: 500 }));
+
+    await el.handleToggleMute(thread({ hasUnread: true }), SPACE.projectId);
+
+    expect(badge(el)).toBe(1);
+  });
+
+  it('leaves the badge alone for a read thread', async () => {
+    const el = createRail([thread({ hasUnread: false })]);
+    apiFetchMock.mockResolvedValue(new Response(JSON.stringify({ muted: true }), { status: 200 }));
+
+    await el.handleToggleMute(thread({ hasUnread: false }), SPACE.projectId);
+
+    expect(badge(el)).toBe(1);
+  });
+
+  it('does not decrement the badge when a muted thread is marked read', async () => {
+    const el = createRail([thread({ hasUnread: true, muted: true, lastMessageId: 'm-1' })]);
+    apiFetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+
+    await el.handleMarkRead(
+      thread({ hasUnread: true, muted: true, lastMessageId: 'm-1' }),
+      SPACE.projectId
+    );
+
+    expect(storedThread(el).hasUnread).toBe(false);
+    expect(badge(el)).toBe(1);
+  });
+
+  it('still decrements for an unmuted thread marked read', async () => {
+    const el = createRail([thread({ hasUnread: true, lastMessageId: 'm-1' })]);
+    apiFetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+
+    await el.handleMarkRead(thread({ hasUnread: true, lastMessageId: 'm-1' }), SPACE.projectId);
+
+    expect(badge(el)).toBe(0);
+  });
+
+  it('markThreadRead skips the badge for a muted thread', () => {
+    const el = createRail([thread({ hasUnread: true, muted: true })]);
+
+    el.markThreadRead('topic-1');
+
+    expect(storedThread(el).hasUnread).toBe(false);
+    expect(badge(el)).toBe(1);
+  });
+});
+
 describe('space rail — pin toggle', () => {
   it('PUTs the pin endpoint and marks the thread pinned', async () => {
     const el = createRail([thread()]);

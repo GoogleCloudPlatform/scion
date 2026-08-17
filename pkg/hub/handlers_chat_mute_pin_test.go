@@ -415,6 +415,65 @@ func TestChatV2_ThreadsList_ReportsMutedAndPinned(t *testing.T) {
 	}
 }
 
+// TestChatV2_SpacesList_MutedThreadIsNotCountedUnread covers the rollup the
+// rail renders as the space badge. The thread-level suppression is only half
+// the feature: a space whose every unread thread is muted must stop carrying a
+// number, or the parent keeps shouting about threads the user silenced.
+func TestChatV2_SpacesList_MutedThreadIsNotCountedUnread(t *testing.T) {
+	srv, _, wcs, proj, topicID := setupMutePinTest(t)
+	ctx := context.Background()
+
+	// Give the topic an unread message: activity the caller has never read.
+	if err := wcs.TouchTopicActivity(ctx, topicID, tid("space-unread-msg")); err != nil {
+		t.Fatalf("TouchTopicActivity: %v", err)
+	}
+
+	if got := spaceUnreadCount(t, srv, proj.ID); got != 1 {
+		t.Fatalf("unmuted unread thread: unreadCount = %d, want 1", got)
+	}
+
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/chat/conversations/"+topicID+"/mute", map[string]bool{"muted": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mute: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if got := spaceUnreadCount(t, srv, proj.ID); got != 0 {
+		t.Errorf("muted unread thread: unreadCount = %d, want 0", got)
+	}
+
+	// Unmuting brings the badge back — the rollup reads the flag, it does not
+	// consume the unread state.
+	rec = doRequest(t, srv, http.MethodPut,
+		"/api/v1/chat/conversations/"+topicID+"/mute", map[string]bool{"muted": false})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unmute: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := spaceUnreadCount(t, srv, proj.ID); got != 1 {
+		t.Errorf("unmuted again: unreadCount = %d, want 1", got)
+	}
+}
+
+// spaceUnreadCount reads one space's unread rollup from GET /chat/spaces.
+func spaceUnreadCount(t *testing.T, srv *Server, projectID string) int {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list spaces: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp chatSpacesResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, s := range resp.Spaces {
+		if s.ProjectID == projectID {
+			return s.UnreadCount
+		}
+	}
+	t.Fatalf("project %s missing from spaces list", projectID)
+	return 0
+}
+
 func TestChatV2_DMList_ReportsMuted(t *testing.T) {
 	srv, _, wcs, _, _ := setupMutePinTest(t)
 	ctx := context.Background()

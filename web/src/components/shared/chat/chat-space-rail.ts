@@ -935,9 +935,11 @@ export class ScionChatSpaceRail extends LitElement {
         }
       );
       if (!res.ok) return;
-      // Update locally
+      // Update locally. A muted thread was never in the space badge (the
+      // server's rollup skips it), so taking one off for it would eat another
+      // thread's unread.
       this.updateThread(projectId, thread.id, { hasUnread: false, hasUnreadMention: false });
-      this.decrementSpaceUnread(projectId);
+      if (!thread.muted) this.adjustSpaceUnread(projectId, -1);
     } catch {
       // Non-critical
     }
@@ -953,16 +955,29 @@ export class ScionChatSpaceRail extends LitElement {
       const target = threads.find((t) => t.id === threadId);
       if (!target || (!target.hasUnread && !target.hasUnreadMention)) continue;
       this.updateThread(projectId, threadId, { hasUnread: false, hasUnreadMention: false });
-      this.decrementSpaceUnread(projectId);
+      if (!target.muted) this.adjustSpaceUnread(projectId, -1);
       return;
     }
   }
 
-  /** Drop one from a space's unread badge, floored at zero. */
-  private decrementSpaceUnread(projectId: string): void {
+  /** Nudge a space's unread badge, floored at zero. */
+  private adjustSpaceUnread(projectId: string, delta: number): void {
     this.spaces = this.spaces.map((s) =>
-      s.projectId === projectId ? { ...s, unreadCount: Math.max(0, s.unreadCount - 1) } : s
+      s.projectId === projectId ? { ...s, unreadCount: Math.max(0, s.unreadCount + delta) } : s
     );
+  }
+
+  /**
+   * Apply a mute decision locally, keeping the space badge in step with it.
+   * The server's rollup does not count muted threads, so an unread thread
+   * leaves the badge when it is muted and rejoins it when it is unmuted —
+   * without this the badge only tells the truth again after a reload.
+   */
+  private setThreadMuted(projectId: string, threadId: string, muted: boolean): void {
+    const target = (this.threadsBySpace.get(projectId) || []).find((t) => t.id === threadId);
+    if (!target || (target.muted === true) === muted) return;
+    this.updateThread(projectId, threadId, { muted });
+    if (target.hasUnread) this.adjustSpaceUnread(projectId, muted ? -1 : 1);
   }
 
   private async handleMarkSpaceRead(projectId: string): Promise<void> {
@@ -1022,7 +1037,7 @@ export class ScionChatSpaceRail extends LitElement {
   private async handleToggleMute(thread: ChatSpaceThread, projectId: string): Promise<void> {
     this.contextMenuTarget = null;
     const next = !thread.muted;
-    this.updateThread(projectId, thread.id, { muted: next });
+    this.setThreadMuted(projectId, thread.id, next);
     try {
       const res = await apiFetch(
         `/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/mute`,
@@ -1033,15 +1048,15 @@ export class ScionChatSpaceRail extends LitElement {
         }
       );
       if (!res.ok) {
-        this.updateThread(projectId, thread.id, { muted: thread.muted === true });
+        this.setThreadMuted(projectId, thread.id, thread.muted === true);
         return;
       }
       const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
       if (typeof data.muted === 'boolean' && data.muted !== next) {
-        this.updateThread(projectId, thread.id, { muted: data.muted });
+        this.setThreadMuted(projectId, thread.id, data.muted);
       }
     } catch {
-      this.updateThread(projectId, thread.id, { muted: thread.muted === true });
+      this.setThreadMuted(projectId, thread.id, thread.muted === true);
     }
   }
 

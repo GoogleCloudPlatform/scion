@@ -428,3 +428,46 @@ describe('chat page — DM mute toggle', () => {
     expect(loud.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell');
   });
 });
+
+describe('chat page — muted DMs raise no unread dot', () => {
+  /** Answer GET /api/v1/chat/dms with the given entries. */
+  function serveDMs(dms: Array<Record<string, unknown>>): void {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      if (url.startsWith('/api/v1/chat/dms')) {
+        return Promise.resolve(new Response(JSON.stringify({ dms }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+  }
+
+  it('leaves a muted DM out of the unread peers', async () => {
+    const el = createPage();
+    serveDMs([
+      { peerId: 'user-1', hasUnread: true, muted: true },
+      { peerId: 'user-2', hasUnread: true, muted: false },
+    ]);
+
+    await el.loadUnreadDMPeers();
+
+    expect(el.v2UnreadFromIds).toEqual(['user-2']);
+  });
+
+  it('keeps unmuted unread DMs when muted is absent from the payload', async () => {
+    const el = createPage();
+    serveDMs([{ peerId: 'user-1', hasUnread: true }]);
+
+    await el.loadUnreadDMPeers();
+
+    expect(el.v2UnreadFromIds).toEqual(['user-1']);
+  });
+
+  it('drops every dot when the only unread DMs are muted', async () => {
+    const el = createPage();
+    el.v2UnreadFromIds = ['user-1'];
+    serveDMs([{ peerId: 'user-1', hasUnread: true, muted: true }]);
+
+    await el.loadUnreadDMPeers();
+
+    expect(el.v2UnreadFromIds).toEqual([]);
+  });
+});
