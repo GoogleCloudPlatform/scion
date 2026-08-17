@@ -33,6 +33,7 @@ limitations under the License.
 {{- include "scion-hub.assertNoCredentialsInValues" . }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
 {{- include "scion-hub.assertExtraEnv" . }}
+{{- include "scion-hub.assertHAUnlanded" . }}
 {{- /*
 Called from here, and not only from the settings template, because the settings
 template is skipped entirely when config.existingSecret is set - which is the

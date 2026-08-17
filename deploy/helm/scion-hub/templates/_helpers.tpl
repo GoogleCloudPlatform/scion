@@ -656,8 +656,10 @@ the mechanism was sound and only the justification was invented:
     count. Both halves were true while the chart rendered no settings file. Now
     a rendered server.database.driver of postgres satisfies the test at :931,
     and server.storage.provider gcs together with server.auth.mode proxy
-    satisfies the one at :934. K_SERVICE is still unset on GKE, so that route
-    alone stays closed. hostedHAGuardsRequired (:921) is therefore satisfied and
+    satisfies the one at :934. GKE does not set K_SERVICE, but hub.extraEnv can
+    and it renders - measured - so that route is reachable from this chart too,
+    and assertHAUnlanded transcribes all three rather than two.
+    hostedHAGuardsRequired (:921) is therefore satisfied and
     the hosted HA preflight DOES run - which is why this chart renders the five
     Block-1 keys in both auth modes rather than leaving them to the hub.
   - The stated harm - "two hubs writing the same RWX workspace share" - is still
@@ -1906,6 +1908,94 @@ it; keep that call.
 {{- if $inline }}
 {{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
 {{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The HA acknowledgement gate.
+
+WHAT IT IS FOR. This chart can render a configuration that satisfies the hub's
+isHADeployment test (cmd/server_foreground.go:927), which turns on
+validateHostedHAPreflight (:951). That preflight has thirteen gates and this
+release cannot satisfy eight of them, so the hub aborts at
+cmd/server_foreground.go:151-153 before it serves anything. The postgres/gcs
+shape is a choice an operator can coherently have made, so this is an opt-in
+acknowledgement rather than a refusal.
+
+MEASURED, gate by gate, through config.LoadGlobalConfig and the real
+validateHostedHAPreflight, on the settings.yaml this chart actually renders.
+Stepped by satisfying each gate and re-running, because the preflight returns on
+first failure. ci/values-settings.yaml, in order:
+
+  1  server.database.url                        Cloud SQL phase
+  2  a durable session/signing secret           session-secret phase
+  3  server.auth.proxy.provider=iap             ingress/IAP phase
+  4  server.auth.proxy.iap.audience             ingress/IAP phase
+  5  server.auth.transport                      ingress/IAP phase
+  6  server.auth.transport.mode=iap             ingress/IAP phase
+  7  server.auth.transport.oidc_audience        ingress/IAP phase
+  8  server.auth.transport.platform_auth_sa     ingress/IAP phase
+
+ci/values-settings-oauth.yaml refuses at nine, the extra one being
+server.auth.mode=proxy, which is not an unlanded phase - it is the operator's
+own auth.mode being incompatible with HA detection. It sorts after the session
+secret and before the proxy family.
+
+EIGHT, NOT FIVE. The figure in circulation was five, from a walk that stopped at
+server.auth.transport because the prober could not satisfy it. Three gates lie
+past that wall and all three are real.
+
+WHAT THIS CHART ALREADY SATISFIES, so nobody re-derives it: server.hub.hub_id,
+server.database.driver=postgres, and server.storage.provider=gcs with a bucket.
+Those three are why the refusal starts at the database URL rather than at gate
+one.
+
+THE ROUTE SET IS TRANSCRIBED FROM THE HUB, NOT INVENTED HERE.
+cmd/server_ha_preflight_test.go:248-256 (ab0d227, branch
+scion/ha-deployment-tripwire) makes this a two-way contract: a route added there
+and not here makes this condition UNDER-trigger, rendering an HA config with no
+acknowledgement, which cannot boot; a route removed or swapped there and not
+here makes it OVER-trigger, demanding an acknowledgement for a deployment that
+is not HA. All three routes are transcribed below. Grep this tree for
+acknowledgeHAUnlanded to find it, as that comment instructs.
+
+Route 1 is K_SERVICE, and it is NOT dead here. GKE does not set it, but
+hub.extraEnv does - measured, it renders - so an operator can turn HA detection
+on through a channel that looks unrelated to the database. The hub tests
+os.Getenv("K_SERVICE") != "", so an explicit empty value is not the route; a
+valueFrom is counted, because the chart cannot read it and under-triggering is
+the outcome that will not boot.
+
+Routes 2 and 3 use lower-cased comparison because the hub uses strings.EqualFold
+(:931, :934), while auth.mode is compared exactly (:934) and so is compared
+exactly here. The schema already enums all three to lower case, which makes the
+difference unobservable today - transcribed faithfully anyway, because the
+contract above is with the hub's test and not with the schema.
+
+NOT EVALUATED UNDER config.existingSecret, and that is a real hole rather than
+an oversight: the chart renders no settings.yaml in that shape, so it cannot see
+the driver, the storage provider or the auth mode. Route 1 is still checked,
+because extraEnv is the chart's own value either way.
+*/}}
+{{- define "scion-hub.assertHAUnlanded" -}}
+{{- $routes := list }}
+{{- range .Values.hub.extraEnv }}
+{{- if eq .name "K_SERVICE" }}
+{{- if or .value .valueFrom }}
+{{- $routes = append $routes "hub.extraEnv sets K_SERVICE (cmd/server_foreground.go:928)" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not .Values.config.existingSecret }}
+{{- if eq (lower (toString .Values.database.driver)) "postgres" }}
+{{- $routes = append $routes "database.driver is postgres (cmd/server_foreground.go:931)" }}
+{{- end }}
+{{- if and (eq (lower (toString .Values.storage.provider)) "gcs") (eq (toString .Values.auth.mode) "proxy") }}
+{{- $routes = append $routes "storage.provider is gcs and auth.mode is proxy (cmd/server_foreground.go:934)" }}
+{{- end }}
+{{- end }}
+{{- if and $routes (not .Values.acknowledgeHAUnlanded) }}
+{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true, its hosted HA preflight runs (cmd/server_foreground.go:951), and it aborts at cmd/server_foreground.go:151-153 before serving. Eight of the preflight's gates have no source in this chart, measured in hub order: (1) server.database.url, from the Cloud SQL phase; (2) a durable session/signing secret, from the session-secret phase; (3) server.auth.proxy.provider=iap, (4) server.auth.proxy.iap.audience, (5) server.auth.transport, (6) server.auth.transport.mode=iap, (7) server.auth.transport.oidc_audience and (8) server.auth.transport.platform_auth_sa, all from the ingress/IAP phase. With auth.mode oauth there is a ninth, server.auth.mode=proxy, which no phase lands because it is your own auth mode. The chart already satisfies server.hub.hub_id, the postgres driver and gcs storage with a bucket, which is why the refusal starts at the database URL. If you are rendering this to inspect it, or to supply the rest yourself, set acknowledgeHAUnlanded: true. That flag is removed when the Cloud SQL values and the ingress/IAP values have both landed - not Filestore, which lands none of these eight." (join " and " $routes)) }}
 {{- end }}
 {{- end }}
 

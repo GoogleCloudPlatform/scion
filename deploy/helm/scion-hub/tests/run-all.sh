@@ -105,7 +105,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=5
-EXPECTED_ASSERTIONS=153   # 107 + 46 from rbac-collision.sh, the cluster-scoped name fixture.
+EXPECTED_ASSERTIONS=173   # 35 chart-integrity + 57 render-guards + 31 reserved-flags + 4 update-strategy + 46 rbac-collision.
 EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
@@ -113,8 +113,8 @@ EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 SCRIPTS=(
   reserved-flags.sh     # 31 - the reserved-flag lists
   update-strategy.sh    #  4 - the updateStrategy derivation
-  render-guards.sh      # 46 - every other render-time refusal
-  chart-integrity.sh    # 26 - .helmignore breadth, the packaged file set, base-url
+  render-guards.sh      # 57 - every other render-time refusal, incl. the HA-unlanded gate
+  chart-integrity.sh    # 35 - .helmignore breadth, the packaged file set, base-url, signing key
   rbac-collision.sh     # 46 - the cluster-scoped RBAC name, and two pinned residuals
 )
 
@@ -284,6 +284,47 @@ done
 
 # --- count check 3: every script actually ran --------------------------------
 [ "$ran" -eq "$EXPECTED_SCRIPTS" ] || note "ran ${ran} scripts, expected exactly ${EXPECTED_SCRIPTS}."
+
+# --- gate 5: hack/verify.sh, WHICH THIS FILE USED TO OMIT ----------------------
+# 🔴 AND THE OMISSION SHIPPED. Commit eec9df03 landed on the work branch with
+# five of the five golden files stale, because their content changed and nothing
+# in this run compares them. I ran run-all.sh, read PASS, and pushed. The goldens
+# are hack/verify.sh's business and hack/ is not tests/, so the set this runner
+# guards stopped at the directory it lives in.
+#
+# THAT IS THIS FILE'S OWN THESIS, TURNED AROUND ON IT. The header above says a
+# set of individually non-vacuous checks is vacuous at the set level, and then
+# bounds the set at the directory the author happened to be standing in - which
+# is gd-em's rule 46, in the file written to prevent exactly this class. The
+# stronger this runner's internal contract got, the more confidently its PASS
+# line was read as "the chart is verified", which is a claim it was never making.
+#
+# NOT SUMMED INTO EXPECTED_ASSERTIONS, and that is deliberate rather than
+# convenient: EXPECTED_ASSERTIONS is cross-checked against each script's own
+# EXPECTED_TOTAL, and hack/verify.sh is not one of the enumerated scripts. It
+# gets its own committed number, failing in both directions like the others.
+# Phase 6 owns CI wiring and may move this; it must not delete it without
+# replacing the coverage.
+EXPECTED_VERIFY_ASSERTIONS=222
+_verify="${HERE}/../hack/verify.sh"
+if [ ! -f "$_verify" ]; then
+  note "hack/verify.sh is missing, so the golden files and the settings-leaf probe were not checked at all."
+else
+  _vout="$(bash "$_verify" 2>&1)"; _vrc=$?
+  _vn="$(printf '%s\n' "$_vout" | sed -n 's/^[[:space:]]*assertions: \([0-9]*\)\/.*/\1/p' | tail -1)"
+  if [ -z "$_vn" ]; then
+    note "hack/verify.sh emitted no assertion count, so its ${EXPECTED_VERIFY_ASSERTIONS} checks cannot be shown to have run."
+  elif [ "$_vn" -ne "$EXPECTED_VERIFY_ASSERTIONS" ]; then
+    note "hack/verify.sh executed ${_vn} assertions, expected exactly ${EXPECTED_VERIFY_ASSERTIONS}. Update this number and its EXPECTED_TOTAL in the same diff."
+  fi
+  if [ "$_vrc" -ne 0 ]; then
+    echo ">>> hack/verify.sh: FAILED (exit ${_vrc})"
+    printf '%s\n' "$_vout" | grep -E '^[[:space:]]*(FAIL|META-FAILURE)' | sed 's/^/    /'
+    real_failure=1
+  else
+    echo ">>> hack/verify.sh: ok (${_vn} assertions, goldens current)"
+  fi
+fi
 
 # --- count check 4: the assertion total ---------------------------------------
 # UNCONDITIONAL. This condition used to read

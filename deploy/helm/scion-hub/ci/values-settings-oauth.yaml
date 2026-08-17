@@ -17,12 +17,29 @@
 # renders shows the authentication subtree and nothing more. Anything else that
 # drifts between them makes that check stop meaning what it claims to mean.
 #
-# The hub's HA preflight does not care which authentication mode is selected -
-# it requires the hub ID, the Postgres driver, the database URL, GCS storage
-# with a bucket, and a durable session secret in either case. A chart that
-# rendered those under proxy and dropped one under oauth would install fine and
-# fail at hub startup, naming the missing key but not the reason it went
-# missing.
+# THE FIVE BLOCK-1 KEYS RENDER IN EITHER AUTHENTICATION MODE, and that is what
+# the paired diff is for: the hub ID, the Postgres driver, the database URL, GCS
+# storage with a bucket and a durable session secret are required whichever mode
+# is selected. A chart that rendered those under proxy and dropped one under
+# oauth would install fine and fail at hub startup, naming the missing key but
+# not the reason it went missing.
+#
+# THE PREFLIGHT AS A WHOLE IS NOT MODE-BLIND, THOUGH, AND THIS FILE USED TO SAY
+# IT WAS. Measured by walking validateHostedHAPreflight gate by gate on the
+# settings.yaml each fixture renders: values-settings.yaml is refused by eight
+# gates and this file by nine. The extra one is server.auth.mode=proxy
+# (cmd/server_foreground.go:980), which sorts after the session secret and
+# before the proxy family. No phase lands it, because it is not missing
+# configuration - it is this fixture's own auth.mode being incompatible with HA
+# detection, which is a legitimate thing for an operator to choose and the
+# reason acknowledgeHAUnlanded is a flag rather than a refusal.
+
+# SET BECAUSE THIS FIXTURE IS EXACTLY THE SHAPE THE FLAG EXISTS FOR. Postgres
+# alone makes the hub's isHADeployment test true, so without this the chart
+# refuses to render this file at all. The fixture's job is to exercise the
+# rendered settings.yaml, not to install, and the acknowledgement is how it says
+# so. Deleted with the flag when Cloud SQL and ingress/IAP land.
+acknowledgeHAUnlanded: true
 
 hub:
   hubId: ci-settings

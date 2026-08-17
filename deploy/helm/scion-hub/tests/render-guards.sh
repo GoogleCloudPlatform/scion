@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=46
+EXPECTED_TOTAL=57
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
@@ -259,6 +259,94 @@ reject "threshold 30, product 150s" "the startup budget is too short" --set prob
 accept "threshold 30, product 300s" --set probes.startup.failureThreshold=30 --set probes.startup.periodSeconds=10
 reject "sub-60 threshold is the HELPER's refusal, not a shadow of the old bound" \
        "the startup budget is too short" --skip-schema-validation --set probes.startup.failureThreshold=30
+
+echo "== the HA-unlanded gate: THREE ROUTES, TRANSCRIBED FROM THE HUB =="
+# scion-hub.assertHAUnlanded refuses the shapes this chart can render but cannot
+# start. The routes are not this chart's invention: they are isHADeployment
+# (cmd/server_foreground.go:927), and the hub's own tripwire test asserts the
+# same three at cmd/server_ha_preflight_test.go:248-256 on ab0d227. THE ROUTES
+# ARE TRANSCRIBED, SO THEY CAN DRIFT, which is what these rows are for.
+#
+# EACH NEGATIVE ASSERTS *WHICH* ROUTE FIRED, NOT MERELY THAT SOMETHING DID. The
+# three routes overlap in the value space - postgres implies gcs by schema rule,
+# and gcs plus proxy is route 3 - so a row that only checked for a refusal would
+# stay green with two of the three routes deleted. Row r2 uses auth.mode oauth
+# for exactly that reason: it is the only way to reach the postgres route with
+# the gcs-plus-proxy route switched off. My first matrix did not do this and
+# three of its rows were confounded by pre-existing schema allOf rules doing the
+# refusing instead of this guard.
+reject "r1: hub.extraEnv sets K_SERVICE" "hub.extraEnv sets K_SERVICE" \
+  --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value=svc'
+reject "r2: postgres driver, route 3 held off with oauth" "database.driver is postgres" \
+  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
+  --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
+reject "r3: gcs storage with proxy auth" "storage.provider is gcs and auth.mode is proxy" \
+  --set storage.provider=gcs --set storage.bucket=b
+
+# POSITIVE TWINS, ONE PER ROUTE. The flag is the escape hatch for rendering the
+# settings.yaml without installing, so each refusal must be clearable - a guard
+# with no way past it is a removed feature, not a warning.
+accept "r1 + acknowledgeHAUnlanded" \
+  --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value=svc' --set acknowledgeHAUnlanded=true
+accept "r2 + acknowledgeHAUnlanded" \
+  --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
+  --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true --set acknowledgeHAUnlanded=true
+accept "r3 + acknowledgeHAUnlanded" \
+  --set storage.provider=gcs --set storage.bucket=b --set acknowledgeHAUnlanded=true
+
+# THE OVER-TRIGGER DIRECTION, WHICH IS THE HALF A REFUSAL SUITE USUALLY OMITS.
+# Demanding an acknowledgement from a deployment that is not HA is a defect of
+# the same size as failing to demand one from a deployment that is: it teaches
+# operators to set the flag reflexively, and then the flag protects nobody.
+# K_SERVICE with an empty value is the near-miss that matters - the hub reads
+# os.Getenv != "" (:928), so an empty value is not a route, and a guard written
+# on the name alone would refuse it.
+accept "K_SERVICE present but with an explicit empty value" \
+  --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value='
+accept "an unrelated extraEnv name"       --set 'hub.extraEnv[0].name=NOT_K_SERVICE' --set 'hub.extraEnv[0].value=svc'
+accept "sqlite + local storage + oauth"   --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
+accept "the chart defaults, no route"
+
+# THE GATE LIST IS PART OF THE CONTRACT, SO IT IS ASSERTED RATHER THAN TRUSTED.
+# gke-deploy-lead's Critical 1 requires the refusal to name all eight unlandable
+# gates in hub order. The number was reported as five for most of a day because
+# a prober stopped at the first gate it could not construct and its extent was
+# read as the preflight's extent; the count below is the guard against that
+# happening again silently. THE DENOMINATOR IS ASSERTED, not the presence of at
+# least one - a message that named three of the eight would satisfy any
+# per-substring check written as a loop with no total.
+executed=$((executed + 1))
+_ha_out="$(render --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b 2>&1)"
+_ha_want='server.database.url
+durable session/signing secret
+server.auth.proxy.provider=iap
+server.auth.proxy.iap.audience
+server.auth.transport
+server.auth.transport.mode=iap
+server.auth.transport.oidc_audience
+server.auth.transport.platform_auth_sa'
+_ha_seen=0
+while IFS= read -r _w; do
+  case "$_ha_out" in *"$_w"*) _ha_seen=$((_ha_seen + 1)) ;; esac
+done <<EOF
+$_ha_want
+EOF
+_ha_total="$(printf '%s\n' "$_ha_want" | grep -c .)"
+if [ "$_ha_total" -ne 8 ]; then
+  # THE PROBE'S OWN CORPUS, ASSERTED. A truncated heredoc would make _ha_seen
+  # equal _ha_total on zero gates and print ok. This is the defect the section
+  # above exists to describe, reproduced one level up, so it gets a meta-failure.
+  echo "HARNESS ERROR: the gate-name list holds ${_ha_total} entries, not 8. NOTHING WAS MEASURED."
+  echo "ASSERTIONS_EXECUTED=${executed}"
+  exit 2
+fi
+if [ "$_ha_seen" -eq 8 ]; then
+  echo "ok    the HA refusal names all 8 unlandable gates"
+else
+  echo "FAIL  the HA refusal names ${_ha_seen}/8 unlandable gates"
+  echo "        got: $(printf '%s' "$_ha_out" | tr '\n' ' ' | cut -c1-300)"
+  failed=$((failed + 1))
+fi
 
 echo "== hub identity is stable across upgrade and independent of the release name =="
 # hub.hubId must be used verbatim and must never be derived from anything Helm

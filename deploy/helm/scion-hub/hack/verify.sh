@@ -111,7 +111,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=221
+EXPECTED_TOTAL=222
 
 failures=0
 assertions=0
@@ -836,7 +836,7 @@ declare -A PROBE_MUTATION=(
   [auth.mode]='--set-string|auth.mode=oauth|--set|auth.acknowledgeOAuthUnlanded=true'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
-  [database.driver]='--set-string|database.driver=postgres|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
+  [database.driver]='--set-string|database.driver=postgres|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
   [hub.args]='--set-string|hub.args[0]=--probe-flag'
   [hub.baseUrl]='--set-string|hub.baseUrl=https://other.example.com'
   [hub.extraEnv]='--set-string|hub.extraEnv[0].name=PROBE_ONE|--set-string|hub.extraEnv[0].value=x'
@@ -852,8 +852,8 @@ declare -A PROBE_MUTATION=(
   [probes.liveness.timeoutSeconds]='--set|probes.liveness.enabled=true|--set|probes.liveness.timeoutSeconds=37'
   [serviceAccount.create]='--set|serviceAccount.create=false|--set-string|serviceAccount.name=preexisting'
   [serviceAccount.gcpServiceAccount]='--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com'
-  [storage.bucket]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
-  [storage.provider]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
+  [storage.bucket]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
+  [storage.provider]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
   [updateStrategy.type]='--set-string|updateStrategy.type=RollingUpdate'
 )
 
@@ -888,12 +888,41 @@ else
   sed -n '/paths: |/,$p' "$WORK/probe-paths.yaml" \
     | sed -e '1d' -e 's/^    //' | grep '|' >"$WORK/probe-leaves.txt" || true
 
+  # LEAVES WITH NO LEGAL MUTATION. Not "leaves that are awkward" - leaves where
+  # every value other than the default is REFUSED BY A RENDER GUARD, so there is
+  # nothing the probe can set them to that produces a manifest to compare. An
+  # exclusion is lost coverage, so each one names the guard that makes it
+  # unreachable and the assertion that covers it instead, and the list's LENGTH
+  # is asserted below: a fifth entry appearing without a reader noticing is the
+  # failure mode of every skip list, and the count is what stops it.
+  #
+  #   config.existingSecret          - not a refusal: it removes the settings
+  #                                    document entirely, so the baseline it
+  #                                    would be compared against does not exist.
+  #                                    Covered by the transfer-list diff below,
+  #                                    which is about nothing else.
+  #   auth.requireStableSigningKey   - default false; true is refused by
+  #                                    templates/configmap-env.yaml unless
+  #                                    config.existingSecret is set, and setting
+  #                                    that companion lands us in the case above.
+  #                                    Covered by tests/chart-integrity.sh
+  #                                    section E, both directions.
+  PROBE_UNMUTABLE=(config.existingSecret auth.requireStableSigningKey)
+  if [[ ${#PROBE_UNMUTABLE[@]} -ne 2 ]]; then
+    echo "HARNESS ERROR: PROBE_UNMUTABLE holds ${#PROBE_UNMUTABLE[@]} entries, not 2. Every entry is coverage this probe is not providing; read the reasons above before changing the number." >&2
+    exit 2
+  fi
+
   probe_total=0 probe_settings_only=0 probe_half=0 probe_quiet=0 probe_err=0
   : >"$WORK/probe-observed.txt"
   probe_quiet_names="" probe_err_names="" probe_unaccounted=""
+  probe_skipped=0
 
   while IFS='|' read -r leaf kind value; do
-    [[ -z "$leaf" || "$leaf" == config.existingSecret ]] && continue
+    [[ -z "$leaf" ]] && continue
+    if [[ " ${PROBE_UNMUTABLE[*]} " == *" $leaf "* ]]; then
+      probe_skipped=$((probe_skipped + 1)); continue
+    fi
     probe_total=$((probe_total + 1))
     spec="${PROBE_MUTATION[$leaf]:-}"
     if [[ -z "$spec" ]]; then
@@ -957,6 +986,17 @@ else
     pass "every leaf could be mutated and rendered"
   else
     fail "$probe_err leaves could not be rendered with their mutation and were classified not at all:$probe_err_names - add an entry to PROBE_MUTATION"
+  fi
+  # THE SKIP LIST'S POSITIVE TWIN. Asserting the list has two entries says
+  # nothing about whether those two entries still name leaves that exist. Rename
+  # auth.requireStableSigningKey and the skip stops matching, the leaf silently
+  # rejoins the walk, and - because its mutation is refused - the run goes red
+  # somewhere else entirely. Worse in the other direction: delete the leaf and
+  # the exclusion sits there forever excusing coverage nobody is missing.
+  if [[ $probe_skipped -eq ${#PROBE_UNMUTABLE[@]} ]]; then
+    pass "both unmutable leaves were present in the walk and skipped deliberately"
+  else
+    fail "the walk skipped $probe_skipped leaves but PROBE_UNMUTABLE names ${#PROBE_UNMUTABLE[@]} (${PROBE_UNMUTABLE[*]}) - an entry no longer matches a leaf in values.yaml, so it is excusing nothing"
   fi
   # Bounded rather than listed: a probe that breaks - helm gone, --set ignored,
   # the walk emptied - shows up as every leaf moving nothing, and a count

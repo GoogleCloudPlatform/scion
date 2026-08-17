@@ -22,6 +22,26 @@
 nameOverride: ""
 fullnameOverride: ""
 
+# A TEMPORARY KEY, AND ITS REMOVAL IS DEFINED RATHER THAN LEFT TO JUDGEMENT.
+#
+# database.driver: postgres, or storage.provider gcs with auth.mode proxy, or
+# hub.extraEnv setting K_SERVICE, each make the hub's isHADeployment test true
+# (cmd/server_foreground.go:927). Its hosted HA preflight then runs, and eight of
+# that preflight's thirteen gates have no source in this chart, so the hub aborts
+# before serving. The chart refuses those value combinations unless you set this,
+# and the refusal names all eight and the phase that lands each.
+#
+# Set it to true when you are rendering to inspect the output, or when you are
+# supplying the missing configuration yourself through config.existingSecret.
+#
+# REMOVAL PREDICATE: this key is deleted when the Cloud SQL values (the database
+# URL) and the ingress/IAP values (the proxy and transport blocks) have both
+# landed, because at that point the chart can satisfy the preflight and there is
+# nothing left to acknowledge. Whoever lands the second of those two deletes this
+# key, the assertHAUnlanded helper, and the flag from ci/values-settings.yaml and
+# ci/values-settings-oauth.yaml, in that change.
+acknowledgeHAUnlanded: false
+
 # Single replica by default. More than one replica breaks the web terminal,
 # exec, log tailing and port forwarding for roughly (N-1)/N of requests: the
 # agent control channel, presence and port tunnels are pod-local state, and
@@ -43,11 +63,20 @@ updateStrategy:
   # (see replicaCount above).
   #
   # Neither is a data-safety question at this point in the chart: it renders no
-  # --db and mounts no volumes, so replicas share no mutable state at all and
-  # the hub's hosted HA preflight does not run at any replica count. That
+  # --db and mounts no volumes, so replicas share no mutable state at all. That
   # changes when the Cloud SQL and Filestore values arrive - a shared database
   # and a shared volume are exactly what they add - and the hub coordinates
   # concurrent instances through Postgres advisory locks when they do.
+  #
+  # THE HOSTED HA PREFLIGHT IS A SEPARATE QUESTION AND IT DOES RUN. This
+  # paragraph used to end "and the hub's hosted HA preflight does not run at any
+  # replica count", which was true at Phase 0 and is false now: the preflight
+  # keys off configuration, not replica count, and a rendered
+  # server.database.driver of postgres turns it on at one replica
+  # (cmd/server_foreground.go:931). It is still not a data-safety question - the
+  # preflight refuses to start, it does not corrupt anything - but "it does not
+  # run" was doing work here that it can no longer do. Whether it runs is
+  # governed by acknowledgeHAUnlanded at the top of this file.
   type: ""
 
 image:
@@ -362,8 +391,19 @@ database:
   # hub's home directory, so replicas do not share it.
   #
   # postgres is what the hosted deployment runs, and selecting it turns on the
-  # hub's HA preflight, which refuses to start unless the hub ID, a database
-  # URL, GCS storage with a bucket and a durable session secret are all present.
+  # hub's HA preflight (cmd/server_foreground.go:931). That preflight has
+  # THIRTEEN gates, and this release cannot satisfy eight of them - the database
+  # URL, a durable session secret, and six keys in the proxy and transport
+  # subtrees - so selecting postgres today means the hub aborts before serving
+  # unless you set acknowledgeHAUnlanded. Measured by walking the preflight gate
+  # by gate on the settings.yaml this chart renders; the eight are enumerated in
+  # the refusal itself.
+  #
+  # An earlier version of this comment listed four requirements - hub ID,
+  # database URL, GCS storage with a bucket, session secret. Those are four of
+  # the thirteen, and the chart already satisfies two of them. Naming a subset
+  # of a guard's conditions reads as naming all of them.
+  #
   # The connection URL itself is not a value here yet; it arrives with Cloud
   # SQL support.
   driver: sqlite
@@ -399,8 +439,15 @@ auth:
   # authenticates the user and the hub trusts a signed header. oauth is the
   # hub's own OAuth login.
   #
-  # This value selects which configuration subtree is rendered and nothing else.
-  # Every key the HA preflight requires renders identically in both modes.
+  # This value selects which configuration subtree is rendered, and the five
+  # Block-1 keys the preflight requires render identically in both modes.
+  #
+  # "AND NOTHING ELSE" WAS TOO STRONG AND THIS COMMENT USED TO SAY IT. auth.mode
+  # is itself a preflight gate: cmd/server_foreground.go:980 requires proxy, so
+  # the oauth permutation is refused by nine gates where the proxy one is
+  # refused by eight. Measured, by walking the preflight on each rendered
+  # settings.yaml. The claim that survives is the narrow one about the Block-1
+  # five, which is what the paired ci fixtures actually diff.
   mode: proxy
 
   # The oauth mode's supporting configuration - the client credentials - is not

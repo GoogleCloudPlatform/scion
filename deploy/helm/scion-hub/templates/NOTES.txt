@@ -173,9 +173,46 @@ WHAT THIS RELEASE DOES NOT YET DO
   The chart is being built incrementally. It renders the hub's settings.yaml,
   but it does not yet configure Cloud SQL and the database URL, GCS credentials
   beyond the bucket name, Filestore, the session secret, the OAuth client
-  secret, Ingress or IAP. With database.driver: postgres the hub's hosted
-  preflight will refuse to start until the database URL and session secret
-  arrive with those changes. Do not treat this as a production install.
+  secret, Ingress or IAP. Do not treat this as a production install.
+
+  THIS RELEASE CAN TURN THE HUB'S HA PREFLIGHT ON, AND IT CANNOT SATISFY IT, SO
+  THE CHART REFUSES TO RENDER THOSE SHAPES. Three of the settings this chart
+  writes make isHADeployment (cmd/server_foreground.go:927) true on their own:
+
+    hub.extraEnv setting K_SERVICE                    (:928)
+    database.driver: postgres                         (:931)
+    storage.provider: gcs with auth.mode: proxy       (:934)
+
+  Any one of them runs validateHostedHAPreflight, whose error aborts startup at
+  :151 rather than degrading - log.Fatalf, not a warning. Eight of its thirteen
+  gates have no source in this chart. Measured by walking the real preflight
+  gate by gate over the settings.yaml this chart renders, in the order the hub
+  checks them:
+
+    server.database.url                     Cloud SQL phase
+    a durable session secret                session-secret phase
+    server.auth.proxy.provider: iap         }
+    server.auth.proxy.iap.audience          }
+    server.auth.transport present           }  Ingress/IAP phase
+    server.auth.transport.mode: iap         }
+    server.auth.transport.oidc_audience     }
+    server.auth.transport.platform_auth_sa  }
+
+  With auth.mode: oauth there is a ninth, server.auth.mode: proxy (:980), which
+  no phase lands - that one is the mode you chose being incompatible with HA
+  detection rather than configuration that is missing.
+
+  You would meet them one at a time, each only after fixing the one before it,
+  because the preflight returns on the first failure. Rather than let you find
+  that out over eight installs, the chart refuses up front and names all eight.
+  Set acknowledgeHAUnlanded: true to render anyway - for rendering the
+  settings.yaml, which works, not for installing, which does not. The chart
+  already satisfies the rest of what the preflight demands (the hub ID, the
+  postgres driver, gcs storage and the bucket), which is why the refusal starts
+  at the database URL and not earlier.
+
+  The default install is unaffected: sqlite and local storage match none of the
+  three routes, isHADeployment is false, and the preflight is skipped.
 
   The hub images published from this repository today run as root, so until a
   hub-gke image exists there is nothing this chart can successfully schedule.

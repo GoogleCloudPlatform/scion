@@ -117,7 +117,29 @@ data:
   # any other value means false. When true the hub refuses to start rather than
   # fall back to a per-process signing key, which across replicas would sign
   # tokens each of the others reject.
-  SCION_REQUIRE_STABLE_SIGNING_KEY: "true"
+  #
+  # THE REFUSAL BELOW EXISTS BECAUSE THE HUB'S REFUSAL IS NOT SCOPED TO ITS OWN
+  # HARM. Setting this true in this release does not make the hub careful; it
+  # makes the hub refuse to boot, every time, on a first install, with nothing
+  # the operator can do about it from this chart. The hub resolves a stable key
+  # from a pre-configured key, then SharedSigningSecret, then a secret backend,
+  # then the store (pkg/hub/server.go:1445). SharedSigningSecret is
+  # resolveSessionSecret() (cmd/server_foreground.go:1556), which reads only
+  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
+  # (cmd/server_foreground.go:1452-1462); the chart renders none of them, and
+  # hub.extraEnv - the one operator-controlled env channel - refuses all three
+  # by name as credential material (_helpers.tpl:1306). The store is empty on a
+  # first boot. So there is no key, pkg/hub/server.go:1634 errors,
+  # pkg/hub/server.go:1008 makes it fatal, and cmd/server_foreground.go:259
+  # calls log.Fatalf.
+  #
+  # config.existingSecret is the one shape where true is satisfiable, and it is
+  # not hypothetical: the operator writes their own settings.yaml, so they can
+  # set server.secrets.backend and pre-provision the key there. The chart does
+  # not render that file and has no business second-guessing it.
+  #
+  # This turns a CrashLoopBackOff at 03:00 into a values error at install time.
+  SCION_REQUIRE_STABLE_SIGNING_KEY: "false"
 ---
 # Source: scion-hub/templates/rbac-role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -233,7 +255,7 @@ spec:
         app.kubernetes.io/part-of: scion
       annotations:
         scion.io/hub-id: "ci-settings"
-        checksum/env-config: 6cfd87e117fed388772147ac8b81eb45b5dba411197bfda2fa9936df233da6ff
+        checksum/env-config: 89a57c8a161eca4df95ce9fb7d6296f0b0c94dc463dc2e4b75d1baf4c24d624b
         checksum/settings: c61e274464dbc604293f7cc17f5e4627f37ba9674ebb9228af8b9bd4761734d9
     spec:
       serviceAccountName: scion-scion-hub
