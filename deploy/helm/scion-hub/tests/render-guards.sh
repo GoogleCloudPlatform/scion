@@ -26,6 +26,24 @@ CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 BASE=(--set image.repository=r --set hub.hubId=ci-minimal)
 
+# TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
+# Without this every helm invocation fails, every assertion fails, and the output
+# accuses the chart of dropping templates when the truth is that helm is not
+# installed. Found by the first person to run this suite who was not its author,
+# in a container without helm, in four minutes. A mutation suite inherits its
+# author's environment, so the environment is the one variable it cannot mutate
+# from the inside - the same shape as axis (d), answerable only from outside.
+# "Nothing was analysed" is a THIRD outcome, distinct from clean and from failing,
+# and it exits 2 with the other harness errors rather than 1.
+_missing=""
+for _t in "$HELM" sha256sum; do command -v "$_t" >/dev/null 2>&1 || _missing="${_missing} ${_t}"; done
+if [ -n "$_missing" ]; then
+  echo "HARNESS ERROR: required tool(s) not on PATH:${_missing}"
+  echo "NOTHING WAS ANALYSED. This is not a passing run, and it is NOT a chart failure."
+  echo "ASSERTIONS_EXECUTED=0"
+  exit 2
+fi
+
 executed=0
 failed=0
 
@@ -40,6 +58,14 @@ reject() {
     echo "FAIL  rendered but must reject: ${label}"; failed=$((failed + 1)); return
   fi
   case "$out" in
+    *'%!'*)
+       # gd-p1-dev's guard, adopted: a printf verb mismatch in _helpers.tpl
+       # renders %!s(<nil>) inside a message whose wording still matches, so the
+       # substring check below would go green on a diagnostic that shows the
+       # operator nothing. Checked first because it is the more specific failure.
+       echo "FAIL  ${label}: the refusal message could not render its own value (%!)"
+       echo "        got:  $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+       failed=$((failed + 1)) ;;
     *"$want"*) echo "ok    rejected: ${label}" ;;
     *) echo "FAIL  ${label}: rejected with the WRONG message"
        echo "        want: ${want}"
@@ -88,12 +114,25 @@ reject "PEM header (whitespace guard wins)" "contains whitespace" --set 'hub.arg
 reject "PEM in a positional"                "shape of a credential" --set 'hub.args[0]=x=-----BEGIN RSA PRIVATE KEY-----'
 
 echo "== the failure message must not print what it caught =="
+# TWO CONDITIONS, AND THE FIRST ONE IS THE POINT. This was a bare negative -
+# "the output does not contain hunter2" - which an EMPTY output satisfies
+# perfectly. With no helm the render produced nothing, grep found nothing, and
+# this printed "ok credential redacted", certifying a redaction guard that had
+# not been consulted. Same family as a reject() satisfied by a missing binary,
+# found by applying rev-2's rule to my own file rather than to theirs.
+# So: establish that the guard actually fired, THEN assert the absence.
 executed=$((executed + 1))
-if render --set 'hub.args[0]=--upstream=postgres://scion:hunter2@10.0.0.1/scion' | grep -q 'hunter2'; then
-  echo "FAIL  the credential guard leaked the password into its own error message"; failed=$((failed + 1))
-else
-  echo "ok    credential redacted in the failure message"
-fi
+_out="$(render --set 'hub.args[0]=--upstream=postgres://scion:hunter2@10.0.0.1/scion')"
+case "$_out" in
+  *"embeds credentials in a URL"*)
+    case "$_out" in
+      *hunter2*) echo "FAIL  the credential guard leaked the password into its own error message"; failed=$((failed + 1)) ;;
+      *) echo "ok    credential redacted in the failure message" ;;
+    esac ;;
+  *) echo "FAIL  credential redaction: the guard did not fire, so redaction was never tested"
+     echo "        got: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-160)"
+     failed=$((failed + 1)) ;;
+esac
 
 echo "== underscore reachability =="
 # Not input validation. The name pattern needs a hyphen or start-of-string
@@ -162,8 +201,19 @@ echo "== hub identity is stable across upgrade and independent of the release na
 # hub.hubId must be used verbatim and must never be derived from anything Helm
 # regenerates. A chart that interpolated .Release.Name or .Release.Revision would
 # pass every case above and still re-scope the hub's storage on upgrade.
+# THE NON-EMPTY CHECK IS LOAD-BEARING, NOT DEFENSIVE. Comparing two hashes is a
+# bare negative wearing a positive's clothes: two FAILED renders produce two
+# empty strings, whose hashes are equal, and this printed "ok render is
+# identical for install and upgrade" on a machine where nothing rendered at all.
+# It is the strongest false pass in this file, because the assertion it fakes -
+# that hub identity survives an upgrade - is the one the whole hubId design
+# exists for. Establish that there is a render before comparing renders.
 executed=$((executed + 1))
-if [ "$(render | sha256sum)" = "$(render --is-upgrade | sha256sum)" ]; then
+_a="$(render)"; _b="$(render --is-upgrade)"
+if [ -z "$_a" ] || [ -z "$_b" ]; then
+  echo "FAIL  install/upgrade comparison: one or both renders were EMPTY, so nothing was compared"
+  failed=$((failed + 1))
+elif [ "$(printf '%s' "$_a" | sha256sum)" = "$(printf '%s' "$_b" | sha256sum)" ]; then
   echo "ok    render is identical for install and upgrade"
 else
   echo "FAIL  render differs between install and upgrade"; failed=$((failed + 1))
@@ -180,6 +230,11 @@ done
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"
+# Emitted unconditionally, on every exit path, so run-all.sh can sum what
+# actually ran even when this script is reporting a failure. The count check must
+# not be silenced by the outcome it is meant to qualify.
+echo "ASSERTIONS_EXECUTED=${executed}"
+
 if [ "$executed" -ne "$EXPECTED_TOTAL" ]; then
   # INEQUALITY, NOT A FLOOR. A short run is a failed run; a LONG run means
   # assertions were added without committing the number, which is the same
