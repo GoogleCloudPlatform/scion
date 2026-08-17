@@ -45,6 +45,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Helm
         uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4
@@ -78,6 +80,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Helm
         uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4
@@ -126,6 +130,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Helm
         uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4
@@ -158,6 +164,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Install yamllint
         run: pip install yamllint==1.38.0
