@@ -53,6 +53,8 @@ export interface ChatSpaceThread {
   name: string;
   isGeneral: boolean;
   pinned: boolean;
+  /** Muted threads raise no notifications and show no unread marker. */
+  muted?: boolean;
   defaultAgent?: string;
   lastActivityAt?: string;
   lastMessagePreview?: string;
@@ -289,6 +291,12 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .thread-item .pin-icon {
+      font-size: 0.625rem;
+      color: var(--scion-text-muted, #64748b);
+      flex-shrink: 0;
+    }
+
+    .thread-item .mute-icon {
       font-size: 0.625rem;
       color: var(--scion-text-muted, #64748b);
       flex-shrink: 0;
@@ -847,6 +855,64 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  /**
+   * Toggle a thread's pinned state. Applied locally first so the rail reorders
+   * on the click, and rolled back if the server refuses — a pin the server
+   * does not have would silently survive until the next reload otherwise.
+   */
+  private async handleTogglePin(thread: ChatSpaceThread, projectId: string): Promise<void> {
+    this.contextMenuTarget = null;
+    const next = !thread.pinned;
+    this.updateThread(projectId, thread.id, { pinned: next });
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/pin`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pinned: next }),
+        }
+      );
+      if (!res.ok) {
+        this.updateThread(projectId, thread.id, { pinned: thread.pinned });
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as { pinned?: boolean };
+      if (typeof data.pinned === 'boolean' && data.pinned !== next) {
+        this.updateThread(projectId, thread.id, { pinned: data.pinned });
+      }
+    } catch {
+      this.updateThread(projectId, thread.id, { pinned: thread.pinned });
+    }
+  }
+
+  /** Toggle a thread's muted state, with the same optimistic-then-reconcile shape as pin. */
+  private async handleToggleMute(thread: ChatSpaceThread, projectId: string): Promise<void> {
+    this.contextMenuTarget = null;
+    const next = !thread.muted;
+    this.updateThread(projectId, thread.id, { muted: next });
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/mute`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ muted: next }),
+        }
+      );
+      if (!res.ok) {
+        this.updateThread(projectId, thread.id, { muted: thread.muted === true });
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
+      if (typeof data.muted === 'boolean' && data.muted !== next) {
+        this.updateThread(projectId, thread.id, { muted: data.muted });
+      }
+    } catch {
+      this.updateThread(projectId, thread.id, { muted: thread.muted === true });
+    }
+  }
+
   private startRename(thread: ChatSpaceThread): void {
     this.contextMenuTarget = null;
     if (thread.isGeneral) return;
@@ -1136,13 +1202,20 @@ export class ScionChatSpaceRail extends LitElement {
         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, thread, projectId)}
       >
         <span class="hash">#</span>
-        <span class="thread-name ${thread.hasUnread ? 'unread' : ''}">${thread.name}</span>
+        <span class="thread-name ${!thread.muted && thread.hasUnread ? 'unread' : ''}"
+          >${thread.name}</span
+        >
         ${thread.pinned ? html`<sl-icon name="star-fill" class="pin-icon"></sl-icon>` : nothing}
-        ${thread.hasUnreadMention
-          ? html`<span class="mention-dot"></span>`
-          : thread.hasUnread
-            ? html`<span class="unread-dot"></span>`
-            : nothing}
+        ${thread.muted
+          ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
+          : nothing}
+        ${thread.muted
+          ? nothing
+          : thread.hasUnreadMention
+            ? html`<span class="mention-dot"></span>`
+            : thread.hasUnread
+              ? html`<span class="unread-dot"></span>`
+              : nothing}
       </div>
     `;
   }
@@ -1193,6 +1266,20 @@ export class ScionChatSpaceRail extends LitElement {
         <div class="context-menu-item" @click=${() => this.handleMarkSpaceRead(projectId)}>
           <sl-icon name="check-lg"></sl-icon>
           Mark space read
+        </div>
+        <div
+          class="context-menu-item pin-toggle"
+          @click=${() => void this.handleTogglePin(thread, projectId)}
+        >
+          <sl-icon name=${thread.pinned ? 'star' : 'star-fill'}></sl-icon>
+          ${thread.pinned ? 'Unpin' : 'Pin to top'}
+        </div>
+        <div
+          class="context-menu-item mute-toggle"
+          @click=${() => void this.handleToggleMute(thread, projectId)}
+        >
+          <sl-icon name=${thread.muted ? 'bell' : 'bell-slash'}></sl-icon>
+          ${thread.muted ? 'Unmute' : 'Mute'}
         </div>
         ${!thread.isGeneral
           ? html`

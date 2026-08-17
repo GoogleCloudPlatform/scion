@@ -363,3 +363,68 @@ describe('chat page — mobile swipe navigation', () => {
     expect(el.mobilePanel).toBe('center');
   });
 });
+
+describe('chat page — DM mute toggle', () => {
+  /** A page with an open DM conversation in the given muted state. */
+  function pageOnDM(muted: boolean): any {
+    const el = createPage();
+    el.v2Conversation = {
+      conversationKey: 'dm:user-me:user-1',
+      projectId: 'proj-1',
+      threadName: '',
+      peerName: 'Ada Lovelace',
+      peerId: 'user-1',
+      peerKind: 'user',
+      isDM: true,
+      muted,
+    };
+    return el;
+  }
+
+  it('PUTs the mute endpoint for the open DM and flips the local state', async () => {
+    const el = pageOnDM(false);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ muted: true }), { status: 200 })
+    );
+
+    await el.toggleDMMute();
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/chat/conversations/dm%3Auser-me%3Auser-1/mute',
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ muted: true }) })
+    );
+    expect(el.v2Conversation.muted).toBe(true);
+  });
+
+  it('unmutes a muted DM', async () => {
+    const el = pageOnDM(true);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ muted: false }), { status: 200 })
+    );
+
+    await el.toggleDMMute();
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/mute'),
+      expect.objectContaining({ body: JSON.stringify({ muted: false }) })
+    );
+    expect(el.v2Conversation.muted).toBe(false);
+  });
+
+  it('rolls back when the server refuses', async () => {
+    const el = pageOnDM(false);
+    vi.mocked(apiFetch).mockResolvedValue(new Response('{}', { status: 403 }));
+
+    await el.toggleDMMute();
+
+    expect(el.v2Conversation.muted).toBe(false);
+  });
+
+  it('renders the bell as filled-through only while muted', () => {
+    const quiet = renderToFragment(pageOnDM(true).renderDMMuteButton(pageOnDM(true).v2Conversation));
+    expect(quiet.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell-slash');
+
+    const loud = renderToFragment(pageOnDM(false).renderDMMuteButton(pageOnDM(false).v2Conversation));
+    expect(loud.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell');
+  });
+});
