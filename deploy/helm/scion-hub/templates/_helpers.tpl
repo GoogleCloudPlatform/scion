@@ -1759,13 +1759,73 @@ shared with argv, where the hyphen rule is the correct one.
 {{- end }}
 
 {{/*
+THE VALUES THAT REACH settings.yaml AND ONLY settings.yaml, AND WHAT THEY WRITE.
+The single source for that list. NOTES.txt renders it, values.yaml repeats it in
+prose at config.existingSecret, and hack/verify.sh checks all three against the
+render rather than against each other.
+
+Under config.existingSecret the chart writes no settings.yaml, so each of these
+values silently does nothing and the operator's own file has to carry the key on
+the right. That is the whole content of the list: what you now owe.
+
+WHY THESE ARE DOCUMENTED AND THE THREE BELOW ARE REFUSED, WHICH IS NOT A
+JUDGEMENT ABOUT WHICH MATTER MORE. It is about what a template can see. Helm
+hands a template the MERGED values and no way to ask which of them the operator
+actually wrote, so intent is only legible where the chart's default is empty:
+config.extra, storage.bucket and agents.imageRegistry are empty by default, so a
+non-empty one was typed by someone and can be refused. Every value here has a
+non-empty default - auth.mode is "proxy", hub.name is "Scion Hub",
+database.maxOpenConns is 25 - and a guard on truthiness would fire on a values
+file that never mentioned them. There is no third option: a literal copy of the
+default inside the guard is a second source of truth for the default, and it
+goes stale in exactly the direction that turns the guard off.
+
+So this list is not a weaker refusal. It is the part of the same problem that a
+refusal cannot express, and it is checked to the same standard: hack/verify.sh
+mutates every leaf of values.yaml, renders, and requires each value whose only
+effect is on the settings document to be EITHER refused by the guard below OR
+named here with the settings key its mutation actually moved. A value in neither
+place fails the suite, and so does an entry here that no longer moves the key it
+claims. The pairs below were produced by that probe, not written from memory.
+
+Both columns are load-bearing. The left tells an operator which of their values
+went nowhere; the right tells them what to write instead, which is the only half
+they can act on, and it is not guessable from the left - hub.name becomes
+server.hub.hub_name, and rbac.agentNamespace and runtime.namespace both become
+the same runtimes.kubernetes.namespace.
+*/}}
+{{- define "scion-hub.existingSecretTransfers" -}}
+  auth.mode                  ->  server.auth.mode
+  database.connMaxIdleTime   ->  server.database.conn_max_idle_time
+  database.connMaxLifetime   ->  server.database.conn_max_lifetime
+  database.maxIdleConns      ->  server.database.max_idle_conns
+  database.maxOpenConns      ->  server.database.max_open_conns
+  hub.hubId                  ->  server.hub.hub_id
+  hub.name                   ->  server.hub.hub_name
+  rbac.agentNamespace        ->  runtimes.kubernetes.namespace
+  runtime.listAllNamespaces  ->  runtimes.kubernetes.list_all_namespaces
+  runtime.namespace          ->  runtimes.kubernetes.namespace
+{{- end }}
+
+{{/*
 config.existingSecret means "I supply the whole settings.yaml myself", so the
 chart renders none - and every value whose only effect is on the file it did not
 render becomes inert. An inert value is the same silent no-op this whole design
 exists to avoid, so supplying both is an error rather than a precedence rule.
 
-Later phases append their own inline values to $inline as they are introduced
-(the database password, the session secret, the OAuth client secret).
+The three names below are the settings values with an empty default, which is
+what makes them refusable at all; the reasoning is in the comment above the
+transfer list, and the two lists are checked together as one partition of the
+values tree. Later phases append their own inline values here as they are
+introduced (the database password, the session secret, the OAuth client secret).
+
+Two settings values are missing from the list on purpose and are covered anyway.
+storage.provider and database.driver have non-empty defaults, so neither can be
+refused on truthiness - but the only other value each can take (gcs, postgres)
+is one the chart already requires storage.bucket alongside, so any render that
+moves either of them is refused for the bucket. hack/verify.sh proves that by
+mutation rather than by argument; if a later phase makes either reachable
+without a bucket, that check goes red rather than the pair going quiet.
 
 MUST be called from a template that always renders. Calling it only from
 scion-hub.settings does not work, and does not look broken: the settings
@@ -1781,7 +1841,7 @@ it; keep that call.
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
 {{- if $inline }}
-{{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it." (join ", " $inline)) }}
+{{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
 {{- end }}
 {{- end }}
 {{- end }}

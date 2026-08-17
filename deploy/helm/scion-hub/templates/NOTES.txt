@@ -74,6 +74,19 @@ CONFIGURATION
   The chart rendered nothing and validated nothing. Hosted mode, the hub ID, the
   preflight keys and schema_version are all yours to get right - see the section
   below on schema_version in particular, which is not optional.
+
+  These values of yours reached nothing. Each one only ever wrote to the
+  settings.yaml the chart did not render, so whatever you set them to, the
+  running hub takes the key on the right from YOUR file or from its own default:
+
+{{ include "scion-hub.existingSecretTransfers" . }}
+
+  This is the complete list as of this chart version, and it is checked against
+  the render rather than maintained by hand. Values not listed here still work
+  normally - they reach the Deployment, the RBAC or the Service. Three that also
+  write to settings.yaml are missing on purpose: config.extra, storage.bucket
+  and agents.imageRegistry fail the render outright when set alongside
+  config.existingSecret, so they cannot go quiet on you.
 {{- else }}
   From the Secret {{ include "scion-hub.settingsSecretName" . }}, key settings.yaml.
 

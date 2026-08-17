@@ -548,6 +548,272 @@ else
 fi
 
 # --------------------------------------------------------------------------
+step "every value that only reaches settings.yaml is refused or documented"
+# --------------------------------------------------------------------------
+# The check on the check for config.existingSecret.
+#
+# The guard above refuses three named values. A named list answers "are these
+# three still refused" and cannot answer the question that matters, which is
+# "are these still the only ones". Nothing about a fourth settings value being
+# added is visible: it renders, it installs, and the operator's setting is
+# discarded with no error - the same silent no-op the guard exists to prevent,
+# arriving through the guard's blind spot rather than past it.
+#
+# So this derives the question from the chart instead of asking it. Every leaf
+# of values.yaml is enumerated, mutated one at a time, and rendered twice; a
+# value whose mutation moves the settings document and nothing else is a value
+# that goes silent under config.existingSecret, and must be either refused by
+# the guard or named in the transfer list with the settings key it moved. A
+# value in neither place fails here. Nobody has to remember to update a list.
+#
+# THE ENUMERATION IS THE PART THAT MUST NOT BE HAND-WRITTEN, so it is taken from
+# values.yaml at run time by a throwaway chart written into $WORK - Helm walking
+# its own values with the same recursion the chart's own helpers use. Two things
+# that cost a round to learn and are easy to reintroduce:
+#
+#   - the walk must be given the same --set values the render gets. Required
+#     values with no default (image.repository, hub.hubId, hub.baseUrl) are
+#     commented out in values.yaml, so a walk over the file alone does not see
+#     them and silently drops three leaves - including the hub ID.
+#   - a mutation has to actually mutate. updateStrategy.type reads Recreate at
+#     replicaCount 1, so "set it to Recreate" changes nothing and reports the
+#     value inert. That class of mistake is caught below by counting the leaves
+#     that moved nothing at all rather than by inspection.
+#
+# Renders here pass --skip-schema-validation. The mutations are deliberately
+# odd values and several would be rejected by the schema before a template ever
+# saw them; the schema's own rejections are asserted in their own step. What is
+# under test here is which document a value reaches, which is a template fact.
+probe_dir="$WORK/valueprobe"
+mkdir -p "$probe_dir/templates"
+cp "$CHART_DIR/values.yaml" "$probe_dir/values.yaml"
+cat >"$probe_dir/Chart.yaml" <<'PROBE_CHART'
+apiVersion: v2
+name: valueprobe
+version: 0.0.0
+PROBE_CHART
+cat >"$probe_dir/templates/paths.yaml" <<'PROBE_TPL'
+{{- define "probe.walk" -}}
+{{- $prefix := .prefix -}}
+{{- range $k, $v := .obj }}
+{{- $p := ternary $k (printf "%s.%s" $prefix $k) (eq $prefix "") }}
+{{- if and (kindIs "map" $v) (gt (len $v) 0) }}
+{{- include "probe.walk" (dict "obj" $v "prefix" $p) }}
+{{- else }}
+{{ printf "%s|%s|%v" $p (kindOf $v) $v }}
+{{- end }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: probe
+data:
+  paths: |
+{{ include "probe.walk" (dict "obj" .Values "prefix" "") | indent 4 }}
+PROBE_TPL
+
+# The settings document flattened to one "key.path=value" line per leaf, so a
+# diff names the settings key that moved rather than a line number. The document
+# is machine-generated - two-space indent, no anchors, no flow mappings, no
+# multi-line scalars - and anything outside that shape exits non-zero rather
+# than being skipped, because a parser that silently sees fewer keys turns this
+# whole step green.
+cat >"$WORK/settings-leaves.py" <<'PROBE_PY'
+import sys
+stack, out = [], []
+for raw in sys.stdin:
+    line = raw.rstrip('\n')
+    if not line.strip() or line.lstrip().startswith('#'):
+        continue
+    indent = len(line) - len(line.lstrip(' '))
+    if indent % 2:
+        sys.stderr.write('odd indent: %r\n' % line)
+        sys.exit(2)
+    depth, body = indent // 2, line.strip()
+    if body.startswith('- '):
+        out.append('.'.join(stack[:depth]) + '[]=' + body[2:])
+        continue
+    if ':' not in body:
+        sys.stderr.write('unparsed line: %r\n' % line)
+        sys.exit(2)
+    key, _, val = body.partition(':')
+    stack = stack[:depth] + [key]
+    if val.strip():
+        out.append('.'.join(stack) + '=' + val.strip())
+print('\n'.join(out))
+PROBE_PY
+
+# Mutations that cannot be derived from the value's type: enum members, patterned
+# strings, and values that need a companion set before they reach anything. A
+# missing entry here does not produce a wrong answer - it produces a render
+# failure or a leaf that moves nothing, both of which are counted and reported
+# below.
+declare -A PROBE_MUTATION=(
+  [auth.mode]='--set-string|auth.mode=oauth|--set|auth.acknowledgeOAuthUnlanded=true'
+  [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
+  [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
+  [database.driver]='--set-string|database.driver=postgres|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
+  [hub.args]='--set-string|hub.args[0]=--probe-flag'
+  [hub.baseUrl]='--set-string|hub.baseUrl=https://other.example.com'
+  [hub.extraEnv]='--set-string|hub.extraEnv[0].name=PROBE_ONE|--set-string|hub.extraEnv[0].value=x'
+  [hub.home]='--set-string|hub.home=/probe/home'
+  [hub.hubId]='--set-string|hub.hubId=probe-two'
+  [hub.tolerations]='--set-string|hub.tolerations[0].key=probe|--set-string|hub.tolerations[0].operator=Exists'
+  [image.digest]='--set-string|image.digest=sha256:abababababababababababababababababababababababababababababababab'
+  [image.pullPolicy]='--set-string|image.pullPolicy=Never'
+  [image.pullSecrets]='--set-string|image.pullSecrets[0].name=probe-secret'
+  [image.repository]='--set-string|image.repository=other.test/probe-img'
+  [probes.liveness.failureThreshold]='--set|probes.liveness.enabled=true|--set|probes.liveness.failureThreshold=37'
+  [probes.liveness.periodSeconds]='--set|probes.liveness.enabled=true|--set|probes.liveness.periodSeconds=37'
+  [probes.liveness.timeoutSeconds]='--set|probes.liveness.enabled=true|--set|probes.liveness.timeoutSeconds=37'
+  [serviceAccount.create]='--set|serviceAccount.create=false|--set-string|serviceAccount.name=preexisting'
+  [serviceAccount.gcpServiceAccount]='--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com'
+  [storage.bucket]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
+  [storage.provider]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
+  [updateStrategy.type]='--set-string|updateStrategy.type=RollingUpdate'
+)
+
+probe_render() {
+  "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    --skip-schema-validation "${BASE[@]}" "$@" 2>&1
+}
+# The settings document only. Everything else in the stream, with the settings
+# checksum removed: that annotation is a hash OF the settings document, so
+# leaving it in would report every settings-only value as touching the
+# Deployment too, and no value would ever be classified settings-only.
+probe_settings() {
+  sed -n '/^  settings\.yaml: |/,/^[^ ]/p' "$1" \
+    | sed -e '1d' -e '/^$/d' | grep '^    ' \
+    | sed -e 's/^    //' -e '/^[[:space:]]*#/d' \
+    | python3 "$WORK/settings-leaves.py"
+}
+probe_other() {
+  awk '/^# Source: /{keep = ($0 !~ /secret-settings\.yaml/)} keep' "$1" \
+    | grep -v 'checksum/settings:'
+}
+
+if ! probe_render >"$WORK/probe-base.yaml"; then
+  fail "the mutation probe's baseline render failed; every classification below is void"
+else
+  probe_settings "$WORK/probe-base.yaml" >"$WORK/probe-base.settings" || true
+  probe_other "$WORK/probe-base.yaml" >"$WORK/probe-base.other"
+
+  if ! "$HELM" template probe "$probe_dir" "${BASE[@]}" >"$WORK/probe-paths.yaml" 2>&1; then
+    fail "the values walk did not render - the leaf enumeration below is empty"
+  fi
+  sed -n '/paths: |/,$p' "$WORK/probe-paths.yaml" \
+    | sed -e '1d' -e 's/^    //' | grep '|' >"$WORK/probe-leaves.txt" || true
+
+  probe_total=0 probe_settings_only=0 probe_half=0 probe_quiet=0 probe_err=0
+  : >"$WORK/probe-observed.txt"
+  probe_quiet_names="" probe_err_names="" probe_unaccounted=""
+
+  while IFS='|' read -r leaf kind value; do
+    [[ -z "$leaf" || "$leaf" == config.existingSecret ]] && continue
+    probe_total=$((probe_total + 1))
+    spec="${PROBE_MUTATION[$leaf]:-}"
+    if [[ -z "$spec" ]]; then
+      case "$kind" in
+        bool)    [[ "$value" == true ]] && spec="--set|$leaf=false" || spec="--set|$leaf=true" ;;
+        float64) spec="--set|$leaf=$(( ${value%.*} + 7 ))" ;;
+        string)  spec="--set-string|$leaf=zzprobe" ;;
+        map)     spec="--set-string|$leaf.probeKey=probeVal" ;;
+        *)       probe_err=$((probe_err + 1)); probe_err_names+=" $leaf(no mutation for $kind)"; continue ;;
+      esac
+    fi
+    IFS='|' read -r -a mutation <<<"$spec"
+
+    if ! probe_render "${mutation[@]}" >"$WORK/probe-mut.yaml"; then
+      probe_err=$((probe_err + 1)); probe_err_names+=" $leaf"
+      continue
+    fi
+    probe_settings "$WORK/probe-mut.yaml" >"$WORK/probe-mut.settings" || true
+    probe_other "$WORK/probe-mut.yaml" >"$WORK/probe-mut.other"
+
+    moved_settings=0 moved_other=0
+    cmp -s "$WORK/probe-base.settings" "$WORK/probe-mut.settings" || moved_settings=1
+    cmp -s "$WORK/probe-base.other" "$WORK/probe-mut.other" || moved_other=1
+
+    if [[ $moved_settings -eq 0 && $moved_other -eq 0 ]]; then
+      probe_quiet=$((probe_quiet + 1)); probe_quiet_names+=" $leaf"
+      continue
+    fi
+    [[ $moved_settings -eq 0 ]] && continue
+
+    [[ $moved_other -eq 1 ]] && probe_half=$((probe_half + 1)) || probe_settings_only=$((probe_settings_only + 1))
+
+    # Refused is a complete answer: the operator cannot reach the silent state.
+    if ! "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+        --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+        "${mutation[@]}" >"$WORK/probe-ex.yaml" 2>&1 \
+      && grep -q 'config.existingSecret is set together with inline settings values' "$WORK/probe-ex.yaml"; then
+      continue
+    fi
+
+    # Not refused, so it must be documented - with the key it actually moved.
+    for key in $(diff "$WORK/probe-base.settings" "$WORK/probe-mut.settings" \
+                   | sed -n 's/^[<>] \([^=]*\)=.*/\1/p' | sort -u); do
+      printf '%s %s\n' "$leaf" "$key" >>"$WORK/probe-observed.txt"
+    done
+  done <"$WORK/probe-leaves.txt"
+
+  # The declared list, read from the one definition NOTES.txt renders.
+  sed -n '/define "scion-hub.existingSecretTransfers"/,/^{{- end }}/p' \
+    "$CHART_DIR/templates/_helpers.tpl" \
+    | sed -e '1d' -e '$d' -e 's/[[:space:]]*->[[:space:]]*/ /' -e 's/^[[:space:]]*//' \
+    | sort -u >"$WORK/probe-declared.txt"
+  sort -u "$WORK/probe-observed.txt" >"$WORK/probe-observed-sorted.txt"
+
+  if [[ $probe_total -ge 50 ]]; then
+    pass "the values walk enumerated $probe_total leaves to mutate"
+  else
+    fail "the values walk enumerated only $probe_total leaves - values.yaml has ~60 and this step is checking almost nothing"
+  fi
+  if [[ $probe_err -eq 0 ]]; then
+    pass "every leaf could be mutated and rendered"
+  else
+    fail "$probe_err leaves could not be rendered with their mutation and were classified not at all:$probe_err_names - add an entry to PROBE_MUTATION"
+  fi
+  # Bounded rather than listed: a probe that breaks - helm gone, --set ignored,
+  # the walk emptied - shows up as every leaf moving nothing, and a count
+  # catches that where an allow-list of known-quiet names would not.
+  if [[ $probe_quiet -le 2 ]]; then
+    pass "$probe_quiet mutations moved nothing anywhere, within the tolerated 2"
+  else
+    fail "$probe_quiet mutations moved nothing anywhere ($probe_quiet_names) - either the probe has stopped working or these values do nothing; give them a PROBE_MUTATION that changes their effective value"
+  fi
+  if [[ $((probe_settings_only + probe_half)) -ge 12 ]]; then
+    pass "$probe_settings_only settings-only and $probe_half part-settings values found and classified"
+  else
+    fail "only $((probe_settings_only + probe_half)) values were found to reach settings.yaml - the chart writes more than that, so the classification below is not seeing the document"
+  fi
+  if diff -u "$WORK/probe-declared.txt" "$WORK/probe-observed-sorted.txt" >"$WORK/probe-transfers.diff"; then
+    pass "the transfer list matches the render, in both directions"
+  else
+    fail "the transfer list in _helpers.tpl disagrees with what the render does. '-' is declared and no longer true; '+' is a value that goes silent under config.existingSecret and is neither refused nor documented. Fix the list in scion-hub.existingSecretTransfers, values.yaml at config.existingSecret, or the guard"
+    cat "$WORK/probe-transfers.diff"
+  fi
+fi
+
+# values.yaml repeats the list for the reader who never runs helm install, and a
+# copy that drifts is worse than no copy: it is the one an operator will act on.
+# Compared both ways for that reason - an entry values.yaml still lists after the
+# template dropped it is the more misleading direction, and a one-way "is it
+# present" check is blind to exactly that one.
+grep -E '^[[:space:]]*#[[:space:]]+[A-Za-z.]+[[:space:]]+->[[:space:]]+[A-Za-z_.]+[[:space:]]*$' \
+  "$CHART_DIR/values.yaml" \
+  | sed -E -e 's/^[[:space:]]*#[[:space:]]*//' -e 's/[[:space:]]*->[[:space:]]*/ /' \
+           -e 's/[[:space:]]*$//' \
+  | sort -u >"$WORK/probe-values-list.txt" || true
+if diff -u "$WORK/probe-declared.txt" "$WORK/probe-values-list.txt" >"$WORK/probe-values.diff"; then
+  pass "values.yaml repeats the transfer list exactly"
+else
+  fail "values.yaml and templates/_helpers.tpl disagree about the transfer list - '-' is in the template and missing from values.yaml, '+' is in values.yaml and no longer in the template"
+  cat "$WORK/probe-values.diff"
+fi
+
+# --------------------------------------------------------------------------
 step "the settings file is delivered read-only, over a writable state directory"
 # --------------------------------------------------------------------------
 # The vacuity guard for the HUB_HOME table. Every path assertion below is

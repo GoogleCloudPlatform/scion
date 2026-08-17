@@ -300,6 +300,40 @@ config:
   # get right. The public_url one is the easiest to get wrong without noticing:
   # setting it splits the base URL between the agent endpoint and the OAuth
   # redirect, silently, and the chart cannot warn you here.
+  #
+  # AND THESE VALUES STOP MEANING ANYTHING, WITHOUT SAYING SO. Each one's only
+  # effect was on the settings.yaml that is now yours, so setting it here writes
+  # to a file the chart does not render. Your file has to carry the key on the
+  # right, or the hub uses its own default for it:
+  #
+  #   auth.mode                  ->  server.auth.mode
+  #   database.connMaxIdleTime   ->  server.database.conn_max_idle_time
+  #   database.connMaxLifetime   ->  server.database.conn_max_lifetime
+  #   database.maxIdleConns      ->  server.database.max_idle_conns
+  #   database.maxOpenConns      ->  server.database.max_open_conns
+  #   hub.hubId                  ->  server.hub.hub_id
+  #   hub.name                   ->  server.hub.hub_name
+  #   rbac.agentNamespace        ->  runtimes.kubernetes.namespace
+  #   runtime.listAllNamespaces  ->  runtimes.kubernetes.list_all_namespaces
+  #   runtime.namespace          ->  runtimes.kubernetes.namespace
+  #
+  # hub.hubId, rbac.agentNamespace, runtime.namespace and
+  # runtime.listAllNamespaces are the awkward ones, because they keep HALF their
+  # effect: they still name the pod annotation and still shape the RBAC the
+  # chart grants. Only their settings half disappears, so the failure is a hub
+  # whose RBAC and whose configuration disagree about which namespace it works
+  # in - and note that two different values above write the same settings key.
+  #
+  # The list is generated from the chart, not maintained by hand: hack/verify.sh
+  # mutates every value in this file, renders, and requires each one that only
+  # moves the settings document to appear here with the key it actually moved.
+  # If you are reading this in a fork whose chart has drifted, run that script
+  # rather than trusting these ten lines. The same list is printed on install by
+  # NOTES.txt, from a single definition in templates/_helpers.tpl.
+  #
+  # Not listed, because they refuse rather than go quiet: config.extra,
+  # storage.bucket and agents.imageRegistry fail the render when set together
+  # with this.
   existingSecret: ""
 
   # Arbitrary additional settings.yaml content, deep-merged over what the chart
