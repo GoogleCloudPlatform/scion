@@ -394,7 +394,7 @@
         },
         "acknowledgeOAuthUnlanded": {
           "type": "boolean",
-          "description": "The oauth mode's client credentials and session secret are not implemented in the chart yet, so an oauth install will not start. Set true to render anyway."
+          "description": "The oauth mode's client credentials are not rendered by the chart yet. An oauth install starts and passes its probes; every human login fails. Set true to render it anyway."
         },
         "requireStableSigningKey": {
           "type": "boolean",
@@ -437,7 +437,7 @@
       }
     },
     {
-      "description": "oauth mode has no supporting configuration in the chart yet. Requiring an explicit acknowledgement keeps it from being selected by accident.",
+      "description": "oauth mode has no supporting configuration in the chart yet. Requiring an explicit acknowledgement keeps it from being selected by accident. Not applied under config.existingSecret: the chart renders no auth mode there, so auth.mode selects nothing and there is nothing to acknowledge. The same rule is enforced again in the template, on the rendered document, because --skip-schema-validation removes this one.",
       "if": {
         "properties": {
           "auth": {
@@ -445,9 +445,15 @@
               "mode": {"const": "oauth"}
             },
             "required": ["mode"]
+          },
+          "config": {
+            "properties": {
+              "existingSecret": {"const": ""}
+            },
+            "required": ["existingSecret"]
           }
         },
-        "required": ["auth"]
+        "required": ["auth", "config"]
       },
       "then": {
         "properties": {
@@ -456,7 +462,7 @@
             "properties": {
               "acknowledgeOAuthUnlanded": {
                 "const": true,
-                "description": "auth.mode oauth requires auth.acknowledgeOAuthUnlanded true: the client credentials and session secret it needs are not rendered by this chart yet."
+                "description": "auth.mode oauth requires auth.acknowledgeOAuthUnlanded true: the client credentials that mode needs are not rendered by this chart yet, and nothing catches that at runtime - the hub starts, passes its probes, and refuses every login."
               }
             }
           }

@@ -1978,6 +1978,30 @@ rendered yet; see the comment in the rendered file. */}}
 {{- if ne (dig "server" "auth" "mode" "" $doc) $root.Values.auth.mode }}
 {{- fail (printf "rendered settings.yaml has server.auth.mode: %q but auth.mode is %q." (dig "server" "auth" "mode" "" $doc) $root.Values.auth.mode) }}
 {{- end }}
+
+{{- /*
+The oauth acknowledgement, enforced here as well as in values.schema.json, and
+the duplication is the point: --skip-schema-validation is one flag away and it
+removes every schema-enforced rule at once. This is the layer that is left.
+
+THE HARM, VERIFIED OUTSIDE THE CHART, AND IT IS NOT "THE HUB WILL NOT START".
+That is what this chart used to claim and it is wrong in the direction that
+matters. Nothing validates the OAuth client credentials at startup - they are
+copied into the server config unchecked at cmd/server_foreground.go:1514-1544 -
+so a hub rendered in oauth mode with no credentials STARTS, binds, and passes
+/readyz. The failure arrives per request, at login: pkg/hub/web.go:1770-1776
+returns 503 "OAuth not configured" or 400 "OAuth provider %s is not configured".
+A deployment that is green in every Kubernetes signal and cannot be logged into
+by anybody is worse than one that crashloops, because nothing pages.
+
+Scoped to the rendered document on purpose. Under config.existingSecret this
+whole template is skipped, so the acknowledgement does not fire - correctly: the
+chart renders no auth mode there and the operator's file is theirs. The schema's
+copy of this rule carries the same exclusion for the same reason.
+*/}}
+{{- if and (eq (dig "server" "auth" "mode" "" $doc) "oauth") (not $root.Values.auth.acknowledgeOAuthUnlanded) }}
+{{- fail "settings.yaml renders server.auth.mode: oauth, but this chart does not render the OAuth client credentials that mode needs - that is Phase 3. Nothing catches it at runtime: the credentials are wired unvalidated (cmd/server_foreground.go:1514-1544), so the hub starts and passes its probes, and every human login fails with \"OAuth provider is not configured\" (pkg/hub/web.go:1770-1776). Set auth.acknowledgeOAuthUnlanded=true to render it anyway, or use auth.mode=proxy." }}
+{{- end }}
 {{- end }}
 
 {{/*

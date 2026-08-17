@@ -369,10 +369,18 @@ auth:
   # Every key the HA preflight requires renders identically in both modes.
   mode: proxy
 
-  # The oauth mode's supporting configuration - the client credentials and the
-  # session secret - is not implemented in the chart yet, so an oauth install
-  # will not currently start. Set this to true to acknowledge that and render
-  # anyway; the schema otherwise rejects the combination.
+  # The oauth mode's supporting configuration - the client credentials - is not
+  # rendered by the chart yet; it lands with the session and client secrets.
+  #
+  # It does not fail loudly. The credentials are wired without validation
+  # (cmd/server_foreground.go:1514-1544), so the hub starts, binds and passes
+  # /readyz, and the failure arrives once per login attempt as "OAuth provider
+  # is not configured" (pkg/hub/web.go:1770-1776) - a deployment that is green
+  # in every Kubernetes signal and that nobody can log in to.
+  #
+  # Set this to true to acknowledge that and render anyway. Both the schema and
+  # the template enforce it, and neither applies under config.existingSecret,
+  # where the chart renders no auth mode at all.
   acknowledgeOAuthUnlanded: false
 
   # When true the hub refuses to start rather than fall back to a signing key

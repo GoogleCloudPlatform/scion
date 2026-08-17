@@ -969,22 +969,61 @@ expect_render_failure \
   --set config.extra.scheduler.interval_seconds=30
 
 expect_render_failure \
-  "postgres without a GCS bucket" \
+  "the SCHEMA rejects postgres without a GCS bucket" \
   "bucket" \
   "${BASE[@]}" \
   --set database.driver=postgres \
   --set storage.provider=gcs
 
 expect_render_failure \
-  "a plaintext base URL" \
+  "the SCHEMA rejects a plaintext base URL" \
   "hub.baseUrl" \
   --set image.repository=example.test/scion-hub-gke \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com
 
 expect_render_failure \
-  "oauth mode without the acknowledgement" \
+  "the SCHEMA rejects oauth mode without the acknowledgement" \
   "acknowledgeOAuthUnlanded" \
+  "${BASE[@]}" \
+  --set auth.mode=oauth
+
+# THE THREE ABOVE TEST THE SCHEMA, AND THEY ARE NAMED FOR IT NOW BECAUSE THEY
+# WERE NOT. Helm validates values.schema.json BEFORE it renders, so an input the
+# schema rejects never reaches the template - and the schema's own message
+# happens to contain the same substring the check was matching. Two of the three
+# have a template guard behind them that had, measurably, zero coverage: the
+# schema message satisfies the check with the template guard deleted.
+#
+# So each is now a PAIR. The schema check above keeps the schema honest; the
+# template check below runs the same input with --skip-schema-validation and
+# matches a substring that appears ONLY in the template's message, never in the
+# schema's. Two layers, two tests, and neither can pass for the other's reason.
+#
+# --skip-schema-validation is not exotic here: it is one flag away for anyone,
+# it is what a values file assembled by another tool can effectively produce, and
+# per the reviewer's F1 it removes EVERY schema-enforced rule at once. The
+# template guards are what is left, so they are worth testing on their own.
+expect_render_failure \
+  "the TEMPLATE rejects postgres without a GCS bucket" \
+  "storage.bucket is required when database.driver is postgres" \
+  --skip-schema-validation \
+  "${BASE[@]}" \
+  --set database.driver=postgres \
+  --set storage.provider=gcs
+
+expect_render_failure \
+  "the TEMPLATE rejects a plaintext base URL" \
+  "The session cookie's Secure attribute is derived from this prefix" \
+  --skip-schema-validation \
+  --set image.repository=example.test/scion-hub-gke \
+  --set hub.hubId=neg \
+  --set hub.baseUrl=http://neg.example.com
+
+expect_render_failure \
+  "the TEMPLATE rejects oauth mode without the acknowledgement" \
+  "every human login fails" \
+  --skip-schema-validation \
   "${BASE[@]}" \
   --set auth.mode=oauth
 
@@ -1134,6 +1173,28 @@ else
   fail "config.extra was refused an unmodelled server.hub key - the public_url rule is matching the namespace instead of the key, which breaks the escape hatch config.extra exists to be"
   printf '          %s\n' "$(tr '\n' ' ' <<<"$out" | cut -c1-300)"
 fi
+
+# The oauth acknowledgement, in the one shape where it must NOT fire. Under
+# config.existingSecret the chart renders no settings file, so auth.mode selects
+# nothing and there is nothing to acknowledge; demanding the acknowledgement
+# there is a refusal with no harm behind it. Asserted at BOTH layers because they
+# are two independent copies of the rule and an exclusion added to one of them is
+# not an exclusion: the first render exercises the schema, the second exercises
+# the template with the schema removed.
+for guard_layer in schema template; do
+  layer_args=()
+  [[ $guard_layer == template ]] && layer_args=(--skip-schema-validation)
+  if out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+      "${layer_args[@]}" \
+      "${BASE[@]}" \
+      --set config.existingSecret=mine \
+      --set auth.mode=oauth 2>&1); then
+    pass "the $guard_layer permits unacknowledged oauth under config.existingSecret"
+  else
+    fail "the $guard_layer refused unacknowledged oauth under config.existingSecret, where the chart renders no auth mode at all"
+    printf '          %s\n' "$(tr '\n' ' ' <<<"$out" | cut -c1-300)"
+  fi
+done
 
 # The twin for the PEM case above: a multi-line value that is not credential
 # material is still accepted. Without this, "rejects a multi-line PEM" would also
