@@ -33,7 +33,9 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { Agent } from '../../../shared/types.js';
 import type { MentionAcceptDetail } from './mention-autocomplete.js';
+import type { SlashCommandDetail } from './slash-autocomplete.js';
 import './mention-autocomplete.js';
+import './slash-autocomplete.js';
 
 /** Maximum message length in rune count. */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -180,10 +182,17 @@ export class ScionChatComposer extends LitElement {
   /** Files the last upload refused, shown until dismissed or superseded. */
   @state() private uploadFailures: UploadFailure[] = [];
 
+  /** Whether a drag is currently over the composer drop zone. */
+  @state() private dragOver = false;
+
+  /** Conversation key used for draft persistence. */
+  @property({ type: String })
+  conversationKey = '';
+
   /** Set of accepted mention slugs. Filtered to those still present on send. */
   private acceptedMentions = new Set<string>();
 
-  /** Phase-3: When editMessage is set, populate the textarea with the content. */
+  /** Phase-3 + Phase-4: Handle editMessage and conversationKey changes. */
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     if (changedProperties.has('editMessage') && this.editMessage) {
@@ -191,7 +200,13 @@ export class ScionChatComposer extends LitElement {
       this.runeCount = countRunes(this.editMessage.content);
       this.focusTextarea();
     }
+    if (changedProperties.has('conversationKey')) {
+      this.restoreDraft();
+    }
   }
+
+  /** Debounce timer for saving drafts to localStorage. */
+  private _draftTimer: ReturnType<typeof setTimeout> | null = null;
 
   static override styles = css`
     :host {
@@ -525,7 +540,92 @@ export class ScionChatComposer extends LitElement {
       font-size: 0.75rem;
       color: var(--scion-neutral-400, #94a3b8);
     }
+
+    /* Drop zone overlay */
+    .composer-wrapper {
+      position: relative;
+    }
+
+    .drop-zone-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(59, 130, 246, 0.08);
+      border: 2px dashed var(--scion-primary, #3b82f6);
+      border-radius: 0.75rem;
+      pointer-events: none;
+    }
+
+    .drop-zone-overlay span {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--scion-primary, #3b82f6);
+    }
   `;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    this.restoreDraft();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this._draftTimer !== null) {
+      clearTimeout(this._draftTimer);
+      this._draftTimer = null;
+    }
+  }
+
+  /** Restore a draft from localStorage for the current conversationKey. */
+  private restoreDraft(): void {
+    if (!this.conversationKey) return;
+    try {
+      const key = `scion-chat-draft-${this.conversationKey}`;
+      const saved = localStorage.getItem(key);
+      if (saved !== null) {
+        this.text = saved;
+        this.runeCount = countRunes(this.text);
+      }
+    } catch {
+      // localStorage may throw in private browsing mode — silently ignore.
+    }
+  }
+
+  /** Save the current draft to localStorage (debounced). */
+  private saveDraft(): void {
+    if (!this.conversationKey) return;
+    if (this._draftTimer !== null) clearTimeout(this._draftTimer);
+    this._draftTimer = setTimeout(() => {
+      try {
+        const key = `scion-chat-draft-${this.conversationKey}`;
+        if (this.text) {
+          localStorage.setItem(key, this.text);
+        } else {
+          localStorage.removeItem(key);
+        }
+      } catch {
+        // localStorage may throw in private browsing mode — silently ignore.
+      }
+      this._draftTimer = null;
+    }, 500);
+  }
+
+  /** Clear the draft from localStorage for the current conversationKey. */
+  private clearDraft(): void {
+    if (this._draftTimer !== null) {
+      clearTimeout(this._draftTimer);
+      this._draftTimer = null;
+    }
+    if (!this.conversationKey) return;
+    try {
+      localStorage.removeItem(`scion-chat-draft-${this.conversationKey}`);
+    } catch {
+      // localStorage may throw in private browsing mode — silently ignore.
+    }
+  }
 
   override render() {
     const isOverLimit = this.runeCount > MAX_MESSAGE_LENGTH;
@@ -543,13 +643,23 @@ export class ScionChatComposer extends LitElement {
 
     return html`
       ${this.conversationMode ? this.renderDestinationChip() : nothing}
-      <div class="composer">
-        ${this.replyTo ? this.renderReplyBar() : nothing}
-        ${this.editMessage ? this.renderEditBar() : nothing}
-        ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
-        ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
-        ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
-        <div class="input-row">
+      <div
+        class="composer-wrapper"
+        @dragover=${this.handleDragOver}
+        @dragenter=${this.handleDragEnter}
+        @dragleave=${this.handleDragLeave}
+        @drop=${this.handleDrop}
+      >
+        ${this.dragOver
+          ? html`<div class="drop-zone-overlay"><span>Drop files here</span></div>`
+          : nothing}
+        <div class="composer">
+          ${this.replyTo ? this.renderReplyBar() : nothing}
+          ${this.editMessage ? this.renderEditBar() : nothing}
+          ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
+          ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
+          ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
+          <div class="input-row">
           ${this.conversationMode && !inEditMode
             ? html`
                 <sl-icon-button
@@ -577,6 +687,7 @@ export class ScionChatComposer extends LitElement {
               .value=${this.text}
               @sl-input=${this.handleInput}
               @keydown=${this.handleKeydown}
+              @paste=${this.handlePaste}
               ?disabled=${this.disabled}
             ></sl-textarea>
             <scion-mention-autocomplete
@@ -584,6 +695,9 @@ export class ScionChatComposer extends LitElement {
               .members=${this.members}
               @mention-accept=${this.handleMentionAccept}
             ></scion-mention-autocomplete>
+            <scion-slash-autocomplete
+              @slash-command=${this.handleSlashCommand}
+            ></scion-slash-autocomplete>
           </div>
           <div class="send-container">
             <sl-button
@@ -613,14 +727,15 @@ export class ScionChatComposer extends LitElement {
               : nothing}
           </div>
         </div>
-        <div class="footer-row">
-          ${this.runeCount > 0 || isNearLimit
-            ? html`
-                <span class="char-counter ${counterClass}">
-                  ${this.runeCount} / ${MAX_MESSAGE_LENGTH}
-                </span>
-              `
-            : nothing}
+          <div class="footer-row">
+            ${this.runeCount > 0 || isNearLimit
+              ? html`
+                  <span class="char-counter ${counterClass}">
+                    ${this.runeCount} / ${MAX_MESSAGE_LENGTH}
+                  </span>
+                `
+              : nothing}
+          </div>
         </div>
       </div>
     `;
@@ -775,6 +890,9 @@ export class ScionChatComposer extends LitElement {
     this.text = target.value;
     this.runeCount = countRunes(this.text);
 
+    // Persist draft with debounce.
+    this.saveDraft();
+
     // Dispatch typing event so the parent can send a typing indicator
     if (this.text.length > 0) {
       this.dispatchEvent(new CustomEvent('chat-typing', { bubbles: true, composed: true }));
@@ -783,7 +901,7 @@ export class ScionChatComposer extends LitElement {
     // Update live mention override for destination chip
     this.updateLiveMentionOverride();
 
-    // Feed the autocomplete component.
+    // Feed the autocomplete components.
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
       | import('./mention-autocomplete.js').ScionMentionAutocomplete
       | null;
@@ -792,6 +910,15 @@ export class ScionChatComposer extends LitElement {
       if (textarea) {
         autocomplete.handleInput(this.text, textarea.selectionStart ?? this.text.length, textarea);
       }
+    }
+
+    // Feed slash command autocomplete.
+    const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
+      | import('./slash-autocomplete.js').ScionSlashAutocomplete
+      | null;
+    if (slashAutocomplete) {
+      const cursorPos = this.getTextareaElement()?.selectionStart ?? this.text.length;
+      slashAutocomplete.handleInput(this.text, cursorPos);
     }
   }
 
@@ -818,7 +945,15 @@ export class ScionChatComposer extends LitElement {
   }
 
   private handleKeydown(e: KeyboardEvent): void {
-    // Let the autocomplete handle keys first.
+    // Let slash command autocomplete handle keys first.
+    const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
+      | import('./slash-autocomplete.js').ScionSlashAutocomplete
+      | null;
+    if (slashAutocomplete?.handleKeydown(e)) {
+      return; // consumed by slash autocomplete
+    }
+
+    // Then let the mention autocomplete handle keys.
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
       | import('./mention-autocomplete.js').ScionMentionAutocomplete
       | null;
@@ -830,6 +965,28 @@ export class ScionChatComposer extends LitElement {
       e.preventDefault();
       this.handleSend();
     }
+  }
+
+  private handleSlashCommand(e: CustomEvent<SlashCommandDetail>): void {
+    const { command } = e.detail;
+    // Extract args from the current text: `/command arg1 arg2`
+    const text = this.text.trim();
+    const spaceIdx = text.indexOf(' ');
+    const args = spaceIdx >= 0 ? text.slice(spaceIdx + 1).trim() : '';
+
+    this.dispatchEvent(
+      new CustomEvent('chat-slash-command', {
+        detail: { command, args },
+        bubbles: true,
+        composed: true,
+      })
+    );
+
+    // Clear the text input after dispatching.
+    this.text = '';
+    this.runeCount = 0;
+    this.clearDraft();
+    this.focusTextarea();
   }
 
   private handleMentionAccept(e: CustomEvent<MentionAcceptDetail>): void {
@@ -933,6 +1090,15 @@ export class ScionChatComposer extends LitElement {
     const input = e.target as HTMLInputElement;
     const files = input.files;
     if (!files || files.length === 0) return;
+    await this.uploadFiles(Array.from(files));
+  }
+
+  /**
+   * Upload one or more files to the attachment endpoint.
+   * Shared by the file picker, paste handler, and drag-and-drop handler.
+   */
+  async uploadFiles(files: File[]): Promise<void> {
+    if (files.length === 0) return;
 
     // Enforce max attachments.
     if (this.pendingFiles.length + files.length > 10) {
@@ -950,7 +1116,7 @@ export class ScionChatComposer extends LitElement {
     try {
       const formData = new FormData();
       formData.append('project_id', this.projectId);
-      for (const file of Array.from(files)) {
+      for (const file of files) {
         formData.append('files', file);
       }
 
@@ -998,6 +1164,55 @@ export class ScionChatComposer extends LitElement {
       );
     } finally {
       this.uploading = false;
+    }
+  }
+
+  /** Handle paste events — extract images from clipboard and upload. */
+  private handlePaste(e: ClipboardEvent): void {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const imageFiles: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      void this.uploadFiles(imageFiles);
+    }
+  }
+
+  /** Prevent default on dragover to allow drop. */
+  private handleDragOver(e: DragEvent): void {
+    e.preventDefault();
+  }
+
+  /** Show the drop zone overlay on drag enter. */
+  private handleDragEnter(e: DragEvent): void {
+    e.preventDefault();
+    this.dragOver = true;
+  }
+
+  /** Hide the drop zone overlay on drag leave. */
+  private handleDragLeave(e: DragEvent): void {
+    // Only hide if we're leaving the composer-wrapper, not entering a child.
+    const wrapper = (e.currentTarget as HTMLElement);
+    const related = e.relatedTarget as Node | null;
+    if (related && wrapper.contains(related)) return;
+    this.dragOver = false;
+  }
+
+  /** Handle file drop — extract files and upload. */
+  private handleDrop(e: DragEvent): void {
+    e.preventDefault();
+    this.dragOver = false;
+    const files = e.dataTransfer?.files;
+    if (files && files.length > 0) {
+      void this.uploadFiles(Array.from(files));
     }
   }
 
@@ -1054,6 +1269,7 @@ export class ScionChatComposer extends LitElement {
         this.runeCount = 0;
         this.acceptedMentions.clear();
         this.pendingFiles = [];
+        this.clearDraft();
         // Phase-3: Clear reply context after successful send.
         this.replyTo = null;
         this.focusTextarea();
