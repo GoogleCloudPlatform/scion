@@ -266,6 +266,12 @@ func TestIsHADeployment(t *testing.T) {
 // which is why adding one is a documented obligation rather than an enforced
 // one.
 func TestIsHADeployment_RouteInventory(t *testing.T) {
+	// NOTE: this test intentionally overlaps with TestIsHADeployment above.
+	// TestIsHADeployment validates functional correctness of HA detection
+	// across combinations. This test is a route-inventory tripwire whose
+	// primary value is the TRIPWIRE comment block above — it documents the
+	// chart condition that must be updated in lockstep. Do not merge them.
+
 	// baseConfig returns a config with none of the HA routes active — the
 	// package defaults are sqlite + local storage + unset auth mode. Each
 	// subtest then turns on exactly one route, so a failure names that route.
