@@ -89,7 +89,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	// 3. Resolve admin mode settings
 	adminMode := cfg.AdminMode
-	if v := os.Getenv("SCION_SERVER_ADMIN_MODE"); v != "" {
+	if os.Getenv("SCION_SERVER_ADMIN_MODE") != "" {
 		adminMode = parseBoolEnv("SCION_SERVER_ADMIN_MODE")
 	}
 	maintenanceMessage := cfg.MaintenanceMessage
