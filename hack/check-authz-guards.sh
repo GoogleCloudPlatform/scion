@@ -69,20 +69,30 @@
 #
 #   0  analysed, no violations
 #   1  analysed, violations found — the list is on stderr
-#   2  COULD NOT ANALYSE: no candidate files matched — nothing was examined
+#   2  RESERVED — never emitted by this script
 #   3  COULD NOT ANALYSE: ripgrep (rg) is not installed — nothing was examined
+#   4  COULD NOT ANALYSE: no candidate files matched — nothing was examined
 #
-# 2 and 3 are separate from 1 on purpose. All three fail a build, which is the
+# 2 is reserved and deliberately left unused, because it is the one code this
+# script cannot own. GNU make 4.3 flattens every non-zero recipe exit to 2, so
+# anything invoked through a makefile — as this check is — reaches its caller as
+# 2 no matter which code it actually returned. Reserving 2 means a consumer
+# seeing it knows information was lost, rather than confidently reporting an
+# empty corpus when the real answer may be 22 violations. A meaningful code in
+# that slot would not merely erase the distinction, it would assert a specific
+# false one. Read 2 as "ask the log", never as an answer.
+#
+# 3 and 4 are separate from 1 on purpose. All three fail a build, which is the
 # point: a run that examined no source must not be indistinguishable from a
 # clean one to anything reading only the exit code, or this check becomes the
 # thing it exists to prevent — a guard that never fires. But they mean different
 # things to whoever reads the log. 1 is a security finding against named code;
-# 2 and 3 accuse nobody.
+# 3 and 4 accuse nobody.
 #
-# 2 and 3 are separate from each other because they ask opposite things of
+# 3 and 4 are separate from each other because they ask opposite things of
 # whoever has to act. 3 is a statement about the runner: the check could not
 # run, install ripgrep or run it somewhere that has it, and nothing at all is
-# implied about the source. 2 is a statement about the tree: the tools were
+# implied about the source. 4 is a statement about the tree: the tools were
 # there, the scan ran, and it was pointed at something that holds no code to
 # examine — wrong cwd, partial or empty checkout. Collapsing them into one code
 # leaves a caller unable to tell a broken image from a broken checkout.
@@ -402,7 +412,7 @@ provenance() {
 }
 
 if ! command -v rg >/dev/null 2>&1; then
-  # 3, not 2: this says nothing about the tree, only that the instrument this
+  # 3, not 4: this says nothing about the tree, only that the instrument this
   # check measures with is absent from the runner. Printed on both streams so a
   # consumer reading either one sees why the build failed.
   msg="check-authz-guards: ripgrep (rg) not found — NOTHING WAS ANALYSED (skipped, not clean)"
@@ -429,7 +439,7 @@ if [[ ${#candidate_files[@]} -eq 0 ]]; then
   msg="check-authz-guards: analysed $(provenance) — no candidate files matched, NOTHING WAS ANALYSED (skipped, not clean)"
   echo "$msg"
   echo "$msg" >&2
-  exit 2
+  exit 4
 fi
 
 tmp="$(mktemp)"
