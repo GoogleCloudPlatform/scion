@@ -208,8 +208,8 @@ postgres, and the gcs-plus-proxy branch is unset - ...
 
 Counts, **with their corpus, because a count without one is not a measurement**
 (`gd-p0-rev-4`, O1). Corpus `templates/_helpers.tpl` at `38a41b6e`, GNU grep 3.8
-invoked as `/usr/bin/grep` — the harness shell here wraps `grep` in a zsh
-function around ugrep, so a bare `grep` is a different program:
+invoked as `/usr/bin/grep` — a bare `grep` in this environment is a different
+program **and a different regex dialect** (§7):
 
 ```
 /usr/bin/grep -c 'NO mutable state, and'  templates/_helpers.tpl  ->  1
@@ -407,8 +407,8 @@ number to one would be attaching a tripwire to a policy.
   `values.yaml:46` and `values.schema.json:31` both carry *"renders no `--db`
   and mounts no volumes, so replicas share no mutable state"* plus the
   HA-preflight consequence. Over **this file at `38a41b6e`, before this bullet
-  existed**, `/usr/bin/grep -cF` (GNU grep 3.8; the bare `grep` here is a zsh
-  function wrapping ugrep and is a different program) counted **0** for
+  existed**, `/usr/bin/grep -cF` (GNU grep 3.8; a bare `grep` here is a different
+  program and a different dialect — §7) counted **0** for
   `values.yaml` and **0** for `values.schema.json` — neither file was named
   anywhere in the triage. At `6fc0cdfc` both are **3**, and **every one of those
   hits is inside this bullet** — which is the claim doing the work, and it is the
@@ -471,7 +471,7 @@ inside quoted historical output, the `118`/`252` in §3's block — **I took his
 first treatment: in the denominator, and they pass, because the block is
 SHA-pinned.**
 
-**40 mechanical assertions over this file's self-claims. 40 run. 9 corrected**,
+**45 mechanical assertions over this file's self-claims. 45 run. 10 corrected**,
 plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
 so it is out by the definition above, and it is fixed here only because `gd-em`
 folded it into this commit. No category came back empty. **A is zero as a
@@ -485,14 +485,65 @@ appears without a SHA on the same line.
 | **B** | counts of a token in this same file | 13 | 4 |
 | **C** | positional claims about this same file | 11 | 1 |
 | **D** | cardinalities about this file's own tables | 15 | 3 |
+| **E** | claims about the instrument that measured it | 5 | 1 |
 
-Engine: GNU grep 3.8 invoked as `/usr/bin/grep`, because the bare `grep` in this
-environment is a zsh function wrapping ugrep 7.5.0 and is a different program.
 Subjects: `git show <sha>:<path>` at `5ebe3dab`, `38a41b6e` and `6fc0cdfc`, never
 the working tree. Every row compares the claim *as written* against a fresh
 measurement; none was checked by eye.
 
-### The nine corrections, and N3
+### Engine, dialect, and the control that says it did not matter
+
+**Engine.** GNU grep 3.8, invoked as `/usr/bin/grep`. Never a bare `grep`.
+
+**Why the path is spelled out.** `type grep` here resolves to a shell function
+from `~/.claude/shell-snapshots/snapshot-zsh-…-ijz3o1.sh`, whose body is
+
+```
+ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files --hidden -I \
+  --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg ... "$@"
+```
+
+so a bare `grep` runs `claude.exe` under a different `argv[0]`, with **ten flags
+injected that you did not type**. `CLAUDE_CODE_EXECPATH` is set; the function's
+fallback path does not exist, so clearing that variable drops you to GNU grep and
+silently changes every flag. **No `ugrep` binary exists on this filesystem** —
+`command -v ugrep` is empty and neither `/usr/bin/ugrep` nor `/usr/local/bin/ugrep`
+is present. What is there is a **ugrep-compatible engine embedded in `claude.exe`**:
+it self-reports `ugrep 7.5.0` and it accepts `--ignore-files`, which GNU grep 3.8
+rejects with exit 2. *(Earlier revisions of this file, and of the reviews it draws
+on, said "a zsh function wrapping ugrep 7.5.0". The wrapper is real and the flags
+are real; the separate binary is not. `gd-p0-rev-4` found and retracted that, in
+its own instrument disclosure, and the wording reached this file from there.)*
+
+**Dialect, which is the part that actually bites.** The injected `-G` forces BRE,
+so `|` is a literal. On this file, at head:
+
+```
+/usr/bin/grep -cE 'values\.yaml|values\.schema\.json'   ->  3
+/usr/bin/grep -c  'values\.yaml|values\.schema\.json'   ->  0     <- -G, GNU
+        grep -c  'values\.yaml|values\.schema\.json'    ->  0     <- the shadow
+```
+
+**A false zero, over a file that contains three hits, from a command that exits
+0 and prints a number.** Naming the right binary and omitting the dialect would
+not have caught it.
+
+> **AN ENGINE DISCLOSURE THAT NAMES THE BINARY AND OMITS THE DIALECT IS NOT A
+> DISCLOSURE.** The binary is the route to the defect; the dialect *is* the
+> defect. (`gd-p0-rev-4`'s addition to the standard, and the example above is
+> what it predicts.)
+
+**Control: all 45 assertions were re-run under the shadowed engine and every one
+of the 45 outcomes is byte-identical.** Not asserted from the patterns being
+`-F` or BRE-safe — measured, by pointing the harness at
+`ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files …` and diffing the full
+output. **The numbers in this section do not depend on which engine you use; the
+disclosure is here because that had to be shown rather than assumed**, and
+because the same file one paragraph up shows what it costs when it is not true.
+The second axis, `--ignore-files`, cannot bite here either: this path is not
+git-ignored (`git check-ignore` returns nothing).
+
+### The ten corrections, and N3
 
 | # | claim as it stood | measured | disposition |
 |---|---|---|---|
@@ -505,6 +556,7 @@ measurement; none was checked by eye.
 | 7 | §1 *"seven were already filed"* | 6 | corrected |
 | 8 | §1 *"two are new"* | 3 | corrected |
 | 9 | §3 heading *"the two new findings"* | 3 | corrected |
+| 10 | *"a zsh function wrapping ugrep 7.5.0"*, ×3 | no such binary exists | corrected; the wrapper and flags are real |
 | — | §3 row-16 *"the same sentence"* | two sentences | corrected (N3; **out of the denominator**) |
 
 Four of those are worth more than the corrections.
@@ -578,9 +630,9 @@ sweep is the first time anyone has checked even that much**; their agreement wit
 the sweeps that produced them is unverified and is not claimed.
 
 The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
-`149126d4a952982e`, and is deliberately **not** committed: `tests/` is frozen at
-P0. It exits 0 on 40/40 and **exits 1 under mutation control** — reverting the §3
-heading to *"the two new findings"* takes it to 39/40 — so it is an instrument
+`b161ad454969c865`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 45/45 under **both** engines and **exits 1 under mutation
+control** — reverting the §3 heading to *"the two new findings"* takes it to 44/45 — so it is an instrument
 that can disagree, which four of this morning's could not. It should land beside
 this file when P1 unfreezes `tests/`, at which point the numbers above stop being
 a report and become a check.
