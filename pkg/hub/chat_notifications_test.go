@@ -467,3 +467,69 @@ type mockPresenceChecker struct {
 func (m *mockPresenceChecker) IsUserActive(userID string) bool {
 	return m.activeUsers[userID]
 }
+
+// ---------------------------------------------------------------------------
+// Tests: presence wiring on the Server (#1032)
+// ---------------------------------------------------------------------------
+
+// The notifier used to be constructed with a nil PresenceChecker, which falls
+// back to NoOpPresenceChecker and reports every user as absent — so the
+// "don't interrupt someone who is already looking at chat" suppression never
+// fired. The mocked-checker tests above could not catch that: only the real
+// server wiring can. Note the construction order this depends on —
+// SetWebChatStore runs before InitPresenceManager on the startup path, so the
+// checker has to resolve the presence manager lazily.
+func TestServer_ChatNotifier_UsesServerPresence(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	wcs := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, wcs.Init())
+
+	// Startup order: the webchat store (and with it the notifier) is wired
+	// first, the presence manager second.
+	srv.SetWebChatStore(wcs)
+	srv.InitPresenceManager()
+	t.Cleanup(srv.StopPresenceManager)
+
+	cn := srv.getChatNotifier()
+	require.NotNil(t, cn, "expected a chat notifier after SetWebChatStore")
+
+	viewer := api.NewUUID()
+	absent := api.NewUUID()
+
+	// The viewer is actively using chat; the other user is not.
+	srv.presenceManager.Heartbeat(ctx, viewer, "Active Viewer", nil)
+	require.True(t, srv.presenceManager.IsUserActive(viewer))
+	require.False(t, srv.presenceManager.IsUserActive(absent))
+
+	cn.NotifyDMReceived(ctx, viewer, "Sender", "dm:user:"+api.NewUUID()+":user:"+viewer, "hello", "")
+	cn.NotifyDMReceived(ctx, absent, "Sender", "dm:user:"+api.NewUUID()+":user:"+absent, "hello", "")
+
+	viewerNotifs, err := st.GetNotifications(ctx, store.SubscriberTypeUser, viewer, false)
+	require.NoError(t, err)
+	assert.Empty(t, viewerNotifs, "an actively present user must not be notified")
+
+	absentNotifs, err := st.GetNotifications(ctx, store.SubscriberTypeUser, absent, false)
+	require.NoError(t, err)
+	assert.Len(t, absentNotifs, 1, "an absent user must still be notified")
+}
+
+// A presence manager that has never seen a heartbeat for the user, and a nil
+// manager (no InitPresenceManager, e.g. in tests or a trimmed deployment),
+// must both report absent so notifications keep flowing.
+func TestPresenceManager_IsUserActive(t *testing.T) {
+	var nilPM *PresenceManager
+	assert.False(t, nilPM.IsUserActive("user-1"))
+
+	pm := NewPresenceManager(NewChannelEventPublisher(), nil)
+	t.Cleanup(pm.Stop)
+
+	assert.False(t, pm.IsUserActive("user-1"))
+	pm.Heartbeat(context.Background(), "user-1", "User One", nil)
+	assert.True(t, pm.IsUserActive("user-1"))
+	assert.False(t, pm.IsUserActive("user-2"))
+}

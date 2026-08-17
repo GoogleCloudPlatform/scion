@@ -517,9 +517,10 @@ const (
 // currently viewing the chat UI). When a user is actively present, DM
 // notifications are suppressed to avoid interrupting them.
 //
-// W5 will implement a real presence map; until then a nil PresenceChecker
-// (or the NoOpPresenceChecker) treats every user as absent, which means
-// DM notifications always fire — the conservative default.
+// The server satisfies this with its PresenceManager (see
+// serverPresenceChecker). A nil PresenceChecker (or the NoOpPresenceChecker)
+// treats every user as absent, which means DM notifications always fire —
+// the conservative default.
 type PresenceChecker interface {
 	// IsUserActive returns true if the user is actively present
 	// (heartbeat within the presence window).
@@ -527,7 +528,7 @@ type PresenceChecker interface {
 }
 
 // NoOpPresenceChecker always returns false (user is not active).
-// Used as the default when W5 presence is not yet available.
+// Used as the default when no presence source is wired in.
 type NoOpPresenceChecker struct{}
 
 // IsUserActive always returns false — the user is assumed absent.

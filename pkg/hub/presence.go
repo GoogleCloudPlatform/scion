@@ -178,6 +178,16 @@ func (pm *PresenceManager) GetState(userID string) PresenceState {
 	return entry.state
 }
 
+// IsUserActive implements PresenceChecker: it reports whether the user has
+// heartbeated within the presence window. A nil manager reports every user as
+// absent, which is the conservative answer — notifications still fire.
+func (pm *PresenceManager) IsUserActive(userID string) bool {
+	if pm == nil {
+		return false
+	}
+	return pm.GetState(userID) == PresenceActive
+}
+
 // GetAllStates returns a map of userID -> presence state for all tracked users.
 func (pm *PresenceManager) GetAllStates() map[string]string {
 	pm.mu.RLock()

@@ -668,7 +668,7 @@ export class ScionChatThread extends LitElement {
     } finally {
       if (currentId === this.fetchId) {
         this.loading = false;
-        this.scrollToBottom();
+        this.scrollToBottomAfterRender();
       }
     }
   }
@@ -732,7 +732,7 @@ export class ScionChatThread extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
       this.loading = false;
-      this.scrollToBottom();
+      this.scrollToBottomAfterRender();
     }
   }
 
@@ -871,11 +871,8 @@ export class ScionChatThread extends LitElement {
     this.eventSource.addEventListener('message', (event: Event) => {
       try {
         const msg = JSON.parse((event as MessageEvent).data as string) as Message;
-        const wasPinned = this.pinnedToBottom;
         this.mergeMessages([msg]);
-        if (wasPinned) {
-          void this.updateComplete.then(() => this.scrollToBottom());
-        }
+        this.scrollToBottomAfterRender();
       } catch {
         // Skip unparseable entries
       }
@@ -927,7 +924,7 @@ export class ScionChatThread extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
       this.loading = false;
-      this.scrollToBottom();
+      this.scrollToBottomAfterRender();
     }
   }
 
@@ -1146,11 +1143,8 @@ export class ScionChatThread extends LitElement {
       }
     }
 
-    const wasPinned = this.pinnedToBottom;
     this.mergeMessages(items);
-    if (wasPinned) {
-      void this.updateComplete.then(() => this.scrollToBottom());
-    }
+    this.scrollToBottomAfterRender();
     // Advance read watermark if applicable
     this.maybeAdvanceReadWatermark();
   }
@@ -1565,9 +1559,33 @@ export class ScionChatThread extends LitElement {
     }
   }
 
+  /**
+   * Scroll to the newest message once the pending render has committed.
+   *
+   * scrollToBottom() reads scrollHeight synchronously, so calling it directly
+   * after a load reads the height of the still-empty (or stale) container and
+   * leaves the user parked at the top of the real list (#1028). Awaiting
+   * updateComplete lets Lit commit the newly loaded messages first.
+   *
+   * The deferred scroll respects pinnedToBottom: if the user scrolled away
+   * while the load was in flight, it is skipped rather than yanking them back.
+   *
+   * updateComplete rejects when a reactive update throws, so the chain is
+   * caught: a failed render should not also surface as an unhandled rejection,
+   * and there is nothing to scroll to in that case anyway.
+   */
+  private scrollToBottomAfterRender(): void {
+    void this.updateComplete
+      .then(() => {
+        if (!this.pinnedToBottom) return;
+        this.scrollToBottom();
+      })
+      .catch(() => {});
+  }
+
   private handleJumpToLatest(): void {
     this.pinnedToBottom = true;
-    this.scrollToBottom();
+    this.scrollToBottomAfterRender();
   }
 
   /** Focus the composer textarea when clicking the message area background. */

@@ -758,6 +758,10 @@ type Server struct {
 	// Single-node only; see design §4.5 HA limitation.
 	presenceManager *PresenceManager
 
+	// Per-sender token-bucket limiter for the chat send paths (#1054).
+	// Set once in New and read without the lock; nil-safe.
+	chatSendLimiter *chatSendLimiter
+
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -999,6 +1003,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize GCP token metrics
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
+
+	// Per-sender chat send rate limiter (#1054).
+	srv.chatSendLimiter = newChatSendLimiter()
 
 	ctx := context.Background()
 
@@ -1898,8 +1905,11 @@ func (s *Server) GetMessageBrokerProxy() *MessageBrokerProxy {
 func (s *Server) SetWebChatStore(wcs WebChatStore) {
 	s.mu.Lock()
 	s.webChatStore = wcs
-	// Initialize ChatNotifier with the store; presence checker is nil (W5 stub).
-	s.chatNotifier = NewChatNotifier(s.store, s.events, wcs, nil, s.messageLog)
+	// Initialize ChatNotifier with the store. Presence is resolved lazily
+	// through the server (see serverPresenceChecker): the presence manager is
+	// created by InitPresenceManager, which runs after this on the current
+	// startup path, and a snapshot taken here would pin a nil checker.
+	s.chatNotifier = NewChatNotifier(s.store, s.events, wcs, serverPresenceChecker{s}, s.messageLog)
 	// Wire into existing broker proxy if already started (startup order varies).
 	if s.messageBrokerProxy != nil {
 		s.messageBrokerProxy.chatNotifier = s.chatNotifier
@@ -1920,6 +1930,28 @@ func (s *Server) getChatNotifier() *ChatNotifier {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.chatNotifier
+}
+
+// serverPresenceChecker adapts the server's presence manager to the
+// PresenceChecker interface, resolving it at call time rather than at
+// construction time. Startup wires the webchat store (and with it the
+// ChatNotifier) before InitPresenceManager runs, so a checker captured up
+// front would be permanently absent-reporting — the defect this replaces.
+type serverPresenceChecker struct {
+	srv *Server
+}
+
+// IsUserActive reports whether the user is currently present, or false while
+// no presence manager exists (before InitPresenceManager, or in deployments
+// that never start one).
+func (c serverPresenceChecker) IsUserActive(userID string) bool {
+	if c.srv == nil {
+		return false
+	}
+	c.srv.mu.RLock()
+	pm := c.srv.presenceManager
+	c.srv.mu.RUnlock()
+	return pm.IsUserActive(userID)
 }
 
 // InitPresenceManager creates and starts the presence manager for real-time

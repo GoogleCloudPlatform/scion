@@ -729,6 +729,18 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// --- Rate limit (#1054) ---
+	// After authorization so an unauthorized caller cannot consume a
+	// legitimate sender's allowance, and before the body is read so a flood
+	// costs the hub as little as possible.
+	//
+	// Always the human class: this handler rejects anything that is not a
+	// UserIdentity above, which is exactly why agent senders need their own
+	// limit on the outbound-message path.
+	if !s.allowChatSend(w, user.ID(), chatSenderHuman) {
+		return
+	}
+
 	// --- Validate body ---
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 	var body struct {
@@ -1180,6 +1192,11 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 // ---------------------------------------------------------------------------
 
 // handleConversationHistory handles GET /api/v1/chat/conversations/{key}/messages.
+//
+// Query params:
+//   - limit: page size (default 50, max 200)
+//   - cursor: keyset pagination cursor from the previous page's nextCursor (optional)
+//   - visibility: repeatable visibility filter (optional)
 func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Request, key string) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
@@ -1243,8 +1260,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	}
 
 	opts := store.ListOptions{
-		Limit:  limit,
-		Cursor: q.Get("before"),
+		Limit: limit,
+		// Keyset pagination cursor. The client sends the opaque `nextCursor`
+		// from the previous page back as `cursor` (see chat-thread.ts
+		// fetchHistoryV2); reading any other parameter name silently drops it
+		// and every page returns the newest messages again (#1027).
+		Cursor: q.Get("cursor"),
 	}
 
 	result, err := s.store.ListMessages(ctx, filter, opts)

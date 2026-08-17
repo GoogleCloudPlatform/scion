@@ -69,6 +69,32 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+
+	if req.Type == "" {
+		req.Type = "input-needed"
+	}
+
+	// Per-sender send limit (#1054). This is the path a looping agent floods a
+	// thread through, so the limit has to live here and not only on the
+	// browser send path. The response is an explicit 429 with Retry-After
+	// rather than a silent drop, so a caller can back off and resend.
+	//
+	// The traffic class is derived from the (now defaulted) message type so the
+	// automatic assistant-reply transcript mirror — posted by the agent hook,
+	// not written by the agent — cannot spend the whole allowance the agent
+	// needs for a completion report or an escalation. The class only ever
+	// selects a reservation inside the agent's single aggregate ceiling, so a
+	// caller cannot buy extra allowance by relabelling its traffic. A type
+	// this build does not recognise is classified as ordinary agent traffic
+	// and still accepted, exactly as before: tightening the type contract on
+	// the wire is a compatibility change and is tracked separately.
+	//
+	// Charged before the payload is validated: a flood of malformed sends is
+	// still a flood.
+	if !s.allowChatSend(w, agentIdent.ID(), chatSenderClassForMessageType(req.Type)) {
+		return
+	}
+
 	if req.Msg == "" {
 		ValidationError(w, "msg is required", nil)
 		return
@@ -76,9 +102,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if msgLen := utf8.RuneCountInString(req.Msg); msgLen > messages.MaxMessageLength {
 		ValidationError(w, fmt.Sprintf("message exceeds %d character limit (current: %d chars). Consider splitting into multiple messages using multiple scion message invocations", messages.MaxMessageLength, msgLen), nil)
 		return
-	}
-	if req.Type == "" {
-		req.Type = "input-needed"
 	}
 
 	// Validate and default visibility.
