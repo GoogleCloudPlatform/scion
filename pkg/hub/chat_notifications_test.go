@@ -68,7 +68,7 @@ func setupChatNotifTest(t *testing.T) *chatNotifTestEnv {
 	// Subscribe to every subject a notification could plausibly reach, so a
 	// test that expects silence sees a chat payload escaping onto the wrong
 	// subject rather than passing because it was only watching the right one.
-	notifCh, unsub := pub.Subscribe("user.>", "notification.>", "project.>", "grove.>")
+	notifCh, unsub := pub.Subscribe("user.>", "notification.>", "project.>")
 
 	notifier := NewChatNotifier(s, pub, wcs, nil, slog.Default())
 

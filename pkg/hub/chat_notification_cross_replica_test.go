@@ -31,8 +31,8 @@ import (
 // which no single-replica test would notice, because the in-process channel
 // publisher never consults a channel map at all.
 //
-// It resolves by rule rather than by table (only project/grove prefixes get a
-// per-grove channel; everything else goes global), so no entry was needed for
+// It resolves by rule rather than by table (only project prefixes get a
+// per-project channel; everything else goes global), so no entry was needed for
 // the new subject. Measured here rather than reasoned about.
 func TestChatNotificationSubject_CrossReplicaChannel(t *testing.T) {
 	const subject = "user.user-alice.notification"

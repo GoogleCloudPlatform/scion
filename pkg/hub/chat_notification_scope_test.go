@@ -83,7 +83,6 @@ func TestChatNotification_NotDeliveredToBystander(t *testing.T) {
 	eve, unsubEve := pub.Subscribe(
 		bystanderSubjects,
 		"project."+projectID+".notification",
-		"grove."+projectID+".notification",
 	)
 	defer unsubEve()
 
