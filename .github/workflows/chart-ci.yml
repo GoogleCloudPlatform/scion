@@ -72,9 +72,9 @@ jobs:
             release-name: ci-cluster-rbac
           - name: long-release-name
             values-file: ci/values-minimal.yaml
-            # 54 characters: exercises trunc 63 in _helpers.tpl fullname
-            # (54 + "-" + "scion-hub" = 64, truncated to 63)
-            release-name: aaaaaaaaa-bbbbbbbbb-ccccccccc-ddddddddd-eeeeeeeee-ffff
+            # 53 characters (Helm max): fullname = 53 + "-" + "scion-hub" = 63,
+            # exactly at the trunc 63 boundary in _helpers.tpl.
+            release-name: aaaaaaaaa-bbbbbbbbb-ccccccccc-ddddddddd-eeeeeeeee-fff
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -159,6 +159,10 @@ jobs:
 
       - name: Lint chart YAML sources
         run: |
+          # Lint non-template YAML only. Template files (templates/*.yaml)
+          # contain Go template directives ({{ }}) which are not valid YAML
+          # and cannot be linted by yamllint. Those are validated by helm lint
+          # and helm template instead.
           yamllint -c <(cat <<'YAMLLINT_CONFIG'
           extends: default
           rules:
@@ -173,5 +177,4 @@ jobs:
           ) \
             deploy/helm/scion-hub/Chart.yaml \
             deploy/helm/scion-hub/values.yaml \
-            deploy/helm/scion-hub/ci/*.yaml \
-            deploy/helm/scion-hub/templates/*.yaml
+            deploy/helm/scion-hub/ci/*.yaml
