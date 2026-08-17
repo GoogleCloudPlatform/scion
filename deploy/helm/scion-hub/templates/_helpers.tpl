@@ -242,6 +242,65 @@ string is not.
   step in a pipeline says nothing about the pipeline. A separator argument can
   only ever be as strong as the operands it separates.
 
+  AND THERE ARE THREE STAGES, NOT TWO. I named the derivation and the join and
+  stopped one short; gd-consumer measured the third and it is the one this
+  helper actually applies:
+
+      1. DERIVATION of each component   <- fullname loses the release name (C4)
+      2. THE JOIN                       <- "-" is legal in both operands (C5)
+      3. THE LENGTH CAP AFTER THE JOIN  <- trunc 63 discards what survived 1-2
+
+  AN INJECTIVE JOIN DOES NOT MAKE AN INJECTIVE NAME. EVERY STAGE THE IDENTITY
+  PASSES THROUGH MUST PRESERVE THE DISTINCTION, AND A FIX AIMED AT ONE STAGE
+  TESTS GREEN WHILE ANOTHER STAGE STILL DISCARDS IT.
+
+  Measured, C1's pair with the release length varied, under a corrected
+  colon-on-release join: distinct at 40, 45 and 50, and COLLIDING AGAIN AT 53 -
+  which is helm's own maximum release name length - because trunc 63 then cuts
+  below the point where the two differ. FIXING THE JOIN ONLY MOVES THE LENGTH AT
+  WHICH C1 COMES BACK. That is why the digest below is applied at the cap rather
+  than the join being merely repaired: stage 3 is where this helper does its
+  damage, and a prettier separator alone would leave it there.
+
+  🛑 A NOTE ON THE 63 ITSELF, AND IT IS THE STRONGEST ARGUMENT AGAINST THE FIX
+  BELOW, RECORDED HERE RATHER THAN OMITTED. The 63 is a DNS-1123 LABEL bound
+  applied to a name that is not a DNS label: ValidateRBACName goes to
+  IsValidPathSegmentName, which is why "system:masters" is legal, and gd-p3-rev
+  measured 70 characters accepted under apimachinery v0.29.0.
+
+  Put gd-p3-rev's result beside gd-consumer's and they compose into something
+  neither states alone. TRUNCATION IS C1'S NECESSARY CONDITION - untruncated,
+  the namespace is already in the name and the bucket does not collide at all.
+  So:
+
+      A CLASS WHOSE NECESSARY CONDITION IS AN AVOIDABLE IMPLEMENTATION CHOICE
+      IS CLOSED BY REMOVING THE CHOICE, NOT BY DISAMBIGUATING ITS MEMBERS.
+
+  Which decomposes the whole problem differently from how this file has been
+  treating it, and the two halves have different warrants:
+
+      C1        RAISE THE CAP. Nothing else is needed.
+      C4 and C5 a join taking .Release.Name - fullname has already collapsed
+                the difference, so joining fullname to anything cannot help.
+
+  AND THE CAP CHANGE IS CONFINED, MEASURED RATHER THAN ASSUMED (gd-consumer).
+  Three use sites: rbac-clusterrole.yaml:20 metadata.name,
+  rbac-clusterrolebinding.yaml:20 metadata.name and :26 roleRef.name. THE NAME
+  IS NEVER A LABEL VALUE - a label value is hard-capped at 63 and would have
+  killed the idea outright. Positive control on the search: scion-hub.fullname
+  matches 6 files, so the grep had aperture and three sites is a real scope
+  rather than a broken query.
+
+  NOT DONE IN THIS COMMIT, AND THE REASON IS NOT THAT IT IS WRONG. The true
+  ceiling is unconfirmed - 253 is read off a boundary control flipping at
+  253/254, NOT measured against apimachinery - and a security fix does not rest
+  on a number nobody has checked, which is the same objection that ruled out
+  option A above and it has not weakened. Raising the cap also renames nothing,
+  so it does not carry the migration risk the digest does; if the ceiling is
+  ever measured, THIS IS THE BETTER FIX FOR C1 AND THIS COMMENT SHOULD BE READ
+  AS SAYING SO. Filed, not fixed, and not fixed for a reason that is itself a
+  measurement someone can go and take.
+
   A SECOND, WEAKER LEG OF THE OLD SENTENCE ALSO FAILS AND IS WORTH NAMING
   BECAUSE IT IS THE MORE TEMPTING KIND OF WRONG. It said "both being DNS names".
   The namespace is one. The first operand is a FULLNAME, and via
