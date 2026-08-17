@@ -485,6 +485,46 @@ database:
   # which is a Secret; it reaches no ConfigMap, no pod annotation and no argv.
   # If you would rather it never passed through Helm values at all, supply the
   # whole settings file yourself with config.existingSecret.
+  #
+  # 🔴 ROTATING THIS VALUE DOES NOT RESTART THE PODS. AFTER YOU CHANGE IT, RUN:
+  #
+  #     kubectl rollout restart deploy/<release>-scion-hub
+  #
+  # If you skip that step, `helm upgrade` succeeds, the Secret holds the new
+  # password, and every running pod keeps using the OLD one until something
+  # unrelated restarts it. Nothing reports this. NOTES.txt prints the same
+  # instruction on every install and upgrade that sets a password, so you do not
+  # have to remember that this comment exists.
+  #
+  # WHY IT WORKS THIS WAY, because the obvious fix is one someone will try:
+  #
+  # settings.yaml is a subPath mount, and the kubelet never refreshes one - it
+  # is bound at container start and frozen for that container's lifetime. The
+  # chart therefore forces a roll by putting a digest of the settings document
+  # in a pod annotation: change the document, change the digest, change the pod
+  # template, get new pods. That is checksum/settings in deployment.yaml and it
+  # predates this value.
+  #
+  # A pod annotation is readable by anyone with get on deployments or pods,
+  # which is a WIDER audience than this Secret's own RBAC. Everything else in a
+  # DSN - scheme, user, host, port, database name - is chart-rendered or public.
+  # So a digest over the raw document is a digest over a preimage with exactly
+  # one unknown in it, and that is an offline verification oracle for this
+  # password: a reader who can list deployments can confirm a guess without ever
+  # being allowed to read the Secret. The digest is therefore taken over a
+  # projection with the credential component of the URL removed.
+  #
+  # That removal is what costs you the automatic roll, and only for a
+  # credential-only change. Change the host, the port, the database name or
+  # anything else in settings.yaml and the pods still roll by themselves.
+  #
+  # MEASURED, NOT ASSERTED. hack/verify.sh renders two charts differing only in
+  # this value and asserts the digests are EQUAL - the oracle is dead - and then
+  # renders one differing only in database.name and asserts they DIFFER, so the
+  # first result cannot be satisfied by a digest that has stopped changing at
+  # all. It also runs a password containing @ : / and # , which the DSN
+  # percent-encodes, because a projection that redacted by matching the value
+  # rather than by URL structure would be silent for exactly those passwords.
   password: ""
 
   # Connection pool. Rendered into settings.yaml, and not settable by

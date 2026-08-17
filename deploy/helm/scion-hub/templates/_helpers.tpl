@@ -2880,3 +2880,98 @@ anywhere nearby. That is the case this guard is really for.
 {{- end }}
 {{- end }}
 {{- end }}
+
+{{- /*
+scion-hub.settingsChecksum - ADOPTED FROM PHASE 3, NOT WRITTEN HERE.
+
+Provenance, because a reader who does not know this will "simplify" it. Author
+gd-p3-dev, branch scion/gke-chart-p3, handed over 2026-08-17 with a mutation
+matrix in which every row was run. The oauth branch below is theirs and is
+inert in this phase; the server.database.url branch is the one this phase
+reaches, and it was written before any input existed that could reach it. It
+arrived here as UNTESTED CODE and is labelled as such in their handover. The
+differential in hack/verify.sh is what turned it into a tested one - if you
+change this helper, that gate is where you find out.
+
+Keep the define body byte-identical to the phase 3 copy where you can: both
+branches carry it and the integration merge resolves by taking either side only
+for as long as that stays true. The known deltas are the floor constant and the
+paragraph that justifies it, both marked PHASE 2 DELTA below.
+*/}}
+{{- define "scion-hub.settingsChecksum" -}}
+{{- $obj := fromYaml (include (print .Template.BasePath "/secret-settings.yaml") .) }}
+{{- if hasKey $obj "Error" }}
+{{- fail (printf "scion-hub.settingsChecksum could not parse the rendered settings Secret as YAML: %s. This annotation is a digest of a redacted projection of that document, so a parse failure would digest an error string instead - a value that never changes, which is worse than no annotation because it looks like coverage." (get $obj "Error")) }}
+{{- end }}
+{{- $doc := fromYaml (dig "stringData" "settings.yaml" "" $obj) }}
+{{- if not (hasKey $doc "server") }}
+{{- fail "scion-hub.settingsChecksum parsed the settings Secret but the document has no top-level server key. Every settings document the chart renders has one, so this means the projection is operating on an empty or unexpected document - and a digest of an empty document is a constant, which would silently stop rolling pods on every future settings change. Failing instead." }}
+{{- end }}
+{{- $redacted := "[redacted-from-checksum]" }}
+{{- $marks := 0 }}
+{{- $rendered := list }}
+{{- range $provider, $entry := (dig "server" "oauth" "web" (dict) $doc) }}
+{{- if hasKey $entry "client_secret" }}
+{{- $rendered = append $rendered (toString (get $entry "client_secret")) }}
+{{- $_ := set $entry "client_secret" $redacted }}
+{{- $marks = add1 $marks }}
+{{- end }}
+{{- end }}
+{{- $db := dig "server" "database" (dict) $doc }}
+{{- if hasKey $db "url" }}
+{{- $was := toString (get $db "url") }}
+{{- $now := regexReplaceAll "://[^/@[:space:]]*:[^/@[:space:]]+@" $was (printf "://%s@" $redacted) }}
+{{- if ne $now $was }}
+{{- $_ := set $db "url" $now }}
+{{- $marks = add1 $marks }}
+{{- end }}
+{{- end }}
+{{- $projection := toYaml $doc }}
+{{- $found := sub (len (splitList $redacted $projection)) 1 }}
+{{- if ne (int $found) (int $marks) }}
+{{- fail (printf "scion-hub.settingsChecksum performed %d redactions but the projection carries %d redaction markers. The two must agree: this is how the helper proves its own edits reached the document that gets digested, rather than assuming the assignment landed. Either a `set` above did not take effect on the parsed document - in which case a credential is about to be digested - or some rendered settings value contains the literal marker text %q, which the chart cannot distinguish from its own mark. Fix the first; for the second, change the marker." (int $marks) (int $found) $redacted) }}
+{{- end }}
+{{- /* SECOND PROOF, AND IT HAS A FLOOR THAT IS THERE FOR A MEASURED REASON.
+The marker count above proves the edits landed at the paths the helper knows.
+It cannot prove the same credential is not ALSO sitting at some path the list
+does not know about, so each rendered credential is searched for by value in the
+finished projection.
+
+THE FLOOR. That search is a plain substring test, and a short credential
+collides with ordinary prose: measured, a client secret of "def" is found inside
+the word "default" in the rendered settings, and the render was refused with a
+message telling the maintainer to add a path that does not exist. False, loud,
+and with remediation advice that cannot be followed. So the value search applies
+only at 12 characters or more. Google issues 24-character client secrets and
+GitHub 40, so no real credential is below the floor.
+
+WHAT THE FLOOR CANNOT SEE, STATED PLAINLY: a credential shorter than 12
+characters copied to a path outside the redaction list would be digested and
+this check would not say so. The path redaction still applies to every path it
+knows, the marker count still proves those landed, and a secret that short is
+not a secret. This is a narrowed check, not a disabled one, and it is narrowed
+in the direction that removes false refusals rather than the direction that
+removes refusals.
+
+AND THE ONE CASE NEITHER HALF COVERS, BECAUSE A MUTATION FOUND IT RATHER THAN
+REASONING. The marker count proves a marker EXISTS; it does not prove the marker
+is at the right key. Rewriting the `set` above to a misspelled key leaves the
+credential in place AND inserts a marker, so the count still balances - and with
+a sub-floor credential the value check is silent too. Measured: the render
+succeeds and `client_secret: shrt` reaches the digest. Both guards see the same
+mutation the moment the credential is of realistic length, and removing the
+`set` outright is caught at any length, so what is uncovered is the intersection
+of two unlikely things. It is written down rather than closed because a guard
+whose gap is named is a guard someone can widen; an unnamed one is a guard
+people trust past its edge. */ -}}
+{{- range $s := $rendered }}
+{{- if and (ge (len $s) 12) (contains $s $projection) }}
+{{- fail (printf "scion-hub.settingsChecksum redacted the credential paths it knows about and a rendered credential is STILL present in the digest input. The path list above is missing the path this value came from. Do not silence this by widening the value check - add the path, because the annotation is published to a wider audience than the Secret and a digest of a credential is a verification oracle for it. Value begins %q." (trunc 4 $s)) }}
+{{- end }}
+{{- end }}
+{{- if regexMatch "://[^/@[:space:]]*:[^/@[:space:]]+@" $projection }}
+{{- fail "scion-hub.settingsChecksum found a scheme://user:password@host URL in the digest input AFTER redaction. This is a backstop and reaching it means an upstream guard was missed, so fix the upstream one rather than this: either some settings path now carries a credential-bearing URL and is not in the redaction list above (add the path), or a values surface that feeds settings.yaml is not running scion-hub.assertNoCredential (add the call, and prefer that - it names the value the operator actually set, which this message cannot)." }}
+{{- end }}
+{{- $_ := set $obj "stringData" (dict "settings.yaml" $projection) }}
+{{- toYaml $obj | sha256sum }}
+{{- end }}

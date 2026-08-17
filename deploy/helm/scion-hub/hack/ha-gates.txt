@@ -19,10 +19,10 @@
 #
 # GOLDEN DIGESTS (sha256, as walked)
 #   existing-secret.yaml     1b9440a25f7ee00a8eab940440c07e53f55e6493606def810709c23dfb73b444
-#   minimal.yaml             16a25ce35aab46e683282abea9b3fd15ed36569a0f197bc95016b1c39ecfa733
-#   settings-oauth.yaml      d8226ed7324bee5e3244f0f0b633179a3f7a1ed7d3501677dac364de67105eb3
-#   settings.yaml            bf4fab72b12e326eb299400114b29aa5dc0ce7d6d5267a3a44490414bd1ca893
-#   varied.yaml              0db33f533c9672a9b08d37ea0f741b8f1c6eb19f5409ce82a0085eb1259433f2
+#   minimal.yaml             336724c28b4c386ce565baa6a2f4dfdc40c1a496455667a63d40895f9ddfab5c
+#   settings-oauth.yaml      34f73a8a1a1d3d33346b8435ec27edf11414642e81455d9f4bd9e2004a092df2
+#   settings.yaml            ffa5ac31dd14fa450507bce0b9dca71db40053424a10a3ce60947821fe9bf5bd
+#   varied.yaml              be45b19bbdbf49a6d2dfb90708f8a188270e33d068ff37153ac99496043ddaf3
 
 ===== existing-secret.yaml
 NO RENDERED settings.yaml: no "settings.yaml: |" block in this golden

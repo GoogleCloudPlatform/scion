@@ -150,7 +150,16 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # of that sweep ended `2>/dev/null || true`, which discarded both, so a grep
 # that FAILED produced the same empty output as a grep that found nothing.
 # Summed, not read off a run.
-EXPECTED_TOTAL=288
+# 288 + 9 for the redacted-projection step: four digest arms (password-only
+# collapse, the same for a percent-encoding password, independence across all
+# four passwords, and the non-credential positive control), the planted
+# un-projected mutation that proves those equalities are the redaction and not
+# an identical pair of renders, the absence of the annotation under
+# config.existingSecret, and three on NOTES.txt printing the rollout-restart
+# remedy in both directions. Summed onto the previous committed value.
+# The step's arm 0 adds none of these on purpose: it is meta_failure, because
+# "nothing was analysed" is a third outcome and not a passing assertion.
+EXPECTED_TOTAL=297
 
 failures=0
 assertions=0
@@ -3820,6 +3829,240 @@ if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
   pass "hub.extraEnv accepts an ordinary multi-line value"
 else
   fail "hub.extraEnv rejected an ordinary multi-line value - the PEM check is matching on whitespace rather than on the PEM header"
+fi
+
+# --------------------------------------------------------------------------
+step "the settings checksum is a redacted projection: the oracle is dead and the rotation cost is measured"
+# --------------------------------------------------------------------------
+# WHAT THIS STEP IS ABOUT, because the assertions below assert an EQUALITY and
+# an equality is the shape a broken harness produces for free.
+#
+# settings.yaml is a subPath mount and the kubelet never refreshes one, so the
+# chart rolls the pods by digesting the settings document into the pod
+# annotation checksum/settings. Phase 2 puts a password inside
+# server.database.url in that document. A pod annotation is readable by anyone
+# with get on deployments, which is a WIDER audience than the settings Secret's
+# own RBAC, and every other component of a DSN - scheme, user, host, port,
+# database name - is chart-rendered or public. A digest over that document is
+# therefore a digest over a preimage with one unknown in it: an offline oracle
+# for the password, checkable by a reader who is not allowed to read the Secret.
+#
+# scion-hub.settingsChecksum digests a projection with the credential removed.
+# The helper is gd-p3-dev's, adopted byte-identical from scion/gke-chart-p3 blob
+# 06b2a4c7cf3d73bb57d1c56370e4b21f3ca12182; the server.database.url branch in it
+# was written for this phase and had never been executed by any input on theirs.
+# This step is what makes it executed code.
+#
+# THE PRICE, AND IT IS ASSERTED HERE RATHER THAN DESCRIBED: with the credential
+# out of the digest input, a password-only change no longer moves the annotation
+# and no pod rolls. That is arm 1. Arm 4 is what stops arm 1 from being
+# satisfied by a digest that has stopped moving for ANY reason.
+_ck_A='RotPlainAlphaAAAA111'
+_ck_B='RotPlainBetaBBBB2222'
+# @ : / and # are four of the nine characters scion-hub.pctEncodeUserinfo
+# encodes, so these two passwords do NOT appear in the rendered file as typed.
+# gd-secann-2 measured that a projection which redacts by MATCHING THE
+# CREDENTIAL'S VALUE is silent for exactly these passwords, and worse than
+# silent - it emits a document that looks redacted and still carries the secret.
+# The adopted helper redacts by URL STRUCTURE, so these arms must collapse too.
+# They are here because that is a case the phase 3 suite structurally cannot
+# reach: nothing percent-encodes an OAuth client secret.
+_ck_S1='Rot@Spec:Alpha/AAA#1'
+_ck_S2='Rot@Spec:Beta/BBBB#2'
+
+_ck_render() { # _ck_render <name> <extra helm args...>
+  local n="$1"; shift
+  local rc=0
+  "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+    --set-string database.auth=password \
+    --set-string database.user=probe-user \
+    "$@" >"$WORK/ck-$n.yaml" 2>"$WORK/ck-$n.err" || rc=$?
+  printf '%s' "$rc" >"$WORK/ck-$n.rc"
+}
+# awk rather than grep throughout this block: this file runs under `set -e`, and
+# grep exits 1 on "found nothing", which is a legitimate reading here and not an
+# error. awk returns the count and exits 0, so a zero cannot abort the script
+# before the assertion that was going to report it.
+_ck_count() { awk '$1=="checksum/settings:"{c++} END{print c+0}' "$1"; }
+_ck_digest() { awk '$1=="checksum/settings:"{print $2}' "$1"; }
+_ck_url() { awk '$1=="url:"{print $2}' "$1"; }
+
+_ck_render A  --set-string database.password="$_ck_A"
+_ck_render A2 --set-string database.password="$_ck_A"
+_ck_render B  --set-string database.password="$_ck_B"
+_ck_render S1 --set-string database.password="$_ck_S1"
+_ck_render S2 --set-string database.password="$_ck_S2"
+_ck_render C  --set-string database.password="$_ck_A" --set-string database.name=other-db
+
+# ARM 0. NOT AN ASSERTION - A META-FAILURE, because "nothing was analysed" is a
+# third outcome and this whole step compares digests for EQUALITY. Two empty
+# renders are equal. Two identical inputs are equal. A chart that deleted the
+# annotation gives two empty strings, which are equal. Every one of those is a
+# green arm 1 measuring nothing.
+#
+# gd-p3-dev hit this by hand on the phase 3 copy - a --set that changed a value
+# to what it already was - and read the resulting collapse as a defect in their
+# own projection. gd-secann-2 hit it from the other side: their first run had
+# helm failing a schema check on all four arms, every digest was sha256 of the
+# empty string, and THREE of their four guards passed on it. The one that caught
+# it was an absolute count. Both arms of that lesson are below.
+for _n in A A2 B S1 S2 C; do
+  _rc="$(cat "$WORK/ck-$_n.rc")"
+  [[ "$_rc" == 0 ]] || meta_failure "the settings-checksum arm $_n did not render (helm exit $_rc): $(head -3 "$WORK/ck-$_n.err"). Nothing in this step was measured."
+  [[ -s "$WORK/ck-$_n.yaml" ]] || meta_failure "the settings-checksum arm $_n rendered an empty document. Every equality below would hold on it."
+  [[ ! -s "$WORK/ck-$_n.err" ]] || meta_failure "the settings-checksum arm $_n wrote to stderr while exiting 0: $(head -3 "$WORK/ck-$_n.err")."
+  # ABSOLUTE, not "at least one". A chart that stopped emitting the annotation
+  # yields an empty digest for every arm, which satisfies arms 1-3 perfectly.
+  _cnt="$(_ck_count "$WORK/ck-$_n.yaml")"
+  [[ "$_cnt" == 1 ]] || meta_failure "the settings-checksum arm $_n carries $_cnt checksum/settings annotations, expected exactly 1. The digests compared below would be a comparison of empty strings."
+done
+# AND THE PART THAT MATTERS MOST: the inputs must genuinely differ. Read off the
+# RENDERED output by value, in both directions, not off the --set arguments -
+# an argument that helm ignored, misparsed or set to the value it already held
+# is invisible from the command line and produces a perfect false green.
+_uA="$(_ck_url "$WORK/ck-A.yaml")"; _uB="$(_ck_url "$WORK/ck-B.yaml")"
+_uS1="$(_ck_url "$WORK/ck-S1.yaml")"; _uS2="$(_ck_url "$WORK/ck-S2.yaml")"
+_uC="$(_ck_url "$WORK/ck-C.yaml")"; _uA2="$(_ck_url "$WORK/ck-A2.yaml")"
+[[ -n "$_uA" ]] || meta_failure "no server.database.url in the settings-checksum arm A render, so no arm in this step is varying a credential at all."
+[[ "$_uA" != "$_uB" ]] || meta_failure "the A and B renders carry the SAME server.database.url ($_uA), so the password-only differential below is comparing a chart against itself. This is the exact false green the arm exists to prevent."
+[[ "$_uS1" != "$_uS2" ]] || meta_failure "the S1 and S2 renders carry the same server.database.url, so the percent-encoded differential is comparing a chart against itself."
+[[ "$_uA" != "$_uC" ]] || meta_failure "the A and C renders carry the same server.database.url, so the positive control below cannot fire on a change that never happened."
+[[ "$_uA" == "$_uA2" ]] || meta_failure "two renders of identical inputs produced different DSNs ($_uA vs $_uA2). The renderer is not deterministic and no equality below means anything."
+# THE CREDENTIAL THAT LANDED MUST BE THE ONE THAT WAS PLANTED, and for S1/S2
+# that means it must have been percent-encoded on the way in. Those two arms are
+# the ONLY thing in this file covering gd-secann-2's finding that a value-based
+# projection goes silent on an encoded password; if the special characters never
+# reached the DSN, the arms quietly degrade into two more plain-password arms
+# and pass while covering nothing. There is a known mechanism for exactly that:
+# gd-p3-dev measured `--set-string` eating backslashes through helm's own escape
+# parser, so what an operator types and what the file holds are not the same
+# string by default. None of the four characters below is a backslash, and this
+# check is what turns that from a belief into a reading.
+case "$_uS1" in
+  *'%40'*) ;;
+  *) meta_failure "the S1 render's DSN carries no percent-encoded octet ($_uS1). The @ : / and # in the planted password never reached the rendered file, so the percent-encoding arm is silently testing an ordinary password and covers nothing." ;;
+esac
+case "$_uS1" in
+  *"$_ck_S1"*) meta_failure "the S1 render's DSN contains the planted password verbatim ($_uS1), so scion-hub.pctEncodeUserinfo did not run on it and this arm is not exercising the encoded case at all." ;;
+  *) ;;
+esac
+
+_dA="$(_ck_digest "$WORK/ck-A.yaml")"; _dA2="$(_ck_digest "$WORK/ck-A2.yaml")"
+_dB="$(_ck_digest "$WORK/ck-B.yaml")"; _dS1="$(_ck_digest "$WORK/ck-S1.yaml")"
+_dS2="$(_ck_digest "$WORK/ck-S2.yaml")"; _dC="$(_ck_digest "$WORK/ck-C.yaml")"
+[[ "$_dA" == "$_dA2" ]] || meta_failure "two renders of identical inputs produced different checksum/settings values ($_dA vs $_dA2). The digest is not a function of the inputs and nothing below is interpretable."
+
+if [[ "$_dA" == "$_dB" ]]; then
+  pass "rotating database.password alone does not move checksum/settings, so the annotation is not an oracle for it (${_dA:0:16})"
+else
+  fail "checksum/settings CHANGED on a password-only rotation ($_dA -> $_dB). The annotation is published to a wider audience than the settings Secret and every other component of the DSN is public, so this digest lets a reader who cannot read the Secret confirm a guessed password offline."
+fi
+
+if [[ "$_dS1" == "$_dS2" ]]; then
+  pass "the same holds for a password containing @ : / and # , which the DSN percent-encodes - so the redaction is by URL structure and not by matching the credential's value"
+else
+  fail "checksum/settings changed on a password-only rotation when the password percent-encodes ($_dS1 -> $_dS2). A projection that redacts by searching for the credential's literal value cannot see these, because scion-hub.pctEncodeUserinfo has already rewritten them - and it emits a document that reads as redacted while still carrying the secret."
+fi
+
+if [[ "$_dA" == "$_dS1" ]]; then
+  pass "checksum/settings is identical across four different passwords, so the digest is independent of the credential rather than merely insensitive to one pair"
+else
+  fail "checksum/settings differs between two passwords that are not a rotation pair ($_dA vs $_dS1), so some part of the credential still reaches the digest input."
+fi
+
+# THE POSITIVE CONTROL, and without it the three arms above are satisfied by a
+# chart that hashes a constant, or by one that deleted the annotation. This is
+# also the assertion that fails if someone "fixes" the rotation gap by removing
+# the projection's input entirely.
+if [[ "$_dC" != "$_dA" ]]; then
+  pass "a non-credential change (database.name) DOES move checksum/settings, so the equalities above are the redaction working and not the digest having stopped"
+else
+  fail "checksum/settings did not move when database.name changed ($_dA). The digest has become a constant: settings changes will no longer roll the pods at all, and the equalities above are meaningless."
+fi
+
+# THE PLANTED MUTATION. Reverting the annotation to a digest of the raw template
+# output must make the password-only differential go RED. Without this the three
+# equalities above could be a property of the harness - two renders that differ
+# in nothing - rather than a property of the projection.
+_ckmut="$WORK/ck-unprojected"
+rm -rf "$_ckmut"; cp -a "$CHART_DIR" "$_ckmut"
+python3 - "$_ckmut/templates/deployment.yaml" <<'CKPY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = 'checksum/settings: {{ include "scion-hub.settingsChecksum" . }}'
+new = 'checksum/settings: {{ include (print $.Template.BasePath "/secret-settings.yaml") . | sha256sum }}'
+if s.count(old) != 1:
+    sys.exit("PLANT-FAILED: expected exactly 1 occurrence of the projected annotation, found %d" % s.count(old))
+open(p, 'w').write(s.replace(old, new))
+CKPY
+_ckmut_rc=0
+_ck_mut_render() { # <out> <password>
+  local rc=0
+  "$HELM" template "$RELEASE" "$_ckmut" --namespace "$NAMESPACE" \
+    --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+    --set-string database.auth=password --set-string database.user=probe-user \
+    --set-string database.password="$2" >"$1" 2>"$1.err" || rc=$?
+  return "$rc"
+}
+_ck_mut_render "$WORK/ck-mut-A.yaml" "$_ck_A" || _ckmut_rc=$?
+_ck_mut_render "$WORK/ck-mut-B.yaml" "$_ck_B" || _ckmut_rc=$?
+[[ "$_ckmut_rc" == 0 ]] || meta_failure "the un-projected control chart did not render (helm exit $_ckmut_rc): $(head -3 "$WORK/ck-mut-A.yaml.err"). The planted mutation below proves nothing."
+_mA="$(_ck_digest "$WORK/ck-mut-A.yaml")"; _mB="$(_ck_digest "$WORK/ck-mut-B.yaml")"
+[[ -n "$_mA" && "$(_ck_count "$WORK/ck-mut-A.yaml")" == 1 ]] || meta_failure "the un-projected control chart rendered no checksum/settings annotation, so its differential is a comparison of empty strings."
+if [[ "$_mA" != "$_mB" ]]; then
+  pass "with the projection removed the SAME password-only differential goes red ($_mA -> $_mB), so the equalities above are caused by the redaction and not by the two renders being identical"
+else
+  fail "removing the projection did not restore the password-only difference. This step's equalities are therefore not evidence of redaction - the two renders it compares do not differ in anything the digest can see, and the whole step is measuring nothing."
+fi
+
+# The permutation where the chart renders no settings file at all. The helper
+# refuses a document with no server key, by design, so the annotation must not
+# be emitted here - and an absent annotation is also the only correct answer:
+# there is nothing for the chart to digest.
+_ck_es="$WORK/ck-existing-secret.yaml"
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-existing-secret.yaml" >"$_ck_es" 2>/dev/null
+_ck_es_n="$(_ck_count "$_ck_es")"
+[[ -s "$_ck_es" ]] || meta_failure "the config.existingSecret render is empty, so the absence asserted below is the absence of the whole manifest."
+if [[ "$_ck_es_n" == 0 ]]; then
+  pass "under config.existingSecret no checksum/settings annotation is emitted at all, so the projection helper is never asked to parse a file the chart did not render"
+else
+  fail "under config.existingSecret the chart emitted $_ck_es_n checksum/settings annotations. There is no rendered settings document there, so the helper is digesting something it did not produce."
+fi
+
+# HALF B. The redaction removes the automatic roll on a credential-only change,
+# and the remedy is an explicit rollout restart. A remedy nobody is told about
+# is not a remedy, so it is asserted here in both directions - printed when a
+# password is set, absent when there is none to rotate.
+render_notes "$WORK/notes-rot-pw.txt" -f "$CHART_DIR/ci/values-cloudsql.yaml" \
+  --set-string database.auth=password --set-string database.user=probe-user \
+  --set-string database.password="$_ck_A"
+_ck_rot_heading='ROTATING THE PASSWORD REQUIRES ONE MANUAL STEP'
+if grep -qF -- "$_ck_rot_heading" "$WORK/notes-rot-pw.txt"; then
+  pass "NOTES.txt states that rotating database.password requires a manual restart"
+else
+  fail "NOTES.txt does not tell an operator that rotating database.password leaves the running pods on the old credential. The chart made the roll stop happening; the operator finds out from an authentication that keeps succeeding with a password they retired."
+fi
+# SUBSTITUTED, not a placeholder. An instruction an operator has to edit before
+# it runs is an instruction that gets edited wrong at the moment it is needed.
+if grep -qF -- "kubectl rollout restart deploy/$RELEASE-scion-hub -n $NAMESPACE" "$WORK/notes-rot-pw.txt"; then
+  pass "the restart command NOTES.txt prints names this release's deployment and namespace, so it runs as printed"
+else
+  fail "NOTES.txt prints a rollout restart command that does not name this release's deployment and namespace. Got: $(grep -F 'rollout restart' "$WORK/notes-rot-pw.txt" || printf '(no rollout restart line at all)')"
+fi
+# THE NEGATIVE ARM, held against a section already proven non-empty above. Under
+# iam there is no password in the DSN, nothing to rotate, and the paragraph
+# would be advice about a value the operator did not set.
+if grep -qF -- 'CLOUD SQL' "$WORK/notes-cloudsql.txt"; then
+  if grep -qF -- "$_ck_rot_heading" "$WORK/notes-cloudsql.txt"; then
+    fail "the iam permutation's NOTES prints the password-rotation restart step. Under iam the DSN carries no password, so this is instructions for a value that does not exist."
+  else
+    pass "the iam permutation's NOTES does not print the password-rotation step, and that absence is inside a render that does carry a CLOUD SQL section"
+  fi
+else
+  fail "the iam permutation's NOTES has no CLOUD SQL section, so the absence of the rotation step there is the absence of everything."
 fi
 
 # --------------------------------------------------------------------------

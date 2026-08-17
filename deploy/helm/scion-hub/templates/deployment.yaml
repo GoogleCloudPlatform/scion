@@ -143,9 +143,39 @@ spec:
         entirely under config.existingSecret: the chart renders no file there,
         the checksum would be of nothing, and a constant that never changes is
         worse than an absent one because it looks like coverage.
+
+        🔴 NOT A DIGEST OF THE FILE. It is a digest of a CREDENTIAL-REDACTED
+        PROJECTION of the file, and the difference is the whole point of
+        scion-hub.settingsChecksum - read that helper before changing this line
+        back to the obvious `include ... | sha256sum`.
+
+        The reason: this annotation is on the pod template, which anyone with
+        get on deployments or pods can read, and that is a WIDER audience than
+        the settings Secret's own RBAC. Before phase 2 the digest input carried
+        no credential and hashing the file was correct. Phase 2 puts a password
+        inside server.database.url in that same file, and the rest of a DSN -
+        scheme, user, host, port, database name - is chart-rendered or public.
+        A digest over a mostly-known preimage is a verification oracle for the
+        one unknown part of it: you can confirm a guessed password offline,
+        against a value you are allowed to read, without ever touching the
+        Secret. Redacting the credential component removes the unknown from the
+        preimage and the oracle with it.
+
+        WHAT THIS COSTS, because it is not free and the cost must not be
+        rediscovered by an operator at 3am: with the password out of the digest
+        input, rotating ONLY the password does not move this annotation, so no
+        pod rolls and helm upgrade reports success while the old credential
+        stays live. MEASURED, not predicted - see hack/verify.sh, which asserts
+        that collapse in both directions rather than describing it. Everything
+        that is not a credential still rolls the pods automatically, host, port
+        and database name included. The remedy for the credential-only case is
+        an explicit `kubectl rollout restart`, documented beside the password in
+        values.yaml and PRINTED by NOTES.txt on every install and upgrade that
+        sets one. Delete either of those and you have deleted the behaviour, not
+        the annotation.
         */}}
         {{- if not .Values.config.existingSecret }}
-        checksum/settings: {{ include (print $.Template.BasePath "/secret-settings.yaml") . | sha256sum }}
+        checksum/settings: {{ include "scion-hub.settingsChecksum" . }}
         {{- end }}
         {{- with $podAnnotations }}
         {{- toYaml . | nindent 8 }}

@@ -163,6 +163,36 @@ CLOUD SQL
   commands then print with your values already substituted.
 {{- end }}
 
+{{- if eq .Values.database.auth "password" }}
+
+  ROTATING THE PASSWORD REQUIRES ONE MANUAL STEP. THIS IS THE STEP.
+
+  When you change database.password, `helm upgrade` writes the new value into
+  the settings Secret and reports success - and every running pod keeps using
+  the OLD password until you also run:
+
+    kubectl rollout restart deploy/{{ include "scion-hub.fullname" . }} -n {{ .Release.Namespace }}
+
+  Nothing detects the omission. The upgrade is green, the Secret is correct, and
+  the hub is still authenticating with the credential you just retired. If you
+  rotated because the old one leaked, it is still live.
+
+  WHY, IN ONE PARAGRAPH, SO THE STEP IS NOT MISTAKEN FOR A BUG TO BE FIXED.
+  settings.yaml is a subPath mount and the kubelet never refreshes one, so the
+  chart rolls the pods by digesting the settings document into a pod annotation.
+  That annotation is readable by anyone who can get deployments - a wider
+  audience than the Secret - and the only unknown in a DSN is the password, so
+  a digest of the raw document lets that reader confirm a guessed password
+  offline. The digest is therefore taken over a projection with the credential
+  removed, and a change that touches nothing but the credential no longer moves
+  it. Everything else still rolls the pods on its own: host, port, database
+  name, pool sizes, config.extra.
+
+  If you would rather not hold the step in your head, rotate the database name
+  or the user in the same upgrade and the roll happens automatically - but do
+  that because it suits your operations, not as a workaround.
+{{- end }}
+
   THE CONNECTION BUDGET, AND THE PART OF IT WE HAVE NOT MEASURED.
 
   Cloud SQL enforces a hard max_connections per instance. Exceeding it does not
