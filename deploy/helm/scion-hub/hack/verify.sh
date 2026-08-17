@@ -87,6 +87,20 @@ declare -A HUB_HOME=(
   [varied]=/srv/hub
 )
 
+# Documents each permutation renders. A committed constant per values file, and
+# not one constant for the chart: existing-secret is SIX because the chart
+# deliberately emits no Secret when the operator supplies their own, and that
+# asymmetry is the config.existingSecret contract rather than an accident of
+# this table. A phase that changes the rendered manifest set updates these here,
+# in its own diff, beside the template it added.
+declare -A EXPECTED_DOCS=(
+  [minimal]=7
+  [settings]=7
+  [settings-oauth]=7
+  [existing-secret]=6
+  [varied]=7
+)
+
 # The one permutation where the chart renders no settings.yaml, because the
 # operator supplied the whole file. Held as an explicit list rather than as an
 # "if the file is missing, skip" rule: a skip that derives itself from the
@@ -97,7 +111,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=200
+EXPECTED_TOTAL=221
 
 failures=0
 assertions=0
@@ -183,8 +197,27 @@ yaml_list_items() {
 expect_render_failure() {
   local label="$1" expected="$2"; shift 2
   local out
+  # An empty $expected makes every check below vacuous, and it is the one input
+  # that does: `grep -F ""` matches any input including the single empty line a
+  # here-string makes of an empty $out, so the wording match passes, the "%!"
+  # match then finds nothing, and the helper reports a pass having read nothing.
+  # `set -u` catches a caller that omits the argument; it does not catch one
+  # that passes "" or an empty variable, which is the likelier mistake. This is
+  # a fault in the harness rather than in the chart, so it is meta, not a fail.
+  [[ -n $expected ]] || meta_failure "expect_render_failure ${label@Q} was given an empty expected-wording argument, which every match below is satisfied by"
   if out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" "$@" 2>&1); then
     fail "$label: the render SUCCEEDED and was supposed to fail"
+    return
+  fi
+  # The render failed and said nothing. helm killed by a signal, an OOM, a
+  # wrapper that swallows stderr. Checked here, ahead of the wording match,
+  # for two reasons: it is the subject every assertion below reads, and it
+  # names the condition. The wording match would also go red on an empty $out,
+  # but it would report "failed, but not for the expected reason (wanted ...)",
+  # which sends the reader to the chart's diagnostic when the diagnostic is the
+  # thing that is missing.
+  if [[ -z $out ]]; then
+    fail "$label: the render failed and produced no output at all - there is no diagnostic to check, and this is a fault in the run rather than an answer about the chart"
     return
   fi
   # "%!" is Go's marker for a printf verb that could not render its argument -
@@ -193,6 +226,13 @@ expect_render_failure() {
   # invisible to a check that greps for the wording, because the wording is
   # still there. Asserted inside this helper rather than beside one message, so
   # a diagnostic added later is covered without anyone remembering to cover it.
+  #
+  # It is a negative assertion, so it reads a subject that must exist: an empty
+  # $out contains no "%!" and would satisfy it silently. The subject check is
+  # the wording match it is nested inside - an empty $out cannot match a
+  # non-empty $expected, so it lands in the else branch and goes red there.
+  # That is why the guard above insists $expected is non-empty: the wording
+  # match is load-bearing twice, and only the second job is obvious.
   if grep -qF -- "$expected" <<<"$out"; then
     if grep -qF -- '%!' <<<"$out"; then
       fail "$label: the message matched, but it contains a Go format error - a value reached printf in a type its verb cannot render"
@@ -231,6 +271,16 @@ step "render and schema-validate"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# The vacuity guard for EXPECTED_DOCS, and it guards a specific regression: if
+# every permutation expected the same number, the table would be satisfied by a
+# chart that had stopped suppressing the settings Secret under
+# config.existingSecret - the one difference it exists to hold.
+if [[ "$(printf '%s\n' "${EXPECTED_DOCS[@]}" | sort -u | wc -l)" -ge 2 ]]; then
+  pass "the expected document counts are not all the same number"
+else
+  fail "every permutation expects the same document count - the count check cannot see the Secret that config.existingSecret suppresses"
+fi
+
 render_failures=0
 for name in "${PERMUTATIONS[@]}"; do
   if render "$name" >"$WORK/$name.yaml" 2>"$WORK/$name.err"; then
@@ -241,10 +291,25 @@ for name in "${PERMUTATIONS[@]}"; do
     render_failures=$((render_failures + 1))
     continue
   fi
-  if "$KUBECONFORM" -strict -summary <"$WORK/$name.yaml" >/dev/null 2>&1; then
-    pass "kubeconform $name"
+  # The summary line, not the exit status, and every field of it.
+  #
+  #   $ kubeconform -strict -summary </dev/null
+  #   Summary: 0 resource found parsing stdin - Valid: 0, Invalid: 0, Errors: 0, Skipped: 0
+  #   $ echo $?
+  #   0
+  #
+  # Measured. An empty document set is a clean pass, so the exit status alone
+  # says "nothing was invalid", which is also what validating nothing produces.
+  # Asserting the expected number of VALID documents turns that into a claim
+  # about what was checked. Skipped is asserted at 0 for the same reason one
+  # layer down: a kind kubeconform has no schema for is a skip, not a failure,
+  # the moment anyone adds --ignore-missing-schemas.
+  kcout="$("$KUBECONFORM" -strict -summary <"$WORK/$name.yaml" 2>&1 || true)"
+  kcwant="Valid: ${EXPECTED_DOCS[$name]}, Invalid: 0, Errors: 0, Skipped: 0"
+  if grep -qF "$kcwant" <<<"$kcout"; then
+    pass "kubeconform $name validated ${EXPECTED_DOCS[$name]} documents, none skipped"
   else
-    fail "kubeconform $name"
+    fail "kubeconform $name: wanted '$kcwant', got '$kcout'"
     "$KUBECONFORM" -strict <"$WORK/$name.yaml" || true
   fi
 done
@@ -1123,6 +1188,194 @@ for name in "${PERMUTATIONS[@]}"; do
     fail "$name has a run-once init container ($(tr '\n' ' ' <<<"$offenders")) - settings are delivered by mount, not by copy. A native sidecar carries restartPolicy: Always and is allowed."
   else
     pass "$name has no run-once init container"
+  fi
+done
+
+# --------------------------------------------------------------------------
+step "the \$ownedByConfig split, measured against the render"
+# --------------------------------------------------------------------------
+# _helpers.tpl reserves five flags on the grounds that each has a delivery
+# channel other than argv. Two of the five are delivered by this chart and three
+# are not, and the file says which in prose.
+#
+# THIS EXISTS BECAUSE THAT PROSE WENT STALE WITHOUT THE FILE BEING EDITED. At
+# phase 0 it read "this chart delivers none of them yet", which was true while
+# nothing was rendered and false the moment a ConfigMap and a Secret were - and
+# no test anywhere referenced any of it, so nothing went red. A paragraph whose
+# truth depends on another file's contents needs an assertion in the same
+# repository or it is true by accident until someone reads it.
+#
+# The numbers below are the committed state. Moving an entry from 0 to 1 is a
+# deliberate act in the diff that lands the channel, in the same diff that edits
+# the paragraph - which is the point: the two move together or this goes red.
+#
+# Measured under the "settings" permutation, named here rather than assumed: it
+# is the one that renders the full settings file with a bucket. A permutation
+# that renders less would report 0 for storage-bucket and be right about itself.
+declare -A DELIVERED=(
+  [base-url]=1        # SCION_SERVER_BASE_URL, configmap-env.yaml
+  [storage-bucket]=1  # server.storage.bucket in the rendered settings.yaml
+  [db]=0              # server.database.url - Cloud SQL
+  [storage-dir]=0     # server.storage.local_path - the workspace share
+  [admin-emails]=0    # server.hub.admin_emails - no phase claims it
+)
+# The probe per flag. Each reads the channel the reservation names, not a proxy
+# for it: a probe for "is there a Secret" would answer yes for a chart that
+# renders a Secret full of something else, which is how the session-secret
+# reservation was nearly misfiled. Keys are the V1 settings spelling, which is
+# snake_case and is NOT the spelling on HubServerConfig - settings.yaml's server
+# section decodes into V1ServerConfig (pkg/config/hub_config.go, at
+# loadServerFromSettingsFile), where HubID is `hub_id`; the camelCase `hubId` on
+# HubServerConfig belongs to the koanf/env path and would be ignored here.
+delivery_probe() {
+  local flag="$1" render="$2" block="$3"
+  case "$flag" in
+    base-url)       grep -q '^  SCION_SERVER_BASE_URL: ' <<<"$render" ;;
+    storage-bucket) grep -qE '^    bucket: .' <<<"$block" ;;
+    db)             grep -qE '^    url: .' <<<"$block" ;;
+    storage-dir)    grep -qE '^    local_path: .' <<<"$block" ;;
+    admin-emails)   grep -qE '^    admin_emails:' <<<"$block" ;;
+    *)              meta_failure "delivery_probe has no probe for $flag" ;;
+  esac
+}
+render="$(cat "$WORK/settings.yaml")"
+block="$(settings_block "$WORK/settings.yaml")"
+delivered_seen=0
+undelivered_seen=0
+for flag in base-url storage-bucket db storage-dir admin-emails; do
+  want="${DELIVERED[$flag]}"
+  if delivery_probe "$flag" "$render" "$block"; then got=1; else got=0; fi
+  [[ $got -eq 1 ]] && delivered_seen=$((delivered_seen + 1)) || undelivered_seen=$((undelivered_seen + 1))
+  if [[ $got -eq $want ]]; then
+    pass "-$flag delivery channel: $got, as committed (settings permutation)"
+  elif [[ $want -eq 0 ]]; then
+    fail "-$flag now has a delivery channel in the render and the committed state says it does not. Bump it to 1 here AND re-tense the \$ownedByConfig prose in _helpers.tpl in the same diff - the refusal and its justification both name which flags are live."
+  else
+    fail "-$flag has no delivery channel in the render and the committed state says it does. Either the channel regressed or the number is wrong; do not lower the number to match without reading the template."
+  fi
+done
+# The coverage control. An all-0 table is satisfied by a probe function that
+# never matches anything - a renamed key, a changed indent, a typo in the case
+# arm - and an all-1 table by one that always does. Requiring both outcomes to
+# occur means at least one probe is discriminating in each direction. This is
+# not the same check as the vacuity guard on the table's literals: that one reads
+# the constants, this one reads what the probes actually returned.
+if [[ $delivered_seen -ge 1 && $undelivered_seen -ge 1 ]]; then
+  pass "the delivery probes returned both outcomes ($delivered_seen delivered, $undelivered_seen not)"
+else
+  fail "every delivery probe returned the same answer ($delivered_seen delivered, $undelivered_seen not) - one broken probe function produces exactly this, and it would agree with a table of all 0s or all 1s"
+fi
+# The prose half. The sentences below are the ones that were true at phase 0 and
+# are false here; naming them by their text is deliberate, because the failure
+# mode is somebody restoring the paragraph wholesale from the phase-0 file.
+#
+# QUOTED SPANS ARE STRIPPED FIRST, AND THAT IS NOT A CONVENIENCE. The prose that
+# explains why a sentence went stale has to reproduce the sentence, so a literal
+# grep flags the warning along with the defect - and the repair it invites is
+# deleting the warning. This check tripped on its own paragraph on its first run,
+# which is the same false positive in the same file on the same afternoon. A
+# double-quoted span in template prose is a quotation, so removing those spans
+# before matching leaves only the sentences the file is asserting in its own
+# voice. The cost is that a claim written inside quotes is invisible here; write
+# claims unquoted.
+strip_quotes() { sed 's/"[^"]*"//g'; }
+prose="$(find "$CHART_DIR/templates" -type f -exec cat {} + | strip_quotes)"
+prose_raw="$(find "$CHART_DIR/templates" -type f -exec cat {} +)"
+for stale in \
+  'This chart delivers none of them yet' \
+  'none of them lands anywhere' \
+  'Nothing in this chart yet feeds hub.hubId into the running process' \
+  ; do
+  if grep -qF -- "$stale" <<<"$prose"; then
+    fail "templates/ asserts ${stale@Q} in its own voice, which was true before this chart rendered a settings file and is false now"
+  else
+    pass "the phase-0 sentence ${stale@Q} is not asserted"
+  fi
+done
+# The control for the stripper, and it is a coverage control rather than an
+# apparatus mutation: it proves the three checks above pass because the
+# quotations are quoted, not because the text is missing or the path is wrong.
+# One of those three sentences IS still in the tree, inside quotes, in the
+# paragraph that explains it went stale. If that ever stops being true the
+# stripper is untested by the checks above and they all pass for free.
+if grep -qF -- 'none of them lands anywhere' <<<"$prose_raw"; then
+  pass "the stale sentence is still present as a quotation, so the quote stripper is what makes the check above pass"
+else
+  fail "no quoted instance of the stale sentence remains anywhere in templates/ - the three checks above are now passing without the stripper being exercised, and a bug in it would be invisible"
+fi
+# The counter-form, per the rule that a negative grep's control is the positive
+# form of the same grep. Three greps that must find nothing are satisfied by a
+# CHART_DIR that points at the wrong place; these two must find something in the
+# same tree, so a path that greps nothing goes red here.
+for present in \
+  'server.hub.hub_id in the mounted' \
+  'DELIVERED HERE' \
+  ; do
+  if grep -rqF -- "$present" "$CHART_DIR/templates/"; then
+    pass "the replacement wording ${present@Q} is present"
+  else
+    fail "templates/ does not contain ${present@Q} - either the re-tensed prose was reverted, or this check is reading the wrong directory and the three checks above found nothing for that reason"
+  fi
+done
+
+# --------------------------------------------------------------------------
+step "the hub ID is one input rendered twice, and the two must agree"
+# --------------------------------------------------------------------------
+# scion.io/hub-id on the pod template and server.hub.hub_id in the settings file
+# are two renderings of hub.hubId. Until this chart rendered a settings file the
+# annotation had nothing to agree with, and deployment.yaml said so - it told the
+# reader a disagreement was legitimate. It is not legitimate now, and a paragraph
+# saying otherwise is worse than no paragraph, because it stops the next person
+# debugging an ID mismatch from looking.
+#
+# A marker value rather than the ci/ values, so that a template which stopped
+# reading hub.hubId and emitted a constant cannot pass: both sites must carry the
+# marker, and the marker appears in no file in this repository.
+hubid_marker=zzmarkerhubid
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-settings.yaml" \
+  --set hub.hubId="$hubid_marker" >"$WORK/hubid.yaml" 2>&1 \
+  || meta_failure "the hub-id marker render failed, so nothing below was checked"
+ann_id="$(grep -o 'scion\.io/hub-id: .*' "$WORK/hubid.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u)"
+set_id="$(settings_block "$WORK/hubid.yaml" | sed -n 's/^    hub_id: //p' | sed 's/"//g' | sort -u)"
+if [[ $ann_id == "$hubid_marker" ]]; then
+  pass "the pod annotation carries the supplied hub ID"
+else
+  fail "the pod annotation is ${ann_id@Q}, not the supplied ${hubid_marker@Q} - one value, or none, or several"
+fi
+if [[ $set_id == "$hubid_marker" ]]; then
+  pass "settings.yaml server.hub.hub_id carries the supplied hub ID"
+else
+  fail "server.hub.hub_id is ${set_id@Q}, not the supplied ${hubid_marker@Q}"
+fi
+if [[ -n $ann_id && $ann_id == "$set_id" ]]; then
+  pass "the annotation and server.hub.hub_id are the same string"
+else
+  fail "the annotation (${ann_id@Q}) and server.hub.hub_id (${set_id@Q}) disagree, or one of them is missing - they come from one helper and cannot legitimately differ"
+fi
+# Every permutation that renders a settings file, not just the marker render, so
+# a values file that reaches one site and not the other is caught.
+for name in "${PERMUTATIONS[@]}"; do
+  # || true on both: under config.existingSecret there is no settings block at
+  # all, so the extractor's grep finds nothing and exits 1, which set -e would
+  # take as a reason to abandon the run. An empty string is the answer here, and
+  # the branch below asserts which permutation is allowed to produce one.
+  a="$(grep -o 'scion\.io/hub-id: .*' "$WORK/$name.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u || true)"
+  s="$(settings_block "$WORK/$name.yaml" 2>/dev/null | sed -n 's/^    hub_id: //p' | sed 's/"//g' | sort -u || true)"
+  if [[ $name == existing-secret ]]; then
+    # The documented exception, asserted rather than skipped. Here the settings
+    # file is the operator's and the chart renders none, so there is genuinely
+    # nothing to agree with - and the annotation must still be there, because an
+    # absent annotation would also satisfy an equality check against nothing.
+    if [[ -n $a && -z $s ]]; then
+      pass "$name: the annotation is rendered and no chart settings file exists to agree with it"
+    else
+      fail "$name: expected an annotation and no rendered hub_id, got annotation ${a@Q} and hub_id ${s@Q}"
+    fi
+  elif [[ -n $a && $a == "$s" ]]; then
+    pass "$name: the annotation and server.hub.hub_id agree (${a@Q})"
+  else
+    fail "$name: the annotation (${a@Q}) and server.hub.hub_id (${s@Q}) disagree or are missing"
   fi
 done
 

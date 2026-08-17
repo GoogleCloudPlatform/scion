@@ -646,19 +646,34 @@ the mechanism was sound and only the justification was invented:
 
   - THE SUBJECT IS WHAT THIS CHART RENDERS, NOT WHAT THE PROJECT IS BUILDING
     TOWARD. Every wrong answer below came from substituting the second for the
-    first, so: this chart mounts no volumes and renders no --db. Replicas share
-    NO mutable state, and isHADeployment (cmd/server_foreground.go:927) is FALSE
-    at every replica count - K_SERVICE is unset on GKE, the driver is not
-    postgres, and the gcs-plus-proxy branch is unset - so the hosted HA preflight
-    at :921 does not run either.
-  - The stated harm - "two hubs writing the same RWX workspace share" - is
-    therefore not a thing this chart can produce.
-  - The replacement harm - "the upgrade transiently enters HA mode" - is false
-    for the same reason, and not for the reason first given for it. HA is not
-    "already on"; it is off, at one replica and at ten.
-  - LATER PHASES FALSIFY THAT ON PURPOSE, WHICH IS WHY IT IS WRITTEN DOWN RATHER
-    THAN LEFT AS AN ABSENCE. The Cloud SQL phase sets the postgres driver and
-    turns isHADeployment true; the Filestore phase lands the shared volumes.
+    first. What it renders now: an emptyDir at the hub's state directory, a
+    read-only settings.yaml projected into it, and no --db on argv. Both volumes
+    are pod-local and one of them cannot be written, so REPLICAS STILL SHARE NO
+    MUTABLE STATE - which is the property the argument below actually needs.
+  - isHADeployment IS TRUE HERE AND WAS FALSE AT PHASE 0, BY TWO INDEPENDENT
+    ROUTES. This bullet used to say the chart mounted no volumes and that
+    isHADeployment (cmd/server_foreground.go:927) was false at every replica
+    count. Both halves were true while the chart rendered no settings file. Now
+    a rendered server.database.driver of postgres satisfies the test at :931,
+    and server.storage.provider gcs together with server.auth.mode proxy
+    satisfies the one at :934. K_SERVICE is still unset on GKE, so that route
+    alone stays closed. hostedHAGuardsRequired (:921) is therefore satisfied and
+    the hosted HA preflight DOES run - which is why this chart renders the five
+    Block-1 keys in both auth modes rather than leaving them to the hub.
+  - The stated harm - "two hubs writing the same RWX workspace share" - is still
+    not a thing this chart can produce, and the reason is now narrower than "no
+    volumes". It is that the share itself does not exist: no RWX volume, no
+    workspace_storage section, nothing two pods can both write.
+  - The replacement harm - "the upgrade transiently enters HA mode" - has to be
+    stated more carefully than it was. HA DETECTION is on, at one replica and at
+    ten, so "it is off" is no longer the answer. The answer is that entering the
+    hub's HA mode costs nothing here, because every consequence of it is about
+    shared mutable state and there is none to share. The refusal was wrong for
+    the reason above, not for this one.
+  - LATER PHASES CHANGE THIS AGAIN, WHICH IS WHY IT IS WRITTEN DOWN RATHER THAN
+    LEFT AS AN ABSENCE. Cloud SQL supplies the database URL behind the postgres
+    driver this chart already renders; the workspace-share phase lands the RWX
+    volume.
     Concurrency correctness becomes a live question at that point, and it is
     answered there by Postgres advisory locks (pg_try_advisory_lock,
     pkg/provision/provision.go:109-116, "for cross-node mutual exclusion", and
@@ -1092,21 +1107,28 @@ Exactly one list is.
        file and then tests raw["server"] for present AND NON-NIL. It never asks
        whether the file exists as a separate question, and "server: ~" parses,
        has the key, and is still not found.
-     - A GLOBAL settings.yaml ALREADY EXISTS AT PHASE 0. This chart delivers no
-       ConfigMap and no Secret, but the hub writes one before it reads one:
-       cmd/server_foreground.go:107 calls config.InitGlobal, seeded from
-       pkg/config/embeds/default_settings.yaml - which carries schema_version,
+     - THE GLOBAL settings.yaml IS THIS CHART'S, AND IT CARRIES A server KEY.
+       That is the whole transition, and it is why the flag is inert here rather
+       than merely discouraged. The chart mounts an emptyDir at $HOME/.scion and
+       lands its rendered settings.yaml into it as a subPath, so the file
+       GetGlobalDir() resolves to is the file this chart wrote.
+     - THE HUB DOES NOT SEED ONE OVER THE TOP, AND THE REASON IS THE MOUNT. The
+       seeding call is guarded at cmd/server_foreground.go:104 by
+       os.Stat(globalDir) / os.IsNotExist, so config.InitGlobal (:107) fires only
+       when $HOME/.scion is ABSENT. The emptyDir makes the directory exist before
+       the process starts, so the guard takes the else branch and the embedded
+       defaults in pkg/config/embeds/default_settings.yaml - schema_version,
        active_profile, default_template, default_harness_config, image_registry,
-       cli, runtimes and profiles, AND NO server KEY. So "the chart ships no
-       settings file" is true and is NOT the reason; the reason is that the file
-       which does exist has no server key.
-     - AND "the hub always creates it" IS NOT DURABLE EITHER. InitGlobal is
-       guarded at cmd/server_foreground.go:104 by os.Stat(globalDir) /
-       os.IsNotExist. It fires only when $HOME/.scion is absent. A phase that
-       mounts a volume there skips the seeding entirely and the contents become
-       whatever the volume holds. Phase 0's answer does not move - an empty
-       mounted directory still has no server key - but a comment keyed off the
-       file would.
+       cli, runtimes, profiles, AND NO server KEY - are never materialised. The
+       rendered file is the only settings.yaml in the container.
+     - THE PREVIOUS PARAGRAPH WAS RIGHT FOR A REASON THAT NO LONGER APPLIES, and
+       it is kept here because the reasoning is what a later phase needs. At
+       phase 0 the chart delivered no ConfigMap and no Secret, the directory did
+       not exist, InitGlobal fired, and the seeded file had no server key - so
+       the flag was LIVE, by a different route to a different answer. Anything
+       that changes what is at $HOME/.scion changes which of these two paragraphs
+       applies: mounting a volume with no settings.yaml in it puts the flag back
+       to LIVE, and nothing in the render inspects that.
 
    THREE VALUES, NOT TWO. Reading the flag as binary is what produced two of the
    wrong answers above. In order of evaluation:
@@ -1278,36 +1300,67 @@ Exactly one list is.
 {{- $aliasOrIgnored := list "production" "port" }}
 
 {{- /*
-4. A LATER PHASE DELIVERS THESE THROUGH A CHANNEL OTHER THAN argv, AND argv WINS
-   OVER IT SILENTLY. The tense is the correction from round 4 and it is the whole
-   point of this paragraph. This comment used to open "the chart ALREADY delivers
-   these settings through a channel other than argv", WHICH IS FALSE AT THIS HEAD:
-   the chart renders no ConfigMap, no Secret, no env, no envFrom and no volumes,
-   so it delivers none of these five through any channel whatsoever. Four of them
-   - db, storage-bucket, storage-dir, base-url - are fully LIVE on argv today
-   (cmd/server_foreground.go:875-877, :889-891, :892-894, :2102) and would simply
-   take effect if passed. There is no second source yet for anything to disagree
-   with.
+4. THESE ARE DELIVERED THROUGH A CHANNEL OTHER THAN argv, AND argv WINS OVER IT
+   SILENTLY. Two of the five are delivered by this chart and three are not, and
+   that split is the paragraph. It was one claim about five flags until the
+   settings rendering landed, and it is two claims now.
+
+   DELIVERED HERE. argv is a second source for these today:
+
+     base-url        SCION_SERVER_BASE_URL, templates/configmap-env.yaml:57,
+                     reaching the container by envFrom at
+                     templates/deployment.yaml:147-148.
+     storage-bucket  server.storage.bucket in the rendered settings.yaml.
+
+   NOT DELIVERED HERE. Live on argv, nothing to disagree with, would simply take
+   effect if passed:
+
+     db              cfg.Database.URL, cmd/server_foreground.go:875-877.
+                     Arrives with Cloud SQL.
+     storage-dir     cfg.Storage.LocalPath, cmd/server_foreground.go:890-892.
+                     Arrives with the workspace share.
+     admin-emails    cfg.Hub.AdminEmails, cmd/server_foreground.go:1402-1409 and
+                     :2116-2124. Both sites read argv first and consult the
+                     settings file only when argv is empty. No phase claims it.
+
+   THIS HEADER WAS CORRECT AND STOPPED BEING CORRECT WITHOUT THE FILE BEING
+   EDITED. It read "there is no second source yet for anything to disagree with"
+   and "none of them lands anywhere", which were true while the chart rendered no
+   ConfigMap, no Secret and no volumes, and false the moment it rendered all
+   three. The refusal at the bottom of this file went stale in the same instant
+   and for the same reason, which is why they are fixed together: this header is
+   that refusal's justification, and fixing one alone leaves the file arguing
+   with itself. An unchanged file is not evidence that its claims about the rest
+   of the chart still hold - it is how they go stale unnoticed.
 
    ALL FIVE STAY RESERVED, AND NOT BY INERTIA. Before removing an entry, name
-   where it lands instead - and none of them lands anywhere. They are not rendered
-   ($setByChart), they do not select which configuration is loaded ($neverPassed),
-   they are neither inert nor misnamed ($aliasOrIgnored), and they do not weaken
-   authentication ($unsafeToPass). The harm is real and arrives on a known
-   schedule: when the configuration phase lands, an argv copy added today becomes
-   the silent winner over the channel that phase delivers, and nothing logs the
-   disagreement. The asymmetry is what decides it - reserving now costs an
-   operator a flag they have no reason to want and un-reserving later is a
-   deliberate act with a place to record itself (see the closing paragraph),
-   whereas reserving after the fact requires somebody to notice.
+   where it lands instead. For base-url and storage-bucket that is the first list
+   above, and the answer is still not argv. For the other three it is nowhere
+   yet. None of the five is rendered as an argument ($setByChart), none selects
+   which configuration is loaded ($neverPassed), none is inert or misnamed
+   ($aliasOrIgnored), and none weakens authentication ($unsafeToPass).
+
+   The harm is present for the first list and scheduled for the second. Passing
+   -base-url or -storage-bucket today makes argv the silent winner over a value
+   this chart rendered, and nothing logs the disagreement. Passing one of the
+   other three today changes a setting nothing else sets; the same silent
+   overriding starts the day its channel lands, with no edit here to mark it. The
+   asymmetry is what decides it - reserving costs an operator a flag they have no
+   reason to want, un-reserving is a deliberate act with a place to record itself
+   (see the closing paragraph), and reserving after the fact requires somebody to
+   notice.
 
    Not verifiable against the rendered arguments, by construction - the rendered
-   argument list is where these must NOT appear. Check them against the channel.
+   argument list is where these must NOT appear. Check them against the channel,
+   which hack/verify.sh now does: it asserts the first list against the render and
+   the second against its absence, so moving an entry between the two lists
+   without moving the code, or the reverse, is a red test rather than a paragraph
+   nobody re-reads.
 
-   NAME THE CHANNEL WHEN YOU ADD AN ENTRY, because it is not the same channel
-   for every entry and the precedence differs. admin-emails, db, storage-bucket
-   and storage-dir are destined for the settings file. base-url is destined for
-   the SCION_SERVER_BASE_URL environment variable.
+   NAME THE CHANNEL WHEN YOU ADD AN ENTRY, because it is not the same channel for
+   every entry and the precedence differs. admin-emails, db, storage-bucket and
+   storage-dir belong to the settings file; base-url belongs to the
+   SCION_SERVER_BASE_URL environment variable.
 
    Precedence for base-url, read from the hub rather than assumed, because "two
    sources" only matters if one of them silently loses:
@@ -1318,9 +1371,10 @@ Exactly one list is.
        settings file server.hub.public_url, else --base-url, else
        SCION_SERVER_BASE_URL, else project settings, else localhost
 
-   Two consequences, both silent. ARGV BEATS THE ENVIRONMENT AT BOTH SITES: a
-   future phase that emits --base-url shadows the environment variable, with no
-   error and, unless --debug is on, no log line either. And the two sites do not
+   Two consequences, both silent. ARGV BEATS THE ENVIRONMENT AT BOTH SITES, and
+   the environment variable is one this chart renders, so an argv --base-url
+   shadows a live value rather than a hypothetical one, with no error and, unless
+   --debug is on, no log line either. And the two sites do not
    agree with each other - the settings file outranks argv when resolving the
    agent-facing endpoint but is not consulted at all for the OAuth redirect - so
    argv plus a settings file that sets public_url yields two different base URLs
@@ -1356,8 +1410,17 @@ Exactly one list is.
    happens to look like a credential, and a passphrase does not. And it PRE-EMPTS
    the delivery channel: resolveSessionSecret (cmd/server_foreground.go:1452-1456)
    takes the flag first and only falls back to SCION_SERVER_SESSION_SECRET, so an
-   argv value silently outranks the Secret-backed environment variable a later
-   phase mounts.
+   argv value silently outranks the Secret-backed environment variable the
+   session-secret phase mounts. THAT CHANNEL IS NOT THE SECRET THIS CHART ALREADY
+   RENDERS, and the distinction is worth the sentence: this chart renders a Secret
+   holding settings.yaml, and the settings file has no session-secret key at all:
+   there is no such field anywhere in V1ServerConfig, and resolveSessionSecret
+   reads exactly three sources in order - the flag, SCION_SERVER_SESSION_SECRET,
+   then bare SESSION_SECRET for compatibility - none of which is a file. So the
+   presence of a Secret in the rendered output says nothing about
+   this claim, which stays forward-tensed until SCION_SERVER_SESSION_SECRET is
+   emitted. Measured at this head: zero occurrences of SESSION_SECRET in every
+   permutation's render.
 
    --dev-auth (cmd/server.go:251) IS A DIRECT WRITE TO cfg.Auth.Enabled AT
    cmd/server_foreground.go:884-886, AND THE DANGEROUS DIRECTION IS TRUE, NOT
@@ -1545,7 +1608,7 @@ overlay on the other, and no single verb covers both.
 {{- fail (printf "hub.args may not contain -%s: it is not the lever it looks like. -production is a deprecated alias bound to the same variable as -hosted, so passing it can disable hosted mode; -port is ignored whenever -enable-web is set, which this chart always sets, so passing it changes nothing observable. The chart renders neither, which is why this is a separate reservation and not a stale entry." $flag) }}
 {{- end }}
 {{- if has $flag $ownedByConfig }}
-{{- fail (printf "hub.args may not contain -%s: a later phase delivers this setting through another channel - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy added now becomes a second and invisible source for one value the moment that channel lands, with nothing reporting the disagreement. This chart delivers none of them yet: today the flag would simply take effect, which is why this reservation cannot be inferred from the rendered output and is written down here instead." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: this setting has a delivery channel other than argv - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy is a second and invisible source for one value, with nothing reporting the disagreement. Two of the five are live in this release: -base-url is shadowed onto the SCION_SERVER_BASE_URL this chart renders, and -storage-bucket onto server.storage.bucket in the settings file it renders, so passing either makes argv the winner over a value already set here. The other three - -db, -storage-dir and -admin-emails - have no second source in this release and would simply take effect; they stay reserved because the channel arrives on a schedule and reserving after the fact requires somebody to notice." $flag) }}
 {{- end }}
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}

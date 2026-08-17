@@ -87,12 +87,25 @@ spec:
 
         Two things about this annotation that are easy to get wrong later.
 
-        It records the operator's INTENT, not an observation of the hub. Nothing
-        in this chart yet feeds hub.hubId into the running process - the
-        settings file that does arrives with the configuration rendering - so
-        until then the hub's actual ID is still hostname-derived and this
-        annotation can legitimately disagree with it. Do not read it as a
-        control or as a status field.
+        It records the operator's INTENT, not an observation of the hub, and the
+        two halves of that sentence now behave differently. This chart does feed
+        hub.hubId into the running process: server.hub.hub_id in the mounted
+        settings.yaml comes from the same helper this annotation does, so within
+        one render they cannot disagree, and hack/verify.sh asserts that pairing
+        per permutation. Treat a disagreement as a defect rather than as the
+        expected state - which is the reverse of what this paragraph said while
+        the chart rendered no settings file, and it changed without this file
+        being edited.
+
+        The exception is config.existingSecret, where the settings file is the
+        operator's and this annotation is still rendered from hub.hubId. There
+        the two are genuinely independent and can differ, which is one more
+        reason that path validates nothing.
+
+        It is still not an observation either way. Nothing reads the running hub
+        back into it, so a pod whose settings file failed to load reports the
+        intended ID here regardless. Do not read it as a control or as a status
+        field.
 
         The prefix is deliberate. This repository has two pod-annotation
         conventions: agent pods use a bare "scion.<name>" form (see
