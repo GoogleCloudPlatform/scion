@@ -170,10 +170,14 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			// key is only ever set under a gke-shared-volume config, so a
 			// consumer's exposure depends on which deployments carry one:
 			//   - the diagnostics UI styles it unhealthy and labels it
-			//     "degraded": with no degraded class, anything but healthy takes
-			//     the red style (diagnostics.ts:294-298) while the label prints
-			//     the raw status (:299-303). This is the one that actually
-			//     happens on a GKE hub with this backend;
+			//     "degraded": renderStatusBanner in diagnostics.ts has no
+			//     degraded class, so degraded falls through its statusClass
+			//     ternary to the red unhealthy style, and through its
+			//     statusLabel ternary to printing the raw status. Not "anything
+			//     but healthy is red" — unknown has its own neutral class, and
+			//     it is what the banner shows before the health fetch resolves.
+			//     This is the one that actually happens on a GKE hub with this
+			//     backend;
 			//   - on a workstation configured with this backend, and only
 			//     there: waitForServerReady (cmd/server_daemon.go) never
 			//     returns true, so `scion server start` stalls for its full 20s
