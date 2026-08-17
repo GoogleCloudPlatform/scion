@@ -28,7 +28,7 @@
         "type": {
           "type": "string",
           "enum": ["", "Recreate", "RollingUpdate"],
-          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. The safe value depends on replicaCount, which this enum cannot see: RollingUpdate at one replica is refused at render time in scion-hub.updateStrategyType, because it renders maxUnavailable: 0 and so guarantees two hubs writing one workspace share for the length of the new pod's startup."
+          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. That default is a preference and not a safety measure: every value is accepted at every replica count, because concurrent hub instances are a supported mode coordinated by Postgres advisory locks. At one replica the trade is an outage that loses PTY sessions and port tunnels (Recreate) against a window with two pods in which the web terminal and exec reach the wrong one about half the time (RollingUpdate, which renders maxUnavailable: 0)."
         }
       }
     },

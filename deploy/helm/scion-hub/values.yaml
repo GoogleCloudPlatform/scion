@@ -31,13 +31,18 @@ replicaCount: 1
 
 updateStrategy:
   # "" resolves to Recreate at one replica and RollingUpdate (maxUnavailable 0)
-  # above one. At one replica a rolling update runs two hubs that both write the
-  # same workspace share, which is the hazard Recreate avoids - and because
-  # maxUnavailable is 0, that overlap is guaranteed rather than brief: the new
-  # hub must become Available before the old one is deleted, which the startup
-  # budget allows to take five minutes. Setting RollingUpdate explicitly at one
-  # replica is therefore refused at render time; leave this empty, or set
-  # Recreate. The value to change for a zero-downtime update is replicaCount.
+  # above one. That default is a preference, not a safety measure, and every
+  # value of this field is accepted at every replica count.
+  #
+  # The trade at one replica: Recreate takes the hub down for the length of one
+  # startup and loses PTY sessions, port tunnels and in-memory presence, which
+  # is what VALIDATION.md scenario 20 expects. RollingUpdate keeps the old hub
+  # serving until the new one is Available - maxUnavailable is 0 - so there is
+  # no outage, at the cost of a window with two pods in which the web terminal,
+  # exec, log tailing and port forwarding hit the wrong pod about half the time
+  # (see replicaCount above). Neither is unsafe: concurrent hub instances are a
+  # supported mode, coordinated by Postgres advisory locks rather than by
+  # anything on disk, and this chart mounts no shared volume in any case.
   type: ""
 
 image:

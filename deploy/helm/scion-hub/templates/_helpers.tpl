@@ -228,6 +228,17 @@ before the listener binds. Killing the pod during that leaves a partially applie
 migration, so the retry starts from a different state than the attempt before it
 and the failure stops being reproducible.
 
+BOTH HALVES OF THAT ARE IN SOURCE, cited because a refusal must encode a harm and
+the harm has to be findable without re-deriving it. The lock is a BLOCKING
+pg_advisory_lock(LockSchemaMigration) taken before Migrate returns and therefore
+before the hub serves - cmd/server_foreground.go:1168-1200. "Partially applied" is
+not an inference from the word migration: CompositeStore.Migrate
+(pkg/store/entadapter/composite.go:179-227) is an ordered SEQUENCE - a scope_id
+backfill, a dedup, entc.AutoMigrate, an allowlist-to-invited data migration, a
+verification-status backfill, a seed - with in-source comments stating that the
+order matters. A kill lands between two of those steps, not before or after all
+of them.
+
 DISABLING THE STARTUP PROBE IS PERMITTED ONLY WHILE THE LIVENESS PROBE IS OFF,
 which is a real distinction and not a loophole. A startup probe's job is to hold
 the liveness probe off until the container is up. With liveness disabled - the
@@ -252,33 +263,51 @@ hub mid-migration, which is the exact failure the budget exists to prevent.
 {{/*
 Deployment update strategy: Recreate at one replica, RollingUpdate above it.
 
-FOUND BY THE SWEEP FOR PRODUCT INVARIANTS, not by review. It is the second
-instance of the startup-budget shape: the schema constrains updateStrategy.type
-with an enum and constrains replicaCount with a minimum, and the property is
-about the PAIR. Explicit RollingUpdate at replicaCount 1 renders clean, with the
-schema fully active and no skip flag, and passes kubeconform - and it is the
-exact hazard the default derivation exists to avoid.
+A DEFAULT MAY ENCODE A PREFERENCE; A REFUSAL MUST ENCODE A HARM. This helper is
+the record of that distinction, because it briefly got it wrong.
 
-The chart's own hardening makes the override worse rather than better. Whenever
-the type resolves to RollingUpdate the Deployment renders maxUnavailable: 0,
-which is correct above one replica and means the new pod must become Available
-before the old one is deleted. At one replica that does not merely permit two
-hubs, it GUARANTEES two hubs - for as long as the new one takes to become ready,
-which the startup budget above allows to be five minutes - both mounting and
-writing the same RWX workspace share. The symptom is corrupted workspace state,
-which points at the workspace, the share and the agent long before it points at
-a strategy field the operator set once and considered settled.
+The default is a preference and owes nobody a justification: at one replica
+Recreate is the simpler upgrade, and it is what VALIDATION.md scenario 20 is
+written against (a short outage, with PTY sessions, port tunnels and in-memory
+presence lost). An operator who would rather keep those across an upgrade sets
+RollingUpdate and accepts a window with two pods. That is an ordinary Kubernetes
+trade and the chart takes no position on it.
 
-Explicit Recreate is accepted at any replica count: it costs downtime and risks
-nothing. Above one replica RollingUpdate is accepted because concurrent hubs are
-already what more than one replica means - the choice was made by replicaCount,
-not by this field.
+There WAS a fail here refusing explicit RollingUpdate at replicaCount 1, added
+during round-2 review and removed in round 3. It is worth knowing why, because
+the mechanism was sound and only the justification was invented:
+
+  - The stated harm - "two hubs writing the same RWX workspace share" - is not
+    a thing this chart can produce. It mounts no volumes at all. Nothing here
+    is shared between pods.
+  - The replacement harm - "the upgrade transiently enters HA mode" - is false
+    too: isHADeployment (cmd/server_foreground.go:927) keys off the database
+    driver, so on Cloud SQL Postgres HA is already true at one replica and the
+    guards are already engaged. Concurrent hub instances are a SUPPORTED mode,
+    coordinated by pg_try_advisory_lock (pkg/provision/provision.go:109-116,
+    whose own comment says "for cross-node mutual exclusion"; the keys are in
+    pkg/store/concurrency.go) rather than by anything on a filesystem.
+  - And no third candidate can rescue it, without anyone having to look for
+    one. The refusal triggered only when replicaCount <= 1. Any harm from
+    CONCURRENCY is strictly worse at two replicas - permanent instead of
+    bounded by one startup - and the chart accepts two replicas without a word.
+    A refusal whose trigger is "only one replica" cannot be discriminating on
+    concurrency, whatever the harm turns out to be.
+  - On the one axis where concurrency IS documented to cost something - more
+    than one replica breaks the web terminal and exec for (N-1)/N of requests,
+    see replicaCount in values.yaml - the refusal was backwards: it forced
+    Recreate, which loses every session with certainty.
+
+The shape that found it is still a good heuristic and it is still worth running:
+an enum on one field, a minimum on another, and the property about the pair. It
+is how probes.startup's budget was found, and that one was real. But the shape
+tells you where to LOOK. The harm has to be found in source before anything is
+refused, and that is the half all three of us skipped here. Recorded in
+verification/p0-product-invariant-sweep.md as a benign shape-match, next to the
+instance that was not.
 */}}
 {{- define "scion-hub.updateStrategyType" -}}
 {{- $explicit := (.Values.updateStrategy | default dict).type | default "" }}
-{{- if and (eq $explicit "RollingUpdate") (le (int .Values.replicaCount) 1) }}
-{{- fail "updateStrategy.type is RollingUpdate at replicaCount 1. A rolling update renders maxUnavailable: 0, so the replacement hub must become Available before the old one is deleted - at one replica that means two hubs run at once, for up to the whole startup budget, both writing the same workspace share. Leave updateStrategy.type empty (it resolves to Recreate at one replica and RollingUpdate above it) or set Recreate explicitly. If you want a rolling update to avoid downtime, the value to change is replicaCount, and read its comment first." }}
-{{- end }}
 {{- if $explicit }}
 {{- $explicit }}
 {{- else if gt (int .Values.replicaCount) 1 }}
@@ -688,6 +717,18 @@ announcing it.
 
 The explicit list is the statement; these two checks are what keep the statement
 true.
+
+KNOWN LIMIT OF THE SCAN BELOW: it classifies an element as a flag by a leading
+"-", so a flag whose VALUE is in the next element and itself starts with "-"
+would be counted as a flag of its own, and direction A would report a chart
+defect naming something that is not a flag. Nothing the chart renders today
+looks like that - every space-separated value is an address, a port or a path -
+and the failure is loud, immediate and names the offending token, so it cannot
+ship silently. THE REMEDY IF IT EVER FIRES: walk $args pairwise, remembering
+whether the previous element was a flag that takes a separate value, instead of
+testing each element independently. Written down rather than pre-implemented,
+because the pairwise walk needs a list of which flags take values, and that list
+would be a third thing to keep in step with the command.
 */}}
 {{- $renderedFlags := list }}
 {{- range $chartArg := $args }}
