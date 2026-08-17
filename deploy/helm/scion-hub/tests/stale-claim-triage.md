@@ -75,7 +75,7 @@ All are **true at `60b2912`** and false at `11a78701`. None reopens Phase 0.
 | 14 | `_helpers.tpl:637-638` | "This chart delivers no ConfigMap and no Secret" | both land |
 | 15 | `_helpers.tpl:827` | "the chart renders no ConfigMap, no Secret, no env, no envFrom and no volumes" | all five land |
 | — | `_helpers.tpl:899-901` | "argv value silently outranks the Secret-backed environment variable a later phase mounts" | the Secret lands |
-| **16** | **`_helpers.tpl:310-314`** | **three clauses of one sentence: "this chart mounts no volumes"; "the driver is not postgres"; "the gcs-plus-proxy branch is unset" — and the conclusion they support, "isHADeployment ... is FALSE at every replica count"** | **P1 mounts the settings volume; and, per `gd-p1-dev`, P1 falsifies the driver clause and the gcs-plus-proxy clause too, so the conclusion is false by two further independent routes** |
+| **16** | **`_helpers.tpl:310-314`** | **three clauses spanning two sentences of one bullet: "this chart mounts no volumes" (ends sentence 2); "the driver is not postgres" and "the gcs-plus-proxy branch is unset" (sentence 3) — and the conclusion they support, "isHADeployment ... is FALSE at every replica count"** | **P1 mounts the settings volume (verified). Per `gd-p1-dev`, P1 also falsifies the driver clause (corroborated in-tree at `:321-322`) and the gcs-plus-proxy clause (attributed, no in-tree corroboration), so the conclusion is false by two further independent routes** |
 | **17** | **`NOTES.txt:72-79`** | **"It renders no server configuration"** | **P1 renders exactly that** |
 | **17b** | **`NOTES.txt:75-76`** | **"It does write a settings.yaml for itself on first boot... that file carries no server section"** | **P1's mounted file has one** |
 
@@ -126,9 +126,20 @@ tree instead of trusting the quotation.**
 
 **First, the basis was fabricated.** The struck paragraph reasons about whether a
 read-only projected volume counts as "shared mutable state" — as though
-`isHADeployment` inspected volumes. It does not. `cmd/server_foreground.go:926-938`
-keys on exactly three things: `K_SERVICE`, `Database.Driver == postgres`, and
-`Storage.Provider == gcs && Auth.Mode == proxy`. **It never reads volumes at all.**
+`isHADeployment` inspected volumes. It does not. `cmd/server_foreground.go:927-938`
+keys on exactly three things:
+
+```
+:928   os.Getenv("K_SERVICE") != ""
+:931   strings.EqualFold(cfg.Database.Driver, "postgres")
+:934   strings.EqualFold(cfg.Storage.Provider, "gcs") && cfg.Auth.Mode == "proxy"
+:937   return false
+```
+
+**No fourth predicate. It never reads volumes, mounts, or anything resembling
+mutable state.** (Two case-insensitive comparisons, not `==`; and the function
+opens at `:927`, not `:926` — both slips inherited from my brief and corrected
+here rather than carried forward, `gd-p0-rev-4` O2/N1.)
 The reassurance was derived from a mechanism that does not exist, and it was the
 reassurance, not the finding, that set the severity.
 
@@ -143,9 +154,26 @@ at every replica count - K_SERVICE is unset on GKE, the driver is not
 postgres, and the gcs-plus-proxy branch is unset - ...
 ```
 
-`grep -c 'NO mutable state, and'` → **1**. `grep -c 'mutable state, so'` → **0**.
-The chart states a **conjunction** and then names the three real predicates
-explicitly. This file sharpened the "and" into a "so", attributed the resulting
+Counts, **with their corpus, because a count without one is not a measurement**
+(`gd-p0-rev-4`, O1). Corpus `templates/_helpers.tpl` at `38a41b6e`, GNU grep 3.8
+invoked as `/usr/bin/grep` — the harness shell here wraps `grep` in a zsh
+function around ugrep, so a bare `grep` is a different program:
+
+```
+/usr/bin/grep -c 'NO mutable state, and'  templates/_helpers.tpl  ->  1
+/usr/bin/grep -c 'mutable state, so'      templates/_helpers.tpl  ->  0
+```
+
+⚠️ **Widen the corpus to the chart tree and the second count is 1, not 0 — and
+the single hit is the line above, in this file, asserting that it is 0.** The
+count falsified itself at the moment it was written down.
+
+> **A NEGATIVE COUNT PUBLISHED IN PROSE ENTERS ITS OWN CORPUS. State the corpus
+> or the document becomes the counter-example to its own finding.**
+
+That is not a quibble about scoping: it is the same defect as the misquote, one
+turn further in. The chart states a **conjunction** and then names the three real
+predicates explicitly. This file sharpened the "and" into a "so", attributed the resulting
 inference to the chart, and then defended it.
 
 > **A MISQUOTE THAT SHARPENS A CONJUNCTION INTO AN INFERENCE CREATES A DEFECT IN
@@ -164,15 +192,36 @@ bullet and it needs nothing from this commit.)
 #### And the row was incomplete, which is the same failure one level up
 
 Row 16 originally cited one clause: `mounts no volumes`. `gd-p1-dev` measured that
-the **same sentence** carries two more clauses that also go false at P1 — the
-`driver is not postgres` clause and the `gcs-plus-proxy branch is unset` clause —
-neither of which appeared in any row of §2. So the bullet's actual conclusion,
-*"isHADeployment is FALSE at every replica count"*, is **false at P1 by two
-independent routes on top of the volumes one**. The struck severity note was
-reasoning about the wrong clause of the sentence it was triaging.
+**the next sentence of the same bullet** carries two more clauses that also go
+false at P1 — the `driver is not postgres` clause and the `gcs-plus-proxy branch
+is unset` clause — neither of which appeared in any row of §2. So the bullet's
+actual conclusion, *"isHADeployment is FALSE at every replica count"*, is **false
+at P1 by two independent routes on top of the volumes one**. The struck severity
+note was reasoning about the wrong clause of the bullet it was triaging.
 
-The sweep missed them because it keyed on the token `volumes`. The two adjacent
-clauses sit inside the same sentence and contain no swept token.
+**Provenance of those two, stated because attributed is not verified.** The
+`postgres` clause is corroborated in-tree at `_helpers.tpl:321-322`, which names
+the Cloud SQL phase as setting the driver. **The `gcs-plus-proxy` clause has no
+in-tree corroboration and rests entirely on `gd-p1-dev`'s report of a tree that
+does not exist at this SHA.** It is attributed, not verified, and this file
+should not be read as having checked it (`gd-p0-rev-4`).
+
+The sweep missed them because it keyed on the token `volumes` — **and the token
+is in the previous sentence.** *(This paragraph said "the same sentence" until
+`gd-p0-rev-4` measured the full stop after `renders no --db`. It is two
+sentences: `mounts no volumes` closes the second, and the driver clause, the
+gcs-plus-proxy clause and the conclusion are all in the third.* **A checkable
+claim about the structure of quoted text, wrong, in the document whose function
+is accurate quotation, inside the commit that removes a wrong mechanism claim —
+the same class, one level down.** *Left visible rather than silently corrected,
+on the same reasoning as the struck note above.)*
+
+**The correction strengthens the finding rather than weakening it.** The sweep
+did not fail to look past a clause; **it stopped at the sentence boundary**, and
+returned a sentence that was true and complete on its own terms while the claim
+it served ran on into the next one. That is a sharper statement of the lesson
+than the one it replaces, and it is the reason the rule below says *claim* and
+not *sentence*.
 
 > **A TOKEN-KEYED SWEEP RETURNS THE CLAUSE CONTAINING THE TOKEN, NOT THE CLAIM
 > CONTAINING THE CLAUSE — AND A ROW QUOTING REAL TEXT FROM THE RIGHT LINE LOOKS
@@ -185,6 +234,31 @@ in this incident quoted real text from the right line.
 Row 16 in §2 has been amended to carry all three clauses and the falsified
 conclusion. Severity is **not** lower than instances eleven to fifteen; the
 original ranking rested on the fabricated basis above.
+
+#### A required sentence that is absent, and why it must stay absent
+
+`gke-deploy-lead`'s ruling for this edit called for the struck note to be
+characterised as *"the conclusion was right for the wrong reason."* **That phrase
+appears nowhere in this file. `gd-p0-rev-4` measured its absence and asked for
+the decision to be recorded rather than left as the commit's silence.**
+
+**I will not claim it was a deliberate declination.** I cannot verify my own
+intent at the time, and dressing an omission as a reasoned decision after the
+fact is the precise defect this commit exists to remove — one that would be
+unfalsifiable by construction, which is worse than the misquote above.
+
+**What is checkable is that the sentence would have been false.** The struck
+note's conclusion was not *"the flag is false today"*; it was that the inference
+**survives** P1. Per `gd-p1-dev`, it does not — the driver and gcs-plus-proxy
+clauses go false too. So writing *"right for the wrong reason"* would have put a
+**new false sentence into the commit whose purpose is removing false sentences**,
+and would have done it in the ruling's own words, where nobody would re-check it.
+
+> **A REQUIRED WORDING IS A CLAIM LIKE ANY OTHER, AND IT ARRIVES WITH THE ONE
+> PROPERTY THAT SUPPRESSES CHECKING: AUTHORITY.**
+
+The sentence stays out. That is now a recorded position with a stated basis,
+which is what was actually missing — not the sentence.
 
 > **A CLAIM CAN BE PROTECTED BY A DISCLAIMER THAT NAMES THE WRONG PHASE, AND
 > THAT IS WORSE THAN AN UNPROTECTED CLAIM, BECAUSE THE DISCLAIMER IS WHAT STOPS
@@ -264,6 +338,20 @@ number to one would be attaching a tripwire to a policy.
   its transition and misnames the phase, because what is wrong there is a
   *relation between two sentences*, and neither sentence is individually
   suspicious.
+- 🔴 **The same claim is in `values.yaml` and `values.schema.json`, and this
+  triage never looked at either file.** `gd-p0-rev-4` found it:
+  `values.yaml:46` and `values.schema.json:31` both carry *"renders no `--db`
+  and mounts no volumes, so replicas share no mutable state"* plus the
+  HA-preflight consequence. `grep -c 'values.yaml'` and
+  `grep -c 'values.schema.json'` over this file are **both 0** — neither file is
+  named anywhere in the triage. This is consistent with the stated method (§3:
+  all four reviewers swept `templates/`, and these are not under `templates/`)
+  and §6 already disclaims coverage, so it is not a contradiction. **It is
+  worse: it is the same defect in the two files an operator is most likely to
+  read and edit, and the schema copy additionally repeats the wrong-phase
+  disclaimer, naming Cloud SQL and Filestore.** Not fixed here — both are
+  chart-proper, and this commit's containment guarantee is that it touches no
+  chart-proper file. **P1 owns all three copies, or none of them are fixed.**
 - **The mood classification is mine and is unreviewed.** Nine of the twenty-four
   are judgement calls between normative and descriptive — chiefly `:851-852`,
   which reads as a statement about the future but functions as an instruction.
