@@ -998,6 +998,18 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	// a trailing slash would pass preflight but cause a runtime audience
 	// mismatch in IAP token verification.
 	cfg.Auth.Proxy.IAP.Audience = proxyAudience
+	// The GKE + GCLB bootstrap flow deliberately allows a placeholder audience
+	// on the first deploy, because the backend-service ID only exists once the
+	// ingress has reconciled.  Preflight stays non-fatal for that case, but an
+	// operator who never completes the follow-up upgrade would otherwise get a
+	// hub that looks healthy and 401s every real request.
+	if isLikelyPlaceholderAudience(proxyAudience) {
+		log.Printf("WARNING: IAP audience %q looks like a bootstrap placeholder. "+
+			"IAP token validation will FAIL on real requests until a valid "+
+			"backend-service audience is configured. After your ingress "+
+			"reconciles, update auth.proxy.iap.audience with the real "+
+			"backend-service ID and restart.", proxyAudience)
+	}
 
 	if cfg.Auth.Transport == nil {
 		return fmt.Errorf("hosted HA deployment requires server.auth.transport; do not use server.transport")
@@ -1045,6 +1057,36 @@ func isSupportedIAPAudience(audience string) bool {
 		parts[1] == "projects" && parts[2] != "" &&
 		parts[3] == "global" &&
 		parts[4] == "backendServices" && parts[5] != "" {
+		return true
+	}
+	return false
+}
+
+// isLikelyPlaceholderAudience returns true when a GCLB audience looks
+// synthetic — e.g. all-zero project numbers, backend-service ID "0", or other
+// patterns that indicate a bootstrap placeholder rather than a real
+// backend-service audience.
+//
+// Only the GCLB format is inspected.  Cloud Run audiences are knowable before
+// the first deploy, so they never need a placeholder.
+func isLikelyPlaceholderAudience(audience string) bool {
+	parts := strings.Split(strings.TrimSpace(audience), "/")
+	if len(parts) != 6 || parts[4] != "backendServices" {
+		return false
+	}
+	projectNumber := parts[2]
+	backendServiceID := parts[5]
+
+	// Backend-service ID "0" is the canonical placeholder.
+	if backendServiceID == "0" {
+		return true
+	}
+	// An all-zeros project number (any length) is synthetic.
+	if projectNumber != "" && strings.Trim(projectNumber, "0") == "" {
+		return true
+	}
+	// Well-known dummy project numbers.
+	if projectNumber == "123456789" {
 		return true
 	}
 	return false
