@@ -36,10 +36,12 @@
 #                        green everywhere - the breach produces no symptom that
 #                        points at the number.
 #
-# 🔴 WHAT EXPECTED_ASSERTIONS DOES NOT TELL YOU, STATED HERE BECAUSE IT USED TO
-# AND NO LONGER DOES. The total counts assertions EXECUTED, not assertions that
+# 🔴 [HISTORY 2026-08-17] WHAT EXPECTED_ASSERTIONS DOES NOT TELL YOU, STATED
+# HERE BECAUSE IT USED TO AND NO LONGER DOES. The total counts assertions EXECUTED, not assertions that
 # meant anything. Those differ: an assertion that shells out to a missing binary
-# and reads the non-zero exit as proof still executes. Before the tool-presence
+# and reads the non-zero exit as proof still executes. [HISTORY 2026-08-17,
+# NUMERALS ARE PERIOD-ACCURATE AND NOT CURRENT: this file now carries 127
+# assertions, not 106] Before the tool-presence
 # arms below, a run with no helm reported 0/106 - visibly alarming, and load-
 # bearing by accident, because the number was a pass-count masquerading as a
 # coverage-count. Counting executions is the correct meaning for rule 9, and it
@@ -52,9 +54,11 @@
 # MUTATION TABLE. Every row EXECUTED, none inferred, and every row asserts the
 # WHOLE summary line - exit code AND scripts AND assertions AND meta-failures -
 # not the field the mutation was aimed at. That rule is not stylistic. The first
-# version of this file shipped with the count check short-circuited once any
+# version of this file [HISTORY 2026-08-17] shipped with the count check short-circuited once any
 # script failed, and MM6 - the mutation that triggers exactly that condition -
-# had already printed "assertions: 60/106" on a run recorded as green, because
+# had already printed "assertions: 60/106" on a run recorded as green - a
+# PERIOD-ACCURATE numeral, not a current one; the denominator is 127 today -
+# because
 # what was asserted about MM6 was its exit code. THE DEFECT WAS IN THE SUITE'S
 # OWN OUTPUT AT THE MOMENT IT WAS DECLARED PASSING. A mutation that checks one
 # field of a multi-field output has tested one field; the rest is decoration you
@@ -180,7 +184,7 @@ summary() {  # <ran> <assertions>
 
 # --- pre-flight: the toolchain ------------------------------------------------
 # THE HARNESS MUST NOT BLAME THE CHART FOR ITS OWN MISSING TOOLS. Run without
-# helm, this suite previously reported "render is MISSING kind: Service" and
+# helm, this suite [HISTORY 2026-08-17] previously reported "render is MISSING kind: Service" and
 # "package is MISSING scion-hub/Chart.yaml" - every one a false accusation - and
 # exited 1, the code reserved for "the chart is broken". Checked here as well as
 # inside each script so that the set-level run says it once and clearly, and so
@@ -191,7 +195,7 @@ for t in "${REQUIRED_TOOLS[@]}"; do
 done
 if [ -n "$missing" ]; then
   # note(), NOT a bare echo, and the SAME summary line as every other exit path.
-  # The first version of this arm printed its own message and exited without a
+  # [HISTORY 2026-08-17] The first version of this arm printed its own message and exited without a
   # summary, so the catastrophic-shortfall run reported no meta-failure count at
   # all - reproducing, on the repair, the precise surface being repaired:
   # a total of 0 sitting beside a meta-failure count that does not say 1.
@@ -296,7 +300,7 @@ done
 [ "$ran" -eq "$EXPECTED_SCRIPTS" ] || note "ran ${ran} scripts, expected exactly ${EXPECTED_SCRIPTS}."
 
 # --- gate 5: hack/verify.sh, WHICH THIS FILE USED TO OMIT ----------------------
-# 🔴 AND THE OMISSION SHIPPED. Commit eec9df03 landed on the work branch with
+# 🔴 [HISTORY 2026-08-17] AND THE OMISSION SHIPPED. Commit eec9df03 landed on the work branch with
 # five of the five golden files stale, because their content changed and nothing
 # in this run compares them. I ran run-all.sh, read PASS, and pushed. The goldens
 # are hack/verify.sh's business and hack/ is not tests/, so the set this runner
@@ -395,7 +399,7 @@ else
     # no reason at all, because the filter below matches none of the lines the
     # toolchain emits when the package cannot be built.
     #
-    # MEASURED, three arms, all three previously reported as "the chart is wrong":
+    # MEASURED, three arms, [HISTORY 2026-08-17] all three previously reported as "the chart is wrong":
     #   gate name drifted, a genuine test failure  -> --- FAIL, --- committed,
     #                                                 --- derived now.  POSITIVE
     #                                                 CONTROL: the filter works
@@ -429,7 +433,7 @@ else
 fi
 
 # --- count check 4: the assertion total ---------------------------------------
-# UNCONDITIONAL. This condition used to read
+# UNCONDITIONAL. [HISTORY 2026-08-17] This condition used to read
 #
 #   real_failure -eq 0 && meta_fail -eq 0 && total_assertions -ne EXPECTED
 #
