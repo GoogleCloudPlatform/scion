@@ -202,7 +202,15 @@ spec:
       a genuine init container that never exits, which hangs the pod at startup
       forever - so cloudsql.nativeSidecar: false exists, and NOTES.txt prints
       what to expect on that path.
+
+      assertNativeSidecarSupported refuses that combination at render time. It
+      is invoked HERE, immediately above the thing it is about, rather than from
+      Chart.yaml's kubeVersion, because the requirement belongs to this branch
+      and not to the chart: a kubeVersion floor is evaluated before values are
+      read, so it also rejected the sub-1.29 clusters the false branch exists to
+      serve. See the note in Chart.yaml.
       */}}
+      {{- include "scion-hub.assertNativeSidecarSupported" . }}
       {{- if and .Values.cloudsql.enabled .Values.cloudsql.nativeSidecar }}
       initContainers:
         {{- include "scion-hub.cloudsqlProxyContainer" . | nindent 8 }}

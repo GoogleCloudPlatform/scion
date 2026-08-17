@@ -2881,6 +2881,49 @@ anywhere nearby. That is the case this guard is really for.
 {{- end }}
 {{- end }}
 
+{{/*
+The native sidecar's version requirement, asserted where it applies.
+
+THIS REPLACES A kubeVersion FLOOR IN Chart.yaml, AND THE REASON IT IS HERE
+INSTEAD OF THERE IS THAT THE REQUIREMENT IS CONDITIONAL ON A VALUE. Chart.yaml's
+kubeVersion is evaluated before any value is read, so ">=1.29.0-0" rejected
+every cluster below 1.29 - including the ones cloudsql.nativeSidecar: false
+exists to serve, and which values.yaml and NOTES.txt both tell the operator to
+use. gd-p2-rev measured that contradiction. The requirement is real, but it is
+the requirement of one branch of one template, so it is asserted from that
+branch.
+
+WHY Major/Minor AND NOT semverCompare. .Capabilities.KubeVersion.Version is
+whatever the API server reports, and real ones are not plain semver: GKE reports
+v1.29.4-gke.1043002, and Minor is frequently "28+" on managed distributions.
+semverCompare on those strings either errors or silently mis-orders them, and
+the usual workaround - stripping non-digits before comparing - turns
+1.28.5-gke.1200 into 1.28.51200, which compares as NEWER than 1.29. Comparing
+the two integers directly has none of those failure modes.
+
+WHY THIS FAILS OPEN ON A VERSION IT CANNOT PARSE. If Minor does not yield a
+number, the only honest statement is that this render does not know the
+cluster's version - and "unknown" is not "below 1.29". Refusing there would
+block a conformant 1.33 cluster whose only sin is an unusual version string, and
+the remedy this message names (set nativeSidecar false) would then push it into
+the crash-loop window NOTES.txt warns about, which is worse than where it
+started. So the guard fires ONLY when it can positively establish minor < 29.
+It converts a known-bad configuration into a sentence; it is not, and must not
+be read as, a proof that any other version works.
+*/}}
+{{- define "scion-hub.assertNativeSidecarSupported" -}}
+{{- if and .Values.cloudsql.enabled .Values.cloudsql.nativeSidecar }}
+{{- $kv := .Capabilities.KubeVersion }}
+{{- $major := regexReplaceAll "[^0-9]" $kv.Major "" }}
+{{- $minor := regexReplaceAll "[^0-9]" $kv.Minor "" }}
+{{- if and (ne $major "") (ne $minor "") }}
+{{- if and (eq (int $major) 1) (lt (int $minor) 29) }}
+{{- fail (printf "cloudsql.nativeSidecar is true and this cluster reports Kubernetes %s, which is below 1.29. Native sidecars (an initContainers entry with restartPolicy: Always) are only honoured from 1.29. Below that the API server ACCEPTS the field and ignores it, so the proxy becomes an ordinary init container that never exits and the pod hangs in Init forever with no error anywhere - which is why this is refused at render time rather than left to be diagnosed in a cluster. Set cloudsql.nativeSidecar=false to run the proxy as a plain sidecar instead; read the warning NOTES.txt prints on that path first, because the hub crash-loops until the tunnel is up." $kv.Version) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
 {{- /*
 scion-hub.settingsChecksum - ADOPTED FROM PHASE 3, NOT WRITTEN HERE.
 

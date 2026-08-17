@@ -159,7 +159,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # remedy in both directions. Summed onto the previous committed value.
 # The step's arm 0 adds none of these on purpose: it is meta_failure, because
 # "nothing was analysed" is a third outcome and not a passing assertion.
-EXPECTED_TOTAL=297
+EXPECTED_TOTAL=301
 
 failures=0
 assertions=0
@@ -1687,6 +1687,84 @@ fi
 #     changed underneath it                 -> the --instance= arm. This is the
 #     fail-open the derivation exists for, and it is the one a hardcoded
 #     "ci-cloudsql" in this file would have missed.
+
+# --------------------------------------------------------------------------
+step "the 1.29 requirement is asserted where it applies, and sub-1.29 still installs"
+# --------------------------------------------------------------------------
+# FOUND BY gd-p2-rev, ROUND 1. Chart.yaml declared kubeVersion ">=1.29.0-0"
+# because the native sidecar needs 1.29. But cloudsql.nativeSidecar: false
+# exists precisely FOR clusters below 1.29 - values.yaml says "Set false only
+# for clusters below 1.29" and NOTES.txt prints "This exists ONLY for GKE below
+# 1.29" - and a kubeVersion floor is evaluated before any value is read. So the
+# chart documented a configuration it refused to render. The floor is gone and
+# the requirement moved to scion-hub.assertNativeSidecarSupported, which can see
+# the value.
+#
+# ARMS 1 AND 4 DIFFER ONLY IN --kube-version. That is deliberate and it is the
+# control: arm 1 asserts a REFUSAL, and a refusal is the single easiest thing in
+# this file to obtain by accident. A mistyped values path, a schema violation, a
+# renamed flag - all of them produce a non-zero exit and would satisfy a bare
+# "it failed" arm forever. Arm 4 runs the identical command one minor version up
+# and requires it to SUCCEED, so the failure in arm 1 is attributable to the
+# version and to nothing else. Arm 2 reads the message for the same reason from
+# the other side: a refusal that does not name the flag is not this guard's.
+_ns_cs="$CHART_DIR/ci/values-cloudsql.yaml"
+
+_ns28_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$_ns_cs" --kube-version 1.28.0 \
+  >"$WORK/ns-28-true.yaml" 2>"$WORK/ns-28-true.err" || _ns28_rc=$?
+if [[ "$_ns28_rc" != 0 ]]; then
+  pass "cloudsql.nativeSidecar: true on a 1.28 cluster is refused at render time"
+else
+  fail "cloudsql.nativeSidecar: true renders against --kube-version 1.28.0. The API server accepts restartPolicy on an init container there and ignores it, so this manifest installs cleanly and then hangs in Init forever with no event, no log line and no error - the failure mode the guard exists to convert into a sentence."
+fi
+
+# THE MESSAGE, NOT JUST THE EXIT CODE. An operator who hits this has set one
+# flag; the message has to name that flag or they are left bisecting values.
+#
+# THE EMPTY-STDERR CASE IS TWO DIFFERENT EVENTS AND THEY GET DIFFERENT VERDICTS.
+# If helm exited non-zero and stderr is empty, no refusal message survived to be
+# read and that is the harness's fault, not the chart's - a meta failure, because
+# an arm that greps an empty file reports "no diagnostic" whatever the chart did.
+# If helm exited ZERO, stderr is empty for the ordinary reason and the missing
+# message is a consequence of the missing refusal that arm 1 just reported; that
+# is an ordinary red, and turning it into a meta failure would abort the run and
+# take the remaining ~150 assertions with it. Measured: with the guard's include
+# deleted, the first draft of this block halted the suite at 151/301.
+if [[ "$_ns28_rc" != 0 && ! -s "$WORK/ns-28-true.err" ]]; then
+  meta_failure "the 1.28 native-sidecar render exited $_ns28_rc and wrote nothing to stderr. The arm below greps that file, and an empty file cannot match, so this would report a missing diagnostic when what actually happened is that the harness lost it."
+fi
+if [[ "$_ns28_rc" == 0 ]]; then
+  fail "there is no refusal message to read because the 1.28 render was not refused. This arm is reporting the same defect as the one above, from the operator's side: nothing tells them anything."
+elif grep -qF 'cloudsql.nativeSidecar' "$WORK/ns-28-true.err" && grep -qF '1.29' "$WORK/ns-28-true.err"; then
+  pass "the refusal names cloudsql.nativeSidecar and the 1.29 boundary"
+else
+  fail "the 1.28 render was refused, but the message names neither the flag nor the version boundary: $(head -2 "$WORK/ns-28-true.err"). Some other failure is being read as this guard, and the arm above is measuring it."
+fi
+
+# THE REGRESSION ARM. This is the render Chart.yaml's floor made impossible.
+_ns28f_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$_ns_cs" --set cloudsql.nativeSidecar=false --kube-version 1.28.0 \
+  >"$WORK/ns-28-false.yaml" 2>"$WORK/ns-28-false.err" || _ns28f_rc=$?
+if [[ "$_ns28f_rc" == 0 ]] && grep -q '^        - name: cloud-sql-proxy$' "$WORK/ns-28-false.yaml" \
+   && ! grep -q '^      initContainers:$' "$WORK/ns-28-false.yaml"; then
+  pass "cloudsql.nativeSidecar: false on a 1.28 cluster renders the proxy as a plain sidecar"
+else
+  fail "the documented sub-1.29 configuration does not render (helm exit $_ns28f_rc): $(head -2 "$WORK/ns-28-false.err"). values.yaml and NOTES.txt both tell operators below 1.29 to set this flag; if the chart refuses them anyway, the advice sends them in a circle."
+fi
+
+# THE SURVIVAL CONTROL for arm 1. Identical to it but for the version.
+_ns29_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$_ns_cs" --kube-version 1.29.0 \
+  >"$WORK/ns-29-true.yaml" 2>"$WORK/ns-29-true.err" || _ns29_rc=$?
+if [[ "$_ns29_rc" == 0 ]] && grep -q '^      initContainers:$' "$WORK/ns-29-true.yaml"; then
+  pass "the same values one minor version up render the native sidecar, so the 1.28 refusal is the version and not the inputs"
+else
+  fail "cloudsql.nativeSidecar: true does not render against --kube-version 1.29.0 either (helm exit $_ns29_rc): $(head -2 "$WORK/ns-29-true.err"). The refusal asserted above is therefore not attributable to the cluster version, and this whole step is measuring a broken input set rather than a guard."
+fi
 
 # --------------------------------------------------------------------------
 step "database.maxOpenConns has a floor of 2, and the floor is the hub's"
