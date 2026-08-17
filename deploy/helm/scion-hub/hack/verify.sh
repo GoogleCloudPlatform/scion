@@ -497,6 +497,86 @@ if [[ $render_failures -gt 0 ]]; then
 fi
 
 # --------------------------------------------------------------------------
+step "kubeconform's positive control: manifests it MUST reject"
+# --------------------------------------------------------------------------
+# PHASE 2, at gd-em's condition. Every kubeconform arm above is a green light,
+# and a validator that has quietly stopped validating emits green lights of
+# exactly the same colour. "Valid: 7, Skipped: 0" narrows that a long way - it
+# rules out an empty document set and it rules out --ignore-missing-schemas -
+# but it still cannot separate "seven documents were checked and were correct"
+# from "seven documents were counted and the schema was never applied". Nothing
+# in a passing run can. The only instrument that can is one where the expected
+# answer is INVALID.
+#
+# THE SUBJECT IS THE CHART'S OWN RENDER, not a hand-written bad manifest. A
+# stub I wrote would demonstrate that kubeconform rejects a stub I wrote. What
+# has to be established is that it is looking at THIS Deployment - the one with
+# the Cloud SQL proxy in initContainers - so the negatives are cut from that
+# document mechanically and each cut is checked to have changed something.
+kc_dep="$WORK/kc-deployment.yaml"
+awk '/^# Source: scion-hub\/templates\/deployment\.yaml$/{f=1} f{ if ($0=="---") exit; print }' \
+  "$WORK/settings.yaml" >"$kc_dep"
+if [[ ! -s "$kc_dep" ]] || ! grep -q '^kind: Deployment$' "$kc_dep" || ! grep -q 'initContainers:' "$kc_dep"; then
+  meta_failure "could not extract this chart's Deployment (with its proxy initContainers) from the settings render, so the control below would be validating something other than the chart."
+fi
+
+kc_summary() { "$KUBECONFORM" -strict -summary <"$1" 2>&1 || true; }
+
+# THE PAIRED POSITIVE. Without it, every negative below is satisfied by a
+# document kubeconform cannot parse at all - which is invalid for the wrong
+# reason and would hide a broken extractor.
+if grep -qF 'Valid: 1, Invalid: 0, Errors: 0, Skipped: 0' <<<"$(kc_summary "$kc_dep")"; then
+  pass "the extracted Deployment validates on its own, so the rejections below are rejections of a specific defect"
+else
+  fail "the extracted Deployment does not validate on its own: $(kc_summary "$kc_dep"). Every negative control below is then meaningless."
+fi
+
+# Each entry: label | sed/awk-free mutation applied by the function below.
+# THREE DEFECTS, THREE DIFFERENT SCHEMA MECHANISMS, deliberately - one arm
+# passing tells you one mechanism is live, not that validation is.
+kc_mutate() { # kc_mutate <which> <out>
+  case "$1" in
+    type)     sed 's/^  replicas: [0-9][0-9]*$/  replicas: "one"/' "$kc_dep" >"$2" ;;
+    strict)   sed '0,/^  replicas: /s//  notAFieldInTheSchema: 1\n  replicas: /' "$kc_dep" >"$2" ;;
+    required) awk '/^  selector:$/{s=1;next} s&&/^    /{next} {s=0;print}' "$kc_dep" >"$2" ;;
+  esac
+}
+declare -A KC_NEGATIVES=(
+  [type]="a string where the schema demands an integer (spec.replicas)"
+  [strict]="a field the schema does not define (proves -strict is in effect, not merely passed)"
+  [required]="a required field removed (spec.selector)"
+)
+for _m in type strict required; do
+  _out="$WORK/kc-neg-$_m.yaml"
+  kc_mutate "$_m" "$_out"
+  # A DERIVED NEGATIVE THAT IS BYTE-IDENTICAL TO THE POSITIVE IS NOT A NEGATIVE.
+  # If the render's shape drifts so a mutation no longer matches, the arm would
+  # go green off the unmodified document. That is a harness error, not a pass.
+  if cmp -s "$kc_dep" "$_out"; then
+    meta_failure "the '$_m' mutation changed nothing, so that arm would be validating the untouched Deployment and reporting it as a rejection."
+  fi
+  if grep -qF 'Valid: 0, Invalid: 1, Errors: 0, Skipped: 0' <<<"$(kc_summary "$_out")"; then
+    pass "kubeconform REJECTS ${KC_NEGATIVES[$_m]}"
+  else
+    fail "kubeconform did NOT reject ${KC_NEGATIVES[$_m]}: $(kc_summary "$_out"). Every kubeconform pass in this file is then unsupported - the validator is counting documents, not checking them."
+  fi
+done
+# ATTACK LOG. This step exists to catch a validator that has stopped
+# validating, so it was run against two, supplied through KUBECONFORM= :
+#
+#   a stub that counts `kind:` lines and reports them all Valid
+#     -> all three negatives RED. The paired positive stayed GREEN, which is
+#        the entire argument for this step in one line: under a validator that
+#        checks nothing, every green arm in this file is still green.
+#   a wrapper that silently strips -strict before exec'ing the real binary
+#     -> the strict arm RED, the other two GREEN. The three defects are
+#        independent and each names the mechanism it lost, so this failure
+#        reads as "-strict is gone" and not as "kubeconform is broken".
+#
+# Both scripts are three lines; neither is committed, because a fake validator
+# living in the tree is a fake validator someone eventually points the suite at.
+
+# --------------------------------------------------------------------------
 if [[ $UPDATE -eq 1 ]]; then
   step "updating golden files"
   mkdir -p "$GOLDEN_DIR"
