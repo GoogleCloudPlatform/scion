@@ -762,6 +762,10 @@ type Server struct {
 	// Set once in New and read without the lock; nil-safe.
 	chatSendLimiter *chatSendLimiter
 
+	// In-memory idempotency cache for chat message sends (#1055).
+	// Keyed by senderID:idempotencyKey with a 5-minute TTL.
+	chatIdempotency *ChatIdempotencyCache
+
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -1006,6 +1010,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Per-sender chat send rate limiter (#1054).
 	srv.chatSendLimiter = newChatSendLimiter()
+	srv.chatIdempotency = NewChatIdempotencyCache()
 
 	ctx := context.Background()
 

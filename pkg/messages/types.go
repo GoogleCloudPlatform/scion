@@ -25,7 +25,7 @@ import (
 const Version = 1
 
 // Maximum length of the Msg field in characters for outbound messages.
-const MaxMessageLength = 2000
+const MaxMessageLength = 16000
 
 // Maximum size of the Msg field in bytes.
 const MaxMsgSize = 64 * 1024 // 64KB

@@ -2346,3 +2346,134 @@ func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
 		t.Fatalf("expected the send to succeed after backing off, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1055: Idempotency key on send
+// ---------------------------------------------------------------------------
+
+func TestChatV2_Send_IdempotencyKey_DeduplicatesSend(t *testing.T) {
+	srv, _, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	// Create a topic.
+	topicID := tid("topic-idem-1")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "idempotency-test",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	path := "/api/v1/chat/conversations/" + topicID + "/messages"
+	idemKey := "test-idempotency-key-123"
+
+	// First send — should create the message (201).
+	body1 := map[string]string{"content": "idempotent message", "idempotency_key": idemKey}
+	rec1 := doRequest(t, srv, http.MethodPost, path, body1)
+	if rec1.Code != http.StatusCreated {
+		t.Fatalf("first send: expected 201, got %d: %s", rec1.Code, rec1.Body.String())
+	}
+
+	var resp1 chatMessageResponse
+	if err := json.NewDecoder(rec1.Body).Decode(&resp1); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if resp1.ID == "" {
+		t.Fatal("first send: expected non-empty message ID")
+	}
+
+	// Second send with the same idempotency key — should return 200 with the same ID.
+	body2 := map[string]string{"content": "idempotent message", "idempotency_key": idemKey}
+	rec2 := doRequest(t, srv, http.MethodPost, path, body2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second send: expected 200, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	var resp2 chatMessageResponse
+	if err := json.NewDecoder(rec2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if resp2.ID != resp1.ID {
+		t.Errorf("expected same message ID %q on duplicate, got %q", resp1.ID, resp2.ID)
+	}
+}
+
+func TestChatV2_Send_DifferentIdempotencyKeys_CreateSeparateMessages(t *testing.T) {
+	srv, _, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	topicID := tid("topic-idem-2")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "idempotency-diff",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	path := "/api/v1/chat/conversations/" + topicID + "/messages"
+
+	// Two sends with different keys should create two distinct messages.
+	body1 := map[string]string{"content": "first message", "idempotency_key": "key-a"}
+	rec1 := doRequest(t, srv, http.MethodPost, path, body1)
+	if rec1.Code != http.StatusCreated {
+		t.Fatalf("first send: expected 201, got %d", rec1.Code)
+	}
+	var resp1 chatMessageResponse
+	_ = json.NewDecoder(rec1.Body).Decode(&resp1)
+
+	body2 := map[string]string{"content": "second message", "idempotency_key": "key-b"}
+	rec2 := doRequest(t, srv, http.MethodPost, path, body2)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("second send: expected 201, got %d", rec2.Code)
+	}
+	var resp2 chatMessageResponse
+	_ = json.NewDecoder(rec2.Body).Decode(&resp2)
+
+	if resp1.ID == resp2.ID {
+		t.Errorf("different idempotency keys should produce different message IDs, both got %q", resp1.ID)
+	}
+}
+
+func TestChatV2_Send_NoIdempotencyKey_AlwaysCreates(t *testing.T) {
+	srv, _, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	topicID := tid("topic-idem-3")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "no-idem-key",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	path := "/api/v1/chat/conversations/" + topicID + "/messages"
+
+	// Without an idempotency key, each send creates a new message.
+	body := map[string]string{"content": "same content, no key"}
+	rec1 := doRequest(t, srv, http.MethodPost, path, body)
+	if rec1.Code != http.StatusCreated {
+		t.Fatalf("first send: expected 201, got %d", rec1.Code)
+	}
+	var resp1 chatMessageResponse
+	_ = json.NewDecoder(rec1.Body).Decode(&resp1)
+
+	rec2 := doRequest(t, srv, http.MethodPost, path, body)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("second send: expected 201, got %d", rec2.Code)
+	}
+	var resp2 chatMessageResponse
+	_ = json.NewDecoder(rec2.Body).Decode(&resp2)
+
+	if resp1.ID == resp2.ID {
+		t.Errorf("sends without idempotency key should create distinct messages, both got %q", resp1.ID)
+	}
+}

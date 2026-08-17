@@ -255,3 +255,228 @@ describe('composer — file picker filter', () => {
     expect(input?.getAttribute('accept')).toBe(ATTACHMENT_ACCEPT);
   });
 });
+
+describe('composer — uploadFiles refactor', () => {
+  it('uploadFiles uploads files and populates pendingFiles', async () => {
+    const el = createComposer();
+    respondWith(201, { attachments: [STORED], failures: [] });
+
+    await el.uploadFiles([new File(['content'], 'compose.yaml')]);
+
+    expect(el.pendingFiles).toHaveLength(1);
+    expect(el.pendingFiles[0].name).toBe('compose.yaml');
+  });
+
+  it('uploadFiles enforces max 10 attachments', async () => {
+    const el = createComposer();
+    // Pre-fill 9 pending files
+    el.pendingFiles = Array.from({ length: 9 }, (_, i) => ({
+      ...STORED,
+      id: `att-${i}`,
+      name: `file-${i}.txt`,
+    }));
+
+    const errors: string[] = [];
+    el.addEventListener('composer-error', (e: CustomEvent<{ message: string }>) =>
+      errors.push(e.detail.message)
+    );
+
+    // Try to add 2 more (9 + 2 = 11 > 10)
+    await el.uploadFiles([new File(['a'], 'a.txt'), new File(['b'], 'b.txt')]);
+
+    expect(errors).toEqual(['Maximum 10 attachments per message']);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('uploadFiles does nothing with an empty array', async () => {
+    const el = createComposer();
+    await el.uploadFiles([]);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('composer — paste-to-upload', () => {
+  it('extracts image files from clipboard and uploads them', async () => {
+    const el = createComposer();
+    respondWith(201, {
+      attachments: [{ ...STORED, name: 'image.png', mime: 'image/png' }],
+      failures: [],
+    });
+
+    const imageFile = new File(['pixels'], 'image.png', { type: 'image/png' });
+    const item = {
+      type: 'image/png',
+      getAsFile: () => imageFile,
+    };
+
+    const pasteEvent = new ClipboardEvent('paste', { cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', {
+      value: { items: [item] },
+    });
+
+    // Call the paste handler directly
+    (el as any).handlePaste(pasteEvent);
+
+    // The event should be prevented (image paste overrides text paste)
+    expect(pasteEvent.defaultPrevented).toBe(true);
+
+    // Wait for the async uploadFiles call to resolve
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+  });
+
+  it('ignores paste events with no image items', () => {
+    const el = createComposer();
+
+    const textItem = {
+      type: 'text/plain',
+      getAsFile: () => null,
+    };
+
+    const pasteEvent = new ClipboardEvent('paste', { cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', {
+      value: { items: [textItem] },
+    });
+
+    (el as any).handlePaste(pasteEvent);
+
+    // Text paste should not be prevented
+    expect(pasteEvent.defaultPrevented).toBe(false);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('composer — drag-and-drop', () => {
+  it('sets dragOver on dragenter and clears on dragleave', async () => {
+    const el = createComposer();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect((el as any).dragOver).toBe(false);
+
+    // Simulate dragenter
+    (el as any).handleDragEnter(new DragEvent('dragenter', { cancelable: true }));
+    expect((el as any).dragOver).toBe(true);
+
+    // Simulate dragleave with relatedTarget outside the wrapper
+    const leaveEvent = new DragEvent('dragleave');
+    Object.defineProperty(leaveEvent, 'currentTarget', { value: document.createElement('div') });
+    Object.defineProperty(leaveEvent, 'relatedTarget', { value: null });
+    (el as any).handleDragLeave(leaveEvent);
+    expect((el as any).dragOver).toBe(false);
+
+    document.body.removeChild(el);
+  });
+
+  it('uploads files on drop', async () => {
+    const el = createComposer();
+    respondWith(201, { attachments: [STORED], failures: [] });
+
+    const file = new File(['data'], 'test.txt');
+    const dt = new DataTransfer();
+    dt.items.add(file);
+
+    const dropEvent = new DragEvent('drop', { cancelable: true });
+    Object.defineProperty(dropEvent, 'dataTransfer', { value: dt });
+
+    (el as any).handleDrop(dropEvent);
+
+    expect(dropEvent.defaultPrevented).toBe(true);
+    expect((el as any).dragOver).toBe(false);
+  });
+
+  it('renders the drop zone overlay when dragOver is true', async () => {
+    const el = createComposer();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(el.shadowRoot.querySelector('.drop-zone-overlay')).toBeNull();
+
+    (el as any).dragOver = true;
+    await el.updateComplete;
+
+    const overlay = el.shadowRoot.querySelector('.drop-zone-overlay');
+    expect(overlay).not.toBeNull();
+    expect(overlay?.textContent).toContain('Drop files here');
+
+    document.body.removeChild(el);
+  });
+});
+
+describe('composer — draft persistence', () => {
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('saves a draft to localStorage on input (debounced)', async () => {
+    const el = createComposer();
+    el.conversationKey = 'conv-123';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Simulate input
+    el.text = 'hello world';
+    (el as any).saveDraft();
+
+    // Before debounce fires, localStorage should be empty
+    expect(localStorage.getItem('scion-chat-draft-conv-123')).toBeNull();
+
+    // Wait for debounce (500ms + buffer)
+    await new Promise((r) => setTimeout(r, 600));
+
+    expect(localStorage.getItem('scion-chat-draft-conv-123')).toBe('hello world');
+
+    document.body.removeChild(el);
+  });
+
+  it('restores a draft from localStorage on connect', async () => {
+    localStorage.setItem('scion-chat-draft-conv-456', 'restored text');
+
+    const el = createComposer();
+    el.conversationKey = 'conv-456';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(el.text).toBe('restored text');
+
+    document.body.removeChild(el);
+  });
+
+  it('restores a draft when conversationKey changes', async () => {
+    localStorage.setItem('scion-chat-draft-conv-A', 'draft A');
+    localStorage.setItem('scion-chat-draft-conv-B', 'draft B');
+
+    const el = createComposer();
+    el.conversationKey = 'conv-A';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(el.text).toBe('draft A');
+
+    el.conversationKey = 'conv-B';
+    await el.updateComplete;
+    expect(el.text).toBe('draft B');
+
+    document.body.removeChild(el);
+  });
+
+  it('clears the draft from localStorage on clearDraft', () => {
+    localStorage.setItem('scion-chat-draft-conv-789', 'some text');
+
+    const el = createComposer();
+    el.conversationKey = 'conv-789';
+    (el as any).clearDraft();
+
+    expect(localStorage.getItem('scion-chat-draft-conv-789')).toBeNull();
+  });
+
+  it('does not save draft when conversationKey is empty', async () => {
+    const el = createComposer();
+    el.conversationKey = '';
+    el.text = 'orphan draft';
+    (el as any).saveDraft();
+
+    await new Promise((r) => setTimeout(r, 600));
+
+    // No key should have been written
+    expect(localStorage.length).toBe(0);
+  });
+});
