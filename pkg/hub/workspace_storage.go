@@ -82,24 +82,31 @@ func workspaceMountRoot(wsCfg *config.V1WorkspaceStorageConfig) string {
 // itself, with a subPath — is still recognized as mounted. Writes in that
 // layout do land in the volume.
 //
-// When device IDs are unavailable (a platform without syscall.Stat_t), this
-// returns true: an unenforceable check must not fail readiness.
-func isMountedVolume(fi os.FileInfo, rootPath string) bool {
+// The second return reports whether the answer could be established at all.
+// When it is false the first return is true, because an unenforceable check
+// must not fail readiness — but the caller is expected to surface the fact,
+// since that state silently reinstates the bug this function exists to catch.
+// It happens when a FileInfo does not carry a unix stat (a fake FileInfo or a
+// filesystem implementation outside package os) or when the container root
+// cannot be stat'ed. Note this file needs syscall.Stat_t at compile time and
+// so builds only on unix targets, which is everything build-release.yml ships;
+// on a platform without that type it would not compile rather than fail open.
+func isMountedVolume(fi os.FileInfo, rootPath string) (mounted, determinable bool) {
 	dev, ok := deviceID(fi)
 	if !ok {
-		return true
+		return true, false
 	}
 
 	rootFI, err := os.Stat(rootPath)
 	if err != nil {
-		return true
+		return true, false
 	}
 	rootDev, ok := deviceID(rootFI)
 	if !ok {
-		return true
+		return true, false
 	}
 
-	return dev != rootDev
+	return dev != rootDev, true
 }
 
 // deviceID returns the filesystem device ID for fi, and whether it could be

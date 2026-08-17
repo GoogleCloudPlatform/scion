@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
@@ -966,6 +967,78 @@ func TestCheckWorkspaceStorageHealth_GKEVolumeMountedAtBaseIsHealthy(t *testing.
 	checks := make(map[string]string)
 	srv.checkWorkspaceStorageHealth(checks)
 	assert.Equal(t, "healthy", checks["workspace_storage"])
+}
+
+// statlessFileInfo is an os.FileInfo whose Sys() carries no unix stat, which is
+// what a filesystem implementation outside package os hands back.
+type statlessFileInfo struct{}
+
+func (statlessFileInfo) Name() string       { return "workspace-vol" }
+func (statlessFileInfo) Size() int64        { return 0 }
+func (statlessFileInfo) Mode() os.FileMode  { return os.ModeDir | 0755 }
+func (statlessFileInfo) ModTime() time.Time { return time.Time{} }
+func (statlessFileInfo) IsDir() bool        { return true }
+func (statlessFileInfo) Sys() any           { return nil }
+
+// The three branches where the device comparison cannot be made are
+// unreachable on every platform this repo ships, which is exactly why they need
+// tests: nothing else will ever exercise them. They must fail open — refusing
+// readiness on a check that cannot be enforced would take a working pod out of
+// service — and they must say so, which is the second return.
+func TestIsMountedVolume_FailsOpenWhenUndeterminable(t *testing.T) {
+	dir := t.TempDir()
+	realFI, err := os.Stat(dir)
+	require.NoError(t, err)
+
+	t.Run("file info carries no unix stat", func(t *testing.T) {
+		mounted, determinable := isMountedVolume(statlessFileInfo{}, dir)
+		assert.True(t, mounted)
+		assert.False(t, determinable)
+	})
+
+	t.Run("container root cannot be stat'ed", func(t *testing.T) {
+		mounted, determinable := isMountedVolume(realFI, filepath.Join(dir, "absent-root"))
+		assert.True(t, mounted)
+		assert.False(t, determinable)
+	})
+
+	t.Run("a determinable comparison reports so", func(t *testing.T) {
+		mounted, determinable := isMountedVolume(realFI, dir)
+		assert.False(t, mounted, "a directory compared against itself shares its device")
+		assert.True(t, determinable)
+	})
+}
+
+// Failing open leaves the pod ready — deliberately — but it also reinstates the
+// failure mode the mount check exists to catch, so it must not be reported as
+// an ordinary "healthy". The distinct entry marks overall health degraded while
+// leaving readiness alone.
+func TestCheckWorkspaceStorageHealth_GKEUnverifiableMountStaysReady(t *testing.T) {
+	srv, _ := testServer(t)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+	setContainerRootPath(t, filepath.Join(mountBase, "absent-root"))
+	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:         "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "workspace-vol"},
+	}
+
+	checks := make(map[string]string)
+	srv.checkWorkspaceStorageHealth(checks)
+	assert.Equal(t, "healthy", checks["workspace_storage"])
+	assert.Contains(t, checks["workspace_storage_mount_verification"], "unavailable")
+
+	rec := doRequest(t, srv, http.MethodGet, "/readyz", nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "an unenforceable check must not take the pod out of service")
+
+	rec = doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp HealthResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "degraded", resp.Status, "the operator needs to see that the mount was never verified")
 }
 
 // The mount requirement is confined to the GKE backend: Cloud Run mounts the

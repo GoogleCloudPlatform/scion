@@ -125,8 +125,9 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 	// hung NFS mount. A stuck stat call would otherwise hang the health
 	// endpoint indefinitely, taking down readiness probes.
 	type statResult struct {
-		err     error
-		mounted bool
+		err          error
+		mounted      bool
+		determinable bool
 	}
 	ch := make(chan statResult, 1)
 	go func() {
@@ -135,11 +136,11 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			ch <- statResult{err: err}
 			return
 		}
-		mounted := true
+		mounted, determinable := true, true
 		if requireMount {
-			mounted = isMountedVolume(fi, containerRootPath)
+			mounted, determinable = isMountedVolume(fi, containerRootPath)
 		}
-		ch <- statResult{mounted: mounted}
+		ch <- statResult{mounted: mounted, determinable: determinable}
 	}()
 
 	select {
@@ -151,6 +152,16 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 		if !res.mounted {
 			checks["workspace_storage"] = "unhealthy: mount path is not a mounted volume"
 			return
+		}
+		if !res.determinable {
+			// The mount could not be verified, so the storage check passed by
+			// default and the silent-ephemeral-storage failure is possible
+			// again. Readiness stays green deliberately — an unenforceable
+			// check must not take a pod out of service — but the operator gets
+			// a distinct signal instead of an indistinguishable "healthy":
+			// this entry marks the overall health status degraded, while
+			// handleReadyz only consults workspace_storage.
+			checks["workspace_storage_mount_verification"] = "unavailable: could not compare filesystem device IDs"
 		}
 		checks["workspace_storage"] = "healthy"
 	case <-time.After(2 * time.Second):
