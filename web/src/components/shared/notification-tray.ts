@@ -30,7 +30,6 @@ import { isChatNotificationStatus } from '../../client/chat-notifications.js';
 import {
   canShowPushNotification,
   enablePushWithPermission,
-  isPushOptedIn,
   pushPermission,
   setPushOptIn,
   PUSH_PREFERENCE_EVENT,
@@ -741,7 +740,12 @@ export class ScionNotificationTray extends LitElement {
   private renderPushToggle() {
     if (this.pushPermission === 'unsupported') return nothing;
 
-    const blocked = this.pushPermission === 'denied' && !isPushOptedIn();
+    // Permission alone decides this. A user who opted in and later revoked
+    // permission in site settings still has the stored flag set, and reading
+    // it here left the button live: the click could not re-prompt (permission
+    // is 'denied', not 'default'), so it silently cleared the flag and only
+    // the next render admitted the button was blocked all along.
+    const blocked = this.pushPermission === 'denied';
     const label = blocked
       ? 'Desktop notifications blocked'
       : this.pushEnabled

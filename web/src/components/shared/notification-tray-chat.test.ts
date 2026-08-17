@@ -213,6 +213,24 @@ describe('notification tray: desktop notification toggle', () => {
     expect(button?.hasAttribute('disabled')).toBe(true);
   });
 
+  it('shows blocked immediately when permission was revoked after opting in', () => {
+    // The stored opt-in survives a revoke in site settings. If it were allowed
+    // to decide, the button would render "off" and stay clickable, and the
+    // click could not re-prompt — it would just clear the flag, so the user
+    // would spend a click to be told what the browser already knew.
+    FakeNotification.permission = 'denied';
+    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    const host = document.createElement('div');
+    const tray = createTray();
+    tray.syncPushState();
+
+    render(tray.renderPushToggle(), host);
+    const button = host.querySelector('button');
+
+    expect(button?.textContent).toContain('blocked');
+    expect(button?.hasAttribute('disabled')).toBe(true);
+  });
+
   it('hides the toggle entirely where the API does not exist', () => {
     delete (window as unknown as { Notification?: unknown }).Notification;
     const host = document.createElement('div');
