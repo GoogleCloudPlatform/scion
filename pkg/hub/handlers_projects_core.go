@@ -2498,10 +2498,13 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	// suppression can never be consulted again — drop it, or a later project
 	// reusing the slug inherits the suppression and never warns.
 	//
-	// As in deleteProject, this has to be the last read of oldSlug. The
-	// hubManagedProjectPath(oldSlug) call above re-records it on
-	// gke-shared-volume, where that resolution takes the warning path, so an
-	// eviction placed before it is undone by it. Best-effort even here: a
+	// As in deleteProject, the invariant is that this follows the last
+	// hubManagedProjectPath(oldSlug) call, not that it follows the last read
+	// of oldSlug — reads that resolve no path cannot re-record. That call
+	// above re-records it on gke-shared-volume, where the resolution takes
+	// the warning path, so an eviction placed before it is undone by it.
+	// Nothing reads oldSlug after this point today, but that is incidental;
+	// the resolution is the thing to order against. Best-effort even here: a
 	// resolution already in flight on another goroutine can re-insert it.
 	s.warnedEphemeralProjects.Delete(oldSlug)
 }
@@ -2621,7 +2624,11 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// fallback and warns, and a project served from that fallback is exactly
 	// the population that has an entry here — so evicting before that call
 	// would reliably reinstate the entry it just removed, not occasionally.
-	// The eviction has to be the last read of the slug, not the first.
+	// The invariant is about resolutions, not reads: the eviction has to
+	// follow the last hubManagedProjectPath call for this slug. Plain reads
+	// after it are harmless and there are several — the project-configs
+	// cleanup below and two log lines — because none of them resolves a path,
+	// and only a resolution re-records.
 	s.warnedEphemeralProjects.Delete(project.Slug)
 
 	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).
