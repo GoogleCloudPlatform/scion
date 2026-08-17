@@ -172,21 +172,113 @@ default. Without these verbs that path fails with a permission error.
   verbs: ["get", "list", "watch"]
 {{- end }}
 
-{{/* Container image reference. digest wins; tag defaults to the chart appVersion. */}}
+{{/*
+Container image reference. digest wins; tag defaults to the chart appVersion.
+
+image.repository is required HERE as well as in the schema, and the second layer
+is the point. With the schema layer removed - deleted, or skipped with
+helm template --skip-schema-validation, which is a real flag - an empty
+repository used to render
+
+    image: ":ci"
+
+which is a well-formed manifest. It passes helm template, and it passes
+kubeconform -strict at 5 valid, 0 skipped, so BOTH of this chart's static gates
+report green on a reference that cannot resolve. The failure arrives at pod
+creation as an invalid-reference error naming neither the chart, the value, nor
+the schema, and the operator starts debugging a registry problem they do not
+have.
+
+hub.hubId already had this second layer. This one did not, and the difference was
+invisible to a test that asserted only that a bad value was rejected - the schema
+answered first every time, so the missing layer behind it could not be seen. Both
+layers are now asserted separately in the guard table.
+*/}}
 {{- define "scion-hub.image" -}}
+{{- $repository := required "image.repository is required: set it to the hub image built from the root Dockerfile with --target hub-gke. The chart has no default and cannot have one - that image is not published anywhere, and the published artifact named scion-hub is NOT it: it runs as root, which this chart's runAsNonRoot refuses, and it has no embedded web UI." .Values.image.repository }}
 {{- if and .Values.image.tag .Values.image.digest }}
 {{- fail "image.tag and image.digest are mutually exclusive: set image.digest (preferred) or image.tag, not both." }}
 {{- end }}
 {{- if .Values.image.digest }}
-{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- printf "%s@%s" $repository .Values.image.digest }}
 {{- else }}
-{{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) }}
+{{- printf "%s:%s" $repository (default .Chart.AppVersion .Values.image.tag) }}
 {{- end }}
 {{- end }}
 
-{{/* Deployment update strategy: Recreate at one replica, RollingUpdate above it. */}}
+{{/*
+The startup budget, asserted as a DURATION rather than as a threshold count.
+
+periodSeconds x failureThreshold is the time the hub gets to become ready before
+the kubelet starts killing it. The schema pins each factor separately and cannot
+pin the product, so both of these passed with the schema fully active:
+
+  probes.startup.periodSeconds=1   -> 60 x 1s  = 60s, not 300s
+  probes.startup.enabled=false     -> no startupProbe at all
+
+Both rendered clean and passed kubeconform -strict, while the schema's own
+description stated the safety property as though it were enforced. A guard whose
+stated contract is wider than what it enforces is worse than no guard, because it
+stops the reader thinking: an operator lowering periodSeconds for faster
+readiness detection reads "at least 60", sees failureThreshold: 60 untouched, and
+has cut the first-boot budget by 80% with nothing to tell them.
+
+Why 300 seconds: first boot blocks on an unbounded schema-migration advisory lock
+before the listener binds. Killing the pod during that leaves a partially applied
+migration, so the retry starts from a different state than the attempt before it
+and the failure stops being reproducible.
+
+DISABLING THE STARTUP PROBE IS PERMITTED ONLY WHILE THE LIVENESS PROBE IS OFF,
+which is a real distinction and not a loophole. A startup probe's job is to hold
+the liveness probe off until the container is up. With liveness disabled - the
+default - nothing can kill the pod during the migration; readiness simply stays
+false and the pod stays out of the Service, which is correct. With liveness
+enabled and no startup probe, the liveness probe begins immediately and kills the
+hub mid-migration, which is the exact failure the budget exists to prevent.
+*/}}
+{{- define "scion-hub.assertStartupBudget" -}}
+{{- $startup := .Values.probes.startup }}
+{{- $liveness := .Values.probes.liveness }}
+{{- if $startup.enabled }}
+{{- $budget := mul (int $startup.periodSeconds) (int $startup.failureThreshold) }}
+{{- if lt $budget 300 }}
+{{- fail (printf "the startup budget is too short: probes.startup.periodSeconds (%d) x probes.startup.failureThreshold (%d) = %ds, and the minimum is 300s. The budget is the PRODUCT, so raising one factor or the other is equally valid - the schema can only bound each separately, which is why this is checked here. First boot blocks on an unbounded schema-migration advisory lock before the listener binds; a pod killed during it leaves a partially applied migration, and the retry starts from a different state than this attempt did." (int $startup.periodSeconds) (int $startup.failureThreshold) (int $budget)) }}
+{{- end }}
+{{- else if $liveness.enabled }}
+{{- fail "probes.startup.enabled is false while probes.liveness.enabled is true. The startup probe is what holds the liveness probe off until the hub is up, so this combination points a killing probe at a hub that is still running its first-boot schema migration. Either leave the startup probe enabled, or disable the liveness probe - with liveness off, no probe can kill the pod and readiness simply stays false until the migration finishes." }}
+{{- end }}
+{{- end }}
+
+{{/*
+Deployment update strategy: Recreate at one replica, RollingUpdate above it.
+
+FOUND BY THE SWEEP FOR PRODUCT INVARIANTS, not by review. It is the second
+instance of the startup-budget shape: the schema constrains updateStrategy.type
+with an enum and constrains replicaCount with a minimum, and the property is
+about the PAIR. Explicit RollingUpdate at replicaCount 1 renders clean, with the
+schema fully active and no skip flag, and passes kubeconform - and it is the
+exact hazard the default derivation exists to avoid.
+
+The chart's own hardening makes the override worse rather than better. Whenever
+the type resolves to RollingUpdate the Deployment renders maxUnavailable: 0,
+which is correct above one replica and means the new pod must become Available
+before the old one is deleted. At one replica that does not merely permit two
+hubs, it GUARANTEES two hubs - for as long as the new one takes to become ready,
+which the startup budget above allows to be five minutes - both mounting and
+writing the same RWX workspace share. The symptom is corrupted workspace state,
+which points at the workspace, the share and the agent long before it points at
+a strategy field the operator set once and considered settled.
+
+Explicit Recreate is accepted at any replica count: it costs downtime and risks
+nothing. Above one replica RollingUpdate is accepted because concurrent hubs are
+already what more than one replica means - the choice was made by replicaCount,
+not by this field.
+*/}}
 {{- define "scion-hub.updateStrategyType" -}}
 {{- $explicit := (.Values.updateStrategy | default dict).type | default "" }}
+{{- if and (eq $explicit "RollingUpdate") (le (int .Values.replicaCount) 1) }}
+{{- fail "updateStrategy.type is RollingUpdate at replicaCount 1. A rolling update renders maxUnavailable: 0, so the replacement hub must become Available before the old one is deleted - at one replica that means two hubs run at once, for up to the whole startup budget, both writing the same workspace share. Leave updateStrategy.type empty (it resolves to Recreate at one replica and RollingUpdate above it) or set Recreate explicitly. If you want a rolling update to avoid downtime, the value to change is replicaCount, and read its comment first." }}
+{{- end }}
 {{- if $explicit }}
 {{- $explicit }}
 {{- else if gt (int .Values.replicaCount) 1 }}
@@ -276,12 +368,27 @@ carries a password and contains none of the words a name pattern would look for.
 A name-based check is still worth having, but it is a different axis and belongs
 with whatever owns the name.
 
-What it catches: credentials in URL userinfo, and a handful of well-known
-credential prefixes. What it does NOT catch, and cannot: an opaque
-high-entropy string with no recognisable shape. There is no reliable way to tell
-one of those from a legitimate identifier, and a heuristic that guessed would
-reject real values with no override, which for an append-only list is worse than
-the hole. Do not add an entropy heuristic here.
+What it catches: credentials in URL userinfo, credentials in a URL query string
+under a well-known parameter name, and a handful of well-known credential
+prefixes. What it does NOT catch, and cannot: an opaque high-entropy string with
+no recognisable shape. There is no reliable way to tell one of those from a
+legitimate identifier, and a heuristic that guessed would reject real values with
+no override, which for an append-only list is worse than the hole. Do not add an
+entropy heuristic here.
+
+THE USERNAME IN THE USERINFO PATTERN IS OPTIONAL, and that is not a typo. An
+empty username is the standard form for a Redis URL and is valid for Postgres,
+so redis://:hunter2@10.0.0.1:6379 carries a real password. Requiring one
+username character missed it - the same class as the DSN case the name axis
+cannot see, since the flag holding it can be called anything.
+
+THE PEM ALTERNATIVE IS UNREACHABLE THROUGH hub.args, and live for every other
+caller. Every PEM header contains spaces and starts with a dash, so on the argv
+path the whitespace guard in scion-hub.hubArgs always rejects it first. Do not
+conclude the branch is dead and delete it: it is the branch that catches a
+multi-line private key in an environment value, where whitespace is legal, and
+its only test coverage chart-wide lives with those callers rather than here. If
+you change this alternative, that is the test that will tell you.
 
 The matched value is redacted or truncated in the failure message. A guard whose
 error message prints the secret it just caught has moved the secret from argv
@@ -290,8 +397,11 @@ into CI logs.
 {{- define "scion-hub.assertNoCredential" -}}
 {{- $s := toString .value }}
 {{- $source := .source }}
-{{- if regexMatch "://[^/@[:space:]]+:[^/@[:space:]]+@" $s }}
-{{- fail (printf "%s %q embeds credentials in a URL (scheme://user:password@host). Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret." $source (regexReplaceAll "://[^/@[:space:]]+:[^/@[:space:]]+@" $s "://REDACTED@")) }}
+{{- if regexMatch "://[^/@[:space:]]*:[^/@[:space:]]+@" $s }}
+{{- fail (printf "%s %q embeds credentials in a URL (scheme://user:password@host, and the username may be empty as in redis://:password@host). Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret." $source (regexReplaceAll "://[^/@[:space:]]*:[^/@[:space:]]+@" $s "://REDACTED@")) }}
+{{- end }}
+{{- if regexMatch "(?i)[?&](access_token|refresh_token|id_token|auth_token|api_?key|client_secret|password|passwd|signature)=[^&[:space:]]" $s }}
+{{- fail (printf "%s carries a credential in a URL query string (%s=...). A query string is not a hiding place: it reaches argv, process listings, proxy logs and Referer headers alike. Deliver it through a Secret and let the hub read it from the environment." $source (regexFind "(?i)[?&](access_token|refresh_token|id_token|auth_token|api_?key|client_secret|password|passwd|signature)=" $s | trimAll "?&=")) }}
 {{- end }}
 {{- if regexMatch "(?i)(^|=)(sk-[A-Za-z0-9]|ghp_|gho_|ghs_|github_pat_|xox[abprs]-|AKIA[A-Z0-9]{8}|-----BEGIN )" $s }}
 {{- fail (printf "%s (starting %q) has the shape of a credential. Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret." $source (trunc 10 $s)) }}
@@ -311,26 +421,41 @@ which behind a load balancer is unreachable and unauthenticated by accident.
 hub.args appends to this list and can never replace it. Two guards apply to
 anything appended.
 
-The RESERVED flags are grouped by WHY they are reserved, in four lists below,
-and the grouping is load-bearing rather than tidy. Most entries are reserved
-because the chart already sets them, and those can be checked against the
-rendered arguments. Two are reserved because nothing may ever set them - not the
-operator and not a future phase of this chart - and for those, finding no match
-in the rendered arguments is the expected steady state, not evidence that the
-entry is stale. A flat list under one comment invites the next maintainer to
-verify each entry against what the chart renders, conclude that --config was
-added in error, and remove it; that removal would look exactly like tidying and
-would reopen the largest hole in this guard. The failure messages differ per
-group so the reason is visible at the point it fires.
+PFLAG IS LAST-WINS, which is the premise the whole reserved list rests on.
+Appending a flag the chart already rendered does not conflict, error or warn -
+it silently replaces the chart's value. So "the chart renders it" is not
+protection; the reserved list is the protection.
 
-Every entry was checked against cmd/server.go's actual flag set rather than
-guessed - the first version of this list was guessed and missed five flags,
-including --config.
+THE FLAG SET IS cmd/server.go PLUS cmd/root.go. server start inherits rootCmd's
+PERSISTENT flags, so the flags it accepts are not all declared in the file that
+declares the command. Two rounds of this list were built from cmd/server.go
+alone and both were incomplete in the same direction: --global, --project, -g
+and --grove are all inherited, all accepted by server start, and all absent from
+cmd/server.go. If you extend this list, enumerate both files.
+
+The RESERVED flags are grouped by WHY they are reserved, in five lists below,
+and the grouping is load-bearing rather than tidy. Only one group is verifiable
+against the rendered arguments. For the other four, finding no match in the
+rendered arguments is the expected steady state and NOT evidence that the entry
+is stale - which is exactly the reasoning that would delete them. A flat list
+under one comment invites the next maintainer to verify each entry against what
+the chart renders, conclude that --config was added in error, and remove it;
+that removal would look like tidying and would reopen the largest hole in this
+guard. The failure messages differ per group so the reason is visible at the
+point it fires, to the person arguing with the guard rather than only to the
+person reading this file.
 
 SHORTHANDS MUST BE LISTED BY LETTER. The normalisation below reduces -x and --x
 to the same token, so a shorthand is only caught if its letter is on the list.
-"c" is on it for --config, and -c is the only shorthand defined on server start
-today. Any future flag registered with a *VarP form needs its letter added here.
+"c" is on it for --config and "g" for --project; those are the two shorthands
+that matter today. Any future flag registered with a *VarP form needs its letter
+added here.
+
+CASE IS NORMALISED before the lists are consulted. pflag itself is
+case-sensitive, so --CONFIG would not reach the hub as --config; it would be an
+unknown flag and the hub would crash-loop. Rejecting it here turns that
+crash-loop into a render error, which is the same reasoning as the whitespace
+guards below.
 
 The CREDENTIAL check is scion-hub.assertNoCredential, applied to every rendered
 argument. It looks at values rather than flag names - see its own comment for
@@ -352,21 +477,40 @@ way to override; names are handled by the exact-match reserved list instead.
     "--auto-provide"
     "--global" }}
 {{- /*
-Four lists, not one, because they are reserved for four different reasons and a
+Five lists, not one, because they are reserved for five different reasons and a
 flat list loses the reason. See the block comment above for why that matters:
 the entries below are NOT all verifiable by checking what the chart renders.
+Exactly one list is.
 */}}
 
 {{- /*
-1. The chart renders these itself. A second value would contradict the manifest.
-   Verifiable against the rendered args - if the chart stops setting one of
-   these, it should leave this list at the same time.
+1. The chart renders these itself, and pflag is last-wins, so an appended copy
+   silently replaces the chart's value rather than conflicting with it.
+
+   THIS IS THE ONLY LIST VERIFIABLE AGAINST THE RENDERED ARGS, and it is now
+   verified mechanically rather than by instruction, in BOTH directions: the
+   invariant below fails the render if the chart emits a flag this list omits,
+   AND if this list names a flag the chart does not emit. So this list is exactly
+   the set of flags the chart renders - not by discipline, by construction.
+
+   Nothing that the chart does NOT render belongs here, however true it is that
+   the flag should be reserved. Two entries used to sit here that the chart never
+   emitted, under a comment telling the maintainer to delete entries that do not
+   appear in the rendered args - a deletion instruction pointed at two live
+   guards. They are in $aliasOrIgnored now, and the second containment is what
+   keeps that from recurring; the previous version of this comment asked the
+   maintainer to enforce it by hand, which is enforcement by whoever read the
+   comment most recently.
+
+   Cross-references in these comments use the LIST VARIABLE NAME, never the list
+   number. Numbers renumber; this comment was written while adding a fifth list.
 */}}
-{{- $setByChart := list "hosted" "production" "host" "web-port" "port" }}
+{{- $setByChart := list "foreground" "hosted" "host" "web-port" "enable-hub" "enable-runtime-broker" "enable-web" "auto-provide" "global" }}
 
 {{- /*
 2. NOTHING may pass these. Not the operator, and not a future phase of this
-   chart either.
+   chart either. Every one of them redirects where the hub's configuration comes
+   from.
 
    DO NOT REMOVE THESE BECAUSE THE CHART DOES NOT SET THEM. That is the point of
    them, not evidence that they were added by mistake. --config redirects
@@ -376,11 +520,48 @@ the entries below are NOT all verifiable by checking what the chart renders.
    annotation continue to report the operator's intent. There is no legitimate
    reason for this chart to emit it, so "nothing in the rendered args matches
    this entry" is the expected steady state forever.
+
+   --project, -g and --grove reach the same place by another door, and this list
+   was incomplete without them for two rounds because they are declared in
+   cmd/root.go rather than cmd/server.go. They redirect project resolution and
+   therefore the config location. --grove binds the SAME VARIABLE as --project
+   (cmd/root.go:249-250), so reserving one without the other leaves the alias
+   open - the same pattern as hosted/production. --profile is here for the same
+   family of reasons: it does not move the file, but it selects which
+   configuration applies, and the chart's guarantee is that the settings file it
+   renders is the one in force.
+
+   Note that --global is NOT here. The chart renders it, so it is in list 1, and
+   list 1 rejects it just as absolutely. It belongs to the same hazard family -
+   --global=false is the --config hazard by another route - and it is filed by
+   how it is checked rather than by how bad it is.
 */}}
-{{- $neverPassed := list "config" "c" }}
+{{- $neverPassed := list "config" "c" "project" "g" "grove" "profile" "p" }}
 
 {{- /*
-3. The chart already delivers these settings through a channel other than argv,
+3. Not the lever they appear to be. Each of these is a flag an operator could
+   reasonably reach for, which either aliases something the chart controls or is
+   silently ignored in the configuration this chart renders. NOT verifiable
+   against the rendered args - the chart emits neither - and that is why they are
+   not in $setByChart, whose comment would instruct their deletion.
+
+   Per-entry, because the two are here for different failures:
+
+   --production binds the SAME VARIABLE as --hosted (cmd/server.go:235, a
+   deprecated alias). So --production=false disables hosted mode - the first
+   hazard this guard was ever written for - while the operator believes they
+   passed a no-op about a deprecated spelling.
+
+   --port is the hub API port for standalone mode and is IGNORED whenever
+   --enable-web is set (cmd/server.go:241), which this chart always sets. An
+   operator moving the port with it changes nothing at all: the listener stays on
+   --web-port, the probes still pass, and the flag they set has no effect they can
+   observe. A silent no-op that looks like a change is worth a render error.
+*/}}
+{{- $aliasOrIgnored := list "production" "port" }}
+
+{{- /*
+4. The chart already delivers these settings through a channel other than argv,
    so passing them here creates a second source for one value. Not verifiable
    against the rendered arguments, by construction - the rendered argument list
    is where these must NOT appear. Check them against the other channel.
@@ -416,26 +597,98 @@ the entries below are NOT all verifiable by checking what the chart renders.
 {{- $ownedByConfig := list "admin-emails" "base-url" "db" "storage-bucket" "storage-dir" }}
 
 {{- /*
-4. These weaken authentication or place credentials where they can be read.
+5. These weaken authentication or place credentials where they can be read.
 */}}
 {{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" }}
+
+{{- /*
+THE INVARIANT THAT MAKES $setByChart SELF-CHECKING, IN BOTH DIRECTIONS.
+
+$setByChart and the flags rendered above must be the SAME SET. Two containments,
+four lines, and they catch opposite mistakes:
+
+  A. rendered is a subset of $setByChart - catches a flag the chart passes that
+     nobody reserved. The list was incomplete twice this way: six flags the chart
+     itself renders (foreground, enable-hub, enable-runtime-broker, enable-web,
+     auto-provide, global) were missing, and because pflag is last-wins an
+     operator could append --enable-runtime-broker=false and get a hub that stays
+     Ready, keeps its RBAC, and can never launch an agent.
+
+  B. $setByChart is a subset of rendered - catches a member the chart claims to
+     set and does not. Two entries sat here that the chart never emitted, under
+     the comment above telling the maintainer to delete entries not present in
+     the rendered args: a deletion instruction pointed at two live guards, one of
+     them --production, whose removal reopens disable-hosted-mode because it
+     binds the same variable as --hosted. They are in $aliasOrIgnored now, and
+     direction B is what keeps them out rather than the comment.
+
+A alone was implemented first and would not have caught B's case at all. Both
+mistakes are the same mistake - the list and the render drifting - and one
+containment only ever sees one direction of drift.
+
+DIRECTION B IS MEANINGFUL FOR $setByChart AND FOR NO OTHER LIST. The other three
+are reserved precisely BECAUSE the chart does not render them, so for them the
+empty intersection is the expected steady state forever. That is what the split
+into reasons bought beyond documentation: it isolated the one group whose
+membership is a checkable claim about this file, and made it checkable.
+
+Both run against the chart's own arguments only, before hub.args is appended, so
+they assert a property of THIS FILE rather than of operator input.
+
+IF A LATER PHASE RENDERS A FLAG CONDITIONALLY, BUILD $setByChart BESIDE THE
+RENDER - append to both inside the same if - rather than weakening either
+containment. I had argued for keeping A one-directional on the grounds that B
+would fire on a legitimate conditional flag; that was the wrong trade. It buys a
+future convenience with a present hole, and the convenience is available anyway
+by keeping the list and the command in step, which is the thing being asserted.
+
+Considered and rejected: deriving $setByChart from $args, which would make both
+containments true by construction and delete this block. It also silently expands
+the operator-facing reserved set every time a maintainer adds a flag to the
+command - a contract change with nothing announcing it. The explicit list is the
+statement; these two checks are what keep the statement true.
+*/}}
+{{- $renderedFlags := list }}
+{{- range $chartArg := $args }}
+{{- if hasPrefix "-" $chartArg }}
+{{- $chartFlag := lower (trimPrefix "-" (trimPrefix "--" (first (splitList "=" $chartArg)))) }}
+{{- $renderedFlags = append $renderedFlags $chartFlag }}
+{{- if not (has $chartFlag $setByChart) }}
+{{- fail (printf "chart defect, not a values error: scion-hub.hubArgs renders -%s but $setByChart does not list it, so hub.args could append a second copy and pflag - which is last-wins - would silently take the operator's value over the chart's. Add %q to $setByChart in _helpers.tpl." $chartFlag $chartFlag) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- range $listed := $setByChart }}
+{{- if not (has $listed $renderedFlags) }}
+{{- fail (printf "chart defect, not a values error: $setByChart lists %q but scion-hub.hubArgs does not render it, and that list's stated reason for reserving a flag is that the chart sets it. Do NOT fix this by deleting the entry - a reserved flag the chart does not render may still be dangerous to accept, and deleting it would silently reopen whatever it was guarding. Move it to the list whose reason actually applies ($neverPassed, $aliasOrIgnored, $ownedByConfig or $unsafeToPass), or render it. If a later phase renders it conditionally, append to $setByChart inside the same conditional." $listed) }}
+{{- end }}
+{{- end }}
 {{- range $raw := .Values.hub.args }}
 {{- $arg := toString $raw }}
 {{- if ne $arg (trim $arg) }}
 {{- fail (printf "hub.args entry %q has leading or trailing whitespace. pflag would read it as a positional argument rather than a flag, and the hub would crash-loop instead of failing here." $arg) }}
 {{- end }}
 {{- if and (hasPrefix "-" $arg) (regexMatch "[[:space:]]" $arg) }}
-{{- fail (printf "hub.args entry %q contains whitespace. Pass a flag and its value as two separate array elements; a single element with a space in it is an unknown flag name to pflag, so the guards below would not see the flag and the hub would crash-loop at startup." $arg) }}
+{{- fail (printf "hub.args entry %q contains whitespace. Pass a flag and its value as two separate array elements. If the VALUE itself contains whitespace - a PEM block, a multi-line banner - splitting will not help: it does not belong on argv at all, where it is readable by anyone with pod read access, and a later phase delivers values like that through a Secret or an environment value instead." $arg) }}
 {{- end }}
-{{- $flag := trimPrefix "-" (trimPrefix "--" (first (splitList "=" $arg))) }}
+{{- /*
+Lowercased before the lists are consulted: pflag is case-sensitive, so --CONFIG
+would crash-loop as an unknown flag rather than redirect the config load. This
+turns that crash-loop into a render error. The name axis lowercases too, and did
+before this did, which is how the inconsistency was found.
+*/}}
+{{- $flag := lower (trimPrefix "-" (trimPrefix "--" (first (splitList "=" $arg)))) }}
 {{- if has $flag $setByChart }}
-{{- fail (printf "hub.args may not contain -%s: the chart sets it, and a second value would contradict the rendered manifest - disabling hosted mode, unbinding the listener, or desynchronising the probes from hub.webPort." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: the chart renders it, and pflag is last-wins, so this would silently replace the chart's value rather than conflict with it - disabling hosted mode, unbinding the listener, taking the daemon fork so PID 1 exits, leaving /readyz unregistered, or leaving the runtime broker off in a pod that still reports Ready and can never launch an agent." $flag) }}
 {{- end }}
 {{- if has $flag $neverPassed }}
-{{- fail (printf "hub.args may not contain -%s: it redirects the hub's entire configuration load away from the settings file this chart delivers, so the hub would run on a file the chart has never seen while every rendered value continued to report the operator's intent." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: it redirects where the hub's configuration comes from, away from the settings file this chart delivers, so the hub would run on configuration the chart has never seen while every rendered value continued to report the operator's intent." $flag) }}
+{{- end }}
+{{- if has $flag $aliasOrIgnored }}
+{{- fail (printf "hub.args may not contain -%s: it is not the lever it looks like. -production is a deprecated alias bound to the same variable as -hosted, so passing it can disable hosted mode; -port is ignored whenever -enable-web is set, which this chart always sets, so passing it changes nothing observable. The chart renders neither, which is why this is a separate reservation and not a stale entry." $flag) }}
 {{- end }}
 {{- if has $flag $ownedByConfig }}
-{{- fail (printf "hub.args may not contain -%s: the chart's configuration already owns this setting, and passing it on argv creates a second source that silently wins over the rendered one." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: the chart already delivers this setting through another channel - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so this creates a second source for one value with nothing reporting the disagreement." $flag) }}
 {{- end }}
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}

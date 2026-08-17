@@ -9,6 +9,20 @@ the people who wrote this chart. The chart's static checks (`helm lint`,
 says the manifests are well formed and internally consistent, and it says nothing
 at all about whether the hub they describe actually works.
 
+> **Quote the resource count, every time — `kubeconform` alone does not tell you
+> the render happened.** `helm template | kubeconform -strict` exits **0** when the
+> render fails: `helm` writes its error to stderr, `kubeconform` gets empty stdin,
+> and reports `Valid: 0, Invalid: 0, Errors: 0, Skipped: 0` with a success status.
+> The shell reports the exit code of the last command in the pipeline, so the whole
+> gate passes on a chart that did not render. Two reviewers hit this live.
+>
+> Every `kubeconform` result quoted anywhere in this chart's review history is
+> therefore trustworthy *only* because it was quoted with its numbers — **5 valid,
+> 0 invalid, 0 skipped**. The count was doing the work and nobody knew it, and a
+> bare "kubeconform passed" would have read as identical while meaning nothing.
+> Until the CI job asserts the count itself (`set -o pipefail` plus a resource-count
+> check — Phase 6 owns it), the count is the check and reporting it is not optional.
+
 The checks below were originally written as chart acceptance criteria. They were
 moved here rather than deleted, because an acceptance criterion nobody can run is
 an acceptance criterion that gets quietly ticked. They are the operator's, and

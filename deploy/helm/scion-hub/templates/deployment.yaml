@@ -100,6 +100,12 @@ spec:
             - name: http
               containerPort: {{ .Values.hub.webPort }}
               protocol: TCP
+          {{- /*
+          Called OUTSIDE the if, and unconditionally, because the disabled case is
+          one of the two things it checks. Inside the if, probes.startup.enabled=false
+          would delete the probe and the assertion guarding it in the same stroke.
+          */}}
+          {{- include "scion-hub.assertStartupBudget" . }}
           {{- if .Values.probes.startup.enabled }}
           startupProbe:
             httpGet:

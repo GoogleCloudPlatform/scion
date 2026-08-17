@@ -31,8 +31,13 @@ replicaCount: 1
 
 updateStrategy:
   # "" resolves to Recreate at one replica and RollingUpdate (maxUnavailable 0)
-  # above one. At one replica a rolling update briefly runs two hubs that both
-  # write the same workspace share, which is the hazard Recreate avoids.
+  # above one. At one replica a rolling update runs two hubs that both write the
+  # same workspace share, which is the hazard Recreate avoids - and because
+  # maxUnavailable is 0, that overlap is guaranteed rather than brief: the new
+  # hub must become Available before the old one is deleted, which the startup
+  # budget allows to take five minutes. Setting RollingUpdate explicitly at one
+  # replica is therefore refused at render time; leave this empty, or set
+  # Recreate. The value to change for a zero-downtime update is replicaCount.
   type: ""
 
 image:
@@ -135,10 +140,21 @@ probes:
   # and not exempt from authentication: it answers 404 or 401 and no pod ever
   # becomes ready.
   startup:
+    # Only turn this off while liveness is also off; the chart refuses the other
+    # combination. The startup probe is what holds the liveness probe off until
+    # the hub is up, so removing it while liveness is enabled points a killing
+    # probe at a hub that is still running its first-boot migration. With
+    # liveness off - the default - nothing can kill the pod, readiness simply
+    # stays false, and the pod stays out of the Service until the hub is ready.
     enabled: true
-    periodSeconds: 5
+    # THE BUDGET IS periodSeconds x failureThreshold, AND BOTH FACTORS COUNT.
     # First boot blocks on an unbounded schema-migration advisory lock before
-    # the listener binds. 60 x 5s = 5 minutes.
+    # the listener binds, so the hub gets 5 x 60 = 300s to become ready. The
+    # chart enforces the product, not either factor: lowering periodSeconds to
+    # speed up readiness detection cuts the budget just as surely as lowering
+    # failureThreshold does, and the JSON schema cannot express that because a
+    # per-field minimum cannot express a product. 10 x 30 is equally valid.
+    periodSeconds: 5
     failureThreshold: 60
     timeoutSeconds: 3
   readiness:

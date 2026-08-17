@@ -28,7 +28,7 @@
         "type": {
           "type": "string",
           "enum": ["", "Recreate", "RollingUpdate"],
-          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it."
+          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. The safe value depends on replicaCount, which this enum cannot see: RollingUpdate at one replica is refused at render time in scion-hub.updateStrategyType, because it renders maxUnavailable: 0 and so guarantees two hubs writing one workspace share for the length of the new pod's startup."
         }
       }
     },
@@ -93,7 +93,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Extra arguments appended to the hub command. The chart's own arguments, including --hosted and --host 0.0.0.0, cannot be overridden or removed, and an argument that looks like secret material fails the render."
+          "description": "Extra arguments APPENDED to the hub command. Appended is literal and it is the hazard: pflag is last-wins, so a flag the chart already renders would be silently replaced rather than rejected by the hub. Nothing at runtime prevents that - what prevents it is a reserved list checked at render time in scion-hub.hubArgs, which refuses the chart's own flags, flags that would redirect the configuration load, flags whose value is delivered through another channel, and flags that weaken authentication. An argument naming or carrying secret material also fails the render."
         },
         "resources": {
           "type": "object"
@@ -151,16 +151,18 @@
           "required": ["enabled", "periodSeconds", "failureThreshold", "timeoutSeconds"],
           "properties": {
             "enabled": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Turning the startup probe off is only permitted while probes.liveness.enabled is false; the template refuses the other combination. See probes.startup.failureThreshold."
             },
             "periodSeconds": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "description": "One of the two factors in the startup budget. This bound only keeps it positive; see probes.startup.failureThreshold for the bound that matters."
             },
             "failureThreshold": {
               "type": "integer",
-              "minimum": 60,
-              "description": "At least 60. First boot blocks on an unbounded schema-migration advisory lock before the listener binds."
+              "minimum": 1,
+              "description": "The startup budget is periodSeconds x failureThreshold, and it must be at least 300s because first boot blocks on an unbounded schema-migration advisory lock before the listener binds. THIS SCHEMA DOES NOT ENFORCE THAT: a per-field minimum cannot express a product, so JSON Schema can only keep each factor positive. The 300s minimum is enforced at render time in scion-hub.assertStartupBudget, which is where to look and where to change it."
             },
             "timeoutSeconds": {
               "type": "integer",
