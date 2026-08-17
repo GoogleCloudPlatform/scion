@@ -392,7 +392,7 @@ settings path, this is why.
 
 ### Cloud SQL
 
-Four items, and **every one of them is UNRUN rather than pending.** The
+Five items, and **every one of them is UNRUN rather than pending.** The
 distinction is the point of this section, so it is stated once here and not
 softened below: *pending* describes work that is scheduled, and reads as a
 queue that will drain on its own. **Nothing here is scheduled.** No cluster and
@@ -549,3 +549,36 @@ have never been observed in a running pod:
 for what was admitted, then `kubectl exec -c cloud-sql-proxy <pod> -- id` for
 what is actually running. If the proxy crash-loops with a write error, this
 section is why.
+
+#### 7.5 The sub-1.29 plain-sidecar path: UNRUN, and newly reachable
+
+Until this phase's round-1 review, `Chart.yaml` declared `kubeVersion: ">=1.29.0-0"`,
+so **no cluster below 1.29 could install this chart at all** — including the ones
+`cloudsql.nativeSidecar: false` exists to serve, which `values.yaml` and
+`NOTES.txt` both told operators to use. That contradiction is fixed: the version
+requirement now belongs to the native-sidecar branch alone
+(`scion-hub.assertNativeSidecarSupported`), and below 1.29 with the flag false
+the chart renders the proxy as an ordinary sidecar.
+
+**That path has never been run on a cluster, and it is the only path this phase
+made newly reachable.** What is asserted about it is asserted from rendered YAML
+only: that the proxy appears as an ordinary container, that no `initContainers`
+block is emitted, and that `NOTES.txt` prints the crash-loop warning. The
+behavioural claim behind those — that the hub loses the startup race to the
+tunnel some number of times, logs `connection refused`, and then **recovers on
+its own** — is reasoning about a race, not an observation of one. Nobody here has
+seen it converge, and "self-healing" is precisely the kind of claim that is
+indistinguishable from "broken" for the first several minutes of watching it.
+
+**To run it**, on a cluster below 1.29 (or any cluster, with the flag forced):
+
+```
+helm install <release> . --set cloudsql.nativeSidecar=false ...
+kubectl get pod <pod> -w                     # count the restarts before Ready
+kubectl logs <pod> -c hub --previous         # expect 'connection refused' on the crashes
+```
+
+Record **how many restarts** it took to converge and how long that was. If it
+does not converge, the flag's documentation is wrong and `NOTES.txt` is
+under-warning; if it converges in one or two, the warning can say so instead of
+leaving the operator to guess.
