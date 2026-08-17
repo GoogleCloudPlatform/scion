@@ -36,10 +36,28 @@ updateStrategy:
   type: ""
 
 image:
-  repository: us-docker.pkg.dev/PROJECT/scion/scion-hub
-  # Defaults to .Chart.AppVersion when empty.
+  # REQUIRED, and deliberately not given a value here.
+  #
+  # The hub image this chart needs is the one built from the root Dockerfile
+  # with --target hub-gke: non-root, uid 1000, web UI embedded, no baked
+  # KUBECONFIG. No such image is published anywhere, so every possible default
+  # would point either at an empty registry path or at somebody else's
+  # artifact - and a default that cannot be correct turns an install-time error
+  # into a runtime mystery.
+  #
+  # In particular the published artifact named "scion-hub"
+  # (us-central1-docker.pkg.dev/PROJECT_ID/public-docker/scion-hub, built from
+  # image-build/hub/Dockerfile) is NOT this image: it runs as root and it is
+  # built without the embedded web UI. Matching the name is a coincidence, not
+  # an endorsement.
+  #
+  #   repository: us-docker.pkg.dev/my-project/my-repo/scion-hub-gke
+  #
+
+  # Defaults to .Chart.AppVersion when empty. Prefer digest.
   tag: ""
-  # Preferred over tag. Mutually exclusive with it.
+  # Preferred over tag, and mutually exclusive with it. A tag can be repointed
+  # underneath a running cluster; a digest cannot.
   digest: ""
   pullPolicy: IfNotPresent
   pullSecrets: []
@@ -77,12 +95,23 @@ hub:
       memory: 2Gi
 
   securityContext:
+    # runAsNonRoot is NOT a value. The chart sets it to true on both the pod and
+    # the hub container and there is no knob, no override and no escape hatch.
+    #
+    # The reason is a specific, likely mistake: the artifact named "scion-hub"
+    # that this project publishes today runs as root, and an operator who
+    # reasons from the name rather than from the docs will point the chart at
+    # it. The dangerous outcome is not that such an image is rejected - it is
+    # that with a loose securityContext it appears to work, as root, writing
+    # root-owned files into a share that agents running as uid 1000 then cannot
+    # write. runAsNonRoot turns that silent outcome into a pod that fails
+    # admission and says why.
+    #
+    # runAsUser and runAsGroup remain configurable because a later part of this
+    # chart requires them to match the workspace share's uid and gid. Zero is
+    # rejected: it contradicts runAsNonRoot rather than overriding it.
     runAsUser: 1000
     runAsGroup: 1000
-    # Requires a non-root hub image. The images in this repository still run as
-    # root; until a non-root image is published the pod will not schedule with
-    # this set to true.
-    runAsNonRoot: true
 
   podAnnotations: {}
   nodeSelector: {}

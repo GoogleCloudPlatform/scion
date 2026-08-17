@@ -35,7 +35,8 @@
       "properties": {
         "repository": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "REQUIRED, with no default. The hub image built from the root Dockerfile with --target hub-gke. It is not published anywhere, so any default the chart could ship would point at an empty path or at another artifact. The published artifact named scion-hub is not this image: it runs as root and has no embedded web UI."
         },
         "tag": {
           "type": "string",
@@ -87,7 +88,8 @@
         "securityContext": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["runAsUser", "runAsGroup", "runAsNonRoot"],
+          "required": ["runAsUser", "runAsGroup"],
+          "description": "runAsNonRoot is deliberately not a property here. The chart always sets it true, on both the pod and the hub container, and additionalProperties is false so it cannot be reintroduced as an override. Zero is rejected for runAsUser and runAsGroup because it contradicts that.",
           "properties": {
             "runAsUser": {
               "type": "integer",
@@ -96,9 +98,6 @@
             "runAsGroup": {
               "type": "integer",
               "minimum": 1
-            },
-            "runAsNonRoot": {
-              "type": "boolean"
             }
           }
         },

@@ -60,9 +60,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
-        runAsNonRoot: {{ .Values.hub.securityContext.runAsNonRoot }}
-        runAsUser: {{ .Values.hub.securityContext.runAsUser }}
-        runAsGroup: {{ .Values.hub.securityContext.runAsGroup }}
+        {{- include "scion-hub.nonRootSecurityContext" . | nindent 8 }}
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -100,6 +98,13 @@ spec:
             timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
           {{- end }}
           securityContext:
+            {{- /*
+            Repeated at the container level on purpose. A container-level
+            securityContext shadows the pod-level one field by field, so
+            restating runAsNonRoot here means the hub container cannot be
+            returned to root by anything that only reaches the pod-level block.
+            */}}
+            {{- include "scion-hub.nonRootSecurityContext" . | nindent 12 }}
             allowPrivilegeEscalation: false
             capabilities:
               drop:

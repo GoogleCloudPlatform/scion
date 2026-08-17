@@ -141,5 +141,30 @@ same rule: a check that was moved here is a check that has **not** passed.
 
 ### Chart skeleton and core workload
 
-Nothing relocated. Every criterion for this part of the chart is static and was
+One item. Every other criterion for this part of the chart is static and was
 verified at authoring time.
+
+#### A root image fails pod admission
+
+The chart sets `runAsNonRoot: true` on the pod and on the hub container and
+exposes no value that can turn it off. The static half of that is verified: the
+field is a literal in the template, `hub.securityContext` rejects unknown
+properties so it cannot be reintroduced as an override, and `runAsUser: 0` fails
+the render. What could not be verified is the half that matters — that the
+kubelet actually refuses the pod.
+
+Point the chart at a root image on purpose, for example the published
+`scion-hub` artifact, and install it.
+
+    kubectl describe pod <hub-pod>
+
+Pass: the pod does not start, and the event says the container has
+`runAsNonRoot` and the image will run as root. **Fail** — and this is the case
+worth watching for — is a pod that reaches `Running`. That means something in
+the path is stripping or overriding the security context, and the wrong image is
+running as root while looking healthy.
+
+Then run the same install with a hub image built from the root `Dockerfile` with
+`--target hub-gke` and confirm the pod schedules and `/readyz` returns 200.
+Confirm the files it creates on the workspace share are owned by
+`hub.securityContext.runAsUser` and `runAsGroup`, not by uid 0.

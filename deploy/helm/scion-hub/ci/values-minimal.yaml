@@ -25,6 +25,8 @@
 hub:
   hubId: ci-minimal
 
+# No default exists for this, and no hub-gke image is published, so CI names an
+# obviously non-real path. Nothing here is ever pulled.
 image:
-  repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
+  repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
   tag: ci

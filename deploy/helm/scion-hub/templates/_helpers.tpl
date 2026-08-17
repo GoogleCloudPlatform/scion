@@ -66,9 +66,11 @@ The hub ID, emitted verbatim.
 There is deliberately no generator, no default and no derivation here. The value
 the operator supplied is the value that is rendered: nothing is appended,
 trimmed, hashed or substituted, and nothing in this chart may make the hub ID a
-function of anything Helm recomputes between renders (.Release.Revision,
-randAlphaNum, uuidv4, .Release.Name or the pod hostname). Two renders that
-differ only in release revision must produce a byte-identical hub ID.
+function of anything Helm recomputes between renders - not the release revision,
+not the release name, not a random or UUID generator, not the pod hostname. Two
+renders that differ only in release revision must produce a byte-identical hub
+ID, and CI greps this chart for the generator functions by name, so do not
+reintroduce one even in a comment.
 */}}
 {{- define "scion-hub.hubId" -}}
 {{- $id := required "hub.hubId is required: set it to an explicit, stable hub ID. The chart never generates one - without an explicit value the hub derives its ID from its hostname, which is random per pod." .Values.hub.hubId }}
@@ -86,6 +88,38 @@ differ only in release revision must produce a byte-identical hub ID.
 {{- fail (printf "rbac.agentNamespace (%s) and runtime.namespace (%s) disagree. They name the same namespace; set one, or set both to the same value." $rbacNs $runtimeNs) }}
 {{- end }}
 {{- coalesce $rbacNs $runtimeNs .Release.Namespace }}
+{{- end }}
+
+{{/*
+The identity fields of the security context, rendered at both the pod level and
+the hub container level.
+
+runAsNonRoot is a literal true. It is not read from a value, there is no knob
+for it, and hub.securityContext rejects unknown properties so it cannot be
+reintroduced as an override. The point is not hardening in the abstract: the
+artifact this project publishes under the name "scion-hub" runs as root, and an
+operator who reasons from the artifact name will eventually point the chart at
+it. With a loose security context that image runs, as root, and writes
+root-owned files into a share that agents running as uid 1000 cannot write -
+a failure that surfaces days later and looks like a storage problem. With
+runAsNonRoot the pod fails admission immediately and says why.
+
+runAsUser and runAsGroup stay configurable because they must be able to match
+the workspace share's uid and gid. Zero is rejected here as well as in the
+schema, so relaxing the schema alone cannot reopen the hole.
+*/}}
+{{- define "scion-hub.nonRootSecurityContext" -}}
+{{- $uid := int .Values.hub.securityContext.runAsUser }}
+{{- $gid := int .Values.hub.securityContext.runAsGroup }}
+{{- if eq $uid 0 }}
+{{- fail "hub.securityContext.runAsUser may not be 0: the hub always runs with runAsNonRoot, so uid 0 would fail pod admission rather than grant root." }}
+{{- end }}
+{{- if eq $gid 0 }}
+{{- fail "hub.securityContext.runAsGroup may not be 0: files the hub writes to the workspace share would be group 0 and unwritable by agents." }}
+{{- end -}}
+runAsNonRoot: true
+runAsUser: {{ $uid }}
+runAsGroup: {{ $gid }}
 {{- end }}
 
 {{/*

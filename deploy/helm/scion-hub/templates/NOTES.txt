@@ -41,6 +41,28 @@ account before the hub needs Google APIs:
 {{- end }}
 {{- end }}
 
+THE IMAGE
+
+  Running: {{ include "scion-hub.image" . }}
+
+  This must be a hub image built from the root Dockerfile with
+  --target hub-gke: non-root at uid 1000, web UI embedded, no baked KUBECONFIG.
+
+  The published artifact named "scion-hub"
+  (us-central1-docker.pkg.dev/PROJECT_ID/public-docker/scion-hub, built from
+  image-build/hub/Dockerfile) is NOT that image. It runs as root and it is built
+  without the embedded web UI, so --enable-web has nothing to serve. The shared
+  name is a coincidence. There is no published hub-gke image yet; you build it.
+
+  The chart sets runAsNonRoot on the pod and on the hub container and offers no
+  way to turn it off, so a root image fails admission with a clear message
+  instead of running and writing root-owned files into your workspace share.
+{{ if not .Values.image.digest }}
+  Pin the image by digest (image.digest) rather than by tag. A tag can be
+  repointed underneath a running cluster; a digest cannot. This release uses a
+  tag.
+{{- end }}
+
 WHAT THIS RELEASE DOES NOT YET DO
 
   The chart is being built incrementally and this release installs the core
@@ -49,9 +71,9 @@ WHAT THIS RELEASE DOES NOT YET DO
   configure Cloud SQL, GCS blob storage, Filestore, a session secret, Ingress or
   IAP. Do not treat this as a production install.
 
-  hub.securityContext.runAsNonRoot defaults to true. The hub images published
-  from this repository today declare no USER and run as root, so the pod will
-  not schedule against them until a non-root image exists.
+  The hub images published from this repository today run as root, so until a
+  hub-gke image exists there is nothing this chart can successfully schedule.
+  That is the intended behaviour, not a defect: see THE IMAGE above.
 
 {{ if gt (int .Values.replicaCount) 1 -}}
 WARNING: replicaCount is {{ .Values.replicaCount }}.
