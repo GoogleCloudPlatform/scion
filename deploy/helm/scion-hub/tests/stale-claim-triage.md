@@ -471,7 +471,7 @@ inside quoted historical output, the `118`/`252` in §3's block — **I took his
 first treatment: in the denominator, and they pass, because the block is
 SHA-pinned.**
 
-**59 mechanical assertions over this file's self-claims. 59 run. 12 corrected**,
+**66 mechanical assertions over this file's self-claims. 66 run. 12 corrected**,
 plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
 so it is out by the definition above, and it is fixed here only because `gd-em`
 folded it into this commit. No category came back empty. **A is zero as a
@@ -486,6 +486,7 @@ appears without a SHA on the same line.
 | **C** | positional claims about this same file | 12 | 1 |
 | **D** | cardinalities about this file's own tables | 15 | 3 |
 | **E** | claims about the instrument that measured it | 13 | 2 |
+| **F** | this section's own description of the harness | 7 | — (never checked before) |
 
 Subjects: `git show <sha>:<path>` at `5ebe3dab`, `38a41b6e` and `6fc0cdfc`, never
 the working tree. Every row compares the claim *as written* against a fresh
@@ -638,8 +639,8 @@ that the BRE extension is live in the dialect actually in use and dead under
 > pattern as passed, byte for byte** — `?` and `\?` are different patterns and a
 > disclosure naming only the dialect cannot tell them apart.
 
-**Control: all 59 assertions were re-run under the shadowed engine and every one
-of the 59 outcomes is byte-identical.** Not asserted from the patterns being
+**Control: all 66 assertions were re-run under the shadowed engine and every one
+of the 66 outcomes is byte-identical.** Not asserted from the patterns being
 `-F` or BRE-safe — measured, by pointing the harness at
 `ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files …` and diffing the full
 output. **The numbers in this section do not depend on which engine you use; the
@@ -737,9 +738,28 @@ sweep is the first time anyone has checked even that much**; their agreement wit
 the sweeps that produced them is unverified and is not claimed.
 
 The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
-`e3a68f77dd98af0b`, and is deliberately **not** committed: `tests/` is frozen at
-P0. It exits 0 on 59/59 under **both** engines and **exits 1 under mutation
-control** — reverting the §3 heading to *"the two new findings"* takes it to 58/59 — so it is an instrument
-that can disagree, which four of this morning's could not. It should land beside
+`b0a6d4ccdd7a61c8`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 66/66 under **both** engines and **exits 1 under a four-arm
+mutation battery**, each arm naming the row it broke:
+
+```
+MM1  revert the §3 heading to "the two new findings"   rc=1  65/66   D8
+MM2  category B in the table above: 18 -> 17           rc=1  64/66   F-B, F7
+MM3  headline total: 66 -> 67                          rc=1  65/66   F7
+MM4  delete the F row entirely                         rc=1  64/66   F-F, F7
+```
+
+**MM4 is the one worth the space.** Deleting a row from the table is the mutation
+a table-checker most naturally misses, because there is then nothing there to
+disagree with — the check has to be keyed on the *categories the harness ran*,
+not on the rows the table happens to contain, or an omission reads as agreement.
+Category F's counts come from a runtime tally inside `chk`, not from grepping the
+harness source: §7's `C` loop emits seven assertions from one `chk` call, so a
+source count would undercount exactly the rows a loop produces. **That is
+`gd-trig`'s dark-row shape one axis over, and F exists because of their
+observation that every comparator built on this project today was an inner join
+and the fix is to assert that the parts sum to an independently-derived total.**
+
+So it is an instrument that can disagree, which four of this morning's could not. It should land beside
 this file when P1 unfreezes `tests/`, at which point the numbers above stop being
 a report and become a check.
