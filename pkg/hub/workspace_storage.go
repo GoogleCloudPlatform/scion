@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -26,6 +28,10 @@ import (
 // the same for the GKE shared volume PVC, since nothing in the config surface
 // can express any other location. Overridden by tests.
 var volumeMountBase = "/mnt"
+
+// containerRootPath is the container root filesystem, used as the reference
+// device for isMountedVolume. Overridden by tests.
+var containerRootPath = "/"
 
 // workspaceMountRoot returns the absolute path at which the configured
 // workspace storage backend is mounted, or "" when the config does not name
@@ -57,4 +63,51 @@ func workspaceMountRoot(wsCfg *config.V1WorkspaceStorageConfig) string {
 	}
 
 	return ""
+}
+
+// isMountedVolume reports whether path lives on a filesystem other than the
+// container root — that is, whether a volume is actually mounted there.
+//
+// Presence alone does not answer that question. The hub image declares no USER
+// and runs as root, so when the volume is mounted somewhere other than the
+// expected path, initHubManagedProject's MkdirAll happily creates the
+// directory on the container's ephemeral overlay. From then on a plain
+// os.Stat succeeds and readiness would report healthy forever while every
+// project tree is written to storage that vanishes on reschedule. Comparing
+// device IDs distinguishes the two: a directory created on the overlay shares
+// the root filesystem's device, a mounted volume does not.
+//
+// The comparison is against the container root rather than the path's parent
+// so that a deployment mounting the volume one level up — at volumeMountBase
+// itself, with a subPath — is still recognized as mounted. Writes in that
+// layout do land in the volume.
+//
+// When device IDs are unavailable (a platform without syscall.Stat_t), this
+// returns true: an unenforceable check must not fail readiness.
+func isMountedVolume(fi os.FileInfo, rootPath string) bool {
+	dev, ok := deviceID(fi)
+	if !ok {
+		return true
+	}
+
+	rootFI, err := os.Stat(rootPath)
+	if err != nil {
+		return true
+	}
+	rootDev, ok := deviceID(rootFI)
+	if !ok {
+		return true
+	}
+
+	return dev != rootDev
+}
+
+// deviceID returns the filesystem device ID for fi, and whether it could be
+// determined.
+func deviceID(fi os.FileInfo) (uint64, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return uint64(st.Dev), true
 }

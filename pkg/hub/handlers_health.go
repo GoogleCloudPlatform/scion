@@ -112,22 +112,44 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 		return
 	}
 
+	// For the GKE shared volume, presence of the directory is not enough. The
+	// pod spec has to mount the PVC at the path derived from the volume name,
+	// and nothing enforces that it did; when it did not, the hub creates that
+	// directory itself on the container overlay the first time a project is
+	// written. Requiring the path to be a mounted volume keeps a
+	// wrongly-mounted deployment permanently unready instead of letting it
+	// latch healthy over ephemeral storage. See isMountedVolume.
+	requireMount := wsCfg.Backend == "gke-shared-volume"
+
 	// Wrap os.Stat in a goroutine with a timeout to prevent blocking on a
 	// hung NFS mount. A stuck stat call would otherwise hang the health
 	// endpoint indefinitely, taking down readiness probes.
 	type statResult struct {
-		err error
+		err     error
+		mounted bool
 	}
 	ch := make(chan statResult, 1)
 	go func() {
-		_, err := os.Stat(mountPath)
-		ch <- statResult{err: err}
+		fi, err := os.Stat(mountPath)
+		if err != nil {
+			ch <- statResult{err: err}
+			return
+		}
+		mounted := true
+		if requireMount {
+			mounted = isMountedVolume(fi, containerRootPath)
+		}
+		ch <- statResult{mounted: mounted}
 	}()
 
 	select {
 	case res := <-ch:
 		if res.err != nil {
 			checks["workspace_storage"] = "unhealthy: mount not available"
+			return
+		}
+		if !res.mounted {
+			checks["workspace_storage"] = "unhealthy: mount path is not a mounted volume"
 			return
 		}
 		checks["workspace_storage"] = "healthy"

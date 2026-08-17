@@ -798,6 +798,166 @@ func TestCheckWorkspaceStorageHealth_MountPathPerBackend(t *testing.T) {
 	}
 }
 
+// setContainerRootPath overrides the reference path isMountedVolume compares
+// device IDs against. Pointing it at a temp directory makes anything created
+// under that directory look like it lives on the container root filesystem.
+func setContainerRootPath(t *testing.T, dir string) {
+	t.Helper()
+	prev := containerRootPath
+	containerRootPath = dir
+	t.Cleanup(func() { containerRootPath = prev })
+}
+
+// distinctDeviceDir returns a fresh directory on a filesystem other than the
+// one containerRootPath lives on — a stand-in for a real volume mount — or
+// skips the test when the sandbox has no second filesystem to offer.
+func distinctDeviceDir(t *testing.T) string {
+	t.Helper()
+
+	rootFI, err := os.Stat(containerRootPath)
+	require.NoError(t, err)
+	rootDev, ok := deviceID(rootFI)
+	if !ok {
+		t.Skip("device IDs unavailable on this platform")
+	}
+
+	for _, candidate := range []string{"/dev/shm", "/run", "/tmp", os.TempDir()} {
+		fi, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		dev, ok := deviceID(fi)
+		if !ok || dev == rootDev {
+			continue
+		}
+		dir, err := os.MkdirTemp(candidate, "scion-mount-")
+		if err != nil {
+			continue
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		return dir
+	}
+
+	t.Skip("no filesystem distinct from the container root is available")
+	return ""
+}
+
+// TestCheckWorkspaceStorageHealth_GKEOverlayDirIsUnhealthy is the regression
+// test for the self-latching readiness check.
+//
+// Nothing forces a Kubernetes pod spec to mount the PVC at /mnt/<volume_name>.
+// When it does not, the hub — running as root — creates that directory itself
+// on the container overlay the first time a project is written. Readiness must
+// keep reporting unhealthy in that state; if it flips to healthy, the pod
+// serves every project tree from ephemeral disk and the failure is silent.
+func TestCheckWorkspaceStorageHealth_GKEOverlayDirIsUnhealthy(t *testing.T) {
+	srv, _ := testServer(t)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+	// Same filesystem as the "container root", i.e. an overlay directory.
+	setContainerRootPath(t, mountBase)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{
+			VolumeName:  "workspace-vol",
+			PVClaimName: "scion-workspaces",
+		},
+	}
+
+	checks := make(map[string]string)
+	srv.checkWorkspaceStorageHealth(checks)
+	assert.Equal(t, "unhealthy: mount path is not a mounted volume", checks["workspace_storage"])
+}
+
+// The same condition must keep the pod out of the load balancer, not merely
+// annotate /healthz.
+func TestReadiness_GKEOverlayDirNotReady(t *testing.T) {
+	srv, _ := testServer(t)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+	setContainerRootPath(t, mountBase)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:         "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "workspace-vol"},
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/readyz", nil)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "not_ready", resp["status"])
+	assert.Contains(t, resp["reason"], "workspace storage")
+}
+
+// A correctly mounted volume — a filesystem of its own — is healthy.
+func TestCheckWorkspaceStorageHealth_GKEMountedVolumeIsHealthy(t *testing.T) {
+	srv, _ := testServer(t)
+
+	mountDir := distinctDeviceDir(t)
+	setVolumeMountBase(t, filepath.Dir(mountDir))
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{
+			VolumeName:  filepath.Base(mountDir),
+			PVClaimName: "scion-workspaces",
+		},
+	}
+
+	checks := make(map[string]string)
+	srv.checkWorkspaceStorageHealth(checks)
+	assert.Equal(t, "healthy", checks["workspace_storage"])
+}
+
+// A chart may mount the PVC one level up — at the mount base itself, with a
+// subPath — so that <base>/<volume_name> is a directory inside the volume
+// rather than the mount point. Writes there still land in the volume, so this
+// must read as healthy. Comparing against the container root rather than the
+// path's parent is what makes that work.
+func TestCheckWorkspaceStorageHealth_GKEVolumeMountedAtBaseIsHealthy(t *testing.T) {
+	srv, _ := testServer(t)
+
+	mountDir := distinctDeviceDir(t)
+	setVolumeMountBase(t, mountDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountDir, "workspace-vol"), 0755))
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:         "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "workspace-vol"},
+	}
+
+	checks := make(map[string]string)
+	srv.checkWorkspaceStorageHealth(checks)
+	assert.Equal(t, "healthy", checks["workspace_storage"])
+}
+
+// The mount requirement is confined to the GKE backend: Cloud Run mounts the
+// volume itself, and changing what its deployments report is out of scope.
+func TestCheckWorkspaceStorageHealth_CloudRunPlainDirIsHealthy(t *testing.T) {
+	srv, _ := testServer(t)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+	setContainerRootPath(t, mountBase)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
+
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:        "cloudrun-volume",
+		CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "workspace-vol"},
+	}
+
+	checks := make(map[string]string)
+	srv.checkWorkspaceStorageHealth(checks)
+	assert.Equal(t, "healthy", checks["workspace_storage"])
+}
+
 // ============================================================================
 // Integration Test: Write → Verify → Simulated Restart
 // ============================================================================
