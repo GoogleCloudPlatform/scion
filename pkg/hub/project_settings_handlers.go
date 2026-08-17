@@ -170,6 +170,14 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 
 	switch r.Method {
 	case http.MethodGet:
+		// Project isolation runs before the authorization check so a cross-project
+		// agent caller keeps its 404 and is not told the project exists.
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			if project.ID != agentIdent.ProjectID() {
+				NotFound(w, "Project")
+				return
+			}
+		}
 		if !s.authorize(w, r, Resource{
 			Type:    "project",
 			ID:      project.ID,

@@ -351,10 +351,13 @@ func (s *Server) handleProjectSettingsResolved(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return
+	// Project isolation runs before the authorization check so a cross-project
+	// agent caller keeps its 404 and is not told the project exists.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if project.ID != agentIdent.ProjectID() {
+			NotFound(w, "Project")
+			return
+		}
 	}
 
 	// Same authorization as GET /settings: ActionRead on the project.
