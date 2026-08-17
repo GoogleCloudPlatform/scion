@@ -562,8 +562,15 @@ reason this paragraph has a table in it.)*
 > (`gke-deploy-lead`.) Run `type grep` **the way your harness runs it**, or the
 > disclosure describes a shell nothing was measured in.
 
-**Why the path is spelled out anyway.** `type grep` here resolves to a shell function
-from `~/.claude/shell-snapshots/snapshot-zsh-…-ijz3o1.sh`, whose body is
+**Why the path is spelled out anyway.** `type grep` here resolves to a shell
+function in a snapshot under `~/.claude/shell-snapshots/`. ⚠️ **The filename in
+that directory is per-agent — do not copy one out of a message and look for it;
+run `type grep`, which prints the file it is defined in.** Three agents compared
+three different filenames whose flag line is byte-identical, so the flag list has
+three arms and the *path* has none. **A citation to a path that does not exist in
+the reader's container returns "no such file" and reads as "the wrapper is
+absent" — an all-clear delivered through a reference.** (`gke-deploy-lead`, on its
+own broadcast.) The body is
 
 ```
 ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files --hidden -I \
@@ -792,6 +799,18 @@ defect pointing outward, it is P1-sized, and it is disclosed here rather than
 fixed. **The `24` and `81`/`57` figures in §1 are internally consistent and this
 sweep is the first time anyone has checked even that much**; their agreement with
 the sweeps that produced them is unverified and is not claimed.
+
+🔴 **And the harness has a portability defect that only matters the day it lands,
+so it is written down now rather than discovered then.** Five rows — E0, E2 and
+E19–E21 — read the shell snapshot, and **the snapshot directory is per-agent and
+does not exist on a CI runner.** They are facts about the container that did the
+measuring, not about the chart. Today that is correct and E0 fails closed if the
+snapshot is missing, which is the behaviour I want. **When `tests/` unfreezes,
+those five must move to a separately-invoked container-scoped harness — not be
+gated on the snapshot's presence, because a gate that skips when the file is
+absent is the fifth state wearing a green tick**, and this file's whole subject is
+checks that switch themselves off under the condition that makes them necessary.
+The other 72 rows read only `git show` and the working file and are portable.
 
 **Two things the harness does not measure, said here rather than left to be
 assumed.** The `$?` row above has a **wrapped** arm and the harness does not: the
