@@ -60,42 +60,81 @@ die_cannot_evaluate() {
 [[ -x "$SHIM" ]] || die_cannot_evaluate "shim at $SHIM is not executable"
 
 # ---------------------------------------------------------------------------
-# --prove-it: a negative control on this harness.
+# --prove-it: negative controls on this harness. ONE PER COUNTER.
 #
 # A green selftest is worth exactly as much as the harness's ability to go red.
-# Before trusting a pass, run the whole suite once with one expectation
-# deliberately falsified and require it to FAIL. If the falsified run passes,
-# the harness is not measuring anything and the honest answer is 2, not 0.
+# Before trusting a pass, run the whole suite with an expectation deliberately
+# falsified and require it to FAIL. If the falsified run passes, the harness is
+# not measuring anything and the honest answer is 2, not 0.
 #
-# This is the question that has paid four times on this project today: what
-# would this check have done if the thing it is checking for were real?
+# THE FIRST VERSION OF THIS PROVED HALF OF WHAT IT CLAIMED. It flipped one
+# arm's expected EXIT STATUS, which exercises `arms_mismatched` and nothing
+# else. The post-conditions — the checks that say the WORK SURVIVED, which are
+# the whole reason this guard exists — run through a separate counter,
+# `checks_failed`, that the negative control never touched. gd-wsg-rev-2
+# measured the consequence by neutering `assert` so that every post-condition
+# passed unconditionally:
+#
+#     assert() { ok=0; ... }   ./selftest.sh --prove-it
+#       -> "negative control PASSED — the suite below is capable of failing."
+#       -> "PASS — 33 arms, 37 post-conditions"                        rc=0
+#
+# The suite announced that it was capable of failing and then reported 37 dead
+# post-conditions as green. It also controlled its own finding, which is why
+# this is precise rather than a general accusation: mutating `still_dirty` to
+# claim the work had been destroyed gave rc=1 and 8 named failures, so the
+# assert path works — --prove-it simply never looked at it.
+#
+# A HEADLINE WITH TWO NUMBERS IN IT NEEDS TWO NEGATIVE CONTROLS. Anything less
+# invites the reader to believe the control covers both, and it covered the
+# first. So: two injection sites, one per counter, and each run must report the
+# counter it was aimed at going red AND THE OTHER ONE STAYING GREEN. Requiring
+# the other to stay green is what makes this a test of the counters rather than
+# a test of the exit code, which is a single number they both feed.
 # ---------------------------------------------------------------------------
+prove_one() {                 # <inject-kind> <expected-counter-line>
+  local kind="$1" want="$2" log status=0 body
+  log="$(mktemp)" || die_cannot_evaluate "mktemp failed"
+  WSGUARD_SELFTEST_INJECT="$kind" "$SELF_DIR/selftest.sh" >"$log" 2>&1 || status=$?
+  body="$(cat "$log")"
+  if (( status != 1 )); then
+    echo "wsguard-selftest: negative control [$kind] exited $status, expected 1." >&2
+    if (( status == 0 )); then
+      echo "wsguard-selftest: a run with a falsified $kind expectation still PASSED, so this" >&2
+      echo "wsguard-selftest: harness cannot go red on that axis and its green means nothing." >&2
+    fi
+    printf '%s\n' "$body" | sed 's/^/  | /' >&2
+    rm -f "$log"
+    exit 2
+  fi
+  # Bash glob containment, not grep — no external tool decides this verdict.
+  if [[ "$body" != *"$want"* ]]; then
+    echo "wsguard-selftest: negative control [$kind] exited 1, but for the WRONG REASON." >&2
+    echo "wsguard-selftest: expected the counter line to contain: $want" >&2
+    echo "wsguard-selftest: an injection that reddens a counter it was not aimed at proves" >&2
+    echo "wsguard-selftest: nothing about the counter it was aimed at." >&2
+    printf '%s\n' "$body" | sed 's/^/  | /' >&2
+    rm -f "$log"
+    exit 2
+  fi
+  rm -f "$log"
+  echo "wsguard-selftest: negative control [$kind] PASSED — exit 1, and $want"
+}
+
 if [[ "${1:-}" == "--prove-it" ]]; then
-  mutated_log="$(mktemp)" || die_cannot_evaluate "mktemp failed"
-  mutated_status=0
-  WSGUARD_SELFTEST_INJECT_FAILURE=1 "$SELF_DIR/selftest.sh" >"$mutated_log" 2>&1 || mutated_status=$?
-  case "$mutated_status" in
-    1)
-      echo "wsguard-selftest: negative control PASSED — with one expectation falsified the harness exited 1."
-      echo "wsguard-selftest: the suite below is therefore capable of failing. Running it for real."
-      echo
-      rm -f "$mutated_log"
-      ;;
-    0)
-      echo "wsguard-selftest: negative control FAILED — a run with a falsified expectation still exited 0." >&2
-      echo "wsguard-selftest: this harness cannot go red, so its green means nothing." >&2
-      sed 's/^/  | /' "$mutated_log" >&2
-      rm -f "$mutated_log"
-      exit 2
-      ;;
-    *)
-      echo "wsguard-selftest: negative control exited $mutated_status, expected 1 — the harness is broken, not the guard." >&2
-      sed 's/^/  | /' "$mutated_log" >&2
-      rm -f "$mutated_log"
-      exit 2
-      ;;
-  esac
+  prove_one arm   "counters: arms_mismatched=1 checks_failed=0"
+  prove_one check "counters: arms_mismatched=0 checks_failed=1"
+  echo "wsguard-selftest: both counters are demonstrably capable of failing. Running for real."
+  echo
   shift
+fi
+
+# Back-compatible with the single-axis variable the earlier round used, so that
+# an external caller pinned to the old name still gets the arm injection rather
+# than silently getting no injection at all — which would read as a pass.
+INJECT="${WSGUARD_SELFTEST_INJECT:-}"
+if [[ -z "$INJECT" && "${WSGUARD_SELFTEST_INJECT_FAILURE:-}" == "1" ]]; then
+  INJECT=arm
 fi
 
 # Resolve the real git the same way the shim does, and by the same rule:
@@ -278,6 +317,7 @@ OVERRIDE_REASON=""
 ROOT_OVERRIDE=""
 PATH_OVERRIDE=""
 HOPS_OVERRIDE=""
+MODE_OVERRIDE=""
 
 run_guarded() {
   local dir="$1"
@@ -293,7 +333,15 @@ run_guarded() {
     if [[ -n "$HOPS_OVERRIDE" ]]; then
       export SCION_WSGUARD_HOPS="$HOPS_OVERRIDE"
     fi
-    export SCION_WORKSPACE_MODE=shared-plain
+    if [[ -n "$MODE_OVERRIDE" ]]; then
+      if [[ "$MODE_OVERRIDE" == "unset" ]]; then
+        unset SCION_WORKSPACE_MODE
+      else
+        export SCION_WORKSPACE_MODE="$MODE_OVERRIDE"
+      fi
+    else
+      export SCION_WORKSPACE_MODE=shared-plain
+    fi
     if [[ -n "$ROOT_OVERRIDE" ]]; then
       export SCION_WSGUARD_ROOT="$ROOT_OVERRIDE"
     else
@@ -327,9 +375,10 @@ arm() {
     78) arms_cannot=$(( arms_cannot + 1 )) ;;
     0)  arms_permit=$(( arms_permit + 1 )) ;;
   esac
-  # The falsified expectation used by --prove-it. It sits on the first arm so
-  # that the negative control exercises the same path as a real regression.
-  if [[ "${WSGUARD_SELFTEST_INJECT_FAILURE:-}" == "1" && "$name" == "N1-checkout-pathspec" ]]; then
+  # Injection site 1 of 2: the expected EXIT STATUS. Reddens arms_mismatched
+  # and must leave checks_failed alone, which is why it flips the expectation
+  # rather than the command.
+  if [[ "$INJECT" == "arm" && "$name" == "N1-checkout-pathspec" ]]; then
     expect=0
   fi
   run_guarded "$dir" "$@"
@@ -350,11 +399,25 @@ arm() {
   ROOT_OVERRIDE=""
   PATH_OVERRIDE=""
   HOPS_OVERRIDE=""
+  MODE_OVERRIDE=""
 }
 
 # assert <arm-name> <description> <condition-result 0|1>
+#
+# Injection site 2 of 2. It inverts the FIRST post-condition of the run and
+# then disarms itself, so exactly one check goes red and `checks_failed=1` is
+# an exact expectation rather than a lower bound. Inverting the RESULT rather
+# than stubbing the function is deliberate: stubbing would also disable every
+# other check, and a control that disables the thing it is measuring cannot
+# tell you the thing was working.
+inject_check_fired=0
 assert() {
   local name="$1" desc="$2" ok="$3"
+  if [[ "$INJECT" == "check" ]] && (( inject_check_fired == 0 )); then
+    inject_check_fired=1
+    ok=$(( 1 - ok ))
+    desc="$desc [FALSIFIED BY --prove-it]"
+  fi
   checks_run=$(( checks_run + 1 ))
   if (( ok == 0 )); then
     printf '    + %s\n' "$desc"
@@ -578,6 +641,121 @@ arm "N14-dash-h-after-terminator" 77 "$SHARED" -- checkout -- -h
   assert "N14-dash-h-after-terminator" "the -h help scan stops at the terminator, so the FILE named -h survives" 0 ||
   assert "N14-dash-h-after-terminator" "the -h help scan stops at the terminator, so the FILE named -h survives" 1
 
+# ---------------------------------------------------------------------------
+# C3. A global option that takes a SEPARATE value and that the guard's table
+# does not know. `--attr-source` is real, takes a separate value in git 2.54.0,
+# and is deliberately absent from opt_takes_value — see the comment there. The
+# guard must refuse anyway, via the union of candidate readings.
+# ---------------------------------------------------------------------------
+"$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+dirty "$SHARED"
+arm "N23-unknown-option-separated-value" 77 "$SHARED" -- --attr-source HEAD checkout -- tracked.txt
+still_dirty && assert "N23-unknown-option-separated-value" "an option of unknown arity does not hide the verb behind it" 0 ||
+  assert "N23-unknown-option-separated-value" "an option of unknown arity does not hide the verb behind it" 1
+[[ "$LAST_OUT" == *"not an option this guard knows the shape of"* ]] &&
+  assert "N23-unknown-option-separated-value" "the refusal says which reading it rested on, instead of looking like a misparse" 0 ||
+  assert "N23-unknown-option-separated-value" "the refusal says which reading it rested on, instead of looking like a misparse" 1
+
+dirty "$SHARED"
+arm "N24-unknown-option-then-another" 77 "$SHARED" -- --attr-source HEAD --literal-pathspecs checkout -- tracked.txt
+still_dirty && assert "N24-unknown-option-then-another" "the second reading resumes the scan rather than taking the next token blind" 0 ||
+  assert "N24-unknown-option-then-another" "the second reading resumes the scan rather than taking the next token blind" 1
+
+# GENERATED, NOT ENUMERATED. The reviewer's central criticism of this suite was
+# that every arm was one-per-known-bug — N12 tests a depth-one alias because
+# the bug was depth one — so no arm generalised its class and four more members
+# of the class survived to round 4. These next two arms are the answer: they
+# construct their inputs from the guard's OWN table plus a name the table does
+# not contain, and assert a property that must hold across the class.
+#
+# The property: for every global option, the SEPARATED form must classify the
+# same as the ATTACHED form. It was the divergence between those two that made
+# C3 visible in the first place.
+#
+# THE ASSERTION MUST CARRY THE DISCRIMINATION. This arm first read "status is
+# not 0", and that was wrong in the way R3 was wrong: a nonzero status can come
+# from the guard refusing OR from real git rejecting the option, and "not 0"
+# cannot tell those apart. Measured, with the union deliberately removed:
+#
+#   --attr-source                rc=128  tracked.txt GONE   guard silent
+#   --wsguard-not-a-real-option  rc=129  tracked.txt DIRTY  guard silent
+#
+# The first line is a WORKING-TREE MUTATION — the file the guard exists to
+# protect was destroyed — and the arm went green, because 128 is not 0. So the
+# one arm whose job was to generalise the class was the one arm that could not
+# see the class break. Two things fix it, and both are properties, not statuses:
+# the guard must have SPOKEN, and the content must still be there.
+optlist=(-C -c --git-dir --work-tree --namespace --config-env --attr-source --wsguard-not-a-real-option)
+gen_class_ok=1
+gen_class_detail=""
+gen_class_spoke=0
+for gopt in "${optlist[@]}"; do
+  "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+  dirty "$SHARED"
+  run_guarded "$SHARED" "$gopt" "$SHARED" checkout -- tracked.txt
+  sep_status="$LAST_STATUS"
+  # (1) The guard, not git, must be what stopped this. 77 refused or 78
+  #     cannot-evaluate, and the banner present so the code cannot be a
+  #     coincidence of some other exit path.
+  case "$sep_status:$LAST_OUT" in
+    77:*"wsguard: REFUSED"*|78:*"wsguard: CANNOT EVALUATE"*)
+      gen_class_spoke=$(( gen_class_spoke + 1 )) ;;
+    *)
+      gen_class_ok=0
+      gen_class_detail="$gen_class_detail $gopt=rc$sep_status/guard-silent" ;;
+  esac
+  # (2) The safety property itself, independent of any status: the uncommitted
+  #     content is still on disk.
+  if ! still_dirty; then
+    gen_class_ok=0
+    gen_class_detail="$gen_class_detail $gopt=CONTENT-LOST"
+  fi
+done
+# Denominator control: if the loop measured nothing, the two checks above are
+# vacuously true and the arm would report success having tested no options.
+if (( ${#optlist[@]} == 0 )); then
+  die_cannot_evaluate "N25 option list is empty: the class assertion would pass without measuring anything"
+fi
+(( gen_class_ok == 1 )) &&
+  assert "N25-global-option-class" "every option in the guard's table plus one it has never heard of: the guard itself stops the separated form and the content survives (${gen_class_spoke}/${#optlist[@]} options, guard spoke on each)" 0 ||
+  assert "N25-global-option-class" "every option in the guard's table plus one it has never heard of: the guard itself stops the separated form and the content survives — LEAKED:$gen_class_detail" 1
+
+# GENERATED, second: an alias chain of depth N, built here rather than written
+# out. gd-wsg-rev-2 was explicit that SIX WAS ITS FIXTURE DEPTH AND NOT A
+# MEASURED LIMIT of git, and that a number lifted from a fixture and recorded
+# as a property is how the depth-one cap came to exist. So the arm takes its
+# depth from a variable, and the assertion is on the hop count the guard
+# reports, not on any particular number being special.
+GEN_DEPTH=9
+"$REAL_GIT" -C "$SHARED" config alias.gen1 checkout
+for (( n = 2; n <= GEN_DEPTH; n++ )); do
+  "$REAL_GIT" -C "$SHARED" config "alias.gen$n" "gen$(( n - 1 ))"
+done
+"$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+dirty "$SHARED"
+arm "N26-alias-chain-generated-depth-$GEN_DEPTH" 77 "$SHARED" -- "gen$GEN_DEPTH" -- tracked.txt
+still_dirty && assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "a chain of generated depth $GEN_DEPTH is resolved to a fixed point and refused" 0 ||
+  assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "a chain of generated depth $GEN_DEPTH is resolved to a fixed point and refused" 1
+[[ "$LAST_OUT" == *"after $GEN_DEPTH expansion(s)"* ]] &&
+  assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "the guard reports the depth it actually walked, so the arm cannot pass on a shorter walk" 0 ||
+  assert "N26-alias-chain-generated-depth-$GEN_DEPTH" "the guard reports the depth it actually walked, so the arm cannot pass on a shorter walk" 1
+
+# ---------------------------------------------------------------------------
+# F3. Two plumbing commands that overwrite the working tree. Filed FYI; closed
+# anyway, because the caller of plumbing is usually a script and a script
+# destroys a shared tree exactly as thoroughly as a person does.
+# ---------------------------------------------------------------------------
+"$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+dirty "$SHARED"
+arm "N27-checkout-index-force" 77 "$SHARED" -- checkout-index -f -a
+still_dirty && assert "N27-checkout-index-force" "checkout-index -f overwrites the tree from the index, and is refused" 0 ||
+  assert "N27-checkout-index-force" "checkout-index -f overwrites the tree from the index, and is refused" 1
+
+dirty "$SHARED"
+arm "N28-read-tree-u-reset" 77 "$SHARED" -- read-tree -u --reset HEAD
+still_dirty && assert "N28-read-tree-u-reset" "read-tree -u updates the WORKING TREE, and is refused" 0 ||
+  assert "N28-read-tree-u-reset" "read-tree -u updates the WORKING TREE, and is refused" 1
+
 echo
 echo "==========================================================================="
 echo "POSITIVE — the guard must permit; a gate that refuses everything is not one"
@@ -611,6 +789,193 @@ arm "P12-push-force-with-lease" 0 "$SHARED" -- push --force-with-lease origin ma
 [[ "$LAST_STATUS" == 0 ]] &&
   assert "P12-push-force-with-lease" "--force-with-lease is permitted: the offered alternative is real" 0 ||
   assert "P12-push-force-with-lease" "--force-with-lease is permitted: the offered alternative is real" 1
+
+# C4. An alias whose NAME SHADOWS A BUILTIN. Git ignores it and runs the
+# builtin; the guard used to honour it and reclassify a real `push` as `log`,
+# then wave it through onto the shared remote. The post-condition is the REMOTE
+# REF, not the working tree — a push arm asserting on tracked.txt would pass
+# for a reason that has nothing to do with the thing being tested.
+"$REAL_GIT" -C "$SHARED" config alias.push log
+arm "N29-alias-shadowing-a-builtin" 77 "$SHARED" -- push --force origin main:main
+[[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]] &&
+  assert "N29-alias-shadowing-a-builtin" "the remote ref is untouched: an alias cannot demote a watched builtin" 0 ||
+  assert "N29-alias-shadowing-a-builtin" "the remote ref is untouched: an alias cannot demote a watched builtin" 1
+[[ "$LAST_OUT" == *"c/shared-remote"* ]] &&
+  assert "N29-alias-shadowing-a-builtin" "it is refused AS a push, not as whatever the alias named" 0 ||
+  assert "N29-alias-shadowing-a-builtin" "it is refused AS a push, not as whatever the alias named" 1
+"$REAL_GIT" -C "$SHARED" config --unset alias.push
+
+# ...and N29 on its own is one-per-known-bug, which is the criticism that
+# produced this round. C4 was FOUND via push, but it is a property of every
+# watched verb: the guard must dispatch a name the way git dispatches it, and
+# git never lets an alias shadow a builtin. Mutation-measured, one verb removed
+# from is_watched_verb at a time, alias.<verb>=log defined, list intact vs
+# dropped — every one of the ten bypasses, and eight of them destroy the
+# uncommitted work at rc=0 with the guard silent:
+#
+#   checkout restore reset switch stash checkout-index read-tree  content
+#     -> COMMITTED (uncommitted work gone)      rm -> GONE (file deleted)
+#   clean -fd and branch -f main left the tree alone for reasons that have
+#   nothing to do with the guard — it was bypassed in those two as well.
+#
+# So the list is load-bearing at every entry, and one arm covered one entry.
+# This arm is generated from the guard's OWN list: it cannot fall behind a verb
+# added later, which is how the single-entry version fell behind in the first
+# place.
+mapfile -t shadow_verbs < <(
+  /usr/bin/sed -n '/^is_watched_verb()/,/^}/p' "$SHIM_DIR/git" |
+  /usr/bin/grep -oE '^ *[a-z|-]+\)' |
+  /usr/bin/tr -d ' )' | /usr/bin/tr '|' '\n' | /usr/bin/grep -v '^$'
+)
+# Denominator control: an empty or implausibly short derived list would make
+# every check below vacuous, and the arm would report a clean sweep of nothing.
+if (( ${#shadow_verbs[@]} < 5 )); then
+  die_cannot_evaluate "N31 derived only ${#shadow_verbs[@]} verbs from is_watched_verb; the sweep would be vacuous"
+fi
+declare -A SHADOW_ARGV=(
+  [checkout]="checkout -- tracked.txt"   [restore]="restore tracked.txt"
+  [reset]="reset --hard HEAD"            [clean]="clean -fd"
+  [rm]="rm -f tracked.txt"               [switch]="switch -f main"
+  [stash]="stash"                        [branch]="branch -f other HEAD"
+  [checkout-index]="checkout-index -f -a" [read-tree]="read-tree -u --reset HEAD"
+  # `fetch origin` alone is CORRECTLY permitted — rule b only fires on a
+  # second positional with no colon, the FETCH_HEAD-writing form. The first
+  # version of this table used the permitted shape and N31 reported it as a
+  # demotion; the arm was wrong, not the guard.
+  [fetch]="fetch origin main"            [push]="push --force origin main"
+)
+shadow_ok=1
+shadow_detail=""
+shadow_n=0
+for sv in "${shadow_verbs[@]}"; do
+  # Coverage control: a verb in the guard's list with no argv here would be
+  # silently skipped, and the sweep would shrink as the guard grows.
+  if [[ -z "${SHADOW_ARGV[$sv]:-}" ]]; then
+    die_cannot_evaluate "N31 has no argv for watched verb '$sv': the sweep would silently skip it"
+  fi
+  "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+  dirty "$SHARED"
+  "$REAL_GIT" -C "$SHARED" config "alias.$sv" log
+  # shellcheck disable=SC2086
+  run_guarded "$SHARED" ${SHADOW_ARGV[$sv]}
+  "$REAL_GIT" -C "$SHARED" config --unset "alias.$sv"
+  shadow_n=$(( shadow_n + 1 ))
+  if [[ "$LAST_STATUS" != 77 || "$LAST_OUT" != *"wsguard: REFUSED"* ]]; then
+    shadow_ok=0
+    shadow_detail="$shadow_detail $sv=rc$LAST_STATUS"
+  fi
+done
+(( shadow_ok == 1 )) &&
+  assert "N31-alias-shadowing-every-watched-verb" "an alias named after a watched builtin cannot demote it, for every verb in the guard's own list ($shadow_n verbs, derived not enumerated)" 0 ||
+  assert "N31-alias-shadowing-every-watched-verb" "an alias named after a watched builtin cannot demote it, for every verb in the guard's own list — DEMOTED:$shadow_detail" 1
+
+# N31 GENERALISES OVER ADDITIONS AND IS BLIND TO DELETIONS. It derives its
+# verbs from is_watched_verb, so deleting a verb from that list shrinks the
+# arm's own input and it sweeps the smaller set reporting success — measured:
+# with checkout-index and read-tree removed, the whole suite stayed green while
+# both were live bypasses. An arm keyed to the thing under test cannot see the
+# thing under test get smaller. So the denominator has to be pinned to a
+# DIFFERENT source, and there is a natural one: armed_for holds the same verbs
+# for a different purpose.
+#
+# The invariant, and the safety-critical direction of it: every verb armed_for
+# can arm MUST appear in is_watched_verb. A verb that is armed but not watched
+# is precisely C4 — resolve_alias walks past it, an alias demotes it, and the
+# guard permits. The converse (watched but not armed) only stops the alias walk
+# early and is harmless, so it is reported rather than failed.
+derive_verbs() { # <function-name>
+  /usr/bin/sed -n "/^$1()/,/^}/p" "$SHIM_DIR/git" |
+  /usr/bin/grep -oE '^ *[a-z|-]+\)' |
+  /usr/bin/tr -d ' )' | /usr/bin/tr '|' '\n' | /usr/bin/grep -v '^$' | LC_ALL=C sort -u
+}
+mapfile -t watched_set < <(derive_verbs is_watched_verb)
+mapfile -t armed_set   < <(derive_verbs armed_for)
+if (( ${#watched_set[@]} == 0 || ${#armed_set[@]} == 0 )); then
+  die_cannot_evaluate "N32 derived ${#watched_set[@]} watched and ${#armed_set[@]} armed verbs; the containment check would be vacuous"
+fi
+unwatched=""
+for av in "${armed_set[@]}"; do
+  found=0
+  for wv in "${watched_set[@]}"; do [[ "$av" == "$wv" ]] && { found=1; break; }; done
+  (( found == 0 )) && unwatched="$unwatched $av"
+done
+[[ -z "$unwatched" ]] &&
+  assert "N32-armed-implies-watched" "every verb armed_for can arm is also in is_watched_verb, so no rule can be reached by a name the alias walk would demote (${#armed_set[@]} armed, ${#watched_set[@]} watched)" 0 ||
+  assert "N32-armed-implies-watched" "every verb armed_for can arm is also in is_watched_verb — ARMED BUT NOT WATCHED:$unwatched" 1
+
+# The guard grew two verbs this round and the sentence in AGENTS.md that tells
+# every agent what is guarded did not grow with them. That sentence is the only
+# description most agents will ever read, and an agent who reads an incomplete
+# list will run `git rm` believing it is unguarded. Fixing the sentence fixes
+# the instance; this arm is what stops it drifting again, and it is the same
+# shape as N32 — derive the set, check containment against a second source.
+AGENTS_MD="$SELF_DIR/../../AGENTS.md"
+if [[ ! -r "$AGENTS_MD" ]]; then
+  die_cannot_evaluate "N33 cannot read $AGENTS_MD; the documentation check would be vacuous"
+fi
+# The paragraph, not the whole file: `git checkout main` appears elsewhere in
+# AGENTS.md as advice, and matching the whole file would let the check pass on
+# a mention that has nothing to do with the guard.
+wsguard_para="$(/usr/bin/grep -F 'puts a `git` shim in front of the real git' "$AGENTS_MD")"
+if [[ -z "$wsguard_para" ]]; then
+  die_cannot_evaluate "N33 could not locate the wsguard paragraph in AGENTS.md; the check would be vacuous"
+fi
+# Only the REFUSED half. The paragraph ends with a list of things that are
+# explicitly permitted — `git rm --cached`, `push --force-with-lease` — and a
+# plain substring test over the whole paragraph counts those as documentation
+# of `rm` and `push`. Measured: deleting `rm` from the refused list left this
+# arm green, because `git rm --cached` further down still matched. A check that
+# passes on the permitted list is a check that cannot see the refused list
+# shrink.
+refused_half="${wsguard_para%%It refuses only inside the shared root*}"
+if [[ "$refused_half" == "$wsguard_para" ]]; then
+  die_cannot_evaluate "N33 could not split the AGENTS.md paragraph at the permitted-list boundary; the check would test the wrong half"
+fi
+# Exact match against BACKTICKED CODE TOKENS, not a substring of the prose.
+# Measured: with `rm` deleted from the refused list this arm was still green,
+# because the word "armed" three clauses later contains the substring "rm". A
+# two-letter verb makes that failure obvious; a longer one would have hidden it.
+# So the paragraph is parsed the way it is written — as code spans — and each
+# span contributes its command word, with a leading `git ` stripped.
+mapfile -t doc_tokens < <(
+  printf '%s' "$refused_half" |
+  /usr/bin/grep -oE '`[^`]+`' | /usr/bin/tr -d '`' |
+  /usr/bin/sed -E 's/^git +//' |
+  /usr/bin/awk '{print $1}' | LC_ALL=C sort -u
+)
+if (( ${#doc_tokens[@]} == 0 )); then
+  die_cannot_evaluate "N33 extracted no code spans from the AGENTS.md paragraph; the check would be vacuous"
+fi
+undocumented=""
+for wv in "${watched_set[@]}"; do
+  found=0
+  for dt in "${doc_tokens[@]}"; do [[ "$wv" == "$dt" ]] && { found=1; break; }; done
+  (( found == 0 )) && undocumented="$undocumented $wv"
+done
+[[ -z "$undocumented" ]] &&
+  assert "N33-watched-set-is-documented" "every verb the guard watches is named in the AGENTS.md paragraph agents actually read (${#watched_set[@]} verbs)" 0 ||
+  assert "N33-watched-set-is-documented" "every verb the guard watches is named in the AGENTS.md paragraph agents actually read — UNDOCUMENTED:$undocumented" 1
+
+# Rule (c) is armed in EVERY workspace mode, because the remote is shared in
+# every workspace mode. It used to ride on refs_shared, which left force-push
+# unguarded in clone-per-agent and with the mode unset — inside the guarded
+# root, where the stated gap did not reach.
+for wsmode in clone-per-agent unset; do
+  MODE_OVERRIDE="$wsmode"
+  arm "N30-push-force-mode-$wsmode" 77 "$SHARED" -- push --force origin main
+  [[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]] &&
+    assert "N30-push-force-mode-$wsmode" "SCION_WORKSPACE_MODE=$wsmode: a private clone does not make the remote private" 0 ||
+    assert "N30-push-force-mode-$wsmode" "SCION_WORKSPACE_MODE=$wsmode: a private clone does not make the remote private" 1
+done
+
+# ...and the tree rules must still stand down in a mode where the tree is NOT
+# shared, or the arm above would just be proving the guard refuses everything.
+MODE_OVERRIDE="clone-per-agent"
+dirty "$SHARED"
+arm "P14-checkout-permitted-in-private-mode" 0 "$SHARED" -- checkout -- tracked.txt
+[[ "$(cat "$SHARED/tracked.txt")" != *UNCOMMITTED-WORK* ]] &&
+  assert "P14-checkout-permitted-in-private-mode" "rule (a) stands down in clone-per-agent: arming rule (c) everywhere did not arm the others" 0 ||
+  assert "P14-checkout-permitted-in-private-mode" "rule (a) stands down in clone-per-agent: arming rule (c) everywhere did not arm the others" 1
 
 # And the justification moved: branch -D is still refused, on the narrower
 # ground, and must no longer claim the shared namespace.
@@ -762,6 +1127,11 @@ printf 'arms run              : %d  (%d refusal, %d cannot-evaluate, %d permit)\
   "$arms_run" "$arms_refuse" "$arms_cannot" "$arms_permit"
 printf 'exit-status mismatches: %d/%d\n' "$arms_mismatched" "$arms_run"
 printf 'post-condition checks : %d  failed: %d\n' "$checks_run" "$checks_failed"
+# Machine-readable, and read by --prove-it with a bash containment test. The
+# two counters are printed SEPARATELY and asserted SEPARATELY because the exit
+# code is one number fed by both, and one number cannot say which of two things
+# went wrong.
+printf 'counters: arms_mismatched=%d checks_failed=%d\n' "$arms_mismatched" "$checks_failed"
 # Not printed as a ratio. Every control calls die_cannot_evaluate on failure, so
 # the denominator can only ever equal the numerator and "6/6" would be a
 # tautology dressed as a measurement. The load-bearing statement is the second

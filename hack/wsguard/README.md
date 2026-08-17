@@ -177,7 +177,7 @@ The selftest follows the project's check contract instead: `0` evaluated-clean,
 A control that has never been fired is not a control.
 
 ```sh
-hack/wsguard/selftest.sh            # 40 arms, 45 post-conditions
+hack/wsguard/selftest.sh            # 49 arms, 61 post-conditions
 hack/wsguard/selftest.sh --prove-it # ... after first proving the harness can fail
 hack/wsguard/hook-probe.sh --prove-it # the hook-mechanism rejection, measured
 make wsguard                        # both, from CI
@@ -191,13 +191,23 @@ vacuously:
   guard refused" proves nothing unless `git checkout --` would have removed the
   modification. Each hazard is first reproduced with the *real* git and asserted
   to do its damage. If a control does not reproduce, the suite exits `2`.
-- **A negative control on the harness.** `--prove-it` runs the whole suite once
-  with one expectation deliberately falsified and requires it to exit `1`. A
-  falsified run that still passes means the harness measures nothing, and the
-  honest answer is `2`, not `0`.
-- **Both directions.** Twenty-two refusal arms, five cannot-evaluate arms,
-  thirteen permit arms — including the same `git checkout --` that is refused in the
+- **A negative control on the harness, one per counter.** The suite reports two
+  numbers — arms whose status mismatched, and post-conditions that failed — and
+  a single injection could only ever prove one of them alive. `--prove-it` now
+  runs the suite twice, once per injection site, and each run must show *its*
+  counter go red **and the other stay green**. One number vouching for another
+  is not a control.
+- **Both directions.** Thirty refusal arms, five cannot-evaluate arms,
+  fourteen permit arms — including the same `git checkout --` that is refused in the
   shared repository being permitted in a private one.
+- **Properties, not instances.** Arms that exist because a specific bug was
+  found can only catch that bug again. Four members of the argv-parsing class
+  survived to round 4 for exactly that reason. The arms that close a class
+  derive their inputs from the guard's own tables and assert an invariant over
+  all of them: every global option classifies the same separated as attached
+  (`N25`); an alias cannot demote any watched builtin (`N31`); every verb
+  `armed_for` can arm is also in `is_watched_verb` (`N32`); every watched verb
+  is named in the `AGENTS.md` paragraph agents actually read (`N33`).
 
 Every arm runs under `timeout`, and a timeout kill is scored as its own status
 rather than folded into "failed". A suite that can hang cannot report.
@@ -287,6 +297,49 @@ tests the cap; arm `P13` requires an alias resolving to `status` to still be
 A refusal also now names the resolution — `` `d6` resolves to `checkout` after 7
 expansion(s) `` — because otherwise the diagnostic discusses a word the operator
 never typed.
+
+### A generated arm is blind to deletions from the source it generates from
+
+The answer to "every arm is one-per-known-bug" is to derive the arm's inputs
+from the guard's own tables. That works, and it has one failure mode that is
+easy to miss: **an arm keyed to the thing under test cannot see the thing under
+test get smaller.** `N31` sweeps every verb in `is_watched_verb` and asserts an
+alias cannot demote it. Delete two verbs from that list and `N31` derives a
+shorter list, sweeps it, and passes — while both deleted verbs are live
+bypasses. Measured, one verb dropped at a time with the mutation verified to
+have actually changed the file: **all ten bypass, and eight destroy the
+uncommitted work at `rc=0` with the guard silent.**
+
+A generated arm therefore generalises over *additions* and needs a second,
+independent source to pin the *denominator*. Here that source already existed:
+`armed_for` holds the same verbs for a different purpose, so `N32` asserts
+`armed_for ⊆ is_watched_verb` — a verb that is armed but not watched is
+precisely the bug `N29` was written for, stated as an invariant instead of an
+example. Deleting from either table now fails.
+
+### The assertion has to carry the discrimination, not the exit code
+
+Two arms this round were green for reasons unrelated to what they claimed.
+
+`N25` asserted `status != 0`, reading any nonzero as "the guard stopped it".
+But a nonzero can also be real git rejecting the option. With the union removed,
+`--attr-source` returned `128` **and deleted the tracked file** — a working-tree
+mutation, the exact event the guard exists to prevent — and the arm stayed
+green, because `128` is not `0`. It now requires that the *guard spoke* (`77`
+with a refusal banner, or `78` with a cannot-evaluate banner) and that the
+content survived.
+
+`N33` checks that every watched verb is named in the `AGENTS.md` paragraph.
+Written as a substring test over the paragraph it could not go red: deleting
+`` `rm` `` from the refused list left it passing, first because `git rm --cached`
+appears further down among the *permitted* examples, and then, after narrowing
+to the refused half, because the word **"armed"** contains the substring `rm`.
+It now extracts backticked code spans and matches command words exactly. Both
+fixes were confirmed by regressing the documentation four separate ways and
+requiring the failure to name the right verb each time.
+
+> A check that passes on the permitted list is a check that cannot see the
+> refused list shrink.
 
 ### The justification must be true of the operation it guards
 

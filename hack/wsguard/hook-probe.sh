@@ -205,6 +205,48 @@ for probe_name in pre-checkout pre-reset; do
   (( found == 0 )) && not_native+=("$probe_name")
 done
 
+# ---------------------------------------------------------------------------
+# THE ABORT-CAPABLE SUBSET — derived from the aperture, not chosen beside it.
+#
+# Filed as R3 by gd-wsg-rev-2, and it is a subtle one: the 24-hook aperture was
+# derived from the git binary precisely so that a membership test I authored
+# would not decide the result, and then every machine-checked assertion tested
+# the single literal string `reference-transaction`. THE APERTURE FED THE
+# DISPLAY AND THE VERDICT STILL KEYED ON ONE CHOSEN NAME. Measured on arm 2:
+# post-index-change and post-checkout both fired, and the probe recorded no
+# contradiction and exited 0 CONFIRMED. The membership test had moved out of
+# the hook set and into the assertion, which is the same defect wearing a
+# different hat.
+#
+# So the assertion now runs over a SUBSET OF THE DERIVED SET, selected by a
+# rule rather than by a list: a hook can abort the operation if git consults
+# its exit status before acting. Those are the `pre-*` family, the ref
+# gatekeepers, and `reference-transaction`, whose `prepared` phase can still
+# refuse. Everything named `post-*` is told after the fact and cannot stop
+# anything, which is why post-checkout firing is not a contradiction and is
+# reported rather than counted.
+#
+# The rule is mine and I am not hiding that. What changed is its INPUT: it
+# filters names git gave us, so a hook git gains in a later version is a
+# candidate automatically, and the printed subset below is the honest statement
+# of what the verdict can see.
+abort_capable=()
+informational=()
+for h in "${native_hooks[@]}"; do
+  case "$h" in
+    pre-*|reference-transaction|update|pre-receive|proc-receive) abort_capable+=("$h") ;;
+    *) informational+=("$h") ;;
+  esac
+done
+
+# DENOMINATOR CONTROL. If the filter selected nothing, every negative arm below
+# would assert over an empty set and pass without looking at anything — the
+# zero-width aperture again, arriving through the filter instead of through a
+# dead hook directory. An empty subset is "nothing was measured", not "nothing
+# fired".
+(( ${#abort_capable[@]} > 0 )) ||
+  die_cannot_measure "the abort-capable filter selected 0 of ${#native_hooks[@]} derived hooks — every negative arm would be vacuous"
+
 for h in "${native_hooks[@]}"; do
   # The hook logs its argv AND its stdin. Logging only "the hook fired" was the
   # first version of this apparatus, and it was not good enough: a
@@ -331,20 +373,45 @@ expect_fired() {
   return 1
 }
 
+# expect_silent <label> <why> — no hook CAPABLE OF ABORTING this command fired.
+#
+# One assertion per (arm, abort-capable hook), so the denominator is the size
+# of the derived subset and is printed with the result. Asserting once per arm
+# would hide which of 20-odd names was actually checked, and "20 hooks were
+# quiet" is a different claim from "the one name I hardcoded was quiet".
 expect_silent() {
-  local label="$1" hook="$2" why="$3"
-  assertions=$(( assertions + 1 ))
+  local label="$1" why="$2"
+  local h fired=0 fired_names=""
+  local -a checking=("${abort_capable[@]}")
   if [[ "$INJECT" == "1" && "$label" == "arm2" ]]; then
-    hook="post-checkout"
+    # The falsification: assert silence from a hook that demonstrably DOES fire
+    # here. post-checkout is informational and normally excluded, which makes
+    # it the right needle — if the harness cannot go red on a hook it can see
+    # firing in its own log, it cannot go red at all.
+    checking=("post-checkout")
     why="FALSIFIED EXPECTATION (--prove-it): post-checkout does fire here"
   fi
-  if [[ "$LAST_HOOKS" != *"$hook"* ]]; then
-    printf '    + %s stayed silent — %s\n' "$hook" "$why"
+  for h in "${checking[@]}"; do
+    assertions=$(( assertions + 1 ))
+    if [[ "$LAST_HOOKS" == *"$h"* ]]; then
+      fired=$(( fired + 1 ))
+      fired_names="$fired_names $h"
+      contradictions=$(( contradictions + 1 ))
+      findings+=("$label: $h fired, contradicting: $why")
+    fi
+  done
+  if (( fired == 0 )); then
+    printf '    + all %d abort-capable hooks stayed silent — %s\n' "${#checking[@]}" "$why"
+    # Named explicitly, because a hook that fired but cannot abort is a fact
+    # about this arm that the verdict deliberately ignores, and an ignored fact
+    # should be visible rather than absent.
+    for h in "${informational[@]}"; do
+      [[ "$LAST_HOOKS" == *"$h"* ]] &&
+        printf '      (%s fired; informational, cannot abort, not a contradiction)\n' "$h"
+    done
     return 0
   fi
-  printf '    ! %s FIRED. The claim is contradicted: %s\n' "$hook" "$why"
-  contradictions=$(( contradictions + 1 ))
-  findings+=("$label: $hook fired, contradicting: $why")
+  printf '    !%s FIRED, and can abort. The claim is contradicted: %s\n' "$fired_names" "$why"
   return 1
 }
 
@@ -409,17 +476,17 @@ echo "==========================================================================
 dirty
 arms_negative=$(( arms_negative + 1 ))
 run_arm "arm2-checkout-pathspec (the command that took gd-p1-dev's work)" checkout -- tracked.txt
-expect_silent "arm2" "reference-transaction" "git checkout -- <path> updates no ref, so nothing can abort it"
+expect_silent "arm2" "git checkout -- <path> updates no ref, so nothing can abort it"
 
 dirty
 arms_negative=$(( arms_negative + 1 ))
 run_arm "arm3-restore-pathspec" restore tracked.txt
-expect_silent "arm3" "reference-transaction" "git restore <path> updates no ref, so nothing can abort it"
+expect_silent "arm3" "git restore <path> updates no ref, so nothing can abort it"
 
 dirty
 arms_negative=$(( arms_negative + 1 ))
 run_arm "arm4-clean-force" clean -fd
-expect_silent "arm4" "reference-transaction" "git clean -fd updates no ref, so nothing can abort it"
+expect_silent "arm4" "git clean -fd updates no ref, so nothing can abort it"
 
 dirty
 arms_negative=$(( arms_negative + 1 ))
@@ -517,8 +584,18 @@ echo
 echo "==========================================================================="
 printf 'arms run           : %d (%d positive control, %d negative, %d contrast)\n' \
   "$arms" "$arms_control" "$arms_negative" "$arms_contrast"
-printf 'harness controls   : %d/%d reproduced, and they are not all the same kind:\n' \
-  "$(( controls + 2 ))" "$(( controls + 2 ))"
+# NOT PRINTED AS A RATIO — and this line is the reason gd-wsg-rev-2 filed R2.
+# It read `%d/%d` with THE SAME EXPRESSION on both sides, so it printed 5/5 and
+# could only ever print N/N. The identical defect had already been found and
+# fixed in selftest.sh, which now carries a comment calling it a tautology
+# dressed as a measurement. IT WAS FIXED IN ONE FILE AND LEFT IN THE OTHER,
+# which is its own small lesson: a defect found in an instrument is a defect in
+# the class of instruments, and the fix has to be swept across all of them
+# rather than applied where it was noticed.
+printf 'harness controls   : %d reproduced with the real git, and not all of one kind.\n' \
+  "$(( controls + 2 ))"
+printf '                     (any that had not reproduced would have exited 2 here,\n'
+printf '                      not 0 — that is the load-bearing part, not the count)\n'
 printf '                     [enumeration] the oracle gives different answers for a\n'
 printf '                                   real hook name and an invented one\n'
 printf '                     [denominator] the derived set contains all %d .sample\n' "$sample_total"
@@ -531,6 +608,13 @@ printf '                                   negative arm, so the silences are\n'
 printf '                                   bracketed by two live readings and not\n'
 printf '                                   merely preceded by one\n'
 printf 'claim assertions   : %d — each could have come back CONTRADICTED\n' "$assertions"
+printf '                     one per (negative arm x abort-capable hook), where the\n'
+printf '                     abort-capable set is %d of the %d derived names, filtered\n' \
+  "${#abort_capable[@]}" "${#native_hooks[@]}"
+printf '                     by a rule over git'"'"'s own list rather than by a list of\n'
+printf '                     mine. The other %d are post-* and cannot abort anything,\n' \
+  "${#informational[@]}"
+printf '                     so they are reported per arm and not counted.\n'
 printf 'contradictions     : %d\n' "$contradictions"
 printf 'note: the contrast arm asserts nothing. It is reported, not counted.\n'
 printf 'aperture           : %d installed (derived from git) vs %d in this probe'"'"'s\n' \
