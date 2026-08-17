@@ -2469,7 +2469,7 @@ HA preflight as configured.
     "database" $database
     "storage" $storage
     "auth" (dict "mode" .Values.auth.mode)
-    "broker" (dict "host" "127.0.0.1" "port" 9800 "auto_provide" true) }}
+    "broker" (dict "host" "127.0.0.1" "port" (int (include "scion-hub.brokerPort" .)) "auto_provide" true) }}
 
 {{- /*
 LOAD-BEARING. schema_version is not boilerplate and it is not redundant with
@@ -2847,6 +2847,28 @@ a running cluster by whoever owns the registry. A digest cannot.
 {{- end }}
 
 {{/*
+The hub's in-process runtime broker port. ONE SOURCE, TWO READERS.
+
+This number is written into server.broker.port in the settings document and is
+also an entry in the port-collision guard below, and those two are not
+independent facts: the guard's entire job is to refuse an operator port that
+collides with what the settings file actually configures. It was a bare 9800 in
+both places, including inside a human-readable message. Two fields that must
+agree are two fields that can disagree, and this pair would disagree SILENTLY -
+the settings file would move, the guard would keep refusing the old port, and
+the new collision it exists to catch would render clean.
+
+Nothing in the values surface sets this today and this helper deliberately does
+not add one: the broker is in-process and its port is not an operator's to
+choose. It is a helper so that the two readers cannot drift, not to make the
+number configurable. hack/verify.sh measures the linkage from outside, deriving
+the port from the rendered settings document rather than naming it.
+*/}}
+{{- define "scion-hub.brokerPort" -}}
+9800
+{{- end }}
+
+{{/*
 Port collisions inside the pod's single network namespace.
 
 EVERY CONTAINER IN A POD SHARES ONE NETWORK NAMESPACE. Two processes in
@@ -2870,7 +2892,7 @@ anywhere nearby. That is the case this guard is really for.
     (dict "n" (int .Values.hub.webPort)              "name" "hub.webPort")
     (dict "n" (int .Values.cloudsql.port)            "name" "cloudsql.port (the proxy's Postgres listener)")
     (dict "n" (int .Values.cloudsql.healthCheckPort) "name" "cloudsql.healthCheckPort (the proxy's health server)")
-    (dict "n" 9800                                   "name" "the hub's in-process runtime broker, fixed at 9800 in settings.yaml") }}
+    (dict "n" (int (include "scion-hub.brokerPort" .)) "name" (printf "the hub's in-process runtime broker, fixed at %s in settings.yaml" (include "scion-hub.brokerPort" .))) }}
 {{- range $p := $ports }}
 {{- $k := printf "p%d" $p.n }}
 {{- if hasKey $seen $k }}

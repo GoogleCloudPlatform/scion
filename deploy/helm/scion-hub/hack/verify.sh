@@ -159,7 +159,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # remedy in both directions. Summed onto the previous committed value.
 # The step's arm 0 adds none of these on purpose: it is meta_failure, because
 # "nothing was analysed" is a third outcome and not a passing assertion.
-EXPECTED_TOTAL=301
+EXPECTED_TOTAL=303
 
 failures=0
 assertions=0
@@ -1764,6 +1764,64 @@ if [[ "$_ns29_rc" == 0 ]] && grep -q '^      initContainers:$' "$WORK/ns-29-true
   pass "the same values one minor version up render the native sidecar, so the 1.28 refusal is the version and not the inputs"
 else
   fail "cloudsql.nativeSidecar: true does not render against --kube-version 1.29.0 either (helm exit $_ns29_rc): $(head -2 "$WORK/ns-29-true.err"). The refusal asserted above is therefore not attributable to the cluster version, and this whole step is measuring a broken input set rather than a guard."
+fi
+
+# --------------------------------------------------------------------------
+step "the port-collision guard defends the port the settings file actually sets"
+# --------------------------------------------------------------------------
+# gd-p2-rev's ROUND-1 O1. The broker port was the literal 9800 in two places -
+# the settings document and the collision guard's table, message text included -
+# and asserted in neither. The guard's whole purpose is to refuse an operator
+# port that collides with what settings.yaml configures, so if those two numbers
+# ever disagreed the guard would keep refusing the old port while the new
+# collision rendered clean. Both now read scion-hub.brokerPort.
+#
+# THIS STEP DERIVES THE PORT FROM THE RENDER AND NEVER NAMES IT. Writing 9800
+# here would rebuild the same duplication one file further out: move the broker
+# and this step keeps testing a port nothing uses, green the whole way.
+_bp_settings="$WORK/bp-settings.yaml"
+_bp_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+  --show-only templates/secret-settings.yaml \
+  >"$_bp_settings" 2>"$_bp_settings.err" || _bp_rc=$?
+[[ "$_bp_rc" == 0 ]] || meta_failure "the settings render for the broker-port probe failed (helm exit $_bp_rc): $(head -3 "$_bp_settings.err"). Everything below derives the port from this file."
+
+# THE DENOMINATOR, PRINTED. If the settings document ever grows a second port:
+# key this extraction becomes ambiguous, and an ambiguous extraction that picks
+# the first match is the quietest way to end up asserting about the wrong port.
+_bp_n="$(awk '$1=="port:"{c++} END{print c+0}' "$_bp_settings")"
+[[ "$_bp_n" == 1 ]] || meta_failure "the rendered settings document has $_bp_n lines whose key is port:, and this step is written for exactly one (the broker's). With more than one it cannot tell which port it derived, and with none it derived nothing; either way the arms below are about a number of unknown provenance."
+_bp="$(awk '$1=="port:"{print $2}' "$_bp_settings" || true)"
+[[ "$_bp" =~ ^[0-9]{2,5}$ ]] || meta_failure "the broker port extracted from the rendered settings document is not a port number (got: ${_bp:-<empty>}). Every arm below feeds it to --set, where a malformed value produces a schema error that reads exactly like the refusal this step is trying to observe."
+
+# THE COLLISION. The proxy's health server is put on the broker's port, which is
+# the case the guard was really written for: the broker appears nowhere in the
+# pod spec, so nothing in the manifest hints at the conflict, and the loser of
+# the bind fails at startup with "address already in use".
+_bp_col_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+  --set "cloudsql.healthCheckPort=$_bp" \
+  >"$WORK/bp-collide.yaml" 2>"$WORK/bp-collide.err" || _bp_col_rc=$?
+if [[ "$_bp_col_rc" != 0 ]] && grep -qF 'broker' "$WORK/bp-collide.err"; then
+  pass "putting the proxy's health server on the broker's port ($_bp, derived from the render) is refused, and the refusal names the broker"
+else
+  fail "cloudsql.healthCheckPort=$_bp rendered (helm exit $_bp_col_rc) or was refused without naming the broker: $(head -2 "$WORK/bp-collide.err"). That port is the hub's in-process runtime broker, set in settings.yaml and declared in no container spec, so the operator's only signal would be one of two processes dying at startup with 'address already in use'."
+fi
+
+# THE SURVIVAL CONTROL. Same command, one port along. Without it the arm above
+# is satisfied by any chart that refuses everything - including one that has
+# stopped rendering for a reason nothing here would notice.
+_bp_ok_rc=0
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+  --set "cloudsql.healthCheckPort=$((_bp + 1))" \
+  >"$WORK/bp-ok.yaml" 2>"$WORK/bp-ok.err" || _bp_ok_rc=$?
+if [[ "$_bp_ok_rc" == 0 ]]; then
+  pass "the adjacent port ($((_bp + 1))) renders, so the refusal above is the collision and not a chart that refuses everything"
+else
+  fail "cloudsql.healthCheckPort=$((_bp + 1)) is refused too (helm exit $_bp_ok_rc): $(head -2 "$WORK/bp-ok.err"). The guard is rejecting a port that collides with nothing, and the arm above proves nothing while this is true."
 fi
 
 # --------------------------------------------------------------------------
