@@ -2923,26 +2923,40 @@ the usual workaround - stripping non-digits before comparing - turns
 1.28.5-gke.1200 into 1.28.51200, which compares as NEWER than 1.29. Comparing
 the two integers directly has none of those failure modes.
 
-WHY THIS FAILS OPEN ON A VERSION IT CANNOT PARSE. If Minor does not yield a
-number, the only honest statement is that this render does not know the
-cluster's version - and "unknown" is not "below 1.29". Refusing there would
-block a conformant 1.33 cluster whose only sin is an unusual version string, and
-the remedy this message names (set nativeSidecar false) would then push it into
-the crash-loop window NOTES.txt warns about, which is worse than where it
-started. So the guard fires ONLY when it can positively establish minor < 29.
-It converts a known-bad configuration into a sentence; it is not, and must not
-be read as, a proof that any other version works.
+WHY THIS DOES NOT REFUSE A VERSION IT CANNOT PARSE, AND WHY THAT IS NOT THE
+SAME AS PASSING. If Minor does not yield a number, the only honest statement is
+that this render does not know the cluster's version - and "unknown" is not
+"below 1.29". Refusing there would block a conformant 1.33 cluster whose only
+sin is an unusual version string, and the remedy the message names (set
+nativeSidecar false) would then push it into the crash-loop window NOTES.txt
+warns about, which is worse than where it started.
+
+🔴 SO THE THIRD OUTCOME IS LOUD. There are three results here, not two: refused,
+checked-and-fine, and NOT CHECKED. The third one emits a notice into the
+rendered manifest and into NOTES.txt naming the version string it could not
+read. A guard that silently declines to guard is indistinguishable from a guard
+that ran and approved, and the whole reason this replaced a kubeVersion floor is
+that an unasserted claim looked like a checked one for weeks. Per the lead's
+standing rule: pass, fail and did-not-measure are three outcomes and the third
+one says so.
+
+WHY THE DECISION TAKES ITS INPUTS AS ARGUMENTS. .Capabilities cannot be forged
+from the command line - helm parses --kube-version as semver and always hands
+the template a numeric Major and Minor - so the not-checked branch is
+UNREACHABLE FROM helm template AND WOULD HAVE SHIPPED UNTESTED. Taking the two
+strings as parameters makes the branch reachable from a probe template, which is
+how hack/verify.sh gets at it. The caller in deployment.yaml is what binds them
+to the real cluster; this define does the deciding and nothing else.
 */}}
-{{- define "scion-hub.assertNativeSidecarSupported" -}}
-{{- if and .Values.cloudsql.enabled .Values.cloudsql.nativeSidecar }}
-{{- $kv := .Capabilities.KubeVersion }}
-{{- $major := regexReplaceAll "[^0-9]" $kv.Major "" }}
-{{- $minor := regexReplaceAll "[^0-9]" $kv.Minor "" }}
+{{- define "scion-hub.nativeSidecarGuard" -}}
+{{- $major := regexReplaceAll "[^0-9]" .major "" }}
+{{- $minor := regexReplaceAll "[^0-9]" .minor "" }}
 {{- if and (ne $major "") (ne $minor "") }}
 {{- if and (eq (int $major) 1) (lt (int $minor) 29) }}
-{{- fail (printf "cloudsql.nativeSidecar is true and this cluster reports Kubernetes %s, which is below 1.29. Native sidecars (an initContainers entry with restartPolicy: Always) are only honoured from 1.29. Below that the API server ACCEPTS the field and ignores it, so the proxy becomes an ordinary init container that never exits and the pod hangs in Init forever with no error anywhere - which is why this is refused at render time rather than left to be diagnosed in a cluster. Set cloudsql.nativeSidecar=false to run the proxy as a plain sidecar instead; read the warning NOTES.txt prints on that path first, because the hub crash-loops until the tunnel is up." $kv.Version) }}
+{{- fail (printf "cloudsql.nativeSidecar is true and this cluster reports Kubernetes %s, which is below 1.29. Native sidecars (an initContainers entry with restartPolicy: Always) are only honoured from 1.29. Below that the API server ACCEPTS the field and ignores it, so the proxy becomes an ordinary init container that never exits and the pod hangs in Init forever with no error anywhere - which is why this is refused at render time rather than left to be diagnosed in a cluster. Set cloudsql.nativeSidecar=false to run the proxy as a plain sidecar instead; read the warning NOTES.txt prints on that path first, because the hub crash-loops until the tunnel is up." .version) }}
 {{- end }}
-{{- end }}
+{{- else }}
+{{- printf "# scion-hub: NATIVE SIDECAR VERSION CHECK NOT RUN. cloudsql.nativeSidecar is true, which needs Kubernetes 1.29 or later, and this cluster reports a version this chart could not read a major/minor out of (version=%q major=%q minor=%q). The check was SKIPPED, not passed - nothing here has established that this cluster honours restartPolicy on an init container. If it does not, the pod hangs in Init forever with no error: set cloudsql.nativeSidecar=false. Verify with: kubectl version" .version .major .minor }}
 {{- end }}
 {{- end }}
 

@@ -203,15 +203,29 @@ spec:
       forever - so cloudsql.nativeSidecar: false exists, and NOTES.txt prints
       what to expect on that path.
 
-      assertNativeSidecarSupported refuses that combination at render time. It
-      is invoked HERE, immediately above the thing it is about, rather than from
-      Chart.yaml's kubeVersion, because the requirement belongs to this branch
-      and not to the chart: a kubeVersion floor is evaluated before values are
-      read, so it also rejected the sub-1.29 clusters the false branch exists to
-      serve. See the note in Chart.yaml.
+      nativeSidecarGuard refuses that combination at render time. It is invoked
+      HERE, inside the branch it is about, rather than from Chart.yaml's
+      kubeVersion, because the requirement belongs to this branch and not to the
+      chart: a kubeVersion floor is evaluated before values are read, so it also
+      rejected the sub-1.29 clusters the false branch exists to serve. See the
+      note in Chart.yaml.
+
+      This is the call site that binds the guard to the real cluster; the guard
+      itself takes the version strings as arguments so that the branch where it
+      CANNOT read them is reachable from a test. When that branch is taken the
+      include returns a comment rather than nothing, and it lands immediately
+      above the sidecar it did not vet - because a check that silently declined
+      to run reads exactly like a check that passed.
+
+      That comment survives in `helm template` and `helm get manifest` and is
+      STRIPPED by the API server, so it is not what an operator will find with
+      kubectl. It is the forensic copy. NOTES.txt carries the same notice and is
+      the one that gets read at install time.
       */}}
-      {{- include "scion-hub.assertNativeSidecarSupported" . }}
       {{- if and .Values.cloudsql.enabled .Values.cloudsql.nativeSidecar }}
+      {{- with (include "scion-hub.nativeSidecarGuard" (dict "major" .Capabilities.KubeVersion.Major "minor" .Capabilities.KubeVersion.Minor "version" .Capabilities.KubeVersion.Version)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
       initContainers:
         {{- include "scion-hub.cloudsqlProxyContainer" . | nindent 8 }}
           restartPolicy: Always

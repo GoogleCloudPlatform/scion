@@ -277,6 +277,19 @@ CLOUD SQL
   problems disappear - the proxy starts before the hub and is torn down after
   it, by the API, not by luck. Check with: kubectl version
 {{- end }}
+{{- if .Values.cloudsql.nativeSidecar }}
+{{- with (include "scion-hub.nativeSidecarGuard" (dict "major" .Capabilities.KubeVersion.Major "minor" .Capabilities.KubeVersion.Minor "version" .Capabilities.KubeVersion.Version)) }}
+
+  NOTICE: THE 1.29 CHECK BEHIND cloudsql.nativeSidecar DID NOT RUN.
+
+  It is not a failure and it is not an approval. The chart could not read a
+  major/minor version out of what this cluster reported, so it declined to
+  judge - and it says so here rather than leaving you to assume a silent guard
+  is a satisfied one. The manifest carries the same notice above the sidecar.
+
+{{ . | trimPrefix "# " | wrapWith 74 "\n" | indent 2 }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 THE IMAGE

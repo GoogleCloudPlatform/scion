@@ -159,7 +159,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # remedy in both directions. Summed onto the previous committed value.
 # The step's arm 0 adds none of these on purpose: it is meta_failure, because
 # "nothing was analysed" is a third outcome and not a passing assertion.
-EXPECTED_TOTAL=303
+EXPECTED_TOTAL=311
 
 failures=0
 assertions=0
@@ -1764,6 +1764,122 @@ if [[ "$_ns29_rc" == 0 ]] && grep -q '^      initContainers:$' "$WORK/ns-29-true
   pass "the same values one minor version up render the native sidecar, so the 1.28 refusal is the version and not the inputs"
 else
   fail "cloudsql.nativeSidecar: true does not render against --kube-version 1.29.0 either (helm exit $_ns29_rc): $(head -2 "$WORK/ns-29-true.err"). The refusal asserted above is therefore not attributable to the cluster version, and this whole step is measuring a broken input set rather than a guard."
+fi
+
+# --------------------------------------------------------------------------
+step "the version check has THREE outcomes, and the third one says so out loud"
+# --------------------------------------------------------------------------
+# gd-em's loud-skip amendment. scion-hub.nativeSidecarGuard refuses below 1.29,
+# approves at 1.29 and above, and on a version string it cannot read a
+# major/minor out of it does NEITHER - it declines to judge. A guard that
+# declines silently is indistinguishable from a guard that ran and approved,
+# which is the exact failure this whole finding started as: Chart.yaml's floor
+# looked like a checked claim for weeks and nothing had ever asserted it.
+#
+# 🔴 THAT THIRD BRANCH IS UNREACHABLE FROM helm template. helm parses
+# --kube-version as semver and hands the template a numeric Major and Minor, so
+# no CLI invocation can produce an unreadable version and the branch WOULD HAVE
+# SHIPPED UNTESTED - the same way the floor did. It is reachable here because
+# the guard takes the two strings as arguments and a probe template can pass any
+# strings it likes. That is why the decision was split out of the caller.
+#
+# The probe chart is a copy with ONE file added and nothing edited; _helpers.tpl
+# is compared byte-for-byte before the render, because a probe against a
+# modified helper measures the modification.
+_ns_probe() { # _ns_probe <out-prefix> <major> <minor> <version>
+  local out="$1" major="$2" minor="$3" version="$4"
+  local d; d="$(mktemp -d)"
+  cp -a "$CHART_DIR" "$d/c" || meta_failure "could not copy the chart for the version-guard probe."
+  cmp -s "$CHART_DIR/templates/_helpers.tpl" "$d/c/templates/_helpers.tpl" \
+    || { rm -rf "$d"; meta_failure "the probe copy's _helpers.tpl is not byte-identical to the chart's, so the guard it exercises is not the guard that ships."; }
+  printf '%s\n' "{{- \$v := include \"scion-hub.nativeSidecarGuard\" (dict \"major\" \"$major\" \"minor\" \"$minor\" \"version\" \"$version\") }}" \
+    "probe: |" "  {{ \$v }}" >"$d/c/templates/zz-nsguard-probe.yaml"
+  local rc=0
+  "$HELM" template "$RELEASE" "$d/c" --namespace "$NAMESPACE" \
+    --values "$CHART_DIR/ci/values-cloudsql.yaml" \
+    --show-only templates/zz-nsguard-probe.yaml >"$out.out" 2>"$out.err" || rc=$?
+  rm -rf "$d"
+  printf '%s' "$rc"
+}
+
+# ROW 1 IS THE RIG'S OWN POSITIVE CONTROL. If the probe were not reaching the
+# guard at all, every "no notice" row below would pass on an empty render and
+# this step would be decoration. A row that must REFUSE cannot pass that way.
+_ns_rows=(
+  "refuse|1|28|v1.28.9"
+  "refuse|1|28+|v1.28.5-gke.1200"
+  "quiet|1|29|v1.29.4-gke.1043002"
+  "quiet|1|33|v1.33.0"
+  "notice|1||v1.30.0-unreadable"
+  "notice|||"
+)
+_ns_i=0
+for _row in "${_ns_rows[@]}"; do
+  IFS='|' read -r _want _maj _min _ver <<<"$_row"
+  _ns_i=$((_ns_i + 1))
+  _p="$WORK/nsguard-$_ns_i"
+  _rc="$(_ns_probe "$_p" "$_maj" "$_min" "$_ver")"
+  _got=""
+  if [[ "$_rc" != 0 ]]; then
+    _got="refuse"
+  elif grep -qF 'NATIVE SIDECAR VERSION CHECK NOT RUN' "$_p.out"; then
+    _got="notice"
+  elif [[ -s "$_p.out" ]]; then
+    _got="quiet"
+  else
+    meta_failure "the version-guard probe for major=$_maj minor=$_min exited 0 and rendered nothing at all. 'quiet' and 'rendered nothing' are the same file, so this row cannot be read either way - the probe template did not render, which is a fault in this harness and not a verdict about the chart."
+  fi
+  if [[ "$_got" == "$_want" ]]; then
+    pass "version guard, major=${_maj:-<empty>} minor=${_min:-<empty>}: $_want"
+  else
+    fail "version guard, major=${_maj:-<empty>} minor=${_min:-<empty>} (${_ver:-<empty>}): expected $_want, got $_got. $( [[ "$_want" == refuse ]] && echo 'A cluster that cannot honour restartPolicy on an init container will install this and hang in Init forever.' || true )$( [[ "$_want" == notice ]] && echo 'The check did not run and did not say so, which reads identically to a check that ran and approved.' || true )$( [[ "$_want" == quiet ]] && echo 'A version the guard can read and approve must produce no notice, or the notice means nothing when it does appear.' || true )"
+  fi
+done
+
+# ROW 2 DESERVES ITS OWN SENTENCE. minor="28+" is what managed distributions
+# actually report, and it is the row that fails if anyone swaps this back to
+# semverCompare with the usual strip-the-non-digits workaround: that turns
+# 1.28.5-gke.1200 into 1.28.51200, which orders as NEWER than 1.29 and lets the
+# broken configuration through on exactly the clusters this is written for.
+
+# THE OPERATOR-FACING HALF. The comment the guard emits into the manifest is
+# stripped by the API server, so NOTES.txt is where a human meets this. The
+# capabilities cannot be forged, so the NOTES probe forces the guard's inputs -
+# one expression, and the substitution is counted rather than assumed.
+_ns_notes_d="$(mktemp -d)"
+cp -a "$CHART_DIR" "$_ns_notes_d/c" || meta_failure "could not copy the chart for the NOTES loud-skip probe."
+mv "$_ns_notes_d/c/templates/NOTES.txt" "$_ns_notes_d/c/templates/zz-notes-probe.txt"
+_ns_sub="$(grep -c 'scion-hub.nativeSidecarGuard' "$_ns_notes_d/c/templates/zz-notes-probe.txt" || true)"
+# ZERO CALL SITES IS A DEFECT, NOT AN UNMEASURABLE STATE, and the difference
+# decides whether this run reports or halts. If NOTES.txt has stopped calling
+# the guard then the operator-facing notice is gone and that is exactly the
+# finding this arm exists to make - so it is a red, with the count intact. More
+# than one call site is different: the probe forces a single expression and
+# cannot say which one it hit, so that one really is unmeasurable.
+if [[ "$_ns_sub" == 0 ]]; then
+  rm -rf "$_ns_notes_d"
+  fail "NOTES.txt does not call scion-hub.nativeSidecarGuard at all, so a version check that declined to run says nothing to the operator. The manifest comment is stripped by the API server; this was the only channel a human reads."
+else
+[[ "$_ns_sub" == 1 ]] || meta_failure "NOTES.txt calls scion-hub.nativeSidecarGuard $_ns_sub times and this probe forces exactly one call site, so it cannot tell which one it exercised."
+sed -i 's/(dict "major" \.Capabilities\.KubeVersion\.Major "minor" \.Capabilities\.KubeVersion\.Minor "version" \.Capabilities\.KubeVersion\.Version)/(dict "major" "1" "minor" "" "version" "v1.30.0-unreadable")/' \
+  "$_ns_notes_d/c/templates/zz-notes-probe.txt"
+grep -qF '"minor" ""' "$_ns_notes_d/c/templates/zz-notes-probe.txt" || meta_failure "the NOTES loud-skip probe's substitution did not take, so the render below is the ordinary NOTES and its silence is not evidence."
+_ns_notes_raw="$("$HELM" template "$RELEASE" "$_ns_notes_d/c" --namespace "$NAMESPACE" --debug \
+  --show-only templates/zz-notes-probe.txt --values "$CHART_DIR/ci/values-cloudsql.yaml" 2>/dev/null || true)"
+printf '%s\n' "$_ns_notes_raw" | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p' >"$WORK/ns-notes-forced.txt"
+rm -rf "$_ns_notes_d"
+[[ -s "$WORK/ns-notes-forced.txt" ]] || meta_failure "the NOTES loud-skip probe rendered nothing. The presence assertion below would report a missing notice when what is missing is the render."
+if grep -qF 'THE 1.29 CHECK BEHIND cloudsql.nativeSidecar DID NOT RUN' "$WORK/ns-notes-forced.txt"; then
+  pass "NOTES.txt prints the not-run notice when the guard cannot read the version"
+else
+  fail "NOTES.txt prints nothing when the version check declines to run. The manifest comment is stripped by the API server, so this is the only channel an operator actually reads, and without it a skipped check and a satisfied one look the same from the install onwards."
+fi
+fi
+# AND THE PAIRED SILENCE, from an ordinary render with a readable version.
+if grep -qF 'DID NOT RUN' "$WORK/notes-cloudsql.txt"; then
+  fail "the not-run notice is printed on a render whose version the guard CAN read, so the notice does not distinguish the two and carries no information"
+else
+  pass "a render with a readable version prints no not-run notice"
 fi
 
 # --------------------------------------------------------------------------
