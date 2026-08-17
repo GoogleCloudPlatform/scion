@@ -287,11 +287,11 @@ export class StateManager extends EventTarget {
 
     // User-scoped notifications: user.{userId}.notification
     //
-    // This branch must come before the user-scoped chat branch below. That
-    // branch routes anything under user.{id}.* that is not typing or
-    // read-state to 'chat-message-received', so without an explicit case here
-    // a notification would masquerade as a chat message and the tray would
-    // never refresh.
+    // Without an explicit case here the subject is silently dropped: it has
+    // three tokens, and the user-scoped chat branch below requires four, so
+    // it falls past every branch to the end of handleUpdate. The tray and the
+    // unread badge would then never hear about a chat notification. (It does
+    // not get misrouted to 'chat-message-received' — measured, not assumed.)
     if (parts[0] === 'user' && parts[2] === 'notification') {
       this.notifyWithData('notification-created', data);
       return;
