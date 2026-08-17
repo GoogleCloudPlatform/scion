@@ -58,6 +58,7 @@ import { can } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { chatNotifications } from '../../client/chat-notifications.js';
 import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
 import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
 import '../shared/chat/chat-thread.js';
@@ -683,6 +684,8 @@ export class ScionPageChat extends LitElement {
       clearTimeout(this._refreshTimer);
       this._refreshTimer = null;
     }
+    // Nothing is on screen any more, so nothing is being actively read.
+    chatNotifications.setActiveConversation(null);
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -692,6 +695,12 @@ export class ScionPageChat extends LitElement {
       } else {
         this.parseRoute();
       }
+    }
+    // A message arriving in the conversation already on screen should not
+    // also pop a desktop notification about it. Reported from updated()
+    // rather than from each of the twenty places v2Conversation is assigned.
+    if (changedProperties.has('v2Conversation')) {
+      chatNotifications.setActiveConversation(this.v2Conversation?.conversationKey ?? null);
     }
   }
 

@@ -26,10 +26,11 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { isChatNotificationStatus } from '../../client/chat-notifications.js';
+import { canShowPushNotification } from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
-const PUSH_STORAGE_KEY = 'scion-push-notifications';
 
 @customElement('scion-notification-tray')
 export class ScionNotificationTray extends LitElement {
@@ -164,11 +165,14 @@ export class ScionNotificationTray extends LitElement {
    * and the browser has granted permission.
    */
   private dispatchBrowserNotification(n: Notification): void {
-    if (
-      !('Notification' in window) ||
-      window.Notification.permission !== 'granted' ||
-      localStorage.getItem(PUSH_STORAGE_KEY) !== 'true'
-    ) {
+    // Chat mentions and DMs are dispatched by chat-notifications.ts straight
+    // off the SSE event, with a conversation tag and a click target this
+    // component cannot build — the notification row has no conversation
+    // column. Firing here too would show every mention twice, because the
+    // same event that produces the popup also triggers the re-fetch below.
+    if (isChatNotificationStatus(n.status)) return;
+
+    if (!canShowPushNotification()) {
       return;
     }
 
@@ -666,12 +670,17 @@ export class ScionNotificationTray extends LitElement {
           </sl-tooltip>
           <div class="notif-meta">
             <span>${this.relativeTime(n.createdAt)}</span>
-            <a
-              href="/agents/${n.agentId}"
-              @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}
-            >
-              View agent
-            </a>
+            ${isChatNotificationStatus(n.status)
+              ? // Chat rows carry the nil agent UUID, so "View agent" would
+                // link to /agents/00000000-... and 404. Until the row records
+                // its conversation there is nowhere honest to send the click.
+                nothing
+              : html`<a
+                  href="/agents/${n.agentId}"
+                  @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}
+                >
+                  View agent
+                </a>`}
             <button class="mark-read-link" @click=${(): void => void this.ackOne(n.id)}>
               Mark read
             </button>

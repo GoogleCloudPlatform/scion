@@ -29,6 +29,7 @@ import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
+import { chatNotifications } from './chat-notifications.js';
 import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
 
 /**
@@ -597,6 +598,9 @@ async function init(): Promise<void> {
   // manager must know who we are before it opens the first SSE connection.
   if (currentUser?.id) {
     stateManager.setCurrentUserId(currentUser.id);
+    // Mention/DM popups are driven off those events. Started here rather than
+    // from the chat page because a mention has to reach you on any page.
+    chatNotifications.start(currentUser.id);
   }
 
   // Wait for core shell components to be defined (page components are lazy-loaded)
