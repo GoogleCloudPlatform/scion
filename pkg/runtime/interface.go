@@ -56,9 +56,10 @@ type RunConfig struct {
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
 
-	// WorkspaceBackendName is "local" or "nfs", set by the workspace backend
-	// selector. Used to branch UID/GID injection and skip per-start chown
-	// when NFS (N1-5).
+	// WorkspaceBackendName is the name of the backend chosen by the workspace
+	// backend selector: "local", "nfs", "cloudrun-volume" or
+	// "gke-shared-volume". Used to branch UID/GID injection and skip per-start
+	// chown when NFS (N1-5); the branches below key on "nfs" only.
 	WorkspaceBackendName string
 	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
 	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"

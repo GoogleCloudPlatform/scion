@@ -263,9 +263,10 @@ type ServerConfig struct {
 	Mode string
 
 	// WorkspaceStorageConfig selects the workspace storage backend for
-	// hub-managed project workspaces. When Backend is "nfs" or
-	// "cloudrun-volume", hubManagedProjectPath returns a path on the
-	// configured durable mount instead of the node-local home directory.
+	// hub-managed project workspaces. When Backend is "nfs",
+	// "cloudrun-volume" or "gke-shared-volume", hubManagedProjectPath returns
+	// a path on the configured durable mount instead of the node-local home
+	// directory.
 	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
 	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
 
