@@ -32,6 +32,7 @@ limitations under the License.
 */}}
 {{- include "scion-hub.assertNoCredentialsInValues" . }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
+{{- include "scion-hub.assertExtraEnv" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -84,6 +85,13 @@ spec:
         precedent to copy.
         */}}
         scion.io/hub-id: {{ $hubId | quote }}
+        {{- /*
+        envFrom is resolved once, when the container starts. Unlike a mounted
+        ConfigMap the kubelet never refreshes it, so without this a helm upgrade
+        that changes the hub's environment would report success and change
+        nothing until something else happened to restart the pods.
+        */}}
+        checksum/env-config: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
         {{- with $podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -103,6 +111,28 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             {{- include "scion-hub.hubArgs" . | nindent 12 }}
+          {{- /*
+          The hub's whole environment. Configuration lives in settings.yaml, not
+          here: see configmap-env.yaml for why, and note that this Deployment
+          does not yet mount that file - delivery is blocked on ptone/scion#1091.
+          */}}
+          envFrom:
+            - configMapRef:
+                name: {{ include "scion-hub.envConfigMapName" . }}
+          env:
+            {{- /*
+            The namespace the hub is running in, which it reads to decide where
+            to create agent pods when no namespace is configured. There is no
+            way to derive this at template time that survives being installed
+            into a different namespace than the one rendered against.
+            */}}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.hub.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.hub.webPort }}

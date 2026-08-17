@@ -16,9 +16,11 @@
 # hub's own defaults for storage and database (SQLite, local workspace storage),
 # and no ingress. Exercised by helm lint and by helm template | kubeconform.
 #
-# Everything else in this file is deliberately absent. Keys for configuration
-# intake, Cloud SQL, Filestore and Ingress do not exist yet, and the schema
-# rejects keys the chart does not understand.
+# Everything else in this file is deliberately absent. Keys for Cloud SQL,
+# Filestore and Ingress do not exist yet, and the schema rejects keys the chart
+# does not understand. The configuration-intake keys do now exist, and this file
+# still omits them on purpose: it is the permutation that proves the chart
+# renders a usable settings.yaml from the hub's own defaults.
 #
 # CI: EVERY helm lint AND helm template INVOCATION MUST PASS -f ON THIS FILE.
 #
@@ -41,10 +43,14 @@
 # runtime mystery, and a defaulted hub ID re-scopes blob storage prefixes and
 # secrets on upgrade.
 
-# Explicit, stable, operator-supplied. The chart has no default for this and
-# never generates one.
 hub:
+  # Explicit, stable, operator-supplied. The chart has no default for this and
+  # never generates one.
   hubId: ci-minimal
+  # Also has no default, and also cannot be omitted: the hub's own fallback is
+  # a localhost URL that agents cannot reach and that disables the session
+  # cookie's Secure attribute.
+  baseUrl: https://ci-minimal.example.com
 
 # No default exists for this, and no hub-gke image is published, so CI names an
 # obviously non-real path. Nothing here is ever pulled.

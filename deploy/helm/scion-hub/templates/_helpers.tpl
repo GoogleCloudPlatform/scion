@@ -1613,3 +1613,251 @@ positive of exactly the kind the hasPrefix fix was written to remove. Translated
 {{- end }}
 {{- toYaml $args }}
 {{- end }}
+
+{{/*
+=============================================================================
+Configuration intake: the rendered settings.yaml
+=============================================================================
+
+The hub is configured by a settings.yaml file, not by SCION_SERVER_* environment
+variables. That is not a style preference. Three independent loaders consume the
+SCION_SERVER_ prefix with three different name mappers, the load error is
+discarded, and unmatched keys are ignored - so a name that does not bind is a
+silent no-op with no error, no warning and no log line. Two whole keyspaces are
+unreachable by any spelling: SCION_SERVER_DATABASE_* (max_open_conns and
+friends carry snake_case koanf tags that mapper #1 turns into
+database.max.open.conns) and every SCION_SERVER_OIDC_*. A chart that configured
+the database by environment variable would install cleanly and behave as though
+nothing had been configured at all.
+*/}}
+
+{{/* Name of the Secret holding the rendered settings.yaml. */}}
+{{- define "scion-hub.settingsSecretName" -}}
+{{- if .Values.config.existingSecret }}
+{{- .Values.config.existingSecret }}
+{{- else }}
+{{- printf "%s-settings" (include "scion-hub.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{/* Name of the ConfigMap holding the process environment. */}}
+{{- define "scion-hub.envConfigMapName" -}}
+{{- printf "%s-env" (include "scion-hub.fullname" .) }}
+{{- end }}
+
+{{/*
+The externally reachable hub URL, as SCION_SERVER_BASE_URL.
+
+Required, and required to be https://. Absence only warns: the hub falls back to
+http://localhost:<port>, which agents cannot reach, and - because the session
+cookie's Secure attribute is literally strings.HasPrefix(baseURL, "https://") -
+an http:// value silently serves session cookies without Secure.
+
+The design conditions the https:// requirement on ingress.enabled. Ingress does
+not exist in this chart yet, and there is no plaintext deployment of it, so the
+requirement is unconditional here. If a non-TLS path is ever added, relax it
+then, deliberately.
+*/}}
+{{- define "scion-hub.baseUrl" -}}
+{{- $url := required "hub.baseUrl is required: the externally reachable URL of the hub, e.g. https://hub.example.com. Without it the hub falls back to http://localhost:<port>, which agents cannot reach." .Values.hub.baseUrl }}
+{{- if not (hasPrefix "https://" $url) }}
+{{- fail (printf "hub.baseUrl must start with https://, got %q. The session cookie's Secure attribute is derived from this prefix, so a plaintext base URL silently ships session cookies without Secure." $url) }}
+{{- end }}
+{{- $url }}
+{{- end }}
+
+{{/*
+Reject any operator-supplied environment variable that cannot work.
+
+This is the render-time half of the rule that no SCION_SERVER_DATABASE_* or
+SCION_SERVER_OIDC_* variable is ever emitted. The chart's own templates emit
+none; hub.extraEnv is the one place an operator could add one, and reaching for
+exactly these two prefixes is the most likely mistake, because they are the
+settings a chart most wants to deliver and they fail silently rather than
+loudly.
+*/}}
+{{- define "scion-hub.assertExtraEnv" -}}
+{{- range $entry := .Values.hub.extraEnv }}
+{{- $name := toString (dig "name" "" $entry) }}
+{{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC)_" $name }}
+{{- fail (printf "hub.extraEnv may not set %s. SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are unreachable by any spelling - the loader ignores unmatched keys, so the variable is accepted, never applied, and never reported. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
+{{- end }}
+{{- if or (eq $name "HOME") (eq $name "KUBECONFIG") (eq $name "SCION_SERVER_BASE_URL") (eq $name "SCION_REQUIRE_STABLE_SIGNING_KEY") }}
+{{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and a duplicate entry in the container's env list shadows the value from envFrom in a way that is easy to miss." $name) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+config.existingSecret means "I supply the whole settings.yaml myself", so the
+chart renders none - and every value whose only effect is on the file it did not
+render becomes inert. An inert value is the same silent no-op this whole design
+exists to avoid, so supplying both is an error rather than a precedence rule.
+
+Later phases append their own inline values to $inline as they are introduced
+(the database password, the session secret, the OAuth client secret).
+*/}}
+{{- define "scion-hub.assertConfigSource" -}}
+{{- if .Values.config.existingSecret }}
+{{- $inline := list }}
+{{- if .Values.config.extra }}{{- $inline = append $inline "config.extra" }}{{- end }}
+{{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
+{{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
+{{- if $inline }}
+{{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it." (join ", " $inline)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Assertions on the settings document AS EMITTED.
+
+Deliberately run against the bytes parsed back from the rendered text rather
+than against the dictionary they were built from, and after config.extra has
+been merged. config.extra is a deep merge over the whole tree, so without this
+an operator could set server.mode: workstation through it and defeat the rule
+that no value can disable hosted mode - the same hole for every invariant below.
+
+Every check here has a positive form. "server.mode is not workstation" would
+pass on a typo'd or absent mode; "server.mode equals hosted" does not. The hub
+ID check asserts the emitted value equals the operator's, which "no Helm
+generator appears in the hub-ID position" does not.
+*/}}
+{{- define "scion-hub.assertSettings" -}}
+{{- $root := .root }}
+{{- $doc := fromYaml .rendered }}
+{{- if hasKey $doc "Error" }}
+{{- fail (printf "the rendered settings.yaml is not valid YAML: %v" (get $doc "Error")) }}
+{{- end }}
+
+{{- /* Top-level shape - see the file layout in the design's configuration section. */}}
+{{- if ne (dig "schema_version" "" $doc) "1" }}
+{{- fail (printf "rendered settings.yaml must carry schema_version: \"1\" as a string, got %q" (dig "schema_version" "" $doc)) }}
+{{- end }}
+{{- if not (dig "active_profile" "" $doc) }}
+{{- fail "rendered settings.yaml must set a non-empty top-level active_profile" }}
+{{- end }}
+{{- if not (dig "profiles" "" $doc) }}
+{{- fail "rendered settings.yaml must carry a non-empty top-level profiles map" }}
+{{- end }}
+{{- if not (dig "runtimes" "" $doc) }}
+{{- fail "rendered settings.yaml must carry a non-empty top-level runtimes map" }}
+{{- end }}
+
+{{- /*
+These six are nested under server: in V1ServerConfig. A file that places any of
+them at the top level parses, installs, and is silently not read.
+*/}}
+{{- if not (hasKey $doc "server") }}
+{{- fail "rendered settings.yaml has no server: section" }}
+{{- end }}
+{{- range $key := list "notification_channels" "message_broker" "native_chat" "plugins" "scheduler" "github_app" }}
+{{- if hasKey $doc $key }}
+{{- fail (printf "rendered settings.yaml has %s at the top level. It belongs under server: - the top-level position parses and is silently ignored. If this came from config.extra, move it to config.extra.server.%s." $key $key) }}
+{{- end }}
+{{- end }}
+
+{{- /* Hosted mode. Not a tuning knob: without it the server applies workstation
+defaults, takes auth-enabled from a development flag and binds 127.0.0.1. */}}
+{{- if ne (dig "server" "mode" "" $doc) "hosted" }}
+{{- fail (printf "rendered settings.yaml must set server.mode: hosted, got %q. Hosted mode cannot be disabled through this chart, config.extra included." (dig "server" "mode" "" $doc)) }}
+{{- end }}
+
+{{- /* HA preflight block 1, part 1: an explicit, operator-supplied hub ID. */}}
+{{- $emittedHubId := dig "server" "hub" "hub_id" "" $doc }}
+{{- if ne $emittedHubId .hubId }}
+{{- fail (printf "rendered settings.yaml has server.hub.hub_id: %q, which is not the value supplied in hub.hubId (%q). The hub ID is emitted verbatim and nothing, config.extra included, may substitute it." $emittedHubId .hubId) }}
+{{- end }}
+
+{{- /* HA preflight block 1, part 2: the store. */}}
+{{- $emittedDriver := dig "server" "database" "driver" "" $doc }}
+{{- if ne $emittedDriver $root.Values.database.driver }}
+{{- fail (printf "rendered settings.yaml has server.database.driver: %q but database.driver is %q. Overriding the driver through config.extra bypasses the schema rules that depend on it, including the requirement for a GCS bucket under Postgres." $emittedDriver $root.Values.database.driver) }}
+{{- end }}
+
+{{- /* HA preflight block 1, part 3: hub blob storage. GCS, and not the
+Filestore share - workspace storage is a different subsystem under
+server.workspace_storage and does not satisfy this. */}}
+{{- if eq $emittedDriver "postgres" }}
+{{- if ne (dig "server" "storage" "provider" "" $doc) "gcs" }}
+{{- fail (printf "rendered settings.yaml must set server.storage.provider: gcs under Postgres, got %q. Local blob storage is not HA-safe and the hub refuses to start. This is the hub's own blob store; the Filestore workspace share does not satisfy it." (dig "server" "storage" "provider" "" $doc)) }}
+{{- end }}
+{{- if not (dig "server" "storage" "bucket" "" $doc) }}
+{{- fail "rendered settings.yaml must set a non-empty server.storage.bucket under Postgres" }}
+{{- end }}
+{{- end }}
+
+{{- /* The discriminator for the two auth modes. The subtree it selects is not
+rendered yet; see the comment in the rendered file. */}}
+{{- if ne (dig "server" "auth" "mode" "" $doc) $root.Values.auth.mode }}
+{{- fail (printf "rendered settings.yaml has server.auth.mode: %q but auth.mode is %q." (dig "server" "auth" "mode" "" $doc) $root.Values.auth.mode) }}
+{{- end }}
+{{- end }}
+
+{{/*
+The rendered settings.yaml.
+
+Built as a dictionary and marshalled, so the output is valid YAML by
+construction rather than by careful indentation, and so config.extra can be a
+real deep merge rather than a text append.
+*/}}
+{{- define "scion-hub.settings" -}}
+{{- $hubId := include "scion-hub.hubId" . }}
+{{- include "scion-hub.assertConfigSource" . }}
+{{- $driver := .Values.database.driver }}
+
+{{- /* server.hub. hub_name, not name: the koanf tag is hub_name. */}}
+{{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
+
+{{- /*
+server.database. The URL is Cloud SQL's, and lands with the proxy in the next
+change; the key for it is url, not dsn. Pool settings are here now because they
+are reachable no other way - SCION_SERVER_DATABASE_MAXOPENCONNS and its siblings
+have snake_case koanf tags with no camelCase entry, so mapper #1 produces
+database.max.open.conns and the variable never binds.
+*/}}
+{{- $database := dict "driver" $driver
+    "max_open_conns" (int .Values.database.maxOpenConns)
+    "max_idle_conns" (int .Values.database.maxIdleConns)
+    "conn_max_lifetime" .Values.database.connMaxLifetime
+    "conn_max_idle_time" .Values.database.connMaxIdleTime }}
+
+{{- /* server.storage: the HUB'S BLOB STORE. Not the Filestore workspace share. */}}
+{{- $storage := dict "provider" .Values.storage.provider }}
+{{- if eq .Values.storage.provider "gcs" }}
+{{- $bucket := .Values.storage.bucket }}
+{{- if and (eq $driver "postgres") (not $bucket) }}
+{{- fail "storage.bucket is required when database.driver is postgres: a Postgres hub is an HA deployment, and an HA hub refuses to start without server.storage.provider=gcs and a bucket. This is the hub's blob store, not the workspace share." }}
+{{- end }}
+{{- $storage = set $storage "bucket" $bucket }}
+{{- end }}
+
+{{- $server := dict
+    "mode" "hosted"
+    "hub" $hub
+    "database" $database
+    "storage" $storage
+    "auth" (dict "mode" .Values.auth.mode)
+    "broker" (dict "host" "127.0.0.1" "port" 9800 "auto_provide" true) }}
+
+{{- $doc := dict "schema_version" "1" "active_profile" "default" "server" $server }}
+{{- if .Values.agents.imageRegistry }}
+{{- $doc = set $doc "image_registry" .Values.agents.imageRegistry }}
+{{- end }}
+{{- $doc = set $doc "profiles" (dict "default" (dict "runtime" "kubernetes")) }}
+{{- $doc = set $doc "runtimes" (dict "kubernetes" (dict
+    "type" "kubernetes"
+    "namespace" (include "scion-hub.agentNamespace" .)
+    "gke" true
+    "list_all_namespaces" .Values.runtime.listAllNamespaces)) }}
+
+{{- /* config.extra, deep-merged over the tree, so an unmodelled setting never
+forces a chart fork. Merged before the assertions run, not after. */}}
+{{- if .Values.config.extra }}
+{{- $doc = mergeOverwrite $doc (deepCopy .Values.config.extra) }}
+{{- end }}
+
+{{- $rendered := toYaml $doc }}
+{{- include "scion-hub.assertSettings" (dict "root" . "rendered" $rendered "hubId" $hubId) }}
+{{- $rendered }}
+{{- end }}

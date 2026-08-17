@@ -16,8 +16,8 @@
 #
 # This chart is being built incrementally. Only the values below are understood
 # today; values.schema.json rejects anything else, so an unknown key is an error
-# rather than a silent no-op. Configuration intake (settings.yaml), Cloud SQL,
-# Filestore and Ingress are added by later changes and bring their own values.
+# rather than a silent no-op. Cloud SQL, Filestore and Ingress are added by
+# later changes and bring their own values.
 
 nameOverride: ""
 fullnameOverride: ""
@@ -95,9 +95,50 @@ hub:
   #   hubId: my-hub
   #
 
+  # Display name for the hub. Cosmetic; unlike hubId nothing is scoped by it.
+  name: Scion Hub
+
+  # REQUIRED, and deliberately without a default. The external URL the hub is
+  # reached at, scheme and host, no trailing path. Absence is not an error in
+  # the hub - it warns once and falls back to http://localhost:<port>, which
+  # agents cannot reach, and which makes the session cookie's Secure attribute
+  # false because that attribute is derived from the https:// prefix of this
+  # exact value. The chart requires it, and requires https://, so neither
+  # failure is reachable by omission.
+  #
+  #   baseUrl: https://scion.example.com
+  #
+
+  # The hub's home directory, and the only lever on where it keeps state:
+  # settings.yaml, storage/, templates/ and scion-token all live in
+  # <home>/.scion. There is no SCION_HOME and no config-path flag; the path is
+  # the process home directory plus /.scion and nothing else moves it. Must be
+  # a directory the container's uid can write.
+  home: /home/scion
+
   # Port the web frontend and the hub API listen on, and the port every probe
   # targets.
   webPort: 8080
+
+  # Optional. Truthy values are "true", "1" and "yes". Read by a literal
+  # os.Getenv, so it is one of the few SCION_SERVER_ names that actually binds.
+  adminMode: ""
+
+  # Optional. Banner text shown to users. Empty means no banner.
+  maintenanceMessage: ""
+
+  # Extra environment variables for the hub container, as a list of Kubernetes
+  # EnvVar objects.
+  #
+  # This is an escape hatch and a sharp one. Most SCION_SERVER_* names do not
+  # bind: the hub reads a handful by literal os.Getenv and ignores the rest
+  # without an error, a warning or a log line, so a variable set here that looks
+  # like it should work will usually do nothing at all and give you no way to
+  # tell. Two prefixes bind under no spelling whatsoever -
+  # SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* - and the render rejects
+  # them outright rather than let the silence stand. Configure those through
+  # config.extra, which lands in settings.yaml, where they are read.
+  extraEnv: []
 
   # Extra arguments appended to the hub command. The chart always renders
   # --hosted and --host 0.0.0.0 and no value can remove them: without hosted
@@ -223,3 +264,98 @@ runtime:
   # true renders a ClusterRole/ClusterRoleBinding instead of the namespaced
   # Role/RoleBinding pair.
   listAllNamespaces: false
+
+agents:
+  # Optional. Registry prefix agent images are pulled from, rendered as the
+  # top-level image_registry key of settings.yaml. Empty leaves the key out and
+  # the hub uses its own default.
+  imageRegistry: ""
+
+# The hub's own configuration - the contents of settings.yaml.
+#
+# WHY THIS IS A FILE AND NOT ENVIRONMENT VARIABLES. The hub reads a handful of
+# SCION_SERVER_* names by literal os.Getenv and ignores every other one. There
+# is no strict-env mode and no unknown-variable warning, so a variable that does
+# not bind produces no error, no log line and no way to tell it did nothing.
+# Two whole keyspaces bind under no spelling at all - the database block and the
+# OIDC block - and those are precisely the ones a deployment most wants to set.
+# So configuration goes in the file, and the chart emits exactly the three
+# environment variables that are known to work.
+config:
+  # Supply your own Secret holding a settings.yaml key instead of having the
+  # chart render one. Mutually exclusive with every value that feeds the
+  # rendered file - config.extra, storage.bucket and agents.imageRegistry - and
+  # supplying both fails the render rather than silently ignoring one of them.
+  #
+  # Nothing checks the contents of a Secret you bring yourself. Everything the
+  # chart asserts about the rendered file - the hosted mode, the explicit hub
+  # ID, the preflight keys - is yours to get right.
+  existingSecret: ""
+
+  # Arbitrary additional settings.yaml content, deep-merged over what the chart
+  # renders. Use it for keys the chart has no value for yet.
+  #
+  # It is a merge over the whole document, so it can reach anything - including
+  # keys the chart renders on purpose. The invariants are re-checked after the
+  # merge, on the merged document, so an override that would disable hosted
+  # mode, drop the hub ID or contradict the database driver fails the render
+  # instead of installing.
+  extra: {}
+
+database:
+  # sqlite is the hub's own default and is single-pod only: it is a file in the
+  # hub's home directory, so replicas do not share it.
+  #
+  # postgres is what the hosted deployment runs, and selecting it turns on the
+  # hub's HA preflight, which refuses to start unless the hub ID, a database
+  # URL, GCS storage with a bucket and a durable session secret are all present.
+  # The connection URL itself is not a value here yet; it arrives with Cloud
+  # SQL support.
+  driver: sqlite
+
+  # Connection pool. Rendered into settings.yaml because no SCION_SERVER_
+  # spelling of any database key binds - the whole block is file-only.
+  #
+  # Keep maxOpenConns comfortably above the number of background workers, and
+  # the total across replicas below the Cloud SQL tier's connection limit.
+  maxOpenConns: 25
+  maxIdleConns: 5
+  connMaxLifetime: 30m
+  connMaxIdleTime: 5m
+
+storage:
+  # The hub's blob store: task artifacts, uploads, agent output. This is NOT the
+  # workspace share that agent pods mount - that is a separate subsystem, on
+  # Filestore, added by a later change.
+  #
+  # local keeps blobs in the hub's home directory, which no other replica can
+  # read. gcs is required for a multi-replica or hosted deployment and is
+  # checked by the HA preflight.
+  provider: local
+
+  # Required when database.driver is postgres, and the schema enforces that.
+  # The preflight checks provider and bucket separately, so a gcs provider with
+  # no bucket fails at hub startup rather than at install; requiring it here
+  # moves that failure to helm template.
+  bucket: ""
+
+auth:
+  # proxy is the hosted shape: an identity-aware proxy in front of the hub
+  # authenticates the user and the hub trusts a signed header. oauth is the
+  # hub's own OAuth login.
+  #
+  # This value selects which configuration subtree is rendered and nothing else.
+  # Every key the HA preflight requires renders identically in both modes.
+  mode: proxy
+
+  # The oauth mode's supporting configuration - the client credentials and the
+  # session secret - is not implemented in the chart yet, so an oauth install
+  # will not currently start. Set this to true to acknowledge that and render
+  # anyway; the schema otherwise rejects the combination.
+  acknowledgeOAuthUnlanded: false
+
+  # When true the hub refuses to start rather than fall back to a signing key
+  # generated per process. That fallback is fatal across replicas - each pod
+  # signs tokens the others reject - and it is silent, so it presents as
+  # intermittent logouts rather than as a configuration error.
+  requireStableSigningKey: true

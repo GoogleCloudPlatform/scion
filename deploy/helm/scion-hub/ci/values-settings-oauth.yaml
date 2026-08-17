@@ -1,0 +1,58 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# values-settings.yaml with the authentication mode changed, and nothing else
+# changed. Keep it that way: the point of this file is that a diff of the two
+# renders shows the authentication subtree and nothing more. Anything else that
+# drifts between them makes that check stop meaning what it claims to mean.
+#
+# The hub's HA preflight does not care which authentication mode is selected -
+# it requires the hub ID, the Postgres driver, the database URL, GCS storage
+# with a bucket, and a durable session secret in either case. A chart that
+# rendered those under proxy and dropped one under oauth would install fine and
+# fail at hub startup, naming the missing key but not the reason it went
+# missing.
+
+hub:
+  hubId: ci-settings
+  name: CI Settings Hub
+  baseUrl: https://ci-settings.example.com
+
+image:
+  repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
+  tag: ci
+
+database:
+  driver: postgres
+
+storage:
+  provider: gcs
+  bucket: ci-settings-hub-blobs
+
+auth:
+  mode: oauth
+  # The client credentials and session secret oauth needs are not rendered by
+  # this chart yet, so this install would not start. The schema requires the
+  # acknowledgement rather than letting the mode be selected by accident.
+  acknowledgeOAuthUnlanded: true
+
+agents:
+  imageRegistry: us-docker.pkg.dev/scion-ci/scion
+
+config:
+  extra:
+    server:
+      log_level: debug
+      scheduler:
+        interval_seconds: 30

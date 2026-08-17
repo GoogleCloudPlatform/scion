@@ -1,0 +1,71 @@
+{{/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+{{/*
+The hub process environment.
+
+This is the whole of it, and the list is short on purpose. Configuration is
+delivered as a rendered settings.yaml, not as SCION_SERVER_* variables, because
+a SCION_SERVER_ name that does not bind is accepted and ignored - no error, no
+warning, no log line - and two entire keyspaces bind under no spelling at all:
+SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_*. Those are exactly the settings
+a chart reaches for environment variables to deliver.
+
+Everything below is read by a literal os.Getenv, so no name mapper stands
+between the value here and the value the hub uses.
+
+Nothing secret goes in a ConfigMap. The session secret arrives by envFrom from
+its own Secret, added with the rest of the secret handling.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "scion-hub.envConfigMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scion-hub.labels" . | nindent 4 }}
+data:
+  # The only lever on where the hub looks for settings.yaml. There is no
+  # SCION_HOME and no config-path override: the directory is os.UserHomeDir()
+  # plus .scion, full stop.
+  HOME: {{ .Values.hub.home | quote }}
+
+  # Emptied deliberately. The Cloud Run image bakes KUBECONFIG=/home/scion/
+  # .kube/config, and an explicit kubeconfig takes precedence over in-cluster
+  # credentials - so a stale baked value silently disables the ServiceAccount
+  # the pod is running with, and the hub's inability to schedule agent pods
+  # presents as an RBAC problem. Cheap insurance against a whole class of
+  # regression, and harmless if the image is clean.
+  KUBECONFIG: ""
+
+  # Mandatory here. Absence only warns, and the fallback is
+  # http://localhost:<port>: agents cannot reach that, and the session cookie's
+  # Secure attribute is derived from the https:// prefix, so the fallback also
+  # quietly serves cookies without Secure.
+  SCION_SERVER_BASE_URL: {{ include "scion-hub.baseUrl" . | quote }}
+
+  # Compared against the literal string "true", so it is emitted as a string and
+  # any other value means false. When true the hub refuses to start rather than
+  # fall back to a per-process signing key, which across replicas would sign
+  # tokens each of the others reject.
+  SCION_REQUIRE_STABLE_SIGNING_KEY: {{ ternary "true" "false" .Values.auth.requireStableSigningKey | quote }}
+  {{- with .Values.hub.adminMode }}
+
+  # Truthy values are true, 1 and yes.
+  SCION_SERVER_ADMIN_MODE: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.hub.maintenanceMessage }}
+  SCION_SERVER_MAINTENANCE_MESSAGE: {{ . | quote }}
+  {{- end }}
