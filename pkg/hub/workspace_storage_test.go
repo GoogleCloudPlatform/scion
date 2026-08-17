@@ -1207,3 +1207,49 @@ func TestWebDAVSafetyGate_ReadMethodsAllowed(t *testing.T) {
 	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code,
 		"WebDAV PROPFIND should not be blocked on Cloud Run")
 }
+
+// The ephemeral-path warning is suppressed per slug for the life of the
+// process, so the suppression has to be dropped when the slug goes away.
+// Otherwise a slug that is deleted and recreated — or reused by a different
+// project — silently inherits the old suppression and never warns, on a
+// deployment that is still writing to ephemeral storage.
+func TestWarnEphemeralProjectPath_SuppressionClearedOnProjectDelete(t *testing.T) {
+	srv, _ := testServer(t)
+	logs := captureProjectsLog(t, srv)
+
+	project, _ := createTestHubManagedProject(t, srv, "Ephemeral Warn Delete")
+
+	srv.warnEphemeralProjectPath(project.Slug, "/local", "/mnt/vol")
+	srv.warnEphemeralProjectPath(project.Slug, "/local", "/mnt/vol")
+	require.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"),
+		"the warning is suppressed after the first call")
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+
+	// The slug is recreated and hits the same fallback.
+	srv.warnEphemeralProjectPath(project.Slug, "/local", "/mnt/vol")
+	assert.Equal(t, 2, strings.Count(logs.String(), "served from ephemeral local path"),
+		"deleting the project should clear its warning suppression")
+}
+
+// A renamed project keeps its state under the new slug; the old slug is
+// unreachable, so its suppression entry is dead weight that would also
+// mis-suppress the old slug if it were later reused by another project.
+func TestWarnEphemeralProjectPath_SuppressionClearedOnSlugMigration(t *testing.T) {
+	srv, _ := testServer(t)
+	logs := captureProjectsLog(t, srv)
+
+	project, _ := createTestHubManagedProject(t, srv, "Ephemeral Warn Rename")
+	oldSlug := project.Slug
+
+	srv.warnEphemeralProjectPath(oldSlug, "/local", "/mnt/vol")
+	require.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"))
+
+	project.Slug = oldSlug + "-renamed"
+	srv.migrateProjectSlug(t.Context(), project, oldSlug)
+
+	srv.warnEphemeralProjectPath(oldSlug, "/local", "/mnt/vol")
+	assert.Equal(t, 2, strings.Count(logs.String(), "served from ephemeral local path"),
+		"migrating away from a slug should clear its warning suppression")
+}

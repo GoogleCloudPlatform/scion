@@ -2493,6 +2493,12 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 			}
 		}
 	}
+
+	// The old slug is now unreachable, so its ephemeral-path warning
+	// suppression can never be consulted again — drop it. This has to run
+	// after the hubManagedProjectPath(oldSlug) call above, which can itself
+	// re-record oldSlug as warned.
+	s.warnedEphemeralProjects.Delete(oldSlug)
 }
 
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string) {
@@ -2601,6 +2607,10 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	s.webdavLocks.Delete(id)
+	// Same reason, keyed by slug rather than ID: drop the once-per-project
+	// ephemeral-path warning suppression so a slug that is deleted and later
+	// recreated warns again instead of inheriting the old suppression.
+	s.warnedEphemeralProjects.Delete(project.Slug)
 
 	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).
 	// This stores external settings, templates, and agent homes for both
