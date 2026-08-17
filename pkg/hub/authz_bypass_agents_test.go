@@ -214,10 +214,44 @@ func (f *bypassAgentsFixture) token(t *testing.T, scopes ...AgentTokenScope) str
 	return tok
 }
 
+// tokenFor mints a JWT for an arbitrary agent with the given scopes.
+// ScopeProjectRead is always included (same rationale as token).
+func (f *bypassAgentsFixture) tokenFor(t *testing.T, agent *store.Agent, scopes ...AgentTokenScope) string {
+	t.Helper()
+	svc := f.srv.GetAgentTokenService()
+	require.NotNil(t, svc)
+	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
+	tok, err := svc.GenerateAgentToken(agent.ID, agent.ProjectID, allScopes, nil)
+	require.NoError(t, err)
+	return tok
+}
+
 // asAgent issues a request carrying the calling agent's token.
 func (f *bypassAgentsFixture) asAgent(t *testing.T, method, path string, body interface{}, scopes ...AgentTokenScope) *httptest.ResponseRecorder {
 	t.Helper()
 	return doRequestWithAgentToken(t, f.srv, method, path, body, f.token(t, scopes...))
+}
+
+// asAgentWithHeaders issues a request carrying the calling agent's token with additional headers.
+func (f *bypassAgentsFixture) asAgentWithHeaders(t *testing.T, method, path string, body interface{}, headers map[string]string, scopes ...AgentTokenScope) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("X-Scion-Agent-Token", f.token(t, scopes...))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	return rec
 }
 
 // asBroker issues an HMAC-signed broker request. Brokers implement neither
@@ -1308,5 +1342,279 @@ func TestBypassAgents_CheckBrokerDispatchAccess(t *testing.T) {
 		ok, rec := check(f, agentCtx(f, f.proj.ID, ScopeAgentCreate), "no-such-broker")
 		assert.False(t, ok)
 		assert.NotEqual(t, http.StatusOK, rec.Code)
+	})
+}
+
+// ============================================================================
+// Cross-project agent denials — project settings, shared-dirs, hooks, logs
+// ============================================================================
+
+// TestBypassAgents_CrossProjectReadDenials extends the denial suite to the
+// remaining project-scoped read endpoints that were converted in this PR.
+// Each of these returned data before the fix; now they deny cross-project
+// agents with a 404 (not 403) to avoid confirming project existence.
+func TestBypassAgents_CrossProjectReadDenials(t *testing.T) {
+	f := bypassAgentsSetup(t)
+
+	cases := []struct {
+		name     string
+		method   string
+		path     string
+		body     interface{}
+		wantCode int
+	}{
+		{"projectSettings", http.MethodGet, "/api/v1/projects/" + f.other.ID + "/settings", nil, http.StatusNotFound},
+		{"sharedDirs", http.MethodGet, "/api/v1/projects/" + f.other.ID + "/shared-dirs", nil, http.StatusNotFound},
+		{"preStartHooks", http.MethodGet, "/api/v1/projects/" + f.other.ID + "/pre-start-hooks", nil, http.StatusNotFound},
+		{"settingsResolved", http.MethodGet, "/api/v1/projects/" + f.other.ID + "/settings/resolved", nil, http.StatusNotFound},
+		{"agentLogs", http.MethodGet, "/api/v1/agents/" + f.stranger.ID + "/logs", nil, http.StatusNotFound},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.asAgent(t, tc.method, tc.path, tc.body)
+			assert.Equal(t, tc.wantCode, rec.Code,
+				"cross-project read must return %d, not disclose existence; got: %s",
+				tc.wantCode, rec.Body.String())
+		})
+	}
+}
+
+// TestBypassAgents_CrossProjectBrokerDenials extends the broker denial table
+// to the same endpoints.
+func TestBypassAgents_CrossProjectBrokerDenials(t *testing.T) {
+	f := bypassAgentsSetup(t)
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"projectSettings", http.MethodGet, "/api/v1/projects/" + f.proj.ID + "/settings"},
+		{"sharedDirs", http.MethodGet, "/api/v1/projects/" + f.proj.ID + "/shared-dirs"},
+		{"preStartHooks", http.MethodGet, "/api/v1/projects/" + f.proj.ID + "/pre-start-hooks"},
+		{"settingsResolved", http.MethodGet, "/api/v1/projects/" + f.proj.ID + "/settings/resolved"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.asBroker(t, tc.method, tc.path, nil)
+			assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+				rec.Code,
+				"broker-authenticated caller must not read %s; got %d: %s",
+				tc.name, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+// ============================================================================
+// Status code assertions — 404-before-403 ordering
+// ============================================================================
+
+// TestBypassAgents_404Before403Ordering pins the isolation check ordering:
+// cross-project agent requests on log endpoints must receive exactly 404
+// (not 403), preventing project/agent existence disclosure.
+func TestBypassAgents_404Before403Ordering(t *testing.T) {
+	f := bypassAgentsSetup(t)
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"agentLogs", "/api/v1/agents/" + f.stranger.ID + "/logs"},
+		{"agentMessageLogs", "/api/v1/agents/" + f.stranger.ID + "/message-logs"},
+		{"projectMessageLogs", "/api/v1/projects/" + f.other.ID + "/message-logs"},
+		{"projectSettings", "/api/v1/projects/" + f.other.ID + "/settings"},
+		{"settingsResolved", "/api/v1/projects/" + f.other.ID + "/settings/resolved"},
+		{"sharedDirs", "/api/v1/projects/" + f.other.ID + "/shared-dirs"},
+		{"preStartHooks", "/api/v1/projects/" + f.other.ID + "/pre-start-hooks"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.asAgent(t, http.MethodGet, tc.path, nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code,
+				"cross-project agent must get exactly 404, not 403 or another code; got: %s",
+				rec.Body.String())
+		})
+	}
+}
+
+// ============================================================================
+// In-project agent success — read baseline reaches the handlers
+// ============================================================================
+
+// TestBypassAgents_InProjectReadSuccess asserts the in-project agent still
+// reaches the handlers for settings, settings/resolved, shared-dirs,
+// pre-start-hooks and message-logs. These prove the read baseline reaches the
+// Resource literals these handlers build — a real outage risk if a literal
+// ever loses its project linkage.
+func TestBypassAgents_InProjectReadSuccess(t *testing.T) {
+	f := bypassAgentsSetup(t)
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"settings", "/api/v1/projects/" + f.proj.ID + "/settings"},
+		{"settingsResolved", "/api/v1/projects/" + f.proj.ID + "/settings/resolved"},
+		{"sharedDirs", "/api/v1/projects/" + f.proj.ID + "/shared-dirs"},
+		{"preStartHooks", "/api/v1/projects/" + f.proj.ID + "/pre-start-hooks"},
+		{"projectMessageLogs", "/api/v1/projects/" + f.proj.ID + "/message-logs"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.asAgent(t, http.MethodGet, tc.path, nil)
+			// message-logs returns 501 when logQueryService is nil, which is
+			// past authorization. All others should return 200.
+			assert.NotEqual(t, http.StatusForbidden, rec.Code,
+				"in-project agent must not be denied on %s; got %d: %s",
+				tc.name, rec.Code, rec.Body.String())
+			assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
+				"in-project agent must not get 401 on %s; got: %s",
+				tc.name, rec.Body.String())
+			assert.NotEqual(t, http.StatusNotFound, rec.Code,
+				"in-project agent must not get 404 on %s; got: %s",
+				tc.name, rec.Body.String())
+		})
+	}
+}
+
+// ============================================================================
+// addGroupMember — non-user role cap
+// ============================================================================
+
+// TestBypassAgents_AddGroupMember_RoleCap pins the cap introduced in this PR:
+// agents with an addMember policy may add plain members but not admin/owner.
+// This is a new authorization rule invented by this change and has zero
+// coverage without this test.
+func TestBypassAgents_AddGroupMember_RoleCap(t *testing.T) {
+	setup := func(t *testing.T) (*bypassAgentsFixture, *store.Group) {
+		t.Helper()
+		f := bypassAgentsSetup(t)
+		ctx := context.Background()
+
+		// Create a project-scoped group that the agent can interact with.
+		group := &store.Group{
+			ID:        uuid.New().String(),
+			Name:      "bypass-test-group",
+			Slug:      "bypass-test-group",
+			GroupType: store.GroupTypeExplicit,
+			ProjectID: f.proj.ID,
+			OwnerID:   f.owner.ID,
+		}
+		require.NoError(t, f.store.CreateGroup(ctx, group))
+
+		// Create an addMember policy and bind it to the agent.
+		policy := &store.Policy{
+			ID:           uuid.New().String(),
+			Name:         "Agent addMember on group",
+			ScopeType:    "project",
+			ScopeID:      f.proj.ID,
+			ResourceType: "group",
+			Actions:      []string{"addMember"},
+			Effect:       "allow",
+		}
+		require.NoError(t, f.store.CreatePolicy(ctx, policy))
+		require.NoError(t, f.store.AddPolicyBinding(ctx, &store.PolicyBinding{
+			PolicyID:      policy.ID,
+			PrincipalType: "agent",
+			PrincipalID:   f.caller.ID,
+		}))
+
+		return f, group
+	}
+
+	t.Run("agent with addMember policy adds a plain member", func(t *testing.T) {
+		f, group := setup(t)
+		rec := f.asAgent(t, http.MethodPost,
+			"/api/v1/groups/"+group.ID+"/members",
+			AddGroupMemberRequest{
+				MemberType: store.GroupMemberTypeUser,
+				MemberID:   f.owner.ID,
+				Role:       store.GroupMemberRoleMember,
+			})
+		assert.Equal(t, http.StatusCreated, rec.Code,
+			"agent with addMember policy must be able to add a plain member; got: %s",
+			rec.Body.String())
+	})
+
+	t.Run("agent with addMember policy cannot add admin", func(t *testing.T) {
+		f, group := setup(t)
+		rec := f.asAgent(t, http.MethodPost,
+			"/api/v1/groups/"+group.ID+"/members",
+			AddGroupMemberRequest{
+				MemberType: store.GroupMemberTypeUser,
+				MemberID:   f.owner.ID,
+				Role:       store.GroupMemberRoleAdmin,
+			})
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"agent must not escalate to admin; got: %s", rec.Body.String())
+	})
+
+	t.Run("agent with addMember policy cannot add owner", func(t *testing.T) {
+		f, group := setup(t)
+		rec := f.asAgent(t, http.MethodPost,
+			"/api/v1/groups/"+group.ID+"/members",
+			AddGroupMemberRequest{
+				MemberType: store.GroupMemberTypeUser,
+				MemberID:   f.owner.ID,
+				Role:       store.GroupMemberRoleOwner,
+			})
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"agent must not escalate to owner; got: %s", rec.Body.String())
+	})
+}
+
+// ============================================================================
+// PTY scope pinning — authorizeAgentLifecycle vs authorize
+// ============================================================================
+
+// TestBypassAgents_PTYScopePinning pins the choice of authorizeAgentLifecycle
+// over authorize for handleAgentPTY. Using authorize here would compile, pass
+// every test, and quietly swap the rule from ScopeAgentLifecycle to the
+// project read baseline.
+func TestBypassAgents_PTYScopePinning(t *testing.T) {
+	wsHeaders := map[string]string{
+		"Upgrade":    "websocket",
+		"Connection": "upgrade",
+	}
+
+	t.Run("scoped agent on a project peer reaches past authz", func(t *testing.T) {
+		// An agent with ScopeAgentLifecycle on a peer in its own project should
+		// pass authorization. Without a runtime broker it gets 422, which proves
+		// it made it past the auth check.
+		f := bypassAgentsSetup(t)
+		rec := f.asAgentWithHeaders(t, http.MethodGet,
+			"/api/v1/agents/"+f.sibling.ID+"/pty", nil,
+			wsHeaders, ScopeAgentLifecycle)
+		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code,
+			"scoped agent should reach past authz to the no-runtime-broker check; got: %s",
+			rec.Body.String())
+	})
+
+	t.Run("unscoped agent is denied with missing scope message", func(t *testing.T) {
+		// An agent WITHOUT ScopeAgentLifecycle should get 403 with the specific
+		// "Missing required scope" message, proving authorizeAgentLifecycle is
+		// the gate rather than the read baseline's authorize.
+		f := bypassAgentsSetup(t)
+		rec := f.asAgentWithHeaders(t, http.MethodGet,
+			"/api/v1/agents/"+f.sibling.ID+"/pty", nil,
+			wsHeaders)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"unscoped agent must be denied; got: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), string(ScopeAgentLifecycle),
+			"denial must cite the missing scope to pin the authorizeAgentLifecycle choice")
+	})
+
+	t.Run("cross-project agent with scope is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asAgentWithHeaders(t, http.MethodGet,
+			"/api/v1/agents/"+f.stranger.ID+"/pty", nil,
+			wsHeaders, ScopeAgentLifecycle)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"cross-project agent must be denied even with the scope; got: %s",
+			rec.Body.String())
 	})
 }
