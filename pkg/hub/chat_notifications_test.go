@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -100,16 +101,39 @@ func TestChatNotifier_MentionCreatesNotification(t *testing.T) {
 
 	ctx := context.Background()
 	userID := api.NewUUID()
+	senderID := api.NewUUID()
 	conversationKey := api.NewUUID() // topic UUID
 	projectID := api.NewUUID()
 
-	env.notifier.NotifyMention(ctx, userID, "Alice", conversationKey, "design-review", "Hey @Bob check this out", projectID)
+	env.notifier.NotifyMention(ctx, userID, ChatMessageContext{
+		SenderID:         senderID,
+		SenderName:       "Alice",
+		ConversationKey:  conversationKey,
+		ConversationName: "design-review",
+		Preview:          "Hey @Bob check this out",
+		ProjectID:        projectID,
+	})
 
 	// Verify notification was published via SSE.
 	evt := drainNotification(env.notifCh, 2*time.Second)
 	require.NotNil(t, evt, "expected a notification event")
 	assert.Equal(t, "user."+userID+".notification", evt.Subject,
 		"mention notifications must be scoped to the mentioned user")
+
+	// The browser notification is built entirely from the event payload: the
+	// client needs the recipient (to ignore events meant for another tab's
+	// user), the conversation (for the tag and the click target) and the
+	// sender (for the title), none of which are recoverable from the
+	// rendered message string.
+	var payload ChatNotificationEvent
+	require.NoError(t, json.Unmarshal(evt.Data, &payload))
+	assert.Equal(t, userID, payload.SubscriberID)
+	assert.Equal(t, senderID, payload.SenderID)
+	assert.Equal(t, "Alice", payload.SenderName)
+	assert.Equal(t, conversationKey, payload.ConversationKey)
+	assert.Equal(t, "design-review", payload.ConversationName)
+	assert.Equal(t, projectID, payload.ProjectID)
+	assert.Equal(t, ChatNotificationMention, payload.Status)
 
 	// Verify notification was persisted in the store.
 	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, userID, false)
@@ -138,7 +162,13 @@ func TestChatNotifier_MentionMuted_NoNotification(t *testing.T) {
 	err := env.wcs.SetMuted(ctx, userID, conversationKey, true)
 	require.NoError(t, err)
 
-	env.notifier.NotifyMention(ctx, userID, "Alice", conversationKey, "general", "Hey @Bob", projectID)
+	env.notifier.NotifyMention(ctx, userID, ChatMessageContext{
+		SenderName:       "Alice",
+		ConversationKey:  conversationKey,
+		ConversationName: "general",
+		Preview:          "Hey @Bob",
+		ProjectID:        projectID,
+	})
 
 	// No notification should be created.
 	evt := drainNotification(env.notifCh, 500*time.Millisecond)
@@ -160,16 +190,35 @@ func TestChatNotifier_DMReceivedCreatesNotification(t *testing.T) {
 
 	ctx := context.Background()
 	recipientID := api.NewUUID()
+	senderID := api.NewUUID()
 	conversationKey := "dm:user:" + api.NewUUID() + ":user:" + recipientID
 	projectID := ""
 
-	env.notifier.NotifyDMReceived(ctx, recipientID, "Charlie", conversationKey, "Hello there!", projectID)
+	env.notifier.NotifyDMReceived(ctx, recipientID, ChatMessageContext{
+		SenderID:        senderID,
+		SenderName:      "Charlie",
+		ConversationKey: conversationKey,
+		Preview:         "Hello there!",
+		ProjectID:       projectID,
+	})
 
 	// Verify notification was published.
 	evt := drainNotification(env.notifCh, 2*time.Second)
 	require.NotNil(t, evt, "expected a notification event")
 	assert.Equal(t, "user."+recipientID+".notification", evt.Subject,
 		"DM notifications must be scoped to the recipient")
+
+	var payload ChatNotificationEvent
+	require.NoError(t, json.Unmarshal(evt.Data, &payload))
+	assert.Equal(t, recipientID, payload.SubscriberID)
+	assert.Equal(t, senderID, payload.SenderID)
+	assert.Equal(t, "Charlie", payload.SenderName)
+	assert.Equal(t, conversationKey, payload.ConversationKey)
+	assert.Equal(t, ChatNotificationDMReceived, payload.Status)
+	// A DM has no thread name; the notification title is the sender. Carrying
+	// a stale conversationName here would put the wrong heading on the popup.
+	assert.Empty(t, payload.ConversationName,
+		"DM events must not carry a conversation name")
 
 	// Verify notification was persisted.
 	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, recipientID, false)
@@ -195,7 +244,11 @@ func TestChatNotifier_DMReceivedMuted_NoNotification(t *testing.T) {
 	err := env.wcs.SetMuted(ctx, recipientID, conversationKey, true)
 	require.NoError(t, err)
 
-	env.notifier.NotifyDMReceived(ctx, recipientID, "Charlie", conversationKey, "Hello!", "")
+	env.notifier.NotifyDMReceived(ctx, recipientID, ChatMessageContext{
+		SenderName:      "Charlie",
+		ConversationKey: conversationKey,
+		Preview:         "Hello!",
+	})
 
 	// No notification should be created.
 	evt := drainNotification(env.notifCh, 500*time.Millisecond)
@@ -218,7 +271,11 @@ func TestChatNotifier_DMReceivedActivePresence_NoNotification(t *testing.T) {
 	activePresence := &mockPresenceChecker{activeUsers: map[string]bool{recipientID: true}}
 	notifier := NewChatNotifier(env.store, env.pub, env.wcs, activePresence, slog.Default())
 
-	notifier.NotifyDMReceived(ctx, recipientID, "Charlie", conversationKey, "Hello!", "")
+	notifier.NotifyDMReceived(ctx, recipientID, ChatMessageContext{
+		SenderName:      "Charlie",
+		ConversationKey: conversationKey,
+		Preview:         "Hello!",
+	})
 
 	// No notification — user has active presence.
 	evt := drainNotification(env.notifCh, 500*time.Millisecond)
@@ -456,8 +513,8 @@ func TestNoOpPresenceChecker_AlwaysReturnsFalse(t *testing.T) {
 func TestChatNotifier_NilSafe(t *testing.T) {
 	// Calling methods on a nil ChatNotifier should not panic.
 	var cn *ChatNotifier
-	cn.NotifyMention(context.Background(), "user", "sender", "key", "thread", "msg", "proj")
-	cn.NotifyDMReceived(context.Background(), "user", "sender", "key", "msg", "proj")
+	cn.NotifyMention(context.Background(), "user", ChatMessageContext{SenderName: "sender", ConversationKey: "key", ConversationName: "thread", Preview: "msg", ProjectID: "proj"})
+	cn.NotifyDMReceived(context.Background(), "user", ChatMessageContext{SenderName: "sender", ConversationKey: "key", Preview: "msg", ProjectID: "proj"})
 }
 
 // ---------------------------------------------------------------------------
@@ -511,8 +568,8 @@ func TestServer_ChatNotifier_UsesServerPresence(t *testing.T) {
 	require.True(t, srv.presenceManager.IsUserActive(viewer))
 	require.False(t, srv.presenceManager.IsUserActive(absent))
 
-	cn.NotifyDMReceived(ctx, viewer, "Sender", "dm:user:"+api.NewUUID()+":user:"+viewer, "hello", "")
-	cn.NotifyDMReceived(ctx, absent, "Sender", "dm:user:"+api.NewUUID()+":user:"+absent, "hello", "")
+	cn.NotifyDMReceived(ctx, viewer, ChatMessageContext{SenderName: "Sender", ConversationKey: "dm:user:" + api.NewUUID() + ":user:" + viewer, Preview: "hello"})
+	cn.NotifyDMReceived(ctx, absent, ChatMessageContext{SenderName: "Sender", ConversationKey: "dm:user:" + api.NewUUID() + ":user:" + absent, Preview: "hello"})
 
 	viewerNotifs, err := st.GetNotifications(ctx, store.SubscriberTypeUser, viewer, false)
 	require.NoError(t, err)

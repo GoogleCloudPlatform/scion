@@ -57,6 +57,18 @@ func newChatNotificationForTest(subscriberID, projectID, message string) *store.
 	}
 }
 
+// chatContextForTest is the conversation/sender context that rides along with
+// a chat notification event.
+func chatContextForTest() ChatMessageContext {
+	return ChatMessageContext{
+		SenderID:        "user-bob",
+		SenderName:      "Bob",
+		ConversationKey: "dm:user:user-bob:user:user-alice",
+		Preview:         "the merger closes friday, keep it quiet",
+		ProjectID:       "proj-1",
+	}
+}
+
 // TestChatNotification_NotDeliveredToBystander is the regression test for the
 // disclosure. Eve subscribes to every subject a session is allowed to request
 // without being the recipient — the unscoped notification subject, and the
@@ -76,7 +88,7 @@ func TestChatNotification_NotDeliveredToBystander(t *testing.T) {
 	defer unsubEve()
 
 	pub.PublishChatNotification(context.Background(),
-		newChatNotificationForTest("user-alice", projectID, secret))
+		newChatNotificationForTest("user-alice", projectID, secret), chatContextForTest())
 
 	select {
 	case evt := <-eve:
@@ -98,7 +110,7 @@ func TestChatNotification_DeliveredToSubscriber(t *testing.T) {
 	defer unsub()
 
 	pub.PublishChatNotification(context.Background(),
-		newChatNotificationForTest("user-alice", "proj-1", secret))
+		newChatNotificationForTest("user-alice", "proj-1", secret), chatContextForTest())
 
 	select {
 	case evt := <-alice:
@@ -123,7 +135,7 @@ func TestChatNotification_NoSubscriberIsDropped(t *testing.T) {
 	defer unsub()
 
 	notif := newChatNotificationForTest("", "proj-1", "alice sent you a message: hi")
-	pub.PublishChatNotification(context.Background(), notif)
+	pub.PublishChatNotification(context.Background(), notif, chatContextForTest())
 
 	select {
 	case evt := <-everything:

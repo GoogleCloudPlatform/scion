@@ -495,7 +495,13 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		strings.HasPrefix(storeMsg.ThreadID, "dm:") &&
 		storeMsg.RecipientID != "" && strings.HasPrefix(storeMsg.Sender, "agent:") {
 		senderName := strings.TrimPrefix(storeMsg.Sender, "agent:")
-		go p.chatNotifier.NotifyDMReceived(context.Background(), storeMsg.RecipientID, senderName, storeMsg.ThreadID, storeMsg.Msg, projectID)
+		go p.chatNotifier.NotifyDMReceived(context.Background(), storeMsg.RecipientID, ChatMessageContext{
+			SenderID:        storeMsg.SenderID,
+			SenderName:      senderName,
+			ConversationKey: storeMsg.ThreadID,
+			Preview:         storeMsg.Msg,
+			ProjectID:       projectID,
+		})
 	}
 
 	// Log to dedicated message audit log
