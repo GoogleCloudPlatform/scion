@@ -1156,3 +1156,157 @@ func TestBypassAgents_UnauthenticatedDenied(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// Broker dispatch — checkBrokerDispatchAccess
+// ============================================================================
+
+// TestBypassAgents_CheckBrokerDispatchAccess pins the response-writing twin of
+// canDispatchToBroker, on the agent-creation path.
+//
+// This was the worst of the #591 sites, because it did not merely omit a deny —
+// it wrote one. `if userIdent == nil { return true }`, commented "no user
+// identity (e.g. broker-to-broker) — allow". GetUserIdentityFromContext returns
+// nil for an agent caller too, so every agent that reached agent creation could
+// place its new agent on ANY broker in the hub, including brokers serving other
+// projects, regardless of scope.
+//
+// The two functions are one rule, and this is the copy that drifted, so the fix
+// is delegation rather than a second transcription of the switch. These cases
+// therefore assert the same verdicts as TestBypassAgents_CanDispatchToBroker
+// plus the HTTP response, and they fail if the delegation is ever unwound into
+// a copy that can drift again.
+func TestBypassAgents_CheckBrokerDispatchAccess(t *testing.T) {
+	newRestrictedBroker := func(t *testing.T, f *bypassAgentsFixture, linkTo string) *store.RuntimeBroker {
+		t.Helper()
+		b := &store.RuntimeBroker{
+			ID:          uuid.New().String(),
+			Name:        "restricted-" + uuid.New().String()[:8],
+			Slug:        "restricted-" + uuid.New().String()[:8],
+			Status:      store.BrokerStatusOnline,
+			AutoProvide: false,
+			CreatedBy:   f.owner.ID,
+			Created:     time.Now(),
+			Updated:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateRuntimeBroker(context.Background(), b))
+		if linkTo != "" {
+			require.NoError(t, f.store.AddProjectProvider(context.Background(), &store.ProjectProvider{
+				ProjectID:  linkTo,
+				BrokerID:   b.ID,
+				BrokerName: b.Name,
+				Status:     store.BrokerStatusOnline,
+			}))
+		}
+		return b
+	}
+
+	agentCtx := func(f *bypassAgentsFixture, projectID string, scopes ...AgentTokenScope) context.Context {
+		return contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: f.caller.ID},
+			ProjectID: projectID,
+			Scopes:    scopes,
+		}})
+	}
+
+	// check runs the gate and returns its verdict together with the response it
+	// wrote, because "denied" here means both false and a 403 on the wire.
+	check := func(f *bypassAgentsFixture, ctx context.Context, brokerID string) (bool, *httptest.ResponseRecorder) {
+		rec := httptest.NewRecorder()
+		return f.srv.checkBrokerDispatchAccess(ctx, rec, brokerID), rec
+	}
+
+	t.Run("agent may not dispatch to a broker serving another project", func(t *testing.T) {
+		// The bypass, stated directly. Before the fix this returned true
+		// without so much as loading the broker.
+		f := bypassAgentsSetup(t)
+		b := newRestrictedBroker(t, f, f.other.ID)
+
+		ok, rec := check(f, agentCtx(f, f.proj.ID, ScopeAgentCreate), b.ID)
+		assert.False(t, ok, "an agent must not place an agent on a broker outside its project")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("agent without the create scope is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		b := newRestrictedBroker(t, f, f.proj.ID)
+
+		ok, rec := check(f, agentCtx(f, f.proj.ID, ScopeAgentStatusUpdate), b.ID)
+		assert.False(t, ok)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("agent with the create scope may dispatch within its own project", func(t *testing.T) {
+		// The flow the gate must preserve: broker selection completing a create
+		// that authorizeAgentCreate already allowed.
+		f := bypassAgentsSetup(t)
+		b := newRestrictedBroker(t, f, f.proj.ID)
+
+		ok, _ := check(f, agentCtx(f, f.proj.ID, ScopeAgentCreate), b.ID)
+		assert.True(t, ok)
+	})
+
+	t.Run("broker-typed caller is denied", func(t *testing.T) {
+		// The case the old comment claimed to be serving. No broker-to-broker
+		// dispatch reaches here in the first place: both callers of this gate
+		// run authorizeAgentCreate first, which denies broker identities.
+		f := bypassAgentsSetup(t)
+		b := newRestrictedBroker(t, f, f.proj.ID)
+
+		ok, rec := check(f, bypassAgentsBrokerCtx(t, f), b.ID)
+		assert.False(t, ok)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("unauthenticated caller is denied", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		b := newRestrictedBroker(t, f, f.proj.ID)
+
+		ok, rec := check(f, context.Background(), b.ID)
+		assert.False(t, ok, "an empty context must deny, not allow — and must not panic")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("auto-provide brokers stay open to authenticated callers", func(t *testing.T) {
+		// Combo hub-broker deployments depend on this, and it is the reason the
+		// AutoProvide check sits ahead of the identity switch rather than inside
+		// the user arm.
+		f := bypassAgentsSetup(t)
+
+		ok, _ := check(f, agentCtx(f, f.proj.ID), f.broker.ID)
+		assert.True(t, ok, "an auto-provide broker must stay dispatchable")
+	})
+
+	t.Run("user path is unchanged", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		b := newRestrictedBroker(t, f, f.proj.ID)
+
+		ownerCtx := contextWithIdentity(context.Background(),
+			NewAuthenticatedUser(f.owner.ID, f.owner.Email, f.owner.DisplayName, string(f.owner.Role), "cli"))
+		ok, _ := check(f, ownerCtx, b.ID)
+		assert.True(t, ok, "the broker's creator must still be able to dispatch to it")
+
+		stranger := &store.User{
+			ID:          tid("bypass-dispatch-stranger"),
+			Email:       "dispatch-stranger@example.com",
+			DisplayName: "Stranger",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), stranger))
+		strangerCtx := contextWithIdentity(context.Background(),
+			NewAuthenticatedUser(stranger.ID, stranger.Email, stranger.DisplayName, string(stranger.Role), "cli"))
+		ok, rec := check(f, strangerCtx, b.ID)
+		assert.False(t, ok, "an unrelated user must not dispatch to someone else's broker")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("unknown broker is an error, not an allow", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+
+		ok, rec := check(f, agentCtx(f, f.proj.ID, ScopeAgentCreate), "no-such-broker")
+		assert.False(t, ok)
+		assert.NotEqual(t, http.StatusOK, rec.Code)
+	})
+}
