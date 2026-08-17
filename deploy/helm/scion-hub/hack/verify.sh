@@ -2428,28 +2428,90 @@ step "no assignment in this script can abort it silently under set -e -o pipefai
 # fallback. This is deliberately syntactic. A semantic version would have to
 # decide which pipelines "can" fail, and my own record on that question this
 # morning is that I cleared :970 in writing on a reason that was false.
+# `\+?=` MATCHES APPENDS, AND WITHOUT IT THIS GATE WAS BLIND TO TWO SITES THE
+# SAME COMMIT ADDED (gd-p1-rev, round 6). `+` is not in [A-Za-z0-9_], so the name
+# class stopped at the `+` and `x+="$(a | b)"` was invisible. The two it could
+# not see were verify.sh:2570-2571, added by the notes gate below:
+#
+#   _ny_settings+="$(settings_block "$WORK/$name.yaml" || true)"$'\n'
+#   _ny_kinds+="$(grep -E '^kind:' "$WORK/$name.yaml" || true)"$'\n'
+#
+# Both happen to carry `|| true`, so the tree was never live-broken. THE GATE WAS
+# NOT LYING ABOUT THE TREE, IT WAS LYING ABOUT THE CLASS - which is the only
+# thing it exists to do. gd-p1-rev demonstrated rather than argued it: remove the
+# one `|| true` from :2570 and nothing else, and since `settings_block` ends in
+# `grep -E '^    '` which matches nothing for the existing-secret permutation,
+#
+#   rc 1, stdout 18698 bytes, stderr 0 bytes, no "assertions:" summary at all,
+#   and BOTH assertions below printed `ok` on the way past.
+#
+# THE GATE CERTIFIED THE SCRIPT AT :2452 AND THE SCRIPT DIED AT :2570, 160 LINES
+# BELOW ITS OWN CERTIFICATE. Extent after the two characters: 31 -> 33 sites.
 _pipe_sites() {  # $1 = script to scan. prints "line:text" for every such assignment.
-  grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*="?\$\(.*\|.*\)' "$1" \
+  grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\+?="?\$\(.*\|.*\)' "$1" \
     | grep -v '^[0-9]*:[[:space:]]*#' || true
 }
+# A KNOWN IMPRECISION, STATED RATHER THAN LEFT FOR THE NEXT READER TO FIND.
+# The guard test is `||` anywhere on the line, so `x="$(a || b | c)"` - which
+# bash parses as `a || (b | c)`, still aborts, and is NOT guarded - would score
+# as guarded. gd-p1-rev checked and no line of that shape exists in this tree
+# (round 6, non-blocking), and the fixture below pins the shapes that do. The
+# detector is deliberately syntactic, so it is imprecise in this direction; it
+# under-reports offenders and never invents one.
 _pipe_unguarded() { _pipe_sites "$1" | grep -v '||' || true; }
 
 _self="${BASH_SOURCE[0]}"
 _ps_total="$(_pipe_sites "$_self" | wc -l || true)"
 _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 
-# EXTENT FIRST, so the zero below is a live zero and not an empty scan. A FLOOR
-# rather than an equality: sites get added, and a gate that fails on every new
-# assignment is a gate people delete. The floor is well under the current 27 and
-# is here only to catch the pattern breaking entirely.
-if [[ "$_ps_total" -lt 20 ]]; then
-  meta_failure "the pipeline-assignment sweep found only $_ps_total sites in $_self. It found 27 when it was written, so the pattern has stopped matching and the zero below would mean nothing."
+# EXTENT FIRST, so the zero below is a live zero and not an empty scan.
+#
+# AN EXACT PIN, NOT A FLOOR, AND I HAD ALREADY LOST THIS ARGUMENT ONCE. This read
+# `-lt 20` against an actual 31 - eleven sites of slack, in which the pattern
+# could rot most of the way to nothing and still report the gate "live". A floor
+# cannot see a fail-open. That is precisely the objection gd-p1-rev raised
+# against `probe_total -ge 50` in round 3, which I accepted then, and it is the
+# design of EXPECTED_TOTAL at :146, which fails on every added assertion and has
+# survived six rounds without anyone deleting it. My stated reason for the floor
+# - "a gate that fails on every new assignment is a gate people delete" - is
+# refuted by the pin thirty lines up in the same file.
+#
+# So: bump this number in the diff that adds the assignment. That is the same
+# contract every other pinned count in this suite carries.
+PIPE_SITES_EXPECTED=33
+if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
+  meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else
-  pass "the pipeline-assignment sweep is live: $_ps_total assignment-from-pipeline sites found in this script"
+  pass "the pipeline-assignment sweep is live: $_ps_total assignment-from-pipeline sites found in this script, matching the pinned $PIPE_SITES_EXPECTED"
 fi
 
+# THE CLAIM IS NARROWED TO WHAT THE DETECTOR ACTUALLY REACHES, AND THE GAP IS
+# MEASURED RATHER THAN WAVED AT. This used to read "so none can abort this script
+# silently" - a UNIVERSAL over every assignment in the file. The detector only
+# sees a line carrying a literal `|`, so the universal was false by 18 sites:
+#
+#   assignments from a command substitution, no `|` on the line, no `||`   18
+#   of those, calls to settings_block(), which ends in `grep -E '^    '`
+#   and therefore RETURNS NON-ZERO for any permutation with no settings
+#   block - the exact function gd-p1-rev's round-6 demonstration exploited    5
+#
+#     :598  db_block="$(settings_block "$WORK/settings.yaml")"
+#     :757  block="$(settings_block "$WORK/settings.yaml")"
+#     :856  block="$(settings_block "$WORK/$name.yaml")"
+#     :1251 block="$(settings_block "$WORK/settings.yaml")"
+#     :2194 block="$(settings_block "$WORK/settings.yaml")"
+#
+# They do not abort TODAY because each runs against a permutation that has a
+# settings block. That is a fact about the current call sites, not a property of
+# the code, and it is the same kind of luck that RQ-3 was resting on.
+#
+# I am not silently widening the gate to cover them in the commit that fixes a
+# different hole in it - some of the 18 SHOULD abort (`WORK="$(mktemp -d)"` is
+# not a site that wants `|| true`), so the class needs triage and not a blanket
+# rule. Filed to gd-p1-rev and gd-em for disposition. Until then the sentence
+# below says only what was checked.
 if [[ "$_ps_bad" -eq 0 ]]; then
-  pass "all $_ps_total of them carry || true or their own || fallback, so none can abort this script silently"
+  pass "all $_ps_total assignments-from-a-pipeline carry || true or their own || fallback. NOTE: this covers lines containing a literal pipe; 18 assignments from a plain command substitution are outside the detector and are not certified by this row"
 else
   fail "$_ps_bad assignment(s) from a pipeline carry no || fallback. Under set -e -o pipefail each is a silent abort with zero bytes on both streams: $(_pipe_unguarded "$_self" | tr '\n' ' ')"
 fi
@@ -2471,22 +2533,29 @@ _pf="$WORK/pipefail-fixture.sh"
 #
 # So `$(` is never written literally below: it is composed from $_S at runtime,
 # and this file therefore contains no assignment-from-pipeline to find.
+# THE `+=` CASES ARE SEEDED HERE, NOT JUST COUNTED IN THE PIN. gd-p1-rev's
+# instruction on its own finding, and it is the right one: "do not just bump the
+# numbers - the fixture is what makes the 0 a live 0, and a `+=` case must be IN
+# it or the next reader restores this hole." A pin moved from 4/2 to 6/3 with no
+# `+=` line in the fixture would pass just as happily with `\+?` deleted again.
 _S='$'
 {
   printf '#!/usr/bin/env bash\n'
   printf 'bad_one="%s(grep -c x /etc/hostname | cut -d. -f1)"\n'          "$_S"
   printf 'bad_two="%s(sed -n 1p /etc/hostname | tr -d . )"\n'             "$_S"
+  printf 'bad_three+="%s(grep -c x /etc/hostname | cut -d. -f1)"\n'       "$_S"
   printf 'good_one="%s(grep -c x /etc/hostname | cut -d. -f1 || true)"\n' "$_S"
   printf 'good_two="%s(command -v sh 2>/dev/null || printf %%s sh)"\n'    "$_S"
+  printf 'good_three+="%s(sed -n 1p /etc/hostname | tr -d . || true)"\n'  "$_S"
   printf '# not_a_site="%s(grep x /etc/hostname | wc -l)"\n'              "$_S"
   printf 'plain_assignment="hello"\n'
 } >"$_pf"
 _fx_total="$(_pipe_sites "$_pf" | wc -l || true)"
 _fx_bad="$(_pipe_unguarded "$_pf" | wc -l || true)"
-if [[ "$_fx_total" -eq 4 && "$_fx_bad" -eq 2 ]]; then
-  pass "coverage control: the detector finds exactly 4 seeded pipeline assignments and flags exactly the 2 unguarded ones, ignoring the commented site and the plain assignment"
+if [[ "$_fx_total" -eq 6 && "$_fx_bad" -eq 3 ]]; then
+  pass "coverage control: the detector finds exactly 6 seeded pipeline assignments including both += appends and flags exactly the 3 unguarded ones, ignoring the commented site and the plain assignment"
 else
-  meta_failure "coverage control FAILED: the detector found $_fx_total sites and $_fx_bad unguarded in a fixture built to contain exactly 4 and 2. The zero it reports about this script is therefore not evidence."
+  meta_failure "coverage control FAILED: the detector found $_fx_total sites and $_fx_bad unguarded in a fixture built to contain exactly 6 and 3. The zero it reports about this script is therefore not evidence."
 fi
 
 # --------------------------------------------------------------------------
