@@ -242,6 +242,82 @@ func TestIsHADeployment(t *testing.T) {
 	}
 }
 
+// TestIsHADeployment_RouteInventory is a tripwire on the source of truth for HA
+// detection. It enumerates every condition that makes isHADeployment return
+// true — one named subtest per route — so a route cannot be removed or swapped
+// without failing CI. Addition of a new route is NOT caught by CI (no subtest
+// exists for the unknown route, so nothing fails); the tripwire for addition is
+// this comment and the test structure: a developer adding route #4 must add a
+// matching subtest here and update the chart condition in lockstep.
+//
+// TRIPWIRE: the GKE Helm chart transcribes these same conditions into template
+// logic gating the operator acknowledgement flag (acknowledgeHAUnlanded). If
+// you add a route here and not to the chart, the chart's condition
+// under-triggers: it renders an HA config without the acknowledgement, and that
+// config cannot boot. Remove or swap a route without touching the chart and it
+// over-triggers, demanding an acknowledgement for a deployment that is not HA.
+// So: change isHADeployment -> update the chart condition in lockstep -> add or
+// update the matching subtest below. To locate the chart condition (once the
+// GKE chart has landed), grep the deploy/helm tree for acknowledgeHAUnlanded.
+//
+// Routes as of this writing:
+//  1. K_SERVICE env var set (Cloud Run)
+//  2. database.driver == "postgres"
+//  3. storage.provider == "gcs" && auth.mode == "proxy"
+//
+// This asserts the route SET, not the route count: each subtest is named for
+// the identity of its route, so a removal or a swap fails the replaced route's
+// subtest. An addition fails nothing — the new route simply has no subtest —
+// which is why adding one is a documented obligation rather than an enforced
+// one.
+func TestIsHADeployment_RouteInventory(t *testing.T) {
+	// NOTE: this test intentionally overlaps with TestIsHADeployment above.
+	// TestIsHADeployment validates functional correctness of HA detection
+	// across combinations. This test is a route-inventory tripwire whose
+	// primary value is the TRIPWIRE comment block above — it documents the
+	// chart condition that must be updated in lockstep. Do not merge them.
+
+	// baseConfig returns a config with none of the HA routes active — the
+	// package defaults are sqlite + local storage + unset auth mode. Each
+	// subtest then turns on exactly one route, so a failure names that route.
+	baseConfig := func(t *testing.T) *config.GlobalConfig {
+		t.Helper()
+		// K_SERVICE is not set under test by default; clear it anyway so a
+		// leaked value cannot make a subtest pass for the wrong reason.
+		t.Setenv("K_SERVICE", "")
+		cfg := config.DefaultGlobalConfig()
+		return &cfg
+	}
+
+	t.Run("K_SERVICE", func(t *testing.T) {
+		cfg := baseConfig(t)
+		t.Setenv("K_SERVICE", "my-svc")
+
+		require.True(t, isHADeployment(cfg), "K_SERVICE set (Cloud Run) must be an HA route")
+	})
+
+	t.Run("postgres_driver", func(t *testing.T) {
+		cfg := baseConfig(t)
+		cfg.Database.Driver = "postgres"
+
+		require.True(t, isHADeployment(cfg), "database.driver=postgres must be an HA route")
+	})
+
+	t.Run("gcs_plus_proxy", func(t *testing.T) {
+		cfg := baseConfig(t)
+		cfg.Storage.Provider = "gcs"
+		cfg.Auth.Mode = "proxy"
+
+		require.True(t, isHADeployment(cfg), "storage.provider=gcs with auth.mode=proxy must be an HA route")
+	})
+
+	t.Run("no_route_active", func(t *testing.T) {
+		cfg := baseConfig(t)
+
+		require.False(t, isHADeployment(cfg), "no HA route active must not be detected as HA")
+	})
+}
+
 func TestNewEventPublisherFailsClosedForHostedHA(t *testing.T) {
 	withHostedHAGuards(t)
 	cfg := validHostedHAConfig()
