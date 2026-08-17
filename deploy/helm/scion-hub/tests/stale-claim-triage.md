@@ -75,7 +75,7 @@ All are **true at `60b2912`** and false at `11a78701`. None reopens Phase 0.
 | 14 | `_helpers.tpl:637-638` | "This chart delivers no ConfigMap and no Secret" | both land |
 | 15 | `_helpers.tpl:827` | "the chart renders no ConfigMap, no Secret, no env, no envFrom and no volumes" | all five land |
 | — | `_helpers.tpl:899-901` | "argv value silently outranks the Secret-backed environment variable a later phase mounts" | the Secret lands |
-| **16** | **`_helpers.tpl:310`** | **"this chart mounts no volumes and renders no --db"** | **P1 mounts the settings volume** |
+| **16** | **`_helpers.tpl:310-314`** | **three clauses of one sentence: "this chart mounts no volumes"; "the driver is not postgres"; "the gcs-plus-proxy branch is unset" — and the conclusion they support, "isHADeployment ... is FALSE at every replica count"** | **P1 mounts the settings volume; and, per `gd-p1-dev`, P1 falsifies the driver clause and the gcs-plus-proxy clause too, so the conclusion is false by two further independent routes** |
 | **17** | **`NOTES.txt:72-79`** | **"It renders no server configuration"** | **P1 renders exactly that** |
 | **17b** | **`NOTES.txt:75-76`** | **"It does write a settings.yaml for itself on first boot... that file carries no server section"** | **P1's mounted file has one** |
 
@@ -107,13 +107,84 @@ hedge sweep sees a hedge and a reader confirms the hedge is handled. A subject
 sweep sees `volumes` and a reader finds the subject already discussed. **The
 paragraph looks triaged because it *is* triaged — against the wrong boundary.**
 
-Severity is *lower* than instances eleven to fifteen, and this matters for
-sequencing: the inference the paragraph draws — "replicas share NO mutable
-state, so `isHADeployment` is false" — **survives**, because a read-only
-projected ConfigMap volume is not shared mutable state. Only the literal clause
-goes false. A reviewer skimming for consequences would correctly conclude
-nothing breaks, and would leave a false sentence in place under a heading that
-says later phases falsify it on purpose.
+#### 🔴 SUPERSEDED — the severity note this section originally carried
+
+The paragraph below shipped in the first draft of this file. **It is struck, not
+deleted, because it is the record of what the sweep could not see.** Read it,
+then read why it is wrong.
+
+> ~~Severity is *lower* than instances eleven to fifteen, and this matters for~~
+> ~~sequencing: the inference the paragraph draws — "replicas share NO mutable~~
+> ~~state, so `isHADeployment` is false" — **survives**, because a read-only~~
+> ~~projected ConfigMap volume is not shared mutable state. Only the literal clause~~
+> ~~goes false. A reviewer skimming for consequences would correctly conclude~~
+> ~~nothing breaks, and would leave a false sentence in place under a heading that~~
+> ~~says later phases falsify it on purpose.~~
+
+**Two things are wrong with it, and `gd-p1-dev` found both by extracting the
+tree instead of trusting the quotation.**
+
+**First, the basis was fabricated.** The struck paragraph reasons about whether a
+read-only projected volume counts as "shared mutable state" — as though
+`isHADeployment` inspected volumes. It does not. `cmd/server_foreground.go:926-938`
+keys on exactly three things: `K_SERVICE`, `Database.Driver == postgres`, and
+`Storage.Provider == gcs && Auth.Mode == proxy`. **It never reads volumes at all.**
+The reassurance was derived from a mechanism that does not exist, and it was the
+reassurance, not the finding, that set the severity.
+
+**Second, and worse, the quotation was not a quotation.** The struck paragraph
+renders the chart as saying *"replicas share NO mutable state, **so**
+`isHADeployment` is false."* The chart says no such thing. Measured against
+`git archive 7a54ba7c`, `_helpers.tpl:311-314` reads:
+
+```
+NO mutable state, and isHADeployment (cmd/server_foreground.go:927) is FALSE
+at every replica count - K_SERVICE is unset on GKE, the driver is not
+postgres, and the gcs-plus-proxy branch is unset - ...
+```
+
+`grep -c 'NO mutable state, and'` → **1**. `grep -c 'mutable state, so'` → **0**.
+The chart states a **conjunction** and then names the three real predicates
+explicitly. This file sharpened the "and" into a "so", attributed the resulting
+inference to the chart, and then defended it.
+
+> **A MISQUOTE THAT SHARPENS A CONJUNCTION INTO AN INFERENCE CREATES A DEFECT IN
+> THE QUOTING DOCUMENT AND LEAVES NO TRACE IN THE QUOTED ONE.** Grep the chart
+> for the false sentence and you find nothing, because the chart never said it.
+
+That is strictly more dangerous than a fabrication. A fabrication is findable in
+the corpus. **This one is unfindable by construction** — every string in it
+exists somewhere, in the right file, near the right line, and only the connective
+is wrong. **No token-keyed sweep can see a connective.**
+
+(The chart's own sentence is loose enough to invite the consequential reading.
+That is a clarity defect in P0 prose, not a fabrication; P1 has rewritten the
+bullet and it needs nothing from this commit.)
+
+#### And the row was incomplete, which is the same failure one level up
+
+Row 16 originally cited one clause: `mounts no volumes`. `gd-p1-dev` measured that
+the **same sentence** carries two more clauses that also go false at P1 — the
+`driver is not postgres` clause and the `gcs-plus-proxy branch is unset` clause —
+neither of which appeared in any row of §2. So the bullet's actual conclusion,
+*"isHADeployment is FALSE at every replica count"*, is **false at P1 by two
+independent routes on top of the volumes one**. The struck severity note was
+reasoning about the wrong clause of the sentence it was triaging.
+
+The sweep missed them because it keyed on the token `volumes`. The two adjacent
+clauses sit inside the same sentence and contain no swept token.
+
+> **A TOKEN-KEYED SWEEP RETURNS THE CLAUSE CONTAINING THE TOKEN, NOT THE CLAIM
+> CONTAINING THE CLAUSE — AND A ROW QUOTING REAL TEXT FROM THE RIGHT LINE LOOKS
+> COMPLETE.**
+
+Those two rules are halves of one failure: **the sweep cannot see connectives,
+and the summary cannot see the clauses the sweep did not return.** Every artifact
+in this incident quoted real text from the right line.
+
+Row 16 in §2 has been amended to carry all three clauses and the falsified
+conclusion. Severity is **not** lower than instances eleven to fifteen; the
+original ranking rested on the fabricated basis above.
 
 > **A CLAIM CAN BE PROTECTED BY A DISCLAIMER THAT NAMES THE WRONG PHASE, AND
 > THAT IS WORSE THAN AN UNPROTECTED CLAIM, BECAUSE THE DISCLAIMER IS WHAT STOPS
