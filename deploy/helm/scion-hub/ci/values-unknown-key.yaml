@@ -18,7 +18,9 @@
 # MUST fail. If it succeeds, the schema is not enforced.
 #
 # This file is used by chart-ci.yml to assert that unknown keys are rejected.
-# DO NOT add these keys to the schema or values.yaml.
+# The negative-control key uses a leading underscore, which by convention is
+# never a real chart value, making it permanently invalid regardless of future
+# schema additions.
 
 hub:
   hubId: ci-schema-check
@@ -27,6 +29,6 @@ image:
   repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
   tag: ci
 
-# This key does not exist in values.schema.json and must be rejected.
-auth:
-  sessionSecret: "this-must-be-rejected-by-the-schema"
+# Permanently-invalid key: leading underscore is never a chart value.
+_ciNegativeControl:
+  mustBeRejected: true
