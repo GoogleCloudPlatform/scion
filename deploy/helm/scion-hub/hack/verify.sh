@@ -3888,6 +3888,44 @@ _ck_count() { awk '$1=="checksum/settings:"{c++} END{print c+0}' "$1"; }
 _ck_digest() { awk '$1=="checksum/settings:"{print $2}' "$1"; }
 _ck_url() { awk '$1=="url:"{print $2}' "$1"; }
 
+# 🔴 THE EXTRACTOR ITSELF IS A SUSPECT, AND EVERY GUARD ON IT USED TO BE AN
+# AGREEMENT CHECK. An extractor that returns nothing agrees with itself
+# perfectly: _dA == _dA2 holds, _dA == _dB holds, and the three assertions that
+# constitute this step's security claim all report ok on a corpse. gd-p1-dev
+# named the class (chart-integrity.sh:377) - a matcher whose expected result in
+# the current phase COINCIDES with what a dead matcher produces - and the
+# discriminator is a control asserting SURVIVAL, never one asserting
+# disappearance.
+#
+# MEASURED ON THIS FILE BEFORE THIS EXISTED, not reasoned about:
+#   _ck_digest keyed to a field that does not exist   -> 3 assertions PASS,
+#     including "the annotation is not an oracle for it ()", and the run then
+#     died at an unrelated -n guard sixty lines later, reporting the CHART as
+#     broken ("the digest has become a constant") when the instrument was.
+#   _ck_digest killed for the mut-B arm alone         -> rc=0, 297/297,
+#     0 failures. A CLEAN PASS with the un-projected control comparing a real
+#     digest against an empty string.
+#
+# So the guard runs THE FUNCTION UNDER SUSPICION over a DERIVED file set and
+# demands a well-formed sha256 back. A second awk of my own would not test the
+# first one; asserting the shape of what the caller actually consumes does.
+# The file set is a glob rather than a list of the six variables the block
+# happens to read, because a list goes stale the moment an arm is added and a
+# glob cannot - and the expected number is ABSOLUTE, so a file set that grew or
+# shrank is a meta-failure naming the number rather than a silently wider sweep.
+_ck_require_live() { # <expected count of well-formed digests> <file>...
+  local _want="$1"; shift
+  local _f _v _n=0 _bad=0 _empty=0
+  for _f in "$@"; do
+    _v="$(_ck_digest "$_f")"
+    if [[ "$_v" =~ ^[0-9a-f]{64}$ ]]; then _n=$((_n+1))
+    elif [[ -n "$_v" ]]; then _bad=$((_bad+1))
+    else _empty=$((_empty+1)); fi
+  done
+  [[ "$_bad" == 0 ]] || meta_failure "_ck_digest returned $_bad value(s) that are not a 64-character sha256 hex digest across $# file(s). It is reading the wrong field, so every equality below is between two strings of unknown provenance."
+  [[ "$_n" == "$_want" ]] || meta_failure "_ck_digest yielded $_n well-formed digest(s) from $# file(s) ($_empty empty, $_bad malformed); this call site is committed to exactly $_want. Either the extractor is dead - in which case the equalities below hold trivially and mean nothing - or the set of ck-*.yaml renders changed and this number was not changed with it."
+}
+
 _ck_render A  --set-string database.password="$_ck_A"
 _ck_render A2 --set-string database.password="$_ck_A"
 _ck_render B  --set-string database.password="$_ck_B"
@@ -3947,6 +3985,10 @@ case "$_uS1" in
   *"$_ck_S1"*) meta_failure "the S1 render's DSN contains the planted password verbatim ($_uS1), so scion-hub.pctEncodeUserinfo did not run on it and this arm is not exercising the encoded case at all." ;;
   *) ;;
 esac
+
+# SIX, derived from the renders on disk. The mutation control and the
+# existing-secret arm are rendered further down and are covered where they land.
+_ck_require_live 6 "$WORK"/ck-*.yaml
 
 _dA="$(_ck_digest "$WORK/ck-A.yaml")"; _dA2="$(_ck_digest "$WORK/ck-A2.yaml")"
 _dB="$(_ck_digest "$WORK/ck-B.yaml")"; _dS1="$(_ck_digest "$WORK/ck-S1.yaml")"
@@ -4009,8 +4051,14 @@ _ck_mut_render() { # <out> <password>
 _ck_mut_render "$WORK/ck-mut-A.yaml" "$_ck_A" || _ckmut_rc=$?
 _ck_mut_render "$WORK/ck-mut-B.yaml" "$_ck_B" || _ckmut_rc=$?
 [[ "$_ckmut_rc" == 0 ]] || meta_failure "the un-projected control chart did not render (helm exit $_ckmut_rc): $(head -3 "$WORK/ck-mut-A.yaml.err"). The planted mutation below proves nothing."
+# BOTH arms, and by shape rather than by -n. The assertion below wants them to
+# DIFFER, so an empty _mB satisfies it against a real _mA - a pass produced by a
+# dead extractor, which is how this control was measured failing open at 297/297.
+# The -n guard that used to be here covered _mA only, which is the arm an empty
+# value could not have hidden in.
+_ck_require_live 2 "$WORK"/ck-mut-*.yaml
 _mA="$(_ck_digest "$WORK/ck-mut-A.yaml")"; _mB="$(_ck_digest "$WORK/ck-mut-B.yaml")"
-[[ -n "$_mA" && "$(_ck_count "$WORK/ck-mut-A.yaml")" == 1 ]] || meta_failure "the un-projected control chart rendered no checksum/settings annotation, so its differential is a comparison of empty strings."
+[[ "$(_ck_count "$WORK/ck-mut-A.yaml")" == 1 && "$(_ck_count "$WORK/ck-mut-B.yaml")" == 1 ]] || meta_failure "an arm of the un-projected control chart does not carry exactly one checksum/settings annotation, so its differential is not a comparison of two digests."
 if [[ "$_mA" != "$_mB" ]]; then
   pass "with the projection removed the SAME password-only differential goes red ($_mA -> $_mB), so the equalities above are caused by the redaction and not by the two renders being identical"
 else
