@@ -76,6 +76,7 @@ const TEXT_EXTENSIONS = new Set([
   '.jsx',
   '.log',
   '.md',
+  '.markdown',
   '.py',
   '.rs',
   '.sh',
