@@ -513,13 +513,39 @@ Exactly one list is.
    from.
 
    DO NOT REMOVE THESE BECAUSE THE CHART DOES NOT SET THEM. That is the point of
-   them, not evidence that they were added by mistake. --config redirects
-   config.LoadGlobalConfig away from $HOME/.scion/settings.yaml, which is where
-   every value this chart renders is delivered; a hub started with it runs on a
-   file the chart has never seen while every guard, the schema and the hub-id
-   annotation continue to report the operator's intent. There is no legitimate
-   reason for this chart to emit it, so "nothing in the rendered args matches
-   this entry" is the expected steady state forever.
+   them, not evidence that they were added by mistake. There is no legitimate
+   reason for this chart to emit any of them, so "nothing in the rendered args
+   matches this entry" is the expected steady state forever.
+
+   --config: READ THIS BEFORE YOU CHANGE OR CHECK IT, BECAUSE ITS EFFECT CHANGES
+   OVER THE LIFE OF THE CHART AND ANY SINGLE-MECHANISM DESCRIPTION OF IT WILL BE
+   FALSE HALF THE TIME. It reaches exactly one place on this command's path:
+   config.LoadGlobalConfig(serverConfigPath), cmd/server_foreground.go:827, via
+   cmd/server.go:237. LoadGlobalConfig tries loadGlobalConfigFromSettings first,
+   and that function reads $HOME/.scion/settings.yaml FIRST and UNCONDITIONALLY
+   (pkg/config/hub_config.go:640-660); the path from --config is consulted only
+   when the global file is missing or has no top-level "server:" key.
+
+   So: TODAY, on this chart as it stands, --config is fully live - this phase
+   mounts nothing at $HOME/.scion, the global lookup finds no settings.yaml, and
+   --config selects the file the hub's server configuration is read from. ONCE
+   THE CONFIGURATION PHASE MOUNTS A settings.yaml WITH A TOP-LEVEL server: KEY,
+   the same flag becomes inert for that config and yields only a deprecation
+   warning.
+
+   That reversal is the durable reason to reserve it, and it is stronger than
+   either half taken alone: the flag's effect is a property of WHAT THIS CHART
+   RENDERS rather than of the binary, so any phase can turn it live or inert
+   again without touching this file or this list. A reservation is the only form
+   of this knowledge that survives that. Reserving it also costs nothing while it
+   is inert, and an inert deprecated path is exactly the kind of thing that is
+   deprecated further later.
+
+   Both readings of this flag were asserted confidently and wrongly today - once
+   as "redirects the entire configuration load", once as "no-ops with a warning".
+   Each was true of a different tree. Check which tree you are in before you
+   correct this comment again: the question is whether the chart renders a
+   settings.yaml with a server: key, not what the flag is called.
 
    --project, -g and --grove reach the same place by another door, and this list
    was incomplete without them for two rounds because they are declared in
@@ -642,11 +668,26 @@ would fire on a legitimate conditional flag; that was the wrong trade. It buys a
 future convenience with a present hole, and the convenience is available anyway
 by keeping the list and the command in step, which is the thing being asserted.
 
-Considered and rejected: deriving $setByChart from $args, which would make both
-containments true by construction and delete this block. It also silently expands
-the operator-facing reserved set every time a maintainer adds a flag to the
-command - a contract change with nothing announcing it. The explicit list is the
-statement; these two checks are what keep the statement true.
+CONSIDERED AND REJECTED: deriving $setByChart from $args. It would make both
+containments true by construction and delete this block, and that is precisely
+the objection - DERIVING ONE SIDE OF A COMPARISON FROM THE OTHER PRODUCES A CHECK
+THAT CANNOT FAIL. Both directions become tautologies over a set defined as the
+thing they are compared against, and the render stays green forever whatever the
+command does.
+
+That is a different move from removing a coupling, though the two look identical
+in a diff. service.port and hub.webPort need no assertion because targetPort: http
+means there is no longer anything to violate - the INVARIANT is gone. Deriving
+this list would leave the invariant exactly as breachable as it is now and delete
+only the CHECK. Prefer the first; refuse the second.
+
+A second and lesser objection, kept because it is independently true: the
+derivation silently expands the operator-facing reserved set every time a
+maintainer adds a flag to the command, which is a contract change with nothing
+announcing it.
+
+The explicit list is the statement; these two checks are what keep the statement
+true.
 */}}
 {{- $renderedFlags := list }}
 {{- range $chartArg := $args }}
@@ -682,7 +723,7 @@ before this did, which is how the inconsistency was found.
 {{- fail (printf "hub.args may not contain -%s: the chart renders it, and pflag is last-wins, so this would silently replace the chart's value rather than conflict with it - disabling hosted mode, unbinding the listener, taking the daemon fork so PID 1 exits, leaving /readyz unregistered, or leaving the runtime broker off in a pod that still reports Ready and can never launch an agent." $flag) }}
 {{- end }}
 {{- if has $flag $neverPassed }}
-{{- fail (printf "hub.args may not contain -%s: it redirects where the hub's configuration comes from, away from the settings file this chart delivers, so the hub would run on configuration the chart has never seen while every rendered value continued to report the operator's intent." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: it selects where the hub's configuration is read from. Whether it redirects the load outright or silently no-ops depends on what this chart renders at the time - it has already been both - and in either case the chart can no longer guarantee that the configuration in force is the configuration it rendered, while every rendered value keeps reporting the operator's intent." $flag) }}
 {{- end }}
 {{- if has $flag $aliasOrIgnored }}
 {{- fail (printf "hub.args may not contain -%s: it is not the lever it looks like. -production is a deprecated alias bound to the same variable as -hosted, so passing it can disable hosted mode; -port is ignored whenever -enable-web is set, which this chart always sets, so passing it changes nothing observable. The chart renders neither, which is why this is a separate reservation and not a stale entry." $flag) }}
