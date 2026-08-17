@@ -1874,11 +1874,11 @@ export class ScionPageChat extends LitElement {
       };
       // A muted DM raises no dot: muting is the user saying "stop telling me
       // about this", and the avatar dot is the telling (#1029).
-      const unreadIds = (data.dms || [])
+      const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
       // Same list the tab-title badge counts — reuse the response.
-      chatUnread.setDMUnread(data.dms || []);
+      chatUnread.setDMUnread(data?.dms || []);
       // Only update if changed to avoid unnecessary re-renders
       if (
         unreadIds.length !== this.v2UnreadFromIds.length ||

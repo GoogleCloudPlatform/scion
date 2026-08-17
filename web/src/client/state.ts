@@ -292,7 +292,7 @@ export class StateManager extends EventTarget {
     // it falls past every branch to the end of handleUpdate. The tray and the
     // unread badge would then never hear about a chat notification. (It does
     // not get misrouted to 'chat-message-received' — measured, not assumed.)
-    if (parts[0] === 'user' && parts[2] === 'notification') {
+    if (parts[0] === 'user' && parts.length === 3 && parts[2] === 'notification') {
       this.notifyWithData('notification-created', data);
       return;
     }

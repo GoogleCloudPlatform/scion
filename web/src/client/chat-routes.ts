@@ -49,6 +49,7 @@ export interface ChatConversationTarget {
  * segment therefore never contains a slash and stays a single path segment.
  */
 export function chatConversationPath(target: ChatConversationTarget): string | null {
+  if (!target) return null;
   const key = target.conversationKey?.trim();
   if (!key) return null;
 

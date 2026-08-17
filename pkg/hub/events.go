@@ -621,7 +621,7 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 		GroveID:   notif.ProjectID,
 		Status:    notif.Status,
 		Message:   notif.Message,
-		CreatedAt: notif.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+		CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}
 	p.sink("notification.created", evt)
 	if notif.ProjectID != "" {
@@ -656,7 +656,7 @@ func (p *eventBuilder) PublishChatNotification(_ context.Context, notif *store.N
 			GroveID:   notif.ProjectID,
 			Status:    notif.Status,
 			Message:   notif.Message,
-			CreatedAt: notif.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		},
 		SubscriberID:     notif.SubscriberID,
 		SenderID:         msg.SenderID,

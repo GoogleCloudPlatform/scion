@@ -146,6 +146,7 @@ export class ChatUnreadCounter {
   /** Recomputes both halves from the server. */
   async refresh(): Promise<void> {
     const [spaces, dms] = await Promise.all([this.fetchSpaces(), this.fetchDMs()]);
+    if (!this.listening) return;
     if (spaces) this.spaceUnread = countUnreadSpaces(spaces);
     if (dms) this.dmUnread = countUnreadDMs(dms);
     this.publish();
@@ -167,7 +168,7 @@ export class ChatUnreadCounter {
       const res = await apiFetch('/api/v1/chat/spaces');
       if (!res.ok) return null;
       const data = (await res.json()) as { spaces?: UnreadSpace[] };
-      return data.spaces ?? [];
+      return data?.spaces ?? [];
     } catch {
       // Offline or chat disabled — keep the last known count rather than
       // flashing the badge to zero.
@@ -180,7 +181,7 @@ export class ChatUnreadCounter {
       const res = await apiFetch('/api/v1/chat/dms');
       if (!res.ok) return null;
       const data = (await res.json()) as { dms?: UnreadDM[] };
-      return data.dms ?? [];
+      return data?.dms ?? [];
     } catch {
       return null;
     }

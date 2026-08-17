@@ -71,9 +71,11 @@ export function setPushOptIn(enabled: boolean): void {
   } catch {
     // Non-fatal: the toggle simply won't persist across reloads.
   }
-  window.dispatchEvent(
-    new CustomEvent<{ enabled: boolean }>(PUSH_PREFERENCE_EVENT, { detail: { enabled } })
-  );
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent<{ enabled: boolean }>(PUSH_PREFERENCE_EVENT, { detail: { enabled } })
+    );
+  }
 }
 
 /**
