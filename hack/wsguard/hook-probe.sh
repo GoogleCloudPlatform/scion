@@ -22,6 +22,28 @@
 # Running only the negatives would be a check that cannot fail. The positive
 # control is what makes the silence evidence.
 #
+# THE APERTURE IS DERIVED FROM GIT, NOT CHOSEN BY ME
+#
+# The first version of this probe installed NINE hook names that I picked. That
+# made the headline result — "no hook fired" — rest on a membership test I
+# authored: a hook git invokes that was not on my list produces silence, which
+# is the same shape as the result being reported. An aperture chosen for
+# convenience becomes a membership test silently, and nothing in the output says
+# so. (gd-doc lost eleven live agents from a roster to exactly this, via a
+# `head -40` that was only ever meant to shorten a display.)
+#
+# So the hook set is now enumerated from git itself, in three steps:
+#
+#   1. an over-inclusive candidate corpus: every maximal [a-z-] run in the git
+#      binary, 6..32 chars, not dash-terminated. Over-inclusive on purpose —
+#      the filter must not be where a hook name gets lost.
+#   2. an ORACLE, which is git: `git hook run <name>` answers "unknown hook
+#      event" for a name git does not know, and "cannot find a hook named" for
+#      one it does. The authority for what a hook is is git, not me.
+#   3. a DENOMINATOR CONTROL against an independent source — the .sample files
+#      git ships in its own templates directory. The derived set must be a
+#      superset of them. Asserted against that expectation, never against zero.
+#
 # EXIT CODES
 #
 #   0  measured, and every arm matched the claim
@@ -93,10 +115,97 @@ LOG="$WORK/hooks.log"
 
 mkdir -p "$HOOKS" || die_cannot_measure "could not create $HOOKS"
 
-# Every hook that could plausibly stand in front of a destructive command, plus
-# the ones git documents as firing after one. Each records that it ran.
-for h in reference-transaction post-checkout pre-checkout pre-reset post-merge \
-         pre-auto-gc post-index-change post-rewrite pre-push; do
+# --- step 1: over-inclusive candidate corpus -------------------------------
+# `tr` transliterates bytes; it has no pattern dialect and cannot be converted
+# by a BRE/ERE mix-up. The shape filter is bash `case`, for the same reason:
+# this is the one place a real hook name could be dropped before git ever sees
+# it, so it must not depend on which regex engine is installed.
+ORACLE_REPO="$WORK/oracle"
+mkdir -p "$ORACLE_REPO" || die_cannot_measure "could not create $ORACLE_REPO"
+"$GIT" -C "$ORACLE_REPO" init -q -b main ||
+  die_cannot_measure "could not init the oracle repo"
+
+candidates=()
+while IFS= read -r tok; do
+  (( ${#tok} < 6 || ${#tok} > 32 )) && continue
+  case "$tok" in
+    *[!a-z-]* ) continue ;;
+    -* | *-   ) continue ;;
+  esac
+  candidates+=("$tok")
+done < <(tr -c 'a-z-' '\n' < "$GIT" | sort -u)
+(( ${#candidates[@]} > 0 )) ||
+  die_cannot_measure "candidate corpus for the hook enumeration came back empty"
+
+# --- step 2: the oracle, which is git ---------------------------------------
+# Control the oracle before trusting it. It must give DIFFERENT answers for a
+# name git knows and a name it cannot know. If both answers are the same string
+# the oracle discriminates nothing and every name would land in one bucket.
+oracle_known="$("$GIT" -C "$ORACLE_REPO" hook run pre-commit 2>&1)"
+oracle_bogus="$("$GIT" -C "$ORACLE_REPO" hook run wsguard-not-a-hook-event 2>&1)"
+case "$oracle_known" in
+  *"unknown hook event"*)
+    die_cannot_measure "the oracle calls pre-commit an unknown hook event; it is not an oracle" ;;
+esac
+case "$oracle_bogus" in
+  *"unknown hook event"*) : ;;
+  *) die_cannot_measure "the oracle accepted an invented hook name; it discriminates nothing" ;;
+esac
+
+native_hooks=()
+for tok in "${candidates[@]}"; do
+  case "$("$GIT" -C "$ORACLE_REPO" hook run "$tok" 2>&1)" in
+    *"unknown hook event"*) ;;
+    *) native_hooks+=("$tok") ;;
+  esac
+done
+(( ${#native_hooks[@]} > 0 )) ||
+  die_cannot_measure "git named zero hook events; the enumeration failed"
+
+# --- step 3: denominator control against an independent source --------------
+# git ships .sample hooks in its own templates directory. That list is authored
+# by git, not by me, and it is a different artefact from the binary the oracle
+# reads. The derived set must contain all of them. Asserting the derived set is
+# merely non-empty would be asserting against zero, which is the assertion that
+# cannot fail.
+templates_dir="$("$GIT" --exec-path)/../../share/git-core/templates/hooks"
+sample_total=0
+sample_missing=()
+if [[ -d "$templates_dir" ]]; then
+  for f in "$templates_dir"/*.sample; do
+    [[ -e "$f" ]] || continue
+    name="${f##*/}"
+    name="${name%.sample}"
+    sample_total=$(( sample_total + 1 ))
+    found=0
+    for h in "${native_hooks[@]}"; do
+      [[ "$h" == "$name" ]] && { found=1; break; }
+    done
+    (( found == 1 )) || sample_missing+=("$name")
+  done
+fi
+if (( sample_total == 0 )); then
+  die_cannot_measure "no .sample hooks found under $templates_dir, so the derived hook set has no independent denominator to be checked against"
+fi
+if (( ${#sample_missing[@]} > 0 )); then
+  echo "hook-probe: the derived hook set is missing names git ships as samples:" >&2
+  printf '  %s\n' "${sample_missing[@]}" >&2
+  die_cannot_measure "the enumeration is incomplete against an independent source"
+fi
+
+# Names I installed in the first version of this probe that git does not know.
+# Reported, because "git has no pre-checkout hook" is the opening sentence of
+# the README's rejection and this is the measurement of it.
+not_native=()
+for probe_name in pre-checkout pre-reset; do
+  found=0
+  for h in "${native_hooks[@]}"; do
+    [[ "$h" == "$probe_name" ]] && { found=1; break; }
+  done
+  (( found == 0 )) && not_native+=("$probe_name")
+done
+
+for h in "${native_hooks[@]}"; do
   # The hook logs its argv AND its stdin. Logging only "the hook fired" was the
   # first version of this apparatus, and it was not good enough: a
   # reference-transaction firing during a fetch tells you nothing about WHICH
@@ -148,6 +257,37 @@ contradictions=0
 findings=()
 LAST_HOOKS=""
 
+# The nine names the FIRST version of this probe installed, kept so that the
+# widening can be diffed rather than asserted. "The wider aperture agrees with
+# the narrower one" is a claim; the set of hooks that fired outside the old nine
+# is a measurement of it, and it costs nothing because both apertures are
+# present in the same log.
+OLD_NINE=(reference-transaction post-checkout pre-checkout pre-reset post-merge
+          pre-auto-gc post-index-change post-rewrite pre-push)
+outside_old_aperture=()
+distinct_fired=()
+
+# aperture_delta — reads the hook names out of LAST_HOOKS by taking the token
+# before the first space. No pattern tool; the log format is ours.
+aperture_delta() {
+  local line name h seen
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    name="${line%% *}"
+    seen=0
+    for h in ${distinct_fired[@]+"${distinct_fired[@]}"}; do
+      [[ "$h" == "$name" ]] && { seen=1; break; }
+    done
+    (( seen == 1 )) && continue
+    distinct_fired+=("$name")
+    seen=0
+    for h in "${OLD_NINE[@]}"; do
+      [[ "$h" == "$name" ]] && { seen=1; break; }
+    done
+    (( seen == 0 )) && outside_old_aperture+=("$name")
+  done <<<"$LAST_HOOKS"
+}
+
 # The one deliberate falsification, for --prove-it. It re-points arm 2's
 # expectation at a hook that DEMONSTRABLY fires for `git checkout -- <path>`
 # (post-checkout, seen in every run), so a probe that is actually reading its
@@ -175,6 +315,7 @@ run_arm() {
     printf '%s\n' "$LAST_HOOKS" | sed 's/^/      /'
   fi
   [[ -n "$out" ]] && printf '%s\n' "$out" | sed 's/^/    git: /'
+  aperture_delta
   return 0
 }
 
@@ -214,8 +355,20 @@ echo "  git            : $GIT"
 echo "  git version    : $("$GIT" --version)"
 echo "  ref backend    : $("$GIT" -C "$REPO" rev-parse --show-ref-format 2>&1) (the answer may be backend-dependent)"
 echo "  core.hooksPath : \$WORK/hooks"
-echo "  hooks installed: reference-transaction post-checkout pre-checkout pre-reset"
-echo "                   post-merge pre-auto-gc post-index-change post-rewrite pre-push"
+echo "  hook aperture  : ${#native_hooks[@]} hooks, ENUMERATED FROM GIT, not chosen by me"
+echo "                   candidate corpus ${#candidates[@]} tokens from the git binary"
+echo "                   -> filtered by git's own \`git hook run\` oracle"
+echo "                   -> checked against $sample_total .sample names git ships: all present"
+printf '  hooks installed: '
+printf '%s ' "${native_hooks[@]}"
+printf '\n'
+if (( ${#not_native[@]} > 0 )); then
+  printf '  NOT hook events: '
+  printf '%s ' "${not_native[@]}"
+  printf '\n'
+  echo "                   git answers \"unknown hook event\" for these. The README's"
+  echo "                   opening sentence, \"git has no pre-checkout hook\", is this line."
+fi
 echo "  repo           : \$WORK/repo ($WORK/repo)"
 echo "  verdict tool   : bash [[ == ]] glob containment. No grep/rg/awk decides anything."
 echo
@@ -332,11 +485,35 @@ echo
 echo "==========================================================================="
 printf 'arms run           : %d (%d positive control, %d negative, %d contrast)\n' \
   "$arms" "$arms_control" "$arms_negative" "$arms_contrast"
-printf 'harness controls   : %d/%d reproduced (hook fires; payload is captured)\n' \
-  "$controls" "$controls"
+printf 'harness controls   : %d/%d reproduced, and they are not all the same kind:\n' \
+  "$(( controls + 2 ))" "$(( controls + 2 ))"
+printf '                     [enumeration] the oracle gives different answers for a\n'
+printf '                                   real hook name and an invented one\n'
+printf '                     [denominator] the derived set contains all %d .sample\n' "$sample_total"
+printf '                                   names git ships — an independent source,\n'
+printf '                                   not zero\n'
+printf '                     [apparatus]   arm 1 fires the hook set\n'
+printf '                     [plumbing]    arm 1 payload names the ref it created\n'
 printf 'claim assertions   : %d — each could have come back CONTRADICTED\n' "$assertions"
 printf 'contradictions     : %d\n' "$contradictions"
 printf 'note: the contrast arm asserts nothing. It is reported, not counted.\n'
+printf 'aperture           : %d installed (derived from git) vs %d in this probe'"'"'s\n' \
+  "${#native_hooks[@]}" "${#OLD_NINE[@]}"
+printf '                     first version (chosen by me). Distinct hooks that\n'
+printf '                     actually fired across all arms: %d\n' "${#distinct_fired[@]}"
+if (( ${#outside_old_aperture[@]} == 0 )); then
+  printf '                     Hooks that fired OUTSIDE the old nine: 0 — so the\n'
+  printf '                     widening changed no arm. The narrow aperture was\n'
+  printf '                     adequate HERE, which it had no way of knowing and\n'
+  printf '                     no way of reporting. That is the defect, not the\n'
+  printf '                     count: a chosen aperture cannot tell you it was\n'
+  printf '                     wide enough, and silence outside it looks exactly\n'
+  printf '                     like the result being claimed.\n'
+else
+  printf '                     Hooks that fired OUTSIDE the old nine: %d — %s\n' \
+    "${#outside_old_aperture[@]}" "${outside_old_aperture[*]}"
+  printf '                     The first version of this probe COULD NOT SEE these.\n'
+fi
 echo "==========================================================================="
 
 if (( contradictions == 0 )); then

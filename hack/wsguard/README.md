@@ -47,9 +47,7 @@ README it was **argued from git's documentation rather than measured** — it wa
 published as the design's weakest claim and the first thing a reviewer should
 attack. `hack/wsguard/hook-probe.sh` now attacks it.
 
-The probe installs a real `core.hooksPath` set (`reference-transaction`,
-`post-checkout`, `pre-checkout`, `pre-reset`, `post-merge`, `pre-auto-gc`,
-`post-index-change`, `post-rewrite`, `pre-push`) in a throwaway repository, with
+The probe installs a real `core.hooksPath` set in a throwaway repository, with
 each hook logging **its argv and its stdin**, and runs both arms. Measured on
 git 2.54.0, `/usr/local/bin/git`, `files` ref backend:
 
@@ -61,6 +59,37 @@ git 2.54.0, `/usr/local/bin/git`, `files` ref backend:
 | 4 | `git clean -fd` | **no hook fires at all** | not merely unabortable — unobservable |
 | 5 | `git fetch <donor> main` | fires 3×, **payload empty**, nothing names `FETCH_HEAD` | hazard (b)'s write side is invisible to it |
 | 6 — contrast | `git reset -q --hard HEAD~1` | **fires**, payloads name `ORIG_HEAD`, `HEAD`, `refs/heads/main` | a hook set would have covered `reset`, and *only* the ref-moving forms |
+
+#### The aperture is derived from git, not chosen
+
+The first version of this probe installed **nine hook names I picked**. That put
+a membership test I authored underneath the headline result: a hook git invokes
+that is not on my list produces silence, and silence is the shape of the result
+being reported. An aperture chosen for display convenience becomes a membership
+test without saying so.
+
+The hook set is now enumerated from git itself:
+
+1. **an over-inclusive candidate corpus** — every maximal `[a-z-]` run in the
+   git binary, 6–32 characters, not dash-terminated (`tr` for the extraction,
+   bash `case` for the shape, so no regex dialect can drop a name);
+2. **an oracle, which is git** — `git hook run <name>` answers `unknown hook
+   event` for a name git does not know and `cannot find a hook named` for one it
+   does. The oracle is controlled first: it must give *different* answers for
+   `pre-commit` and for an invented name, or it discriminates nothing;
+3. **a denominator control against an independent source** — the `.sample` hooks
+   git ships in its own templates directory. The derived set must be a superset
+   of all 14. Asserting merely that it is non-empty would be asserting against
+   zero.
+
+Result: **5779 candidates → 24 native hook events**, all 14 shipped samples
+present. And the differential, run rather than argued: across all six arms,
+**3** distinct hooks fired and **0** of them were outside the original nine. The
+narrow aperture happened to be adequate — but it had no way of knowing that and
+no way of reporting it, which is the defect, not the count.
+
+`pre-checkout` and `pre-reset` come back `unknown hook event`. The README's
+opening sentence, *"git has no `pre-checkout` hook"*, is that line of output.
 
 Arm 6 is why the rejection matters. A hook set is not useless — it is *partial*,
 and it would have looked whole. The part it misses is the part that took
@@ -75,7 +104,10 @@ argv, reported the claim CONTRADICTED, and was wrong. It is quoted here rather
 than quietly fixed, because the differential between the two versions is the
 evidence that the second one is measuring the right thing.
 
-The probe has the same two defences as the selftest: a **positive control**
+The probe has four controls, and they are not all the same kind — enumeration
+(the oracle discriminates), denominator (24 ⊇ the 14 shipped samples),
+apparatus (arm 1 fires the hook set), plumbing (arm 1's payload names the ref it
+created). Beyond those it has the same two defences as the selftest: a **positive control**
 (arms 2–5 are all "nothing happened", which is exactly what a hook set that was
 never installed produces for free — arm 1 must fire, and its payload must be
 captured, or the probe exits `2` and reports nothing) and a **negative control**
