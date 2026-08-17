@@ -1,0 +1,177 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Chart CI — validates the Helm chart at deploy/helm/scion-hub.
+#
+# TRIGGER DESIGN (C7): The existing ci.yml uses `branches: [ main ]` on
+# pull_request, which filters on the PR's BASE branch, not its head. PRs based
+# on phase branches (e.g. scion/gke-chart-p1) never trigger CI because their
+# base is not main. This workflow does NOT filter by branch. It uses path
+# filtering to run only when chart files change, and it runs on pull_request
+# events regardless of which branch the PR targets. This ensures stacked PRs
+# based on phase branches still get chart CI.
+
+name: Chart CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'deploy/helm/scion-hub/**'
+      - '.github/workflows/chart-ci.yml'
+  pull_request:
+    paths:
+      - 'deploy/helm/scion-hub/**'
+      - '.github/workflows/chart-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  helm-lint:
+    name: Helm Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4
+        with:
+          version: 'v3.17.3'
+
+      - name: Helm lint (minimal values)
+        run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-minimal.yaml
+
+      - name: Helm lint (cluster RBAC values)
+        run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-cluster-rbac.yaml
+
+  helm-template:
+    name: Helm Template (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minimal
+            values-file: ci/values-minimal.yaml
+            release-name: ci-minimal
+          - name: cluster-rbac
+            values-file: ci/values-cluster-rbac.yaml
+            release-name: ci-cluster-rbac
+          - name: long-release-name
+            values-file: ci/values-minimal.yaml
+            # 54 characters: exercises trunc 63 in _helpers.tpl fullname
+            # (54 + "-" + "scion-hub" = 64, truncated to 63)
+            release-name: aaaaaaaaa-bbbbbbbbb-ccccccccc-ddddddddd-eeeeeeeee-ffff
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4
+        with:
+          version: 'v3.17.3'
+
+      - name: Install kubeconform
+        run: |
+          curl -sSLo kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz
+          sudo mv kubeconform /usr/local/bin/
+          kubeconform -v
+
+      - name: Render and validate
+        run: |
+          set -euo pipefail
+
+          CHART_DIR="deploy/helm/scion-hub"
+          VALUES_FILE="${CHART_DIR}/${{ matrix.values-file }}"
+          RELEASE_NAME="${{ matrix.release-name }}"
+
+          echo "::group::Helm template"
+          helm template "${RELEASE_NAME}" "${CHART_DIR}" \
+            -f "${VALUES_FILE}" \
+            --namespace ci-test \
+            > /tmp/rendered.yaml
+          echo "Rendered $(wc -l < /tmp/rendered.yaml) lines"
+          echo "::endgroup::"
+
+          echo "::group::Kubeconform validation"
+          kubeconform \
+            -strict \
+            -summary \
+            -output json \
+            /tmp/rendered.yaml
+          echo "::endgroup::"
+
+  schema-validation:
+    name: Schema Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4
+        with:
+          version: 'v3.17.3'
+
+      - name: Unknown key MUST be rejected by schema
+        run: |
+          set -euo pipefail
+
+          CHART_DIR="deploy/helm/scion-hub"
+
+          # This MUST fail. If it succeeds, the schema is not enforcing
+          # additionalProperties: false and unknown keys pass silently.
+          if helm template ci-schema "${CHART_DIR}" \
+            -f "${CHART_DIR}/ci/values-unknown-key.yaml" \
+            --namespace ci-test 2>/tmp/schema-error.txt; then
+            echo "::error::Schema validation did not reject unknown key 'auth.sessionSecret'."
+            echo "values.schema.json declares additionalProperties: false at the root,"
+            echo "so helm template with an unknown key MUST fail. It did not."
+            exit 1
+          fi
+
+          echo "Schema correctly rejected unknown key. Error:"
+          head -5 /tmp/schema-error.txt
+
+  yamllint:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint chart YAML sources
+        run: |
+          yamllint -c <(cat <<'YAMLLINT_CONFIG'
+          extends: default
+          rules:
+            line-length:
+              max: 200
+            truthy:
+              check-keys: false
+            comments:
+              min-spaces-from-content: 1
+            document-start: disable
+          YAMLLINT_CONFIG
+          ) \
+            deploy/helm/scion-hub/Chart.yaml \
+            deploy/helm/scion-hub/values.yaml \
+            deploy/helm/scion-hub/ci/*.yaml \
+            deploy/helm/scion-hub/templates/*.yaml
