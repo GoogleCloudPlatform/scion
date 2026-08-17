@@ -48,7 +48,7 @@ func (c *testClock) Advance(d time.Duration) {
 // tokens refill — the refusal carries a usable retry delay.
 func TestChatSendLimiter_BurstThenRefusesUntilRefill(t *testing.T) {
 	clock := newTestClock()
-	lim := newChatSendLimiterWithRates(30, 60, clock.Now)
+	lim := newChatSendLimiterWithClock(clock.Now)
 
 	for i := range chatSendHumanRatePerMinute {
 		if allowed, _ := lim.Allow("u1", chatSenderHuman); !allowed {
@@ -91,7 +91,10 @@ func TestChatSendLimiter_BurstThenRefusesUntilRefill(t *testing.T) {
 // rate classes are tracked separately even for the same ID.
 func TestChatSendLimiter_BucketsAreScopedToSenderAndClass(t *testing.T) {
 	clock := newTestClock()
-	lim := newChatSendLimiterWithRates(2, 3, clock.Now)
+	lim := newChatSendLimiterWithRates(map[chatSenderClass]float64{
+		chatSenderHuman: 2,
+		chatSenderAgent: 3,
+	}, clock.Now)
 
 	for range 2 {
 		if allowed, _ := lim.Allow("shared-id", chatSenderHuman); !allowed {
@@ -121,12 +124,40 @@ func TestChatSendLimiter_ProductionLimits(t *testing.T) {
 	if got := lim.limitFor(chatSenderAgent); got != 60 {
 		t.Errorf("agent limit = %v, want 60/min", got)
 	}
+	if got := lim.limitFor(chatSenderAgentMirror); got != 60 {
+		t.Errorf("assistant-reply mirror limit = %v, want 60/min", got)
+	}
+}
+
+// An agent's transcript mirror and its own messages are counted separately,
+// so neither can spend the other's allowance.
+func TestChatSendLimiter_MirrorAndAgentTrafficHaveSeparateBuckets(t *testing.T) {
+	clock := newTestClock()
+	lim := newChatSendLimiterWithRates(map[chatSenderClass]float64{
+		chatSenderAgent:       2,
+		chatSenderAgentMirror: 2,
+	}, clock.Now)
+
+	for range 2 {
+		if allowed, _ := lim.Allow("a1", chatSenderAgentMirror); !allowed {
+			t.Fatal("the mirror's own allowance should not be exhausted yet")
+		}
+	}
+	if allowed, _ := lim.Allow("a1", chatSenderAgentMirror); allowed {
+		t.Fatal("the mirror is over its limit and should be refused")
+	}
+
+	for i := range 2 {
+		if allowed, _ := lim.Allow("a1", chatSenderAgent); !allowed {
+			t.Errorf("agent-authored send %d refused: the mirror must not spend this allowance", i+1)
+		}
+	}
 }
 
 // Bucket state is bounded: senders that stop sending are forgotten.
 func TestChatSendLimiter_EvictsIdleBuckets(t *testing.T) {
 	clock := newTestClock()
-	lim := newChatSendLimiterWithRates(30, 60, clock.Now)
+	lim := newChatSendLimiterWithClock(clock.Now)
 
 	for _, id := range []string{"a", "b", "c"} {
 		lim.Allow(id, chatSenderHuman)
@@ -157,7 +188,9 @@ func TestChatSendLimiter_NilAllows(t *testing.T) {
 func TestChatSendLimiter_ConcurrentSendersGetExactlyTheAllowance(t *testing.T) {
 	clock := newTestClock()
 	const limit = 20
-	lim := newChatSendLimiterWithRates(limit, limit, clock.Now)
+	lim := newChatSendLimiterWithRates(map[chatSenderClass]float64{
+		chatSenderAgent: limit,
+	}, clock.Now)
 
 	var allowed atomic.Int64
 	var wg sync.WaitGroup

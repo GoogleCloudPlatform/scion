@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
@@ -35,9 +36,16 @@ import (
 // postOutbound sends one agent→human message as the given agent.
 func postOutbound(t *testing.T, srv *Server, projectID, agentID, msg string) *httptest.ResponseRecorder {
 	t.Helper()
+	return postOutboundTyped(t, srv, projectID, agentID, msg, "")
+}
+
+// postOutboundTyped sends one agent→human message of a specific message type.
+func postOutboundTyped(t *testing.T, srv *Server, projectID, agentID, msg, msgType string) *httptest.ResponseRecorder {
+	t.Helper()
 	body, _ := json.Marshal(OutboundMessageRequest{
 		Recipient: "user:human@example.com",
 		Msg:       msg,
+		Type:      msgType,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -95,8 +103,7 @@ func TestOutboundMessage_RateLimitsFloodingAgent(t *testing.T) {
 	// Production limits, test clock: the real 60/min ceiling without a real
 	// minute of waiting.
 	clock := newTestClock()
-	srv.chatSendLimiter = newChatSendLimiterWithRates(
-		chatSendHumanRatePerMinute, chatSendAgentRatePerMinute, clock.Now)
+	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
 
 	for i := range chatSendAgentRatePerMinute {
 		if rr := postOutbound(t, srv, project.ID, flooder, "spam"); rr.Code != http.StatusOK {
@@ -125,5 +132,63 @@ func TestOutboundMessage_RateLimitsFloodingAgent(t *testing.T) {
 	clock.Advance(time.Second)
 	if rr := postOutbound(t, srv, project.ID, flooder, "after backoff"); rr.Code != http.StatusOK {
 		t.Errorf("expected the send to succeed after backing off, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// The automatic assistant-reply transcript mirror shares an agent with the
+// messages the agent writes itself, but not a bucket: a chatty agent whose
+// mirror is over its limit can still deliver a completion report or a blocker
+// escalation. Low-value traffic must not starve high-value traffic.
+func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:         api.NewUUID(),
+		Name:       "mirror-project",
+		Slug:       "mirror-project",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if err := s.CreateUser(ctx, &store.User{
+		ID:          api.NewUUID(),
+		Email:       "human@example.com",
+		DisplayName: "Human",
+	}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Name:       "chatty",
+		Slug:       "chatty",
+		ProjectID:  project.ID,
+		Phase:      "running",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	clock := newTestClock()
+	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
+
+	// Exhaust the mirror's allowance with hook-posted assistant replies.
+	for i := range chatSendAgentMirrorRatePerMinute {
+		rr := postOutboundTyped(t, srv, project.ID, agent.ID, "mirrored transcript", messages.TypeAssistantReply)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("mirror send %d: expected 200, got %d: %s", i+1, rr.Code, rr.Body.String())
+		}
+	}
+	rr := postOutboundTyped(t, srv, project.ID, agent.ID, "mirrored transcript", messages.TypeAssistantReply)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("the mirror is over its limit and should be refused, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// The agent's own message to a human is unaffected.
+	if rr := postOutbound(t, srv, project.ID, agent.ID, "task complete"); rr.Code != http.StatusOK {
+		t.Fatalf("the agent's own message must not be starved by its transcript mirror: got %d: %s",
+			rr.Code, rr.Body.String())
 	}
 }

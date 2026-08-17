@@ -2309,8 +2309,7 @@ func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
 	// Production limits, test clock: the real 30/min ceiling without a real
 	// minute of waiting.
 	clock := newTestClock()
-	srv.chatSendLimiter = newChatSendLimiterWithRates(
-		chatSendHumanRatePerMinute, chatSendAgentRatePerMinute, clock.Now)
+	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
 
 	path := "/api/v1/chat/conversations/" + tid("topic-ratelimit") + "/messages"
 	for i := range chatSendHumanRatePerMinute {

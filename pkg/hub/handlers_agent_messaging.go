@@ -64,19 +64,29 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Per-sender send limit (#1054). This is the path a looping agent floods a
-	// thread through, so the limit has to live here and not only on the
-	// browser send path. The response is an explicit 429 with Retry-After
-	// rather than a silent drop, so a caller can back off and resend.
-	if !s.allowChatSend(w, agentIdent.ID(), chatSenderAgent) {
-		return
-	}
-
 	var req OutboundMessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+
+	// Per-sender send limit (#1054). This is the path a looping agent floods a
+	// thread through, so the limit has to live here and not only on the
+	// browser send path. The response is an explicit 429 with Retry-After
+	// rather than a silent drop, so a caller can back off and resend.
+	//
+	// The automatic assistant-reply transcript mirror (posted by the agent
+	// hook, not written by the agent) is limited in its own bucket: it is
+	// still part of the flood vector, but it must not be able to spend the
+	// allowance the agent needs for a completion report or an escalation.
+	sendClass := chatSenderAgent
+	if req.Type == messages.TypeAssistantReply {
+		sendClass = chatSenderAgentMirror
+	}
+	if !s.allowChatSend(w, agentIdent.ID(), sendClass) {
+		return
+	}
+
 	if req.Msg == "" {
 		ValidationError(w, "msg is required", nil)
 		return

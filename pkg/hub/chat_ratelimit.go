@@ -44,9 +44,17 @@ const (
 	chatSendHumanRatePerMinute = 30
 
 	// chatSendAgentRatePerMinute is the sustained send rate allowed for a
-	// single agent. Agents legitimately send more than humans (status
-	// reports, replies to several recipients), so they get a higher ceiling.
+	// single agent's own messages to humans. Agents legitimately send more
+	// than humans (status reports, replies to several recipients), so they
+	// get a higher ceiling.
 	chatSendAgentRatePerMinute = 60
+
+	// chatSendAgentMirrorRatePerMinute is the sustained rate allowed for an
+	// agent's automatic assistant-reply transcript mirror. Same ceiling as
+	// the agent's own messages, but a separate bucket: the mirror is machine
+	// generated and must not be able to spend the allowance an agent needs
+	// for a completion report or a blocker escalation.
+	chatSendAgentMirrorRatePerMinute = 60
 
 	// chatSendLimiterIdleTTL is how long an untouched bucket is kept before
 	// being evicted. It also bounds how often the sweep runs.
@@ -57,15 +65,30 @@ const (
 	chatSendLimiterMaxBuckets = 10000
 )
 
-// chatSenderClass distinguishes the rate classes. Buckets are keyed by class
-// as well as ID so a user and an agent that share an ID cannot drain each
-// other's allowance.
+// chatSenderClass distinguishes both who is sending and what kind of traffic
+// it is. Buckets are keyed by class as well as by ID, so a user and an agent
+// that share an ID cannot drain each other's allowance and — more
+// importantly — an agent's automatic transcript mirror cannot starve the
+// messages that agent writes itself.
 type chatSenderClass int
 
 const (
 	chatSenderHuman chatSenderClass = iota
 	chatSenderAgent
+	chatSenderAgentMirror
 )
+
+// keyPrefix namespaces a class's buckets.
+func (c chatSenderClass) keyPrefix() string {
+	switch c {
+	case chatSenderAgent:
+		return "agent:"
+	case chatSenderAgentMirror:
+		return "agent-mirror:"
+	default:
+		return "user:"
+	}
+}
 
 // chatSenderClassFor maps an authenticated identity to its rate class.
 // Anything that is not an agent is rated as a human.
@@ -89,8 +112,9 @@ type chatSendLimiter struct {
 	buckets   map[string]*chatSendBucket
 	lastSweep time.Time
 
-	humanPerMinute float64
-	agentPerMinute float64
+	// ratesPerMinute is the allowance per rate class. A missing class, or a
+	// rate of zero or less, disables limiting for that class.
+	ratesPerMinute map[chatSenderClass]float64
 
 	// now is the clock, injectable so tests can exhaust and refill a bucket
 	// without sleeping a real minute.
@@ -99,20 +123,28 @@ type chatSendLimiter struct {
 
 // newChatSendLimiter creates a limiter with the production limits.
 func newChatSendLimiter() *chatSendLimiter {
-	return newChatSendLimiterWithRates(chatSendHumanRatePerMinute, chatSendAgentRatePerMinute, time.Now)
+	return newChatSendLimiterWithClock(time.Now)
 }
 
-// newChatSendLimiterWithRates creates a limiter with explicit limits and
-// clock. A rate of zero or less disables limiting for that class.
-func newChatSendLimiterWithRates(humanPerMinute, agentPerMinute float64, now func() time.Time) *chatSendLimiter {
+// newChatSendLimiterWithClock creates a limiter with the production limits
+// and an injectable clock.
+func newChatSendLimiterWithClock(now func() time.Time) *chatSendLimiter {
+	return newChatSendLimiterWithRates(map[chatSenderClass]float64{
+		chatSenderHuman:       chatSendHumanRatePerMinute,
+		chatSenderAgent:       chatSendAgentRatePerMinute,
+		chatSenderAgentMirror: chatSendAgentMirrorRatePerMinute,
+	}, now)
+}
+
+// newChatSendLimiterWithRates creates a limiter with explicit limits and clock.
+func newChatSendLimiterWithRates(ratesPerMinute map[chatSenderClass]float64, now func() time.Time) *chatSendLimiter {
 	if now == nil {
 		now = time.Now
 	}
 	return &chatSendLimiter{
 		buckets:        make(map[string]*chatSendBucket),
 		lastSweep:      now(),
-		humanPerMinute: humanPerMinute,
-		agentPerMinute: agentPerMinute,
+		ratesPerMinute: ratesPerMinute,
 		now:            now,
 	}
 }
@@ -122,10 +154,7 @@ func (l *chatSendLimiter) limitFor(class chatSenderClass) float64 {
 	if l == nil {
 		return 0
 	}
-	if class == chatSenderAgent {
-		return l.agentPerMinute
-	}
-	return l.humanPerMinute
+	return l.ratesPerMinute[class]
 }
 
 // Allow consumes one token for the sender and reports whether the send may
@@ -139,10 +168,7 @@ func (l *chatSendLimiter) Allow(senderID string, class chatSenderClass) (bool, t
 		return true, 0
 	}
 
-	perMinute, prefix := l.limitFor(class), "user:"
-	if class == chatSenderAgent {
-		prefix = "agent:"
-	}
+	perMinute := l.limitFor(class)
 	if perMinute <= 0 {
 		return true, 0
 	}
@@ -154,7 +180,7 @@ func (l *chatSendLimiter) Allow(senderID string, class chatSenderClass) (bool, t
 	now := l.now()
 	l.sweepLocked(now)
 
-	key := prefix + senderID
+	key := class.keyPrefix() + senderID
 	b, ok := l.buckets[key]
 	if !ok {
 		b = &chatSendBucket{tokens: perMinute, last: now}
