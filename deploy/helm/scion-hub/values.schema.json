@@ -1,0 +1,262 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "scion-hub chart values",
+  "description": "Values understood by the scion-hub chart. Unknown keys are rejected rather than ignored, so a misspelled key is an error and not a silent no-op.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime"],
+  "properties": {
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "More than one replica breaks the web terminal, exec, log tailing and port forwarding for roughly (N-1)/N of requests."
+    },
+    "updateStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["", "Recreate", "RollingUpdate"],
+          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it."
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "description": "Defaults to the chart appVersion. Mutually exclusive with digest."
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[a-f0-9]{64})$",
+          "description": "Preferred over tag. Mutually exclusive with it."
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "pullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "hub": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hubId", "webPort"],
+      "properties": {
+        "hubId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(.*\\S)?$",
+          "description": "REQUIRED, with no default. The hub's stable identity, supplied explicitly by the operator and used verbatim. The chart never generates or derives it: with no explicit value the hub derives its ID from its hostname, which on a Deployment is random per pod, so replicas silently diverge onto different blob-storage prefixes and secret scopes. Must be identical across upgrades. The empty string and leading or trailing whitespace are rejected."
+        },
+        "webPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra arguments appended to the hub command. The chart's own arguments, including --hosted and --host 0.0.0.0, cannot be overridden or removed, and an argument that looks like secret material fails the render."
+        },
+        "resources": {
+          "type": "object"
+        },
+        "securityContext": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runAsUser", "runAsGroup", "runAsNonRoot"],
+          "properties": {
+            "runAsUser": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "runAsGroup": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "runAsNonRoot": {
+              "type": "boolean"
+            }
+          }
+        },
+        "podAnnotations": {
+          "type": "object"
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "affinity": {
+          "type": "object"
+        }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startup", "readiness", "liveness"],
+      "description": "Probe paths are not configurable. Every HTTP probe targets the literal /readyz.",
+      "properties": {
+        "startup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "periodSeconds", "failureThreshold", "timeoutSeconds"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 60,
+              "description": "At least 60. First boot blocks on an unbounded schema-migration advisory lock before the listener binds."
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 3
+            }
+          }
+        },
+        "readiness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["periodSeconds", "timeoutSeconds", "failureThreshold"],
+          "properties": {
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 3,
+              "description": "Must exceed 2 seconds: the readiness handler's workspace mount check has its own 2 second internal timeout, and the kubelet default of 1 second would cut it off before the hub could report the failure."
+            },
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "liveness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "periodSeconds", "failureThreshold", "timeoutSeconds"],
+          "description": "Disabled by default, and always a TCP check on the web port when enabled: /readyz folds in external dependencies, so a liveness probe on it would kill healthy pods during a database failover.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port"],
+      "description": "The Service is always ClusterIP: the ingress path this chart targets is container-native load balancing through a network endpoint group, which requires it.",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create"],
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "gcpServiceAccount": {
+          "type": "string",
+          "pattern": "^(|[a-zA-Z0-9-]+@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com)$",
+          "description": "Workload Identity target. Must be a fully qualified Google service account address."
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create"],
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "agentNamespace": {
+          "type": "string",
+          "description": "Optional alias for runtime.namespace. If both are set they must agree."
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["listAllNamespaces"],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "description": "Namespace agent pods are created in. Defaults to the release namespace."
+        },
+        "listAllNamespaces": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

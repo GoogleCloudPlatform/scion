@@ -1,0 +1,145 @@
+# Operator validation checklist
+
+**These checks have never been run.**
+
+Everything in this file requires a live environment — a GKE Autopilot cluster with
+Cloud SQL, Filestore and a GCS bucket — and no such environment was available to
+the people who wrote this chart. The chart's static checks (`helm lint`,
+`helm template | kubeconform -strict`, the render-time assertions) all pass; that
+says the manifests are well formed and internally consistent, and it says nothing
+at all about whether the hub they describe actually works.
+
+The checks below were originally written as chart acceptance criteria. They were
+moved here rather than deleted, because an acceptance criterion nobody can run is
+an acceptance criterion that gets quietly ticked. They are the operator's, and
+they are outstanding until an operator runs them.
+
+If you are the first person to install this chart against real infrastructure,
+you are the first person to test it. Please record the outcome.
+
+---
+
+## Live checks
+
+Numbering follows the design document's whole-chart acceptance list (§18, items
+14–23) so the two can be cross-referenced.
+
+### 14. Two-step install under `auth.mode: proxy` (IAP)
+
+Run the two-step install from `NOTES.txt`: `helm install` with
+`bootstrap.deferHub=true`, wait for the Ingress to get an address, read the
+backend-service ID, then `helm upgrade` with `iap.audience` set.
+
+Pass: the upgrade completes; `curl https://<host>/readyz` returns 200;
+`gcloud compute backend-services get-health <name> --global` reports `HEALTHY`
+for the NEG; a browser reaches the web UI through IAP and a signed-in user gets
+a session.
+
+A **404** on the health check means a prefixed readiness path slipped into the
+chart — the endpoint is `/readyz` at the root and both the route table and the
+authentication exemption match it by exact string. A **401** means the health
+check is not hitting an auth-exempt endpoint.
+
+### 15. Single-step install under `auth.mode: oauth`
+
+Only possible once the hosted-mode preflight split has landed; until then the
+pod fails preflight at startup whatever the chart renders.
+
+Pass: one `helm install`, no backend-service ID, no `bootstrap.deferHub`, and a
+signed-in user gets a session with no IAP in the request path.
+
+### 16. `hub_id` is identical across replicas and stable across upgrade
+
+    kubectl get pods -l app.kubernetes.io/name=scion-hub \
+      -o jsonpath='{range .items[*]}{.metadata.annotations.scion\.io/hub-id}{"\n"}{end}'
+
+Pass: every pod prints the same value, it equals the `hub.hubId` you supplied,
+and it is unchanged after `helm upgrade`. Confirm the hub agrees with the
+annotation — check the hub's own logs or admin view for the ID it is using, not
+just the manifest.
+
+Fail here is expensive and quiet: divergent hub IDs put replicas on different
+GCS prefixes and different secret scopes, and it gets worse on every rollout.
+
+### 17. The hub reads and writes the configured GCS bucket
+
+Exercise something that stores a blob (a template or an attachment), then:
+
+    gsutil ls -r gs://<bucket>/
+
+Pass: objects appear under the bucket, prefixed by the hub ID. Also confirm the
+negative: no equivalent objects are written to the Filestore share. Hub blob
+storage and workspace storage are different subsystems and conflating them is
+the most likely configuration error in this chart.
+
+### 18. Long-lived WebSockets, unbuffered SSE, unmodified headers
+
+Open a web terminal on an agent and leave it idle for more than 120 seconds.
+
+Pass: the session survives. A drop at ~30s means the backend timeout is not
+being applied — `BackendConfig.spec.timeoutSec` is a *stream* timeout for
+WebSockets and 3600 is load-bearing, not tuning.
+
+Also confirm server-sent event streams are not buffered (events arrive as they
+are produced, not in a burst), and that `X-Scion-*` request headers arrive at
+the hub byte-identical — they are inputs to an HMAC canonical string, so any
+rewrite breaks authentication in a way that reads like a bad credential.
+
+### 19. An agent starts, on Autopilot, without a Pending PVC
+
+Create an agent and watch it through to `Running`.
+
+    kubectl get pvc -n <agent-namespace> -w
+
+Pass: the agent pod reaches `Running` and no PVC sits in `Pending`. A `Pending`
+RWX PVC on Autopilot means the default StorageClass is not RWX-capable; the
+agent will hang silently rather than error.
+
+### 20. `helm upgrade` with a changed image
+
+Pass: the upgrade completes and the hub returns to ready. Expect a short outage
+at one replica — the update strategy is `Recreate` — and expect PTY sessions,
+port tunnels and in-memory presence to be lost across the restart.
+
+### 21. `helm uninstall` is non-destructive
+
+    helm uninstall <release>
+
+Pass: the PersistentVolume, the PersistentVolumeClaim, the Filestore instance,
+the GCS bucket and the Cloud SQL instance all still exist afterwards.
+
+### 22. Documented surprise: database-owned settings shadow chart values
+
+Change `runtimes` or `admin_emails` in your values file and run `helm upgrade`
+against a hub that has already run once with Postgres.
+
+Pass: the *database* value wins and the chart value is inert. This is the
+documented behaviour, not a bug, and it is the single most surprising
+operational property of the deployment: `helm upgrade` reports success and
+changes nothing.
+
+### 23. Agent workspace storage regression check
+
+With `workspaceStorage.backend: nfs` and the runtime plumbing issue still open,
+inspect an agent pod's manifest.
+
+    kubectl get pod <agent-pod> -o yaml | grep -A5 'volumes:'
+
+Expected (not desired): an `EmptyDir`, not the workspace PVC. Then determine
+whether edits an agent makes reach the share at all. The hub side of workspace
+storage does work, so the hub reads and writes Filestore while agents write to
+ephemeral disk — a split view of the same workspace, which is worse than a
+feature that is simply switched off. Record what you observe; this is the
+question the check exists to answer.
+
+---
+
+## Relocated per-phase checks
+
+Later changes to this chart append their own unrunnable checks here, with the
+same rule: a check that was moved here is a check that has **not** passed.
+
+### Chart skeleton and core workload
+
+Nothing relocated. Every criterion for this part of the chart is static and was
+verified at authoring time.

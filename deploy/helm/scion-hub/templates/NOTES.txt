@@ -1,0 +1,66 @@
+{{- $fullName := include "scion-hub.fullname" . -}}
+{{- $hubId := include "scion-hub.hubId" . -}}
+Scion hub {{ $fullName }} installed in namespace {{ .Release.Namespace }}.
+
+Hub ID: {{ $hubId }}
+
+  This is the value you supplied in hub.hubId, rendered verbatim. The chart never
+  generates, defaults or derives it. Supply the same value on every upgrade:
+  changing it re-scopes the hub's blob storage prefixes and its secrets and is
+  NOT a safe upgrade. Two releases in one cluster must not share a hub ID.
+
+Reach the hub:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ $fullName }} 8080:{{ .Values.service.port }}
+  curl -i http://127.0.0.1:8080/readyz
+
+  /readyz is the only readiness signal, and the chart hardcodes it. The hub's
+  other health endpoints answer 200 unconditionally and are intercepted by the
+  Google front end, so a probe or load balancer health check pointed at one of
+  those reports healthy whatever state the hub is in. The path is also matched
+  by exact string in both the route table and the authentication exemption, so
+  a prefixed variant is at once unrouted and not exempt from authentication.
+
+Agent pods will be created in namespace: {{ include "scion-hub.agentNamespace" . }}
+{{- if .Values.runtime.listAllNamespaces }}
+  runtime.listAllNamespaces is true, so the hub was granted a ClusterRole rather
+  than a namespaced Role.
+{{- end }}
+
+{{ if .Values.serviceAccount.create -}}
+Workload Identity: bind the Kubernetes service account to your Google service
+account before the hub needs Google APIs:
+{{ if .Values.serviceAccount.gcpServiceAccount }}
+  gcloud iam service-accounts add-iam-policy-binding {{ .Values.serviceAccount.gcpServiceAccount }} \
+    --role roles/iam.workloadIdentityUser \
+    --member "serviceAccount:PROJECT.svc.id.goog[{{ .Release.Namespace }}/{{ include "scion-hub.serviceAccountName" . }}]"
+{{- else }}
+  serviceAccount.gcpServiceAccount is not set, so no
+  iam.gke.io/gcp-service-account annotation was rendered and the hub has no
+  Google identity.
+{{- end }}
+{{- end }}
+
+WHAT THIS RELEASE DOES NOT YET DO
+
+  The chart is being built incrementally and this release installs the core
+  workload only. It does not yet render a settings.yaml, so the hub starts on
+  its own defaults - SQLite and local workspace storage - and it does not yet
+  configure Cloud SQL, GCS blob storage, Filestore, a session secret, Ingress or
+  IAP. Do not treat this as a production install.
+
+  hub.securityContext.runAsNonRoot defaults to true. The hub images published
+  from this repository today declare no USER and run as root, so the pod will
+  not schedule against them until a non-root image exists.
+
+{{ if gt (int .Values.replicaCount) 1 -}}
+WARNING: replicaCount is {{ .Values.replicaCount }}.
+
+  Schema migration is safe across replicas, but several hub subsystems hold
+  state in the pod: the agent control channel manager, the presence manager, the
+  port tunnel manager, the local disk attachment store and the in-process event
+  bus. An agent's control channel terminates on exactly one pod, so a web
+  terminal, log tail, exec or port-forward request that lands on any other pod
+  fails - roughly (N-1)/N of attempts. Load balancer session affinity does not
+  fix this: it pins a client to a pod, not to the pod holding the channel.
+{{- end }}
