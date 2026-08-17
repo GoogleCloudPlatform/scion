@@ -217,8 +217,21 @@ CLOUD SQL
   state to report, and a number invented here would be indistinguishable from
   one. Measure it on your own instance, at your own load, with one replica:
 
+{{- if .Values.config.existingSecret }}
+
+    SELECT count(*) FROM pg_stat_activity
+     WHERE datname = '<the database in your own DSN>'
+       AND usename = '<the role in your own DSN>';
+
+  The chart cannot fill those in under config.existingSecret: database.name and
+  database.user are refused there precisely because they would go nowhere, and
+  the DSN the hub dials is the one in your settings.yaml. M below is the chart's
+  default rather than your value, for the same reason.
+{{- else }}
+
     SELECT count(*) FROM pg_stat_activity
      WHERE datname = '{{ .Values.database.name }}' AND usename = '{{ include "scion-hub.databaseUser" . }}';
+{{- end }}
 
   Take that at steady state under representative traffic, subtract M, and the
   remainder is your S. Re-measure after any change to replica count or
@@ -335,12 +348,31 @@ CONFIGURATION
 
 {{ include "scion-hub.existingSecretTransfers" . }}
 
-  This is the complete list as of this chart version, and it is checked against
-  the render rather than maintained by hand. Values not listed here still work
-  normally - they reach the Deployment, the RBAC or the Service. Three that also
-  write to settings.yaml are missing on purpose: config.extra, storage.bucket
-  and agents.imageRegistry fail the render outright when set alongside
-  config.existingSecret, so they cannot go quiet on you.
+  This list is written by hand AND checked against the render, in both
+  directions: a value that goes inert without appearing here fails the chart's
+  test suite, and an entry here that no longer writes the key it claims fails it
+  too. Neither half is worth much without the other, and the check was vacuous
+  once already - it read any refusal as coverage, including one fired by a
+  different value entirely.
+
+  Values not listed here still work normally - they reach the Deployment, the
+  RBAC or the Service. The cloudsql.* values in particular are fully live under
+  config.existingSecret: they configure the proxy sidecar, which the chart does
+  render. What YOUR settings.yaml must then match is the DSN the proxy expects -
+  127.0.0.1 and cloudsql.port - because nothing here writes it for you.
+
+  database.auth is the one value that is half of each, so it is worth a
+  sentence. It is LIVE for the proxy - iam is what adds --auto-iam-authn - and
+  INERT for the DSN, which is yours. Set it to the mode your own settings.yaml
+  actually uses. Setting it to iam while your DSN carries a password gets you a
+  proxy authenticating one way and a hub the other, and the failure arrives at
+  the first connection rather than at install.
+
+  These also write to settings.yaml and are missing on purpose: they fail the
+  render outright when set alongside config.existingSecret, so they cannot go
+  quiet on you.
+
+    {{ include "scion-hub.existingSecretRefusals" . }}
 {{- else }}
   From the Secret {{ include "scion-hub.settingsSecretName" . }}, key settings.yaml.
 

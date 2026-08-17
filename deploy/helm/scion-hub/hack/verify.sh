@@ -162,9 +162,15 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # +1 for arm U, gd-p2-rev's C1: rotating database.user must move the checksum.
 # +2 for HALF C, gd-p2-rev's C2: the credential-placement paragraph must make no
 # pod-roll claim, and must name the manual-step heading it used to contradict.
+# +7 for gd-p2-rev's R3 and R4, all in the values-walk step: the refusal each
+# leaf is booked on must NAME that leaf; the two companion exemptions must each
+# be exercised; the liveness instrument must be provable in both directions (2);
+# the operator-facing refusal list must equal the refusals the walk observed;
+# and the two configurations the new refusals could have locked out must still
+# render (2). 1+1+2+1+2 = 7, and 314+7 = 321.
 # The _ck_planted() guard that landed alongside arm U adds none: it is
 # meta_failure, for the same reason arm 0 is.
-EXPECTED_TOTAL=314
+EXPECTED_TOTAL=321
 
 failures=0
 assertions=0
@@ -2171,7 +2177,7 @@ declare -A PROBE_MUTATION=(
   [database.user]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.user=probe-user'
   # The one leaf that cannot use the iam preamble: under iam the schema and the
   # template both refuse a password, and the DSN has nowhere to put one.
-  [database.password]='--set-string|database.driver=postgres|--set-string|database.auth=password|--set-string|database.name=probe-db|--set-string|database.user=probe-user|--set-string|database.password=probe-pw|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
+  [database.password]='--set-string|database.driver=postgres|--set-string|database.auth=password|--set-string|database.name=probe-db|--set-string|database.user=probe-user|--set-string|database.password=probe-pw|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.password=probe-pw2'
   [cloudsql.instanceConnectionName]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.instanceConnectionName=other-project:us-west1:db-2'
   [cloudsql.nativeSidecar]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.nativeSidecar=false'
   [cloudsql.privateIp]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.privateIp=true'
@@ -2204,6 +2210,77 @@ declare -A PROBE_MUTATION=(
 probe_render() {
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
     --skip-schema-validation "${BASE[@]}" "$@" 2>&1
+}
+# IS THIS LEAF STILL LIVE WHEN config.existingSecret IS SET?
+#
+# The question the refusal check actually cares about. A value that goes inert
+# under existingSecret must be refused or documented; a value that still does
+# something needs neither, and cloudsql.* is the whole family in the second
+# group - the chart renders the proxy sidecar there whatever the settings
+# document says, so cloudsql.port keeps changing the manifest.
+#
+# ASKED WITHOUT A BASELINE, deliberately. probe-base.yaml is rendered from BASE
+# alone, so for any leaf whose spec carries a preamble the observed movement is
+# the PREAMBLE's, not the leaf's - that contamination is why a refusal was the
+# only thing this loop could look at. Perturbing one leaf across two renders
+# that are otherwise identical asks about the leaf and nothing else. It is the
+# same two-values-one-diff method gd-p2-rev used to measure R3 in the first
+# place.
+#
+# The second value is the spec's own trailing override REMOVED rather than a
+# value invented here: an invented one has to satisfy whatever shape the leaf
+# requires (cloudsql.image.digest is not going to accept "zzprobe"), and a
+# render refused for a malformed probe value is indistinguishable from a leaf
+# that did nothing. The spec's default-vs-override pair is two values the chart
+# already accepts.
+#
+# Exit: 0 live, 1 inert, 2 could not be asked.
+probe_leaf_live_under_es() { # <leaf> <comma-list of leaves to drop> <spec args...>
+  # The guard prints its list as "a, b, c"; the spaces come out here rather than
+  # at every call site, because a call site that forgets to strip them silently
+  # drops nothing and the whole question comes back unanswerable.
+  local leaf="$1" drop=",${2// /},"; shift 2
+  local -a full=()
+  # DROP THE REFUSABLE COMPANIONS FIRST. The question cannot be asked inside a
+  # render the chart refuses: both sides come back as the same refusal message
+  # and the leaf never gets to show what it does. The values to drop are the
+  # ones the guard just named, read out of its own message rather than listed
+  # here, so this tracks the guard instead of a copy of it.
+  local i=0 _f _a
+  while (( i < $# )); do
+    _f="${@:i+1:1}"; _a="${@:i+2:1}"
+    if [[ "$_f" == --set* && "$drop" == *",${_a%%=*},"* ]]; then
+      i=$((i + 2)); continue
+    fi
+    full+=("$_f" "$_a"); i=$((i + 2))
+  done
+  local n=${#full[@]}
+  (( n >= 2 )) || return 2
+  # The spec must END with an override of the leaf under probe. This is an
+  # assumption about how PROBE_MUTATION is written, so it is tested rather than
+  # trusted: a spec that sets the leaf in the middle and something else last
+  # would have the wrong element trimmed and the answer would be about that
+  # something else.
+  # "$leaf." as well as "$leaf=", because a map leaf is overridden through one of
+  # its sub-keys - cloudsql.resources is set as cloudsql.resources.limits.memory.
+  [[ "${full[$((n-2))]}" == --set* ]] \
+    && [[ "${full[$((n-1))]}" == "$leaf="* || "${full[$((n-1))]}" == "$leaf."* ]] \
+    || return 2
+  local -a trimmed=("${full[@]:0:$((n-2))}")
+  local ra=0 rb=0
+  "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+    "${full[@]}" >"$WORK/probe-live-a.yaml" 2>&1 || ra=$?
+  "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+    "${trimmed[@]}" >"$WORK/probe-live-b.yaml" 2>&1 || rb=$?
+  if [[ $ra -ne 0 || $rb -ne 0 ]]; then
+    # Both refused identically is not an answer about the leaf; it is an answer
+    # about the preamble. Anything else - one refused, or two different
+    # refusals - is the leaf changing the outcome, which is liveness.
+    cmp -s "$WORK/probe-live-a.yaml" "$WORK/probe-live-b.yaml" && return 2 || return 0
+  fi
+  cmp -s "$WORK/probe-live-a.yaml" "$WORK/probe-live-b.yaml" && return 1 || return 0
 }
 # The settings document only. Everything else in the stream, with the settings
 # checksum removed: that annotation is a hash OF the settings document, so
@@ -2314,11 +2391,55 @@ else
     exit 2
   fi
 
+  # EVERY SPEC ENDS IN AN OVERRIDE OF ITS OWN LEAF, INCLUDING THE ONES THAT DID
+  # NOT NEED TO. database.password's preamble already set the password, so the
+  # spec had no trailing override and the liveness question below came back
+  # unaskable - a loud halt, but a halt where a clean red was available. A
+  # second value costs one --set and turns "cannot measure" into "measured, and
+  # inert". Keep the shape: the trailing element of a spec is the leaf's own
+  # override, and the liveness probe asserts that rather than assuming it.
+  #
+  # LEAVES THAT ARE REFUSED, BUT UNDER A COMPANION'S NAME. gd-p2-rev's R4: this
+  # loop used to book any refusal as proof the leaf was guarded, and every
+  # postgres preamble below carries storage.bucket, so the refusal fired for the
+  # BUCKET and the leaf under probe was never named. The refusal check now
+  # requires the leaf itself to appear in the guard's parenthesised list. Two
+  # leaves genuinely cannot appear there and are exempted BY NAME:
+  #
+  #   storage.provider  - default gcs is non-empty, so it is not refusable on
+  #   database.driver     truthiness; adding either to the guard would refuse
+  #                       every config.existingSecret install rather than the
+  #                       ones that set something inert. The reasoning is in
+  #                       _helpers.tpl above scion-hub.assertConfigSource.
+  #
+  # The exemption is not a free pass: the render must still be REFUSED, and the
+  # refusal must name storage.bucket, which is the companion the chart's comment
+  # claims covers them. If a later phase makes either reachable without a
+  # bucket, the exemption stops matching and this goes red - which is exactly
+  # what that comment promises hack/verify.sh does.
+  #
+  # WHY THE OTHER HALF OF R4'S FIX IS NOT HERE. gd-p2-rev also asked that the
+  # probe preamble stop carrying a second refusable value. It cannot: postgres
+  # forces server.storage.provider=gcs (secret-settings.yaml refuses "local"
+  # under Postgres) and gcs forces a bucket, so every database.* preamble
+  # carries one by construction. Measured - dropping the storage pair from the
+  # database.password spec fails the render with "rendered settings.yaml must
+  # set server.storage.provider: gcs under Postgres". Naming the leaf is the
+  # remedy that survives that, and it is the stronger half anyway: it checks the
+  # operator is told about THEIR value, not merely that something was refused.
+  PROBE_REFUSED_BY_COMPANION=(storage.provider database.driver)
+  if [[ ${#PROBE_REFUSED_BY_COMPANION[@]} -ne 2 ]]; then
+    echo "HARNESS ERROR: PROBE_REFUSED_BY_COMPANION holds ${#PROBE_REFUSED_BY_COMPANION[@]} entries, not 2. Each entry is a leaf allowed to be booked as guarded on a refusal that never names it; read the reasons above before changing the number." >&2
+    exit 2
+  fi
+
   # probe_total is deliberately absent (gd-p1-rev, N-1, round 4). It counted the
   # kept leaves for the `-ge 50` floor, the floor is gone, and its four
   # surviving siblings are all read below. A counter nobody reads is a reader's
   # invitation to assume something is checked.
   probe_settings_only=0 probe_half=0 probe_quiet=0 probe_err=0
+  probe_misrefused="" probe_companion_used="" probe_live_named=""
+  : >"$WORK/probe-refused-named.txt"
   : >"$WORK/probe-observed.txt"
   probe_quiet_names="" probe_err_names=""
   probe_skipped=0
@@ -2359,12 +2480,41 @@ else
 
     [[ $moved_other -eq 1 ]] && probe_half=$((probe_half + 1)) || probe_settings_only=$((probe_settings_only + 1))
 
-    # Refused is a complete answer: the operator cannot reach the silent state.
-    if ! "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-        --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
-        "${mutation[@]}" >"$WORK/probe-ex.yaml" 2>&1 \
+    # Refused is a complete answer ONLY IF THE REFUSAL NAMES THIS LEAF. See
+    # PROBE_REFUSED_BY_COMPANION above for why, and for the two exemptions.
+    _ex_rc=0
+    "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+      --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+      "${mutation[@]}" >"$WORK/probe-ex.yaml" 2>&1 || _ex_rc=$?
+    if [[ $_ex_rc -ne 0 ]] \
       && grep -qF 'config.existingSecret is set together with inline settings values' "$WORK/probe-ex.yaml"; then
-      continue
+      # The guard prints the leaves it objected to in parentheses. Reading them
+      # back is the whole point: "refused" and "refused about you" are different
+      # facts and this loop used to conflate them.
+      _ex_named="$(sed -n 's/.*inline settings values (\([^)]*\)).*/\1/p' "$WORK/probe-ex.yaml" | head -1)"
+      if [[ -z "$_ex_named" ]]; then
+        meta_failure "the config.existingSecret refusal for [$leaf] printed no parenthesised list of inline values, so there is nothing to compare the leaf against and every leaf below would be booked on an unreadable refusal. The guard's message shape changed; this reader has to change with it. Got: $(grep -m1 'inline settings values' "$WORK/probe-ex.yaml")"
+      fi
+      _ex_list=",${_ex_named//, /,},"
+      if [[ "$_ex_list" == *",$leaf,"* ]]; then
+        printf '%s\n' "$leaf" >>"$WORK/probe-refused-named.txt"
+        continue
+      fi
+      if [[ " ${PROBE_REFUSED_BY_COMPANION[*]} " == *" $leaf "* ]] \
+        && [[ "$_ex_list" == *",storage.bucket,"* ]]; then
+        probe_companion_used+=" $leaf"
+        continue
+      fi
+      # Not named in the refusal - so ask the question the refusal was standing
+      # in for. A leaf that still moves the manifest under config.existingSecret
+      # is not silently discarded and needs no refusal to protect it.
+      _live_rc=0
+      probe_leaf_live_under_es "$leaf" "$_ex_named" "${mutation[@]}" || _live_rc=$?
+      case "$_live_rc" in
+        0) probe_live_named+=" $leaf"; continue ;;
+        1) probe_misrefused+=" $leaf(refused for: $_ex_named; INERT)"; continue ;;
+        *) meta_failure "could not determine whether [$leaf] is still live under config.existingSecret: its PROBE_MUTATION spec does not end in a --set of that leaf, or both renders were refused identically. The leaf is neither named in the refusal it was booked on nor measurable, so it would be booked as covered by a check that did not run. Spec: ${mutation[*]}" ;;
+      esac
     fi
 
     # Not refused, so it must be documented - with the key it actually moved.
@@ -2424,6 +2574,87 @@ else
     pass "both unmutable leaves were present in the walk and skipped deliberately"
   else
     fail "the walk skipped $probe_skipped leaves but PROBE_UNMUTABLE names ${#PROBE_UNMUTABLE[@]} (${PROBE_UNMUTABLE[*]}) - an entry no longer matches a leaf in values.yaml, so it is excusing nothing"
+  fi
+  # gd-p2-rev's R4, the arm that did not exist. A leaf booked as guarded on a
+  # refusal that never mentions it is a leaf nobody is guarding: the operator
+  # sets it, the chart refuses for something ELSE, they fix that something else,
+  # and now the value is silently inert with no refusal left to catch it.
+  # THE LIVENESS INSTRUMENT, PROVED IN BOTH DIRECTIONS BEFORE ITS ANSWERS ARE
+  # USED. The arm below excuses a leaf on "still live under existingSecret", so
+  # an instrument stuck on LIVE would excuse everything and an instrument stuck
+  # on INERT would condemn everything. Neither shows up in the arm's own result.
+  # Two leaves with known and opposite answers, through the same function:
+  # replicaCount reaches the Deployment, which is rendered either way;
+  # database.maxOpenConns reaches nothing but the settings document, which is
+  # not.
+  _lv_pos=0; probe_leaf_live_under_es replicaCount "" --set replicaCount=3 || _lv_pos=$?
+  _lv_neg=0; probe_leaf_live_under_es database.maxOpenConns "" --set database.maxOpenConns=37 || _lv_neg=$?
+  if [[ "$_lv_pos" == 0 ]]; then
+    pass "the liveness probe says replicaCount is LIVE under config.existingSecret, so it can still see a leaf that moves the manifest"
+  else
+    fail "the liveness probe returned $_lv_pos for replicaCount, which reaches the Deployment and is rendered under config.existingSecret. It cannot see liveness, so every leaf it excuses below is excused by an instrument that has stopped working (0=live 1=inert 2=unaskable)."
+  fi
+  if [[ "$_lv_neg" == 1 ]]; then
+    pass "the liveness probe says database.maxOpenConns is INERT under config.existingSecret, so it is not answering LIVE to everything"
+  else
+    fail "the liveness probe returned $_lv_neg for database.maxOpenConns, whose only effect is on the settings document the chart does not render under config.existingSecret. It should have said inert; an instrument that never says inert excuses every leaf put to it (0=live 1=inert 2=unaskable)."
+  fi
+  if [[ -z "$probe_misrefused" ]]; then
+    pass "every leaf booked as guarded was either NAMED in the refusal it was booked on, or measured still live under config.existingSecret ($probe_live_named )"
+  else
+    fail "these leaves were booked as guarded on a refusal that names a different value:$probe_misrefused. The refusal fires for the companion the probe preamble had to set, not for the leaf, so an operator who sets the leaf alongside config.existingSecret is never told it went nowhere. Add them to the inline list in scion-hub.assertConfigSource, or - if their default makes them unrefusable - to PROBE_REFUSED_BY_COMPANION with the reason."
+  fi
+  # THE EXEMPTION LIST'S POSITIVE TWIN, the same rule PROBE_UNMUTABLE gets. An
+  # exemption that no leaf takes is not harmless: it sits there reading like
+  # coverage of a case that has stopped occurring, and it is the line someone
+  # later points at to justify a third entry.
+  # THE REFUSAL LIST NOTES.txt PRINTS, AGAINST THE REFUSALS THE WALK OBSERVED.
+  # gd-p2-rev's R3 was two failures at once: the guard did not refuse the
+  # database leaves, and NOTES.txt told operators the list of refusals was
+  # "checked against the render rather than maintained by hand" when it was
+  # neither complete nor checked. It is checked here, in both directions, so
+  # that sentence has something behind it.
+  sed -n '/define "scion-hub.existingSecretRefusals"/,/^{{- end }}/p' \
+    "$CHART_DIR/templates/_helpers.tpl" \
+    | sed -e '1d' -e '$d' | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -v '^$' | sort -u >"$WORK/probe-refusals-declared.txt"
+  sort -u "$WORK/probe-refused-named.txt" >"$WORK/probe-refusals-observed.txt"
+  # An empty declared list would make the diff below pass against an empty
+  # observed list, which is the state a broken walk produces.
+  [[ -s "$WORK/probe-refusals-declared.txt" ]] || meta_failure "scion-hub.existingSecretRefusals extracted to an empty list, so the parity check below is comparing nothing against nothing and would pass however the guard behaves."
+  if diff -u "$WORK/probe-refusals-declared.txt" "$WORK/probe-refusals-observed.txt" >"$WORK/probe-refusals.diff"; then
+    pass "the refusal list NOTES.txt prints is exactly the set of leaves the walk saw refused by name ($(tr '\n' ' ' <"$WORK/probe-refusals-observed.txt"))"
+  else
+    fail "scion-hub.existingSecretRefusals and the leaves the walk observed being refused by name disagree. '-' is declared to operators but never refused; '+' is refused without being declared: $(grep '^[-+][^-+]' "$WORK/probe-refusals.diff" | tr '\n' ' ')"
+  fi
+  # ADDING A REFUSAL CAN CLOSE THE LAST DOOR OUT OF A ROOM, and this one did.
+  # With database.user refused under config.existingSecret, an operator on
+  # auth=password had nowhere to stand: setting the user was refused as inert,
+  # and NOT setting it hit "database.user is required when database.auth is
+  # password" from the connection-budget query in NOTES.txt. Both refusals were
+  # individually correct and together they made a legitimate install - "I supply
+  # my own settings.yaml AND I authenticate with a password" - unrenderable.
+  # A guard that refuses every value of a key is not a guard, it is a removal.
+  for _es_auth in iam password; do
+    _es_rc=0
+    "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+      --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+      --set-string database.driver=postgres --set-string "database.auth=$_es_auth" \
+      --set cloudsql.enabled=true --set-string cloudsql.instanceConnectionName=p:r:i \
+      --set-string storage.provider=gcs --set acknowledgeHAUnlanded=true \
+      >"$WORK/probe-es-$_es_auth.yaml" 2>&1 || _es_rc=$?
+    if [[ "$_es_rc" == 0 ]]; then
+      pass "config.existingSecret with Cloud SQL and database.auth=$_es_auth still renders, so the refusals above did not close off a configuration the chart supports"
+    else
+      fail "config.existingSecret + cloudsql + database.auth=$_es_auth does not render (helm exit $_es_rc): $(head -2 "$WORK/probe-es-$_es_auth.yaml"). The operator is refused whichever way they turn, which is not a guard - it is the silent removal of a supported install, announced as an error message about something else."
+    fi
+  done
+  _pc_n="$(printf '%s\n' $probe_companion_used | grep -c . || true)"
+  if [[ "$_pc_n" -eq ${#PROBE_REFUSED_BY_COMPANION[@]} ]]; then
+    pass "both companion-refused exemptions were exercised by a real leaf ($probe_companion_used ), so neither is excusing a case that no longer happens"
+  else
+    fail "PROBE_REFUSED_BY_COMPANION names ${#PROBE_REFUSED_BY_COMPANION[@]} leaves (${PROBE_REFUSED_BY_COMPANION[*]}) but $_pc_n took that path ($probe_companion_used ). An unexercised exemption is either a leaf that is now refused under its own name - delete the entry - or one that stopped being refused at all, which is the failure this step exists to catch."
   fi
   # Bounded rather than listed: a probe that breaks - helm gone, --set ignored,
   # the walk emptied - shows up as every leaf moving nothing, and a count

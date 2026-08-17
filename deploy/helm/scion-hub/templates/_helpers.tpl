@@ -1925,16 +1925,38 @@ the same runtimes.kubernetes.namespace.
 {{- end }}
 
 {{/*
+The other half of the same partition: the settings values that are REFUSED
+alongside config.existingSecret rather than transferred. One define, because
+NOTES.txt prints this list to operators and scion-hub.assertConfigSource
+enforces it, and a second hand-written copy is how the two stop agreeing.
+
+hack/verify.sh checks these names against the leaves its values walk observed
+being refused BY NAME - not merely refused, which is the vacuity gd-p2-rev found
+as R4. Order is the order the guard appends them in, so the refusal message and
+this list read the same way.
+*/}}
+{{- define "scion-hub.existingSecretRefusals" -}}
+config.extra, storage.bucket, agents.imageRegistry, database.name, database.user, database.password
+{{- end }}
+
+{{/*
 config.existingSecret means "I supply the whole settings.yaml myself", so the
 chart renders none - and every value whose only effect is on the file it did not
 render becomes inert. An inert value is the same silent no-op this whole design
 exists to avoid, so supplying both is an error rather than a precedence rule.
 
-The three names below are the settings values with an empty default, which is
-what makes them refusable at all; the reasoning is in the comment above the
-transfer list, and the two lists are checked together as one partition of the
-values tree. Later phases append their own inline values here as they are
-introduced (the database password, the session secret, the OAuth client secret).
+The names below are the settings values with an empty default, which is what
+makes them refusable at all; the reasoning is in the comment above the transfer
+list, and the two lists are checked together as one partition of the values
+tree. Later phases append their own inline values here as they are introduced
+(the session secret, the OAuth client secret). Phase 2 appended three database
+leaves and deliberately did not append the fourth; see the PHASE 2 DELTA note in
+the body.
+
+THE SAME NAMES ARE PRINTED TO OPERATORS, so they come from one define rather
+than from a second hand-written copy in NOTES.txt. hack/verify.sh checks that
+define against the leaves its values walk observed being refused BY NAME, so a
+leaf added here and not there - or there and not here - goes red.
 
 Two settings values are missing from the list on purpose and are covered anyway.
 storage.provider and database.driver have non-empty defaults, so neither can be
@@ -1957,6 +1979,37 @@ it; keep that call.
 {{- if .Values.config.extra }}{{- $inline = append $inline "config.extra" }}{{- end }}
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
+{{- /*
+PHASE 2 DELTA. The three database leaves below are the append this comment asked
+later phases for, and phase 2 owed it: phase 2 is what introduced the database
+credential. gd-p2-rev found the omission as R3 and measured it - existingSecret
+plus database.password rendered BYTE-IDENTICAL manifests for two different
+passwords, zero occurrences of either in the output and no warning anywhere. An
+operator got a green upgrade and a hub authenticating with whatever their own
+Secret happened to hold.
+
+THREE, NOT THE FOUR THE REVIEW ASKED FOR, and the fourth is the interesting one.
+database.auth is NOT refused here because it is not inert: it selects the
+proxy's --auto-iam-authn flag, and the proxy is rendered under
+config.existingSecret like every other container. Measured, existingSecret +
+cloudsql + postgres, iam against password:
+
+  212d211
+  <             - "--auto-iam-authn"
+
+Refusing it would break a coherent install - "I supply my own settings.yaml AND
+I use IAM authentication" - by forbidding the only value that tells the proxy
+so. It is half-inert instead: the proxy half lands, the DSN half is the
+operator's own file to write, and NOTES.txt says that rather than this pretending
+to refuse it.
+
+The three below all have an empty default, which is what makes them refusable on
+truthiness. database.driver does not, and is covered by the storage.bucket
+companion instead; that pair is explained above.
+*/}}
+{{- if .Values.database.name }}{{- $inline = append $inline "database.name" }}{{- end }}
+{{- if .Values.database.user }}{{- $inline = append $inline "database.user" }}{{- end }}
+{{- if .Values.database.password }}{{- $inline = append $inline "database.password" }}{{- end }}
 {{- if $inline }}
 {{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
 {{- end }}
