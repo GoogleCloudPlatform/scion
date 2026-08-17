@@ -1817,9 +1817,7 @@ The top-level server: key, and it carries a load-bearing property that nothing
 else in this file would suggest.
 
 It is not only that the hub's configuration lives under it. It is that THE KEY'S
-PRESENCE IS WHAT MAKES --config INERT, and --config is reserved in hub.args on
-the grounds that it redirects the hub's entire configuration load. That
-reservation is correct about the consequence and wrong about the mechanism:
+PRESENCE IS WHAT MAKES --config INERT:
 
   LoadGlobalConfig            pkg/config/hub_config.go:628
   loadGlobalConfigFromSettings                        :640
@@ -1829,11 +1827,33 @@ reservation is correct about the consequence and wrong about the mechanism:
     found = the file parses AND raw["server"] exists AND is non-nil
                                                       :1344-1347
 
-So --config is a no-op while this key is here, and the moment it is not,
-LoadGlobalConfig falls through to loadGlobalConfigLegacy(configPath) (:635) and
-the flag does exactly what the reserved list says. A settings.yaml of only
-profiles and runtimes - a plausible minimisation, and one that would look like a
-simplification - hands the whole configuration load to a flag.
+WHAT THE FLAG DOES WHEN IT IS LIVE, WHICH IS NOT A REDIRECT. It cannot be one:
+GetGlobalDir (pkg/config/paths.go:188-194) is os.UserHomeDir() joined with
+GlobalDir and TAKES NO ARGUMENTS, so no flag value can move the directory the
+hub reads first. Dropping this key opens two narrower routes instead:
+
+  :648-659  the --config path's own directory is searched for a settings.yaml,
+            and if that file has a server key it becomes the SOLE source of the
+            server config - a substitution of that section, nothing merged
+  :635      failing that, loadGlobalConfigLegacy(configPath) (:699), which loads
+            defaults, then ~/.scion/server.yaml (:772-775), then LAYERS the
+            --config path over the result (:777-787) - an overlay
+
+Both are real and neither is "the whole configuration load moves". Keep the
+distinction: a mitigation scoped to preventing redirection does not cover an
+overlay. A settings.yaml of only profiles and runtimes - a plausible
+minimisation, and one that would look like a simplification - is what opens
+them.
+
+A NO-OP WITH NO SIGNAL, WHICH IS WHY THIS ASSERTION IS THE ONLY WARNING THERE
+WILL EVER BE. --config is not marked deprecated - MarkDeprecated appears twice
+in cmd/server.go, :236 and :290, both for --production; the flag itself is a
+plain StringVarP at :237 - and the two warnings in the load path (:668, :678)
+are about a server.yaml beside settings.yaml, the second of them additionally
+requiring hasServerYAML(dir) (:1393), which this chart creates nowhere. So the
+flag is accepted and ignored in silence today, and tomorrow it takes effect in
+the same silence. The author of the refactor that flips this gets no runtime
+symptom to discover. They get this message, at render time, or they get nothing.
 
 Non-nil is asserted, not merely present, because that is the condition the
 binary tests. `server:` with nothing under it satisfies hasKey and fails
@@ -1847,10 +1867,10 @@ The six keys below are nested under server: in V1ServerConfig. A file that
 places any of them at the top level parses, installs, and is silently not read.
 */}}
 {{- if not (hasKey $doc "server") }}
-{{- fail "rendered settings.yaml has no server: section. Besides losing every server setting, this makes the hub's global settings read return not-found, which un-inerts --config: it would then redirect the whole configuration load, which is the thing hub.args reserves it to prevent." }}
+{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads the server section and nothing else from it (pkg/config/hub_config.go:1344-1347). (2) --config goes live, and it is Phase 0's reserved flag. The hub's global settings read succeeds today only because this key is here (:647); without it, loadGlobalConfigFromSettings consults the --config path instead (:648-659), where that path's own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (:777-787). --config is silently accepted and ignored today - no error, no warning, no log line, and it is not marked deprecated (cmd/server.go:237 defines it; the MarkDeprecated calls at :236 and :290 are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
 {{- end }}
 {{- if not (kindIs "map" (get $doc "server")) }}
-{{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil, so an empty or nulled server section reads as no settings file at all - every server setting is lost AND --config becomes a live whole-config redirect." (get $doc "server")) }}
+{{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil (pkg/config/hub_config.go:1344-1347), so an empty or nulled server section reads as no settings file at all: every server setting is lost, and --config - reserved by Phase 0, silently accepted and ignored while this key is a map - becomes live as a sole-source substitution at :648-659 or as an overlay at :777-787. Same consequence as omitting the key entirely; see the comment above this check." (get $doc "server")) }}
 {{- end }}
 {{- range $key := list "notification_channels" "message_broker" "native_chat" "plugins" "scheduler" "github_app" }}
 {{- if hasKey $doc $key }}

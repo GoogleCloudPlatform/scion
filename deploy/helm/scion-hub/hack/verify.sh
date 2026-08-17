@@ -316,20 +316,22 @@ step "every rendered settings.yaml carries a top-level server: key"
 # what belongs under server:. This asserts that the key exists at all, in EVERY
 # permutation, and it is here because a Phase 0 guard is closed by it.
 #
-# --config / -c is reserved in hub.args on the grounds that it redirects the
-# hub's whole configuration load. It does not, today, and the reason is ours:
-# loadGlobalConfigFromSettings (pkg/config/hub_config.go:640) reads
+# --config / -c is reserved in hub.args. It does nothing today, and the reason
+# is ours: loadGlobalConfigFromSettings (pkg/config/hub_config.go:640) reads
 # GetGlobalDir() first and unconditionally, and consults the --config path only
 # `if !found` (:647-660). `found` is true exactly when
 # $HOME/.scion/settings.yaml parses AND has a non-nil top-level `server` key -
 # loadServerFromSettingsFile decides it at :1344-1347 on that key alone, not on
 # the file existing and not on its contents being useful.
 #
-# So the whole-config redirect is unreachable while, and only while, this chart
-# renders that key. Drop it - by minimising the document, by moving the server
-# section under a profile, by rendering a settings.yaml that is only profiles
-# and runtimes - and LoadGlobalConfig falls through to
-# loadGlobalConfigLegacy(configPath) (:635) and the flag is live again.
+# So the flag is inert while, and only while, this chart renders that key. Drop
+# it - by minimising the document, by moving the server section under a profile,
+# by rendering a settings.yaml that is only profiles and runtimes - and the flag
+# is live again, in two forms: the --config path's own settings.yaml becomes the
+# sole source of the server config (:648-659), or, failing that,
+# loadGlobalConfigLegacy (:635, :699) layers the --config file over the loaded
+# configuration (:777-787). Neither is a redirect of the whole load and nothing
+# is: GetGlobalDir (pkg/config/paths.go:188-194) takes no arguments.
 #
 # That is rule 8 from the far side: Phase 0's guard is closed by Phase 1's
 # configuration, so it is deferred to whoever changes Phase 1's configuration,
@@ -632,7 +634,7 @@ for name in "${PERMUTATIONS[@]}"; do
 done
 
 # --------------------------------------------------------------------------
-step "nothing redirects the hub away from the mounted settings file"
+step "nothing points the hub at a second configuration file"
 # --------------------------------------------------------------------------
 # Everything else in this file asserts what settings.yaml CONTAINS. Nothing so
 # far asserts that the hub will read it.
@@ -648,19 +650,42 @@ step "nothing redirects the hub away from the mounted settings file"
 #
 # THE FLAG IS INERT TODAY BECAUSE OF A PROPERTY OF THIS CHART'S OUTPUT, NOT
 # BECAUSE OF ANYTHING IN THE BINARY. Every settings-bearing permutation renders a
-# top-level `server:` key, so `found` is true, so --config yields nothing but a
-# deprecation warning (:665-681). Render a settings.yaml without that key - a
-# minimisation, a refactor of the document's top-level shape, a phase that moves
-# everything under a profile - and `found` goes false, LoadGlobalConfig falls
-# through to loadGlobalConfigLegacy(configPath) (:635), and the flag becomes the
-# whole-config redirect that Phase 0's reserved list was written to prevent. The
-# top-level `server:` key is asserted separately, above, for that reason.
+# top-level `server:` key, so `found` is true, so --config does nothing at all.
 #
-# The redirect, when it is live, is silent: the mount still exists, the mode is
-# still 0444, schema_version is still rendered, every check above still passes,
-# and the hub is reading somebody else's file. That is why the check stays even
-# though the flag is currently inert - the condition that makes it inert is ours
-# and can be changed by someone who does not know they hold it.
+# NOTHING AT ALL, LITERALLY - NOT EVEN A WARNING, and it would be easy to write
+# "only warns" here and be wrong in the direction that matters. The flag is not
+# marked deprecated: MarkDeprecated appears twice in cmd/server.go, :236 and
+# :290, both for --production, never for config or c (the flag itself is
+# cmd/server.go:237). The only two warnings in the load path,
+# pkg/config/hub_config.go:668 and :678, are about a server.yaml sitting beside
+# settings.yaml, and the one that depends on the --config path at all additionally
+# requires hasServerYAML(dir) (:1393) - a server.yaml or server.yml next to the
+# --config target, which this chart creates nowhere. So an operator who appends
+# --config gets no error, no warning and no log line. There is no runtime signal
+# to fall back on, which is precisely why a reserved flag is the only available
+# guard and why this check is worth its lines.
+#
+# Render a settings.yaml without the top-level key - a minimisation, a refactor
+# of the document's top-level shape, a phase that moves everything under a
+# profile - and `found` goes false and the flag takes effect. IN TWO FORMS, AND
+# NEITHER OF THEM IS A REDIRECT OF THE WHOLE LOAD. At :648-659 the --config
+# path's own directory is searched for a settings.yaml and, if it has a server
+# key, that file becomes the SOLE source of the server config. Failing that,
+# LoadGlobalConfig falls through to loadGlobalConfigLegacy(configPath) (:635,
+# :699), which loads defaults, then ~/.scion/server.yaml (:772-775), then LAYERS
+# the --config file over the result (:777-787) - an overlay. Nothing can move the
+# directory the hub reads first: GetGlobalDir (pkg/config/paths.go:188-194) is
+# os.UserHomeDir() joined with GlobalDir and takes no arguments. Keep the
+# distinction if you narrow this check - an overlay and a redirect have different
+# blast radii, and a mitigation scoped to redirection does not cover an overlay.
+# The top-level `server:` key is asserted separately, above, for that reason.
+#
+# Either form, when live, is silent: the mount still exists, the mode is still
+# 0444, schema_version is still rendered, every check above still passes, and the
+# hub's configuration is coming from somewhere the chart never wrote. That is why
+# the check stays even though the flag is currently inert - the condition that
+# makes it inert is ours and can be changed by someone who does not know they
+# hold it.
 #
 # This is deliberately NOT the same check as the chart's reserved-flag guard on
 # hub.args. That one rejects operator input. This one inspects rendered output,
@@ -714,7 +739,7 @@ for name in "${PERMUTATIONS[@]}"; do
     continue
   fi
   if grep -Eq "$config_flag_re" <<<"$args_block"; then
-    fail "$name renders a config-path flag in the hub's arguments. It redirects the whole configuration load away from the mounted settings.yaml, and every other check in this file still passes when it does."
+    fail "$name renders a config-path flag in the hub's arguments. It points the hub at a second configuration source the chart does not write - inert only while the rendered settings.yaml keeps its top-level server: key - and every other check in this file still passes when it does."
     grep -E '^\s*-\s*"?(--config|-c)' <<<"$args_block" || true
   else
     pass "$name renders no config-path flag"
@@ -907,7 +932,7 @@ expect_render_failure \
 
 # The top-level server: key, nulled. Not a wilful-input test: this is the one
 # shape that makes the hub's global settings read return not-found, which is what
-# takes --config from inert to a live whole-config redirect. `server: ~` passes
+# takes --config from inert to live. `server: ~` passes
 # hasKey and fails the binary's raw["server"] != nil, so the presence check alone
 # does not cover it and the assertion tests the same condition the binary does.
 cat >"$WORK/null-server.yaml" <<'NULLSERVER'
