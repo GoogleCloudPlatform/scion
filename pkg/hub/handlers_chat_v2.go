@@ -729,6 +729,14 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// --- Rate limit (#1054) ---
+	// After authorization so an unauthorized caller cannot consume a
+	// legitimate sender's allowance, and before the body is read so a flood
+	// costs the hub as little as possible.
+	if !s.allowChatSend(w, user.ID(), chatSenderClassFor(user)) {
+		return
+	}
+
 	// --- Validate body ---
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 	var body struct {

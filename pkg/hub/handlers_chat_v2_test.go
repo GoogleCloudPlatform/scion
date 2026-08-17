@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2285,5 +2286,59 @@ func TestChatV2_History_CursorPaginatesToOlderMessages(t *testing.T) {
 	}
 	if third.NextCursor != "" {
 		t.Errorf("third page: expected no nextCursor, got %q", third.NextCursor)
+	}
+}
+
+// A human sender that floods a thread is cut off with a retryable 429 rather
+// than being allowed to fill the conversation, and the cut-off lifts as soon
+// as tokens refill (#1054).
+func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
+	srv, _, wcs, proj := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        tid("topic-ratelimit"),
+		ProjectID: proj.ID,
+		Name:      "flooded",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Production limits, test clock: the real 30/min ceiling without a real
+	// minute of waiting.
+	clock := newTestClock()
+	srv.chatSendLimiter = newChatSendLimiterWithRates(
+		chatSendHumanRatePerMinute, chatSendAgentRatePerMinute, clock.Now)
+
+	path := "/api/v1/chat/conversations/" + tid("topic-ratelimit") + "/messages"
+	for i := range chatSendHumanRatePerMinute {
+		rec := doRequest(t, srv, http.MethodPost, path, map[string]string{"content": "flood"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("send %d: expected 201, got %d: %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, path, map[string]string{"content": "one too many"})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("send %d: expected 429, got %d: %s",
+			chatSendHumanRatePerMinute+1, rec.Code, rec.Body.String())
+	}
+	retryAfter := rec.Header().Get("Retry-After")
+	if retryAfter == "" {
+		t.Error("a rate-limited send must say when to retry (Retry-After header missing)")
+	} else if secs, err := strconv.Atoi(retryAfter); err != nil || secs < 1 {
+		t.Errorf("Retry-After = %q, want a positive number of seconds", retryAfter)
+	}
+	if !strings.Contains(rec.Body.String(), ErrCodeRateLimited) {
+		t.Errorf("expected a %q error code in the body, got %s", ErrCodeRateLimited, rec.Body.String())
+	}
+
+	// The refusal is transient: at 30/min a token accrues every 2 seconds.
+	clock.Advance(2 * time.Second)
+	rec = doRequest(t, srv, http.MethodPost, path, map[string]string{"content": "after backoff"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected the send to succeed after backing off, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

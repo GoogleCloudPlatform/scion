@@ -64,6 +64,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Per-sender send limit (#1054). This is the path a looping agent floods a
+	// thread through, so the limit has to live here and not only on the
+	// browser send path. The response is an explicit 429 with Retry-After
+	// rather than a silent drop, so a caller can back off and resend.
+	if !s.allowChatSend(w, agentIdent.ID(), chatSenderAgent) {
+		return
+	}
+
 	var req OutboundMessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())

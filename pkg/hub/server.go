@@ -757,6 +757,10 @@ type Server struct {
 	// Single-node only; see design §4.5 HA limitation.
 	presenceManager *PresenceManager
 
+	// Per-sender token-bucket limiter for the chat send paths (#1054).
+	// Set once in New and read without the lock; nil-safe.
+	chatSendLimiter *chatSendLimiter
+
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -993,6 +997,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize GCP token metrics
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
+
+	// Per-sender chat send rate limiter (#1054).
+	srv.chatSendLimiter = newChatSendLimiter()
 
 	ctx := context.Background()
 
