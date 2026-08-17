@@ -999,8 +999,27 @@ the operator's string into all five objects it emits.
 
 A shorter list, a longer list and a cleverer list all share the same defect: a
 values path added next month is not on any of them. Walking .Values inverts the
-default. A new value is covered on the day it is added, and the only way to
-escape the check is to add something that is not in .Values at all.
+default: a new value is covered on the day it is added.
+
+WHAT IS STILL OUTSIDE IT, NAMED RATHER THAN LEFT AS "everything is covered".
+Inverting the default covers .Values. It does not cover the operator-supplied
+strings that never appear in .Values at all, and there are two:
+
+  .Release.Name       helm install <name> ./scion-hub
+  .Release.Namespace  helm install ... --namespace <name>
+
+.Release.Name is not a hypothetical. It is measured to place the operator's
+string into 16 scalars across all five object kinds - an identical footprint to
+nameOverride, which this walk DOES check - and the two therefore get opposite
+verdicts for the same value. "helm install <secret> ./scion-hub" is a real
+command someone can type. Closing that is a chart-level decision about failing
+an install on the release name, not a change to this walk, and it is filed
+rather than silently absorbed here.
+
+A THIRD ESCAPE WAS CLOSED RATHER THAN LISTED: map KEYS. Recursing on values
+alone never inspected the names, so a credential written as an annotation key
+rendered clean. The walk now checks both sides of the colon - see the key check
+in the tree helper - so it is no longer in this list.
 
 WHY IT DOES NOT CONDITION ON WHETHER THE VALUE REACHES A MANIFEST. Checking
 only values that this particular render happens to emit would make coverage
@@ -1055,6 +1074,26 @@ A wrong filename is cheaper than a re-openable hole, so this is not traded.
 {{- $v := .value }}
 {{- if kindIs "map" $v }}
 {{- range $k, $e := $v }}
+{{- /*
+   THE KEY IS CHECKED TOO, AND IT IS NOT A LEAF THIS WALK WOULD OTHERWISE VISIT.
+   Recursing on $e alone descends the VALUES and never inspects the names, so a
+   credential written as an annotation KEY - "ghp_...: mine" - rendered clean
+   into the manifest. A map key reaches exactly the same readers as a map value;
+   the two sides of a colon do not have different threat models.
+
+   IT GETS THE VALUE AXIS, NOT THE NAME AXIS, AND THE DISTINCTION MATTERS. The
+   name axis judges a hyphen-segmented FLAG name and hard-fails on an underscore,
+   so routing keys through it would reject "app_version: 1.2" as a caller error.
+   The value axis asks only whether this string has the SHAPE of a credential,
+   which is the right question for both sides.
+
+   THE SOURCE DELIBERATELY DOES NOT INTERPOLATE THE KEY. Everywhere else the path
+   is built from the key so the operator can find the leaf, but here the key IS
+   the suspect string, and a failure message naming it would print the credential
+   it just caught. The parent path plus "(a map key)" is enough to locate it in a
+   values file the operator wrote, and it cannot leak.
+*/}}
+{{- include "scion-hub.assertNoCredential" (dict "value" $k "source" (printf "%s (a map key)" $source)) }}
 {{- include "scion-hub.assertNoCredentialTree" (dict "value" $e "source" (printf "%s.%v" $source $k)) }}
 {{- end }}
 {{- else if kindIs "slice" $v }}

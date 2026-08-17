@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=110   # 77 (upstream: 63 + 14 Phase 3 oauth) + 33 (F2 name-axis separators, multi-line-leaf, anchor-class rows).
+EXPECTED_TOTAL=113   # 77 (upstream) + 33 (F2 name-axis, multi-line-leaf, anchor-class) + 3 (map-KEY rows).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -290,6 +290,31 @@ sl a5   "' ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'" \
 # hand-listed set of separators misses and a negated token class catches.
 sl aq   "'{\"tok\":\"ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\"}'" \
   && reject "token after a double quote"      "shape of a credential" -f "$MLTMP/aq.yaml"
+
+echo "== the walk checks BOTH SIDES of the colon =="
+# A credential written as an annotation KEY rendered clean: the walk recursed on
+# values and never inspected names. A key reaches exactly the same readers as a
+# value.
+{ printf 'hub:\n  hubId: fixed-id\n  podAnnotations:\n'
+  printf '    ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8: mine\n'; } > "$MLTMP/k1.yaml"
+reject "credential as an annotation KEY" "shape of a credential" -f "$MLTMP/k1.yaml"
+# AND THE MESSAGE MUST NOT PRINT THE KEY IT CAUGHT. Everywhere else the source
+# path interpolates the key so the operator can find the leaf; here the key IS
+# the secret, so the path stops at the parent. Asserted, not assumed.
+executed=$((executed + 1))
+_kout="$(render -f "$MLTMP/k1.yaml")"
+case "$_kout" in
+  *ghp_A1b2C3d4E5f6G7h8*) echo "FAIL  the key-check message printed the credential it caught"
+                          failed=$((failed + 1)) ;;
+  *"a map key"*)          echo "ok    key-check message locates the leaf without printing it" ;;
+  *) echo "FAIL  key-check message did not name the surface"; failed=$((failed + 1)) ;;
+esac
+# KEYS GET THE VALUE AXIS, NOT THE NAME AXIS, AND THIS IS THE ROW THAT PINS IT.
+# The name axis hard-fails on an underscore because pflag rejects one in a flag
+# name. Annotation keys are not flags, and underscores are legal in them, so
+# routing keys through the name axis would reject an ordinary label.
+accept "ordinary key with an underscore" \
+  --set 'hub.podAnnotations.app_version=1.2'
 
 echo "== NEGATIVE CONTROLS: ordinary prose must still render =="
 # THE ANCHOR AND THE ALTERNATION ARE ONE FIX AND THESE ROWS ARE THE HALF THAT
