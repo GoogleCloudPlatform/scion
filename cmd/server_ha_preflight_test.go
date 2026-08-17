@@ -123,10 +123,15 @@ func TestValidateHostedHAPreflightRejectsUnsafeBackends(t *testing.T) {
 func TestValidateHostedHAPreflightAcceptsGCLBAudience(t *testing.T) {
 	withHostedHAGuards(t)
 	cfg := validHostedHAConfig()
-	cfg.Auth.Proxy.IAP.Audience = "/projects/123456789/global/backendServices/987654321"
+	cfg.Auth.Proxy.IAP.Audience = "/projects/486315127503/global/backendServices/987654321"
 	cfg.Auth.Transport.OIDCAudience = cfg.Auth.Proxy.IAP.Audience
 
-	require.NoError(t, validateHostedHAPreflight(cfg))
+	var err error
+	logged := captureLog(t, func() {
+		err = validateHostedHAPreflight(cfg)
+	})
+	require.NoError(t, err)
+	require.NotContains(t, logged, "looks like a bootstrap placeholder")
 }
 
 func TestValidateHostedHAPreflightRequiresSessionSecret(t *testing.T) {
@@ -298,5 +303,13 @@ func TestValidateHostedHAPreflightAcceptsPlaceholderGCLBAudience(t *testing.T) {
 	cfg.Auth.Proxy.IAP.Audience = "/projects/000000000/global/backendServices/0"
 	cfg.Auth.Transport.OIDCAudience = cfg.Auth.Proxy.IAP.Audience
 
-	require.NoError(t, validateHostedHAPreflight(cfg))
+	// Non-fatality alone is not the contract: the operator must also be told
+	// the deployment will 401 until the real backend-service ID is wired in.
+	var err error
+	logged := captureLog(t, func() {
+		err = validateHostedHAPreflight(cfg)
+	})
+	require.NoError(t, err)
+	require.Contains(t, logged, "looks like a bootstrap placeholder")
+	require.Contains(t, logged, cfg.Auth.Proxy.IAP.Audience)
 }
