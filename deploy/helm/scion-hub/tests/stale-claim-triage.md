@@ -471,7 +471,7 @@ inside quoted historical output, the `118`/`252` in §3's block — **I took his
 first treatment: in the denominator, and they pass, because the block is
 SHA-pinned.**
 
-**54 mechanical assertions over this file's self-claims. 54 run. 11 corrected**,
+**59 mechanical assertions over this file's self-claims. 59 run. 12 corrected**,
 plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
 so it is out by the definition above, and it is fixed here only because `gd-em`
 folded it into this commit. No category came back empty. **A is zero as a
@@ -482,7 +482,7 @@ appears without a SHA on the same line.
 | | category | assertions | wrong on entry |
 |---|---|---|---|
 | **A** | line numbers or ranges into this same file | 1 | 1 (four coordinates, deleted) |
-| **B** | counts of a token in this same file | 13 | 4 |
+| **B** | counts of a token in this same file | 18 | 5 |
 | **C** | positional claims about this same file | 12 | 1 |
 | **D** | cardinalities about this file's own tables | 15 | 3 |
 | **E** | claims about the instrument that measured it | 13 | 2 |
@@ -493,7 +493,37 @@ measurement; none was checked by eye.
 
 ### Engine, dialect, and the control that says it did not matter
 
-**Engine.** GNU grep 3.8, invoked as `/usr/bin/grep`. Never a bare `grep`.
+**Engine.** GNU grep 3.8, invoked as `/usr/bin/grep`. Never a bare `grep`. One row
+uses a **third** engine — `git grep -cF`, because the claim it protects is about
+the tree and not about this file — and that row is *not* substitutable in the
+shadowed-engine control below, so it is asserted with its own controls instead
+(B11e, B11f) and with `-F`, which is dialect-invariant. **An engine that the
+invariance control cannot swap has to carry its controls locally, or it is
+outside the control while sitting inside its total.**
+
+🛑 **The harness caught the day's aperture defect in itself, and only after a
+reviewer named the class against a third party.** Row B11 asserted
+*"1 tree-wide"* and measured `git grep ... | wc -l` — **files, not hits.** The
+claim it exists to protect is a hit count that goes 1 → 2 when §7 quotes the
+token. **The file count is 1 at both SHAs, so the check would have passed at
+head over a broken claim: it is structurally blind to the only transition it was
+written for.** It is now B11 (files, labelled as files), B11b (sites @`6fc0cdfc`
+= 1), B11c (sites in the working file = 2), B11d (asserting that the file count
+is 1 at both SHAs, so the blindness is recorded rather than inferred), and two
+controls. Credit where it is owed: `gd-p0-rev-4` filed *file-level agreement is
+strictly weaker than site-level agreement* against `gd-prec`'s control, not
+against mine; I went and looked because of it. **Nothing in this file has yet
+been caught by its author without an outside instrument.**
+
+**And the census I ran while investigating it was itself junk, in the day's
+signature shape.** My first pass passed the pathspec as one shell word and sent
+`git`'s `fatal:` to `/dev/null`; it printed a tidy table of zeros that read as
+*the token is absent from the chart*, and the positive control I ran alongside
+it used no pathspec at all, so it never exercised the argument that was broken.
+**A silenced error path plus a control that misses the broken axis is the whole
+defect family in four lines of throwaway shell.** The corrected census is above;
+the error is recorded here because it is not in the harness and would otherwise
+leave no trace.
 
 **Where the hazard is, and where it is not — because this is a scoped claim and
 an unscoped version of it costs every reader a re-run.** `grep` is a *shell
@@ -608,8 +638,8 @@ that the BRE extension is live in the dialect actually in use and dead under
 > pattern as passed, byte for byte** — `?` and `\?` are different patterns and a
 > disclosure naming only the dialect cannot tell them apart.
 
-**Control: all 54 assertions were re-run under the shadowed engine and every one
-of the 54 outcomes is byte-identical.** Not asserted from the patterns being
+**Control: all 59 assertions were re-run under the shadowed engine and every one
+of the 59 outcomes is byte-identical.** Not asserted from the patterns being
 `-F` or BRE-safe — measured, by pointing the harness at
 `ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files …` and diffing the full
 output. **The numbers in this section do not depend on which engine you use; the
@@ -618,7 +648,7 @@ because the same file one paragraph up shows what it costs when it is not true.
 The second axis, `--ignore-files`, cannot bite here either: this path is not
 git-ignored (`git check-ignore` returns nothing).
 
-### The eleven corrections, and N3
+### The twelve corrections, and N3
 
 | # | claim as it stood | measured | disposition |
 |---|---|---|---|
@@ -633,6 +663,7 @@ git-ignored (`git check-ignore` returns nothing).
 | 9 | §3 heading *"the two new findings"* | 3 | corrected |
 | 10 | *"a zsh function wrapping ugrep 7.5.0"*, ×3 | no such binary exists | corrected; the wrapper and flags are real |
 | 11 | §7 *"the injected `-G` forces BRE"* | `-G` is inert vs GNU default | corrected; POSIX, so it reaches CI |
+| 12 | §7's own harness, row B11 | counted FILES for a claim about HITS; blind at both SHAs | split into B11/B11b–f, site-level |
 | — | §3 row-16 *"the same sentence"* | two sentences | corrected (N3; **out of the denominator**) |
 
 Four of those are worth more than the corrections.
@@ -706,9 +737,9 @@ sweep is the first time anyone has checked even that much**; their agreement wit
 the sweeps that produced them is unverified and is not claimed.
 
 The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
-`76b397c0508b8e56`, and is deliberately **not** committed: `tests/` is frozen at
-P0. It exits 0 on 54/54 under **both** engines and **exits 1 under mutation
-control** — reverting the §3 heading to *"the two new findings"* takes it to 53/54 — so it is an instrument
+`e3a68f77dd98af0b`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 59/59 under **both** engines and **exits 1 under mutation
+control** — reverting the §3 heading to *"the two new findings"* takes it to 58/59 — so it is an instrument
 that can disagree, which four of this morning's could not. It should land beside
 this file when P1 unfreezes `tests/`, at which point the numbers above stop being
 a report and become a check.
