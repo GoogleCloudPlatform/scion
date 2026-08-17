@@ -178,12 +178,10 @@ func TestValidateHostedHAPreflightSkippedForNonHA(t *testing.T) {
 	require.NoError(t, validateHostedHAPreflight(&cfg))
 }
 
-// TestValidateHostedHAPreflightAcceptsOAuthMode covers the core of #1087: IAP
-// is not required for HA. A hub that authenticates users itself (OAuth/OIDC)
-// starts in HA as long as the universal consistency checks are satisfied.
-func TestValidateHostedHAPreflightAcceptsOAuthMode(t *testing.T) {
-	withHostedHAGuards(t)
-
+// validHostedHAOAuthConfig is the HA-safe counterpart of validHostedHAConfig
+// for a hub that authenticates users itself: every universal check is
+// satisfied and no IAP configuration is present.
+func validHostedHAOAuthConfig() *config.GlobalConfig {
 	cfg := config.DefaultGlobalConfig()
 	cfg.Mode = "hosted"
 	cfg.Hub.HubID = "scion-hub"
@@ -192,8 +190,16 @@ func TestValidateHostedHAPreflightAcceptsOAuthMode(t *testing.T) {
 	cfg.Storage.Provider = "gcs"
 	cfg.Storage.Bucket = "scion-prod-artifacts"
 	cfg.Auth.Mode = "oauth"
+	return &cfg
+}
 
-	require.NoError(t, validateHostedHAPreflight(&cfg), "oauth mode should pass HA preflight when universal checks are satisfied")
+// TestValidateHostedHAPreflightAcceptsOAuthMode covers the core of #1087: IAP
+// is not required for HA. A hub that authenticates users itself (OAuth/OIDC)
+// starts in HA as long as the universal consistency checks are satisfied.
+func TestValidateHostedHAPreflightAcceptsOAuthMode(t *testing.T) {
+	withHostedHAGuards(t)
+
+	require.NoError(t, validateHostedHAPreflight(validHostedHAOAuthConfig()), "oauth mode should pass HA preflight when universal checks are satisfied")
 }
 
 // TestValidateHostedHAPreflightStillRequiresIAPForProxy pins the other half of
@@ -210,20 +216,79 @@ func TestValidateHostedHAPreflightStillRequiresIAPForProxy(t *testing.T) {
 	require.Contains(t, err.Error(), "requires server.auth.proxy.provider=iap")
 }
 
-// TestValidateHostedHAPreflightEnforcesUniversalForOAuth checks that skipping
-// the IAP block does not skip the universal checks.  Postgres makes this an HA
-// deployment; hub_id is missing, so preflight must still reject it.
+// TestValidateHostedHAPreflightEnforcesUniversalForOAuth pins every universal
+// check against oauth mode. Without a case per check, a universal check could
+// be nested under the proxy guard by accident and the suite would stay green:
+// the proxy-mode tests would still exercise it, and the oauth tests would only
+// notice the one check they happen to break.
 func TestValidateHostedHAPreflightEnforcesUniversalForOAuth(t *testing.T) {
-	withHostedHAGuards(t)
+	tests := []struct {
+		name    string
+		mutate  func(t *testing.T, cfg *config.GlobalConfig)
+		wantErr string
+	}{
+		{
+			name: "missing hub_id",
+			mutate: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Hub.HubID = ""
+			},
+			wantErr: "requires an explicit server.hub.hub_id",
+		},
+		{
+			name: "sqlite",
+			mutate: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Database.Driver = "sqlite"
+				// Postgres is what marks this deployment HA, so removing it
+				// would also skip preflight entirely. K_SERVICE keeps
+				// isHADeployment true and isolates the driver check.
+				t.Setenv("K_SERVICE", "scion-hub")
+			},
+			wantErr: "requires server.database.driver=postgres",
+		},
+		{
+			name: "empty postgres dsn",
+			mutate: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Database.URL = ""
+			},
+			wantErr: "requires server.database.url",
+		},
+		{
+			name: "local storage",
+			mutate: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Storage.Provider = "local"
+				cfg.Storage.Bucket = ""
+			},
+			wantErr: "requires server.storage.provider=gcs",
+		},
+		{
+			name: "gcs without bucket",
+			mutate: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Storage.Bucket = ""
+			},
+			wantErr: "requires server.storage.provider=gcs",
+		},
+		{
+			name: "missing session secret",
+			mutate: func(t *testing.T, cfg *config.GlobalConfig) {
+				webSessionSecret = ""
+				t.Setenv("SCION_SERVER_SESSION_SECRET", "")
+				t.Setenv("SESSION_SECRET", "")
+			},
+			wantErr: "durable session/signing secret",
+		},
+	}
 
-	cfg := config.DefaultGlobalConfig()
-	cfg.Mode = "hosted"
-	cfg.Database.Driver = "postgres"
-	cfg.Auth.Mode = "oauth"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withHostedHAGuards(t)
+			cfg := validHostedHAOAuthConfig()
+			tt.mutate(t, cfg)
 
-	err := validateHostedHAPreflight(&cfg)
-	require.Error(t, err, "universal checks should still enforce for oauth mode")
-	require.Contains(t, err.Error(), "requires an explicit server.hub.hub_id")
+			err := validateHostedHAPreflight(cfg)
+			require.Error(t, err, "universal checks should still enforce for oauth mode")
+			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
 
 func TestIsHADeployment(t *testing.T) {
