@@ -38,6 +38,8 @@ func TestParseBoolEnvAcceptsTruthyValues(t *testing.T) {
 		{"T", "T"},
 		{"yes", "yes"},
 		{"YES", "YES"},
+		{"lowercase y", "y"},
+		{"uppercase Y", "Y"},
 		{"on", "on"},
 		{"ON", "ON"},
 		{"leading space", " true"},
@@ -55,7 +57,7 @@ func TestParseBoolEnvAcceptsTruthyValues(t *testing.T) {
 }
 
 func TestParseBoolEnvRejectsFalsyValues(t *testing.T) {
-	for _, val := range []string{"false", "FALSE", "0", "f", "no", "off", "", "maybe"} {
+	for _, val := range []string{"false", "FALSE", "0", "f", "no", "n", "N", "off", "OFF", "", "maybe"} {
 		t.Run(val, func(t *testing.T) {
 			t.Setenv("SCION_REQUIRE_STABLE_SIGNING_KEY", val)
 			require.False(t, parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"))
@@ -65,4 +67,32 @@ func TestParseBoolEnvRejectsFalsyValues(t *testing.T) {
 
 func TestParseBoolEnvUnsetIsFalse(t *testing.T) {
 	require.False(t, parseBoolEnv("SCION_BOOL_ENV_THAT_IS_NOT_SET"))
+}
+
+// A value like "enabled" reads as an intent to turn the feature on. Falling
+// back to false is the safe behaviour, but it must be visible to the operator.
+func TestParseBoolEnvWarnsOnUnrecognizedValue(t *testing.T) {
+	t.Setenv("SCION_REQUIRE_STABLE_SIGNING_KEY", "enabled")
+	var result bool
+	logged := captureLog(t, func() {
+		result = parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY")
+	})
+	require.False(t, result)
+	require.Contains(t, logged, "not a recognized boolean value")
+	require.Contains(t, logged, "SCION_REQUIRE_STABLE_SIGNING_KEY")
+	require.Contains(t, logged, `"enabled"`)
+}
+
+// Recognized values — truthy, falsy, or empty — are not a misconfiguration, so
+// they must stay silent.
+func TestParseBoolEnvNoWarningOnRecognizedValues(t *testing.T) {
+	for _, val := range []string{"", "  ", "true", "false", "1", "0", "yes", "off"} {
+		t.Run(val, func(t *testing.T) {
+			t.Setenv("SCION_REQUIRE_STABLE_SIGNING_KEY", val)
+			logged := captureLog(t, func() {
+				parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY")
+			})
+			require.Empty(t, logged)
+		})
+	}
 }
