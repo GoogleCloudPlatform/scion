@@ -106,7 +106,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=4
 EXPECTED_ASSERTIONS=107   # 106 + chart-integrity.sh's base-url channel tripwire.
-EXPECTED_FILES=7        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
+EXPECTED_FILES=6        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
 # present and could never notice that something is absent.
@@ -135,12 +135,6 @@ NOT_RUN_HERE=(
 # reported as un-covered. Listing it here is the statement that it is data, not
 # an executable, and that no assertion total is expected from it.
 NOT_EXECUTABLE=(
-  # The Commit A stale-claim triage, per gd-em's ruling. It is a CLASSIFICATION
-  # TABLE and it changes no prose. It lives in the repo rather than in a message
-  # because a disclosure to a reviewer has the durability of a message and only
-  # the file ships - and because a site nobody wrote down is a site the next
-  # phase rediscovers from scratch.
-  stale-claim-triage.md
 )
 
 REQUIRED_TOOLS=("${HELM:-helm}" tar mktemp awk sha256sum)
