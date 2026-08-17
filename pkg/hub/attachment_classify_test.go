@@ -18,11 +18,14 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -485,6 +488,87 @@ func TestAttachmentDownload_SetsNosniffAndDisposition(t *testing.T) {
 		wantCD := expected.disposition + `; filename="` + att.Name + `"`
 		if h := got.Header().Get("Content-Disposition"); h != wantCD {
 			t.Errorf("%s: Content-Disposition = %q, want %q", att.Name, h, wantCD)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Orphan blobs (#1089)
+// ---------------------------------------------------------------------------
+
+// createAttachmentFailingStore fails the metadata write for named files and
+// passes everything else through, which is the shape of the real failure: the
+// blob is already saved when the DB call comes back with an error.
+type createAttachmentFailingStore struct {
+	WebChatStore
+	failNames map[string]bool
+}
+
+func (s createAttachmentFailingStore) CreateAttachment(ctx context.Context, meta AttachmentMeta) error {
+	if s.failNames[meta.Filename] {
+		return fmt.Errorf("injected metadata failure")
+	}
+	return s.WebChatStore.CreateAttachment(ctx, meta)
+}
+
+func countStoredBlobs(t *testing.T, dir string) []string {
+	t.Helper()
+	var names []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			names = append(names, d.Name())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	return names
+}
+
+// A blob whose metadata write failed is unreachable: the download path finds
+// attachments through the row that was never written. It used to stay on disk
+// for good, one per request; the per-file loop would have made it ten.
+func TestAttachmentUpload_MetadataFailureLeavesNoOrphanBlob(t *testing.T) {
+	srv, _ := attachmentTestServer(t)
+
+	dir := t.TempDir()
+	as, err := NewLocalDiskAttachmentStore(dir)
+	if err != nil {
+		t.Fatalf("NewLocalDiskAttachmentStore: %v", err)
+	}
+	srv.SetAttachmentStore(as)
+	srv.SetWebChatStore(createAttachmentFailingStore{
+		WebChatStore: srv.webChatStore,
+		failNames:    map[string]bool{"boom.log": true},
+	})
+
+	rec := uploadAttachments(t, srv, []uploadFile{
+		{name: "first.log", mime: "application/octet-stream", content: "one\n"},
+		{name: "boom.log", mime: "application/octet-stream", content: "two\n"},
+		{name: "third.log", mime: "application/octet-stream", content: "three\n"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeUploadResponse(t, rec)
+	if len(resp.Attachments) != 2 {
+		t.Fatalf("stored %d files, want 2 (the rest of the batch survives): %s", len(resp.Attachments), rec.Body.String())
+	}
+	if len(resp.Failures) != 1 || resp.Failures[0].Name != "boom.log" {
+		t.Fatalf("failures = %+v, want one entry for boom.log", resp.Failures)
+	}
+
+	blobs := countStoredBlobs(t, dir)
+	if len(blobs) != 2 {
+		t.Fatalf("on disk: %v, want exactly the two files that got a row", blobs)
+	}
+	for _, name := range blobs {
+		if name == "boom.log" {
+			t.Errorf("boom.log is still on disk with no row to reach it")
 		}
 	}
 }

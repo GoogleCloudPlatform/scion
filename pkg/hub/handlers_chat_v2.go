@@ -2960,6 +2960,12 @@ func (s *Server) storeUploadedFile(
 	meta.UploadedBy = userID
 
 	if err := wcs.CreateAttachment(ctx, meta); err != nil {
+		// The blob is already on disk and nothing will ever reach it again: the
+		// download path finds an attachment through the row that just failed to
+		// be written, so what is left is storage no one can list or delete.
+		// Aborting the batch on the first failure used to cap that at one blob
+		// per request; the per-file loop makes it ten (#1089).
+		_ = as.Delete(ctx, projectID, meta.ID)
 		return attachmentUploadResult{}, fmt.Errorf("save attachment metadata: %w", err)
 	}
 
