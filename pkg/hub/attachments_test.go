@@ -111,11 +111,11 @@ func TestAttachmentExt_NormalisesTrailingAndInvisibleCharacters(t *testing.T) {
 		{"a.sh\t", ".sh"},
 		{"a.sh\n", ".sh"},
 		{"a.sh\x00", ".sh"},
-		{"a.sh​", ".sh"},      // zero-width space
+		{"a.sh\u200b", ".sh"}, // zero-width space
 		{"a.sh ", ".sh"},      // no-break space
-		{"a.s​h", ".sh"},      // zero-width space inside the extension
+		{"a.s\u200bh", ".sh"}, // zero-width space inside the extension
 		{"a.s\x00h", ".sh"},   // NUL inside the extension
-		{"a.‮sh", ".sh"},      // right-to-left override
+		{"a.\u202esh", ".sh"}, // right-to-left override
 		{"notes.txt", ".txt"}, // the ordinary case is unchanged
 		{"archive.tar.gz", ".gz"},
 		{"noext", ""},
@@ -132,7 +132,7 @@ func TestAttachmentExt_NormalisesTrailingAndInvisibleCharacters(t *testing.T) {
 func TestSanitizeFilename_TrailingCharactersDoNotDefeatTheBlocklist(t *testing.T) {
 	variants := []string{
 		"a.sh ", "a.sh.", "a.sh\t", "a.sh\n", "a.sh\x00",
-		"a.sh​", "a.sh ", "a.SH ", "a.s\x00h", "payload.sh...",
+		"a.sh\u200b", "a.sh ", "a.SH ", "a.s\x00h", "payload.sh...",
 	}
 	for _, v := range variants {
 		_, err := SanitizeFilename(v)
