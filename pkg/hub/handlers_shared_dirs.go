@@ -46,16 +46,12 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 	switch r.Method {
 	case http.MethodGet:
 		// Read access check
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-				Type:    "project",
-				ID:      project.ID,
-				OwnerID: project.OwnerID,
-			}, ActionRead)
-			if !decision.Allowed {
-				Forbidden(w)
-				return
-			}
+		if !s.authorize(w, r, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, ActionRead) {
+			return
 		}
 
 		dirs := project.SharedDirs

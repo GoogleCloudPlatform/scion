@@ -362,16 +362,12 @@ func (s *Server) handleProjectSettingsResolved(w http.ResponseWriter, r *http.Re
 	// owner see that hub defaults exist. Only the existence of an
 	// agent_defaults entry is exposed, never a hub value and never any other
 	// part of the server configuration.
-	if userIdent, ok := identity.(UserIdentity); ok {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionRead)
-		if !decision.Allowed {
-			Forbidden(w)
-			return
-		}
+	if !s.authorize(w, r, Resource{
+		Type:    "project",
+		ID:      project.ID,
+		OwnerID: project.OwnerID,
+	}, ActionRead) {
+		return
 	}
 
 	writeJSON(w, http.StatusOK, s.resolvedProjectSettings(project))
