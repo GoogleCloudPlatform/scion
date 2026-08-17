@@ -35,13 +35,38 @@ BASE=(--set image.repository=r --set hub.hubId=ci-minimal)
 # from the inside - the same shape as axis (d), answerable only from outside.
 # "Nothing was analysed" is a THIRD outcome, distinct from clean and from failing,
 # and it exits 2 with the other harness errors rather than 1.
+#
+# 🔴 AND THE PREFLIGHT DESTROYED THE MEASUREMENT THAT AUDITS THE PREFLIGHT.
+# Adding it was correct and it stays. But the way to check whether an assertion
+# in this file is reason-matched or fail-open is to run it with no toolchain and
+# read which lines go green - and after this arm exists, there are no lines to
+# read: the run reports ASSERTIONS_EXECUTED=0 and exits before any of them. The
+# two vacuous greens at :110 and :184 were found that way; :212 survived because
+# by then the probe that would have shown it could no longer be run.
+# IMPROVING A MEASUREMENT CAN DESTROY ITS DIAGNOSTIC VALUE.
+#
+# So: AUDIT=1 bypasses the arm and lets the assertions run against a broken or
+# absent toolchain, which is the only way to see which of them go green anyway.
+# IT CAN NEVER CERTIFY ANYTHING - an audit run exits 2 unconditionally at the
+# bottom, whatever the assertions say, so it cannot be pasted into a review as a
+# pass and cannot be wired into run-all.sh by accident.
+AUDIT="${AUDIT:-0}"
 _missing=""
 for _t in "$HELM" sha256sum; do command -v "$_t" >/dev/null 2>&1 || _missing="${_missing} ${_t}"; done
-if [ -n "$_missing" ]; then
+if [ -n "$_missing" ] && [ "$AUDIT" != "1" ]; then
   echo "HARNESS ERROR: required tool(s) not on PATH:${_missing}"
   echo "NOTHING WAS ANALYSED. This is not a passing run, and it is NOT a chart failure."
+  echo "  To see WHICH assertions go green anyway - the fail-open audit - re-run with AUDIT=1."
+  echo "  That mode exits 2 no matter what it prints. It is an instrument, not a verdict."
   echo "ASSERTIONS_EXECUTED=0"
   exit 2
+fi
+if [ "$AUDIT" = "1" ]; then
+  echo "=================================================================="
+  echo "AUDIT MODE. The tool-presence arm is BYPASSED. Missing:${_missing:- (none)}"
+  echo "Every 'ok' below is a SUSPECT, not a result: it is an assertion that"
+  echo "passed without the toolchain it claims to exercise. This run exits 2."
+  echo "=================================================================="
 fi
 
 executed=0
@@ -201,17 +226,44 @@ echo "== hub identity is stable across upgrade and independent of the release na
 # hub.hubId must be used verbatim and must never be derived from anything Helm
 # regenerates. A chart that interpolated .Release.Name or .Release.Revision would
 # pass every case above and still re-scope the hub's storage on upgrade.
-# THE NON-EMPTY CHECK IS LOAD-BEARING, NOT DEFENSIVE. Comparing two hashes is a
-# bare negative wearing a positive's clothes: two FAILED renders produce two
-# empty strings, whose hashes are equal, and this printed "ok render is
-# identical for install and upgrade" on a machine where nothing rendered at all.
-# It is the strongest false pass in this file, because the assertion it fakes -
-# that hub identity survives an upgrade - is the one the whole hubId design
-# exists for. Establish that there is a render before comparing renders.
+# ESTABLISH THAT THERE IS A RENDER BEFORE COMPARING RENDERS. Comparing two
+# hashes is a bare negative wearing a positive's clothes: two failed renders
+# agree, and this printed "ok render is identical for install and upgrade" on a
+# machine where nothing rendered at all. It is the strongest false pass in this
+# file, because the assertion it fakes - that hub identity survives an upgrade -
+# is the one the whole hubId design exists for.
+#
+# 🔴 THE FIRST FIX FOR THAT WAS INCOMPLETE AND SHIPPED, AND THE REASON IS WORTH
+# MORE THAN THE FIX. It tested `[ -z "$_a" ]`. But the defect was never "the
+# output was empty" - it was "nothing rendered, and the check could not tell."
+# Emptiness was the symptom in the world it was found in: no helm, so nothing
+# on stdout. `render()` ends `2>&1`, so when helm IS present and the render
+# fails, the output is not empty - it is the error message, and the two error
+# messages are identical. Measured at 8cc8d9b with `hub.baseUrl` added to the
+# schema's required list (helm v3.16.3+gcfd0749, /tmp/linux-amd64/helm):
+#
+#   install rc=1 bytes=127   upgrade rc=1 bytes=127   -z fires? NO   shas equal? YES
+#   -> "ok    render is identical for install and upgrade"
+#
+# Found by gd-p0-rev-2 and gd-p0-rev-3 independently, from different containers,
+# byte-identical. THE REMEDY ARRIVED CARRYING THE DEFECT IT WAS WRITTEN TO
+# REMOVE, because it was written against the description of the bug rather than
+# against its mechanism. So this now gates on what is actually claimed - that
+# helm SUCCEEDED and produced the manifest whose identity is under test - and
+# keeps `-z` as well, which costs nothing and is not the load-bearing arm.
 executed=$((executed + 1))
-_a="$(render)"; _b="$(render --is-upgrade)"
-if [ -z "$_a" ] || [ -z "$_b" ]; then
+_a="$(render)"; _rc_a=$?
+_b="$(render --is-upgrade)"; _rc_b=$?
+if [ "$_rc_a" -ne 0 ] || [ "$_rc_b" -ne 0 ]; then
+  echo "FAIL  install/upgrade comparison: helm EXITED NON-ZERO (install=${_rc_a} upgrade=${_rc_b}), so nothing was compared"
+  echo "        got: $(printf '%s' "$_a" | tr '\n' ' ' | cut -c1-160)"
+  failed=$((failed + 1))
+elif [ -z "$_a" ] || [ -z "$_b" ]; then
   echo "FAIL  install/upgrade comparison: one or both renders were EMPTY, so nothing was compared"
+  failed=$((failed + 1))
+elif ! printf '%s\n' "$_a" | grep -q '^kind: Deployment$' \
+  || ! printf '%s\n' "$_b" | grep -q '^kind: Deployment$'; then
+  echo "FAIL  install/upgrade comparison: helm exited 0 but the output carries no Deployment, so the compared strings are not the manifest"
   failed=$((failed + 1))
 elif [ "$(printf '%s' "$_a" | sha256sum)" = "$(printf '%s' "$_b" | sha256sum)" ]; then
   echo "ok    render is identical for install and upgrade"
@@ -234,6 +286,15 @@ echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"
 # actually ran even when this script is reporting a failure. The count check must
 # not be silenced by the outcome it is meant to qualify.
 echo "ASSERTIONS_EXECUTED=${executed}"
+
+# THE AUDIT EXIT, PLACED BEFORE EVERY OTHER VERDICT SO NOTHING CAN OVERTAKE IT.
+# An audit run is an observation of a deliberately broken world. It has no
+# passing form, so it does not get one.
+if [ "$AUDIT" = "1" ]; then
+  echo "AUDIT MODE: ${executed} assertions ran, ${failed} failed, so $((executed - failed)) went GREEN WITHOUT A WORKING TOOLCHAIN."
+  echo "Each of those is a candidate fail-open assertion. This is not a pass."
+  exit 2
+fi
 
 if [ "$executed" -ne "$EXPECTED_TOTAL" ]; then
   # INEQUALITY, NOT A FLOOR. A short run is a failed run; a LONG run means
