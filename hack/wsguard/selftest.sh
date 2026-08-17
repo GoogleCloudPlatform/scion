@@ -207,6 +207,8 @@ checks_failed=0
 failures=()
 OVERRIDE_REASON=""
 ROOT_OVERRIDE=""
+PATH_OVERRIDE=""
+HOPS_OVERRIDE=""
 
 run_guarded() {
   local dir="$1"
@@ -214,7 +216,14 @@ run_guarded() {
   LAST_STATUS=0
   LAST_OUT="$(
     cd "$dir" || exit 90
-    export PATH="$SHIM_DIR:$PATH"
+    if [[ -n "$PATH_OVERRIDE" ]]; then
+      export PATH="$PATH_OVERRIDE"
+    else
+      export PATH="$SHIM_DIR:$PATH"
+    fi
+    if [[ -n "$HOPS_OVERRIDE" ]]; then
+      export SCION_WSGUARD_HOPS="$HOPS_OVERRIDE"
+    fi
     export SCION_WORKSPACE_MODE=shared-plain
     if [[ -n "$ROOT_OVERRIDE" ]]; then
       export SCION_WSGUARD_ROOT="$ROOT_OVERRIDE"
@@ -227,7 +236,15 @@ run_guarded() {
     if [[ -n "$OVERRIDE_REASON" ]]; then
       export SCION_WSGUARD_OVERRIDE="$OVERRIDE_REASON"
     fi
-    git "$@" 2>&1
+    # Every arm runs under a timeout. Two shims that resolve to each other do
+    # not fail, they SPIN — measured at rc=124 with empty stderr before the fix
+    # below. A suite that can hang cannot report, so the hang is bounded and
+    # scored as a distinct status rather than being waited on.
+    if [[ -n "$TIMEOUT_BIN" ]]; then
+      "$TIMEOUT_BIN" 20 git "$@" 2>&1
+    else
+      git "$@" 2>&1
+    fi
   )" || LAST_STATUS=$?
 }
 
@@ -262,6 +279,8 @@ arm() {
   fi
   OVERRIDE_REASON=""
   ROOT_OVERRIDE=""
+  PATH_OVERRIDE=""
+  HOPS_OVERRIDE=""
 }
 
 # assert <arm-name> <description> <condition-result 0|1>
@@ -276,6 +295,8 @@ assert() {
   failures+=("$name: $desc")
   printf '    ! %s  <-- FAILED\n' "$desc"
 }
+
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null)" || TIMEOUT_BIN=""
 
 still_dirty() {
   local content
@@ -451,6 +472,71 @@ audit_body="$(cat "$AUDIT" 2>&1)"
 echo
 echo "audit log after the run:"
 sed 's/^/    | /' "$AUDIT"
+
+echo
+echo "==========================================================================="
+echo "TWO SHIMS ON ONE PATH — the failure mode that produces no output at all"
+echo "==========================================================================="
+echo
+echo "A second copy of the shim on PATH used to be a fork bomb: copy A skips its"
+echo "own directory, finds copy B, execs it; B skips its own, finds A, execs it."
+echo "Measured before the fix: timeout killed it at rc=124 with EMPTY stderr. A"
+echo "guard that hangs silently is worse than one that refuses with a reason, so"
+echo "the shim now recognises its own kind by a marker in the file rather than by"
+echo "path, and bounds the hops as a backstop."
+
+TWOSHIM="$WORK/twoshim"
+mkdir -p "$TWOSHIM/a" "$TWOSHIM/b"
+cp "$SHIM" "$TWOSHIM/a/git"
+cp "$SHIM" "$TWOSHIM/b/git"
+chmod +x "$TWOSHIM/a/git" "$TWOSHIM/b/git"
+real_git_dir="${REAL_GIT%/*}"
+
+# A minimal bin holding ONLY bash, so PATH_OVERRIDE can be exhaustive without
+# breaking the shim's own `#!/usr/bin/env bash`. Building it explicitly rather
+# than reusing /usr/bin keeps the control honest: the C1 arm below asserts that
+# NO real git is reachable, and that assertion is worthless if the directory
+# supplying bash also happens to supply git.
+MINBIN="$WORK/minbin"
+mkdir -p "$MINBIN"
+bash_path="$(command -v bash)" || bash_path=""
+if [[ -z "$bash_path" ]]; then
+  echo "wsguard-selftest: no bash on PATH; the two-shim arms cannot be built" >&2
+  exit 2
+fi
+ln -s "$bash_path" "$MINBIN/bash"
+if [[ -e "$MINBIN/git" ]]; then
+  echo "wsguard-selftest: $MINBIN unexpectedly contains git; the C1 control would be vacuous" >&2
+  exit 2
+fi
+
+# CONTROL FIRST. If PATH holds nothing but shim copies, the marker check must
+# reject BOTH and the shim must report that it cannot find a real git. Without
+# the content check this configuration is the fork bomb itself, so a clean 78
+# here is direct evidence that the marker is doing the work — and P9 below would
+# otherwise be passing for some other reason.
+PATH_OVERRIDE="$TWOSHIM/a:$TWOSHIM/b:$MINBIN"
+arm "C1-only-shims-on-path" 78 "$SHARED" -- checkout -- tracked.txt
+[[ "$LAST_OUT" == *"could not find a real git"* ]] &&
+  assert "C1-only-shims-on-path" "a shim copy is recognised as a shim, not mistaken for the real git" 0 ||
+  assert "C1-only-shims-on-path" "a shim copy is recognised as a shim, not mistaken for the real git" 1
+(( LAST_STATUS != 124 )) &&
+  assert "C1-only-shims-on-path" "it answered instead of spinning (124 is the timeout kill)" 0 ||
+  assert "C1-only-shims-on-path" "it answered instead of spinning (124 is the timeout kill)" 1
+
+PATH_OVERRIDE="$TWOSHIM/a:$TWOSHIM/b:$MINBIN:$real_git_dir"
+arm "P9-two-shims-then-real-git" 0 "$SHARED" -- --version
+[[ "$LAST_OUT" == *"git version"* ]] &&
+  assert "P9-two-shims-then-real-git" "two shims on PATH resolve THROUGH to the real git" 0 ||
+  assert "P9-two-shims-then-real-git" "two shims on PATH resolve THROUGH to the real git" 1
+
+# The backstop, tested directly rather than trusted. It only fires if the marker
+# check has already failed, so it cannot be reached by any ordinary path.
+HOPS_OVERRIDE=99
+arm "U3-hop-cap" 78 "$SHARED" -- status --porcelain
+[[ "$LAST_OUT" == *"entered 99 times"* ]] &&
+  assert "U3-hop-cap" "the backstop names the loop instead of hanging" 0 ||
+  assert "U3-hop-cap" "the backstop names the loop instead of hanging" 1
 
 echo
 echo "==========================================================================="

@@ -177,7 +177,7 @@ The selftest follows the project's check contract instead: `0` evaluated-clean,
 A control that has never been fired is not a control.
 
 ```sh
-hack/wsguard/selftest.sh            # 21 arms, 24 post-conditions
+hack/wsguard/selftest.sh            # 24 arms, 28 post-conditions
 hack/wsguard/selftest.sh --prove-it # ... after first proving the harness can fail
 hack/wsguard/hook-probe.sh --prove-it # the hook-mechanism rejection, measured
 make wsguard                        # both, from CI
@@ -195,9 +195,12 @@ vacuously:
   with one expectation deliberately falsified and requires it to exit `1`. A
   falsified run that still passes means the harness measures nothing, and the
   honest answer is `2`, not `0`.
-- **Both directions.** Eleven refusal arms, two cannot-evaluate arms, eight
+- **Both directions.** Eleven refusal arms, four cannot-evaluate arms, nine
   permit arms — including the same `git checkout --` that is refused in the
   shared repository being permitted in a private one.
+
+Every arm runs under `timeout`, and a timeout kill is scored as its own status
+rather than folded into "failed". A suite that can hang cannot report.
 
 ### Both sides of a path comparison must come from the same normaliser
 
@@ -210,6 +213,39 @@ a root that does not exist matches nothing. Both are now `78`
 (cannot-evaluate) or a refusal, asserted by arms `U2-unresolvable-root` and
 `N11-root-with-trailing-slash`. A guard must not answer *"not shared, go ahead"*
 on the strength of a comparison it could not make.
+
+### A shim must recognise its own kind, not just itself
+
+`find_real_git` originally skipped its own directory — which answers *"is this
+me"* when the question is *"is this one of us"*. With two copies of the shim on
+`PATH`, each skipped itself, found the other, and exec'd it: an unbounded loop
+that never returned and printed **nothing**. For a guard that is the worst
+reachable outcome, worse than refusing wrongly, because there is no diagnostic
+to read.
+
+The shim now identifies its own kind by a **marker string in the file**, so
+every shim copy is skipped regardless of path, and a hop counter bounds the
+chain at 8 and exits `78` naming the loop for any copy too old to carry the
+marker. The counter is unset immediately before exec'ing a real git, so ordinary
+nesting (`git` → hook → `git`) always starts from zero.
+
+The first version of this fix did not work, for a reason worth keeping: the
+marker was declared on line 119 and the reader was bounded to 60 lines, so the
+shim could not recognise itself and the loop survived. **A bound chosen for
+safety is still a chosen aperture.** The marker is now on line 2.
+
+Arm `C1-only-shims-on-path` is the control that makes the other two mean
+something: with *nothing* on `PATH` but two shims and a purpose-built bash-only
+bin, the configuration **is** the loop unless the marker check works, and it
+must exit `78` saying it could not find a real git. `P9` then requires two shims
+plus a real git to resolve through at exit `0`, and `U3` exercises the hop cap
+directly, since no ordinary path reaches it.
+
+Building `C1` exposed a second defect of the same shape: with a minimal `PATH`
+the shim's fail-closed diagnostic emitted `dirname: command not found` and
+`cat: command not found`. **The code that runs when the environment is broken
+must not depend on the environment.** Those paths now use parameter expansion,
+`echo` and a bash read loop instead of `dirname`, `cat` and `sed`.
 
 ### Instrument disclosure
 

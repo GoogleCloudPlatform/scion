@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# wsguard-shim-marker:8f3a1c
+#
+# The line above is load-bearing, not decoration: it is how one wsguard shim
+# recognises another on PATH, and it must stay inside the first few lines. See
+# WSGUARD_SHIM_MARKER below. (First attempt put the marker at line 119 behind a
+# 60-line bounded read, so the shim could not recognise itself and the fork bomb
+# survived the fix. The bound silently excluded the thing it was looking for.)
 #
 # wsguard — a PATH shim named `git` that refuses the git operations which
 # destroy other agents' work in a SHARED workspace, and which cannot be caught
@@ -107,7 +114,70 @@ readonly EX_REFUSED=77
 readonly EX_CANNOT_EVALUATE=78
 
 self_path="${BASH_SOURCE[0]}"
-self_dir="$(cd -- "$(dirname -- "$self_path")" && pwd -P)"
+# Parameter expansion, not `dirname`. Everything on this code path runs BEFORE
+# the real git has been located, which is exactly the situation where PATH may
+# be minimal or wrong — so the guard must not need coreutils to say what went
+# wrong. Measured: with a PATH holding only bash and two shim copies, the
+# `dirname` form emitted "dirname: command not found" and the fail-closed
+# diagnostic below never printed at all.
+self_parent="${self_path%/*}"
+[[ "$self_parent" == "$self_path" ]] && self_parent="."
+self_dir="$(cd -- "$self_parent" && pwd -P)"
+
+# A shim identifies its own kind by CONTENT, not by path. Skipping only
+# "$self_dir" was enough for one installation and became a fork bomb with two:
+# copy A skips A, finds B, execs it; B skips B, finds A, execs it; forever, with
+# no output and no exit. Measured before this fix: `timeout 20` killed it at
+# rc=124 with an empty stderr — the worst diagnostic a guard can produce, which
+# is none. Path identity answers "is this me"; the question is "is this one of
+# us".
+readonly WSGUARD_SHIM_MARKER="wsguard-shim-marker:8f3a1c"
+
+# is_wsguard_shim <path> — true if the file carries the marker in its head.
+# Bounded read: an unbounded read of an arbitrary PATH entry is its own hazard.
+#
+# The bound is why the first version of this fix did not work. The marker was
+# declared HERE, at line ~119, and the reader stopped at 60 — so the shim could
+# not recognise itself, and the fork bomb survived a change made specifically to
+# kill it. A bound chosen for safety is still a chosen aperture, and this one
+# silently excluded the one thing it was looking for. The marker now sits at the
+# top of the file and selftest arm C1-only-shims-on-path is the control: with
+# nothing on PATH but two shims, that arm HANGS unless this function works.
+is_wsguard_shim() {
+  local f="$1" line n=0
+  [[ -r "$f" ]] || return 1
+  while IFS= read -r line; do
+    n=$(( n + 1 ))
+    (( n > 60 )) && break
+    [[ "$line" == *"$WSGUARD_SHIM_MARKER"* ]] && return 0
+  done < "$f"
+  return 1
+}
+
+# Belt and braces for the case where the marker check fails to recognise an
+# older or modified shim: bound the number of shim hops instead of spinning.
+# A wrong answer that arrives is debuggable; a hang is not. The counter is
+# unset immediately before exec'ing a resolved real git, so ordinary nesting
+# (git -> hook -> git) always starts from zero rather than accumulating.
+wsguard_hops="${SCION_WSGUARD_HOPS:-0}"
+case "$wsguard_hops" in
+  ''|*[!0-9]*) wsguard_hops=0 ;;
+esac
+if (( wsguard_hops >= 8 )); then
+  {
+    echo "wsguard: CANNOT EVALUATE — this shim has been entered $wsguard_hops times"
+    echo "wsguard: without ever reaching a real git. NOTHING WAS RUN."
+    echo "wsguard:"
+    echo "wsguard: That means two or more wsguard shims are on PATH and are"
+    echo "wsguard: resolving to each other. Check for a second copy:"
+    echo "wsguard:   type -a git"
+    echo "wsguard:"
+    echo "wsguard: Refusing to loop. A guard that hangs with no output is worse"
+    echo "wsguard: than one that refuses with a reason."
+  } >&2
+  exit "$EX_CANNOT_EVALUATE"
+fi
+export SCION_WSGUARD_HOPS=$(( wsguard_hops + 1 ))
 
 # ---------------------------------------------------------------------------
 # Locate the real git: the first `git` on PATH that is not this shim.
@@ -120,6 +190,8 @@ find_real_git() {
     resolved="$(cd -- "$dir" 2>/dev/null && pwd -P)" || continue
     [[ "$resolved" == "$self_dir" ]] && continue
     candidate="$resolved/git"
+    # Not "is this me" — "is this one of us". See WSGUARD_SHIM_MARKER above.
+    is_wsguard_shim "$candidate" && continue
     if [[ -f "$candidate" && -x "$candidate" ]]; then
       printf '%s' "$candidate"
       return 0
@@ -129,14 +201,33 @@ find_real_git() {
 }
 
 REAL_GIT="$(find_real_git)" || {
-  cat >&2 <<EOF
-wsguard: could not find a real git on PATH behind the shim at $self_dir.
-wsguard: NOTHING WAS RUN. This is a broken environment, not a policy refusal.
-EOF
+  {
+    echo "wsguard: could not find a real git on PATH behind the shim at $self_dir."
+    echo "wsguard: NOTHING WAS RUN. This is a broken environment, not a policy refusal."
+    echo "wsguard:"
+    echo "wsguard: Every git on PATH is a wsguard shim, or there is none at all."
+    echo "wsguard:   type -a git"
+  } >&2
   exit "$EX_CANNOT_EVALUATE"
 }
 
-passthrough() { exec "$REAL_GIT" "$@"; }
+# The resolved git is a real git, so the hop counter has done its job. Unsetting
+# it here keeps ordinary nesting (git -> hook -> git) starting from zero instead
+# of walking toward the cap.
+passthrough() { unset SCION_WSGUARD_HOPS; exec "$REAL_GIT" "$@"; }
+
+# reprint_indented <file> — echo a captured stderr back to the caller, indented.
+# A builtin, for the same reason as above: this runs only on the paths where
+# something has already gone wrong, and `2>/dev/null` on a broken tool is how a
+# "command not found" became a confident false claim on this project today. The
+# whole point of these paths is that the underlying tool's own words survive.
+reprint_indented() {
+  local line
+  while IFS= read -r line; do
+    printf 'wsguard:   %s\n' "$line"
+  done < "$1"
+  [[ -s "$1" ]] || printf 'wsguard:   (it said nothing)\n'
+}
 
 if [[ "${SCION_WSGUARD:-}" == "off" ]]; then
   echo "wsguard: DISABLED via SCION_WSGUARD=off — the shared-workspace guard is not in effect." >&2
@@ -274,7 +365,7 @@ if (( root_status != 0 )) || [[ -z "$resolved_root" ]]; then
       echo "wsguard: root came from    : the built-in default (SCION_WSGUARD_ROOT is unset)"
     fi
     echo "wsguard: cd exited $root_status and said:"
-    sed 's/^/wsguard:   /' "$root_err"
+    reprint_indented "$root_err"
     echo "wsguard:"
     echo "wsguard: An unresolvable root cannot be compared against the repository this"
     echo "wsguard: command would act on, and a guard that cannot make the comparison"
@@ -297,7 +388,7 @@ if (( probe_status != 0 )); then
     echo "wsguard: was taken and the command WAS NOT RUN."
     echo "wsguard:"
     echo "wsguard: git rev-parse --show-toplevel exited $probe_status and said:"
-    sed 's/^/wsguard:   /' "$probe_err"
+    reprint_indented "$probe_err"
     echo "wsguard:"
     echo "wsguard: This is fail-closed by design. The guard will not permit a"
     echo "wsguard: destructive operation on the grounds that it could not tell whether"
