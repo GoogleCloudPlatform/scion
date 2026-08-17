@@ -63,19 +63,204 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Name for the cluster-scoped RBAC pair.
+Name for the cluster-scoped RBAC pair. Rewritten 2026-08-17 by gd-p3-dev; the
+previous version of this comment is quoted below because it is evidence.
 
-Deliberately different from the namespaced pair: scion-hub.fullname is a
-function of the release name only, so two installs of the same release name in
-different namespaces - a per-team or per-environment layout, which is normal -
-would collide on one cluster-scoped object. Under helm install that is an
-ownership error and survivable. Under helm template | kubectl apply, or a GitOps
-pipeline, the second apply silently rewrites the first's ClusterRoleBinding
-subject and points cluster-wide pods/exec and secrets authority at another
-namespace's ServiceAccount. Including the namespace makes that unrepresentable.
+WHY THE NAMESPACE IS IN THE NAME. scion-hub.fullname is a function of the
+release name only, so two installs of the same release name in different
+namespaces - a per-team or per-environment layout, which is normal - would
+collide on one cluster-scoped object. Under helm install that is an ownership
+error and survivable. Under helm template piped to kubectl apply, or a GitOps
+pipeline, there is no ownership check: by the Kubernetes API's documented
+behaviour an apply of a ClusterRoleBinding that already exists updates it in
+place, so the second release's subject replaces the first's and cluster-wide
+pods/exec and secrets authority points at another namespace's ServiceAccount.
+NOBODY ON THIS PROJECT HAS RUN THAT SECOND APPLY - it is documented API
+behaviour, not our measurement. The COLLISION below is measured.
+
+THE COMMENT THAT USED TO BE HERE ENDED: "Including the namespace makes that
+unrepresentable." The line under it was:
+
+    printf "%s-%s-agents" (include "scion-hub.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-"
+
+TRUNCATION DISCARDS THE NAMESPACE, WHICH IS THE ONLY PART MAKING THE NAME
+UNIQUE. The guarantee was never enforced - not prose that fell behind the code,
+unenforced from the first commit. Filed as C1 by gd-regmis-rev, graded Critical
+by gke-deploy-lead, reproduced at merged main by gd-consumer.
+
+  ns=team-alpha-production   CR and CRB  ...-scion-hub-team-alpha (62)  subject ns=team-alpha-production
+  ns=team-alpha-staging      CR and CRB  ...-scion-hub-team-alpha (62)  subject ns=team-alpha-staging
+
+trimSuffix PARTICIPATED IN THE COLLISION rather than breaking it: the cut lands
+on a hyphen, the hyphen is removed, and the two names are still identical at 62
+characters. A test asserting a 63-character name misses exactly these cases.
+
+WHEN IT COLLIDES, AS A RULE AND NOT AS A THRESHOLD:
+
+    collide  <=>  len(fullname) + 1 + sharedPrefix(ns1+S, ns2+S)  >=  63
+
+        where S is the literal suffix the object's name ends in.
+
+S IS A PARAMETER AND NOT A CONSTANT, even though it has exactly one value here.
+S = "-agents" for both cluster-scoped objects in this chart, which is the whole
+population: of the seven kinds this chart emits, only ClusterRole and
+ClusterRoleBinding are cluster-scoped, and both take their name - and the
+binding its roleRef - from this one helper. Namespaced objects cannot collide
+across namespaces at all, because the namespace scopes them. A NEW
+CLUSTER-SCOPED OBJECT WITH A DIFFERENT SUFFIX NEEDS ITS OWN S AND IS NOT
+COVERED BY THE NUMBERS BELOW. The parameter is here because every grid run
+today held the suffix constant, so no measurement anyone has taken could have
+told us whether it mattered (gd-em, 14:29).
+
+THE "-agents" TERM IS LOAD-BEARING AND WAS MISSING FOR MOST OF A DAY. The rule
+was first published without it, taking sharedPrefix over the bare namespaces. In
+that form it agreed with gd-consumer over 40 rendered cells and with gd-p3-dev
+over 360, and it is WRONG: when one namespace is a proper prefix of the other,
+the hyphen beginning "-agents" continues the match past the end of the shorter
+namespace. gd-regmis-rev found it over 16,994,448 exhaustive cases (2,214
+under-predictions, 0 over-predictions) and named one decisive cell; gd-p3-dev
+and gd-p3-rev independently rendered it on real helm:
+
+    release 41 x "r",  ns team-alpha  vs  team-alpha-staging
+      bare-namespace rule:  51 + 1 + 10 = 62  ->  predicts DISTINCT
+      helm:                 ...-scion-hub-team-alpha (62) BOTH  ->  COLLIDES
+
+    the same pair at release length 40 renders DISTINCT, and the two names
+    differ in the LAST of their 63 characters: "a" from "-agents" against the
+    "s" of "staging". The suffix does the matching; that is the mechanism, in
+    rendered bytes rather than in argument.
+
+BECAUSE THE ERROR WAS ALL IN ONE DIRECTION - 0 over-predictions - the corrected
+rule only ever GROWS the collision set. Nothing established under the old form
+was withdrawn, and neither the severity nor this fix moved when it was
+corrected. Recorded because the two grids that missed it were not careless: 400
+renders across two rigs, and NOT ONE PAIR IN EITHER had one namespace as a
+proper prefix of the other, so no input existed that could make the model say
+the other thing. 400 agreements measured the pair set, not the rule.
+
+IT IS A BUCKET, NOT A PAIR (gd-p3-rev). Both statements of the rule take two
+namespaces and ask whether those two collide, which is correct arithmetic and
+under-describes the object. Every namespace truncating to the same bytes lands
+on ONE ClusterRole and ONE ClusterRoleBinding - rendered, at release length 41,
+team-alpha and team-alpha-staging and team-alpha-production all produce
+...-scion-hub-team-alpha. A reader told "two namespaces can collide" will check
+their two namespaces; the question is how many namespaces are in the bucket.
+
+THE FIRST COLLIDING RELEASE-NAME LENGTH IS NOT A PROPERTY OF THIS CHART. It
+moves with the namespaces:
+
+    shared prefix 31   platform-team-alpha-production-{east,west}   release length 21
+    shared prefix 11   team-alpha-production / team-alpha-staging   release length 41
+    shared prefix  5   prod-a / prod-b                              release length 47
+    shared prefix  0   a / b                                        release length 52
+
+AND len(fullname) IS NOT len(release): the helm idiom skips appending the chart
+name when the release already contains it, so two release names of the same
+length can differ by ten characters of fullname and only one of them collides.
+scion-hub-prod-eu-01 in platform-team-alpha-production-{east,west} is an
+ordinary thing for an operator to type, and it collides.
+
+THERE IS NO RELEASE-NAME-LENGTH FLOOR AT ALL (gd-p3-rev, rendered).
+scion-hub.fullname returns fullnameOverride DIRECTLY, so an operator setting it
+severs the release-to-fullname relationship: a 31-character fullnameOverride
+collides at a ONE-CHARACTER release name across the 31-prefix namespace pair.
+Any statement of this defect in terms of release length is therefore a
+description of the default naming path only. THIS IS ALSO THE TRAP FOR THE FIX:
+gating "does this need a digest" on release-name length would let
+fullnameOverride walk straight past the gate. The gate below is
+len($readable) > 63 - the truncation actually happening, which is the condition
+the defect is made of, and the only one that sees every path into it.
+
+THE FIX, AND WHY THIS ONE. Three options were on the table: (A) raise the 63 cap
+to 253, (B) suffix a digest, (C) refuse to render and make the operator shorten
+the name. A IS RULED OUT because the 253 is an inference from the word "most" in
+the Kubernetes documentation, which does not name ClusterRole, and nobody here
+has a cluster to confirm it against. A security fix does not rest on the word
+"most". C IS NOT TAKEN because the chart cannot enumerate other releases, so it
+can only refuse on TRUNCATION, not on COLLISION - it would refuse installs that
+are unique and safe, and above a 46-character namespace it would refuse every
+release name there is, leaving those operators no name they could choose.
+
+So B, CONDITIONALLY. When the readable name fits it is emitted BYTE-IDENTICAL to
+what this chart has always produced - no existing install is renamed, which is
+half of the regression fixture and not a courtesy. Only when it would truncate
+is the readable part cut back and a digest appended.
+
+THE DIGEST IS TAKEN OVER A SEPARATOR THAT CANNOT OCCUR IN EITHER INPUT, and that
+is deliberate. Hashing the assembled name would inherit its ambiguity: fullname
+"a-b" in namespace "c" and fullname "a" in namespace "b-c" both assemble to
+"a-b-c-agents". A slash is legal in neither a release name nor a namespace, both
+being DNS names, so "fullname/namespace" is injective where the assembled string
+is not.
+
+WHAT THIS DOES NOT PROMISE, because the comment above this one made an absolute
+it could not keep. Distinct identities now produce distinct names UNLESS they
+collide in the first 10 hex characters of SHA-256, which is a 40-bit space: not
+impossible, and not something this chart can rule out by construction, because
+any fixed-length name over unbounded input has collisions by pigeonhole. The
+case that would defeat this fix is two identities sharing a truncated readable
+prefix; tests/rbac-collision.sh renders exactly that case and shows the digests
+diverging. What is now unrepresentable is a SILENT collision from truncation
+alone, which is what C1 was.
+
+STILL OPEN, FILED SEPARATELY, NOT FIXED HERE: fullnameOverride can reach the
+"a-b"/"c" versus "a"/"b-c" ambiguity in the readable branch, where no digest is
+applied. It needs fullnameOverride set to a colliding shape and is out of scope
+for this Critical.
+
+THE DIGEST IS PART OF THE INTERFACE, NOT AN IMPLEMENTATION DETAIL. Pinned here
+and in tests/rbac-collision.sh:
+
+    algorithm  sha256sum, first 10 hex characters
+    input      printf "%s/%s" <fullname> <.Release.Namespace>, UNTRUNCATED
+    layout     printf "%s-%s" (<readable> | trunc 52 | trimSuffix "-") <digest>
+
+CHANGING EITHER THE INPUT OR THE ALGORITHM RENAMES EVERY AFFECTED INSTALL AND
+ORPHANS A SECOND CLUSTER-SCOPED OBJECT - and silently, because the operator read
+the NOTES disclosure once and will not expect it twice. The fixture asserts one
+specific rendered name, so such a change is a red test rather than a second
+incident. If you are here because that test is red: you have not broken a test,
+you have proposed a migration.
+
+    release platform-hub-production-release in namespace team-alpha-production
+      -> platform-hub-production-release-scion-hub-team-alpha-aa14af2e08
+
+The input is UNTRUNCATED on purpose: it is the full identity, so two installs
+whose readable parts truncate to the same 52 bytes still differ in the digest.
+That is what makes the fix work at all, and it is why the digest cannot be taken
+over the already-truncated string.
 */}}
 {{- define "scion-hub.clusterRoleName" -}}
-{{- printf "%s-%s-agents" (include "scion-hub.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" }}
+{{- $full := include "scion-hub.fullname" . -}}
+{{- $readable := printf "%s-%s-agents" $full .Release.Namespace -}}
+{{- if le (len $readable) 63 -}}
+{{- $readable -}}
+{{- else -}}
+{{- $digest := sha256sum (printf "%s/%s" $full .Release.Namespace) | trunc 10 -}}
+{{- printf "%s-%s" ($readable | trunc 52 | trimSuffix "-") $digest -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+THE PRE-FIX NAME. This is the C1 defect, preserved deliberately and called by
+exactly one thing: the orphan disclosure in NOTES.txt. DO NOT USE IT TO NAME AN
+OBJECT.
+
+It exists because the fix does not remediate anyone who already has the defect -
+it only stops new ones. An install that was colliding gets a NEW cluster-scoped
+name on upgrade, and under the template-piped-to-apply path there is nothing to
+delete the object under the OLD name, which keeps its cluster-wide secrets and
+pods/exec grant pointed at whichever ServiceAccount applied last. To tell the
+operator which object to look at, NOTES has to be able to NAME it, and the name
+is only computable with the algorithm that produced it. Replacing the helper in
+place would leave NOTES able to say no more than "a previous object may remain",
+which is information rather than an instruction (gd-consumer, 14:22).
+
+WHEN THIS CAN BE DELETED: when no supported upgrade path starts from a chart
+version at or before 0.1.0. Delete the NOTES block with it, not before.
+*/}}
+{{- define "scion-hub.clusterRoleNameLegacy" -}}
+{{- printf "%s-%s-agents" (include "scion-hub.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
 {{/*
