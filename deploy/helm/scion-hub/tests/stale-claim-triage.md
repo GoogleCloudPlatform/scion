@@ -471,7 +471,7 @@ inside quoted historical output, the `118`/`252` in §3's block — **I took his
 first treatment: in the denominator, and they pass, because the block is
 SHA-pinned.**
 
-**68 mechanical assertions over this file's self-claims. 68 run. 13 corrected**,
+**77 mechanical assertions over this file's self-claims. 77 run. 14 corrected**,
 plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
 so it is out by the definition above, and it is fixed here only because `gd-em`
 folded it into this commit. No category came back empty. **A is zero as a
@@ -485,7 +485,7 @@ appears without a SHA on the same line.
 | **B** | counts of a token in this same file | 18 | 5 |
 | **C** | positional claims about this same file | 14 | 2 |
 | **D** | cardinalities about this file's own tables | 15 | 3 |
-| **E** | claims about the instrument that measured it | 13 | 2 |
+| **E** | claims about the instrument that measured it | 22 | 3 |
 | **F** | this section's own description of the harness | 7 | — (never checked before) |
 
 Subjects: `git show <sha>:<path>` at `5ebe3dab`, `38a41b6e` and `6fc0cdfc`, never
@@ -513,8 +513,13 @@ written for.** It is now B11 (files, labelled as files), B11b (sites @`6fc0cdfc`
 is 1 at both SHAs, so the blindness is recorded rather than inferred), and two
 controls. Credit where it is owed: `gd-p0-rev-4` filed *file-level agreement is
 strictly weaker than site-level agreement* against `gd-prec`'s control, not
-against mine; I went and looked because of it. **Nothing in this file has yet
-been caught by its author without an outside instrument.**
+against mine; I went and looked because of it. **At that point nothing in this
+file had ever been caught by its author without an outside instrument** — every
+correction in the table below arrived because someone else's check, usually aimed
+at someone else, described a shape I then went looking for. Category F, added an
+hour later, is the first thing here that has broken that streak, and it did it
+twice; the streak is recorded because a file about stale claims should not
+quietly drop the least flattering measurement it ever took of itself.
 
 **And the census I ran while investigating it was itself junk, in the day's
 signature shape.** My first pass passed the pathspec as one shell word and sent
@@ -593,12 +598,48 @@ fault.** On this file at `6fc0cdfc`:
 
 🛑 **The injected `-G` is INERT against GNU grep.** Grep with no matcher flag is
 BRE by POSIX, so `-G` changes nothing here; what it does is move *ugrep*, which
-defaults to extended, onto grep's behaviour. **The blame shrinks and the reach
-grows: the silent zero is POSIX, not a local shim, so it is present in stock grep
-on the CI runner and in anyone's terminal.** (`gd-em`, withdrawing its own
+defaults to extended, onto **ugrep's own BRE, which is not GNU's — they diverge
+on `$?`, silently and in the fail-closed direction.** **The blame shrinks and the
+reach grows: the silent zero is POSIX, not a local shim, so it is present in stock
+grep on the CI runner and in anyone's terminal.** (`gd-em`, withdrawing its own
 earlier ruling; `gd-p0-rev-4` reproduced it independently and found the same
 thing had voided its own two-engine control, both arms of which were BRE.
 Measured here before adopting — the four rows above are this container.)
+
+**`-G` is inert against GNU and it is not inert against the engine it was
+injected for.** An earlier revision of this paragraph said `-G` moves ugrep *"onto
+grep's behaviour"* — first clause true, second false, and the false half is the
+one a reader would act on. `gke-deploy-lead` measured the counterexample and
+`gd-pkg-rep` put a second arm on it; both reproduce here, on a four-line fixture,
+ground truth asserted **absolutely on the `-F` arm before any comparison**
+(`gd-em` ruling (p1) — a differential is blind to needle mutation, so no arm here
+is checked against the other arm):
+
+```
+ground truth   /usr/bin/grep -cF '$?'   ->  2      asserted first, not inferred
+stock BRE      /usr/bin/grep -cG '$?'   ->  2      correct
+WRAPPED BRE    grep -c '$?'             ->  0      FAILS CLOSED, SILENTLY
+stock ERE      /usr/bin/grep -cE '$?'   ->  4      FAILS OPEN — every line
+control 'rc='  metacharacter-free       ->  3 == 3 == 3
+control 'a\+b' a BRE operator that does NOT diverge -> 2 == 2   (gd-pkg-rep)
+```
+
+🛑 **The `-E` row is the one to keep.** It does not return a plausible wrong
+number — it returns *every line in the file*, four of four, and the only thing
+that says so is a single line on **stderr**: `grep: warning: ? at start of
+expression`. Under `2>/dev/null` that becomes a clean `4` from a command that
+exits 0. **The fail-open arm's entire evidence is in the stream `gd-em` banned us
+from discarding at 11:05**, and rows E16/E17 assert both halves — the count *and*
+the stderr line — so the harness cannot lose the tell either. **`$?` is the third
+direction reversal of the day: `-E` fails open where `-G` fails closed, and on
+this pattern `-G` fails closed where `-E` fails open.**
+
+`gd-pkg-rep`'s `a\+b` control is the load-bearing one and it is not decoration:
+it **agrees** across the arms, so a dialect check that happened to use `\+`, `\|`
+or `\?` clears and has learned nothing. **"I ran both dialect arms and they
+agreed" is a claim about the patterns you ran, not about the engine.** (Same
+shape as the negative-result rule below: the denominator of an agreement is the
+set of patterns you tried, and it is never printed.)
 
 **An earlier revision of this section said "the injected `-G` forces BRE, so `|`
 is a literal", with the disproof printed two lines below it** — the middle row of
@@ -666,6 +707,7 @@ git-ignored (`git check-ignore` returns nothing).
 | 11 | §7 *"the injected `-G` forces BRE"* | `-G` is inert vs GNU default | corrected; POSIX, so it reaches CI |
 | 12 | §7's own harness, row B11 | counted FILES for a claim about HITS; blind at both SHAs | split into B11/B11b–f, site-level |
 | 13 | §7's harness, C10's bullet boundaries | a single value off a match set, cardinality never asserted | C10c/C10d added |
+| 14 | §7 *"`-G` moves ugrep onto grep's behaviour"* | onto **ugrep's own** BRE; they diverge on `$?` | corrected; E14–E18 added |
 | — | §3 row-16 *"the same sentence"* | two sentences | corrected (N3; **out of the denominator**) |
 
 Four of those are worth more than the corrections.
@@ -724,6 +766,19 @@ A sweep that reports only its catches has no measurable error rate, so:
   contents; it grepped the path and found nothing. **A defect that reads as a pass
   is the failure mode this whole file is about**, and it was caught only because
   the answer disagreed with a manual grep run four minutes earlier.
+- **Both banned shapes, on one line, in the row that discloses the engine.** The
+  harness resolved the shell snapshot with
+  `SNAP=$(ls -t …/snapshot-zsh-*.sh 2>/dev/null | head -1)`. That is a single value
+  taken off the front of a *time-ordered* list with its cardinality never asserted
+  (`gd-em` ruling (o) §2) **and** a suppressed stream (`gd-em`, 11:05) — and the
+  two compose: with no snapshot present, `ls` writes to the silenced stream, `SNAP`
+  is empty, and E2 becomes a pass-by-absence, **the fifth state, inside the row
+  whose whole job is to prove the instrument is what the file says it is.** The
+  glob's cardinality is now asserted as E0 *before* the element is taken, and
+  nothing in the harness suppresses a stream. Measured, not asserted: the harness
+  writes **0 lines of stderr** on a clean run. `export -p 2>/dev/null` in E6 was
+  the only other instance and it is gone. **Neither was found by running the
+  harness — both were found by pointing someone else's re-check questions at it.**
 
 > **A SWEEP IS AN INSTRUMENT AND GETS NO EXEMPTION FROM THE RULE IT ENFORCES.**
 > Report its false positives and its false negatives, or its denominator is a
@@ -738,22 +793,48 @@ fixed. **The `24` and `81`/`57` figures in §1 are internally consistent and thi
 sweep is the first time anyone has checked even that much**; their agreement with
 the sweeps that produced them is unverified and is not claimed.
 
+**Two things the harness does not measure, said here rather than left to be
+assumed.** The `$?` row above has a **wrapped** arm and the harness does not: the
+wrapped engine is `claude.exe` under a forged `argv[0]` and exists on no CI
+runner, so E14–E18 pin the three *portable* arms and the wrapped `0` is measured
+out-of-band, in this container, and is **not in the 77**. And the harness carries
+no `-z`, `-Z`, `--null`, `-print0` or `xargs -0` in any arm — the flags that drop
+a bare `grep` out of the wrapper's `case` and silently back onto stock grep. That
+is **read off the harness source, not asserted from memory**, and it is a fact
+about the harness rather than one of the 77, because a check for it inside the
+file would match its own pattern.
+
 The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
-`46e7b71ed3d0149f`, and is deliberately **not** committed: `tests/` is frozen at
-P0. It exits 0 on 68/68 under **both** engines and **exits 1 under a four-arm
-mutation battery**, each arm naming the row it broke:
+`df9a27ebb70813dc`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 77/77 under **both** engines, writes **0 lines of stderr**, and
+**exits 1 under a five-arm mutation battery**, each arm naming the row it broke,
+every arm at `stderr=0`:
 
 ```
-MM1  revert the §3 heading to "the two new findings"   rc=1  67/68   D8
-MM2  category B in the table above: 18 -> 17           rc=1  66/68   F-B, F7
-MM3  headline total: 68 -> 69                          rc=1  67/68   F7
-MM4  delete the F row entirely                         rc=1  66/68   F-F, F7
+MM1  revert the §3 heading to "the two new findings"   rc=1  76/77   D8
+MM2  category B in the table above: 18 -> 17           rc=1  75/77   F-B, F7
+MM3  headline total: 77 -> 78                          rc=1  76/77   F7
+MM4  delete the F row entirely                         rc=1  75/77   F-F, F7
+MM5  mutate the $? fixture NEEDLE, not the document    rc=1  75/77   E14, E15
 ```
 
-🔴 **Category F earned itself within the hour: adding C10c/C10d took C from 12 to
-14 and F-C went red on the next run, before the table above had been touched.** The
-table cannot now go stale without the harness saying so, which is the property the
-rest of this file exists to complain about the absence of.
+**MM5 is the (p1) arm and it is the only one that mutates the instrument's input
+rather than the document.** A differential is blind to needle mutation: change the
+needle and both arms go to zero, the difference stays zero, and the run reports
+*no divergence* — green, guarding nothing (`gd-pkg-rep`, applying `gd-em`'s (p) to
+its own controls). E14 pins an **absolute** on the ground-truth arm, so breaking
+the fixture breaks the row instead of quietly agreeing with itself. **MM1–MM4 all
+mutate the subject; a battery that only ever mutates the subject cannot tell you
+whether the instrument would notice losing its grip on it.**
+
+🔴 **Category F earned itself within the hour, twice.** Adding C10c/C10d took C
+from 12 to 14 and F-C went red on the next run, before the table above had been
+touched; adding E0 and E14–E21 took E from 13 to 22 and F-E went red the same way.
+**Both times the harness told its author the document had drifted, before its
+author noticed.** The table cannot now go stale without the harness saying so,
+which is the property the rest of this file exists to complain about the absence
+of — and it is the first mechanism in this file that has caught anything without
+an outside instrument.
 
 **MM4 is the one worth the space.** Deleting a row from the table is the mutation
 a table-checker most naturally misses, because there is then nothing there to
