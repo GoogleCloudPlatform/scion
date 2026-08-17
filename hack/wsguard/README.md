@@ -177,7 +177,7 @@ The selftest follows the project's check contract instead: `0` evaluated-clean,
 A control that has never been fired is not a control.
 
 ```sh
-hack/wsguard/selftest.sh            # 33 arms, 37 post-conditions
+hack/wsguard/selftest.sh            # 40 arms, 45 post-conditions
 hack/wsguard/selftest.sh --prove-it # ... after first proving the harness can fail
 hack/wsguard/hook-probe.sh --prove-it # the hook-mechanism rejection, measured
 make wsguard                        # both, from CI
@@ -195,8 +195,8 @@ vacuously:
   with one expectation deliberately falsified and requires it to exit `1`. A
   falsified run that still passes means the harness measures nothing, and the
   honest answer is `2`, not `0`.
-- **Both directions.** Seventeen refusal arms, four cannot-evaluate arms, twelve
-  permit arms — including the same `git checkout --` that is refused in the
+- **Both directions.** Twenty-two refusal arms, five cannot-evaluate arms,
+  thirteen permit arms — including the same `git checkout --` that is refused in the
   shared repository being permitted in a private one.
 
 Every arm runs under `timeout`, and a timeout kill is scored as its own status
@@ -226,11 +226,11 @@ it, and the gap between the two readings was a hole:
 | `git checkout -- -h` | `0`, work destroyed, silent | `77` | the help scan did not stop at `--`, so a **pathspec** named `-h` read as a help flag |
 | `git rm -f f` | `0`, file gone | `77` | `rm` deletes from the **working tree**, and was simply missing from the watched set |
 
-Aliases are resolved **one level**, because that is what git does — measured, not
-assumed: with `alias.a = co` and `alias.co = checkout`, `git a -- tracked.txt`
-left the modification in place. A `!`-prefixed shell alias is deliberately *not*
-expanded: any git it runs is a new process that finds the shim on `PATH` and is
-judged on its own merits, so re-entry already covers it.
+Aliases are resolved to a **fixed point**, not to depth one, and the first
+version of this got it wrong in the most expensive way available — see below. A
+`!`-prefixed shell alias is deliberately *not* expanded: any git it runs is a new
+process that finds the shim on `PATH` and is judged on its own merits, so
+re-entry already covers it.
 
 `git rm --cached` and `git clean -n` are permitted for the same reason — in both
 cases the discriminating flag was measured, not inferred, by running the real
@@ -240,6 +240,53 @@ git and looking at the disk.
 of `77`. In a fixture containing a file literally named `-h` it is `rc=0` and
 the uncommitted content is gone. The reviewer's fixture had no such file, so
 git's own pathspec error stood in for a refusal.
+
+### A bound with a wrong reason attached is worse than an arbitrary bound
+
+The alias fix shipped resolving **one level**, carrying a comment that said so
+deliberately: *"alias chains are NOT followed by git… measured."* **git 2.54.0
+chains aliases to arbitrary depth, and the measurement behind that comment was
+an artifact.** Found by `gd-wsg-rev-2`:
+
+| | shipped | now |
+|---|---|---|
+| `alias.a = co`, `alias.co = checkout` → `git a -- f` | `rc=0`, **work gone**, silent | `77` |
+| a six-deep chain → `git d6 -- f` | `rc=0`, **work gone**, silent | `77` |
+| `alias.r1 = rm`, `alias.r2 = r1` → `git r2 -f f` | `rc=0`, **file gone**, silent | `77` |
+| `alias.g = -c core.quotepath=false checkout` | `rc=0`, **work gone**, silent | `77` |
+
+**How the original measurement lied, which is worth more than the bug.** The
+probe reused a repository whose index had already been rewritten by earlier
+arms, so the *dirty* content was also the *staged* content. `checkout -- f` then
+restored the file to bytes identical to the ones already on disk. The
+post-condition was *"the content did not change"* — and **that cannot
+distinguish "the command never ran" from "the command ran and wrote the same
+bytes."** The arm read a successful checkout as a no-op and concluded git does
+not chain.
+
+The reviewer reproduced the *false negative* before reproducing the bug, which
+is the only reason the artifact was identified rather than merely overruled.
+
+Two changes make it a measurement: a **hard reset before each arm**, and a
+post-condition asserting the content is now the *committed* string rather than
+merely "not the dirty string".
+
+> **This is the same shape as the 60-line marker bound, and the more expensive
+> of the two.** An arbitrary bound invites testing. A bound with a stated reason
+> attached, where the reason is wrong, actively discourages the next reader from
+> testing it.
+
+Resolution now loops until the head word is neither an option nor an alias.
+Termination is git's problem and it solves it — `fatal: alias loop detected` is
+measured — so the 10-iteration cap is a backstop, and hitting it is `78`, not a
+passthrough: the guard cannot tell a cycle from a chain deeper than 10, and
+*"probably the harmless one"* is the reasoning it exists to refuse. Arm `U4`
+tests the cap; arm `P13` requires an alias resolving to `status` to still be
+**permitted**, so the loop is classifying rather than blanket-refusing.
+
+A refusal also now names the resolution — `` `d6` resolves to `checkout` after 7
+expansion(s) `` — because otherwise the diagnostic discusses a word the operator
+never typed.
 
 ### The justification must be true of the operation it guards
 

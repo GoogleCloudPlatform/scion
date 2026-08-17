@@ -337,40 +337,107 @@ done
 # one line of output. That is the silent-bypass shape this whole guard exists
 # to prevent, arriving through the guard's own front door.
 #
-# Two things make one level of expansion the right amount, both measured rather
-# than assumed:
+# RESOLVED TO A FIXED POINT, NOT TO DEPTH ONE. The first version of this block
+# stopped after one expansion and carried a comment explaining why that was
+# correct: "alias chains are NOT followed by git", supposedly measured. THAT
+# MEASUREMENT WAS AN ARTIFACT AND THE CONCLUSION WAS FALSE. git 2.54.0 chains
+# aliases to arbitrary depth:
 #
-#   - Alias chains are NOT followed by git. With alias.a=co and alias.co=checkout,
-#     `git a -- tracked.txt` left the modification in place: git expands once.
-#     Resolving once therefore matches git exactly; resolving twice would make
-#     the guard refuse commands git would not run.
-#   - A `!`-prefixed SHELL alias needs no handling here. Whatever git command it
-#     runs is spawned as a new process, finds this shim on PATH first, and is
-#     classified on its own merits. Re-entry already covers it, and the hop
-#     counter above bounds the re-entry.
+#     alias.co=checkout, alias.a=co      git a  -- f   destroyed the file
+#     a six-deep chain                   git d6 -- f   destroyed the file
+#     alias.r1=rm, alias.r2=r1           git r2 -f f   deleted the file
 #
-# Cost: one `git config --get` on subcommands that are not already watched, and
-# only while the guard is armed. An unarmed guard has already passed through.
+# The false negative came from a contaminated fixture, and the mechanism is
+# worth more than the bug: the earlier probe reused a repository whose index
+# had already been rewritten by previous arms, so the DIRTY content was the
+# staged content. `checkout -- f` then restored the file to bytes identical to
+# the ones already on disk. The post-condition was "the content did not
+# change", and that cannot distinguish "the command never ran" from "the
+# command ran and rewrote the file with the same bytes". A hard reset between
+# arms separates the two readings; without it the arm is not a measurement.
+#
+# gd-wsg-rev-2 found this by reproducing the false negative BEFORE reproducing
+# the bug, which is the only reason the artifact was identified rather than
+# merely overruled.
+#
+# The shape is the same as the 60-line marker bound in the fork-bomb fix, and
+# it is the more expensive of the two: A BOUND CHOSEN FOR A STATED REASON,
+# WHERE THE REASON IS ITSELF WRONG, is worse than an arbitrary bound, because
+# the comment actively discourages the next reader from testing it.
+#
+# Termination is not this loop's problem to solve. git refuses a cyclic alias
+# itself — measured: `fatal: alias loop detected: expansion of 'loop1' does not
+# terminate`. The iteration cap below is therefore a backstop against something
+# unforeseen, not the primary defence, and hitting it is fail-closed (78), not
+# a passthrough.
+#
+# A `!`-prefixed SHELL alias is deliberately NOT expanded. Whatever git it runs
+# is a new process that finds this shim on PATH and is classified on its own
+# merits; re-entry covers it, and the hop counter above bounds that re-entry.
 classify_as="$subcmd"
 alias_of=""
-case "$subcmd" in
-  checkout|switch|restore|reset|clean|stash|branch|rm|fetch) ;;
-  *)
-    alias_expansion="$("$REAL_GIT" ${pre[@]+"${pre[@]}"} config --get "alias.$subcmd" 2>/dev/null)" || alias_expansion=""
-    case "$alias_expansion" in
-      ''|'!'*) ;;
-      *)
-        # First whitespace-delimited word of the expansion is the subcommand
-        # git will actually dispatch on.
-        alias_first="${alias_expansion%%[$' \t']*}"
-        if [[ -n "$alias_first" && "$alias_first" != "$subcmd" ]]; then
-          classify_as="$alias_first"
-          alias_of="$subcmd"
-        fi
-        ;;
+alias_hops=0
+
+# alias_head <expansion> — the subcommand git will dispatch, i.e. the first
+# word that is not a global option. An expansion may LEAD with one:
+# `alias.g = -c core.quotepath=false checkout` dispatches checkout, and reading
+# only the first word yields `-c`, which matches no rule. Filed as F1b.
+alias_head() {
+  local -a words=()
+  local w head=""
+  read -r -a words <<<"$1"
+  local n=${#words[@]} i=0
+  while (( i < n )); do
+    w="${words[i]}"
+    case "$w" in
+      -C|-c|--git-dir|--work-tree|--namespace|--exec-path|--config-env)
+        i=$(( i + 2 ))        # option WITH a separate value
+        continue ;;
+      -*)
+        i=$(( i + 1 ))        # option carrying its own value, or a plain flag
+        continue ;;
     esac
-    ;;
-esac
+    head="$w"
+    break
+  done
+  # git splits an alias with shell-style quoting, so the dispatched word may be
+  # written quoted. Strip one layer; anything more exotic falls through to the
+  # cap and is refused, not permitted.
+  head="${head#[\'\"]}"
+  head="${head%[\'\"]}"
+  printf '%s' "$head"
+}
+
+while : ; do
+  case "$classify_as" in
+    checkout|switch|restore|reset|clean|stash|branch|rm|fetch|push) break ;;
+  esac
+  alias_expansion="$("$REAL_GIT" ${pre[@]+"${pre[@]}"} config --get "alias.$classify_as" 2>/dev/null)" || alias_expansion=""
+  case "$alias_expansion" in
+    ''|'!'*) break ;;
+  esac
+  alias_next="$(alias_head "$alias_expansion")"
+  [[ -z "$alias_next" || "$alias_next" == "$classify_as" ]] && break
+  [[ -z "$alias_of" ]] && alias_of="$subcmd"
+  classify_as="$alias_next"
+  alias_hops=$(( alias_hops + 1 ))
+  if (( alias_hops > 10 )); then
+    {
+      echo "wsguard: CANNOT EVALUATE — the alias \`$subcmd\` did not resolve to a"
+      echo "wsguard: real subcommand within 10 expansions. NOTHING WAS RUN."
+      echo "wsguard:"
+      echo "wsguard: If the alias is cyclic, git would refuse it too, with"
+      echo "wsguard: \"fatal: alias loop detected\" — but this guard cannot tell a cycle"
+      echo "wsguard: from a chain deeper than 10, and passing through on the assumption"
+      echo "wsguard: that it is the harmless one is exactly the reasoning this guard"
+      echo "wsguard: exists to refuse. It will not permit a possibly destructive command"
+      echo "wsguard: on the grounds that it could not work out what the command is."
+      echo "wsguard:"
+      echo "wsguard:   git config --get alias.$subcmd"
+    } >&2
+    exit "$EX_CANNOT_EVALUATE"
+  fi
+done
 
 watched=0
 case "$classify_as" in
@@ -739,6 +806,11 @@ fi
   echo "wsguard:"
   echo "wsguard: repository : $toplevel"
   echo "wsguard: guarded    : $guard_root (SCION_WORKSPACE_MODE=${mode:-unset}${forced:+, SCION_WSGUARD_FORCE=$forced})"
+  # Without this line a refusal of `git a` talks about `git checkout`, a word
+  # the operator never typed and cannot find in their own command.
+  if [[ -n "$alias_of" ]]; then
+    echo "wsguard: alias      : \`$alias_of\` resolves to \`$classify_as\` after $alias_hops expansion(s)"
+  fi
   echo "wsguard:"
   printf 'wsguard: %s\n' "$why"
   echo "wsguard:"

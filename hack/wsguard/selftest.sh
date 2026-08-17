@@ -207,6 +207,37 @@ if (( control_status != 0 )) || [[ "$control_content" == *UNCOMMITTED-WORK* ]]; 
 fi
 control "alias-reaches-checkout" "reproduced: \`git co\` erased the modification, so the alias is a real path to the hazard"
 
+# F1. The original version of this control concluded the OPPOSITE, and the way
+# it went wrong is the reason for the reset below.
+#
+# It reused a fixture whose index had already been rewritten by earlier arms, so
+# the DIRTY content was also the STAGED content. `checkout -- f` then restored
+# the file to bytes identical to the ones already on disk, the post-condition
+# "the content did not change" held, and the arm reported that git had not
+# expanded the alias. It had. THE POST-CONDITION COULD NOT DISTINGUISH "THE
+# COMMAND NEVER RAN" FROM "THE COMMAND RAN AND WROTE THE SAME BYTES", and a
+# post-condition that cannot separate those is not a measurement.
+#
+# Two changes make it one: hard-reset the index before the arm, and assert the
+# content is now the COMMITTED string rather than merely "not the dirty string".
+"$REAL_GIT" -C "$CONTROL" reset -q --hard >/dev/null 2>&1
+"$REAL_GIT" -C "$CONTROL" config alias.a co
+for _d in 1 2 3 4 5 6; do
+  if (( _d == 1 )); then
+    "$REAL_GIT" -C "$CONTROL" config alias.d1 co
+  else
+    "$REAL_GIT" -C "$CONTROL" config "alias.d$_d" "d$(( _d - 1 ))"
+  fi
+done
+dirty "$CONTROL"
+control_status=0
+"$REAL_GIT" -C "$CONTROL" d6 -- tracked.txt || control_status=$?
+control_content="$(cat "$CONTROL/tracked.txt")"
+if (( control_status != 0 )) || [[ "$control_content" != *"committed content"* ]]; then
+  die_cannot_evaluate "control 'git chains aliases' did not reproduce (status=$control_status, content='$control_content') — if this says the file is unchanged, check the index is clean before blaming git"
+fi
+control "alias-chains-to-depth-6" "reproduced: a six-deep chain reached checkout and restored the COMMITTED bytes"
+
 dirty "$CONTROL"
 control_status=0
 "$REAL_GIT" -C "$CONTROL" rm -f -q tracked.txt >/dev/null 2>&1 || control_status=$?
@@ -451,6 +482,18 @@ echo "==========================================================================
 # Fixtures for the alias and dash-pathspec arms, on the SHARED repo.
 "$REAL_GIT" -C "$SHARED" config alias.co checkout
 "$REAL_GIT" -C "$SHARED" config alias.sh '!echo SHELL-ALIAS'
+# F1: git chains aliases to arbitrary depth. F1b: an expansion may LEAD with a
+# global option, or quote the dispatched word.
+"$REAL_GIT" -C "$SHARED" config alias.a co
+"$REAL_GIT" -C "$SHARED" config alias.d1 co
+for _d in 2 3 4 5 6; do
+  "$REAL_GIT" -C "$SHARED" config "alias.d$_d" "d$(( _d - 1 ))"
+done
+"$REAL_GIT" -C "$SHARED" config alias.r1 rm
+"$REAL_GIT" -C "$SHARED" config alias.r2 r1
+"$REAL_GIT" -C "$SHARED" config alias.g '-c core.quotepath=false checkout'
+"$REAL_GIT" -C "$SHARED" config alias.q '"checkout"'
+"$REAL_GIT" -C "$SHARED" config alias.safe status
 printf 'committed\n' >"$SHARED/-h"
 "$REAL_GIT" -C "$SHARED" add -- ./-h >/dev/null 2>&1
 "$REAL_GIT" -C "$SHARED" -c user.email=w@g -c user.name=w commit -qm "a file named -h" >/dev/null 2>&1
@@ -472,6 +515,54 @@ dirty "$SHARED"
 arm "N12-alias-reaches-checkout" 77 "$SHARED" -- co -- tracked.txt
 still_dirty && assert "N12-alias-reaches-checkout" "an alias is judged as the command git will dispatch" 0 ||
   assert "N12-alias-reaches-checkout" "an alias is judged as the command git will dispatch" 1
+
+# F1. Depth two, depth six, and a chain ending at rm. Each is preceded by a hard
+# reset so that "the work survived" cannot be satisfied by a stale index.
+"$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+dirty "$SHARED"
+arm "N18-alias-chain-depth-2" 77 "$SHARED" -- a -- tracked.txt
+still_dirty && assert "N18-alias-chain-depth-2" "a two-deep chain is resolved to checkout and refused" 0 ||
+  assert "N18-alias-chain-depth-2" "a two-deep chain is resolved to checkout and refused" 1
+
+"$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+dirty "$SHARED"
+arm "N19-alias-chain-depth-6" 77 "$SHARED" -- d6 -- tracked.txt
+still_dirty && assert "N19-alias-chain-depth-6" "depth is not bounded at one: a six-deep chain is refused" 0 ||
+  assert "N19-alias-chain-depth-6" "depth is not bounded at one: a six-deep chain is refused" 1
+[[ "$LAST_OUT" == *"resolves to"* && "$LAST_OUT" == *"checkout"* ]] &&
+  assert "N19-alias-chain-depth-6" "the refusal names the resolution, so the operator can find a word they never typed" 0 ||
+  assert "N19-alias-chain-depth-6" "the refusal names the resolution, so the operator can find a word they never typed" 1
+
+"$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+dirty "$SHARED"
+arm "N20-alias-chain-to-rm" 77 "$SHARED" -- r2 -f tracked.txt
+[[ -e "$SHARED/tracked.txt" ]] && assert "N20-alias-chain-to-rm" "a chain ending at rm is refused and the file survives" 0 ||
+  assert "N20-alias-chain-to-rm" "a chain ending at rm is refused and the file survives" 1
+
+# F1b. The dispatched word is not always the first word.
+"$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+dirty "$SHARED"
+arm "N21-alias-leading-global-option" 77 "$SHARED" -- g -- tracked.txt
+still_dirty && assert "N21-alias-leading-global-option" "an expansion leading with -c is resolved past the option" 0 ||
+  assert "N21-alias-leading-global-option" "an expansion leading with -c is resolved past the option" 1
+
+"$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+dirty "$SHARED"
+arm "N22-alias-quoted-word" 77 "$SHARED" -- q -- tracked.txt
+still_dirty && assert "N22-alias-quoted-word" "git splits aliases with shell quoting, so a quoted word still resolves" 0 ||
+  assert "N22-alias-quoted-word" "git splits aliases with shell quoting, so a quoted word still resolves" 1
+
+# The cap is fail-closed, and it is tested rather than trusted. git refuses a
+# cyclic alias itself, but this guard cannot tell a cycle from a chain deeper
+# than 10, and "it is probably the harmless one" is the reasoning the guard
+# exists to refuse.
+"$REAL_GIT" -C "$SHARED" config alias.loop1 loop2
+"$REAL_GIT" -C "$SHARED" config alias.loop2 loop1
+"$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+dirty "$SHARED"
+arm "U4-alias-cap" 78 "$SHARED" -- loop1 -- tracked.txt
+still_dirty && assert "U4-alias-cap" "an unresolvable alias is 78 and NOT RUN, not a passthrough" 0 ||
+  assert "U4-alias-cap" "an unresolvable alias is 78 and NOT RUN, not a passthrough" 1
 
 # R3. git rm deletes from the WORKING TREE, and was simply missing.
 dirty "$SHARED"
@@ -538,6 +629,11 @@ arm "P10-rm-cached-is-permitted" 0 "$SHARED" -- rm --cached -q tracked.txt
 # A `!`-alias needs no expansion here: any git it runs re-enters this shim on
 # PATH and is judged on its own merits. Passing it through is the correct
 # answer, not a gap.
+arm "P13-alias-to-safe-command" 0 "$SHARED" -- safe --porcelain
+[[ "$LAST_OUT" == *"tracked.txt"* ]] &&
+  assert "P13-alias-to-safe-command" "an alias resolving to status is permitted: the loop classifies, it does not blanket-refuse" 0 ||
+  assert "P13-alias-to-safe-command" "an alias resolving to status is permitted: the loop classifies, it does not blanket-refuse" 1
+
 arm "P11-shell-alias-passes-through" 0 "$SHARED" -- sh
 [[ "$LAST_OUT" == *"SHELL-ALIAS"* ]] &&
   assert "P11-shell-alias-passes-through" "a !-alias runs; its nested git is covered by re-entry, not by expansion" 0 ||
