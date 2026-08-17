@@ -1847,6 +1847,26 @@ it; keep that call.
 {{- end }}
 
 {{/*
+A value, as it should appear inside a diagnostic. Quoted, except when there is
+nothing to quote, in which case the word null - which is what YAML calls it.
+
+printf %q against a nil renders the literal text %!q(<nil>), and every one of the
+assertions below reaches nil by an ordinary route: a key present with no value
+("mode:" and nothing after it) parses to nil, and dig's default only covers the
+key being ABSENT. So the operator who writes the near-miss gets a message with a
+Go format error in the middle of it, at the exact moment they are trying to work
+out what the chart read. Missing and null then also print identically as "",
+which hides the difference between a key they did not write and a key they wrote
+wrong.
+
+toString alone is not the fix: it turns nil into the string "<nil>", and %q then
+quotes it into "<nil>", which reads as a value the operator supplied.
+*/}}
+{{- define "scion-hub.diagValue" -}}
+{{- if kindIs "invalid" . }}null{{ else }}{{ printf "%q" (toString .) }}{{ end }}
+{{- end }}
+
+{{/*
 Assertions on the settings document AS EMITTED.
 
 Deliberately run against the bytes parsed back from the rendered text rather
@@ -1886,7 +1906,7 @@ one way to turn a mount that merely refuses writes into a hard failure.
 Present is not enough; it has to be the value that stops migration, as a string.
 */}}
 {{- if ne (dig "schema_version" "" $doc) "1" }}
-{{- fail (printf "rendered settings.yaml must carry schema_version: \"1\" as a string, got %q. Without it the hub's lazy auto-migration can fire during operation, and it replaces the file with os.Rename, which returns EBUSY against the subPath mount this file is delivered through." (dig "schema_version" "" $doc)) }}
+{{- fail (printf "rendered settings.yaml must carry schema_version: \"1\" as a string, got %s. Without it the hub's lazy auto-migration can fire during operation, and it replaces the file with os.Rename, which returns EBUSY against the subPath mount this file is delivered through." (include "scion-hub.diagValue" (dig "schema_version" "" $doc))) }}
 {{- end }}
 {{- if not (dig "active_profile" "" $doc) }}
 {{- fail "rendered settings.yaml must set a non-empty top-level active_profile" }}
@@ -1984,19 +2004,19 @@ places any of them at the top level parses, installs, and is silently not read.
 {{- /* Hosted mode. Not a tuning knob: without it the server applies workstation
 defaults, takes auth-enabled from a development flag and binds 127.0.0.1. */}}
 {{- if ne (dig "server" "mode" "" $doc) "hosted" }}
-{{- fail (printf "rendered settings.yaml must set server.mode: hosted, got %q. Hosted mode cannot be disabled through this chart, config.extra included." (dig "server" "mode" "" $doc)) }}
+{{- fail (printf "rendered settings.yaml must set server.mode: hosted, got %s. Hosted mode cannot be disabled through this chart, config.extra included." (include "scion-hub.diagValue" (dig "server" "mode" "" $doc))) }}
 {{- end }}
 
 {{- /* HA preflight block 1, part 1: an explicit, operator-supplied hub ID. */}}
 {{- $emittedHubId := dig "server" "hub" "hub_id" "" $doc }}
 {{- if ne $emittedHubId .hubId }}
-{{- fail (printf "rendered settings.yaml has server.hub.hub_id: %q, which is not the value supplied in hub.hubId (%q). The hub ID is emitted verbatim and nothing, config.extra included, may substitute it." $emittedHubId .hubId) }}
+{{- fail (printf "rendered settings.yaml has server.hub.hub_id: %s, which is not the value supplied in hub.hubId (%s). The hub ID is emitted verbatim and nothing, config.extra included, may substitute it." (include "scion-hub.diagValue" $emittedHubId) (include "scion-hub.diagValue" .hubId)) }}
 {{- end }}
 
 {{- /* HA preflight block 1, part 2: the store. */}}
 {{- $emittedDriver := dig "server" "database" "driver" "" $doc }}
 {{- if ne $emittedDriver $root.Values.database.driver }}
-{{- fail (printf "rendered settings.yaml has server.database.driver: %q but database.driver is %q. Overriding the driver through config.extra bypasses the schema rules that depend on it, including the requirement for a GCS bucket under Postgres." $emittedDriver $root.Values.database.driver) }}
+{{- fail (printf "rendered settings.yaml has server.database.driver: %s but database.driver is %s. Overriding the driver through config.extra bypasses the schema rules that depend on it, including the requirement for a GCS bucket under Postgres." (include "scion-hub.diagValue" $emittedDriver) (include "scion-hub.diagValue" $root.Values.database.driver)) }}
 {{- end }}
 
 {{- /* HA preflight block 1, part 3: hub blob storage. GCS, and not the
@@ -2004,7 +2024,7 @@ Filestore share - workspace storage is a different subsystem under
 server.workspace_storage and does not satisfy this. */}}
 {{- if eq $emittedDriver "postgres" }}
 {{- if ne (dig "server" "storage" "provider" "" $doc) "gcs" }}
-{{- fail (printf "rendered settings.yaml must set server.storage.provider: gcs under Postgres, got %q. Local blob storage is not HA-safe and the hub refuses to start. This is the hub's own blob store; the Filestore workspace share does not satisfy it." (dig "server" "storage" "provider" "" $doc)) }}
+{{- fail (printf "rendered settings.yaml must set server.storage.provider: gcs under Postgres, got %s. Local blob storage is not HA-safe and the hub refuses to start. This is the hub's own blob store; the Filestore workspace share does not satisfy it." (include "scion-hub.diagValue" (dig "server" "storage" "provider" "" $doc))) }}
 {{- end }}
 {{- if not (dig "server" "storage" "bucket" "" $doc) }}
 {{- fail "rendered settings.yaml must set a non-empty server.storage.bucket under Postgres" }}
@@ -2073,13 +2093,13 @@ considered policy; one entry reads as a stub, and a stub is the only thing that
 ever gets converted.
 */}}
 {{- if dig "server" "hub" "public_url" "" $doc }}
-{{- fail (printf "rendered settings.yaml sets server.hub.public_url: %q. The chart refuses this key. It does not override the hub's base URL, it splits it: the agent endpoint reads server.hub.public_url, the OAuth redirect resolver never reads the settings file, and the two then disagree inside one process while both look correct. Set the base URL through hub.baseUrl, which the chart renders as SCION_SERVER_BASE_URL - the only source both resolvers honour, so they agree by construction. If you reached this through config.extra, remove server.hub.public_url from it." (dig "server" "hub" "public_url" "" $doc)) }}
+{{- fail (printf "rendered settings.yaml sets server.hub.public_url: %s. The chart refuses this key. It does not override the hub's base URL, it splits it: the agent endpoint reads server.hub.public_url, the OAuth redirect resolver never reads the settings file, and the two then disagree inside one process while both look correct. Set the base URL through hub.baseUrl, which the chart renders as SCION_SERVER_BASE_URL - the only source both resolvers honour, so they agree by construction. If you reached this through config.extra, remove server.hub.public_url from it." (include "scion-hub.diagValue" (dig "server" "hub" "public_url" "" $doc))) }}
 {{- end }}
 
 {{- /* The discriminator for the two auth modes. The subtree it selects is not
 rendered yet; see the comment in the rendered file. */}}
 {{- if ne (dig "server" "auth" "mode" "" $doc) $root.Values.auth.mode }}
-{{- fail (printf "rendered settings.yaml has server.auth.mode: %q but auth.mode is %q." (dig "server" "auth" "mode" "" $doc) $root.Values.auth.mode) }}
+{{- fail (printf "rendered settings.yaml has server.auth.mode: %s but auth.mode is %s." (include "scion-hub.diagValue" (dig "server" "auth" "mode" "" $doc)) (include "scion-hub.diagValue" $root.Values.auth.mode)) }}
 {{- end }}
 
 {{- /*

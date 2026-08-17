@@ -105,6 +105,27 @@ settings_block() {
     | sed -e 's/^    //' -e '/^[[:space:]]*#/d'
 }
 
+# Every YAML list item in a rendered manifest whose first key is "name: $2",
+# one line of output per item, the item's own keys joined with "; ". Item
+# boundaries are read from the indentation: the body of an item is every line
+# indented further than the "- " that opens it.
+#
+# This exists so that a check about one item cannot be answered by a neighbour's
+# keys. grep -A<n> reads a fixed window, and in a volumeMounts list the window
+# that reaches far enough into one entry has already entered the next.
+yaml_list_items() {
+  awk -v want="$2" '
+    function flush() { if (inblk) { print out; inblk = 0; out = "" } }
+    {
+      lead = $0; sub(/[^ ].*$/, "", lead); ind = length(lead)
+      if ($0 ~ "^ *- name: " want "$") { flush(); inblk = 1; base = ind; next }
+      if (inblk && ind <= base) { flush(); next }
+      if (inblk) { gsub(/^ +/, ""); out = out (out == "" ? "" : "; ") $0 }
+    }
+    END { flush() }
+  ' "$1"
+}
+
 # A render that MUST fail, and must fail for the stated reason. Asserting the
 # message and not just the exit status: a template that fails for an unrelated
 # reason would otherwise score as a passing negative test, which is the exact
@@ -116,8 +137,19 @@ expect_render_failure() {
     fail "$label: the render SUCCEEDED and was supposed to fail"
     return
   fi
+  # "%!" is Go's marker for a printf verb that could not render its argument -
+  # %!q(<nil>), %!d(string=x). It reaches an operator as line noise inside the
+  # one sentence that is supposed to tell them what the chart read, and it is
+  # invisible to a check that greps for the wording, because the wording is
+  # still there. Asserted inside this helper rather than beside one message, so
+  # a diagnostic added later is covered without anyone remembering to cover it.
   if grep -qF -- "$expected" <<<"$out"; then
-    pass "$label"
+    if grep -qF -- '%!' <<<"$out"; then
+      fail "$label: the message matched, but it contains a Go format error - a value reached printf in a type its verb cannot render"
+      printf '          got: %s\n' "$(tr '\n' ' ' <<<"$out" | cut -c1-300)"
+    else
+      pass "$label"
+    fi
   else
     fail "$label: failed, but not for the expected reason (wanted ${expected@Q})"
     printf '          got: %s\n' "$(tr '\n' ' ' <<<"$out" | cut -c1-300)"
@@ -483,20 +515,35 @@ done
 # change one line and nothing else; a chart that dropped a preflight key in one
 # mode would install and then fail at hub startup, naming the key but not the
 # reason it went missing.
-settings_block "$WORK/settings.yaml"      | sed 's/^\( *mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-a"
-settings_block "$WORK/settings-oauth.yaml" | sed 's/^\( *mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-b"
+#
+# The mask is anchored to server.auth.mode's exact indentation - four spaces, two
+# levels down - and not to any line spelling "mode:". server.mode: hosted is one
+# level up and would be masked by a looser pattern the day someone renders an
+# auth mode named hosted, and any future subtree with a mode key of its own would
+# be masked silently, which is the direction that hides a difference rather than
+# reporting one.
+settings_block "$WORK/settings.yaml"       | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-a"
+settings_block "$WORK/settings-oauth.yaml" | sed 's/^\(    mode: \)\(proxy\|oauth\)$/\1MASKED/' >"$WORK/auth-b"
 if diff -u "$WORK/auth-a" "$WORK/auth-b" >"$WORK/auth.diff"; then
   pass "the two auth modes render identical settings.yaml apart from auth.mode"
 else
   fail "switching auth.mode changed more than the auth subtree"
   cat "$WORK/auth.diff"
 fi
-# The mask has to have masked something, or the comparison above is comparing
-# two files that were never different.
-if grep -qxF '    mode: MASKED' "$WORK/auth-a" && grep -qxF '  mode: hosted' "$WORK/auth-a"; then
-  pass "the auth-mode mask matched auth.mode and left server.mode alone"
+# The mask has to have masked something, in both files, and exactly one line of
+# each - or the comparison above is either comparing two files that were never
+# different, or comparing two files it has flattened into agreement.
+masked_a="$(grep -cxF '    mode: MASKED' "$WORK/auth-a" || true)"
+masked_b="$(grep -cxF '    mode: MASKED' "$WORK/auth-b" || true)"
+if [[ "$masked_a" == 1 && "$masked_b" == 1 ]]; then
+  pass "the auth-mode mask matched exactly one line in each of the two renders"
 else
-  fail "the auth-mode mask did not match - the comparison above proves nothing"
+  fail "the auth-mode mask matched $masked_a lines in proxy mode and $masked_b in oauth mode, expected 1 and 1 - at 0 the comparison above proves nothing, and above 1 it is hiding a real difference"
+fi
+if grep -qxF '  mode: hosted' "$WORK/auth-a" && grep -qxF '  mode: hosted' "$WORK/auth-b"; then
+  pass "the auth-mode mask left server.mode alone"
+else
+  fail "server.mode: hosted is not present unmasked in both renders - either hosted mode is gone, or the mask reached a line it should not have"
 fi
 
 # --------------------------------------------------------------------------
@@ -873,10 +920,32 @@ for name in "${PERMUTATIONS[@]}"; do
   # The directory must NOT be read-only: storage/, templates/ and scion-token
   # are created in it at runtime. A read-only mount here breaks the hub for
   # reasons that have nothing to do with configuration.
-  if grep -A2 'name: scion-home' "$f" | grep -q 'readOnly: true'; then
+  #
+  # Read by list item and not by line window. readOnly sits at an unknown offset
+  # inside the item, so a window narrow enough to stay inside it (-A2) cannot
+  # reach the key it is looking for, and a window wide enough to reach it runs
+  # into the NEXT item - which is the settings mount, and which IS readOnly. A
+  # wider window here does not strengthen the check, it inverts it.
+  #
+  # Both directions are asserted from the same extractor: the state directory
+  # must not carry readOnly, the settings file must. An extractor that returned
+  # nothing would satisfy the first on its own; it fails the second.
+  mapfile -t home_items < <(yaml_list_items "$f" scion-home)
+  if [[ "${#home_items[@]}" -eq 2 ]]; then
+    pass "$name refers to the scion-home volume exactly twice, as a mount and as a volume"
+  else
+    fail "$name has ${#home_items[@]} scion-home list items, expected 2 (one volumeMount, one volume) - the read-only check below selects items by that name and passes vacuously against a rename"
+  fi
+  if [[ "${#home_items[@]}" -gt 0 ]] && printf '%s\n' "${home_items[@]}" | grep -q 'readOnly: *true'; then
     fail "$name mounts the hub's state directory read-only; only settings.yaml may be read-only"
   else
     pass "$name leaves the hub's state directory writable"
+  fi
+  settings_mount="$(yaml_list_items "$f" settings | grep -F 'subPath: settings.yaml' || true)"
+  if [[ -n "$settings_mount" ]] && grep -q 'readOnly: *true' <<<"$settings_mount"; then
+    pass "$name mounts settings.yaml read-only"
+  else
+    fail "$name does not mount settings.yaml read-only - the file is the one thing in that directory the hub may not write, and defaultMode 0444 alone does not stop a write by uid 0 or a rename by the owner"
   fi
   if grep -q 'fsGroup' "$f"; then
     fail "$name sets fsGroup: it is pod-wide, so it grants every sidecar read access, and it makes the kubelet recursively chown mounted volumes"
@@ -1225,6 +1294,40 @@ expect_render_failure \
   "which is not the value supplied in hub.hubId" \
   "${BASE[@]}" \
   --set config.extra.server.hub.hub_id=somethingelse
+
+# The near miss, which is the likelier mistake than the wrong value: a key
+# written with nothing after it. YAML parses that as null, not as absent, so
+# dig's default never applies and the value that reaches the diagnostic is nil.
+# Each of these is a case where the message used to read %!q(<nil>).
+#
+# The pair matters in both directions. The null cases prove the value is
+# rendered as null rather than as a format error; the wrong-value case beside
+# them proves a real value is still quoted, so a diagValue that had degenerated
+# into printing "null" for everything - which would satisfy every check above,
+# since %! would be gone - fails here.
+expect_render_failure \
+  "a null schema_version is reported as null, not as a format error" \
+  'as a string, got null.' \
+  "${BASE[@]}" \
+  --set config.extra.schema_version=null
+
+expect_render_failure \
+  "a null server.mode is reported as null, not as a format error" \
+  'server.mode: hosted, got null.' \
+  "${BASE[@]}" \
+  --set config.extra.server.mode=null
+
+expect_render_failure \
+  "a null hub_id is reported as null on one side and quoted on the other" \
+  'server.hub.hub_id: null, which is not the value supplied in hub.hubId ("neg").' \
+  "${BASE[@]}" \
+  --set config.extra.server.hub.hub_id=null
+
+expect_render_failure \
+  "a non-null wrong value is still quoted, not reported as null" \
+  'as a string, got "2".' \
+  "${BASE[@]}" \
+  --set-string config.extra.schema_version=2
 
 # The base URL cannot be split in two. This is NOT a hypothetical guard against a
 # future template line: config.extra is deep-merged over the settings tree before
