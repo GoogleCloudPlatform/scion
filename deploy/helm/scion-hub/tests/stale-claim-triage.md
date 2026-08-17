@@ -471,7 +471,7 @@ inside quoted historical output, the `118`/`252` in §3's block — **I took his
 first treatment: in the denominator, and they pass, because the block is
 SHA-pinned.**
 
-**77 mechanical assertions over this file's self-claims. 77 run. 14 corrected**,
+**78 mechanical assertions over this file's self-claims. 78 run. 14 corrected**,
 plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
 so it is out by the definition above, and it is fixed here only because `gd-em`
 folded it into this commit. No category came back empty. **A is zero as a
@@ -485,7 +485,7 @@ appears without a SHA on the same line.
 | **B** | counts of a token in this same file | 18 | 5 |
 | **C** | positional claims about this same file | 14 | 2 |
 | **D** | cardinalities about this file's own tables | 15 | 3 |
-| **E** | claims about the instrument that measured it | 22 | 3 |
+| **E** | claims about the instrument that measured it | 23 | 3 |
 | **F** | this section's own description of the harness | 7 | — (never checked before) |
 
 Subjects: `git show <sha>:<path>` at `5ebe3dab`, `38a41b6e` and `6fc0cdfc`, never
@@ -565,12 +565,17 @@ reason this paragraph has a table in it.)*
 **Why the path is spelled out anyway.** `type grep` here resolves to a shell
 function in a snapshot under `~/.claude/shell-snapshots/`. ⚠️ **The filename in
 that directory is per-agent — do not copy one out of a message and look for it;
-run `type grep`, which prints the file it is defined in.** Three agents compared
-three different filenames whose flag line is byte-identical, so the flag list has
-three arms and the *path* has none. **A citation to a path that does not exist in
-the reader's container returns "no such file" and reads as "the wrapper is
-absent" — an all-clear delivered through a reference.** (`gke-deploy-lead`, on its
-own broadcast.) The body is
+run `type grep`, which prints the file it is defined in.** **A citation to a path
+that does not exist in the reader's container returns "no such file" and reads as
+"the wrapper is absent" — an all-clear delivered through a reference.**
+(`gke-deploy-lead`, on its own broadcast.)
+
+**Cite the digest instead of the path** (`gd-p7-dev`'s proposal, adopted): the
+snapshot is **3692 bytes, `sha256 07a8387c9fd0faae…`**, and that value is
+byte-identical in **four containers** measured independently — `gd-doc`,
+`gd-p7-dev`, `ag-dev`, and this one. So the *contents* have four arms and the
+*path* has none, and one comparison settles every per-line citation between us
+instead of settling them one line at a time. Row `E22` asserts it. The body is
 
 ```
 ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files --hidden -I \
@@ -801,41 +806,78 @@ sweep is the first time anyone has checked even that much**; their agreement wit
 the sweeps that produced them is unverified and is not claimed.
 
 🔴 **And the harness has a portability defect that only matters the day it lands,
-so it is written down now rather than discovered then.** Five rows — E0, E2 and
-E19–E21 — read the shell snapshot, and **the snapshot directory is per-agent and
+so it is written down now rather than discovered then.** Six rows — E0, E2 and
+E19–E22 — read the shell snapshot, and **the snapshot directory is per-agent and
 does not exist on a CI runner.** They are facts about the container that did the
 measuring, not about the chart. Today that is correct and E0 fails closed if the
 snapshot is missing, which is the behaviour I want. **When `tests/` unfreezes,
-those five must move to a separately-invoked container-scoped harness — not be
+those six must move to a separately-invoked container-scoped harness — not be
 gated on the snapshot's presence, because a gate that skips when the file is
 absent is the fifth state wearing a green tick**, and this file's whole subject is
 checks that switch themselves off under the condition that makes them necessary.
 The other 72 rows read only `git show` and the working file and are portable.
 
+**One qualification on that, measured rather than assumed.** *Per-agent* here
+describes the **path**, not the **contents**: `E22` pins the snapshot at 3692
+bytes / `07a8387c9fd0faae…`, and four containers report that value independently.
+So these rows are not unreproducible between agents — they are unreproducible on
+**CI**, which has no such file at any path. That is a narrower defect than the one
+I wrote down first, and the remedy is the same either way.
+
 **Two things the harness does not measure, said here rather than left to be
 assumed.** The `$?` row above has a **wrapped** arm and the harness does not: the
 wrapped engine is `claude.exe` under a forged `argv[0]` and exists on no CI
 runner, so E14–E18 pin the three *portable* arms and the wrapped `0` is measured
-out-of-band, in this container, and is **not in the 77**. And the harness carries
+out-of-band, in this container, and is **not in the 78**. And the harness carries
 no `-z`, `-Z`, `--null`, `-print0` or `xargs -0` in any arm — the flags that drop
 a bare `grep` out of the wrapper's `case` and silently back onto stock grep. That
 is **read off the harness source, not asserted from memory**, and it is a fact
-about the harness rather than one of the 77, because a check for it inside the
+about the harness rather than one of the 78, because a check for it inside the
 file would match its own pattern.
 
 The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
-`df9a27ebb70813dc`, and is deliberately **not** committed: `tests/` is frozen at
-P0. It exits 0 on 77/77 under **both** engines, writes **0 lines of stderr**, and
+`ce2a5a4e2d503d39`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 78/78 under **both** engines, writes **0 lines of stderr**, and
 **exits 1 under a five-arm mutation battery**, each arm naming the row it broke,
 every arm at `stderr=0`:
 
 ```
-MM1  revert the §3 heading to "the two new findings"   rc=1  76/77   D8
-MM2  category B in the table above: 18 -> 17           rc=1  75/77   F-B, F7
-MM3  headline total: 77 -> 78                          rc=1  76/77   F7
-MM4  delete the F row entirely                         rc=1  75/77   F-F, F7
-MM5  mutate the $? fixture NEEDLE, not the document    rc=1  75/77   E14, E15
+BASE control, unmutated, must exit 0                   rc=0  78/78   (none)
+MM1  revert the §3 heading to "the two new findings"   rc=1  77/78   D8
+MM2  category B in the table above: decrement it       rc=1  76/78   F-B, F7
+MM3  headline total: increment it                      rc=1  77/78   F7
+MM4  delete the F row entirely                         rc=1  76/78   F-F, F7
+MM5  mutate the $? fixture NEEDLE, not the document    rc=1  75/78   E14, E15, E18
+RSTR control, restored, must exit 0 again              rc=0  78/78   (none)
 ```
+
+🔴 **Two of those five arms were dead when I re-ran them, and the battery said
+nothing.** `MM1` and `MM5` were stored as literal `sed` expressions; the text they
+matched had since been edited, so the `sed` changed nothing, the harness correctly
+found nothing wrong, and the arm printed `rc=0` — **which reads exactly like "the
+harness failed to catch this."** A battery arm that does not apply is
+indistinguishable from a harness miss, and it is the fifth state again: the
+instrument was absent and the absence was reported as a fact about the subject.
+
+**`MM3` was worse, and it is the one I want on the record.** It was specified as
+the literal pair *"headline total: 77 → 78"*. The true total then **became 78**.
+An arm whose mutant is the truth is a no-op that can never fail — **the subject
+drifted onto the mutant and disarmed it, silently, with no edit to the battery at
+all.** This is `gd-trig`'s self-reference rule (11:12) applying to *mutants*, not
+just to prose: a mutation named by literal value is a self-referential claim with
+the same expiry.
+
+Both are fixed the same way and the fix is cheap. **Arms are now specified as
+operations** — *increment the total*, *decrement that cell* — read off the file at
+run time, so they cannot go stale against it. **And every arm now carries a
+positive control on its own mutation**: it `cmp`s the target against the pristine
+copy and reports `DEAD ARM` rather than a result if the file did not move.
+`BASE` and `RSTR` are the inverse control — they assert the target is *unchanged*
+and that the harness still exits 0, so a battery that leaves debris behind cannot
+report success. **The battery is the instrument that checks the instrument, and
+until 11:31 it was the only thing here with no controls on it** — `gd-prec`'s
+point that a probe's denominator is the axes you thought of, arriving one level
+further up than I had been looking.
 
 **MM5 is the (p1) arm and it is the only one that mutates the instrument's input
 rather than the document.** A differential is blind to needle mutation: change the
