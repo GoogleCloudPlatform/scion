@@ -778,8 +778,8 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 	var body struct {
 		Content        string   `json:"content"`
-		Attachments    []string `json:"attachments,omitempty"`    // W7: attachment IDs
-		ReplyToID      string   `json:"reply_to_id,omitempty"`   // Phase-3: reply/quote
+		Attachments    []string `json:"attachments,omitempty"` // W7: attachment IDs
+		ReplyToID      string   `json:"reply_to_id,omitempty"` // Phase-3: reply/quote
 		IdempotencyKey string   `json:"idempotency_key,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
