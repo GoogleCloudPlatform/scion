@@ -345,9 +345,11 @@ done
 # replacing the coverage.
 EXPECTED_VERIFY_ASSERTIONS=283
 # hack/ IS OUTSIDE THIS DIRECTORY, SO THE FILE SCAN BELOW CANNOT SEE IT, AND
-# NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Two
-# files, both stated: verify.sh, gated below, and run-all-mutations.sh, which is
-# the driver that produces the MM table at the top of this file. That driver is
+# NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Four
+# entries, all stated: verify.sh, gated below; run-all-mutations.sh, which is
+# the driver that produces the MM table at the top of this file;
+# trigger-entry-c.sh with its fixtures/ directory, gated further down; and
+# ha-gates.txt, the derived artifact, checked with its producer. That driver is
 # not run from here - it copies this tree ten times and each copy runs this
 # script, so it would recurse and it takes minutes - but its ABSENCE is reported,
 # because the MM table was already stale once and the reason was that its
@@ -480,6 +482,49 @@ else
     else
       echo ">>> cmd/helm_chart_ha_contract_test.go: ok (${_ct} tests; hack/ha-gates.txt re-derived and unchanged)"
     fi
+  fi
+fi
+
+# --- gate 7: trigger registry, ENTRY C --------------------------------------
+# 🔴 THIS GATE RUNS THE OBLIGATION HALF ONLY, AND THAT IS NOT A LIMITATION TO BE
+# FIXED LATER. Entry C's PREDICATE is the state of a Google Cloud project -
+# whether the 403s recorded in VALIDATION.md section 7.2 have stopped. Nothing
+# in a checkout can observe that, so `trigger-entry-c.sh predicate` needs live
+# credentials and is deliberately NOT invoked here. It is the one entry in the
+# registry that chart CI cannot evaluate, and this comment is the place that
+# says so, because the file that says it is the file somebody reads.
+#
+# WHAT IS RUN IS THE SYNTHETIC CONTROL. A trigger predicate cannot have a
+# positive control in production - the only world exercising its true branch is
+# the world it exists to catch - so the self-test drives the obligation
+# evaluator over a committed true/false fixture pair, an absent path and a
+# renumbered document, and requires three DIFFERENT exit codes out of it.
+#
+# THE ANTI-VACUITY ARM IS THE ONE TO NOT DELETE: an absent VALIDATION.md exits
+# 2, never 0. Deleting the file is the cheapest way to stop it saying UNRUN,
+# and a check that rewarded that would be worse than no check at all.
+#
+# Not summed into EXPECTED_ASSERTIONS for the same reason hack/verify.sh is
+# not: it is not one of the enumerated tests/ scripts. It carries its own
+# committed number, failing in both directions.
+EXPECTED_ENTRY_C_ASSERTIONS=5
+_entry_c="${HERE}/../hack/trigger-entry-c.sh"
+if [ ! -f "$_entry_c" ]; then
+  note "hack/trigger-entry-c.sh is missing. Trigger registry Entry C - the Phase 2 IAM verification moving off UNRUN - then has no evaluator, and its obligation becomes a sentence in a document rather than something that can go red. Restore it, or retire Entry C from the registry deliberately."
+else
+  _ecout="$(bash "$_entry_c" selftest 2>&1)"; _ecrc=$?
+  _ecn="$(printf '%s\n' "$_ecout" | sed -n 's/^ASSERTIONS_EXECUTED=\([0-9]*\)$/\1/p' | tail -1)"
+  if [ -z "$_ecn" ]; then
+    note "hack/trigger-entry-c.sh emitted no assertion count, so its ${EXPECTED_ENTRY_C_ASSERTIONS} control arms cannot be shown to have run."
+  elif [ "$_ecn" -ne "$EXPECTED_ENTRY_C_ASSERTIONS" ]; then
+    note "hack/trigger-entry-c.sh executed ${_ecn} arms, expected exactly ${EXPECTED_ENTRY_C_ASSERTIONS}."
+  fi
+  if [ "$_ecrc" -ne 0 ]; then
+    echo ">>> hack/trigger-entry-c.sh: FAILED (exit ${_ecrc})"
+    printf '%s\n' "$_ecout" | grep -E '^(FAIL|HARNESS)' | sed 's/^/    /'
+    real_failure=1
+  else
+    echo ">>> hack/trigger-entry-c.sh: ok (${_ecn} control arms; Entry C obligation OPEN, as it should be today)"
   fi
 fi
 

@@ -516,7 +516,15 @@ step "kubeconform's positive control: manifests it MUST reject"
 kc_dep="$WORK/kc-deployment.yaml"
 awk '/^# Source: scion-hub\/templates\/deployment\.yaml$/{f=1} f{ if ($0=="---") exit; print }' \
   "$WORK/settings.yaml" >"$kc_dep"
-if [[ ! -s "$kc_dep" ]] || ! grep -q '^kind: Deployment$' "$kc_dep" || ! grep -q 'initContainers:' "$kc_dep"; then
+# DIALECT NAMED PER PATTERN, NOT PER FILE. -E on the first because ^ and $ are
+# anchors that must stay anchors; -F on the second because "initContainers:" is
+# a literal and -F is the only flag that cannot reinterpret it. Adding -E to
+# both would be the mechanical fix and it is the wrong one: GNU BRE's \| \? \+
+# are operators under -G and literals under -E, so a blanket -E converts
+# correct BRE patterns into confident zeros. Neither pattern here contains a
+# metacharacter that differs between the two dialects, so this changes no
+# result - it labels an instrument that was already reading correctly.
+if [[ ! -s "$kc_dep" ]] || ! grep -Eq '^kind: Deployment$' "$kc_dep" || ! grep -qF 'initContainers:' "$kc_dep"; then
   meta_failure "could not extract this chart's Deployment (with its proxy initContainers) from the settings render, so the control below would be validating something other than the chart."
 fi
 

@@ -565,8 +565,17 @@ cloudsql:
     #   docker-content-digest: sha256:825d5e4ce70d38bd0006c9eea15a6a2e2983e87b31ac6924d33e2dba56eafc9f
     #
     # It is the multi-arch index digest, so it resolves on amd64 and arm64
-    # alike. The image runs as uid 65532 with no shell, which is what lets it
-    # satisfy this pod's runAsNonRoot without a per-container exemption.
+    # alike.
+    #
+    # THE IMAGE DECLARES USER 65532 AND THE PROXY DOES NOT RUN AS IT. This pod
+    # sets runAsUser at pod level from hub.securityContext.runAsUser (1000 by
+    # default), and a pod-level runAsUser is inherited by every container and
+    # cannot be unset for one of them - only overridden. So the proxy runs as
+    # 1000. It satisfies runAsNonRoot either way, which is why no per-container
+    # exemption is needed, but the reason is the pod's uid and not the image's.
+    # An earlier draft of this comment said the opposite; it was reading the
+    # image and not the rendered pod. What actually happens at runtime is
+    # UNVERIFIED - see VALIDATION.md section 7.4.
     digest: sha256:825d5e4ce70d38bd0006c9eea15a6a2e2983e87b31ac6924d33e2dba56eafc9f
     pullPolicy: IfNotPresent
 
