@@ -48,7 +48,6 @@ set -u -o pipefail
 
 SHA="${1:?usage: verify-failopen.sh <sha>}"
 REPO="${REPO:-$(git rev-parse --show-toplevel 2>/dev/null || echo /workspace)}"
-NOHELM_PATH="/usr/bin:/bin"
 
 # The toolchain is DISCOVERED, never assumed at a path. An earlier draft of this
 # file hardcoded /tmp/linux-amd64 -- the author's container -- which is the same
