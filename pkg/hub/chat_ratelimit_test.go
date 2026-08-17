@@ -16,7 +16,6 @@ package hub
 
 import (
 	"fmt"
-	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -242,7 +241,20 @@ func TestChatSendLimiter_UnknownClassIsLimitedAtTheStrictestRate(t *testing.T) {
 	lim := newChatSendLimiterWithClock(clock.Now)
 
 	const unknown = chatSenderClass(99)
-	strictest := math.Min(chatSendHumanRatePerMinute, chatSendAgentMirrorRatePerMinute)
+	// Derive the expectation from the rate set the limiter was actually built
+	// with, not from a hand-picked subset of the constants: a test that decides
+	// for itself which rates count drifts from production the day one of the
+	// others becomes the smallest, and fails for a reason that reads like a bug
+	// in the limiter.
+	strictest := 0.0
+	for _, rate := range lim.ratesPerMinute {
+		if strictest == 0 || rate < strictest {
+			strictest = rate
+		}
+	}
+	if strictest == 0 {
+		t.Fatal("the production limiter was built with no rates at all")
+	}
 	if got := lim.limitFor(unknown); got != strictest {
 		t.Fatalf("limitFor(unknown) = %v, want the strictest configured rate %v", got, strictest)
 	}

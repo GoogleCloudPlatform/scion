@@ -536,12 +536,19 @@ describe('scion-chat-thread initial scroll position', () => {
     await flushRefetch(el);
 
     expect(scrollWrites.filter((w) => w.top === SCROLL_HEIGHT)).toEqual([]);
+  });
 
-    // Positive control, same flush sequence: with the user re-pinned the very
-    // same event must produce a scroll. Without this, a future change to the
-    // timing above silently returns the negative assertion to vacuity.
-    (el as unknown as { pinnedToBottom: boolean }).pinnedToBottom = true;
+  // Positive control for the test above. It has to run on its own element:
+  // sharing one with the negative phase lets that phase's still-in-flight
+  // refetch land inside this window, so the control passes on someone else's
+  // scroll and stops noticing whether flushRefetch is long enough. Keep the
+  // flush sequence identical to the negative case — that is the whole point.
+  it('positive control: a pinned user IS scrolled by the same refetch', async () => {
+    const el = await mountWithHistory();
+    scrollWrites = [];
+
     emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm5' });
+    await vi.waitFor(() => expect(historyCalls()).toBeGreaterThan(0));
     await flushRefetch(el);
 
     expect(
