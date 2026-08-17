@@ -614,12 +614,33 @@ func TestOneShotTimerFiresAtCorrectTime(t *testing.T) {
 		t.Error("expected FiredAt to be set")
 	}
 
-	// Timer should have been removed from the in-memory map
-	s.mu.Lock()
-	_, exists := s.timers["timer-1"]
-	s.mu.Unlock()
-	if exists {
-		t.Error("timer should have been removed from in-memory map after firing")
+	// Timer should have been removed from the in-memory map. The scheduler
+	// writes the fired status inside fireEvent and only then takes s.mu to
+	// delete the map entry, so the status poll above is a signal raised
+	// BEFORE the removal — asserting removal immediately after it is a race.
+	// Wait on the condition actually being asserted instead, bounded by a
+	// timeout that fails the test when it expires.
+	//
+	// The bound is sized against a gap of one mutex acquire, which holds only
+	// because this mock store is not a store.ScheduledEventClaimer: for a
+	// claimer, fireEvent sets the status BEFORE running the handler, and the
+	// handler gets 30s, so the status would precede the removal by far more
+	// than this bound. Raise it if the mock ever gains ClaimScheduledEvent.
+	const removalTimeout = 2 * time.Second
+	removalDeadline := time.After(removalTimeout)
+	for {
+		s.mu.Lock()
+		_, exists := s.timers["timer-1"]
+		s.mu.Unlock()
+		if !exists {
+			break
+		}
+		select {
+		case <-removalDeadline:
+			t.Fatalf("timer should have been removed from in-memory map after firing (still present after %s)", removalTimeout)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
