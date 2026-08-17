@@ -192,6 +192,49 @@ describe('ChatUnreadCounter', () => {
     }
   });
 
+  it('keeps the thread count moving while DM pushes arrive on every message', async () => {
+    // The scenario this phase exists to serve: a busy conversation while the
+    // user is elsewhere. chat.ts calls loadUnreadDMPeers() — and so
+    // setDMUnread() — on *every* inbound message, while the rail's own reload
+    // is debounced at 2s and reset by each message. If a DM push cancels the
+    // pending refresh, nothing is left to advance the space half and the
+    // thread count in the tab title freezes for as long as the burst lasts.
+    vi.useFakeTimers();
+    let serverSpaces: UnreadSpace[] = [{ unreadCount: 0 }];
+    let serverDMs: UnreadDM[] = [];
+    apiFetch.mockImplementation((url: string) => {
+      const body = url.includes('/chat/dms') ? { dms: serverDMs } : { spaces: serverSpaces };
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    });
+
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getUnreadBadge()).toBe(0);
+
+    try {
+      // Threads go unread during the burst, and so does one DM.
+      serverSpaces = [{ unreadCount: 3 }, { unreadCount: 1 }];
+      serverDMs = [{ hasUnread: true }];
+
+      for (let i = 0; i < 10; i++) {
+        stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+        // Messages arrive closer together than the refresh debounce.
+        await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS / 2);
+        counter.setDMUnread(serverDMs);
+      }
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS * 4);
+
+      const spaceHalf = countUnreadSpaces(serverSpaces);
+      // Guard: if the fixture ever drifts to zero unread threads the assertion
+      // below would pass without the space half being under test at all.
+      expect(spaceHalf).toBeGreaterThan(0);
+      expect(getUnreadBadge()).toBe(spaceHalf + countUnreadDMs(serverDMs));
+    } finally {
+      counter.stop();
+    }
+  });
+
   it('stops listening after stop()', async () => {
     vi.useFakeTimers();
     mockChatApi([], []);

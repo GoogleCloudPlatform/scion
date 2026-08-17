@@ -102,11 +102,17 @@ export class ChatUnreadCounter {
     this.cancelPending();
   }
 
-  /** DM half, from data the chat page already loaded. */
+  /**
+   * DM half, from data the chat page already loaded.
+   *
+   * Deliberately does not cancel a pending refresh, unlike `setSpaceUnread`:
+   * this owns only `dmUnread`, and the refresh it would cancel also carries
+   * the space half. The chat page pushes DMs in on every inbound message, so
+   * cancelling here starves the thread count for the whole of a busy burst.
+   */
   setDMUnread(dms: readonly UnreadDM[]): void {
     this.dmUnread = countUnreadDMs(dms);
     this.publish();
-    this.cancelPending();
   }
 
   /** Coalesces a burst of events into a single refresh. */
