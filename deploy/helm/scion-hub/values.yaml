@@ -421,4 +421,34 @@ auth:
   # generated per process. That fallback is fatal across replicas - each pod
   # signs tokens the others reject - and it is silent, so it presents as
   # intermittent logouts rather than as a configuration error.
-  requireStableSigningKey: true
+  #
+  # DEFAULTED false, AND IT WILL BECOME true IN THE SESSION-SECRET PHASE. Not a
+  # judgement that the protection is unwanted - it is that in THIS release
+  # nothing can satisfy it. The hub resolves a stable key from, in order: a
+  # pre-configured key, SharedSigningSecret, a secret backend, then the store
+  # (pkg/hub/server.go:1445). SharedSigningSecret is resolveSessionSecret()
+  # (cmd/server_foreground.go:1556), which reads only --session-secret,
+  # SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET
+  # (cmd/server_foreground.go:1452-1462) - it has no settings-file source at
+  # all, and this chart renders none of the three. On a first boot the store is
+  # empty too. So with true there is no key to find, and pkg/hub/server.go:1634
+  # returns an error that pkg/hub/server.go:1008 makes fatal and
+  # cmd/server_foreground.go:259 turns into log.Fatalf.
+  #
+  # MEASURED through the real hub.New, not read: ServerConfig{RequireStableSigningKey:
+  # true} refuses; adding only SharedSigningSecret makes the same call succeed.
+  # The missing session secret is the entire difference. Four of the five ci
+  # permutations rendered "true" and none rendered a secret, so four of five
+  # could not start - including minimal, which the rest of this chart's prose
+  # points at as the safe one.
+  #
+  # The harm the true setting prevents - replicas signing tokens each other
+  # reject - needs a replica set this release cannot start one member of. It
+  # arrives with the secret, so the two should arrive together. A guard that
+  # nothing can satisfy is worse than no guard, because it teaches operators to
+  # turn guards off.
+  #
+  # tests/chart-integrity.sh asserts the flip: the day the default render gains
+  # a session-secret source, the LANDING limb fails and stays failing until this
+  # line reads true.
+  requireStableSigningKey: false

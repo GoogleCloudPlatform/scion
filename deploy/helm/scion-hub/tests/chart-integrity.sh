@@ -47,8 +47,9 @@ BASE=(--set image.repository=example.invalid/scion-hub --set hub.hubId=h --set h
 
 # HELD AT 26 ON PURPOSE, AND THIS SCRIPT THEREFORE EXITS 2.
 #
-# The true Phase 1 figure is 30: 26 as adopted, +2 kinds (ConfigMap, Secret) in
-# section B, +2 files (configmap-env.yaml, secret-settings.yaml) in section C.
+# The true Phase 1 figure is 35: 26 as adopted, +2 kinds (ConfigMap, Secret) in
+# section B, +2 files (configmap-env.yaml, secret-settings.yaml) in section C,
+# +5 in section E (the signing-key flip).
 # Nothing FAILS -- every assertion the chart is accused by passes. The only red
 # is this number.
 #
@@ -57,8 +58,8 @@ BASE=(--set image.repository=example.invalid/scion-hub --set hub.hubId=h --set h
 # this harness means "the run is not evidence", which is exactly the status of a
 # count that has been deliberately not committed -- so leaving it wrong is the
 # honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
-# warned about. Lifting the hold is a two-line change: 26 -> 30 here, and
-# 107 -> 111 in run-all.sh, in one diff.
+# warned about. Lifting the hold is a two-line change: 26 -> 35 here, and
+# 107 -> 116 in run-all.sh, in one diff.
 EXPECTED_TOTAL=26
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
@@ -376,6 +377,203 @@ else
     echo "          sites - _helpers.tpl:835 and :1089 - IN THE SAME DIFF. Bumping the"
     echo "          constant alone leaves the chart lying to operators in its own error text."
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# E. The signing-key flip.  (5 assertions)
+#
+# WHAT THIS PROTECTS, AND IT IS NOT THE FIX.
+#
+# auth.requireStableSigningKey defaults to false in this release because nothing
+# in this release can satisfy true: the hub resolves a stable key from a
+# pre-configured key, SharedSigningSecret, a secret backend or its store
+# (pkg/hub/server.go:1445), SharedSigningSecret comes only from --session-secret,
+# SCION_SERVER_SESSION_SECRET or bare SESSION_SECRET
+# (cmd/server_foreground.go:1452-1462), and the chart renders none of the three.
+# With true and no key, pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008
+# makes it fatal, cmd/server_foreground.go:259 calls log.Fatalf.
+#
+# The failure mode this section exists for is the OPPOSITE one, and it is the
+# one a check written to protect the fix will miss: the session-secret phase
+# lands the Secret and nobody flips the default back. A `false` default satisfies
+# every negative assertion vacuously and forever. So the LANDING limb is keyed to
+# the DEFAULT RENDER, not to the permutation set, and it goes red the day the
+# default render gains a source and stays red until this default reads true.
+#
+# Keyed to the default deliberately: an operator who supplies their own secret
+# and leaves the flag false is doing something legitimate and must not trip it.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_RENDER="$("$HELM" template t "$CHART" "${BASE[@]}" 2>&1)"
+
+# THE SUBJECT IS THE RENDER WITH FULL-LINE COMMENTS REMOVED, AND THAT IS NOT
+# TIDINESS - IT IS THE DIFFERENCE BETWEEN RED AND GREEN TODAY.
+#
+# configmap-env.yaml documents this exact mechanism in a plain YAML `#` comment,
+# which means the comment RENDERS, which means the default render contains the
+# string SCION_SERVER_SESSION_SECRET right now. A naive probe reads that as "the
+# default render carries a session-secret source", the LANDING limb then demands
+# the default be flipped to true, and the chart would be driven into precisely
+# the boot failure this whole section exists to prevent - by a detector satisfied
+# by a sentence ABOUT sources. Same shape as section D's quotation problem: the
+# explanatory prose and the thing it describes have identical bytes.
+#
+# FULL-LINE comments only - first non-space character is `#`. A trailing comment
+# after a value is left alone, because `#` inside a quoted YAML scalar is legal
+# and stripping to end-of-line would delete real content. Under-stripping yields
+# a false RED, which is the safe direction; over-stripping would yield a false
+# GREEN. An env var name and an argv flag are never on a full-line comment.
+#
+# LOAD-BEARING TODAY, MEASURED, NOT ASSERTED. On the default render at this head:
+#   with the stripper:    (no sources)
+#   without the stripper: --session-secret SCION_SERVER_SESSION_SECRET SESSION_SECRET
+# So the corpus is its own coverage control - remove the stripper and E5 goes red
+# immediately, and its remedy text tells you to set the default to true, which is
+# the log.Fatalf. A detector that recommends the harm is worse than no detector.
+_strip_comment_lines() { grep -v '^[[:space:]]*#'; }
+
+_secret_sources() { # stdin = render text; stdout = space-separated distinct tokens
+  _strip_comment_lines \
+    | grep -oE 'SCION_SERVER_SESSION_SECRET|SESSION_SECRET|--session-secret' \
+    | sort -u | tr '\n' ' '
+}
+
+# BOTH CONTROLS ARE META-FAILURES (exit 2), NOT ASSERTIONS, for section D's
+# reason: a broken stripper does not make the CHART wrong, it makes this run not
+# evidence.
+#
+# CONTROL 1 - the apparatus fires. A full-line comment naming a source vanishes.
+# The fixture is the real line out of today's default render, not an invention.
+if printf '%s\n' '  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET' \
+     | _secret_sources | grep -q .; then
+  echo "META-FAILURE: the comment stripper did not strip a full-line YAML comment." >&2
+  echo "  The LANDING limb would read the chart's own documentation as a secret source" >&2
+  echo "  and demand a default flip that makes every pod log.Fatalf on first boot." >&2
+  exit 2
+fi
+# CONTROL 2 - the apparatus does not over-fire, and this is the twin that
+# matters. A stripper that deleted everything passes control 1 perfectly and
+# silences the real thing. Three fixtures because the three source spellings sit
+# at three different indents and one of them is an argv element.
+#
+# THE DENOMINATOR IS ASSERTED, NOT DISPLAYED (gd-em, 08:22). Both loops below
+# score "no misses" over whatever the heredoc contains, and an empty heredoc
+# yields no misses - the vacuous green, reproduced inside the control written to
+# prevent it. So each loop counts what it evaluated and the count is committed.
+_c2_missed=""
+_c2_seen=0
+while IFS= read -r _line; do
+  [ -z "$_line" ] && continue
+  _c2_seen=$((_c2_seen+1))
+  printf '%s\n' "$_line" | _secret_sources | grep -q . || _c2_missed="${_c2_missed}
+    ${_line}"
+done <<'EOF'
+        - name: SCION_SERVER_SESSION_SECRET
+          key: SESSION_SECRET
+        - --session-secret=$(HUB_SESSION_SECRET)
+  value: "x"  # not a comment line: SESSION_SECRET named after a real value
+EOF
+if [ "$_c2_seen" -ne 4 ]; then
+  echo "META-FAILURE: control 2 evaluated ${_c2_seen} fixtures, expected exactly 4." >&2
+  echo "  A control that evaluated nothing reports the same green as one that passed." >&2
+  exit 2
+fi
+if [ -n "$_c2_missed" ]; then
+  echo "META-FAILURE: the comment stripper removed lines that are not comments:${_c2_missed}" >&2
+  echo "  The LANDING limb would report green by deleting its own subject." >&2
+  exit 2
+fi
+
+# --- E1. POSITIVE. Written before the negative, on purpose. -----------------
+# The probe can find a source when one exists. Without this every limb below is
+# satisfiable by a probe that finds nothing ever, which is the vacuous pass this
+# project has shipped twice. Seeded with the three shapes the session-secret
+# phase can plausibly render: a container env entry, a key inside the Secret it
+# creates (envFrom means the NAME appears in the Secret, not in the Deployment),
+# and the argv flag.
+_e1_missed=""
+_e1_seen=0
+while IFS= read -r _line; do
+  [ -z "$_line" ] && continue
+  _e1_seen=$((_e1_seen+1))
+  printf '%s\n' "$_line" | _secret_sources | grep -q . || _e1_missed="${_e1_missed} [${_line}]"
+done <<'EOF'
+            - name: SCION_SERVER_SESSION_SECRET
+  SCION_SERVER_SESSION_SECRET: c2VjcmV0
+            - --session-secret=$(HUB_SESSION_SECRET)
+        - name: SESSION_SECRET
+EOF
+if [ "$_e1_seen" -ne 4 ]; then
+  echo "META-FAILURE: E1 evaluated ${_e1_seen} seeded fixtures, expected exactly 4." >&2
+  echo "  An empty seed list scores 'no misses' - the vacuous green, inside the check" >&2
+  echo "  written to prevent it. The denominator is asserted, not displayed." >&2
+  exit 2
+fi
+if [ -z "$_e1_missed" ]; then
+  pass "session-secret probe finds all ${_e1_seen} seeded source shapes"
+else
+  fail "session-secret probe MISSED seeded source(s):${_e1_missed} -- every limb below is vacuous"
+fi
+
+# --- E2. NEGATIVE. The chart refuses an unsatisfiable true. -----------------
+# Asserting the error TEXT, not merely a non-zero exit: several `fail`s and the
+# schema also exit non-zero, so "it was rejected" alone does not prove THIS guard
+# rejected it. The text asserted is the harm citation, because that is the part
+# an operator needs and the part a weakened message would drop first.
+_e2="$("$HELM" template t "$CHART" "${BASE[@]}" --set auth.requireStableSigningKey=true 2>&1)"
+if printf '%s' "$_e2" | grep -q 'auth.requireStableSigningKey is true' \
+   && printf '%s' "$_e2" | grep -q 'cmd/server_foreground.go:259'; then
+  pass "chart refuses requireStableSigningKey=true with no secret source, citing the log.Fatalf"
+else
+  fail "chart did NOT refuse requireStableSigningKey=true, or the refusal stopped naming its harm"
+  printf '%s\n' "$_e2" | sed 's/^/        | /' | head -3
+fi
+
+# --- E3. POSITIVE TWIN OF E2. The guard is not refusing everything. ---------
+# config.existingSecret is the one shape where true is satisfiable: the operator
+# writes their own settings.yaml and can configure server.secrets there. Without
+# this assertion, a guard hardened into an unconditional refusal scores E2 green.
+_e3="$("$HELM" template t "$CHART" "${BASE[@]}" --set auth.requireStableSigningKey=true \
+         --set config.existingSecret=operator-settings 2>&1)"
+if printf '%s\n' "$_e3" | grep -q 'SCION_REQUIRE_STABLE_SIGNING_KEY: "true"'; then
+  pass "requireStableSigningKey=true is permitted under config.existingSecret"
+else
+  fail "requireStableSigningKey=true was refused even under config.existingSecret -- the guard is unconditional"
+  printf '%s\n' "$_e3" | sed 's/^/        | /' | head -3
+fi
+
+# --- E4. NON-VACUITY, on the render E5 reads. -------------------------------
+# E5 compares two things it reads out of _DEFAULT_RENDER. If that render is empty
+# or has lost the key, E5's comparison is between two absences and passes. This
+# is the assertion that makes E5 mean something.
+_e4_flag="$(printf '%s\n' "$_DEFAULT_RENDER" | sed -n 's/^[[:space:]]*SCION_REQUIRE_STABLE_SIGNING_KEY:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' | head -1)"
+if [ "$_e4_flag" = "true" ] || [ "$_e4_flag" = "false" ]; then
+  pass "default render carries SCION_REQUIRE_STABLE_SIGNING_KEY (= \"${_e4_flag}\")"
+else
+  fail "default render does NOT carry a readable SCION_REQUIRE_STABLE_SIGNING_KEY -- the LANDING limb below is vacuous"
+  printf '%s\n' "$_DEFAULT_RENDER" | sed 's/^/        | /' | head -3
+fi
+
+# --- E5. LANDING. The limb that fires when the secret arrives. --------------
+_e5_src="$(printf '%s\n' "$_DEFAULT_RENDER" | _secret_sources)"
+if [ -n "$_e5_src" ] && [ "$_e4_flag" = "false" ]; then
+  fail "THE SESSION SECRET HAS LANDED AND THE DEFAULT WAS NOT FLIPPED."
+  echo "        the default render now carries: ${_e5_src}"
+  echo "        values.yaml still defaults auth.requireStableSigningKey to false, so this"
+  echo "        release ships replicas that sign tokens each other reject - silently,"
+  echo "        presenting as intermittent logouts rather than as a configuration error."
+  echo "        SET IT TO true. This assertion stays red until you do."
+# THIS ARM IS UNREACHABLE FROM THE DEFAULT RENDER TODAY AND IS KEPT ANYWAY.
+# configmap-env.yaml's guard refuses true-without-existingSecret before any
+# manifest is produced, so a default of true makes the render fail outright and
+# E4 catches it first. The arm is here because that guard is one `{{- if }}` and
+# a future phase that relaxes it - to allow true under some new secret shape -
+# would otherwise silently remove the last check on this combination. Stated
+# rather than deleted so nobody counts it as coverage it is not providing.
+elif [ -z "$_e5_src" ] && [ "$_e4_flag" = "true" ]; then
+  fail "default is true but the default render carries no session-secret source -- every pod would log.Fatalf at cmd/server_foreground.go:259 on first boot"
+else
+  pass "signing-key default agrees with the default render's secret sources (flag=\"${_e4_flag}\", sources=${_e5_src:-none})"
 fi
 
 # ---------------------------------------------------------------------------
