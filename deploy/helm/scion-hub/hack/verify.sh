@@ -143,7 +143,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=261
+EXPECTED_TOTAL=274
 
 failures=0
 assertions=0
@@ -241,11 +241,30 @@ _hv="$("$HELM" version --short 2>>"$_tcerr" || echo unknown)"
 _kv="$("$KUBECONFORM" -v 2>>"$_tcerr" || echo unknown)"
 _hp="$(command -v "$HELM" 2>>"$_tcerr" || printf '%s' "$HELM")"
 _kp="$(command -v "$KUBECONFORM" 2>>"$_tcerr" || printf '%s' "$KUBECONFORM")"
-# The pipeline's status is `cut`'s, which is 0 even when sha256sum could not
-# read the file, so the empty string is the failure signal here and is named
-# rather than left to print as a blank field.
-_hs="$(sha256sum "$_hp" 2>>"$_tcerr" | cut -d' ' -f1)"; _hs="${_hs:-unreadable}"
-_ks="$(sha256sum "$_kp" 2>>"$_tcerr" | cut -d' ' -f1)"; _ks="${_ks:-unreadable}"
+# `|| true` IS LOAD-BEARING AND THIS BLOCK WAS FATAL WITHOUT IT (gd-p1-rev, RQ-3,
+# round 5). The comment that used to sit here said "the pipeline's status is
+# `cut`'s, which is 0 even when sha256sum could not read the file, so the empty
+# string is the failure signal". BOTH CLAUSES WERE WRONG, and in the one block
+# whose entire argument is that a run which cannot execute helm must still report
+# and keep going. Line 78 is `set -euo pipefail`: under pipefail the status is
+# sha256sum's, not cut's, and under `set -e` an assignment whose command
+# substitution exits non-zero ABORTS THE SCRIPT - so `; _hs="${_hs:-unreadable}"`
+# after the semicolon is a separate command that never ran.
+#
+# Trigger, and it is not exotic: helm resolved through an exported shell
+# function, so `command -v helm` returns the bare word `helm` and sha256sum has
+# no such file. That is the same "command -v answers IS THIS CALLABLE, not WHERE
+# IS THE BINARY" mechanism gd-em corrected fleet-wide at 12:22.
+#
+#   without `|| true`   rc 1, stdout 0 bytes, stderr 0 bytes. NOTHING AT ALL.
+#   with    `|| true`   rc 0, sha256=unreadable, pin=DIFFERS, and the banner's own
+#                       stderr row publishes "sha256sum: helm: No such file or
+#                       directory". 271/271.
+#
+# So the empty string is the failure signal BECAUSE `|| true` makes it one. It is
+# not a property of the pipeline. Do not remove the `|| true` to "tighten" this.
+_hs="$(sha256sum "$_hp" 2>>"$_tcerr" | cut -d' ' -f1 || true)"; _hs="${_hs:-unreadable}"
+_ks="$(sha256sum "$_kp" 2>>"$_tcerr" | cut -d' ' -f1 || true)"; _ks="${_ks:-unreadable}"
 _pin_verdict() {  # $1 = the sha256 this run resolved, $2 = the pinned sha256
   if [[ "$1" == "$2" ]]; then
     printf 'pin=MATCHES the chain above'
@@ -533,7 +552,7 @@ step "no SCION_SERVER_DATABASE_* or SCION_SERVER_OIDC_* variable is ever emitted
 # configuring the hub through env or stopped rendering, and either way the
 # refusal below is unearned.
 for name in "${PERMUTATIONS[@]}"; do
-  _env_names="$(grep -Eo 'SCION_SERVER_[A-Z_]+' "$WORK/$name.yaml" | sort -u | tr '\n' ' ')"
+  _env_names="$(grep -Eo 'SCION_SERVER_[A-Z_]+' "$WORK/$name.yaml" | sort -u | tr '\n' ' ' || true)"
   _env_names="${_env_names% }"
   if [[ -n "$_env_names" ]]; then
     pass "$name renders SCION_SERVER_ variables, so the refusal below has a subject [${_env_names}]"
@@ -621,7 +640,12 @@ step "hub.extraEnv refuses every variable the chart itself sets"
 shadow_src="$WORK/shadow-src.yaml"
 "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
   --values "$CHART_DIR/ci/values-varied.yaml" \
-  --set hub.extraEnv=null >"$shadow_src" 2>/dev/null || true
+  --set hub.extraEnv=null >"$shadow_src" 2>>"$_tcerr" || true
+# Stderr goes to the toolchain log rather than to /dev/null (my own audit for
+# gd-p2-dev, item 4). This site is fail-CLOSED either way - the consumer below
+# has an absolute floor of 7 NAMED variables, so a failed render cannot pass -
+# but a reader who hits that floor should be told WHY the render produced
+# nothing instead of being left to re-run it by hand.
 # ConfigMap keys, from inside the ConfigMap's data block only, plus the container
 # env entries, which are uppercase by convention and are the fieldRef variables a
 # ConfigMap render cannot see. Ports and container names are lowercase and do not
@@ -954,14 +978,27 @@ command -v sha256sum >/dev/null 2>&1 || meta_failure "sha256sum is not on PATH, 
 # Neither half is sufficient. The golden step alone says nothing about the
 # preflight; the walk alone says nothing about the chart. This is the join.
 while read -r _gname _gsum; do
-  _gactual="$(sha256sum "$GOLDEN_DIR/$_gname" 2>/dev/null | cut -d' ' -f1)"
+  # `|| true` for the same reason as the toolchain banner, and I got this one
+  # wrong OUT LOUD before gd-p1-rev caught it. I scored this site to gd-p2-dev as
+  # "empty CANNOT equal a 64-hex digest, so it meta-fails ... correct by
+  # construction rather than by luck". IT DID NOT META-FAIL, IT ABORTED: under
+  # `set -e -o pipefail` a missing golden takes the script out on this line and
+  # the `${_gactual:-<absent>}` I cited as proof the site was correct is
+  # UNREACHABLE. Measured by deleting golden/minimal.yaml: rc 1, stdout truncated
+  # mid-run, and 0 occurrences of the message below.
+  #
+  # The site was always fail-CLOSED - an upstream assertion catches the missing
+  # golden and run-all returns rc 2 - so the verdict I published stands and the
+  # reason I published for it does not. Stderr is captured rather than discarded
+  # too, so the reason a digest could not be read reaches the reader.
+  _gactual="$(sha256sum "$GOLDEN_DIR/$_gname" 2>>"$_tcerr" | cut -d' ' -f1 || true)"
   if [[ "$_gactual" != "$_gsum" ]]; then
     meta_failure "hack/ha-gates.txt records golden/$_gname at ${_gsum:0:12} but this tree has ${_gactual:-<absent>}. The walk did not run on the render this suite just verified. Regenerate with: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract"
   fi
 done < <(sed -n 's/^#   \([a-z-]*\.yaml\) *\([0-9a-f]\{64\}\)$/\1 \2/p' "$GATES_FILE")
 # THE BINDING'S OWN DENOMINATOR. A sed that matched nothing would leave the loop
 # body unexecuted and the binding silently absent.
-_gcount="$(sed -n 's/^#   \([a-z-]*\.yaml\) *\([0-9a-f]\{64\}\)$/\1/p' "$GATES_FILE" | wc -l)"
+_gcount="$(sed -n 's/^#   \([a-z-]*\.yaml\) *\([0-9a-f]\{64\}\)$/\1/p' "$GATES_FILE" | wc -l || true)"
 [[ "$_gcount" -eq ${#PERMUTATIONS[@]} ]] || meta_failure "hack/ha-gates.txt binds $_gcount goldens; this chart has ${#PERMUTATIONS[@]}. The walk's corpus and this suite's corpus are not the same set."
 
 # canon_block <golden> <arm>  emits the walk's derived gate list for one arm.
@@ -1007,7 +1044,7 @@ for _k in "${CANON_KEYS[@]}"; do
   for _o in "${CANON_KEYS[@]}"; do
     case "$_o" in "$_k".*) _isprefix=1 ;; esac
   done
-  _esc="$(printf '%s' "$_k" | sed 's/\./\\./g')"
+  _esc="$(printf '%s' "$_k" | sed 's/\./\\./g' || true)"
   if [[ $_isprefix -eq 1 ]]; then
     HA_GATE_PATTERNS+=("${_esc}([^.[:alnum:]_]|\$)")
   else
@@ -1131,7 +1168,7 @@ _session_hits="$(printf '%s\n' "${CANON_PROSE[@]}" | grep -cF 'durable session' 
 if [[ "$_session_hits" -ne 1 ]]; then
   meta_failure "the walk's canonical arm records $_session_hits prose gates matching 'durable session', not exactly 1. At 0 the SESSION_MARKER below is empty and every 'names all the gates' assertion passes on the strength of an empty string; above 1 the marker is whichever line sorted first, which is a coin toss this suite would not report. Prose gates found: $(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'durable session' | tr '\n' '|')"
 fi
-SESSION_MARKER="$(prose_marker "$(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'durable session')")"
+SESSION_MARKER="$(prose_marker "$(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'durable session')" || true)"
 [[ -n "$SESSION_MARKER" ]] || meta_failure "the walk's canonical arm records a durable-session gate that prose_marker() maps to the empty string, so every 'names all the gates' assertion below would pass on the strength of an empty string."
 # Preflight keys that legitimately appear beside the gates. Each is here for a
 # stated reason, because an exclusion list with no reasons becomes a place to
@@ -1192,14 +1229,14 @@ printf '%s\n' "${CANON_GATES[@]}" "${ALLOWED_NON_GATES[@]}" | sort -u >"$WORK/ga
 for _src in doc fail notes; do
   _f="$WORK/gates-$_src.txt"
   gate_tokens "$_f" >"$WORK/gates-$_src.tok"
-  _missing="$(comm -23 "$WORK/gates-canon.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ')"
+  _missing="$(comm -23 "$WORK/gates-canon.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ' || true)"
   _missing="${_missing% }"
   if [[ -z "$_missing" ]] && grep -qF "$SESSION_MARKER" "$_f"; then
     pass "the $_src copy names every gate the walk found"
   else
     fail "the $_src copy does not name every gate the walk found: missing [${_missing:-none}]$(grep -qF "$SESSION_MARKER" "$_f" || printf ' and the session-secret gate')"
   fi
-  _extra="$(comm -13 "$WORK/gates-permitted.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ')"
+  _extra="$(comm -13 "$WORK/gates-permitted.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ' || true)"
   _extra="${_extra% }"
   if [[ -z "$_extra" ]]; then
     pass "the $_src copy names no preflight key the walk did not find"
@@ -2088,7 +2125,7 @@ if [[ ${#FX_CASES[@]} -ne 13 ]]; then
 fi
 for _case in "${FX_CASES[@]}"; do
   IFS='|' read -r _fx _want _what <<<"$_case"
-  _got="$(init_entries_without_always "$WORK/$_fx.yaml" | tr '\n' ' ')"
+  _got="$(init_entries_without_always "$WORK/$_fx.yaml" | tr '\n' ' ' || true)"
   _got="${_got% }"
   if [[ "$_got" == "$_want" ]]; then
     pass "the init-container rule $_what"
@@ -2194,7 +2231,7 @@ fi
 # voice. The cost is that a claim written inside quotes is invisible here; write
 # claims unquoted.
 strip_quotes() { sed 's/"[^"]*"//g'; }
-prose="$(find "$CHART_DIR/templates" -type f -exec cat {} + | strip_quotes)"
+prose="$(find "$CHART_DIR/templates" -type f -exec cat {} + | strip_quotes || true)"
 prose_raw="$(find "$CHART_DIR/templates" -type f -exec cat {} +)"
 for stale in \
   'This chart delivers none of them yet' \
@@ -2264,8 +2301,19 @@ hubid_marker=zzmarkerhubid
   --values "$CHART_DIR/ci/values-settings.yaml" \
   --set hub.hubId="$hubid_marker" >"$WORK/hubid.yaml" 2>&1 \
   || meta_failure "the hub-id marker render failed, so nothing below was checked"
-ann_id="$(grep -oE 'scion\.io/hub-id: .*' "$WORK/hubid.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u)"
-set_id="$(settings_block "$WORK/hubid.yaml" | sed -n 's/^    hub_id: //p' | sed 's/"//g' | sort -u)"
+# `|| true` on both, and OP-5 (gd-p1-rev, round 5) is why. These are the
+# single-permutation siblings of the loop twenty lines below, and they had the
+# RQ-3 shape: under `set -e -o pipefail` a grep that matches nothing takes the
+# script out on this line. gd-p1-rev measured it on the REAL subject rather than
+# on the apparatus - deleting `scion.io/hub-id:` from deployment.yaml, which is
+# exactly the defect these three assertions exist to catch - and got rc 1 with
+# the output truncated and 0 occurrences of any of the three fail messages.
+# All three hand-written diagnostics were unreachable for the case they were
+# written for. The goldens catch it five sections earlier so the run still went
+# red; this is diagnostic loss, not a fail-open, and the empty string now reaches
+# the ${ann_id@Q} in the message instead of killing the run.
+ann_id="$(grep -oE 'scion\.io/hub-id: .*' "$WORK/hubid.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u || true)"
+set_id="$(settings_block "$WORK/hubid.yaml" | sed -n 's/^    hub_id: //p' | sed 's/"//g' | sort -u || true)"
 if [[ $ann_id == "$hubid_marker" ]]; then
   pass "the pod annotation carries the supplied hub ID"
 else
@@ -2310,9 +2358,22 @@ for name in "${PERMUTATIONS[@]}"; do
   # META-FAILURE: the extractor has no legitimate reason to complain, so if it
   # does, this run is not evidence either way. Second, the emptiness gets a
   # POSITIVE TWIN - the arm now asserts the structural fact that MAKES it empty,
-  # that the rendered ConfigMap carries no settings.yaml key at all. A broken
-  # extractor cannot satisfy that, because it is answered by grepping the
-  # manifest directly and not by the extractor under suspicion.
+  # that the render carries no settings.yaml key at all.
+  #
+  # THE TWIN IS TWO SIGNALS, NOT ONE, AND OP-4 (gd-p1-rev, round 5) IS WHY.
+  # `_has_block` greps '^  settings\.yaml: \|' while settings_block():304 seds on
+  # /^  settings\.yaml: |/ - THE SAME BYTES. That is independence of the PIPELINE
+  # but not of the LOCATOR, and my commit message claimed the stronger thing. So
+  # `_has_obj` answers the same question from a different direction entirely: is
+  # there a document of kind Secret whose name ends in -settings. It keys on the
+  # object's identity rather than on the key's text, so a locator that drifts
+  # cannot take both signals with it.
+  #
+  # N-2, same round: these messages used to say "the ConfigMap". Measured off the
+  # render - the settings.yaml key is at line 31 inside `kind: Secret
+  # name: r-scion-hub-settings`, and the chart's actual ConfigMap is
+  # r-scion-hub-env at line 87 and does not carry it. The name pointed the reader
+  # at the wrong template, and at the one object this PR exists to add.
   a="$(grep -oE 'scion\.io/hub-id: .*' "$WORK/$name.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u || true)"
   _sberr="$WORK/hubid-$name.err"
   s="$(settings_block "$WORK/$name.yaml" 2>"$_sberr" | sed -n 's/^    hub_id: //p' | sed 's/"//g' | sort -u || true)"
@@ -2320,20 +2381,225 @@ for name in "${PERMUTATIONS[@]}"; do
     meta_failure "the hub_id extractor wrote to stderr for the $name permutation, so an empty hub_id below cannot be read as 'the chart rendered none'. Stderr: $(tr '\n' ' ' <"$_sberr")"
   fi
   if grep -qE '^  settings\.yaml: \|' "$WORK/$name.yaml"; then _has_block=yes; else _has_block=no; fi
+  # The second, locator-independent signal: an object of kind Secret named
+  # *-settings. Keyed on the document's identity, not on the key's text.
+  _has_obj=no
+  if awk '/^---/ {k=""; n=""; next}
+          /^kind:/ {k=$2}
+          /^  name:/ {if (n=="") n=$2}
+          k=="Secret" && n!="" && n ~ /-settings$/ {found=1}
+          END {exit !found}' "$WORK/$name.yaml"; then _has_obj=yes; fi
   if [[ $name == existing-secret ]]; then
     # The documented exception, asserted rather than skipped. Here the settings
     # file is the operator's and the chart renders none, so there is genuinely
     # nothing to agree with - and the annotation must still be there, because an
     # absent annotation would also satisfy an equality check against nothing.
-    if [[ -n $a && -z $s && $_has_block == no ]]; then
-      pass "$name: the annotation is rendered, the ConfigMap carries no settings.yaml key, and so there is no chart hub_id to agree with it"
+    if [[ -n $a && -z $s && $_has_block == no && $_has_obj == no ]]; then
+      pass "$name: the annotation is rendered, the chart renders no settings Secret and no settings.yaml key, and so there is no chart hub_id to agree with it"
     else
-      fail "$name: expected an annotation, no rendered hub_id, and no settings.yaml key in the ConfigMap; got annotation ${a@Q}, hub_id ${s@Q}, settings.yaml key present: ${_has_block}"
+      fail "$name: expected an annotation, no rendered hub_id, no settings.yaml key and no settings Secret; got annotation ${a@Q}, hub_id ${s@Q}, settings.yaml key present: ${_has_block}, settings Secret present: ${_has_obj}"
     fi
-  elif [[ -n $a && $a == "$s" && $_has_block == yes ]]; then
+  elif [[ -n $a && $a == "$s" && $_has_block == yes && $_has_obj == yes ]]; then
     pass "$name: the annotation and server.hub.hub_id agree (${a@Q})"
   else
-    fail "$name: the annotation (${a@Q}) and server.hub.hub_id (${s@Q}) disagree or are missing (settings.yaml key present: ${_has_block})"
+    fail "$name: the annotation (${a@Q}) and server.hub.hub_id (${s@Q}) disagree or are missing (settings.yaml key present: ${_has_block}, settings Secret present: ${_has_obj})"
+  fi
+done
+
+# --------------------------------------------------------------------------
+step "no assignment in this script can abort it silently under set -e -o pipefail"
+# --------------------------------------------------------------------------
+# THIS GATE EXISTS BECAUSE THE FIX FOR RQ-2 INTRODUCED RQ-3 (gd-p1-rev, round 5).
+# Line 78 is `set -euo pipefail`. Under pipefail an assignment whose pipeline
+# fails anywhere takes the whole script out ON THAT LINE, before any reporting
+# machinery runs - rc 1, zero bytes on stdout, zero bytes on stderr. Every
+# assertion below the abort silently does not happen, and the harness's own
+# design goal is that a run which could not execute something SAYS SO and keeps
+# going.
+#
+# Three separate instances of the shape shipped and all three were found by a
+# reviewer rather than by this suite: the toolchain banner (:247-248), the golden
+# digest binding (:970), and the single-permutation hub_id block (OP-5). In each
+# case the hand-written diagnostic for the exact failure it was written for was
+# UNREACHABLE. Patching three lines would leave the fourth to be found the same
+# way, so this is the class and not the instances.
+#
+# THE RULE: an assignment from a pipeline must carry `|| true` or its own `||`
+# fallback. This is deliberately syntactic. A semantic version would have to
+# decide which pipelines "can" fail, and my own record on that question this
+# morning is that I cleared :970 in writing on a reason that was false.
+_pipe_sites() {  # $1 = script to scan. prints "line:text" for every such assignment.
+  grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*="?\$\(.*\|.*\)' "$1" \
+    | grep -v '^[0-9]*:[[:space:]]*#' || true
+}
+_pipe_unguarded() { _pipe_sites "$1" | grep -v '||' || true; }
+
+_self="${BASH_SOURCE[0]}"
+_ps_total="$(_pipe_sites "$_self" | wc -l || true)"
+_ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
+
+# EXTENT FIRST, so the zero below is a live zero and not an empty scan. A FLOOR
+# rather than an equality: sites get added, and a gate that fails on every new
+# assignment is a gate people delete. The floor is well under the current 27 and
+# is here only to catch the pattern breaking entirely.
+if [[ "$_ps_total" -lt 20 ]]; then
+  meta_failure "the pipeline-assignment sweep found only $_ps_total sites in $_self. It found 27 when it was written, so the pattern has stopped matching and the zero below would mean nothing."
+else
+  pass "the pipeline-assignment sweep is live: $_ps_total assignment-from-pipeline sites found in this script"
+fi
+
+if [[ "$_ps_bad" -eq 0 ]]; then
+  pass "all $_ps_total of them carry || true or their own || fallback, so none can abort this script silently"
+else
+  fail "$_ps_bad assignment(s) from a pipeline carry no || fallback. Under set -e -o pipefail each is a silent abort with zero bytes on both streams: $(_pipe_unguarded "$_self" | tr '\n' ' ')"
+fi
+
+# COVERAGE CONTROL. The assertion above is a zero, and a detector that finds
+# nothing anywhere produces the same zero as a clean script. Seed a fixture with
+# known instances and assert an ABSOLUTE EXPECTED COUNT - not agreement with the
+# subject, which would let both arms be wrong together.
+_pf="$WORK/pipefail-fixture.sh"
+# THE FIXTURE IS ASSEMBLED, NOT WRITTEN LITERALLY, AND THAT IS NOT STYLE.
+# I first wrote these six lines as a quoted heredoc. The heredoc's body IS part
+# of this file, so `_pipe_sites "$_self"` found the two seeded bad lines in
+# MY OWN SOURCE and the gate failed on its own fixture - site count 27 -> 35,
+# two spurious offenders reported at the fixture's line numbers. THE INSTRUMENT
+# WROTE ITS OWN NEEDLE INTO ITS OWN HAYSTACK, which is the failure gd-em
+# broadcast fleet-wide at 12:22, reproduced here about fifteen minutes later by
+# the person quoting it. Caught by the gate itself, which is the argument for
+# building the subject assertion before the control.
+#
+# So `$(` is never written literally below: it is composed from $_S at runtime,
+# and this file therefore contains no assignment-from-pipeline to find.
+_S='$'
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'bad_one="%s(grep -c x /etc/hostname | cut -d. -f1)"\n'          "$_S"
+  printf 'bad_two="%s(sed -n 1p /etc/hostname | tr -d . )"\n'             "$_S"
+  printf 'good_one="%s(grep -c x /etc/hostname | cut -d. -f1 || true)"\n' "$_S"
+  printf 'good_two="%s(command -v sh 2>/dev/null || printf %%s sh)"\n'    "$_S"
+  printf '# not_a_site="%s(grep x /etc/hostname | wc -l)"\n'              "$_S"
+  printf 'plain_assignment="hello"\n'
+} >"$_pf"
+_fx_total="$(_pipe_sites "$_pf" | wc -l || true)"
+_fx_bad="$(_pipe_unguarded "$_pf" | wc -l || true)"
+if [[ "$_fx_total" -eq 4 && "$_fx_bad" -eq 2 ]]; then
+  pass "coverage control: the detector finds exactly 4 seeded pipeline assignments and flags exactly the 2 unguarded ones, ignoring the commented site and the plain assignment"
+else
+  meta_failure "coverage control FAILED: the detector found $_fx_total sites and $_fx_bad unguarded in a fixture built to contain exactly 4 and 2. The zero it reports about this script is therefore not evidence."
+fi
+
+# --------------------------------------------------------------------------
+step "NOTES.txt's \"does not yet do\" list is true of what the chart renders"
+# --------------------------------------------------------------------------
+# NOTES.txt SHIPS. It is not in .helmignore, and it prints on every `helm
+# install` and every `helm upgrade`, which makes it the only file in this chart
+# whose blast radius is every operator (gd-em, 12:02). Its "WHAT THIS RELEASE
+# DOES NOT YET DO" sentence is a hand-maintained enumeration of things A LATER
+# PHASE WILL MAKE FALSE. It is true today only because P1 rewrote it. The moment
+# P2 lands the database URL the sentence becomes a lie printed to every
+# operator, and without this step nothing in the tree would notice.
+#
+# A comment asking the next phase to keep the sentence updated is a request, not
+# a mechanism. This is the mechanism: every thing the sentence names as absent
+# is checked against the RENDERED artifact, so landing one of them turns this
+# step red instead of turning the notes into a lie.
+#
+# THE ANTI-JOIN IS THE HALF THAT KEEPS IT HONEST. The needle table below is
+# hand-written, which is precisely the shape that quietly stops being complete,
+# so it is joined against THE SENTENCE ITSELF in both directions: a phrase in
+# the prose with no needle fails, and a needle with no phrase fails. The table
+# cannot drift from the text it is about, because neither side is allowed to
+# move alone.
+declare -A NOT_YET=(
+  ["Cloud SQL and the database URL"]='settings:^ *url:'
+  ["GCS credentials beyond the bucket name"]='settings:credentials|service_account|key_file'
+  ["Filestore"]='settings:workspace_storage'
+  ["the session secret"]='settings:session_secret|signing_key'
+  ["the OAuth client secret"]='settings:client_secret'
+  ["Ingress or IAP"]='kinds:^kind: (Ingress|BackendConfig)'
+)
+EXPECTED_NOT_YET=6
+
+# The sentence, read out of the shipped template. It carries no template
+# actions - checked, it is static prose - so the source text and the rendered
+# text are the same bytes here.
+_notes_prose="$(tr '\n' ' ' <"$CHART_DIR/templates/NOTES.txt" | tr -s ' ' || true)"
+if ! grep -qF 'does not yet configure' <<<"$_notes_prose"; then
+  meta_failure "NOTES.txt no longer contains the phrase 'does not yet configure', so the sentence this whole step is about could not be located. Every check below would be reading the entire file as one sentence. Re-anchor the extraction, do not delete this step."
+fi
+_not_yet_sentence="${_notes_prose#*does not yet configure }"
+_not_yet_sentence="${_not_yet_sentence%%.*}"
+mapfile -t _prose_items < <(tr ',' '\n' <<<"$_not_yet_sentence" | sed -e 's/^ *//' -e 's/ *$//' -e '/^$/d')
+
+# EXTENT, against an independently-derived expectation and never against zero.
+if [[ ${#_prose_items[@]} -eq $EXPECTED_NOT_YET ]]; then
+  pass "the notes name $EXPECTED_NOT_YET things this release does not yet configure"
+else
+  fail "the notes name ${#_prose_items[@]} things this release does not yet configure, EXPECTED_NOT_YET is $EXPECTED_NOT_YET. Adding or removing one is a deliberate act; make it in the same change that adds or removes the needle below (${_prose_items[*]})"
+fi
+
+# THE ANTI-JOIN, BOTH DIRECTIONS, WITH THE SYMMETRIC DIFFERENCE PRINTED.
+_ny_no_needle=""
+for _item in "${_prose_items[@]}"; do
+  [[ -v NOT_YET["$_item"] ]] || _ny_no_needle+="${_item@Q} "
+done
+_ny_no_prose=""
+for _key in "${!NOT_YET[@]}"; do
+  _found=no
+  for _item in "${_prose_items[@]}"; do [[ $_item == "$_key" ]] && _found=yes && break; done
+  [[ $_found == yes ]] || _ny_no_prose+="${_key@Q} "
+done
+if [[ -z $_ny_no_needle ]]; then
+  pass "every phrase in the notes' list has a needle that checks it against the render"
+else
+  fail "these phrases are in NOTES.txt but nothing checks them against the render, so the notes could claim them falsely: $_ny_no_needle"
+fi
+if [[ -z $_ny_no_prose ]]; then
+  pass "every needle corresponds to a phrase the notes actually print"
+else
+  fail "these needles have no phrase in NOTES.txt, so the table is testing a claim the notes no longer make: $_ny_no_prose"
+fi
+
+# THE TWO CORPORA, built once from every permutation. || true on settings_block
+# because existing-secret legitimately has no settings block; the coverage
+# control below is what stops that from turning into a vacuous pass.
+_ny_settings=""
+_ny_kinds=""
+for name in "${PERMUTATIONS[@]}"; do
+  _ny_settings+="$(settings_block "$WORK/$name.yaml" || true)"$'\n'
+  _ny_kinds+="$(grep -E '^kind:' "$WORK/$name.yaml" || true)"$'\n'
+done
+
+# COVERAGE CONTROL. Six absence assertions follow, and six absence assertions
+# are satisfied perfectly by two empty strings. This seeds nothing - it asserts
+# that each corpus already contains a known instance, so the greps below are
+# being run against something.
+# hub_id is nested under server.hub, and settings_block de-indents by exactly
+# four, so it lands at column four and not at column zero. Anchoring this at ^
+# was my first attempt and this control failed on its own instance - which is
+# the control working: it reported "empty or wrong" while printing 130 settings
+# lines, and the two halves of that message are what identified the anchor as
+# the wrong half.
+if grep -qE '^ *hub_id:' <<<"$_ny_settings" && grep -qE '^kind: Deployment' <<<"$_ny_kinds"; then
+  pass "both corpora are real: $(grep -c . <<<"$_ny_settings") settings lines containing hub_id, $(grep -c . <<<"$_ny_kinds") kind lines containing Deployment"
+else
+  fail "the corpora this step reads are empty or wrong - settings lines $(grep -c . <<<"$_ny_settings"), kind lines $(grep -c . <<<"$_ny_kinds") - so the six absence checks below would pass against nothing"
+fi
+
+for _item in "${_prose_items[@]}"; do
+  _spec="${NOT_YET[$_item]:-}"
+  [[ -z $_spec ]] && continue   # already reported by the anti-join above
+  _corpus="${_spec%%:*}"; _needle="${_spec#*:}"
+  case "$_corpus" in
+    settings) _hay="$_ny_settings" ;;
+    kinds)    _hay="$_ny_kinds" ;;
+    *)        meta_failure "unknown corpus ${_corpus@Q} in the NOT_YET table" ;;
+  esac
+  if grep -qE "$_needle" <<<"$_hay"; then
+    fail "NOTES.txt tells every operator this release does not yet configure ${_item@Q}, and the render contains it (${_needle@Q} matched in the $_corpus corpus). The chart grew a feature and the notes still deny it - fix the notes in the change that added the feature."
+  else
+    pass "the notes say ${_item@Q} is not configured yet, and it is absent from the $_corpus the chart renders"
   fi
 done
 

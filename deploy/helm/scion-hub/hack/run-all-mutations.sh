@@ -80,13 +80,40 @@ row() { # row <label> <mutation function name>
     if ( PATH="$farm"; hash -r 2>/dev/null; command -v helm >/dev/null 2>&1 ); then
       echo "HARNESS ERROR: the $label arm still resolves helm, so it is not the arm it claims to be. NOTHING WAS MEASURED."; exit 2
     fi
-    # Positive: EVERY OTHER tool the suite needs must still run. Without this,
-    # an over-broad PATH makes run-all.sh report git's or kubeconform's absence
-    # as a fact about the chart - the exact defect this replaced.
-    for _t in git kubeconform bash sed diff python3; do
-      ( PATH="$farm"; hash -r 2>/dev/null; command -v "$_t" >/dev/null 2>&1 ) || {
-        echo "HARNESS ERROR: the $label arm also removed ${_t}, so its result would be about ${_t} and not about helm. NOTHING WAS MEASURED."; exit 2; }
-    done
+    # Positive: EVERY OTHER tool must still be reachable. Without this, an
+    # over-broad PATH makes run-all.sh report git's or kubeconform's absence as
+    # a fact about the chart - the exact defect this replaced.
+    #
+    # DERIVED AS A SET DIFFERENCE, NOT A HAND-WRITTEN LIST. This control used to
+    # read `for _t in git kubeconform bash sed diff python3`. An anti-join
+    # against the tools the suite actually invokes put 27 outside that list,
+    # INCLUDING grep - the single most-invoked tool here, and the one whose
+    # silent absence would turn every assertion in run-all.sh into a fake chart
+    # failure, which is precisely what these two controls exist to prevent. A
+    # hand-picked tool list is the same defect as a hand-transcribed flag
+    # enumeration; it goes stale silently and its gaps are invisible.
+    #
+    # The farm's contents are fully determined: every executable basename on the
+    # caller's absolute PATH entries, minus the dropped tool. So the honest
+    # question is not "are these six present" but "does the farm differ from the
+    # real PATH by exactly {helm}". That is complete by construction and cannot
+    # go out of date when the suite starts using a new tool.
+    _want="$d/.farm-want"; _have="$d/.farm-have"
+    { oldifs="$IFS"; IFS=:; set -- $PATH; IFS="$oldifs"
+      for _dir in "$@"; do
+        case "$_dir" in /*) ;; *) continue ;; esac
+        [ -d "$_dir" ] || continue
+        for _f in "$_dir"/*; do [ -x "$_f" ] && printf '%s\n' "${_f##*/}"; done
+      done; } | sort -u | grep -vx helm > "$_want"
+    ls -1 "$farm" 2>/dev/null | sort -u > "$_have"
+    # Extent before the difference, so an empty diff cannot come from an empty scan.
+    if [ ! -s "$_want" ]; then
+      echo "HARNESS ERROR: the expected-tool set for the $label arm is EMPTY, so the comparison below would pass on anything. NOTHING WAS MEASURED."; exit 2
+    fi
+    _absent="$(comm -23 "$_want" "$_have" | tr '\n' ' ' | sed 's/  *$//')"
+    if [ -n "$_absent" ]; then
+      echo "HARNESS ERROR: the $label arm should differ from the real PATH by exactly {helm}, but the farm is also missing: ${_absent}. Its result would be about those tools and not about helm. NOTHING WAS MEASURED."; exit 2
+    fi
     out="$(PATH="$farm" bash "$d/tests/run-all.sh" 2>&1)"; rc=$?
   else
     out="$(bash "$d/tests/run-all.sh" 2>&1)"; rc=$?

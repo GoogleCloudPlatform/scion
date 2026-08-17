@@ -217,21 +217,33 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 		// wrote it as "gateSupplier must use t.Setenv, never os.Setenv" and that
 		// message was a diagnosis this assertion cannot make:
 		//
-		//   os.Setenv instead of t.Setenv, walkOne's unset loop intact   PASSES
-		//   os.Setenv AND walkOne's unset loop at :376 removed           FAILS
-		//   clean                                                        PASSES
+		// I published a THREE-cell matrix here and concluded from it that this row
+		// is "NOT the guard for the t.Setenv change". gd-p1-rev ran the FOURTH
+		// cell (OP-6, round 5) and the conclusion does not survive it:
 		//
-		// The middle row is the only one that fires, so the guard is on the
-		// END STATE - "the walk leaves no session secret behind" - and TWO
-		// independent mechanisms currently deliver it: t.Setenv's restore, and
-		// walkOne clearing the variable at the top of every arm. Either alone
-		// is enough, which is why swapping one out is invisible here.
+		//   t.Setenv,  loop intact   (committed)   pass   env limb -
+		//   os.Setenv, loop intact                 pass   env limb silent
+		//   t.Setenv,  loop REMOVED                fail   env limb silent
+		//   os.Setenv, loop REMOVED                fail   env limb FIRES
 		//
-		// It is kept rather than deleted because the end state is the thing that
-		// can hurt a later test, and it is the only assertion that would survive
-		// someone deciding the per-arm isolation loop is redundant. But it is NOT
-		// the guard for the t.Setenv change; that change is covered by review and
-		// by the fact that it cannot be worse than os.Setenv.
+		// Rows 3 and 4 differ in exactly one token and this limb is the only
+		// thing that separates them. SO IT IS THE GUARD FOR THE t.Setenv CHANGE,
+		// conditional on the unset loop being gone - which is precisely the
+		// future the paragraph below anticipates. The guard is on the END STATE,
+		// "the walk leaves no session secret behind", and two mechanisms deliver
+		// it today: t.Setenv's restore and walkOne clearing the variable per arm.
+		// While the loop is present this limb is MASKED; when someone decides the
+		// loop is redundant it becomes the discriminator.
+		//
+		// DO NOT DELETE IT ON THE STRENGTH OF ROW 2. A limb that is silent only
+		// because a second mechanism is doing the work is not a limb that does
+		// nothing.
+		//
+		// AND THE BOUND, which is gd-p1-rev's and cuts against the row: rows 3
+		// and 4 ALSO fail the golden comparison, because removing the per-arm
+		// unset loop changes the derived gate list. There is no configuration of
+		// this file in which this limb is the ONLY thing red. That does not make
+		// it useless; it does bound what it can prove on its own.
 		gotSecret, gotSet := os.LookupEnv("SCION_SERVER_SESSION_SECRET")
 		if gotSet != entrySecretSet || gotSecret != entrySecret {
 			t.Errorf("this test left SCION_SERVER_SESSION_SECRET behind: set=%v value=%q on entry, set=%v value=%q on exit. Both the per-arm unset loop in walkOne and gateSupplier's t.Setenv have to be gone for this to fire, so check both.",
