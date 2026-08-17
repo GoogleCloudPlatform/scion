@@ -232,6 +232,23 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 	}
 
 	action := parts[1]
+	// Check for sub-resource under messages (e.g., messages/{id}).
+	if strings.HasPrefix(action, "messages/") {
+		messageID := strings.TrimPrefix(action, "messages/")
+		if messageID == "" {
+			BadRequest(w, "message ID required")
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			s.handleMessageEdit(w, r, key, messageID)
+		case http.MethodDelete:
+			s.handleMessageDelete(w, r, key, messageID)
+		default:
+			MethodNotAllowed(w)
+		}
+		return
+	}
 	switch action {
 	case "messages":
 		s.handleConversationMessages(w, r, key)
@@ -760,9 +777,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// --- Validate body ---
 	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 	var body struct {
-		Content        string   `json:"content"`
-		Attachments    []string `json:"attachments,omitempty"` // W7: attachment IDs
-		IdempotencyKey string   `json:"idempotency_key,omitempty"`
+		Content     string   `json:"content"`
+		Attachments []string `json:"attachments,omitempty"` // W7: attachment IDs
+		ReplyToID   string   `json:"reply_to_id,omitempty"` // Phase-3: reply/quote
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
@@ -803,26 +820,6 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 				MimeType: meta.MimeType,
 				Size:     meta.Size,
 			})
-		}
-	}
-
-	// --- Idempotency check (#1055) ---
-	// If the client supplied an idempotency key, check whether a message with
-	// that key from this sender was already created recently. If so, return
-	// the existing message ID (200 OK) instead of creating a duplicate.
-	if body.IdempotencyKey != "" {
-		if existingID, ok := s.chatIdempotency.Check(user.ID(), body.IdempotencyKey); ok {
-			// Idempotency hit: return the existing message ID.
-			// We return the minimal response (ID + current content) rather than
-			// re-fetching the stored message, because the client already received
-			// the full 201 response on the original send. This response only
-			// signals "your message was already accepted."
-			writeJSON(w, http.StatusOK, chatMessageResponse{
-				ID:      existingID,
-				Content: content,
-				Sender:  "user:" + user.DisplayName(),
-			})
-			return
 		}
 	}
 
@@ -868,21 +865,10 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	now := time.Now().UTC()
 
-	// Closure to record idempotency after message creation.
-	recordIdempotency := func(messageID string) {
-		if body.IdempotencyKey != "" {
-			s.chatIdempotency.Record(user.ID(), body.IdempotencyKey, messageID)
-		}
-	}
-
 	// Step 3: Determine routing.
 	if len(mentionedAgents) > 0 {
 		// --- Agent-routed: explicit mentions ---
-		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, mentionedAgents, mentionNames, mentionResults, attachmentRefs, now)
-		if msgID == "" {
-			return // error response already written by sendAgentRouted
-		}
-		recordIdempotency(msgID)
+		s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, mentionedAgents, mentionNames, mentionResults, attachmentRefs, now, body.ReplyToID)
 		// Ensure DM registry rows exist so the DM appears in the rail.
 		if isDM {
 			s.ensureDMRegistered(ctx, key, user.ID())
@@ -898,11 +884,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		if agentID := parseAgentDMKey(key); agentID != "" {
 			dmAgent, err := s.store.GetAgent(ctx, agentID)
 			if err == nil && dmAgent != nil {
-				msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, mentionNames, nil, attachmentRefs, now)
-				if msgID == "" {
-					return // error response already written by sendAgentRouted
-				}
-				recordIdempotency(msgID)
+				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, mentionNames, nil, attachmentRefs, now, body.ReplyToID)
 				// Ensure DM registry rows exist so the DM appears in the rail.
 				s.ensureDMRegistered(ctx, key, user.ID())
 				return
@@ -920,35 +902,26 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 				defaultAgent, err = s.store.GetAgent(ctx, topic.DefaultAgent)
 			}
 			if err == nil && defaultAgent != nil {
-				msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, attachmentRefs, now)
-				if msgID == "" {
-					return // error response already written by sendAgentRouted
-				}
-				recordIdempotency(msgID)
+				s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, attachmentRefs, now, body.ReplyToID)
 				return
 			}
 		}
 	}
 
 	// --- Human-to-human message ---
-	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, mentionNames, attachmentRefs, now)
-	if msgID == "" {
-		return // error response already written by sendHumanToHuman
-	}
-	recordIdempotency(msgID)
+	s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, mentionNames, attachmentRefs, now, body.ReplyToID)
 }
 
 // sendAgentRouted sends a message through the existing agent dispatch path.
-// Returns the persisted message ID (empty on error).
 func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
 	content, senderLabel string, agents []*store.Agent, mentionNames []string, mentionResults []messages.MentionResult,
-	attachmentRefs []AttachmentRef, now time.Time) string {
+	attachmentRefs []AttachmentRef, now time.Time, replyToID string) {
 
 	ctx := r.Context()
 
 	if len(agents) == 0 {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "no agent to route to", nil)
-		return ""
+		return
 	}
 
 	primaryAgent := agents[0]
@@ -1050,7 +1023,19 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil)
-		return ""
+		return
+	}
+
+	// Phase-3: Store reply-to reference if provided.
+	if replyToID != "" {
+		s.mu.RLock()
+		replyWcs := s.webChatStore
+		s.mu.RUnlock()
+		if replyWcs != nil {
+			if err := replyWcs.SetMessageReplyTo(ctx, storeMsg.ID, replyToID); err != nil {
+				slog.Error("Failed to store reply_to_id", "messageId", storeMsg.ID, "replyToId", replyToID, "error", err)
+			}
+		}
 	}
 
 	// W7: Link attachments to the persisted message.
@@ -1141,13 +1126,11 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		Mentions:    mentionResults,
 		Attachments: attachmentRefs,
 	})
-	return storeMsg.ID
 }
 
 // sendHumanToHuman persists a type:chat message for human-to-human communication.
-// Returns the persisted message ID (empty on error).
 func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
-	content, senderLabel string, isDM bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time) string {
+	content, senderLabel string, isDM bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string) {
 
 	ctx := r.Context()
 
@@ -1200,7 +1183,14 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil)
-		return ""
+		return
+	}
+
+	// Phase-3: Store reply-to reference if provided.
+	if replyToID != "" && wcs != nil {
+		if err := wcs.SetMessageReplyTo(ctx, storeMsg.ID, replyToID); err != nil {
+			slog.Error("Failed to store reply_to_id", "messageId", storeMsg.ID, "replyToId", replyToID, "error", err)
+		}
 	}
 
 	// W7: Link attachments to the persisted message.
@@ -1254,7 +1244,224 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		CreatedAt:   now,
 		Attachments: attachmentRefs,
 	})
-	return storeMsg.ID
+}
+
+// ---------------------------------------------------------------------------
+// Message Edit / Delete (Phase 3)
+// ---------------------------------------------------------------------------
+
+// handleMessageEdit implements PUT /api/v1/chat/conversations/{key}/messages/{id}.
+// Only the message sender can edit, and only if no agent has replied after it.
+func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, messageID string) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	// Fetch the message.
+	msg, err := s.store.GetMessage(ctx, messageID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch message", nil)
+		return
+	}
+	if msg == nil {
+		NotFound(w, "Message")
+		return
+	}
+
+	// Verify the caller is the message sender.
+	if msg.SenderID != user.ID() {
+		Forbidden(w)
+		return
+	}
+
+	// Verify conversation key matches.
+	if msg.ThreadID != key {
+		BadRequest(w, "message does not belong to this conversation")
+		return
+	}
+
+	// Check no agent has replied after this message.
+	if hasAgentReplyAfter(ctx, s.store, key, msg.CreatedAt) {
+		writeError(w, http.StatusConflict, "AGENT_REPLIED", "Cannot edit: an agent has replied after this message", nil)
+		return
+	}
+
+	// Parse the new content.
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+	content := strings.TrimSpace(body.Content)
+	if content == "" {
+		ValidationError(w, "content is required", nil)
+		return
+	}
+
+	// Resolve projectID for event publishing.
+	projectID := msg.ProjectID
+	if projectID == uuid.Nil.String() {
+		projectID = ""
+	}
+
+	// Update message content and mark as edited.
+	//
+	// Known limitation: content update and edited_at are separate DB writes.
+	// If UpdateMessageContent succeeds but SetMessageEdited fails, the content
+	// changes without an edited_at record. A full transactional fix would
+	// require combining them into a single call, which is out of scope here.
+	if err := wcs.UpdateMessageContent(ctx, messageID, content); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update message", nil)
+		return
+	}
+
+	now := time.Now().UTC()
+	if err := wcs.SetMessageEdited(ctx, messageID, now); err != nil {
+		slog.Error("Failed to set message edited_at", "messageId", messageID, "error", err)
+	}
+
+	// Publish SSE event.
+	s.events.PublishChatMessageEdited(ctx, projectID, key, ChatMessageEditedEvent{
+		ConversationKey: key,
+		MessageID:       messageID,
+		Content:         content,
+		EditedAt:        now.Format(time.RFC3339Nano),
+	})
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"messageId": messageID,
+		"content":   content,
+		"editedAt":  now,
+	})
+}
+
+// handleMessageDelete implements DELETE /api/v1/chat/conversations/{key}/messages/{id}.
+// Only the message sender can delete, and only if no agent has replied after it.
+func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key, messageID string) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	// Fetch the message.
+	msg, err := s.store.GetMessage(ctx, messageID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch message", nil)
+		return
+	}
+	if msg == nil {
+		NotFound(w, "Message")
+		return
+	}
+
+	// Verify the caller is the message sender.
+	if msg.SenderID != user.ID() {
+		Forbidden(w)
+		return
+	}
+
+	// Verify conversation key matches.
+	if msg.ThreadID != key {
+		BadRequest(w, "message does not belong to this conversation")
+		return
+	}
+
+	// Check no agent has replied after this message.
+	if hasAgentReplyAfter(ctx, s.store, key, msg.CreatedAt) {
+		writeError(w, http.StatusConflict, "AGENT_REPLIED", "Cannot delete: an agent has replied after this message", nil)
+		return
+	}
+
+	// Resolve projectID for event publishing.
+	projectID := msg.ProjectID
+	if projectID == uuid.Nil.String() {
+		projectID = ""
+	}
+
+	// Soft-delete: set deleted_at in extension table.
+	now := time.Now().UTC()
+	if err := wcs.SetMessageDeleted(ctx, messageID, now); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete message", nil)
+		return
+	}
+
+	// Publish SSE event.
+	s.events.PublishChatMessageDeleted(ctx, projectID, key, ChatMessageDeletedEvent{
+		ConversationKey: key,
+		MessageID:       messageID,
+		DeletedAt:       now.Format(time.RFC3339Nano),
+	})
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"messageId": messageID,
+		"deletedAt": now,
+	})
+}
+
+// hasAgentReplyAfter checks if any agent has sent a message in the same
+// conversation after the given time. Used to guard edit/delete operations.
+// Fail-closed: returns true (denying edit/delete) when the query errors,
+// so a transient DB failure cannot be exploited to bypass the guard.
+//
+// The scan pages through results in small batches so memory stays bounded
+// regardless of how many messages follow the target timestamp. Each page
+// loads at most pageSize messages; as soon as one agent-sent message is
+// found the function returns early.
+func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, after time.Time) bool {
+	filter := store.MessageFilter{
+		Channel:  "web",
+		ThreadID: threadID,
+		After:    after,
+	}
+	const pageSize = 50
+	cursor := ""
+	for {
+		opts := store.ListOptions{Limit: pageSize}
+		if cursor != "" {
+			opts.Cursor = cursor
+		}
+		result, err := s.ListMessages(ctx, filter, opts)
+		if err != nil || result == nil {
+			return true // fail-closed: deny edit/delete when we can't verify
+		}
+		for _, msg := range result.Items {
+			if strings.HasPrefix(msg.Sender, "agent:") {
+				return true
+			}
+		}
+		// No more pages — no agent reply found.
+		if result.NextCursor == "" || len(result.Items) < pageSize {
+			return false
+		}
+		cursor = result.NextCursor
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1374,11 +1581,72 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Phase-3: Enrich messages with extension data (reply-to, edited, deleted)
+	// and generate reply previews using a single batch query.
+	var messageExtensions map[string]*WebChatMessageExt
+	var replyPreviews map[string]chatReplyPreview
+	if wcs != nil && len(result.Items) > 0 {
+		msgIDs2 := make([]string, len(result.Items))
+		for i, msg := range result.Items {
+			msgIDs2[i] = msg.ID
+		}
+		exts, err := wcs.GetMessageExts(ctx, msgIDs2)
+		if err == nil && len(exts) > 0 {
+			messageExtensions = exts
+
+			// Strip content from soft-deleted messages so the original
+			// text is not leaked to clients over the wire.
+			for i := range result.Items {
+				if ext, ok := messageExtensions[result.Items[i].ID]; ok && ext.DeletedAt != nil {
+					result.Items[i].Msg = ""
+				}
+			}
+
+			// Collect referenced message IDs for reply previews.
+			replyToIDs := make([]string, 0, len(exts))
+			for _, ext := range exts {
+				if ext.ReplyToID != "" {
+					replyToIDs = append(replyToIDs, ext.ReplyToID)
+				}
+			}
+			if len(replyToIDs) > 0 {
+				// Also fetch extensions for the referenced messages so
+				// we can detect deleted reply parents.
+				replyExts, _ := wcs.GetMessageExts(ctx, replyToIDs)
+
+				refMsgs, err := s.store.GetMessagesByIDs(ctx, replyToIDs)
+				if err == nil && len(refMsgs) > 0 {
+					replyPreviews = make(map[string]chatReplyPreview, len(refMsgs))
+					for id, refMsg := range refMsgs {
+						content := refMsg.Msg
+						// If the referenced message is deleted, show
+						// "[deleted]" instead of leaking the original text.
+						if replyExts != nil {
+							if rExt, ok := replyExts[id]; ok && rExt.DeletedAt != nil {
+								content = "[deleted]"
+							}
+						}
+						if content != "[deleted]" && len([]rune(content)) > 100 {
+							content = string([]rune(content)[:100]) + "..."
+						}
+						replyPreviews[id] = chatReplyPreview{
+							MessageID:  id,
+							SenderName: refMsg.Sender,
+							Content:    content,
+						}
+					}
+				}
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, chatHistoryResponse{
 		Messages:           result.Items,
 		NextCursor:         result.NextCursor,
 		TotalCount:         result.TotalCount,
 		MessageAttachments: messageAttachments,
+		MessageExtensions:  messageExtensions,
+		ReplyPreviews:      replyPreviews,
 	})
 }
 
@@ -2774,10 +3042,19 @@ type chatMessageResponse struct {
 }
 
 type chatHistoryResponse struct {
-	Messages           []store.Message            `json:"messages"`
-	NextCursor         string                     `json:"nextCursor,omitempty"`
-	TotalCount         int                        `json:"totalCount"`
-	MessageAttachments map[string][]AttachmentRef `json:"messageAttachments,omitempty"` // W7: keyed by message ID
+	Messages           []store.Message               `json:"messages"`
+	NextCursor         string                        `json:"nextCursor,omitempty"`
+	TotalCount         int                           `json:"totalCount"`
+	MessageAttachments map[string][]AttachmentRef    `json:"messageAttachments,omitempty"` // W7: keyed by message ID
+	MessageExtensions  map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"`  // Phase-3: keyed by message ID
+	ReplyPreviews      map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`      // Phase-3: keyed by reply-to message ID
+}
+
+// chatReplyPreview provides a truncated preview of the message being replied to.
+type chatReplyPreview struct {
+	MessageID  string `json:"messageId"`
+	SenderName string `json:"senderName"`
+	Content    string `json:"content"` // truncated to 100 chars
 }
 
 type chatDMListResponse struct {

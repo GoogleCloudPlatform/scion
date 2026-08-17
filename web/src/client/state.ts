@@ -68,7 +68,9 @@ export type StateEventType =
   | 'chat-topic-updated'
   | 'chat-presence-updated'
   | 'chat-typing-received'
-  | 'chat-read-state-updated';
+  | 'chat-read-state-updated'
+  | 'chat-message-edited'
+  | 'chat-message-deleted';
 
 export class StateManager extends EventTarget {
   private state: AppState = {
@@ -297,7 +299,7 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // User-scoped chat events: user.{userId}.chat.{dm|typing}
+    // User-scoped chat events: user.{userId}.chat.{dm|typing|message.edited|message.deleted}
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
       // Human-to-human DMs have no project, so their typing events arrive on
       // the user-scoped subject rather than project.{id}.chat.typing.
@@ -306,6 +308,14 @@ export class StateManager extends EventTarget {
       } else if (parts[3] === 'read-state') {
         // A DM peer advanced their read watermark — drives the "seen" tick.
         this.notifyWithData('chat-read-state-updated', data);
+      } else if (parts[3] === 'message' && parts.length >= 5) {
+        // Phase-3: user-scoped message.edited / message.deleted for DMs.
+        const subType = parts[4];
+        if (subType === 'edited') {
+          this.notifyWithData('chat-message-edited', data);
+        } else if (subType === 'deleted') {
+          this.notifyWithData('chat-message-deleted', data);
+        }
       } else {
         this.notifyWithData('chat-message-received', data);
       }
@@ -349,11 +359,21 @@ export class StateManager extends EventTarget {
         return;
       }
 
-      // Chat events: project.{projectId}.chat.{eventType}
+      // Chat events: project.{projectId}.chat.{eventType}[.{subType}]
       if (parts[2] === 'chat' && parts.length >= 4) {
         const chatEventType = parts[3];
         // Include projectId and the SSE payload so consumers can filter by conversation
         const chatDetail = { projectId, ...(data as Record<string, unknown>) };
+        if (chatEventType === 'message' && parts.length >= 5) {
+          // Phase-3: message.edited / message.deleted
+          const subType = parts[4];
+          if (subType === 'edited') {
+            this.notifyWithData('chat-message-edited', chatDetail);
+          } else if (subType === 'deleted') {
+            this.notifyWithData('chat-message-deleted', chatDetail);
+          }
+          return;
+        }
         if (chatEventType === 'message') {
           this.notifyWithData('chat-message-received', chatDetail);
         } else if (chatEventType === 'topic') {

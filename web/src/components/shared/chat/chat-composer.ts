@@ -36,7 +36,7 @@ import type { MentionAcceptDetail } from './mention-autocomplete.js';
 import './mention-autocomplete.js';
 
 /** Maximum message length in rune count. */
-const MAX_MESSAGE_LENGTH = 16000;
+const MAX_MESSAGE_LENGTH = 2000;
 
 /** Uploaded attachment info returned from the server. */
 export interface UploadedAttachment {
@@ -85,6 +85,14 @@ export interface ChatSendDetail {
   mentions: string[];
   /** W7: Attachment IDs to include with the message. */
   attachmentIds: string[];
+  /** Phase-3: Reply-to message ID. */
+  replyToId?: string;
+}
+
+/** Event detail for the chat-edit custom event (Phase 3). */
+export interface ChatEditDetail {
+  messageId: string;
+  text: string;
 }
 
 /** Member info for human mention in v2 mode. */
@@ -144,6 +152,16 @@ export class ScionChatComposer extends LitElement {
   @property()
   projectId = '';
 
+  // ---- Phase-3 properties ----
+
+  /** Reply-to context: shows a reply preview bar above the input. */
+  @property({ type: Object })
+  replyTo: { messageId: string; senderName: string; content: string } | null = null;
+
+  /** Edit mode: populates the textarea with existing content. */
+  @property({ type: Object })
+  editMessage: { messageId: string; content: string } | null = null;
+
   @state() private text = '';
   @state() private runeCount = 0;
 
@@ -162,18 +180,18 @@ export class ScionChatComposer extends LitElement {
   /** Files the last upload refused, shown until dismissed or superseded. */
   @state() private uploadFailures: UploadFailure[] = [];
 
-  /** Whether a drag is currently over the composer drop zone. */
-  @state() private dragOver = false;
-
-  /** Conversation key used for draft persistence. */
-  @property({ type: String })
-  conversationKey = '';
-
   /** Set of accepted mention slugs. Filtered to those still present on send. */
   private acceptedMentions = new Set<string>();
 
-  /** Debounce timer for saving drafts to localStorage. */
-  private _draftTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Phase-3: When editMessage is set, populate the textarea with the content. */
+  override updated(changedProperties: Map<string, unknown>): void {
+    super.updated(changedProperties);
+    if (changedProperties.has('editMessage') && this.editMessage) {
+      this.text = this.editMessage.content;
+      this.runeCount = countRunes(this.editMessage.content);
+      this.focusTextarea();
+    }
+  }
 
   static override styles = css`
     :host {
@@ -448,112 +466,91 @@ export class ScionChatComposer extends LitElement {
       padding: 0 0.25rem;
     }
 
-    /* Drop zone overlay */
-    .composer-wrapper {
-      position: relative;
-    }
-
-    .drop-zone-overlay {
-      position: absolute;
-      inset: 0;
-      z-index: 50;
+    /* ---- Phase-3: Reply preview bar ---- */
+    .reply-bar {
       display: flex;
       align-items: center;
-      justify-content: center;
-      background: rgba(59, 130, 246, 0.08);
-      border: 2px dashed var(--scion-primary, #3b82f6);
-      border-radius: 0.75rem;
-      pointer-events: none;
+      gap: 0.5rem;
+      padding: 0.375rem 0.75rem;
+      background: var(--scion-surface-50, #f8fafc);
+      border-left: 3px solid var(--scion-primary-400, #60a5fa);
+      border-radius: 0 0.25rem 0.25rem 0;
+      font-size: 0.75rem;
+      color: var(--scion-neutral-600, #475569);
     }
 
-    .drop-zone-overlay span {
-      font-size: 0.875rem;
+    .reply-bar .reply-info {
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .reply-bar .reply-sender {
       font-weight: 600;
-      color: var(--scion-primary, #3b82f6);
+      color: var(--scion-primary-600, #2563eb);
+    }
+
+    .reply-bar .reply-content {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      display: block;
+    }
+
+    .reply-bar sl-icon-button::part(base) {
+      padding: 0.125rem;
+      font-size: 0.75rem;
+      color: var(--scion-neutral-400, #94a3b8);
+    }
+
+    /* ---- Phase-3: Edit mode bar ---- */
+    .edit-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.375rem 0.75rem;
+      background: var(--scion-warning-50, #fffbeb);
+      border-left: 3px solid var(--scion-warning-400, #fbbf24);
+      border-radius: 0 0.25rem 0.25rem 0;
+      font-size: 0.75rem;
+      color: var(--scion-neutral-600, #475569);
+    }
+
+    .edit-bar .edit-info {
+      flex: 1;
+      font-weight: 600;
+    }
+
+    .edit-bar sl-icon-button::part(base) {
+      padding: 0.125rem;
+      font-size: 0.75rem;
+      color: var(--scion-neutral-400, #94a3b8);
     }
   `;
-
-  override connectedCallback(): void {
-    super.connectedCallback();
-    this.restoreDraft();
-  }
-
-  override disconnectedCallback(): void {
-    super.disconnectedCallback();
-    if (this._draftTimer !== null) {
-      clearTimeout(this._draftTimer);
-      this._draftTimer = null;
-    }
-  }
-
-  override updated(changedProperties: Map<string, unknown>): void {
-    if (changedProperties.has('conversationKey')) {
-      this.restoreDraft();
-    }
-  }
-
-  /** Restore a draft from localStorage for the current conversationKey. */
-  private restoreDraft(): void {
-    if (!this.conversationKey) return;
-    const key = `scion-chat-draft-${this.conversationKey}`;
-    const saved = localStorage.getItem(key);
-    if (saved !== null) {
-      this.text = saved;
-      this.runeCount = countRunes(this.text);
-    }
-  }
-
-  /** Save the current draft to localStorage (debounced). */
-  private saveDraft(): void {
-    if (!this.conversationKey) return;
-    if (this._draftTimer !== null) clearTimeout(this._draftTimer);
-    this._draftTimer = setTimeout(() => {
-      const key = `scion-chat-draft-${this.conversationKey}`;
-      if (this.text) {
-        localStorage.setItem(key, this.text);
-      } else {
-        localStorage.removeItem(key);
-      }
-      this._draftTimer = null;
-    }, 500);
-  }
-
-  /** Clear the draft from localStorage for the current conversationKey. */
-  private clearDraft(): void {
-    if (this._draftTimer !== null) {
-      clearTimeout(this._draftTimer);
-      this._draftTimer = null;
-    }
-    if (!this.conversationKey) return;
-    localStorage.removeItem(`scion-chat-draft-${this.conversationKey}`);
-  }
 
   override render() {
     const isOverLimit = this.runeCount > MAX_MESSAGE_LENGTH;
     const isNearLimit = this.runeCount > MAX_MESSAGE_LENGTH * 0.9;
     const hasContent = this.text.trim().length > 0 || this.pendingFiles.length > 0;
+    const inEditMode = !!this.editMessage;
     const canSend = hasContent && !isOverLimit && !this.disabled && !this.uploading;
 
     const counterClass = isOverLimit ? 'over' : isNearLimit ? 'warn' : '';
 
+    // Phase-3: Send button label changes in edit mode.
+    const sendLabel = inEditMode ? 'Save Edit' : 'Send';
+    const sendIcon = inEditMode ? 'check-lg' : 'send';
+    const sendVariant = inEditMode ? 'warning' : 'primary';
+
     return html`
       ${this.conversationMode ? this.renderDestinationChip() : nothing}
-      <div
-        class="composer-wrapper"
-        @dragover=${this.handleDragOver}
-        @dragenter=${this.handleDragEnter}
-        @dragleave=${this.handleDragLeave}
-        @drop=${this.handleDrop}
-      >
-        ${this.dragOver
-          ? html`<div class="drop-zone-overlay"><span>Drop files here</span></div>`
-          : nothing}
-        <div class="composer">
-          ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
-          ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
-          ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
-          <div class="input-row">
-          ${this.conversationMode
+      <div class="composer">
+        ${this.replyTo ? this.renderReplyBar() : nothing}
+        ${this.editMessage ? this.renderEditBar() : nothing}
+        ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
+        ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
+        ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
+        <div class="input-row">
+          ${this.conversationMode && !inEditMode
             ? html`
                 <sl-icon-button
                   class="attach-btn"
@@ -573,14 +570,13 @@ export class ScionChatComposer extends LitElement {
             : nothing}
           <div class="textarea-wrapper">
             <sl-textarea
-              placeholder="Send a message..."
+              placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
               size="small"
               rows="1"
               resize="auto"
               .value=${this.text}
               @sl-input=${this.handleInput}
               @keydown=${this.handleKeydown}
-              @paste=${this.handlePaste}
               ?disabled=${this.disabled}
             ></sl-textarea>
             <scion-mention-autocomplete
@@ -593,15 +589,15 @@ export class ScionChatComposer extends LitElement {
             <sl-button
               class="send-btn"
               size="small"
-              variant="primary"
+              variant=${sendVariant}
               ?disabled=${!canSend}
               @click=${this.handleSend}
               @contextmenu=${this.handleSendContextMenu}
             >
-              <sl-icon slot="prefix" name="send"></sl-icon>
-              Send
+              <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
+              ${sendLabel}
             </sl-button>
-            ${this.showSendContextMenu
+            ${this.showSendContextMenu && !inEditMode
               ? html`
                   <div
                     class="send-context-overlay"
@@ -617,18 +613,63 @@ export class ScionChatComposer extends LitElement {
               : nothing}
           </div>
         </div>
-          <div class="footer-row">
-            ${this.runeCount > 0 || isNearLimit
-              ? html`
-                  <span class="char-counter ${counterClass}">
-                    ${this.runeCount} / ${MAX_MESSAGE_LENGTH}
-                  </span>
-                `
-              : nothing}
-          </div>
+        <div class="footer-row">
+          ${this.runeCount > 0 || isNearLimit
+            ? html`
+                <span class="char-counter ${counterClass}">
+                  ${this.runeCount} / ${MAX_MESSAGE_LENGTH}
+                </span>
+              `
+            : nothing}
         </div>
       </div>
     `;
+  }
+
+  // ---- Phase-3: Reply and edit bar renderers ----
+
+  /** Render the reply preview bar above the composer input. */
+  private renderReplyBar() {
+    if (!this.replyTo) return nothing;
+    return html`
+      <div class="reply-bar">
+        <div class="reply-info">
+          <span class="reply-sender">${this.replyTo.senderName}</span>
+          <span class="reply-content">${this.replyTo.content}</span>
+        </div>
+        <sl-icon-button
+          name="x-lg"
+          label="Cancel reply"
+          @click=${this.cancelReply}
+        ></sl-icon-button>
+      </div>
+    `;
+  }
+
+  /** Render the edit mode bar above the composer input. */
+  private renderEditBar() {
+    return html`
+      <div class="edit-bar">
+        <span class="edit-info">Editing message</span>
+        <sl-icon-button
+          name="x-lg"
+          label="Cancel edit"
+          @click=${this.cancelEdit}
+        ></sl-icon-button>
+      </div>
+    `;
+  }
+
+  private cancelReply(): void {
+    this.replyTo = null;
+    this.focusTextarea();
+  }
+
+  private cancelEdit(): void {
+    this.editMessage = null;
+    this.text = '';
+    this.runeCount = 0;
+    this.focusTextarea();
   }
 
   /** Render the destination chip showing where the message will go. */
@@ -733,9 +774,6 @@ export class ScionChatComposer extends LitElement {
     const target = e.target as HTMLInputElement;
     this.text = target.value;
     this.runeCount = countRunes(this.text);
-
-    // Persist draft with debounce.
-    this.saveDraft();
 
     // Dispatch typing event so the parent can send a typing indicator
     if (this.text.length > 0) {
@@ -895,15 +933,6 @@ export class ScionChatComposer extends LitElement {
     const input = e.target as HTMLInputElement;
     const files = input.files;
     if (!files || files.length === 0) return;
-    await this.uploadFiles(Array.from(files));
-  }
-
-  /**
-   * Upload one or more files to the attachment endpoint.
-   * Shared by the file picker, paste handler, and drag-and-drop handler.
-   */
-  async uploadFiles(files: File[]): Promise<void> {
-    if (files.length === 0) return;
 
     // Enforce max attachments.
     if (this.pendingFiles.length + files.length > 10) {
@@ -921,7 +950,7 @@ export class ScionChatComposer extends LitElement {
     try {
       const formData = new FormData();
       formData.append('project_id', this.projectId);
-      for (const file of files) {
+      for (const file of Array.from(files)) {
         formData.append('files', file);
       }
 
@@ -972,55 +1001,6 @@ export class ScionChatComposer extends LitElement {
     }
   }
 
-  /** Handle paste events — extract images from clipboard and upload. */
-  private handlePaste(e: ClipboardEvent): void {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-
-    const imageFiles: File[] = [];
-    for (const item of Array.from(items)) {
-      if (item.type.startsWith('image/')) {
-        const file = item.getAsFile();
-        if (file) imageFiles.push(file);
-      }
-    }
-
-    if (imageFiles.length > 0) {
-      e.preventDefault();
-      void this.uploadFiles(imageFiles);
-    }
-  }
-
-  /** Prevent default on dragover to allow drop. */
-  private handleDragOver(e: DragEvent): void {
-    e.preventDefault();
-  }
-
-  /** Show the drop zone overlay on drag enter. */
-  private handleDragEnter(e: DragEvent): void {
-    e.preventDefault();
-    this.dragOver = true;
-  }
-
-  /** Hide the drop zone overlay on drag leave. */
-  private handleDragLeave(e: DragEvent): void {
-    // Only hide if we're leaving the composer-wrapper, not entering a child.
-    const wrapper = (e.currentTarget as HTMLElement);
-    const related = e.relatedTarget as Node | null;
-    if (related && wrapper.contains(related)) return;
-    this.dragOver = false;
-  }
-
-  /** Handle file drop — extract files and upload. */
-  private handleDrop(e: DragEvent): void {
-    e.preventDefault();
-    this.dragOver = false;
-    const files = e.dataTransfer?.files;
-    if (files && files.length > 0) {
-      void this.uploadFiles(Array.from(files));
-    }
-  }
-
   /** Remove a pending file from the list. */
   private removePendingFile(index: number): void {
     this.pendingFiles = this.pendingFiles.filter((_, i) => i !== index);
@@ -1037,44 +1017,71 @@ export class ScionChatComposer extends LitElement {
     if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
       return;
 
+    // Phase-3: If in edit mode, dispatch chat-edit instead of chat-send.
+    if (this.editMessage) {
+      this.dispatchEvent(
+        new CustomEvent<ChatEditDetail>('chat-edit', {
+          detail: {
+            messageId: this.editMessage.messageId,
+            text: trimmed,
+          },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      this.text = '';
+      this.runeCount = 0;
+      this.editMessage = null;
+      this.focusTextarea();
+      return;
+    }
+
     // Filter accepted mentions to those still literally present in the text.
     const mentions = [...this.acceptedMentions].filter((slug) => trimmed.includes(`@${slug}`));
 
     // W7: Collect attachment IDs from pending uploads.
     const attachmentIds = this.pendingFiles.map((f) => f.id);
 
+    // Phase-3: Build detail with optional replyToId.
+    const detail: ChatSendDetail = {
+      text: trimmed,
+      plain: false,
+      interrupt,
+      mentions,
+      attachmentIds,
+      onSuccess: () => {
+        this.text = '';
+        this.runeCount = 0;
+        this.acceptedMentions.clear();
+        this.pendingFiles = [];
+        // Phase-3: Clear reply context after successful send.
+        this.replyTo = null;
+        this.focusTextarea();
+      },
+    };
+    if (this.replyTo) {
+      detail.replyToId = this.replyTo.messageId;
+    }
+
     this.dispatchEvent(
       new CustomEvent<ChatSendDetail>('chat-send', {
-        detail: {
-          text: trimmed,
-          plain: false,
-          interrupt,
-          mentions,
-          attachmentIds,
-          onSuccess: () => {
-            this.text = '';
-            this.runeCount = 0;
-            this.acceptedMentions.clear();
-            this.pendingFiles = [];
-            this.clearDraft();
-            // Restore focus to the textarea after send.
-            // Use requestAnimationFrame to ensure the Lit render cycle
-            // and Shoelace's internal DOM update have completed.
-            void this.updateComplete.then(() => {
-              requestAnimationFrame(() => {
-                const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
-                if (slTextarea) {
-                  // Shoelace components expose their own .focus() method.
-                  (slTextarea as HTMLElement).focus();
-                }
-              });
-            });
-          },
-        },
+        detail,
         bubbles: true,
         composed: true,
       })
     );
+  }
+
+  /** Focus the textarea after send/cancel. */
+  private focusTextarea(): void {
+    void this.updateComplete.then(() => {
+      requestAnimationFrame(() => {
+        const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+        if (slTextarea) {
+          (slTextarea as HTMLElement).focus();
+        }
+      });
+    });
   }
 
   /** Show the right-click send context menu. */

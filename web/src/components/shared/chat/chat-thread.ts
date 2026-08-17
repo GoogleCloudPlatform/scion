@@ -188,6 +188,48 @@ export class ScionChatThread extends LitElement {
   /** W7: Attachment refs keyed by message ID (from history endpoint + send response). */
   private v2AttachmentMap = new Map<string, import('./chat-message.js').AttachmentRefInfo[]>();
 
+  // ---- Phase-3 state ----
+
+  /** Current user's last-read message ID (for unread divider). */
+  @state() private lastReadMessageId = '';
+
+  /** Whether the "New messages" divider is currently visible. */
+  @state() private showUnreadDivider = false;
+
+  /** Reply-to context for the composer. */
+  @state() private composerReplyTo: {
+    messageId: string;
+    senderName: string;
+    content: string;
+  } | null = null;
+
+  /** Edit mode context for the composer. */
+  @state() private composerEditMessage: {
+    messageId: string;
+    content: string;
+  } | null = null;
+
+  /** Message extensions keyed by message ID. */
+  private v2MessageExtMap = new Map<
+    string,
+    { replyToId?: string; editedAt?: string; deletedAt?: string }
+  >();
+
+  /** Reply previews keyed by reply-to message ID. */
+  private v2ReplyPreviewMap = new Map<
+    string,
+    { messageId: string; senderName: string; content: string }
+  >();
+
+  /** Bound listener for v2 SSE message-edited events. */
+  private _v2EditHandler = this.handleV2MessageEdited.bind(this);
+
+  /** Bound listener for v2 SSE message-deleted events. */
+  private _v2DeleteHandler = this.handleV2MessageDeleted.bind(this);
+
+  /** Timer for delayed unread watermark advancement. */
+  private _unreadWatermarkTimeout: ReturnType<typeof setTimeout> | null = null;
+
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
   private lastKnownTimestamp: string | null = null;
@@ -377,6 +419,39 @@ export class ScionChatThread extends LitElement {
       white-space: nowrap;
     }
 
+    /* Unread divider */
+    .unread-divider {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.5rem 1rem;
+    }
+
+    .unread-divider::before,
+    .unread-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--scion-primary, #3b82f6);
+    }
+
+    .unread-label {
+      font-size: 0.6875rem;
+      font-weight: 600;
+      color: var(--scion-primary, #3b82f6);
+      white-space: nowrap;
+    }
+
+    /* Permalink highlight animation */
+    .permalink-highlight {
+      animation: permalink-fade 2s ease-out;
+    }
+
+    @keyframes permalink-fade {
+      0% { background-color: rgba(59, 130, 246, 0.2); }
+      100% { background-color: transparent; }
+    }
+
     /* Empty / Loading / Error states */
     .state-msg {
       display: flex;
@@ -490,6 +565,20 @@ export class ScionChatThread extends LitElement {
         opacity: 1;
       }
     }
+
+    /* Phase-3: Scroll-to-message highlight effect. */
+    scion-chat-message.scroll-highlight {
+      animation: highlight-flash 2s ease-out;
+    }
+
+    @keyframes highlight-flash {
+      0%, 20% {
+        background: var(--scion-primary-50, #eff6ff);
+      }
+      100% {
+        background: transparent;
+      }
+    }
   `;
 
   /** Auto-trigger loadHistory when the component first renders in v2 mode. */
@@ -523,9 +612,19 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+    stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
+    stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
 
     // Clear read-receipt state — it belongs to the conversation we just left.
     this.clearSeenState();
+
+    // Clear unread divider state and cancel any pending watermark advancement.
+    if (this._unreadWatermarkTimeout) {
+      clearTimeout(this._unreadWatermarkTimeout);
+      this._unreadWatermarkTimeout = null;
+    }
+    this.lastReadMessageId = '';
+    this.showUnreadDivider = false;
 
     // Clear message state
     this.messageMap.clear();
@@ -568,6 +667,14 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     this.clearSeenState();
+    stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
+    stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
+    this.clearSeenState();
+    // Clean up unread watermark advancement timer
+    if (this._unreadWatermarkTimeout) {
+      clearTimeout(this._unreadWatermarkTimeout);
+      this._unreadWatermarkTimeout = null;
+    }
     // Clean up typing timers
     for (const entry of this.typingUsers.values()) {
       clearTimeout(entry.timer);
@@ -712,6 +819,8 @@ export class ScionChatThread extends LitElement {
       stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
       stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
       stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+      stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
+      stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
     }
 
   }
@@ -920,11 +1029,32 @@ export class ScionChatThread extends LitElement {
       if (this.isHumanDM) {
         void this.fetchPeerReadState();
       }
+      // Fetch own read watermark for the unread divider.
+      await this.fetchOwnReadState();
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
       this.loading = false;
       this.scrollToBottomAfterRender();
+      // Determine scroll target: permalink hash > unread divider > bottom.
+      const hashMsgId = this.parseMessageHash();
+      if (hashMsgId) {
+        this.scrollToMessageById(hashMsgId, true);
+      } else if (this.showUnreadDivider) {
+        this.scrollToUnreadDivider();
+      } else {
+        this.scrollToBottomAfterRender();
+      }
+      // Advance read watermark after a short delay so the user sees the divider.
+      if (this.showUnreadDivider && this.messages.length > 0) {
+        this._unreadWatermarkTimeout = setTimeout(() => {
+          this._unreadWatermarkTimeout = null;
+          const lastMsg = this.messages[this.messages.length - 1];
+          if (lastMsg) {
+            void this.advanceReadWatermark(lastMsg.id);
+          }
+        }, 2000);
+      }
     }
   }
 
@@ -950,6 +1080,14 @@ export class ScionChatThread extends LitElement {
       messages?: Message[];
       nextCursor?: string;
       messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+      messageExtensions?: Record<
+        string,
+        { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
+      >;
+      replyPreviews?: Record<
+        string,
+        { messageId: string; senderName: string; content: string }
+      >;
     };
 
     const items = data?.items ?? data?.messages ?? [];
@@ -958,6 +1096,18 @@ export class ScionChatThread extends LitElement {
     if (data?.messageAttachments) {
       for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
         this.v2AttachmentMap.set(msgId, refs);
+      }
+    }
+
+    // Phase-3: Merge message extensions and reply previews.
+    if (data?.messageExtensions) {
+      for (const [msgId, ext] of Object.entries(data.messageExtensions)) {
+        this.v2MessageExtMap.set(msgId, ext);
+      }
+    }
+    if (data?.replyPreviews) {
+      for (const [msgId, preview] of Object.entries(data.replyPreviews)) {
+        this.v2ReplyPreviewMap.set(msgId, preview);
       }
     }
 
@@ -977,6 +1127,8 @@ export class ScionChatThread extends LitElement {
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+    stateManager.addEventListener('chat-message-edited', this._v2EditHandler);
+    stateManager.addEventListener('chat-message-deleted', this._v2DeleteHandler);
     // Seed the typing self-filter. The scope may not exist yet — see selfUserId.
     const scope = stateManager.currentScope;
     if (scope && scope.type === 'chat') {
@@ -1007,98 +1159,29 @@ export class ScionChatThread extends LitElement {
     return this._currentUserId || this.currentUserId;
   }
 
-  /** Handle v2 SSE chat message events.
-   *
-   * If the SSE event carries a full message payload (has `id` and content),
-   * merge it directly via `mergeMessages()` instead of doing a full 50-message
-   * backfill. Fall back to `backfillV2()` when the event is a lightweight
-   * notification (e.g. just a threadId).
-   */
+  /** Handle v2 SSE chat message events. Only backfill if the event is for this conversation. */
   private handleV2ChatMessage(e: Event): void {
     type ChatEventData = {
       threadId?: string;
       conversationKey?: string;
       topicId?: string;
       senderId?: string;
-      // Full message fields from UserMessageEvent:
-      id?: string;
-      msg?: string;
-      sender?: string;
-      recipient?: string;
-      recipientId?: string;
-      type?: string;
-      projectId?: string;
-      agentId?: string;
-      createdAt?: string;
-      channel?: string;
-      visibility?: string;
-      groupId?: string;
-      dispatchState?: string;
-      urgent?: boolean;
-      broadcasted?: boolean;
-      read?: boolean;
-      attachments?: import('./chat-message.js').AttachmentRefInfo[];
     };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ChatEventData } & ChatEventData)
       | undefined;
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const eventData: ChatEventData | undefined = detail?.data ?? detail;
-    if (!eventData) {
-      void this.backfillV2();
-      return;
-    }
-
-    // Filter: only process events for this conversation
-    const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
-    if (eventKey && eventKey !== this.conversationKey) {
-      return; // Not for this conversation
-    }
-
-    // The sender finished typing the moment their message landed — drop the
-    // indicator now rather than waiting out TYPING_EXPIRY_MS.
-    this.clearTypingForUser(eventData.senderId);
-
-    // If the event carries a full message payload, merge directly instead of
-    // doing a round-trip backfill.
-    // SSE events from PublishUserMessage carry the full message payload.
-    // mergeMessages() deduplicates by ID (last-write-wins via Map.set),
-    // so if both the POST response and the SSE event provide the same
-    // message, the later arrival's fields prevail — this is acceptable.
-    if (eventData.id && (eventData.msg !== undefined || eventData.type)) {
-      const msg: Message = {
-        id: eventData.id,
-        projectId: eventData.projectId || '',
-        sender: eventData.sender || '',
-        senderId: eventData.senderId || '',
-        recipient: eventData.recipient || '',
-        recipientId: eventData.recipientId || '',
-        msg: eventData.msg || '',
-        type: eventData.type || '',
-        agentId: eventData.agentId || '',
-        createdAt: eventData.createdAt || new Date().toISOString(),
-        ...(eventData.channel != null ? { channel: eventData.channel } : {}),
-        ...(eventData.threadId != null ? { threadId: eventData.threadId } : {}),
-        ...(eventData.visibility != null ? { visibility: eventData.visibility } : {}),
-        ...(eventData.groupId != null ? { groupId: eventData.groupId } : {}),
-        ...(eventData.dispatchState != null ? { dispatchState: eventData.dispatchState } : {}),
-        ...(eventData.urgent != null ? { urgent: eventData.urgent } : {}),
-        ...(eventData.broadcasted != null ? { broadcasted: eventData.broadcasted } : {}),
-        ...(eventData.read != null ? { read: eventData.read } : {}),
-      };
-      this.mergeMessages([msg]);
-
-      // Update attachment map if the event carries attachment data.
-      if (eventData.attachments && eventData.attachments.length > 0) {
-        this.v2AttachmentMap.set(msg.id, eventData.attachments);
+    if (eventData) {
+      // Filter: only process events for this conversation
+      const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
+      if (eventKey && eventKey !== this.conversationKey) {
+        return; // Not for this conversation
       }
-
-      this.scrollToBottomAfterRender();
-      this.maybeAdvanceReadWatermark();
-      return;
+      // The sender finished typing the moment their message landed — drop the
+      // indicator now rather than waiting out TYPING_EXPIRY_MS.
+      this.clearTypingForUser(eventData.senderId);
     }
-
-    // Lightweight notification (no full message) — fall back to backfill.
     void this.backfillV2();
   }
 
@@ -1216,6 +1299,36 @@ export class ScionChatThread extends LitElement {
     this.scrollToBottomAfterRender();
     // Advance read watermark if applicable
     this.maybeAdvanceReadWatermark();
+  }
+
+  /**
+   * Fetch the current user's read watermark for this conversation.
+   * Used to position the unread divider on thread open.
+   */
+  private async fetchOwnReadState(): Promise<void> {
+    const currentId = this.fetchId;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/read`
+      );
+      if (!res.ok || currentId !== this.fetchId) return;
+      const data = (await res.json()) as {
+        lastReadMessageId?: string;
+        peerLastReadMessageId?: string;
+        peerLastReadAt?: string;
+      };
+      if (currentId !== this.fetchId) return;
+      if (data?.lastReadMessageId) {
+        this.lastReadMessageId = data.lastReadMessageId;
+        // Show divider if there are messages after the watermark.
+        const idx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
+        if (idx >= 0 && idx < this.messages.length - 1) {
+          this.showUnreadDivider = true;
+        }
+      }
+    } catch {
+      // Non-critical: the divider is a convenience, not essential.
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1369,7 +1482,7 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, mentions, attachmentIds, onSuccess } = e.detail;
+    const { text, mentions, attachmentIds, replyToId, onSuccess } = e.detail;
     const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
     if (!hasContent || this.sending) return;
 
@@ -1384,12 +1497,8 @@ export class ScionChatThread extends LitElement {
     this.sendError = null;
 
     try {
-      // Generate an idempotency key so duplicate sends (e.g. network retry)
-      // are collapsed server-side.
-      const idempotencyKey = crypto.randomUUID();
       const body: Record<string, unknown> = {
         content: text,
-        idempotency_key: idempotencyKey,
       };
       if (mentions && mentions.length > 0) {
         body.mentions = mentions;
@@ -1397,6 +1506,10 @@ export class ScionChatThread extends LitElement {
       // W7: Include attachment IDs.
       if (attachmentIds && attachmentIds.length > 0) {
         body.attachments = attachmentIds;
+      }
+      // Phase-3: Include reply_to_id.
+      if (replyToId) {
+        body.reply_to_id = replyToId;
       }
 
       const res = await apiFetch(
@@ -1498,6 +1611,152 @@ export class ScionChatThread extends LitElement {
     } catch {
       // Non-critical
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase-3: Message action handlers
+  // ---------------------------------------------------------------------------
+
+  /** Handle reply action from a message. Sets the composer reply-to context. */
+  private handleMessageReply(
+    e: CustomEvent<{ messageId: string; senderName: string; content: string }>
+  ): void {
+    this.composerEditMessage = null; // Cancel any pending edit
+    this.composerReplyTo = {
+      messageId: e.detail.messageId,
+      senderName: e.detail.senderName,
+      content:
+        e.detail.content.length > 100
+          ? e.detail.content.slice(0, 100) + '...'
+          : e.detail.content,
+    };
+  }
+
+  /** Handle edit action from a message. Sets the composer edit mode. */
+  private handleMessageEditRequest(
+    e: CustomEvent<{ messageId: string; content: string }>
+  ): void {
+    this.composerReplyTo = null; // Cancel any pending reply
+    this.composerEditMessage = {
+      messageId: e.detail.messageId,
+      content: e.detail.content,
+    };
+  }
+
+  /** Handle delete action from a message. Shows confirmation and calls API. */
+  private async handleMessageDeleteRequest(
+    e: CustomEvent<{ messageId: string }>
+  ): Promise<void> {
+    const { messageId } = e.detail;
+    const confirmed = window.confirm('Delete this message? This cannot be undone.');
+    if (!confirmed) return;
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(messageId)}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok) {
+        const errMsg = await extractApiError(res, 'Failed to delete message');
+        this.sendError = errMsg;
+      }
+      // SSE event will update the message state.
+    } catch (err) {
+      this.sendError = err instanceof Error ? err.message : 'Failed to delete message';
+    }
+  }
+
+  /** Handle chat-edit event from the composer. Calls PUT endpoint. */
+  private async handleChatEditV2(
+    e: CustomEvent<{ messageId: string; text: string }>
+  ): Promise<void> {
+    const { messageId, text } = e.detail;
+    if (!text.trim()) return;
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages/${encodeURIComponent(messageId)}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: text }),
+        }
+      );
+      if (!res.ok) {
+        const errMsg = await extractApiError(res, 'Failed to edit message');
+        this.sendError = errMsg;
+      }
+      // SSE event will update the message state.
+    } catch (err) {
+      this.sendError = err instanceof Error ? err.message : 'Failed to edit message';
+    }
+  }
+
+  /** Handle scroll-to-message from reply preview click. */
+  private handleScrollToMessage(e: CustomEvent<{ messageId: string }>): void {
+    this.scrollToMessageById(e.detail.messageId);
+  }
+
+  /** SSE handler for message-edited events. */
+  private handleV2MessageEdited(e: Event): void {
+    const detail = (e as CustomEvent).detail as
+      | ({ data?: { conversationKey?: string; messageId?: string; content?: string; editedAt?: string } }
+        & { conversationKey?: string; messageId?: string; content?: string; editedAt?: string })
+      | undefined;
+    // stateManager wraps SSE payloads as { state, data }; unwrap like handleV2ChatMessage.
+    const eventData = detail?.data ?? detail;
+    if (!eventData || eventData.conversationKey !== this.conversationKey) return;
+
+    const messageId = eventData.messageId;
+    const content = eventData.content;
+    const editedAt = eventData.editedAt;
+    if (!messageId) return;
+
+    // Update the message in messageMap.
+    const msg = this.messageMap.get(messageId);
+    if (msg) {
+      msg.msg = content ?? msg.msg;
+      // Update the extension map.
+      const ext = this.v2MessageExtMap.get(messageId) || {};
+      if (editedAt) ext.editedAt = editedAt;
+      this.v2MessageExtMap.set(messageId, ext);
+      // Force re-render by cloning messages array.
+      this.messages = [...this.messages];
+    }
+  }
+
+  /** SSE handler for message-deleted events. */
+  private handleV2MessageDeleted(e: Event): void {
+    const detail = (e as CustomEvent).detail as
+      | ({ data?: { conversationKey?: string; messageId?: string; deletedAt?: string } }
+        & { conversationKey?: string; messageId?: string; deletedAt?: string })
+      | undefined;
+    // stateManager wraps SSE payloads as { state, data }; unwrap like handleV2ChatMessage.
+    const eventData = detail?.data ?? detail;
+    if (!eventData || eventData.conversationKey !== this.conversationKey) return;
+
+    const messageId = eventData.messageId;
+    const deletedAt = eventData.deletedAt;
+    if (!messageId) return;
+
+    // Update the extension map with deletedAt.
+    const ext = this.v2MessageExtMap.get(messageId) || {};
+    if (deletedAt) ext.deletedAt = deletedAt;
+    this.v2MessageExtMap.set(messageId, ext);
+    // Force re-render.
+    this.messages = [...this.messages];
+  }
+
+  /** Check if any agent has sent a message after the given message. */
+  private hasAgentReplyAfter(msg: Message): boolean {
+    const msgIdx = this.messages.indexOf(msg);
+    if (msgIdx < 0) return false;
+    for (let i = msgIdx + 1; i < this.messages.length; i++) {
+      if (this.messages[i].sender?.startsWith('agent:')) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Advance the read watermark if conditions are met. */
@@ -1661,6 +1920,56 @@ export class ScionChatThread extends LitElement {
     this.scrollToBottomAfterRender();
   }
 
+  /**
+   * Parse `#msg-{id}` from the URL hash.
+   * Returns the message ID or empty string if no match.
+   */
+  private parseMessageHash(): string {
+    const hash = window.location.hash;
+    const match = hash.match(/^#msg-(.+)$/);
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  /**
+   * Scroll to a specific message by ID, with optional highlight animation.
+   * Can be called externally (e.g. from search navigation on same conversation).
+   */
+  scrollToMessageById(messageId: string, highlight = true): void {
+    void this.updateComplete.then(() => {
+      const scrollEl = this.shadowRoot?.querySelector('.messages-scroll');
+      if (!scrollEl) return;
+      const msgEl = scrollEl.querySelector(`#msg-${messageId}`);
+      if (!msgEl) return;
+      msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (highlight) {
+        msgEl.classList.add('permalink-highlight');
+        setTimeout(() => msgEl.classList.remove('permalink-highlight'), 2000);
+      }
+    });
+  }
+
+  /** Scroll to the unread divider after render. */
+  private scrollToUnreadDivider(): void {
+    void this.updateComplete.then(() => {
+      const divider = this.shadowRoot?.querySelector('.unread-divider');
+      if (divider) {
+        divider.scrollIntoView({ behavior: 'auto', block: 'center' });
+      } else {
+        // Fallback: scroll to bottom if divider not found.
+        this.scrollToBottom();
+      }
+    });
+  }
+
+  /** Handle copy-link event from a message's action bar. */
+  private handleCopyLink(e: CustomEvent<{ messageId: string }>): void {
+    const { messageId } = e.detail;
+    const url = `${window.location.origin}${window.location.pathname}#msg-${encodeURIComponent(messageId)}`;
+    navigator.clipboard.writeText(url).catch(() => {
+      // Fallback: ignore clipboard failure silently.
+    });
+  }
+
   /** Focus the composer textarea when clicking the message area background. */
   private handleMessageAreaClick(e: MouseEvent): void {
     const target = e.target as HTMLElement;
@@ -1780,7 +2089,10 @@ export class ScionChatThread extends LitElement {
           .conversationMode=${this.isDM ? 'dm' : 'thread'}
           .peerName=${this.peerName}
           .projectId=${this.projectId}
+          .replyTo=${this.composerReplyTo}
+          .editMessage=${this.composerEditMessage}
           @chat-send=${this.handleChatSendV2}
+          @chat-edit=${this.handleChatEditV2}
           @chat-typing=${() => this.sendTypingEvent()}
           @default-agent-change=${this.handleDefaultAgentChange}
         ></scion-chat-composer>
@@ -1945,6 +2257,14 @@ export class ScionChatThread extends LitElement {
     const lastOwnMessageId = this.lastOwnMessageId();
     const seenExpired = this.peerReadAt > 0 && Date.now() - this.peerReadAt > SEEN_VISIBLE_MS;
 
+    // Unread divider: find the position of the last-read message so we can
+    // insert the divider after it.
+    let unreadDividerInserted = false;
+    let lastReadIdx = -1;
+    if (this.showUnreadDivider && this.lastReadMessageId) {
+      lastReadIdx = this.messages.findIndex((m) => m.id === this.lastReadMessageId);
+    }
+
     for (let mi = 0; mi < this.messages.length; mi++) {
       const msg = this.messages[mi];
       const d = new Date(msg.createdAt);
@@ -1990,6 +2310,19 @@ export class ScionChatThread extends LitElement {
         `);
       }
 
+      // Unread divider: insert between the last-read message and the next one.
+      if (!unreadDividerInserted && lastReadIdx >= 0 && mi > lastReadIdx) {
+        unreadDividerInserted = true;
+        rows.push(html`
+          <div class="unread-divider">
+            <span class="unread-label">New messages</span>
+          </div>
+        `);
+        // Reset grouping so the first unread message shows its header.
+        prevSender = '';
+        prevTimestamp = 0;
+      }
+
       // System/state-change messages
       if (SYSTEM_MESSAGE_TYPES.has(msg.type)) {
         prevSender = '';
@@ -2033,8 +2366,18 @@ export class ScionChatThread extends LitElement {
           ? this.agentName || ''
           : '';
 
+      // Phase-3: Get extension data for this message.
+      const ext = this.v2MessageExtMap.get(msg.id);
+      const replyPreview = ext?.replyToId
+        ? this.v2ReplyPreviewMap.get(ext.replyToId) ?? null
+        : null;
+      const isOwnMessage = msg.senderId === this.currentUserId;
+      // Guard: can edit/delete only if no agent has replied after this message.
+      const canEditDelete = isOwnMessage && !this.hasAgentReplyAfter(msg);
+
       rows.push(html`
         <scion-chat-message
+          id="msg-${msg.id}"
           body=${msg.msg}
           sender=${msg.sender}
           senderId=${msg.senderId || ''}
@@ -2055,6 +2398,18 @@ export class ScionChatThread extends LitElement {
           .attachments=${msg.attachments || []}
           .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
           routedTo=${!isAgentSender && this.defaultAgent ? this.defaultAgent : ''}
+          messageId=${msg.id}
+          ?isOwn=${isOwnMessage}
+          ?canEdit=${canEditDelete}
+          ?canDelete=${canEditDelete}
+          .replyPreview=${replyPreview}
+          editedAt=${ext?.editedAt || ''}
+          deletedAt=${ext?.deletedAt || ''}
+          @message-reply=${this.handleMessageReply}
+          @message-edit=${this.handleMessageEditRequest}
+          @message-delete=${this.handleMessageDeleteRequest}
+          @message-copy-link=${this.handleCopyLink}
+          @scroll-to-message=${this.handleScrollToMessage}
         ></scion-chat-message>
       `);
 

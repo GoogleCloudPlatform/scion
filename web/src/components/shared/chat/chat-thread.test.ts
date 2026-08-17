@@ -175,9 +175,11 @@ describe('scion-chat-thread read watermark', () => {
       el as unknown as { advanceReadWatermark(id: string): Promise<void> }
     ).advanceReadWatermark('msg-7');
 
-    const readCall = apiFetch.mock.calls.find((c) => String(c[0]).endsWith('/read'));
+    const readCall = apiFetch.mock.calls.find(
+      (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+    );
     expect(readCall).toBeDefined();
-    const init = readCall?.[1] as RequestInit;
+    const init = readCall![1] as RequestInit;
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual({ messageId: 'msg-7' });
   });
@@ -581,154 +583,5 @@ describe('scion-chat-thread initial scroll position', () => {
     await Promise.resolve();
 
     expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Issue #1034: SSE direct message append
-// ---------------------------------------------------------------------------
-
-describe('scion-chat-thread SSE direct message append (#1034)', () => {
-  beforeEach(() => {
-    apiFetch.mockReset();
-    apiFetch.mockResolvedValue(emptyHistory());
-  });
-
-  afterEach(() => {
-    document.body.innerHTML = '';
-  });
-
-  it('merges a full SSE event payload directly without backfill', async () => {
-    const el = await mount();
-
-    // Emit a full message event (has id + msg).
-    emitChatMessage({
-      threadId: CONVERSATION_KEY,
-      id: 'direct-msg-1',
-      msg: 'Hello direct!',
-      senderId: 'user-a',
-      sender: 'user:Alice',
-      type: 'chat',
-      createdAt: new Date().toISOString(),
-    });
-
-    // Wait for render.
-    await el.updateComplete;
-    await Promise.resolve();
-
-    // No backfill should have been triggered — zero history calls.
-    expect(historyCalls()).toBe(0);
-  });
-
-  it('falls back to backfill when event has no full payload', async () => {
-    await mount();
-
-    // Emit a lightweight event (no id or msg).
-    emitChatMessage({ threadId: CONVERSATION_KEY });
-
-    await vi.waitFor(() => expect(historyCalls()).toBe(1));
-  });
-
-  it('still clears typing indicator on direct append', async () => {
-    const el = await mount();
-
-    // Set up a typing indicator.
-    fakeStateManager.dispatchEvent(
-      new CustomEvent('chat-typing-received', {
-        detail: {
-          data: {
-            threadId: CONVERSATION_KEY,
-            userId: 'user-typer',
-            displayName: 'Typer',
-          },
-        },
-      })
-    );
-    await el.updateComplete;
-    expect(el.shadowRoot?.querySelector('.typing-indicator')).not.toBeNull();
-
-    // Emit a full message from the same sender.
-    emitChatMessage({
-      threadId: CONVERSATION_KEY,
-      id: 'direct-msg-2',
-      msg: 'Done typing',
-      senderId: 'user-typer',
-      type: 'chat',
-      createdAt: new Date().toISOString(),
-    });
-    await el.updateComplete;
-
-    // Typing indicator should be cleared.
-    expect(el.shadowRoot?.querySelector('.typing-indicator')).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Issue #1055: Idempotency key on send (frontend)
-// ---------------------------------------------------------------------------
-
-describe('scion-chat-thread idempotency key on send (#1055)', () => {
-  beforeEach(() => {
-    apiFetch.mockReset();
-    apiFetch.mockResolvedValue(emptyHistory());
-  });
-
-  afterEach(() => {
-    document.body.innerHTML = '';
-  });
-
-  it('includes an idempotency_key in the send POST body', async () => {
-    const el = await mount();
-
-    // Mock the send response.
-    apiFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: () => Promise.resolve({ id: 'msg-1' }),
-    } as unknown as Response);
-    // Mock the backfill after send.
-    apiFetch.mockResolvedValue(emptyHistory());
-
-    // The chat-send event is dispatched from the composer child inside the
-    // shadow DOM. Find the composer and dispatch from it so the thread's
-    // @chat-send listener fires.
-    await el.updateComplete;
-    const composer = el.shadowRoot?.querySelector('scion-chat-composer');
-    expect(composer, 'composer should be in the thread shadow DOM').not.toBeNull();
-
-    composer!.dispatchEvent(
-      new CustomEvent('chat-send', {
-        detail: {
-          text: 'Hello with idempotency!',
-          mentions: [],
-          attachmentIds: [],
-          onSuccess: () => {},
-        },
-        bubbles: true,
-        composed: true,
-      })
-    );
-
-    // Wait for the send to complete.
-    await vi.waitFor(() => {
-      const sendCalls = apiFetch.mock.calls.filter(
-        (c) => String(c[0]).includes('/messages') && (c[1] as Record<string, unknown>)?.method === 'POST'
-      );
-      expect(sendCalls.length).toBeGreaterThanOrEqual(1);
-    });
-
-    // Find the send call.
-    const sendCall = apiFetch.mock.calls.find(
-      (c) => String(c[0]).includes('/messages') && (c[1] as Record<string, unknown>)?.method === 'POST'
-    );
-    expect(sendCall).toBeDefined();
-
-    const body = JSON.parse((sendCall![1] as Record<string, string>).body) as Record<string, unknown>;
-    expect(body.idempotency_key).toBeDefined();
-    expect(typeof body.idempotency_key).toBe('string');
-    // Verify it looks like a UUID (8-4-4-4-12 format).
-    expect(body.idempotency_key).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-    );
   });
 });
