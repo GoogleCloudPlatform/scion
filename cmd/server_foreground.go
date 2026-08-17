@@ -1077,8 +1077,8 @@ func isLikelyPlaceholderAudience(audience string) bool {
 	projectNumber := parts[2]
 	backendServiceID := parts[5]
 
-	// Backend-service ID "0" is the canonical placeholder.
-	if backendServiceID == "0" {
+	// Backend-service ID "0" (or any all-zeros string) is the canonical placeholder.
+	if backendServiceID != "" && strings.Trim(backendServiceID, "0") == "" {
 		return true
 	}
 	// An all-zeros project number (any length) is synthetic.

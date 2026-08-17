@@ -278,6 +278,7 @@ func TestIsLikelyPlaceholderAudience(t *testing.T) {
 	}{
 		{"canonical placeholder", "/projects/000000000/global/backendServices/0", true},
 		{"zero backend ID", "/projects/486315127503/global/backendServices/0", true},
+		{"padded zero backend service ID", "/projects/486315127503/global/backendServices/000000", true},
 		{"all-zeros project", "/projects/000000000/global/backendServices/12345", true},
 		{"all-zeros project short", "/projects/0/global/backendServices/12345", true},
 		{"dummy project number", "/projects/123456789/global/backendServices/12345", true},
