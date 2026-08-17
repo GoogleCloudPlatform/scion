@@ -207,7 +207,7 @@ func TestValidateHostedHAPreflightStillRequiresIAPForProxy(t *testing.T) {
 
 	err := validateHostedHAPreflight(cfg)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "iap")
+	require.Contains(t, err.Error(), "requires server.auth.proxy.provider=iap")
 }
 
 // TestValidateHostedHAPreflightEnforcesUniversalForOAuth checks that skipping

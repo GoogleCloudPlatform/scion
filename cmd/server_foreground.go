@@ -1402,17 +1402,13 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 
 	// In hosted mode with IAP authentication, derive the Cloud Run URL from
 	// the IAP audience. This prevents the localhost:8080 fallback which is
-	// unreachable from GKE-dispatched agents.
+	// unreachable from GKE-dispatched agents. GCLB/GKE audiences carry no
+	// routing information and cannot be converted to a URL, so they fall
+	// through to the HA warning below.
 	if hostedMode && cfg.Auth.Proxy != nil && cfg.Auth.Proxy.IAP != nil && cfg.Auth.Proxy.IAP.Audience != "" {
 		if cloudRunURL := iapAudienceToCloudRunURL(cfg.Auth.Proxy.IAP.Audience); cloudRunURL != "" {
 			log.Printf("Hub endpoint derived from IAP audience: %s", cloudRunURL)
 			return cloudRunURL
-		}
-		// GCLB/GKE audiences cannot be used to derive a URL; warn if no
-		// explicit base URL was provided (all earlier return paths above
-		// would have caught an explicit one).
-		if isSupportedIAPAudience(strings.TrimRight(strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience), "/")) {
-			log.Println("Warning: GKE/GCLB IAP audience detected but SCION_SERVER_BASE_URL not set; hub endpoint will fall back to localhost which is likely unreachable from dispatched agents")
 		}
 	}
 
@@ -1421,6 +1417,14 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 		port = webPort
 	}
 	hubEndpoint := fmt.Sprintf("http://localhost:%d", port)
+	// Any hosted multi-instance deployment reaching this fallback has no
+	// usable public URL: dispatched agents would resolve the loopback address
+	// inside their own container. This is not specific to IAP — a GCLB
+	// audience cannot be converted to a URL, and a hub doing its own
+	// OAuth/OIDC has no audience to derive one from at all.
+	if hostedHAGuardsRequired(cfg) {
+		log.Printf("Warning: hosted HA deployment has no explicit hub base URL; falling back to %s, which is unreachable from dispatched agents. Set SCION_SERVER_BASE_URL or server.hub.public_url.", hubEndpoint)
+	}
 	if enableDebug {
 		log.Printf("Auto-computed hub endpoint for combo mode: %s", hubEndpoint)
 	}
