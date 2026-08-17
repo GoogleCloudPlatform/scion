@@ -27,7 +27,15 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { isChatNotificationStatus } from '../../client/chat-notifications.js';
-import { canShowPushNotification } from '../../client/push-preference.js';
+import {
+  canShowPushNotification,
+  enablePushWithPermission,
+  isPushOptedIn,
+  pushPermission,
+  setPushOptIn,
+  PUSH_PREFERENCE_EVENT,
+  type PushPermissionState,
+} from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
@@ -40,9 +48,14 @@ export class ScionNotificationTray extends LitElement {
   @state() private notifications: Notification[] = [];
   @state() private open = false;
 
+  /** Mirrors the shared push preference so the panel can render its state. */
+  @state() private pushEnabled = false;
+  @state() private pushPermission: PushPermissionState = 'default';
+
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnNotification = this.onNotificationEvent.bind(this);
+  private boundOnPushPreference = (): void => this.syncPushState();
 
   /** IDs already seen — used to detect genuinely new notifications. */
   private seenIds = new Set<string>();
@@ -56,6 +69,10 @@ export class ScionNotificationTray extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.syncPushState();
+    // Keep in step with the profile settings page, which writes the same
+    // preference. Two toggles disagreeing about one setting is worse than one.
+    window.addEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     if (this.user) {
       void this.fetchNotifications();
       this.startPolling();
@@ -67,6 +84,7 @@ export class ScionNotificationTray extends LitElement {
     super.disconnectedCallback();
     this.stopPolling();
     this.stopListeningForNotifications();
+    window.removeEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
@@ -83,6 +101,34 @@ export class ScionNotificationTray extends LitElement {
       }
     }
     this.detectTruncation();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Push preference
+  // ---------------------------------------------------------------------------
+
+  private syncPushState(): void {
+    this.pushPermission = pushPermission();
+    // Permission can be revoked in site settings long after the opt-in was
+    // stored, so the toggle reflects both halves rather than the flag alone.
+    this.pushEnabled = canShowPushNotification();
+  }
+
+  /**
+   * Turns desktop notifications on or off.
+   *
+   * This is the only path that asks the browser for permission, and it is
+   * reachable from chat because the tray is in the chat header. Permission is
+   * never requested on load: browsers penalise unprompted requests, and a
+   * permission dialog nobody asked for is the reason they do.
+   */
+  private async handlePushToggle(): Promise<void> {
+    if (this.pushEnabled) {
+      setPushOptIn(false);
+    } else {
+      await enablePushWithPermission();
+    }
+    this.syncPushState();
   }
 
   private detectTruncation(): void {
@@ -543,9 +589,38 @@ export class ScionNotificationTray extends LitElement {
     .panel-footer {
       display: flex;
       align-items: center;
-      justify-content: center;
+      justify-content: space-between;
+      gap: 0.5rem;
       padding: 0.5rem 1rem;
       border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .push-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      border: none;
+      background: transparent;
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.75rem;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      transition: background 0.15s ease;
+    }
+
+    .push-toggle.on {
+      color: var(--scion-primary, #3b82f6);
+    }
+
+    .push-toggle:hover:not(:disabled) {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .push-toggle:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
     }
 
     .manage-link {
@@ -640,6 +715,7 @@ export class ScionNotificationTray extends LitElement {
           ${count > 0 ? this.notifications.map((n) => this.renderItem(n)) : this.renderEmpty()}
         </div>
         <div class="panel-footer">
+          ${this.renderPushToggle()}
           <a
             href="/projects"
             class="manage-link"
@@ -654,6 +730,36 @@ export class ScionNotificationTray extends LitElement {
           >
         </div>
       </div>
+    `;
+  }
+
+  /**
+   * The master desktop-notification toggle. Lives in the tray because the tray
+   * is the one notification surface present on every page, chat included —
+   * the profile settings page is not reachable without leaving a conversation.
+   */
+  private renderPushToggle() {
+    if (this.pushPermission === 'unsupported') return nothing;
+
+    const blocked = this.pushPermission === 'denied' && !isPushOptedIn();
+    const label = blocked
+      ? 'Desktop notifications blocked'
+      : this.pushEnabled
+        ? 'Desktop notifications on'
+        : 'Desktop notifications off';
+
+    return html`
+      <button
+        class="push-toggle ${this.pushEnabled ? 'on' : ''}"
+        role="switch"
+        aria-checked=${this.pushEnabled}
+        ?disabled=${blocked}
+        title=${blocked ? 'Allow notifications in your browser site settings' : label}
+        @click=${(): void => void this.handlePushToggle()}
+      >
+        <sl-icon name=${this.pushEnabled ? 'bell-fill' : 'bell-slash'}></sl-icon>
+        ${label}
+      </button>
     `;
   }
 

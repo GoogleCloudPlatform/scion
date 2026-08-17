@@ -24,6 +24,12 @@
  * explicit split every mention would appear twice.
  *
  * The split is by status, and it is asserted here rather than assumed.
+ *
+ * The second half of the file covers the master desktop-notification toggle
+ * the tray carries. It lives here because the tray is the only notification
+ * surface present on every page including chat, and because the rule that
+ * matters about it — permission is requested on click and never on load — is
+ * invisible unless something asserts it.
  */
 
 // @vitest-environment happy-dom
@@ -31,7 +37,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render } from 'lit';
 
-import { PUSH_STORAGE_KEY } from '../../client/push-preference.js';
+import { PUSH_PREFERENCE_EVENT, PUSH_STORAGE_KEY } from '../../client/push-preference.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -46,6 +52,11 @@ let popups: Array<{ title: string; options: NotificationOptions }> = [];
 
 class FakeNotification {
   static permission: NotificationPermission = 'granted';
+  static requestPermission = vi.fn(async (): Promise<NotificationPermission> => {
+    FakeNotification.permission = 'granted';
+    return FakeNotification.permission;
+  });
+
   constructor(title: string, options: NotificationOptions = {}) {
     popups.push({ title, options });
   }
@@ -121,5 +132,95 @@ describe('notification tray: chat notifications', () => {
     const agentLinks = host.querySelectorAll('a[href^="/agents/"]');
     expect(agentLinks).toHaveLength(1);
     expect(agentLinks[0].getAttribute('href')).toBe('/agents/agent-1');
+  });
+});
+
+describe('notification tray: desktop notification toggle', () => {
+  beforeAll(async () => {
+    await import('./notification-tray.js');
+  });
+
+  beforeEach(() => {
+    FakeNotification.permission = 'default';
+    FakeNotification.requestPermission.mockClear();
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('never asks for permission on load', async () => {
+    const tray = createTray();
+    document.body.appendChild(tray);
+    await tray.updateComplete;
+
+    expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
+
+    tray.remove();
+  });
+
+  it('asks for permission when the user turns it on, and only then', async () => {
+    const tray = createTray();
+
+    await tray.handlePushToggle();
+
+    expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(PUSH_STORAGE_KEY)).toBe('true');
+    expect(tray.pushEnabled).toBe(true);
+  });
+
+  it('turns off without touching the browser permission', async () => {
+    FakeNotification.permission = 'granted';
+    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    const tray = createTray();
+    tray.syncPushState();
+    expect(tray.pushEnabled).toBe(true);
+
+    await tray.handlePushToggle();
+
+    expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
+    expect(localStorage.getItem(PUSH_STORAGE_KEY)).toBe('false');
+    expect(tray.pushEnabled).toBe(false);
+  });
+
+  it('reports the preference change so other surfaces follow', async () => {
+    const heard: boolean[] = [];
+    const listener = (e: Event): void => {
+      heard.push((e as CustomEvent<{ enabled: boolean }>).detail.enabled);
+    };
+    window.addEventListener(PUSH_PREFERENCE_EVENT, listener);
+    try {
+      await createTray().handlePushToggle();
+    } finally {
+      window.removeEventListener(PUSH_PREFERENCE_EVENT, listener);
+    }
+
+    expect(heard).toEqual([true]);
+  });
+
+  it('shows the toggle as blocked, not as off, when the browser refused', () => {
+    FakeNotification.permission = 'denied';
+    const host = document.createElement('div');
+    const tray = createTray();
+    tray.syncPushState();
+
+    render(tray.renderPushToggle(), host);
+    const button = host.querySelector('button');
+
+    expect(button?.textContent).toContain('blocked');
+    expect(button?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('hides the toggle entirely where the API does not exist', () => {
+    delete (window as unknown as { Notification?: unknown }).Notification;
+    const host = document.createElement('div');
+    const tray = createTray();
+    tray.syncPushState();
+
+    render(tray.renderPushToggle(), host);
+
+    expect(host.querySelector('button')).toBeNull();
   });
 });

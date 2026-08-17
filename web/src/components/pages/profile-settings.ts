@@ -25,9 +25,15 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
+import {
+  canShowPushNotification,
+  enablePushWithPermission,
+  pushPermission,
+  setPushOptIn,
+  PUSH_PREFERENCE_EVENT,
+  type PushPermissionState,
+} from '../../client/push-preference.js';
 import '../shared/subscription-manager.js';
-
-const STORAGE_KEY = 'scion-push-notifications';
 
 @customElement('scion-page-profile-settings')
 export class ScionPageProfileSettings extends LitElement {
@@ -35,7 +41,7 @@ export class ScionPageProfileSettings extends LitElement {
   private _pushEnabled = false;
 
   @state()
-  private _permissionState: NotificationPermission | 'unsupported' = 'default';
+  private _permissionState: PushPermissionState = 'default';
 
   @state()
   private _gcloudADCAvailable = false;
@@ -165,10 +171,20 @@ export class ScionPageProfileSettings extends LitElement {
     }
   `;
 
+  private readonly _onPushPreferenceChanged = (): void => this._initNotificationState();
+
   override connectedCallback(): void {
     super.connectedCallback();
     this._initNotificationState();
+    // The tray carries the same toggle; whichever one the user flips, both
+    // must show the same answer.
+    window.addEventListener(PUSH_PREFERENCE_EVENT, this._onPushPreferenceChanged);
     void this._loadSystemStatus();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener(PUSH_PREFERENCE_EVENT, this._onPushPreferenceChanged);
   }
 
   private async _loadSystemStatus(): Promise<void> {
@@ -190,15 +206,8 @@ export class ScionPageProfileSettings extends LitElement {
   }
 
   private _initNotificationState(): void {
-    if (!('Notification' in window)) {
-      this._permissionState = 'unsupported';
-      this._pushEnabled = false;
-      return;
-    }
-
-    this._permissionState = Notification.permission;
-    const stored = localStorage.getItem(STORAGE_KEY);
-    this._pushEnabled = stored === 'true' && Notification.permission === 'granted';
+    this._permissionState = pushPermission();
+    this._pushEnabled = canShowPushNotification();
   }
 
   private async _handleToggle(e: Event): Promise<void> {
@@ -206,27 +215,16 @@ export class ScionPageProfileSettings extends LitElement {
     const wantsEnabled = target.checked;
 
     if (!wantsEnabled) {
-      localStorage.setItem(STORAGE_KEY, 'false');
-      this._pushEnabled = false;
+      setPushOptIn(false);
+      this._initNotificationState();
       return;
     }
 
-    if (!('Notification' in window)) {
-      target.checked = false;
-      this._permissionState = 'unsupported';
-      return;
-    }
-
-    const permission = await Notification.requestPermission();
-    this._permissionState = permission;
-
-    if (permission === 'granted') {
-      localStorage.setItem(STORAGE_KEY, 'true');
-      this._pushEnabled = true;
-    } else {
-      target.checked = false;
-      this._pushEnabled = false;
-    }
+    // Requesting permission from the change handler keeps it inside the user
+    // gesture, which is the only place browsers accept the request.
+    this._permissionState = await enablePushWithPermission();
+    this._initNotificationState();
+    target.checked = this._pushEnabled;
   }
 
   private async _handleADCToggle(e: Event): Promise<void> {
