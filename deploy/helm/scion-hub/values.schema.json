@@ -28,7 +28,7 @@
         "type": {
           "type": "string",
           "enum": ["", "Recreate", "RollingUpdate"],
-          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. That default is a preference and not a safety measure: every value is accepted at every replica count, because concurrent hub instances are a supported mode coordinated by Postgres advisory locks. At one replica the trade is an outage that loses PTY sessions and port tunnels (Recreate) against a window with two pods in which the web terminal and exec reach the wrong one about half the time (RollingUpdate, which renders maxUnavailable: 0)."
+          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. That default is a preference and not a safety measure: every value is accepted at every replica count. This chart renders no --db and mounts no volumes, so replicas share no mutable state and there is nothing for a strategy choice to corrupt; when the Cloud SQL and Filestore values add shared state, concurrent instances are coordinated by the hub's Postgres advisory locks rather than by this field. At one replica the trade is an outage that loses PTY sessions and port tunnels (Recreate) against a window with two pods in which the web terminal and exec reach the wrong one about half the time (RollingUpdate, which renders maxUnavailable: 0)."
         }
       }
     },
@@ -40,7 +40,7 @@
         "repository": {
           "type": "string",
           "minLength": 1,
-          "description": "REQUIRED, with no default. The hub image built from the root Dockerfile with --target hub-gke. It is not published anywhere, so any default the chart could ship would point at an empty path or at another artifact. The published artifact named scion-hub is not this image: it runs as root and has no embedded web UI."
+          "description": "REQUIRED, with no default. A hub image built from the root Dockerfile with --target hub-gke - a stage the accompanying image-build change adds and which is not in the root Dockerfile yet. It is not published anywhere, so any default the chart could ship would point at an empty path or at another artifact. The published artifact named scion-hub is not this image: it runs as root, and it is built with -tags no_embed_web so it has no embedded web UI."
         },
         "tag": {
           "type": "string",
@@ -93,7 +93,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Extra arguments APPENDED to the hub command. Appended is literal and it is the hazard: pflag is last-wins, so a flag the chart already renders would be silently replaced rather than rejected by the hub. Nothing at runtime prevents that - what prevents it is a reserved list checked at render time in scion-hub.hubArgs, which refuses the chart's own flags, flags that would redirect the configuration load, flags whose value is delivered through another channel, and flags that weaken authentication. An argument naming or carrying secret material also fails the render."
+          "description": "Extra arguments APPENDED to the hub command. Appended is literal and it is the hazard: pflag is last-wins, so a flag the chart already renders would be silently replaced rather than rejected by the hub. Nothing at runtime prevents that - what prevents it is a reserved list checked at render time in scion-hub.hubArgs, which refuses the chart's own flags, flags that change which configuration the hub selects, flags that are not the lever they appear to be, flags whose value is delivered through another channel, and flags that weaken authentication. An argument naming or carrying secret material also fails the render."
         },
         "resources": {
           "type": "object"

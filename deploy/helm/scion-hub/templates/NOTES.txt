@@ -47,6 +47,8 @@ THE IMAGE
 
   This must be a hub image built from the root Dockerfile with
   --target hub-gke: non-root at uid 1000, web UI embedded, no baked KUBECONFIG.
+  The hub-gke stage arrives with the image-build change that accompanies this
+  chart; until then that build reports an unknown target.
 
   The published artifact named "scion-hub"
   (us-central1-docker.pkg.dev/PROJECT_ID/public-docker/scion-hub, built from

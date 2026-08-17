@@ -40,9 +40,14 @@ updateStrategy:
   # serving until the new one is Available - maxUnavailable is 0 - so there is
   # no outage, at the cost of a window with two pods in which the web terminal,
   # exec, log tailing and port forwarding hit the wrong pod about half the time
-  # (see replicaCount above). Neither is unsafe: concurrent hub instances are a
-  # supported mode, coordinated by Postgres advisory locks rather than by
-  # anything on disk, and this chart mounts no shared volume in any case.
+  # (see replicaCount above).
+  #
+  # Neither is a data-safety question at this point in the chart: it renders no
+  # --db and mounts no volumes, so replicas share no mutable state at all and
+  # the hub's hosted HA preflight does not run at any replica count. That
+  # changes when the Cloud SQL and Filestore values arrive - a shared database
+  # and a shared volume are exactly what they add - and the hub coordinates
+  # concurrent instances through Postgres advisory locks when they do.
   type: ""
 
 image:
@@ -50,16 +55,22 @@ image:
   #
   # The hub image this chart needs is the one built from the root Dockerfile
   # with --target hub-gke: non-root, uid 1000, web UI embedded, no baked
-  # KUBECONFIG. No such image is published anywhere, so every possible default
+  # KUBECONFIG. That stage is added by the image-build change that accompanies
+  # this chart and is not in the root Dockerfile yet, so the build command above
+  # fails with an unknown-target error until it lands - which is a known
+  # sequencing gap and not a mistake in this file.
+  # No such image is published anywhere, so every possible default
   # would point either at an empty registry path or at somebody else's
   # artifact - and a default that cannot be correct turns an install-time error
   # into a runtime mystery.
   #
   # In particular the published artifact named "scion-hub"
   # (us-central1-docker.pkg.dev/PROJECT_ID/public-docker/scion-hub, built from
-  # image-build/hub/Dockerfile) is NOT this image: it runs as root and it is
-  # built without the embedded web UI. Matching the name is a coincidence, not
-  # an endorsement.
+  # image-build/hub/Dockerfile) is NOT this image: it runs as root
+  # (image-build/hub/Dockerfile:24 sets USER root and nothing sets it back) and
+  # it is built with -tags no_embed_web (image-build/scion-base/Dockerfile:55),
+  # so it has no web UI to serve. Matching the name is a coincidence, not an
+  # endorsement.
   #
   #   repository: us-docker.pkg.dev/my-project/my-repo/scion-hub-gke
   #
