@@ -1075,6 +1075,7 @@ direction was less work. Naming the routes instead of picking a verb is the fix
 that stays correct: --config reaches a sole-source substitution on one path and an
 overlay on the other, and no single verb covers both.
 */}}
+{{- if hasPrefix "-" $arg }}
 {{- $flag := lower (trimPrefix "-" (trimPrefix "--" (first (splitList "=" $arg)))) }}
 {{- if has $flag $setByChart }}
 {{- fail (printf "hub.args may not contain -%s: the chart renders it, and pflag is last-wins, so this would silently replace the chart's value rather than conflict with it - disabling hosted mode, unbinding the listener, taking the daemon fork so PID 1 exits, leaving /readyz unregistered, or leaving the runtime broker off in a pod that still reports Ready and can never launch an agent." $flag) }}
@@ -1091,7 +1092,6 @@ overlay on the other, and no single verb covers both.
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
 {{- end }}
-{{- if hasPrefix "-" $arg }}
 {{- include "scion-hub.assertNoCredentialName" (dict "name" $flag "source" "hub.args flag") }}
 {{- end }}
 {{- $args = append $args $arg }}
