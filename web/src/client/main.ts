@@ -592,6 +592,12 @@ async function init(): Promise<void> {
     currentUser = await fetchCurrentUser();
   }
 
+  // Chat notifications are published on user.<id>.notification, so the state
+  // manager must know who we are before it opens the first SSE connection.
+  if (currentUser?.id) {
+    stateManager.setCurrentUserId(currentUser.id);
+  }
+
   // Wait for core shell components to be defined (page components are lazy-loaded)
   await Promise.all([
     customElements.whenDefined('scion-app'),

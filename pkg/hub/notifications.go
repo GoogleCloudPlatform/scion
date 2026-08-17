@@ -599,7 +599,7 @@ func (cn *ChatNotifier) NotifyMention(ctx context.Context, mentionedUserID, send
 		return
 	}
 
-	cn.events.PublishNotification(ctx, notif)
+	cn.events.PublishChatNotification(ctx, notif)
 	cn.log.Info("Mention notification created",
 		"notificationID", notif.ID, "mentionedUser", mentionedUserID,
 		"sender", senderName, "conversationKey", conversationKey)
@@ -651,7 +651,7 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID, s
 		return
 	}
 
-	cn.events.PublishNotification(ctx, notif)
+	cn.events.PublishChatNotification(ctx, notif)
 	cn.log.Info("DM notification created",
 		"notificationID", notif.ID, "recipient", recipientUserID,
 		"sender", senderName, "conversationKey", conversationKey)

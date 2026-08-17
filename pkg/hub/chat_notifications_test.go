@@ -63,8 +63,10 @@ func setupChatNotifTest(t *testing.T) *chatNotifTestEnv {
 	pub := NewChannelEventPublisher()
 	t.Cleanup(pub.Close)
 
-	// Subscribe to notification events so we can verify what was published.
-	notifCh, unsub := pub.Subscribe("notification.>")
+	// Subscribe to every subject a notification could plausibly reach, so a
+	// test that expects silence sees a chat payload escaping onto the wrong
+	// subject rather than passing because it was only watching the right one.
+	notifCh, unsub := pub.Subscribe("user.>", "notification.>", "project.>", "grove.>")
 
 	notifier := NewChatNotifier(s, pub, wcs, nil, slog.Default())
 
@@ -106,7 +108,8 @@ func TestChatNotifier_MentionCreatesNotification(t *testing.T) {
 	// Verify notification was published via SSE.
 	evt := drainNotification(env.notifCh, 2*time.Second)
 	require.NotNil(t, evt, "expected a notification event")
-	assert.Contains(t, evt.Subject, "notification.")
+	assert.Equal(t, "user."+userID+".notification", evt.Subject,
+		"mention notifications must be scoped to the mentioned user")
 
 	// Verify notification was persisted in the store.
 	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, userID, false)
@@ -165,6 +168,8 @@ func TestChatNotifier_DMReceivedCreatesNotification(t *testing.T) {
 	// Verify notification was published.
 	evt := drainNotification(env.notifCh, 2*time.Second)
 	require.NotNil(t, evt, "expected a notification event")
+	assert.Equal(t, "user."+recipientID+".notification", evt.Subject,
+		"DM notifications must be scoped to the recipient")
 
 	// Verify notification was persisted.
 	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, recipientID, false)
