@@ -16,6 +16,24 @@
 # THE GATE. These objects render only when rbac.create AND
 # runtime.listAllNamespaces are BOTH true, and both halves are pinned below.
 #
+# 🛑 WHAT A GREEN RUN OF THIS FILE DOES NOT MEAN. READ THIS BEFORE CITING IT.
+# This change fixes C1: the TRUNCATION bucket. It does NOT fix C4 or C5, which
+# are two further cluster-scoped collisions, both live, both Critical, and both
+# PINNED AS PRESENT here - arm (o) and arm (q). Those arms are written to PASS
+# WHILE THE DEFECT EXISTS. They are fences, not regression tests.
+#
+#   C1  needs a LONG release name - it fires only when the 63-byte cut lands
+#   C4  release R beside release R-scion-hub, one namespace, len(R) 1..43
+#   C5  the "-" between fullname and namespace is legal inside both operands,
+#       so the joined string splits two ways. Renders at 33 bytes.
+#
+# 🔴 C4 AND C5 DO NOT TRUNCATE, AND THIS FIX IS GATED ON TRUNCATION. THE GATE IS
+# KEYED ON THE ONE PROPERTY BOTH REMAINING CRITICALS LACK. So this PR closes the
+# class that needs long release names and declares residuals on the two classes
+# that fire on ordinary ones - `prod`, and a one-character release name. An
+# operator reading "fixes the RBAC name collision" gets the rarest of the three,
+# which is why the PR body says so explicitly and why this paragraph exists.
+#
 # ------------------------------------------------------------------------
 # WHY THIS FILE ASSERTS EXACT NAME STRINGS AND NOT collide/distinct VERDICTS.
 #
@@ -660,18 +678,65 @@ fi
 # in (o) both installs bind ONE ServiceAccount, which is what makes a rename
 # cosmetic there. HERE THE SUBJECTS DIFFER - two ServiceAccounts, two namespaces,
 # contending for one ClusterRoleBinding name. Last writer wins and the loser's
-# hub silently loses cluster-wide secrets get/list/create/delete. A disambiguating
-# rename IS a real fix here, which is exactly why this belongs to C1 and why a
-# green suite must not be read as "C1 closed".
+# hub silently loses cluster-wide secrets get/list/create/delete.
+#
+# 📌 FILED AS C5, SEPARATELY FROM C1, ON gd-em's RULING - AND I ARGUED THE OTHER
+# WAY AND LOST ON A POINT WORTH KEEPING. I claimed C5 belongs to C1 because the
+# subjects differ, so a rename at this site WOULD be a real fix. gd-em accepted
+# that reasoning and rejected the conclusion on one word: COULD.
+#
+#   A SEVERITY CLASS IS NOT A CLAIM ABOUT WHAT A HYPOTHETICAL REMEDY COULD CLOSE.
+#   IT IS A CLAIM ABOUT WHAT THE REMEDY BEING BUILT DOES CLOSE.
+#
+# This change is GATED ON TRUNCATION. C5 renders at 33 bytes against a bound of
+# 63, so the gate never fires on C5's inputs, no digest is applied, and the two
+# names stay identical. Filing C5 under C1 would make this PR's approval imply
+# coverage it does not have.
+#
+# 🛑 AND THE PROPERTY C4 AND C5 SHARE IS THE REAL FINDING, NOT EITHER DEFECT:
+#   BOTH ARE INVISIBLE TO ANY TRUNCATION-GATED REMEDY, BECAUSE NEITHER TRUNCATES.
+#   THE GATE IS KEYED ON THE ONE PROPERTY BOTH LIVE CRITICALS LACK.
+#
+# ⚠️ THE CLASSIFICATION IS CONTINGENT ON THE GATE, AND THAT IS RECORDED HERE
+# BECAUSE A CONTINGENT RULING READ LATER LOOKS LIKE AN ABSOLUTE ONE. If anyone
+# ever removes the truncation gate and applies the digest unconditionally, the
+# argument above stops holding and C5 merges back into C1. Whoever does that must
+# revisit C5's filing in the same change. Do not treat "C5 is separate" as a fact
+# about the defect; it is a fact about the shape of this remedy.
 #
 # THE FIX IS KNOWN AND WAS NOT TAKEN UNILATERALLY. The digest arm ALREADY gets
 # this right: it hashes  printf "%s/%s" $fullname $namespace  and "/" cannot occur
 # in either component. Only the readable arm is ambiguous. Separating with ":"
-# - legal in RBAC names, which is why system:masters is legal, and illegal in a
-# DNS-1123 label - closes all three known instances. MEASURED COST: it renames
-# every install, 42 of 42 sampled, ZERO unchanged. That is a breaking rename for
-# installs that never had the defect, so it is a maintainer decision and it is
-# recorded here rather than slipped in.
+# closes all three known instances, and the reason it works is a measured
+# property from both ends rather than a preference:
+#
+#   ":" is ILLEGAL in a helm release name  - gd-consumer ran it: release "a:b" is
+#       rejected, "ab" accepted as the control that proves the rig can say yes
+#   ":" is ILLEGAL in a DNS-1123 label     - so it cannot occur in a namespace
+#   ":" is LEGAL in an RBAC object name    - gd-p3-rev executed apimachinery
+#       v0.29.0: these names go through IsValidPathSegmentName, which is why
+#       system:masters is legal
+#
+# ILLEGAL IN BOTH INPUTS, LEGAL IN THE OUTPUT. That is what makes the split
+# unambiguous BY CONSTRUCTION rather than by luck - the same property "/" already
+# gives the digest arm.
+#
+# 🔴 MEASURED COST, AND IT IS WHY THIS WAS NOT TAKEN: it renames every install,
+# 42 of 42 sampled, ZERO unchanged. A breaking rename for installs that never had
+# the defect. gd-em declined to reverse the lead's cost ruling mid-build and has
+# escalated the C4+C5 pair to gke-deploy-lead. Recorded here rather than slipped
+# in, and my own summary of the position stands unsoftened: I DO NOT THINK A
+# CHEAP FIX EXISTS - THE AMBIGUITY IS PRESENT FOR NEARLY EVERY INPUT, NOT ONLY
+# FOR COLLIDING ONES.
+#
+# ⚠️ ONE NOTATION WARNING, FROM gd-consumer's RETRACTION OF THEIR OWN TABLE, AND
+# IT IS THE TRAP THIS ARM EXISTS TO DOCUMENT. The separating identity is a TUPLE
+# of (Release.Name, Namespace) - joined by a separator illegal in both operands,
+# or hashed as a tuple. NEVER a bare concatenation. gd-consumer measured a tuple
+# (NUL-joined) and published a column headed "Release.Name + Namespace"; anyone
+# implementing that heading writes printf "%s-%s" AND REINTRODUCES EXACTLY THIS
+# DEFECT. When the subject is string ambiguity, the notation is part of the
+# artefact.
 #
 # IF THIS ARM GOES RED, THAT IS THE GOOD OUTCOME: the separator was disambiguated.
 # Re-pin deliberately, and handle the upgrade path, because it renames broadly.
@@ -690,7 +755,7 @@ _q_sa_a="$(sa_subject a team-alpha-x-b)"
 _q_sa_b="$(sa_subject a-scion-hub-team-alpha-x b)"
 [ -n "$_q_sa_a" ] && [ -n "$_q_sa_b" ] || meta_failure "(q) could not read the ClusterRoleBinding subject for one or both releases (got '$_q_sa_a' and '$_q_sa_b'); two empty strings compare equal and would report 'identical subjects', which is C4's signature and the opposite of this arm's finding"
 if [ "$_q_sa_a" != "$_q_sa_b" ]; then
-  pass "(q) the two colliding installs bind DIFFERENT ServiceAccounts ('$_q_sa_a' and '$_q_sa_b') in different namespaces - unlike arm (o), so a disambiguating rename here WOULD be a real fix and this collision is in scope for this helper"
+  pass "(q) the two colliding installs bind DIFFERENT ServiceAccounts ('$_q_sa_a' and '$_q_sa_b') in different namespaces - unlike arm (o), so a disambiguating rename at this site WOULD be a real fix - unlike arm (o). That makes C5 FIXABLE HERE; it does NOT make it fixed here, and gd-em ruled it a SEPARATE Critical because this change is gated on truncation and C5 does not truncate"
 else
   fail "(q) both installs now bind the same ServiceAccount subject ('$_q_sa_a'). That is arm (o)'s signature, not this arm's, and it would mean scion-hub.fullname changed underneath this pair - re-derive which class this is before touching the expectations."
 fi
