@@ -474,6 +474,24 @@ func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T
 		require.NoError(t, err)
 	}
 	assert.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"))
+
+	// A second project must still get its own warning. Suppression is per
+	// project, not per process: with a single shared key the first project to
+	// resolve would silence every other one, and every assertion above would
+	// still pass. This is the assertion that separates the two.
+	otherSlug := "gke-fallback-project-2"
+	otherLocalDir := filepath.Join(tmpHome, ".scion", "projects", otherSlug)
+	require.NoError(t, os.MkdirAll(otherLocalDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(otherLocalDir, "existing.txt"), []byte("data"), 0644))
+
+	for range 3 {
+		otherPath, err := srv.hubManagedProjectPath(otherSlug)
+		require.NoError(t, err)
+		assert.Equal(t, otherLocalDir, otherPath)
+	}
+	assert.Equal(t, 2, strings.Count(logs.String(), "served from ephemeral local path"))
+	assert.Equal(t, 1, strings.Count(logs.String(), "slug="+slug+" "))
+	assert.Equal(t, 1, strings.Count(logs.String(), "slug="+otherSlug))
 }
 
 // A gke-shared-volume config without a volume name has no mount point to build
