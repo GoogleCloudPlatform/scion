@@ -471,7 +471,7 @@ inside quoted historical output, the `118`/`252` in §3's block — **I took his
 first treatment: in the denominator, and they pass, because the block is
 SHA-pinned.**
 
-**45 mechanical assertions over this file's self-claims. 45 run. 10 corrected**,
+**49 mechanical assertions over this file's self-claims. 49 run. 10 corrected**,
 plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
 so it is out by the definition above, and it is fixed here only because `gd-em`
 folded it into this commit. No category came back empty. **A is zero as a
@@ -485,7 +485,7 @@ appears without a SHA on the same line.
 | **B** | counts of a token in this same file | 13 | 4 |
 | **C** | positional claims about this same file | 11 | 1 |
 | **D** | cardinalities about this file's own tables | 15 | 3 |
-| **E** | claims about the instrument that measured it | 5 | 1 |
+| **E** | claims about the instrument that measured it | 9 | 1 |
 
 Subjects: `git show <sha>:<path>` at `5ebe3dab`, `38a41b6e` and `6fc0cdfc`, never
 the working tree. Every row compares the claim *as written* against a fresh
@@ -495,7 +495,32 @@ measurement; none was checked by eye.
 
 **Engine.** GNU grep 3.8, invoked as `/usr/bin/grep`. Never a bare `grep`.
 
-**Why the path is spelled out.** `type grep` here resolves to a shell function
+**Where the hazard is, and where it is not — because this is a scoped claim and
+an unscoped version of it costs every reader a re-run.** `grep` is a *shell
+function*, and **a shell function is not inherited across `exec`**. Measured
+here, four ways:
+
+```
+typed inline in the harness shell   type grep -> function from the zsh snapshot   SHADOWED
+inside a #!/bin/bash script         type -t grep -> file, /usr/bin/grep           GNU 3.8
+zsh -c '...'  (snapshot not sourced)          grep is /usr/bin/grep               GNU 3.8
+bash -c '...' (function not exported)         grep is /usr/bin/grep               GNU 3.8
+export -p | grep -c BASH_FUNC_grep  -> 0      the function is NOT exported
+```
+
+**The exposure is a `grep` you typed, not a `grep` your script ran.** This
+file's harness is a `#!/bin/bash` script, so it was never exposed in the first
+place; the invariance control below is therefore an explicit emulation of the
+shadow, not a report that the harness got lucky. *(`gke-deploy-lead` broadcast
+this hazard fleet-wide and then corrected its own scope within the hour, on
+measurements from `ag-dev`, `gd-prec` and `gd-p0-rev-4`. The correction is the
+reason this paragraph has a table in it.)*
+
+> **AN ENGINE IDENTITY MEASURED AT THE PROMPT IS A FACT ABOUT THE PROMPT.**
+> (`gke-deploy-lead`.) Run `type grep` **the way your harness runs it**, or the
+> disclosure describes a shell nothing was measured in.
+
+**Why the path is spelled out anyway.** `type grep` here resolves to a shell function
 from `~/.claude/shell-snapshots/snapshot-zsh-…-ijz3o1.sh`, whose body is
 
 ```
@@ -533,8 +558,8 @@ not have caught it.
 > defect. (`gd-p0-rev-4`'s addition to the standard, and the example above is
 > what it predicts.)
 
-**Control: all 45 assertions were re-run under the shadowed engine and every one
-of the 45 outcomes is byte-identical.** Not asserted from the patterns being
+**Control: all 49 assertions were re-run under the shadowed engine and every one
+of the 49 outcomes is byte-identical.** Not asserted from the patterns being
 `-F` or BRE-safe — measured, by pointing the harness at
 `ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files …` and diffing the full
 output. **The numbers in this section do not depend on which engine you use; the
@@ -630,9 +655,9 @@ sweep is the first time anyone has checked even that much**; their agreement wit
 the sweeps that produced them is unverified and is not claimed.
 
 The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
-`b161ad454969c865`, and is deliberately **not** committed: `tests/` is frozen at
-P0. It exits 0 on 45/45 under **both** engines and **exits 1 under mutation
-control** — reverting the §3 heading to *"the two new findings"* takes it to 44/45 — so it is an instrument
+`3ebf182982cbe19e`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 49/49 under **both** engines and **exits 1 under mutation
+control** — reverting the §3 heading to *"the two new findings"* takes it to 48/49 — so it is an instrument
 that can disagree, which four of this morning's could not. It should land beside
 this file when P1 unfreezes `tests/`, at which point the numbers above stop being
 a report and become a check.
