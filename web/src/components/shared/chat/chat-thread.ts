@@ -1007,29 +1007,94 @@ export class ScionChatThread extends LitElement {
     return this._currentUserId || this.currentUserId;
   }
 
-  /** Handle v2 SSE chat message events. Only backfill if the event is for this conversation. */
+  /** Handle v2 SSE chat message events.
+   *
+   * If the SSE event carries a full message payload (has `id` and content),
+   * merge it directly via `mergeMessages()` instead of doing a full 50-message
+   * backfill. Fall back to `backfillV2()` when the event is a lightweight
+   * notification (e.g. just a threadId).
+   */
   private handleV2ChatMessage(e: Event): void {
     type ChatEventData = {
       threadId?: string;
       conversationKey?: string;
       topicId?: string;
       senderId?: string;
+      // Full message fields from UserMessageEvent:
+      id?: string;
+      msg?: string;
+      sender?: string;
+      recipient?: string;
+      recipientId?: string;
+      type?: string;
+      projectId?: string;
+      agentId?: string;
+      createdAt?: string;
+      channel?: string;
+      visibility?: string;
+      groupId?: string;
+      dispatchState?: string;
+      urgent?: boolean;
+      broadcasted?: boolean;
+      read?: boolean;
+      attachments?: import('./chat-message.js').AttachmentRefInfo[];
     };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ChatEventData } & ChatEventData)
       | undefined;
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const eventData: ChatEventData | undefined = detail?.data ?? detail;
-    if (eventData) {
-      // Filter: only process events for this conversation
-      const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
-      if (eventKey && eventKey !== this.conversationKey) {
-        return; // Not for this conversation
-      }
-      // The sender finished typing the moment their message landed — drop the
-      // indicator now rather than waiting out TYPING_EXPIRY_MS.
-      this.clearTypingForUser(eventData.senderId);
+    if (!eventData) {
+      void this.backfillV2();
+      return;
     }
+
+    // Filter: only process events for this conversation
+    const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
+    if (eventKey && eventKey !== this.conversationKey) {
+      return; // Not for this conversation
+    }
+
+    // The sender finished typing the moment their message landed — drop the
+    // indicator now rather than waiting out TYPING_EXPIRY_MS.
+    this.clearTypingForUser(eventData.senderId);
+
+    // If the event carries a full message payload, merge directly instead of
+    // doing a round-trip backfill.
+    if (eventData.id && (eventData.msg !== undefined || eventData.type)) {
+      const msg: Message = {
+        id: eventData.id,
+        projectId: eventData.projectId || '',
+        sender: eventData.sender || '',
+        senderId: eventData.senderId || '',
+        recipient: eventData.recipient || '',
+        recipientId: eventData.recipientId || '',
+        msg: eventData.msg || '',
+        type: eventData.type || '',
+        agentId: eventData.agentId || '',
+        createdAt: eventData.createdAt || new Date().toISOString(),
+        ...(eventData.channel != null ? { channel: eventData.channel } : {}),
+        ...(eventData.threadId != null ? { threadId: eventData.threadId } : {}),
+        ...(eventData.visibility != null ? { visibility: eventData.visibility } : {}),
+        ...(eventData.groupId != null ? { groupId: eventData.groupId } : {}),
+        ...(eventData.dispatchState != null ? { dispatchState: eventData.dispatchState } : {}),
+        ...(eventData.urgent != null ? { urgent: eventData.urgent } : {}),
+        ...(eventData.broadcasted != null ? { broadcasted: eventData.broadcasted } : {}),
+        ...(eventData.read != null ? { read: eventData.read } : {}),
+      };
+      this.mergeMessages([msg]);
+
+      // Update attachment map if the event carries attachment data.
+      if (eventData.attachments && eventData.attachments.length > 0) {
+        this.v2AttachmentMap.set(msg.id, eventData.attachments);
+      }
+
+      this.scrollToBottomAfterRender();
+      this.maybeAdvanceReadWatermark();
+      return;
+    }
+
+    // Lightweight notification (no full message) — fall back to backfill.
     void this.backfillV2();
   }
 
@@ -1315,8 +1380,12 @@ export class ScionChatThread extends LitElement {
     this.sendError = null;
 
     try {
+      // Generate an idempotency key so duplicate sends (e.g. network retry)
+      // are collapsed server-side.
+      const idempotencyKey = crypto.randomUUID();
       const body: Record<string, unknown> = {
         content: text,
+        idempotency_key: idempotencyKey,
       };
       if (mentions && mentions.length > 0) {
         body.mentions = mentions;
