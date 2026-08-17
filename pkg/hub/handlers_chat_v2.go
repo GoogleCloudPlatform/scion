@@ -47,9 +47,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"regexp"
 	"slices"
@@ -2855,68 +2857,126 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var results []attachmentUploadResult
+	// One bad file in a selection of ten used to lose the other nine. Each file
+	// now succeeds or fails on its own and the response reports both, so the
+	// composer can keep what worked and name what did not.
+	results := make([]attachmentUploadResult, 0, len(files))
+	failures := make([]attachmentUploadFailure, 0)
+	internalError := false
 	for _, fh := range files {
-		// Validate size.
-		if fh.Size > MaxAttachmentSize {
-			ValidationError(w, fmt.Sprintf("file %q exceeds maximum size of %d bytes", fh.Filename, MaxAttachmentSize), nil)
-			return
-		}
-
-		// Sanitize filename.
-		safeName, err := SanitizeFilename(fh.Filename)
+		result, err := s.storeUploadedFile(ctx, as, wcs, projectID, user.ID(), fh)
 		if err != nil {
-			ValidationError(w, fmt.Sprintf("invalid filename %q: %v", fh.Filename, err), nil)
-			return
+			var rejection attachmentRejection
+			if !errors.As(err, &rejection) {
+				internalError = true
+				s.messageLog.Error("Attachment upload failed", "file", fh.Filename, "error", err)
+			}
+			failures = append(failures, attachmentUploadFailure{
+				Name:  fh.Filename,
+				Error: uploadFailureMessage(err),
+			})
+			continue
 		}
-
-		// Validate MIME type.
-		mime := fh.Header.Get("Content-Type")
-		// Normalize: strip parameters (e.g. "text/plain; charset=utf-8" -> "text/plain").
-		if idx := strings.Index(mime, ";"); idx >= 0 {
-			mime = strings.TrimSpace(mime[:idx])
-		}
-		if !AllowedMimeTypes[mime] {
-			ValidationError(w, fmt.Sprintf("file type %q not allowed", mime), nil)
-			return
-		}
-
-		// Open the file.
-		file, err := fh.Open()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to read uploaded file", nil)
-			return
-		}
-
-		// Save to storage.
-		meta, err := as.Save(ctx, projectID, safeName, file, fh.Size, mime)
-		_ = file.Close()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", fmt.Sprintf("failed to save file: %v", err), nil)
-			return
-		}
-
-		// Set the uploader.
-		meta.UploadedBy = user.ID()
-
-		// Persist metadata in DB.
-		if err := wcs.CreateAttachment(ctx, meta); err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to save attachment metadata", nil)
-			return
-		}
-
-		results = append(results, attachmentUploadResult{
-			ID:       meta.ID,
-			Name:     meta.Filename,
-			MimeType: meta.MimeType,
-			Size:     meta.Size,
-			URL:      "/api/v1/chat/attachments/" + meta.ID,
-		})
+		results = append(results, result)
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]interface{}{
+	// 201 whenever something was created, even alongside failures: the
+	// response body is where per-file outcomes live, and a client that got
+	// attachments back has to treat the request as having created them.
+	// Nothing created means nothing to report as created — 400 for a batch the
+	// caller can fix, 500 if the batch died on our side. 207 Multi-Status was
+	// the other candidate and was passed over: it is a WebDAV code that
+	// browsers and fetch wrappers treat as an oddity, for no gain over reading
+	// the body that has to be read anyway.
+	status := http.StatusCreated
+	if len(results) == 0 {
+		status = http.StatusBadRequest
+		if internalError {
+			status = http.StatusInternalServerError
+		}
+	}
+
+	writeJSON(w, status, map[string]interface{}{
 		"attachments": results,
+		"failures":    failures,
 	})
+}
+
+// attachmentRejection is a refusal the uploader caused and could fix — a
+// blocked extension, an unreadable type, an oversized file. Anything else is
+// ours and is reported as an internal error instead.
+type attachmentRejection struct{ msg string }
+
+func (e attachmentRejection) Error() string { return e.msg }
+
+func rejectAttachment(format string, args ...interface{}) error {
+	return attachmentRejection{msg: fmt.Sprintf(format, args...)}
+}
+
+// uploadFailureMessage renders a per-file failure for the composer. Rejections
+// speak for themselves; internal failures are logged in full and summarised
+// here, since their detail is about our storage, not the user's file.
+func uploadFailureMessage(err error) string {
+	var rejection attachmentRejection
+	if errors.As(err, &rejection) {
+		return rejection.msg
+	}
+	return "upload failed"
+}
+
+// storeUploadedFile validates, classifies, and stores one uploaded file.
+func (s *Server) storeUploadedFile(
+	ctx context.Context, as AttachmentStore, wcs WebChatStore,
+	projectID, userID string, fh *multipart.FileHeader,
+) (attachmentUploadResult, error) {
+	if fh.Size > MaxAttachmentSize {
+		return attachmentUploadResult{}, rejectAttachment(
+			"file exceeds the maximum size of %d bytes", MaxAttachmentSize)
+	}
+
+	safeName, err := SanitizeFilename(fh.Filename)
+	if err != nil {
+		return attachmentUploadResult{}, rejectAttachment("invalid filename: %v", err)
+	}
+
+	file, err := fh.Open()
+	if err != nil {
+		return attachmentUploadResult{}, fmt.Errorf("open uploaded file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	// Classify from the content, not from the Content-Type the client put on
+	// the part: that header is a claim the uploader controls.
+	head := make([]byte, contentSniffLen)
+	n, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return attachmentUploadResult{}, fmt.Errorf("read uploaded file: %w", err)
+	}
+	mimeType, err := ClassifyAttachment(safeName, head[:n])
+	if err != nil {
+		return attachmentUploadResult{}, attachmentRejection{msg: err.Error()}
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return attachmentUploadResult{}, fmt.Errorf("rewind uploaded file: %w", err)
+	}
+
+	meta, err := as.Save(ctx, projectID, safeName, file, fh.Size, mimeType)
+	if err != nil {
+		return attachmentUploadResult{}, fmt.Errorf("save file: %w", err)
+	}
+	meta.UploadedBy = userID
+
+	if err := wcs.CreateAttachment(ctx, meta); err != nil {
+		return attachmentUploadResult{}, fmt.Errorf("save attachment metadata: %w", err)
+	}
+
+	return attachmentUploadResult{
+		ID:       meta.ID,
+		Name:     meta.Filename,
+		MimeType: meta.MimeType,
+		Size:     meta.Size,
+		URL:      "/api/v1/chat/attachments/" + meta.ID,
+	}, nil
 }
 
 // handleAttachmentDownload handles GET /api/v1/chat/attachments/{id}.
@@ -2993,6 +3053,13 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, reader)
+}
+
+// attachmentUploadFailure is one file the batch could not take, named so the
+// composer can say which of the dropped files did not make it and why.
+type attachmentUploadFailure struct {
+	Name  string `json:"name"`
+	Error string `json:"error"`
 }
 
 type attachmentUploadResult struct {
