@@ -106,11 +106,39 @@ S = "-agents" for both cluster-scoped objects in this chart, which is the whole
 population: of the seven kinds this chart emits, only ClusterRole and
 ClusterRoleBinding are cluster-scoped, and both take their name - and the
 binding its roleRef - from this one helper. Namespaced objects cannot collide
-across namespaces at all, because the namespace scopes them. A NEW
+ACROSS namespaces, because the namespace scopes them - but read the next
+paragraph before taking any comfort from that. A NEW
 CLUSTER-SCOPED OBJECT WITH A DIFFERENT SUFFIX NEEDS ITS OWN S AND IS NOT
 COVERED BY THE NUMBERS BELOW. The parameter is here because every grid run
 today held the suffix constant, so no measurement anyone has taken could have
 told us whether it mattered (gd-em, 14:29).
+
+🛑 "NAMESPACED OBJECTS CANNOT COLLIDE" IS TRUE ONLY OF THE ACROSS-NAMESPACE
+CASE, AND THE SENTENCE ABOVE USED TO STOP THERE. Qualified 2026-08-17. Two
+installs IN ONE NAMESPACE collide on every namespaced object the chart emits
+whenever their fullnames agree - which C4 makes reachable with two ordinary
+release names, "prod" and "prod-scion-hub". That is not hypothetical here:
+Phase 3's session Secret is a namespaced object, both installs render it under
+the same name, and the Deployment consumes it by envFrom secretRef, so the
+second install's session key silently replaces the first's for BOTH. Upstream's
+pkg/hub/signing_key_shared_test.go is explicit that a shared session secret
+makes two processes accept each other's tokens. THE SCOPING PROPERTY THAT MAKES
+NAMESPACED OBJECTS SAFE IS THE NAMESPACE, AND IT DOES NOTHING WHEN THE NAMESPACE
+IS THE SAME.
+
+  AND THERE IS NO BENIGN BRANCH (gd-em, 15:32). The session secret is always
+  operator-supplied - the chart fails the render rather than generating one - so
+  two colliding installs fall into exactly two cases and both are Critical:
+
+      SAME value      -> ONE SHARED JWT SIGNING KEY -> cross-install token
+                         forgery. Silent. No error, no event, no log line.
+      DIFFERENT value -> two secrets, one object name -> MUTUAL CLOBBER. Each
+                         apply overwrites the other; sessions invalidate on a
+                         schedule nobody controls, and the settings Secret and
+                         the OAuth client secret go with it.
+
+  ANYONE ARGUING THIS COLLISION IS RARE ENOUGH TO IGNORE MUST ARGUE BOTH
+  BRANCHES AWAY, NOT ONE.
 
 THE "-agents" TERM IS LOAD-BEARING AND WAS MISSING FOR MOST OF A DAY. The rule
 was first published without it, taking sharedPrefix over the bare namespaces. In
@@ -189,9 +217,38 @@ is the readable part cut back and a digest appended.
 THE DIGEST IS TAKEN OVER A SEPARATOR THAT CANNOT OCCUR IN EITHER INPUT, and that
 is deliberate. Hashing the assembled name would inherit its ambiguity: fullname
 "a-b" in namespace "c" and fullname "a" in namespace "b-c" both assemble to
-"a-b-c-agents". A slash is legal in neither a release name nor a namespace, both
-being DNS names, so "fullname/namespace" is injective where the assembled string
-is not.
+"a-b-c-agents". A slash is legal in neither a fullname nor a namespace, so
+"fullname/namespace" is injective ON THE PAIR IT IS GIVEN where the assembled
+string is not.
+
+  🛑 AND THE PAIR IT IS GIVEN IS NOT THE IDENTITY THAT MATTERS. CORRECTED
+  2026-08-17 - the sentence above used to end "injective where the assembled
+  string is not", full stop, and that full stop was doing work it had not
+  earned.
+
+  The security-relevant identity is (Release.Name, Namespace): two installs are
+  two installs because they were installed under different release names or into
+  different namespaces. What this digest actually consumes is (fullname,
+  Namespace). Those are not the same tuple, and the map between them is not
+  injective:
+
+      scion-hub.fullname is MANY-TO-ONE IN THE RELEASE NAME. The helm idiom
+      skips appending the chart name when the release already contains it, so
+      release "prod" and release "prod-scion-hub" BOTH yield fullname
+      "prod-scion-hub". Same fullname, same namespace, same digest input, same
+      digest. Filed as C4.
+
+  So the join is injective, the COMPOSITION is not, and injectivity of the last
+  step in a pipeline says nothing about the pipeline. A separator argument can
+  only ever be as strong as the operands it separates.
+
+  A SECOND, WEAKER LEG OF THE OLD SENTENCE ALSO FAILS AND IS WORTH NAMING
+  BECAUSE IT IS THE MORE TEMPTING KIND OF WRONG. It said "both being DNS names".
+  The namespace is one. The first operand is a FULLNAME, and via
+  fullnameOverride it is an arbitrary operator-supplied string that this chart
+  never validates - the API server would reject a slash in it, but the digest is
+  computed at RENDER time, before anything validates anything. The premise was
+  asserted about the inputs and only ever held of one of them.
 
 WHAT THIS DOES NOT PROMISE, because the comment above this one made an absolute
 it could not keep. Distinct identities now produce distinct names UNLESS they
@@ -200,13 +257,51 @@ impossible, and not something this chart can rule out by construction, because
 any fixed-length name over unbounded input has collisions by pigeonhole. The
 case that would defeat this fix is two identities sharing a truncated readable
 prefix; tests/rbac-collision.sh renders exactly that case and shows the digests
-diverging. What is now unrepresentable is a SILENT collision from truncation
-alone, which is what C1 was.
+diverging.
 
-STILL OPEN, FILED SEPARATELY, NOT FIXED HERE: fullnameOverride can reach the
-"a-b"/"c" versus "a"/"b-c" ambiguity in the readable branch, where no digest is
-applied. It needs fullnameOverride set to a colliding shape and is out of scope
-for this Critical.
+🛑 WHAT INCLUDING THE NAMESPACE ACTUALLY BUYS. REWRITTEN 2026-08-17. The
+sentence here used to read "What is now unrepresentable is a SILENT collision
+from truncation alone, which is what C1 was." That is narrower than it sounds
+and it was still the wrong shape of claim, so it is replaced by the true one:
+
+    PUTTING THE NAMESPACE IN THE NAME REDUCES THE COLLISION SURFACE. IT DOES
+    NOT ELIMINATE IT. THE (fullname, namespace) PAIR IS NOT A SECURITY
+    BOUNDARY AND MUST NOT BE RELIED ON AS ONE.
+
+Two collision classes are DECLARED RESIDUALS of this change - known, measured,
+graded Critical by gke-deploy-lead, and open after this commit lands:
+
+  C4  fullname is many-to-one in the release name, above. Release "prod" beside
+      release "prod-scion-hub" in ONE namespace share every generated name.
+      Measured 20 colliding release pairs over len(R) 1..43.
+  C5  the "-" this helper joins with is LEGAL INSIDE BOTH OPERANDS, so the
+      readable branch is an ambiguous concatenation: fullname "a-b" in namespace
+      "c" and fullname "a" in namespace "b-c" both render "a-b-c-agents".
+      Measured 3875 colliding pairs.
+
+🔴 AND HERE IS THE PART A READER OF THIS FIX WILL GET WRONG IF NOBODY WRITES IT
+DOWN: NEITHER RESIDUAL TRUNCATES, AND THIS FIX IS GATED ON TRUNCATION. The gate
+is len($readable) > 63. C4 and C5 render at ordinary lengths - C5's example is
+33 bytes against a bound of 63 - so the digest branch never executes on their
+inputs and the identical names are emitted unchanged. THE GATE IS KEYED ON THE
+ONE PROPERTY BOTH REMAINING CRITICALS LACK. Do not read a green
+tests/rbac-collision.sh as "collisions are handled"; several of its assertions
+PIN THESE RESIDUALS AS PRESENT and go red when they are fixed.
+
+What this commit does close is the class needing a LONG name: a silent collision
+arising FROM TRUNCATION, which is what C1 was. That is one class of three.
+
+THE PRIOR VERSION OF THE PARAGRAPH BELOW ALSO UNDERSTATED ITS OWN SUBJECT and is
+corrected rather than deleted, because the understatement is the instructive
+part. It read: "fullnameOverride can reach the 'a-b'/'c' versus 'a'/'b-c'
+ambiguity in the readable branch [...] It needs fullnameOverride set to a
+colliding shape." IT NEEDS NOTHING OF THE KIND. Fullname "a-b" is what release
+"a-b" produces by default. The precondition named was a sufficient one presented
+as a necessary one, which turned a defect reachable by typing an ordinary
+hyphenated release name into one requiring a deliberate override - and a reader
+triaging their own install against that sentence would have cleared themselves.
+A PRECONDITION THAT IS ONLY SUFFICIENT, WRITTEN AS THOUGH IT WERE NECESSARY, IS
+AN UNDER-REPORT OF SEVERITY DRESSED AS A DETAIL.
 
 THE DIGEST IS PART OF THE INTERFACE, NOT AN IMPLEMENTATION DETAIL. Pinned here
 and in tests/rbac-collision.sh:
