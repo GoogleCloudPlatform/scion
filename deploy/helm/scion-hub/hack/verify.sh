@@ -1161,7 +1161,14 @@ done
 # has been inverted rather than dropped. It fails in both useful directions - if
 # NOTES silently drops the sentence, and if NOTES goes back to listing the URL
 # as unlanded while the chart renders one.
-if grep -qF 'server.database.url was the first of these until the Cloud SQL phase' "$WORK/notes-ack.txt"; then
+#
+# THIS ARM IS A LITERAL-PROSE ARM and its known failure mode is a re-wording
+# rather than a regression. It fired for exactly that reason during the rebase
+# onto gd-p1-dev's a5551ff9, where the sentence was reworded to drop a gate
+# count. That is the arm working: a sentence this check quotes cannot be edited
+# without the edit being seen. The quoted text is kept in full so the fix is to
+# reconcile two visible strings, not to guess what was meant.
+if grep -qF 'server.database.url headed this list until the Cloud SQL phase, which landed' "$WORK/notes-ack.txt"; then
   pass "the acknowledged release's NOTES records server.database.url as landed, not as a gate"
 else
   fail "the acknowledged release's NOTES does not say server.database.url was landed. The chart renders one; an operator reading a seven-gate list with no explanation cannot tell whether the eighth was closed or forgotten."
@@ -1356,6 +1363,13 @@ SESSION_MARKER="$(prose_marker "$(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'd
 # stated reason, because an exclusion list with no reasons becomes a place to
 # put anything that turns a check green.
 ALLOWED_NON_GATES=(
+  server.database.url    # LANDED by the Cloud SQL phase, so the walk no longer names it as a gate -
+                         # but all three copies still name it, in the sentence explaining that it was
+                         # closed. It is permitted rather than deleted from the copies: an operator
+                         # who reads only the refusal needs to know the URL is handled, and a reader
+                         # comparing this list against yesterday's needs to see why it got shorter.
+                         # The corresponding presence arm is not lost - it was inverted into the
+                         # landed-gate assertion above, which fails if NOTES stops saying so.
   server.hub.hub_id      # satisfied by this chart, named to explain where the refusal starts
   server.database.driver # ditto
   server.storage.provider # ditto

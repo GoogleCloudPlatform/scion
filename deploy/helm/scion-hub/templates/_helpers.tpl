@@ -1336,17 +1336,23 @@ Exactly one list is.
    of the chart still hold - it is how they go stale unnoticed.
 
    ALL FIVE STAY RESERVED, AND NOT BY INERTIA. Before removing an entry, name
-   where it lands instead. For base-url and storage-bucket that is the first list
-   above, and the answer is still not argv. For the other three it is nowhere
-   yet. None of the five is rendered as an argument ($setByChart), none selects
+   where it lands instead. For base-url, storage-bucket and - since the Cloud SQL
+   phase - db, that is the first list above, and the answer is still not argv.
+   For the other two, admin-emails and storage-dir, it is nowhere yet. None of
+   the five is rendered as an argument ($setByChart), none selects
    which configuration is loaded ($neverPassed), none is inert or misnamed
    ($aliasOrIgnored), and none weakens authentication ($unsafeToPass).
 
-   The harm is present for the first list and scheduled for the second. Passing
-   -base-url or -storage-bucket today makes argv the silent winner over a value
-   this chart rendered, and nothing logs the disagreement. Passing one of the
-   other three today changes a setting nothing else sets; the same silent
-   overriding starts the day its channel lands, with no edit here to mark it. The
+   The harm is present for three of the five and scheduled for the other two.
+   Passing -base-url, -storage-bucket or -db today makes argv the silent winner
+   over a value this chart rendered, and nothing logs the disagreement. -db
+   joined that group when the Cloud SQL phase started rendering
+   server.database.url, and the move was forced rather than remembered:
+   hack/verify.sh carries the delivery state as a committed number per flag and
+   goes red when a channel appears without this paragraph being re-tensed in the
+   same diff. Passing admin-emails or storage-dir today changes a setting nothing
+   else sets; the same silent overriding starts the day its channel lands, with
+   no edit here to mark it. The
    asymmetry is what decides it - reserving costs an operator a flag they have no
    reason to want, un-reserving is a deliberate act with a place to record itself
    (see the closing paragraph), and reserving after the fact requires somebody to
@@ -1987,7 +1993,6 @@ agreeing with the hub in none.
 ci/values-settings.yaml, in hub order:
 
   GATE TABLE BEGIN
-    server.database.url                        Cloud SQL phase
     a durable session/signing secret           session-secret phase
     server.auth.proxy.provider=iap             ingress/IAP phase
     server.auth.proxy.iap.audience             ingress/IAP phase
@@ -2021,9 +2026,16 @@ server.auth.proxy.iap.audience rather than a table row. Both mistakes are the
 same mistake: reporting what the probe reached as what the hub does.
 
 WHAT THIS CHART ALREADY SATISFIES, so nobody re-derives it: server.hub.hub_id,
-server.database.driver=postgres, and server.storage.provider=gcs with a bucket.
-Those three are why the refusal starts at the database URL rather than at gate
-one.
+server.database.driver=postgres, server.storage.provider=gcs with a bucket, and
+- since the Cloud SQL phase - server.database.url. Those four are why the refusal
+starts where it does rather than at the hub's first gate. The URL is satisfied
+only where the chart renders a settings.yaml, so under config.existingSecret it
+is the operator's again, and the table above is the list for the rendering case.
+
+server.database.url LEFT THE TABLE ABOVE BECAUSE THE WALK STOPPED NAMING IT, not
+because this phase decided it had landed. TestHelmChartHAGateWalk's authored
+tripwire went red with "gates the authored list names and the hub no longer
+refuses on: [server.database.url]" and this edit is the response to that line.
 
 THE ROUTE SET IS TRANSCRIBED FROM THE HUB, NOT INVENTED HERE.
 cmd/server_ha_preflight_test.go:248-256 (ab0d227, branch
@@ -2418,8 +2430,7 @@ real deep merge rather than a text append.
 {{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
 
 {{- /*
-server.database. The URL is Cloud SQL's, and lands with the proxy in the next
-change; the key for it is url, not dsn. Pool settings are here now because they
+server.database. The key is url, not dsn. Pool settings are here now because they
 are reachable no other way - SCION_SERVER_DATABASE_MAXOPENCONNS and its siblings
 have snake_case koanf tags with no camelCase entry, so mapper #1 produces
 database.max.open.conns and the variable never binds.
@@ -2429,6 +2440,18 @@ database.max.open.conns and the variable never binds.
     "max_idle_conns" (int .Values.database.maxIdleConns)
     "conn_max_lifetime" .Values.database.connMaxLifetime
     "conn_max_idle_time" .Values.database.connMaxIdleTime }}
+
+{{- /*
+The reserved position, now filled. Under password auth this value carries the
+credential, which is why it is built here - inside the document that becomes the
+settings Secret - and never passed through a ConfigMap, an argument vector or a
+pod annotation. Only under postgres: a sqlite hub has no URL and rendering an
+empty one would make server.database.url present-but-blank, which reads to the
+HA preflight as configured.
+*/}}
+{{- if eq $driver "postgres" }}
+{{- $database = set $database "url" (include "scion-hub.databaseUrl" .) }}
+{{- end }}
 
 {{- /* server.storage: the HUB'S BLOB STORE. Not the Filestore workspace share. */}}
 {{- $storage := dict "provider" .Values.storage.provider }}
@@ -2560,6 +2583,300 @@ regression in every one of those cases.
 {{- end }}
 {{- if $collisions }}
 {{- fail (printf "config.extra overwrites %s, which the chart itself sets. config.extra is for settings the chart does not model; overriding one it does write is invisible afterwards, because the rendered file reports your value and every check downstream of the merge passes on it. If the chart's value is wrong for you, change the value that produces it - or say why it cannot, because that is a gap in the chart's own interface rather than a job for the escape hatch." (join ", " (uniq $collisions))) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+================================================================================
+PHASE 2 - CLOUD SQL. Appended at end of file by agreement with gd-p1-dev and
+gd-p3-dev: three phases edit this file, and appending is the only edit that
+cannot collide with an insertion point somebody else is also moving.
+================================================================================
+*/}}
+
+{{/*
+Percent-encode one userinfo component of a URL.
+
+The IAM database role is a Google service account with the domain trimmed, so
+it CONTAINS AN @: "scion-hub@my-project.iam". Go's net/url splits the authority
+at the LAST @, so the raw two-@ form does in fact parse correctly - I measured
+it against the hub's real parser rather than assuming it. It is still encoded
+here, for two reasons that outlive that measurement:
+
+  - The last-@ rule is net/url's, not RFC 3986's. Any intermediary that splits
+    at the FIRST @ - a log scrubber, a URL rewriter, a different language's
+    parser - reads the host as "my-project.iam@127.0.0.1:5432" and is wrong in
+    a way that produces a connection error nobody can explain from the DSN as
+    written.
+  - The password arm has no such luck. A password containing @ or : is
+    misparsed outright, and that is an operator's arbitrary string, not a
+    Google-shaped identifier.
+
+% MUST BE FIRST or it re-encodes the escapes emitted after it. The set is the
+RFC 3986 userinfo-illegal characters that can plausibly occur here; a character
+outside it passes through unchanged, which is correct - over-encoding a legal
+character is as wrong as under-encoding an illegal one.
+
+Verified by round-trip through pgx's own parser, not by inspection: see
+hack/verify.sh dsn-roundtrip and tests/.
+*/}}
+{{- define "scion-hub.pctEncodeUserinfo" -}}
+{{- $s := . -}}
+{{- $s = replace "%" "%25" $s -}}
+{{- $s = replace "@" "%40" $s -}}
+{{- $s = replace ":" "%3A" $s -}}
+{{- $s = replace "/" "%2F" $s -}}
+{{- $s = replace "?" "%3F" $s -}}
+{{- $s = replace "#" "%23" $s -}}
+{{- $s = replace "[" "%5B" $s -}}
+{{- $s = replace "]" "%5D" $s -}}
+{{- $s = replace " " "%20" $s -}}
+{{- $s -}}
+{{- end }}
+
+{{/*
+The Postgres role, unencoded.
+
+Under auth: iam the role is the Google service account with the trailing
+".gserviceaccount.com" removed - Cloud SQL registers IAM principals under that
+truncated form, and the untruncated one is simply not a role that exists. The
+chart derives it from serviceAccount.gcpServiceAccount rather than asking for it
+twice, because two fields that must agree are two fields that can disagree.
+
+database.user still overrides, for the case the derivation does not cover: a
+user-managed role name, or a service account whose Cloud SQL role was created
+under a different spelling.
+*/}}
+{{- define "scion-hub.databaseUser" -}}
+{{- if .Values.database.user -}}
+{{- .Values.database.user -}}
+{{- else if eq .Values.database.auth "iam" -}}
+{{- $gsa := .Values.serviceAccount.gcpServiceAccount -}}
+{{- if not $gsa -}}
+{{- fail "database.auth is iam but neither database.user nor serviceAccount.gcpServiceAccount is set. IAM database authentication logs in AS the pod's Google service account, so with no service account there is no role to log in as. Either set serviceAccount.gcpServiceAccount and let the chart derive the role from it, or set database.user to the role name explicitly." -}}
+{{- end -}}
+{{- trimSuffix ".gserviceaccount.com" $gsa -}}
+{{- else -}}
+{{- fail "database.user is required when database.auth is password. Under password authentication the chart has nothing to derive a role name from - unlike iam, where the role is the service account." -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+server.database.url, the position secret-settings.yaml reserves.
+
+Shape: postgres://USER[:PASSWORD]@127.0.0.1:PORT/NAME?sslmode=disable
+
+127.0.0.1 is not a placeholder. The proxy runs in this pod and every container
+in a pod shares one network namespace, so the loopback address IS the tunnel
+entrance. The port is cloudsql.port, read here and by the proxy's --port from
+the same key, so the DSN and the listener cannot drift apart.
+
+sslmode=disable is correct and is not a downgrade. The encrypted, mutually
+authenticated leg is proxy-to-Cloud-SQL; the hub-to-proxy leg never leaves the
+pod's network namespace. Asking for TLS on it fails, because the proxy's local
+listener does not serve TLS - so an operator who "hardens" this to require
+breaks the connection without adding a metre of protected path.
+
+UNDER auth: iam THERE IS NO PASSWORD IN THIS STRING AT ALL - not an empty one,
+no colon. The proxy mints an OAuth token per connection with --auto-iam-authn.
+Under auth: password the credential is here, and this string only ever exists
+inside the settings Secret.
+*/}}
+{{- define "scion-hub.databaseUrl" -}}
+{{- /*
+THE HOST IN THIS URL IS A CONSTANT, so the thing that makes it true has to be
+checked before it is written. 127.0.0.1 is correct only because the Auth Proxy
+is in this pod listening on it; with cloudsql.enabled false the chart would emit
+a DSN pointing at a loopback port nothing binds, the hub would come up, and the
+first database call would fail with connection refused - a runtime mystery
+manufactured at template time.
+
+The schema refuses this too. It is checked in both places on purpose and this
+layer is not redundant: the schema can only say WHICH key is wrong, and its
+message for a conditional is "(root): Must validate "then" as "if" was valid -
+cloudsql.enabled does not match: true", which does not tell an operator that the
+driver they chose is what demands the proxy. This layer is also the one an
+operator reaches with --skip-schema-validation.
+*/ -}}
+{{- if not .Values.cloudsql.enabled -}}
+{{- fail "database.driver is postgres but cloudsql.enabled is false. This chart reaches Postgres only through the Cloud SQL Auth Proxy: it renders server.database.url with the host fixed at 127.0.0.1 and the proxy is what listens there, so with the proxy off the hub would start and then fail every query with connection refused. There is no database.host key and this is deliberate - a direct-to-Postgres path needs its own TLS, credential and network-policy story, and none of it is written. Set cloudsql.enabled: true with cloudsql.instanceConnectionName, or set database.driver: sqlite." -}}
+{{- end -}}
+{{- $user := include "scion-hub.databaseUser" . | include "scion-hub.pctEncodeUserinfo" -}}
+{{- $cred := $user -}}
+{{- if eq .Values.database.auth "password" -}}
+{{- if not .Values.database.password -}}
+{{- fail "database.password is required when database.auth is password." -}}
+{{- end -}}
+{{- $cred = printf "%s:%s" $user (include "scion-hub.pctEncodeUserinfo" .Values.database.password) -}}
+{{- end -}}
+{{- printf "postgres://%s@127.0.0.1:%d/%s?sslmode=disable" $cred (int .Values.cloudsql.port) .Values.database.name -}}
+{{- end }}
+
+{{/*
+The Cloud SQL Auth Proxy container.
+
+ONE DEFINITION, TWO PLACEMENTS. As a native sidecar it is an initContainers
+entry carrying restartPolicy: Always; on clusters below 1.29 it is an ordinary
+container appended after the hub. Rendering it from one define means the two
+placements cannot drift into being two different proxies - the failure this
+would otherwise invite is a fix applied to the native path and not the fallback,
+which nobody runs until the day they run it on an old cluster.
+
+restartPolicy is added by the CALLER, not here, because it is the single field
+that distinguishes the two placements and putting it inside a conditional here
+would hide the distinction inside the thing being distinguished.
+*/}}
+{{- define "scion-hub.cloudsqlProxyContainer" -}}
+{{- $cs := .Values.cloudsql -}}
+{{- $args := list "--structured-logs" -}}
+{{- /*
+--port and the DSN's port come from the same value. They are the two ends of one
+loopback connection and a chart that let them disagree would produce a hub
+dialling a port nothing listens on, with both halves individually plausible.
+*/ -}}
+{{- $args = append $args (printf "--port=%d" (int $cs.port)) -}}
+{{- $args = append $args "--health-check" -}}
+{{- /*
+0.0.0.0 and not 127.0.0.1. The probes are issued by the kubelet from OUTSIDE the
+pod's network namespace, so a health server bound to loopback is unreachable by
+the very thing it exists to answer - and the symptom is a readiness probe that
+fails while the proxy is perfectly healthy.
+*/ -}}
+{{- $args = append $args "--http-address=0.0.0.0" -}}
+{{- $args = append $args (printf "--http-port=%d" (int $cs.healthCheckPort)) -}}
+{{- if eq .Values.database.auth "iam" -}}
+{{- $args = append $args "--auto-iam-authn" -}}
+{{- end -}}
+{{- if $cs.privateIp -}}
+{{- $args = append $args "--private-ip" -}}
+{{- end -}}
+{{- $args = append $args $cs.instanceConnectionName -}}
+{{- /*
+Phase 0's guard, reused rather than reimplemented. Every argument is checked for
+an embedded credential before it is rendered. Under auth: password the password
+must reach the process through the settings Secret and NOTHING else; argv is
+world-readable to anything that can read /proc in this pod, and it is echoed by
+kubectl describe, by the API server's audit log and by every controller that
+logs a pod spec.
+*/ -}}
+{{- range $a := $args -}}
+{{- include "scion-hub.assertNoCredential" (dict "value" $a "source" "cloud-sql-proxy argument") -}}
+{{- end -}}
+- name: cloud-sql-proxy
+  image: {{ include "scion-hub.cloudsqlProxyImage" . | quote }}
+  imagePullPolicy: {{ $cs.image.pullPolicy }}
+  args:
+    {{- range $a := $args }}
+    - {{ $a | quote }}
+    {{- end }}
+  {{- /*
+  /startup and /readiness are the PROXY's endpoints. They are not the hub's, and
+  the hub's /readyz is not the proxy's. Pointing either process's probe at the
+  other's path produces a probe that answers about the wrong process.
+
+  The startup probe is what makes the native sidecar worth having: the kubelet
+  holds the hub container until this one reports started, so the hub's
+  AutoMigrate does not race the tunnel.
+  */}}
+  startupProbe:
+    httpGet:
+      path: /startup
+      port: {{ int $cs.healthCheckPort }}
+    periodSeconds: 1
+    failureThreshold: 60
+    timeoutSeconds: 5
+  readinessProbe:
+    httpGet:
+      path: /readiness
+      port: {{ int $cs.healthCheckPort }}
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 5
+  securityContext:
+    {{- /*
+    Restated at container level for the same reason the hub container restates
+    it: a container-level securityContext shadows the pod-level one field by
+    field, so a change that only reaches the pod block cannot quietly return
+    this container to root.
+
+    THE PROXY DOES NOT RUN AS ITS IMAGE'S OWN UID. The image declares USER
+    65532, but this pod's securityContext sets runAsUser from
+    hub.securityContext.runAsUser (1000 by default) and that is inherited by
+    every container, so the proxy runs as the hub's uid. There is no way to
+    opt a single container back out of a pod-level runAsUser - it can be
+    overridden, not unset - so this is a property of the pod, not a choice made
+    here. It is recorded because the obvious reading of the image is wrong.
+
+    That is EXPECTED to be harmless: the proxy writes nothing, opens no
+    uid-owned files, and needs only a socket and the metadata server. It is
+    NOT VERIFIED, because verifying it requires running the pod and there is no
+    cluster - see VALIDATION.md, where it sits with the rest of the unrun smoke
+    test rather than being asserted here as though it had been checked.
+
+    readOnlyRootFilesystem is safe here and is NOT safe on the hub container -
+    the hub writes its state directory - which is why it appears on this
+    container only. It is unverified for the same reason and in the same place.
+    */}}
+    {{- include "scion-hub.nonRootSecurityContext" . | nindent 4 }}
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  {{- with $cs.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+
+{{/*
+The proxy image, pinned by digest.
+
+DIGEST ONLY, and there is deliberately no tag value to set. image.repository /
+image.digest for the hub refuse a tag and a digest together, on the grounds that
+two sources for one identity can disagree; the same reasoning applies here, and
+the proxy has no reason to ever run unpinned. A tag can be repointed underneath
+a running cluster by whoever owns the registry. A digest cannot.
+*/}}
+{{- define "scion-hub.cloudsqlProxyImage" -}}
+{{- $img := .Values.cloudsql.image -}}
+{{- $repo := required "cloudsql.image.repository is required when cloudsql.enabled." $img.repository -}}
+{{- $digest := required "cloudsql.image.digest is required: the Cloud SQL Auth Proxy is pinned by digest, not by tag. Resolve one with: curl -sSI -H 'Accept: application/vnd.oci.image.index.v1+json' https://gcr.io/v2/cloud-sql-connectors/cloud-sql-proxy/manifests/<version> and read the docker-content-digest header." $img.digest -}}
+{{- printf "%s@%s" $repo $digest -}}
+{{- end }}
+
+{{/*
+Port collisions inside the pod's single network namespace.
+
+EVERY CONTAINER IN A POD SHARES ONE NETWORK NAMESPACE. Two processes in
+different containers binding the same port is not isolated by the container
+boundary - it is an ordinary bind conflict, and the loser fails at startup with
+"address already in use" while the manifest looks entirely reasonable, because
+each port is declared in a different container's block and nothing in the
+Kubernetes API cross-checks them.
+
+Four ports live in this namespace once the proxy is added, and only two of them
+are visible in the Deployment: the hub's web port and the proxy's two. The
+fourth, the hub's in-process runtime broker on 9800, is set in settings.yaml and
+does not appear in the pod spec at all - so an operator who moves the proxy's
+health port onto it gets a conflict with a process they cannot see declared
+anywhere nearby. That is the case this guard is really for.
+*/}}
+{{- define "scion-hub.assertCloudsqlPorts" -}}
+{{- if .Values.cloudsql.enabled }}
+{{- $seen := dict }}
+{{- $ports := list
+    (dict "n" (int .Values.hub.webPort)              "name" "hub.webPort")
+    (dict "n" (int .Values.cloudsql.port)            "name" "cloudsql.port (the proxy's Postgres listener)")
+    (dict "n" (int .Values.cloudsql.healthCheckPort) "name" "cloudsql.healthCheckPort (the proxy's health server)")
+    (dict "n" 9800                                   "name" "the hub's in-process runtime broker, fixed at 9800 in settings.yaml") }}
+{{- range $p := $ports }}
+{{- $k := printf "p%d" $p.n }}
+{{- if hasKey $seen $k }}
+{{- fail (printf "port %d is claimed by both %s and %s. Every container in a pod shares one network namespace, so these are the same port and the second process to bind it fails at startup with 'address already in use'. Container boundaries do not separate ports; only the namespace does, and there is one." $p.n (get $seen $k) $p.name) }}
+{{- end }}
+{{- $seen = set $seen $k $p.name }}
 {{- end }}
 {{- end }}
 {{- end }}

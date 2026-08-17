@@ -275,10 +275,32 @@ echo "== the HA-unlanded gate: THREE ROUTES, TRANSCRIBED FROM THE HUB =="
 # the gcs-plus-proxy route switched off. My first matrix did not do this and
 # three of its rows were confounded by pre-existing schema allOf rules doing the
 # refusing instead of this guard.
+# POSTGRES NOW COSTS FOUR MORE VALUES, AND THAT IS THE CLOUD SQL PHASE, NOT A
+# WORKAROUND. --set database.driver=postgres on its own is a hard refusal since
+# the proxy landed: the chart reaches Postgres only through the Cloud SQL Auth
+# Proxy, so a postgres driver with cloudsql.enabled false renders a DSN pointing
+# at a loopback port nothing binds. Every row below that wants to reach an HA
+# route THROUGH postgres has to get past that refusal first, or it measures the
+# Cloud SQL guard while claiming to measure the HA guard - a green row about the
+# wrong subject.
+#
+# MEASURED, and this is why the list is here rather than inline: with these four
+# omitted, r2 and its positive twin both fail with "database.driver is postgres
+# but cloudsql.enabled is false" instead of the HA refusal, and the gate-name arm
+# below reports 0/7 because the message it reads is the Cloud SQL one.
+CLOUDSQL_SET=(
+  --set cloudsql.enabled=true
+  --set cloudsql.instanceConnectionName=my-project:us-central1:db-1
+  --set database.auth=iam
+  --set database.name=scion
+  --set serviceAccount.gcpServiceAccount=hub@my-project.iam.gserviceaccount.com
+)
+
 reject "r1: hub.extraEnv sets K_SERVICE" "hub.extraEnv sets K_SERVICE" \
   --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value=svc'
 reject "r2: postgres driver, route 3 held off with oauth" "database.driver is postgres" \
   --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
+  "${CLOUDSQL_SET[@]}" \
   --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true
 reject "r3: gcs storage with proxy auth" "storage.provider is gcs and auth.mode is proxy" \
   --set storage.provider=gcs --set storage.bucket=b
@@ -290,6 +312,7 @@ accept "r1 + acknowledgeHAUnlanded" \
   --set 'hub.extraEnv[0].name=K_SERVICE' --set 'hub.extraEnv[0].value=svc' --set acknowledgeHAUnlanded=true
 accept "r2 + acknowledgeHAUnlanded" \
   --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b \
+  "${CLOUDSQL_SET[@]}" \
   --set auth.mode=oauth --set auth.acknowledgeOAuthUnlanded=true --set acknowledgeHAUnlanded=true
 accept "r3 + acknowledgeHAUnlanded" \
   --set storage.provider=gcs --set storage.bucket=b --set acknowledgeHAUnlanded=true
