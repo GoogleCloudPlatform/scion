@@ -36,8 +36,9 @@
 #      panic (which would mean the code after the block is the fall-through
 #      deny — the shape authorizeProjectImport and handlers_env_secrets.go use).
 #
-# Attribution guards fail (2). Guards with `} else { Forbidden(w); return }`
-# fail (3). Only the bypass shape is reported.
+# Attribution guards fail criterion 2. Guards with `} else { Forbidden(w);
+# return }` fail criterion 3. Only the bypass shape is reported. (These are the
+# numbered criteria above, not exit codes — see EXIT CODES below.)
 #
 # A third shape is reported unconditionally, because it has no benign reading —
 # an explicit allow when the caller is not a user:
@@ -91,6 +92,14 @@
 # this under `2>/dev/null` — would otherwise receive the refusal's exit code
 # with none of its words, and a refusal nobody can read is barely better than
 # the wrong answer it replaces.
+#
+# The cost, paid knowingly: anything that reads both streams as one — `2>&1`, a
+# terminal, a GitHub Actions step log — sees each refusal line twice, and where
+# a runner captures the two streams separately before interleaving them the
+# copies need not even be adjacent. A duplicated refusal is judged the cheaper
+# error than a lost one, because the duplicate is visibly a duplicate and reads
+# as noise, while the loss is silent and reads as a pass. Anyone grepping this
+# output for a count of refusals should deduplicate, or read one stream only.
 #
 # Note this differs from the exit-0-on-missing-rg convention in
 # hack/check-project-compat-literals.sh; the difference is deliberate, because a
