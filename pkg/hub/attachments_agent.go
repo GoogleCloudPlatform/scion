@@ -221,7 +221,11 @@ func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as 
 
 	if err := wcs.CreateAttachment(ctx, meta); err != nil {
 		// Leave no orphaned bytes behind when the metadata row fails.
-		_ = as.Delete(ctx, projectID, meta.ID)
+		if delErr := as.Delete(ctx, projectID, meta.ID); delErr != nil {
+			// The blob is orphaned after all. Say so: nothing else will.
+			s.messageLog.Error("Failed to delete orphaned attachment blob",
+				"project_id", projectID, "attachment", meta.ID, "error", delErr)
+		}
 		return AttachmentRef{}, err
 	}
 

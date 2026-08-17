@@ -2965,7 +2965,11 @@ func (s *Server) storeUploadedFile(
 		// be written, so what is left is storage no one can list or delete.
 		// Aborting the batch on the first failure used to cap that at one blob
 		// per request; the per-file loop makes it ten (#1089).
-		_ = as.Delete(ctx, projectID, meta.ID)
+		if delErr := as.Delete(ctx, projectID, meta.ID); delErr != nil {
+			// The blob is orphaned after all. Say so: nothing else will.
+			s.messageLog.Error("Failed to delete orphaned attachment blob",
+				"project_id", projectID, "attachment", meta.ID, "error", delErr)
+		}
 		return attachmentUploadResult{}, fmt.Errorf("save attachment metadata: %w", err)
 	}
 
