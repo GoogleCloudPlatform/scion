@@ -279,6 +279,11 @@ type ChatNotificationEvent struct {
 	ConversationKey string `json:"conversationKey,omitempty"`
 	// ConversationName is the human-readable thread name; empty for DMs.
 	ConversationName string `json:"conversationName,omitempty"`
+	// Preview is the truncated message text, already bounded by the same
+	// limit the formatted Message uses. It is the notification body; without
+	// it the client would have to split Message on ": ", which breaks on the
+	// first thread named with a colon in it.
+	Preview string `json:"preview,omitempty"`
 }
 
 // AllowListChangedEvent is published when the allow list is modified.
@@ -658,6 +663,7 @@ func (p *eventBuilder) PublishChatNotification(_ context.Context, notif *store.N
 		SenderName:       msg.SenderName,
 		ConversationKey:  msg.ConversationKey,
 		ConversationName: msg.ConversationName,
+		Preview:          truncateChatPreview(msg.Preview),
 	}
 	p.sink("user."+notif.SubscriberID+".notification", evt)
 }

@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -230,6 +231,44 @@ func TestChatNotifier_DMReceivedCreatesNotification(t *testing.T) {
 	assert.Equal(t, ChatNotificationDMReceived, n.Status)
 	assert.Contains(t, n.Message, "Charlie sent you a message")
 	assert.Contains(t, n.Message, "Hello there!")
+}
+
+// TestChatNotifier_EventPreviewMatchesMessageTruncation pins the two
+// renderings of the same text to one truncation rule. The tray row reads the
+// formatted Message; the browser popup reads Preview. If they truncate
+// differently the same message stops at two different words depending on
+// where you read it.
+func TestChatNotifier_EventPreviewMatchesMessageTruncation(t *testing.T) {
+	env := setupChatNotifTest(t)
+	defer env.unsub()
+
+	ctx := context.Background()
+	recipientID := api.NewUUID()
+
+	// Comfortably longer than the cap, and multi-byte, so a byte-based
+	// truncation would produce a replacement character rather than "é".
+	long := strings.Repeat("é", 150)
+
+	env.notifier.NotifyDMReceived(ctx, recipientID, ChatMessageContext{
+		SenderID:        api.NewUUID(),
+		SenderName:      "Charlie",
+		ConversationKey: "dm:user:" + api.NewUUID() + ":user:" + recipientID,
+		Preview:         long,
+	})
+
+	evt := drainNotification(env.notifCh, 2*time.Second)
+	require.NotNil(t, evt, "expected a notification event")
+
+	var payload ChatNotificationEvent
+	require.NoError(t, json.Unmarshal(evt.Data, &payload))
+
+	// Recomputed, not hard-coded: whatever the cap is, both must honour it.
+	expected := truncateChatPreview(long)
+	assert.Equal(t, expected, payload.Preview)
+	assert.Contains(t, payload.Message, expected,
+		"the formatted message and the event preview must truncate identically")
+	assert.Less(t, len([]rune(payload.Preview)), len([]rune(long)),
+		"preview was not truncated at all — the test proves nothing")
 }
 
 func TestChatNotifier_DMReceivedMuted_NoNotification(t *testing.T) {

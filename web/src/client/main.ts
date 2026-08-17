@@ -28,6 +28,7 @@ import type { PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
+import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
 
 /**
@@ -461,17 +462,17 @@ const ROUTES: RouteConfig[] = [
   },
   // Wave-2 v2 chat routes: space, thread, and DM navigation
   {
-    pattern: /^\/chat\/space\/[^/]+\/thread\/[^/]+$/,
+    pattern: CHAT_THREAD_ROUTE,
     tag: 'scion-page-chat',
     load: () => import('../components/pages/chat.js'),
   },
   {
-    pattern: /^\/chat\/space\/[^/]+$/,
+    pattern: CHAT_SPACE_ROUTE,
     tag: 'scion-page-chat',
     load: () => import('../components/pages/chat.js'),
   },
   {
-    pattern: /^\/chat\/dm\/[^/]+$/,
+    pattern: CHAT_DM_ROUTE,
     tag: 'scion-page-chat',
     load: () => import('../components/pages/chat.js'),
   },

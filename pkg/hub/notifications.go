@@ -691,18 +691,26 @@ func (cn *ChatNotifier) buildChatNotification(
 	}
 }
 
+// maxChatPreview bounds the message text carried in a notification, in runes.
+const maxChatPreview = 100
+
+// truncateChatPreview bounds a message preview for notification display.
+// Rune-based so a multi-byte character is never split down the middle.
+//
+// Shared by the formatted message and the structured event payload: the two
+// must show the same amount of the message, or the tray row and the browser
+// popup disagree about where the text stops.
+func truncateChatPreview(messagePreview string) string {
+	runes := []rune(messagePreview)
+	if len(runes) > maxChatPreview {
+		return string(runes[:maxChatPreview]) + "…"
+	}
+	return messagePreview
+}
+
 // formatChatNotification formats a notification message for chat triggers.
 func formatChatNotification(trigger, senderName, conversationName, messagePreview string) string {
-	// Truncate preview to a reasonable length for push notifications.
-	// Use rune-based slicing to avoid splitting multi-byte UTF-8 characters.
-	const maxPreview = 100
-	runes := []rune(messagePreview)
-	var preview string
-	if len(runes) > maxPreview {
-		preview = string(runes[:maxPreview]) + "…"
-	} else {
-		preview = messagePreview
-	}
+	preview := truncateChatPreview(messagePreview)
 
 	switch trigger {
 	case ChatNotificationMention:
