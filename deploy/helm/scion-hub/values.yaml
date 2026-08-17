@@ -138,6 +138,13 @@ hub:
   # SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* - and the render rejects
   # them outright rather than let the silence stand. Configure those through
   # config.extra, which lands in settings.yaml, where they are read.
+  #
+  # Do not put secret material in a literal "value". It lives in the Deployment
+  # object, which is readable by more people than the Secret would be. The render
+  # rejects a literal whose value looks like a credential, and one whose NAME
+  # ends in a credential word - SESSION_SECRET, ADMIN_TOKEN, DB_PASSWORD. The
+  # rule is on the trailing word, so TOKEN_TTL_SECONDS and MAX_TOKENS are fine.
+  # Use valueFrom.secretKeyRef, which neither check touches.
   extraEnv: []
 
   # Extra arguments appended to the hub command. The chart always renders

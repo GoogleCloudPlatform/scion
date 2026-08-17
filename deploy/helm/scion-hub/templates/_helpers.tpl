@@ -1699,15 +1699,35 @@ loudly.
 {{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and a duplicate entry in the container's env list shadows the value from envFrom in a way that is easy to miss." $name) }}
 {{- end }}
 {{- /*
-The same rule the argument guard applies to argv, applied to env. A literal
-value here is stored in the Deployment and readable by anyone who can read the
-object - which is a wider set of people than can read a Secret, and a set that
-grows every time somebody is granted "just read access to the workloads".
-valueFrom.secretKeyRef is untouched by this: it carries a reference, not the
-material.
+The same two rules the argument guard applies to argv, applied to env, through
+the same two shared helpers rather than a second near-miss copy of them. A
+literal value here is stored in the Deployment and readable by anyone who can
+read the object - which is a wider set of people than can read a Secret, and a
+set that grows every time somebody is granted "just read access to the
+workloads". valueFrom.secretKeyRef is untouched by both checks: it carries a
+reference, not the material, so neither a name nor a value test has anything to
+say about it.
+
+Both are conditioned on the entry actually carrying a literal, for that reason.
+
+THE UNDERSCORE IS WHY $name IS TRANSLATED BEFORE THE NAME CHECK.
+scion-hub.assertNoCredentialName matches a credential noun as a whole trailing
+SEGMENT, and its segment separator is the hyphen, because it was written for
+flag names. Environment variable names separate with underscores, so passing
+SESSION_SECRET to it unchanged matches nothing at all: the guard renders, reads
+as applied, and is inert. Translating _ to - puts the name into the alphabet the
+helper's positional rule is expressed in, and the rule then means the same thing
+on both axes - SESSION_SECRET is caught, TOKEN_TTL_SECONDS and MAX_TOKENS are
+not. verify.sh asserts the catch and both non-catches, so a regression here
+cannot pass as "no false positives".
+
+Do not "simplify" this by widening the shared helper's character class instead.
+The translation belongs to the caller whose names use underscores; the helper is
+shared with argv, where the hyphen rule is the correct one.
 */}}
-{{- if and (hasKey $entry "value") (regexMatch "(?i)(secret|password|token|credential|api_?key)" $name) }}
-{{- fail (printf "hub.extraEnv sets %s to a literal value, and the name looks like secret material. A literal env value lives in the Deployment object, readable by anyone with pod read access. Use valueFrom.secretKeyRef instead." $name) }}
+{{- if hasKey $entry "value" }}
+{{- include "scion-hub.assertNoCredentialName" (dict "name" (replace "_" "-" $name) "source" (printf "hub.extraEnv entry %s: the name" $name)) }}
+{{- include "scion-hub.assertNoCredential" (dict "value" (dig "value" "" $entry) "source" (printf "hub.extraEnv value of %s" $name)) }}
 {{- end }}
 {{- end }}
 {{- end }}
