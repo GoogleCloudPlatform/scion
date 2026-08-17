@@ -733,11 +733,11 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 // It prefers projects/<slug> and falls back to groves/<slug> for backward compatibility
 // with workspaces created before the grove-to-project rename.
 //
-// When the server has a workspace storage config with backend "nfs" or
-// "cloudrun-volume", the NFS/volume-backed path is returned instead.
-// A backward-compatible fallback checks the NFS path first, then the
-// legacy local path, so existing local deployments continue to work
-// when NFS is first configured.
+// When the server has a workspace storage config with backend "nfs",
+// "cloudrun-volume" or "gke-shared-volume", the durable volume-backed path is
+// returned instead. A backward-compatible fallback checks the durable path
+// first, then the legacy local path, so existing local deployments continue to
+// work when durable storage is first configured.
 func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	if err := validateProjectSlug(slug); err != nil {
 		return "", err
@@ -747,9 +747,7 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 
 	// --- NFS backend ---
 	if wsCfg != nil && wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
-		share := wsCfg.NFS.Shares[0]
-		mountBase := filepath.Join(wsCfg.NFS.MountRoot, share.ID)
-		nfsPath := filepath.Join(mountBase, "hub-projects", slug)
+		nfsPath := filepath.Join(workspaceMountRoot(wsCfg), "hub-projects", slug)
 		if hasWorkspaceContent(nfsPath) {
 			return nfsPath, nil
 		}
@@ -762,12 +760,15 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	}
 
 	// --- Cloud Run volume backend ---
+	// Unlike the GKE branch below, this one does not require a non-empty
+	// volume name: guarding it would change where existing Cloud Run
+	// deployments look for content, which needs its own migration (#1073).
 	if wsCfg != nil && wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil {
 		subPathRoot := wsCfg.CloudRunVolume.SubPathRoot
 		if subPathRoot == "" {
 			subPathRoot = "projects"
 		}
-		crPath := filepath.Join("/mnt", wsCfg.CloudRunVolume.VolumeName, subPathRoot, "hub-projects", slug)
+		crPath := filepath.Join(volumeMountBase, wsCfg.CloudRunVolume.VolumeName, subPathRoot, "hub-projects", slug)
 		if hasWorkspaceContent(crPath) {
 			return crPath, nil
 		}
@@ -776,6 +777,35 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 			return localPath, nil
 		}
 		return crPath, nil
+	}
+
+	// --- GKE shared volume backend ---
+	// The mount root comes from workspaceMountRoot, the same resolver
+	// checkWorkspaceStorageHealth probes for readiness, so the two cannot
+	// drift. An empty root means no volume name was configured: there is no
+	// mount point to build a path from, so the config is treated as unset and
+	// this falls through to the local path. A deployment in that state fails
+	// its readiness check and never serves.
+	if wsCfg != nil && wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil {
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			subPathRoot := wsCfg.GKESharedVolume.SubPathRoot
+			if subPathRoot == "" {
+				subPathRoot = "projects"
+			}
+			gkePath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
+			if hasWorkspaceContent(gkePath) {
+				return gkePath, nil
+			}
+			// Fallback: check legacy local path
+			if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
+				// Worth saying out loud: on GKE the local path is always pod
+				// ephemeral storage, so this content disappears on the next
+				// reschedule and the project silently moves to the volume.
+				s.warnEphemeralProjectPath(slug, localPath, gkePath)
+				return localPath, nil
+			}
+			return gkePath, nil
+		}
 	}
 
 	// --- Default: local ephemeral path (existing behavior) ---
@@ -2463,6 +2493,20 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 			}
 		}
 	}
+
+	// The old slug is now unreachable, so its ephemeral-path warning
+	// suppression can never be consulted again — drop it, or a later project
+	// reusing the slug inherits the suppression and never warns.
+	//
+	// As in deleteProject, the invariant is that this follows the last
+	// hubManagedProjectPath(oldSlug) call, not that it follows the last read
+	// of oldSlug — reads that resolve no path cannot re-record. That call
+	// above re-records it on gke-shared-volume, where the resolution takes
+	// the warning path, so an eviction placed before it is undone by it.
+	// Nothing reads oldSlug after this point today, but that is incidental;
+	// the resolution is the thing to order against. Best-effort even here: a
+	// resolution already in flight on another goroutine can re-insert it.
+	s.warnedEphemeralProjects.Delete(oldSlug)
 }
 
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string) {
@@ -2571,6 +2615,22 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	s.webdavLocks.Delete(id)
+	// Same reason, keyed by slug rather than ID: drop the once-per-project
+	// ephemeral-path warning suppression so a slug that is deleted and later
+	// recreated warns again instead of inheriting the old suppression.
+	//
+	// Order matters, and not marginally. The hubManagedProjectPath call above
+	// can re-record this slug: on gke-shared-volume it takes the legacy-local
+	// fallback and warns, and a project served from that fallback is exactly
+	// the population that has an entry here — so evicting before that call
+	// would reliably reinstate the entry it just removed, not occasionally.
+	// The invariant is about resolutions, not reads: the eviction has to
+	// follow the last hubManagedProjectPath call for this slug. The
+	// project-configs cleanup below reads the slug three times after it —
+	// its guard, the marker, and the failure log — and all three are
+	// harmless, because none of them calls hubManagedProjectPath, and only
+	// that resolution re-records.
+	s.warnedEphemeralProjects.Delete(project.Slug)
 
 	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).
 	// This stores external settings, templates, and agent homes for both

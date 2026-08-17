@@ -13,19 +13,25 @@ import (
 	"google.golang.org/api/googleapi"
 )
 
+// Receiver ports in these tests are always 0 so the kernel assigns a free
+// port. A hardcoded port here is unsafe even if nothing else in the tree uses
+// it: `go test ./...` runs package binaries in parallel, and any port in the
+// local ephemeral range (32768-60999 on Linux) can already be held as the
+// source port of an outbound connection made by a sibling test binary, which
+// makes Start fail with "bind: address already in use".
 func TestPipeline_HealthGauge_Registers(t *testing.T) {
 	clearTelemetryEnv()
 	t.Setenv(EnvEnabled, "true")
 	t.Setenv(EnvCloudEnabled, "false")
-	t.Setenv(EnvGRPCPort, "54401")
-	t.Setenv(EnvHTTPPort, "54402")
+	t.Setenv(EnvGRPCPort, "0")
+	t.Setenv(EnvHTTPPort, "0")
 	defer clearTelemetryEnv()
 
 	cfg := &Config{
 		Enabled:       true,
 		CloudEnabled:  false,
-		GRPCPort:      54401,
-		HTTPPort:      54402,
+		GRPCPort:      0,
+		HTTPPort:      0,
 		CloudProvider: "",
 	}
 	pipeline := NewWithConfig(cfg)
@@ -55,14 +61,14 @@ func TestPipeline_HealthGauge_StopsOnStop(t *testing.T) {
 	clearTelemetryEnv()
 	t.Setenv(EnvEnabled, "true")
 	t.Setenv(EnvCloudEnabled, "false")
-	t.Setenv(EnvGRPCPort, "54403")
-	t.Setenv(EnvHTTPPort, "54404")
+	t.Setenv(EnvGRPCPort, "0")
+	t.Setenv(EnvHTTPPort, "0")
 	defer clearTelemetryEnv()
 
 	cfg := &Config{
 		Enabled:  true,
-		GRPCPort: 54403,
-		HTTPPort: 54404,
+		GRPCPort: 0,
+		HTTPPort: 0,
 	}
 	pipeline := NewWithConfig(cfg)
 	if pipeline == nil {
@@ -92,8 +98,8 @@ func TestPipeline_HealthGauge_StopsOnStop(t *testing.T) {
 func TestPipeline_ExportErrors_NilCounter(t *testing.T) {
 	cfg := &Config{
 		Enabled:  true,
-		GRPCPort: 54405,
-		HTTPPort: 54406,
+		GRPCPort: 0,
+		HTTPPort: 0,
 	}
 	pipeline := NewWithConfig(cfg)
 	if pipeline == nil {

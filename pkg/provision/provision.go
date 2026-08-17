@@ -67,7 +67,8 @@ type ResolvedWorkspace struct {
 	// SharedDirs maps shared-dir name → resolved path info.
 	SharedDirs map[string]ResolvedSharedDir
 
-	// Backend identifies which backend produced this resolution ("local" or "nfs").
+	// Backend identifies which backend produced this resolution: "local",
+	// "nfs", "cloudrun-volume" or "gke-shared-volume".
 	Backend string
 }
 
