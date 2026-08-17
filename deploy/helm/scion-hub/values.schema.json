@@ -421,7 +421,7 @@
         "maxOpenConns": {
           "type": "integer",
           "minimum": 2,
-          "description": "Keep above the number of background workers, and keep the total across replicas below the database tier's connection limit."
+          "description": "The ent pool's per-replica ceiling. The floor of 2 is the hub's, not a style preference: applyDatabasePoolDefaults (pkg/config/hub_config.go:573) treats a postgres value of 1 or less as UNSET and substitutes its own default, because a single-connection pool self-deadlocks as soon as one query waits on another. So 1 does not get you 1 and does not get you an error - it gets you the default, while the settings.yaml you can read still says 1. Refusing it here turns a silent substitution into a message. This is not the whole connection budget: each replica also holds connections outside this pool, and NOTES.txt gives the formula and says plainly that the overhead term is unmeasured."
         },
         "maxIdleConns": {
           "type": "integer",

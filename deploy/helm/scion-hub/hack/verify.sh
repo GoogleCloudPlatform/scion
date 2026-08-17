@@ -143,7 +143,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=280
+EXPECTED_TOTAL=283
 
 failures=0
 assertions=0
@@ -1641,6 +1641,67 @@ fi
 #     changed underneath it                 -> the --instance= arm. This is the
 #     fail-open the derivation exists for, and it is the one a hardcoded
 #     "ci-cloudsql" in this file would have missed.
+
+# --------------------------------------------------------------------------
+step "database.maxOpenConns has a floor of 2, and the floor is the hub's"
+# --------------------------------------------------------------------------
+# PHASE 2. The hub treats MaxOpenConns <= 1 as UNSET for postgres
+# (pkg/config/hub_config.go:573) and substitutes its own default, with a
+# documented rationale: a single-connection pool self-deadlocks the moment one
+# query waits on another. So an operator who sets 1 to economise on connections
+# does not get 1 and does not get an error - they get the hub's default, and
+# the settings.yaml they can read says 1. The schema moves that from a silent
+# substitution to a refusal at helm template.
+#
+# THE BOUNDARY IS PINNED FROM BOTH SIDES, which is the only way to check a
+# boundary. Rejecting 1 is satisfied by a schema that rejects everything;
+# accepting 2 is satisfied by one that accepts everything. Rejecting 0 AND 1
+# while accepting 2 locates it exactly, and moving the schema's minimum in
+# either direction turns one of these three red.
+for _bad in 0 1; do
+  expect_render_failure \
+    "database.maxOpenConns=$_bad is refused, not silently replaced by the hub's default" \
+    "database.maxOpenConns: Must be greater than or equal to 2" \
+    "${BASE[@]}" \
+    --set database.driver=postgres \
+    --set database.auth=iam \
+    --set database.name=scion \
+    --set storage.provider=gcs \
+    --set storage.bucket=b \
+    --set auth.mode=proxy \
+    --set acknowledgeHAUnlanded=true \
+    --set serviceAccount.gcpServiceAccount=sa@p.iam.gserviceaccount.com \
+    --set cloudsql.enabled=true \
+    --set cloudsql.instanceConnectionName=my-project:us-central1:db-1 \
+    --set "database.maxOpenConns=$_bad"
+done
+# THE OTHER DIRECTION, and "helm did not error" is not enough for it: a schema
+# that accepted 2 while the template dropped the key would pass a bare render
+# check and ship a hub running its own default anyway. The assertion is that
+# the VALUE ARRIVES.
+if _mo_out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    -f "$CHART_DIR/ci/values-cloudsql.yaml" --set database.maxOpenConns=2 2>&1); then
+  if grep -qE '^ +max_open_conns: 2$' <<<"$_mo_out"; then
+    pass "database.maxOpenConns=2 renders and reaches settings.yaml as max_open_conns: 2"
+  else
+    fail "database.maxOpenConns=2 rendered but max_open_conns: 2 is not in the settings file, so the value the operator set is not the value the hub reads"
+  fi
+else
+  fail "database.maxOpenConns=2 was refused, and 2 is the smallest value the hub will honour: $(tr '\n' ' ' <<<"$_mo_out" | cut -c1-300)"
+fi
+# MUTATION LOG. The schema's minimum was moved in both directions:
+#   minimum: 1  -> the =1 arm goes red ("the render SUCCEEDED and was supposed
+#                  to fail"), and the =0 arm goes red on the WORDING, because
+#                  the diagnostic an operator reads changes with the bound.
+#   minimum: 3  -> the =2 arm goes red. The floor cannot drift upward either.
+# Both runs stayed at 278/278, so neither is a harness error in disguise.
+#
+# Noted because it nearly cost the measurement: the first attempt at these two
+# mutations had a stale text anchor, the patch step raised inside a subshell
+# with no `|| exit`, and the loop printed "278/278, 0 failures" for a chart it
+# had never modified. Read quickly that says "the arms do not catch it". A
+# mutation harness needs the same rule as the suite it attacks - a setup that
+# did not run is not a result.
 
 # --------------------------------------------------------------------------
 step "config.extra deep merge"
