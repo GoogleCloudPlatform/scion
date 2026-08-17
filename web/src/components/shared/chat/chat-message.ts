@@ -97,6 +97,33 @@ const PREVIEW_MAX_LINES = 40;
 /** Lines that fit in the 200px slice; beyond this the edge is faded. */
 const PREVIEW_VISIBLE_LINES = 9;
 
+/**
+ * Map fenced code block language tags to CodeMirror language identifiers.
+ * Used by the syntax-highlighting post-processor to replace plain
+ * `<pre><code>` blocks with `<scion-code-editor readonly>`.
+ */
+const CODE_BLOCK_LANGUAGE_MAP: Record<string, string> = {
+  typescript: 'typescript',
+  ts: 'typescript',
+  javascript: 'javascript',
+  js: 'javascript',
+  go: 'go',
+  python: 'python',
+  py: 'python',
+  json: 'json',
+  yaml: 'yaml',
+  yml: 'yaml',
+  html: 'html',
+  css: 'css',
+  rust: 'rust',
+  rs: 'rust',
+  markdown: 'markdown',
+  md: 'markdown',
+  bash: 'plaintext',
+  sh: 'plaintext',
+  shell: 'plaintext',
+};
+
 /** Lowercase extension including the dot, or '' when the name has none. */
 function extensionOf(name: string): string {
   const dot = name.lastIndexOf('.');
@@ -497,6 +524,16 @@ export class ScionChatMessage extends LitElement {
       border: none;
       padding: 0;
       font-size: 0.8125rem;
+    }
+
+    /* Syntax-highlighted code blocks (#1049) */
+    .code-block-editor {
+      display: block;
+      margin: 0.5em 0;
+      max-height: 400px;
+      overflow: auto;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
     }
 
     .copy-btn {
@@ -979,6 +1016,7 @@ export class ScionChatMessage extends LitElement {
     }
     if (changed.has('renderedHtml')) {
       this.injectCopyButtons();
+      this.injectSyntaxHighlighting();
     }
     this.observePreviews();
   }
@@ -1059,6 +1097,47 @@ export class ScionChatMessage extends LitElement {
         }, 1500);
       });
       pre.appendChild(btn);
+    });
+  }
+
+  /**
+   * Replace fenced code blocks that have a language class with
+   * `<scion-code-editor readonly>` for syntax highlighting.
+   *
+   * `marked` produces `<pre><code class="language-typescript">` for
+   * ` ```typescript ` blocks. We detect the class, extract the language,
+   * and swap the `<pre>` with a readonly code editor.
+   */
+  private injectSyntaxHighlighting(): void {
+    const pres = this.shadowRoot?.querySelectorAll('.md-content pre');
+    if (!pres) return;
+
+    pres.forEach((pre) => {
+      // Skip if already replaced.
+      if (pre.getAttribute('data-highlighted') === 'true') return;
+
+      const codeEl = pre.querySelector('code');
+      if (!codeEl) return;
+
+      // Extract language from class="language-xxx" set by marked.
+      const langClass = Array.from(codeEl.classList).find((c) => c.startsWith('language-'));
+      if (!langClass) return; // No language tag — keep plain styling.
+
+      const langTag = langClass.replace('language-', '').toLowerCase();
+      const language = CODE_BLOCK_LANGUAGE_MAP[langTag];
+      if (!language) return; // Unknown language — keep plain styling.
+
+      const content = codeEl.textContent ?? '';
+      pre.setAttribute('data-highlighted', 'true');
+
+      // Create a readonly code editor and replace the <pre> in-place.
+      const editor = document.createElement('scion-code-editor') as import('../code-editor.js').ScionCodeEditor;
+      editor.content = content;
+      editor.language = language;
+      editor.readonly = true;
+      editor.classList.add('code-block-editor');
+
+      pre.replaceWith(editor);
     });
   }
 
