@@ -413,6 +413,41 @@ func TestAttachmentUpload_AllFilesRejected(t *testing.T) {
 	}
 }
 
+// The composer prints the filename and this string side by side, so the string
+// has to be one reason and not a stack of subjects. Moving the extension
+// refusal into SanitizeFilename put it behind the upload path's wrapper, which
+// produced "invalid filename: files with a .html extension are not accepted"
+// and, for a dot-only name, "invalid filename: invalid filename" (#1045).
+//
+// Exact strings, not substrings: this is the whole of what the user is told.
+func TestAttachmentUpload_FailureMessageIsASingleReason(t *testing.T) {
+	srv, _ := attachmentTestServer(t)
+
+	cases := []struct {
+		file uploadFile
+		want string
+	}{
+		{uploadFile{name: "evil.html", mime: "text/plain", content: "<img src=x onerror=alert(1)>"},
+			"files with a .html extension are not accepted"},
+		{uploadFile{name: "diagram.svg", mime: "image/svg+xml", content: "<svg/>"},
+			"files with a .svg extension are not accepted"},
+		{uploadFile{name: "bad.exe", mime: "application/octet-stream", content: "MZ binary"},
+			"dangerous file extension: .exe"},
+		{uploadFile{name: "..", mime: "text/plain", content: "hi"},
+			"invalid filename"},
+	}
+	for _, tc := range cases {
+		rec := uploadAttachments(t, srv, []uploadFile{tc.file})
+		resp := decodeUploadResponse(t, rec)
+		if len(resp.Failures) != 1 {
+			t.Fatalf("%q: failures = %+v, want exactly one", tc.file.name, resp.Failures)
+		}
+		if resp.Failures[0].Error != tc.want {
+			t.Errorf("%q: failure text = %q, want %q", tc.file.name, resp.Failures[0].Error, tc.want)
+		}
+	}
+}
+
 func TestAttachmentUpload_OversizedFileIsAPerFileFailure(t *testing.T) {
 	srv, _ := attachmentTestServer(t)
 

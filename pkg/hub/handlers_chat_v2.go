@@ -2929,7 +2929,13 @@ func (s *Server) storeUploadedFile(
 
 	safeName, err := SanitizeFilename(fh.Filename)
 	if err != nil {
-		return attachmentUploadResult{}, rejectAttachment("invalid filename: %v", err)
+		// Passed through without a prefix. Every error this can return already
+		// names the problem — "invalid filename", or the refused extension —
+		// and the failure entry carries the filename beside it, so a wrapper
+		// only stacks two subjects on one line ("invalid filename: invalid
+		// filename"). Nothing here echoes the uploader's text: the two
+		// extension errors interpolate a key of our own blocklists (#1045).
+		return attachmentUploadResult{}, attachmentRejection{msg: err.Error()}
 	}
 
 	file, err := fh.Open()
