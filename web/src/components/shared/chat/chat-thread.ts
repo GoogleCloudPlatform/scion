@@ -1569,12 +1569,18 @@ export class ScionChatThread extends LitElement {
    *
    * The deferred scroll respects pinnedToBottom: if the user scrolled away
    * while the load was in flight, it is skipped rather than yanking them back.
+   *
+   * updateComplete rejects when a reactive update throws, so the chain is
+   * caught: a failed render should not also surface as an unhandled rejection,
+   * and there is nothing to scroll to in that case anyway.
    */
   private scrollToBottomAfterRender(): void {
-    void this.updateComplete.then(() => {
-      if (!this.pinnedToBottom) return;
-      this.scrollToBottom();
-    });
+    void this.updateComplete
+      .then(() => {
+        if (!this.pinnedToBottom) return;
+        this.scrollToBottom();
+      })
+      .catch(() => {});
   }
 
   private handleJumpToLatest(): void {

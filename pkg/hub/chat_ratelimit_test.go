@@ -294,6 +294,46 @@ func TestChatSendLimiter_ProductionRatesCoverEveryClass(t *testing.T) {
 	}
 }
 
+// A rate below one per minute throttles, it does not lock the sender out.
+// Capacity tracked the rate, so a 0.5/min bucket could hold at most half the
+// single token a send costs and no amount of waiting ever bought one: the
+// sender was refused forever. Capacity is floored at one token so the slow
+// rate becomes a slow drip.
+func TestChatSendLimiter_SubOnePerMinuteRateStillEventuallyAllows(t *testing.T) {
+	clock := newTestClock()
+	lim := newChatSendLimiterWithRates(map[chatSenderClass]float64{
+		chatSenderHuman:       0.5,
+		chatSenderAgent:       0.5,
+		chatSenderAgentMirror: 0.5,
+	}, clock.Now)
+
+	if !lim.Allow("u1", chatSenderHuman).Allowed {
+		t.Fatal("the first send at 0.5/min was refused; a fresh bucket must hold at least the one token a send costs")
+	}
+	if lim.Allow("u1", chatSenderHuman).Allowed {
+		t.Fatal("the second send in the same instant should be refused at 0.5/min")
+	}
+
+	// At 0.5/min a token accrues every two minutes.
+	clock.Advance(time.Minute)
+	if lim.Allow("u1", chatSenderHuman).Allowed {
+		t.Error("half a token later the sender should still be refused")
+	}
+	clock.Advance(time.Minute)
+	if !lim.Allow("u1", chatSenderHuman).Allowed {
+		t.Error("two minutes on, a full token has accrued and the send should be allowed")
+	}
+
+	// The floor is a floor, not a new burst size: idling does not bank sends.
+	clock.Advance(time.Hour)
+	if !lim.Allow("u1", chatSenderHuman).Allowed {
+		t.Fatal("the sender should be allowed after a long idle")
+	}
+	if lim.Allow("u1", chatSenderHuman).Allowed {
+		t.Error("a long idle should refill at most one token, not a burst")
+	}
+}
+
 // Bucket state is bounded: senders that stop sending are forgotten.
 func TestChatSendLimiter_EvictsIdleBuckets(t *testing.T) {
 	clock := newTestClock()

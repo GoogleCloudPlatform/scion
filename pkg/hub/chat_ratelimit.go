@@ -336,20 +336,27 @@ func (l *chatSendLimiter) Allow(senderID string, class chatSenderClass) chatSend
 // when the limiter has no positive rate at all — an empty rate map means "no
 // limiting configured", the same as a nil limiter, and nothing in production
 // constructs one. The caller must hold l.mu.
+//
+// Capacity is floored at one token. A sub-1/minute rate would otherwise cap the
+// bucket below the single token a send costs, so it could never accumulate
+// enough to allow one — a permanent block rather than a slow drip. Flooring the
+// capacity leaves the refill rate untouched: the sender still waits 1/perMinute
+// minutes between sends, but the send eventually happens.
 func (l *chatSendLimiter) refillLocked(senderID string, class chatSenderClass, now time.Time) *chatSendBucket {
 	perMinute := l.limitFor(class)
 	if perMinute <= 0 {
 		return nil
 	}
+	capacity := math.Max(1, perMinute)
 
 	key := class.keyPrefix() + senderID
 	b, ok := l.buckets[key]
 	if !ok {
-		b = &chatSendBucket{tokens: perMinute, last: now}
+		b = &chatSendBucket{tokens: capacity, last: now}
 		l.buckets[key] = b
 		return b
 	}
-	b.tokens = math.Min(perMinute, b.tokens+now.Sub(b.last).Seconds()*perMinute/60)
+	b.tokens = math.Min(capacity, b.tokens+now.Sub(b.last).Seconds()*perMinute/60)
 	b.last = now
 	return b
 }
