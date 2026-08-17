@@ -177,11 +177,15 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			//     returns true, so `scion server start` stalls for its full 20s
 			//     wait and then skips the browser open with "server not yet
 			//     ready" — in an interactive non-headless terminal with web
-			//     enabled — and `scion server status` leaves WebRunning false,
-			//     reporting the web frontend as not detected. HubRunning
-			//     survives either way: the :9810 standalone fallback parses the
-			//     body without comparing the status, so a degraded standalone
-			//     hub still reads as running;
+			//     enabled — and `scion server status` leaves WebRunning and
+			//     HubRunning both false, reporting the web frontend and the hub
+			//     API as not detected. Both, and the hub half is the one worth
+			//     spelling out: a workstation enables web by default
+			//     (cmd/server_config.go), so the hub is mounted on the web port
+			//     rather than binding :9810 (cmd/server_foreground.go), and the
+			//     status command's :9810 fallback — which would otherwise leave
+			//     HubRunning true, since it parses the body without comparing
+			//     the status — has nothing to connect to here;
 			//   - scripts/starter-hub/gce-start-hub.sh greps for
 			//     '"status":"healthy"' and exits 1 on both its health checks.
 			//     The settings.yaml that script writes declares no
