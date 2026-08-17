@@ -192,6 +192,35 @@ describe('space rail — space badge follows mute', () => {
     expect(badge(el)).toBe(0);
   });
 
+  it('leaves the badge alone when an already-read thread is marked read', async () => {
+    // "Mark as read" is offered on every thread, read or not. Each click used
+    // to take one off the badge, so a few clicks on a read thread could drive
+    // it to zero while other threads still showed their unread dots.
+    const el = createRail([
+      thread({ id: 'topic-1', hasUnread: false, lastMessageId: 'm-1' }),
+      thread({ id: 'topic-2', hasUnread: true }),
+    ]);
+    el.spaces = [{ ...SPACE, unreadCount: 1 }];
+    apiFetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const target = thread({ id: 'topic-1', hasUnread: false, lastMessageId: 'm-1' });
+    await el.handleMarkRead(target, SPACE.projectId);
+    await el.handleMarkRead(target, SPACE.projectId);
+
+    expect(badge(el)).toBe(1);
+    expect(storedThread(el, 'topic-2').hasUnread).toBe(true);
+  });
+
+  it('leaves the badge alone when the server refuses the mark-read', async () => {
+    const el = createRail([thread({ hasUnread: true, lastMessageId: 'm-1' })]);
+    apiFetchMock.mockResolvedValue(new Response('{}', { status: 500 }));
+
+    await el.handleMarkRead(thread({ hasUnread: true, lastMessageId: 'm-1' }), SPACE.projectId);
+
+    expect(storedThread(el).hasUnread).toBe(true);
+    expect(badge(el)).toBe(1);
+  });
+
   it('markThreadRead skips the badge for a muted thread', () => {
     const el = createRail([thread({ hasUnread: true, muted: true })]);
 
@@ -200,6 +229,7 @@ describe('space rail — space badge follows mute', () => {
     expect(storedThread(el).hasUnread).toBe(false);
     expect(badge(el)).toBe(1);
   });
+
 });
 
 describe('space rail — pin toggle', () => {

@@ -934,7 +934,9 @@ export class ScionChatSpaceRail extends LitElement {
     this.contextMenuPos = { x: e.clientX, y: e.clientY };
   }
 
-  private async handleMarkRead(thread: ChatSpaceThread, projectId: string): Promise<void> {
+  // _projectId is kept for the call site's symmetry with the other context-menu
+  // actions; markThreadRead finds the thread's space itself.
+  private async handleMarkRead(thread: ChatSpaceThread, _projectId: string): Promise<void> {
     this.contextMenuTarget = null;
     // The server requires the watermark to move to a specific message. Without
     // an ID it rejects the request, and the dot comes back on the next reload.
@@ -952,11 +954,11 @@ export class ScionChatSpaceRail extends LitElement {
         }
       );
       if (!res.ok) return;
-      // Update locally. A muted thread was never in the space badge (the
-      // server's rollup skips it), so taking one off for it would eat another
-      // thread's unread.
-      this.updateThread(projectId, thread.id, { hasUnread: false, hasUnreadMention: false });
-      if (!thread.muted) this.adjustSpaceUnread(projectId, -1);
+      // Update locally through the same helper the no-watermark path above
+      // uses. The badge arithmetic lives there and nowhere else: doing it
+      // inline here is how "Mark as read" on an already-read thread came to
+      // decrement the badge on every click (#1029).
+      this.markThreadRead(thread.id);
     } catch {
       // Non-critical
     }
@@ -965,7 +967,12 @@ export class ScionChatSpaceRail extends LitElement {
   /**
    * Clear a thread's unread markers without talking to the server. Called when
    * the thread view itself advanced the watermark — the rail has no other way
-   * to learn that happened.
+   * to learn that happened — and by "Mark as read" once the server has moved
+   * the watermark for it.
+   *
+   * The space badge is a server-side rollup of unread, unmuted threads, so a
+   * thread only leaves it if it was in it: an already-read thread and a muted
+   * one both take nothing off, or they would eat another thread's unread.
    */
   markThreadRead(threadId: string): void {
     for (const [projectId, threads] of this.threadsBySpace) {
