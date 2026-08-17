@@ -97,8 +97,24 @@ fail() { executed=$((executed+1)); failed=$((failed+1)); echo "FAIL  $1"; }
 schema_rejects() { # $1 = --set expr, $2 = expected path in the schema error
   local out
   out="$("$HELM" template t "$CHART" "${BASE[@]}" --set "$1" 2>&1)"
-  if printf '%s' "$out" | grep -q "Additional property .* is not allowed" \
-     && printf '%s' "$out" | grep -q "^- $2: Additional property"; then
+  # -F ON THE SECOND ARM, AND THE REASON IS F24 IN MINIATURE. $2 is a schema
+  # path and the paths in this file include '(root)'. Under -E those parentheses
+  # are a capture group, so the pattern matches "- root: Additional property" and
+  # NOT the literal text helm prints - measured: naming -E here turned a passing
+  # assertion red. -F cannot carry the ^ anchor, so the anchor is spent to keep
+  # the dialect honest; "- (root): Additional property" is distinctive enough in
+  # a helm error that the loss is nominal, and the first arm still asserts the
+  # sentence. The alternative - escaping $2 at every call site - puts the
+  # correctness of the check in the caller's hands, which is where this kind of
+  # thing goes wrong quietly.
+  #
+  # AND THE `--`, WHICH IS NOT DECORATION. Dropping the ^ anchor makes the
+  # pattern start with "- ", and grep reads a leading dash as an option: the
+  # first attempt printed "grep: invalid option -- ' '" on stderr and the
+  # assertion went red. It is visible here only because this harness does not
+  # redirect stderr away, which is the rule that caught it.
+  if printf '%s' "$out" | grep -qE "Additional property .* is not allowed" \
+     && printf '%s' "$out" | grep -qF -- "- $2: Additional property"; then
     pass "schema rejects unknown key ($1) at '$2'"
   else
     fail "schema did NOT reject unknown key ($1) at '$2' -- values.schema.json missing or not enforcing"
@@ -132,7 +148,7 @@ RENDER="$("$HELM" template t "$CHART" "${BASE[@]}" 2>/dev/null)" || RENDER=""
 EXPECTED_KINDS=(ConfigMap Deployment Role RoleBinding Secret Service ServiceAccount)
 
 for k in "${EXPECTED_KINDS[@]}"; do
-  if printf '%s\n' "$RENDER" | grep -qx "kind: $k"; then
+  if printf '%s\n' "$RENDER" | grep -qxF "kind: $k"; then
     pass "render contains kind: $k"
   else
     fail "render is MISSING kind: $k -- template dropped (check .helmignore breadth)"
@@ -143,7 +159,7 @@ done
 # present; it is silent on anything present that is NOT named. A template that
 # started emitting a second Secret, or a stray manifest from an over-broad
 # range, satisfies every iteration above.
-kinds="$(printf '%s\n' "$RENDER" | grep -c '^kind:')"
+kinds="$(printf '%s\n' "$RENDER" | grep -cE '^kind:')"
 if [ "$kinds" -eq "${#EXPECTED_KINDS[@]}" ]; then
   pass "render emits exactly ${#EXPECTED_KINDS[@]} manifests"
 else
@@ -181,13 +197,13 @@ pkgdir="$(mktemp -d)"
 trap 'rm -rf "$pkgdir"' EXIT
 
 if "$HELM" package "$CHART" -d "$pkgdir" >/dev/null 2>&1; then
-  listing="$(tar tzf "$pkgdir"/*.tgz | grep -v '/$' | sort)"
+  listing="$(tar tzf "$pkgdir"/*.tgz | grep -vE '/$' | sort)"
 else
   listing=""
 fi
 
 for f in "${EXPECTED_FILES[@]}"; do
-  if printf '%s\n' "$listing" | grep -qx "$f"; then
+  if printf '%s\n' "$listing" | grep -qxF "$f"; then
     pass "package contains $f"
   else
     fail "package is MISSING $f -- .helmignore is too broad, or packaging failed"
@@ -216,7 +232,7 @@ done
 # change without its assertion is the shape this suite exists to catch.
 _excluded=""
 for _d in ci tests golden hack; do
-  printf '%s\n' "$listing" | grep -q "^scion-hub/${_d}/" && _excluded="${_excluded} ${_d}/"
+  printf '%s\n' "$listing" | grep -qE "^scion-hub/${_d}/" && _excluded="${_excluded} ${_d}/"
 done
 if [ -z "$listing" ]; then
   fail "package exclusion check: the listing is EMPTY, so nothing was examined -- helm package failed or produced no tarball"
@@ -233,7 +249,7 @@ fi
 # every file that MUST survive. This is only recorded here so the pair is visible in one place;
 # it adds no assertion.
 
-count="$(printf '%s\n' "$listing" | grep -c '^scion-hub/')"
+count="$(printf '%s\n' "$listing" | grep -cE '^scion-hub/')"
 if [ "$count" -eq "${#EXPECTED_FILES[@]}" ]; then
   pass "package contains exactly ${#EXPECTED_FILES[@]} files"
 else
@@ -295,10 +311,10 @@ else
   _chan=0
   _via=""
   # Channel 1: argv. Channel 2: the environment variable named in the reservation.
-  if printf '%s\n' "$RENDER" | grep -q -- '--base-url'; then
+  if printf '%s\n' "$RENDER" | grep -qF -- '--base-url'; then
     _chan=$((_chan + 1)); _via="${_via} argv(--base-url)"
   fi
-  if printf '%s\n' "$RENDER" | grep -q 'SCION_SERVER_BASE_URL'; then
+  if printf '%s\n' "$RENDER" | grep -qF 'SCION_SERVER_BASE_URL'; then
     _chan=$((_chan + 1)); _via="${_via} env(SCION_SERVER_BASE_URL)"
   fi
   # Does the prose still claim zero? Matched on the two sentences that make the
@@ -331,7 +347,7 @@ else
   #
   # CONTROL 1 - the apparatus fires. A quoted instance must vanish.
   if printf '%s\n' 'It read "none of them lands anywhere", which was true then.' \
-       | _strip_quotes | grep -q 'none of them lands anywhere'; then
+       | _strip_quotes | grep -qF 'none of them lands anywhere'; then
     echo "META-FAILURE: the quotation stripper did not strip a quoted phrase." >&2
     echo "  Everything the base-url tripwire reports about prose is unreliable." >&2
     exit 2
@@ -342,7 +358,7 @@ else
   # an UNRELATED quoted span on the same line as an UNQUOTED claim, because that
   # is the layout a per-line stripper gets wrong.
   if ! printf '%s\n' 'Today "hub.baseUrl" is set and none of them lands anywhere.' \
-       | _strip_quotes | grep -q 'none of them lands anywhere'; then
+       | _strip_quotes | grep -qF 'none of them lands anywhere'; then
     echo "META-FAILURE: the quotation stripper removed an UNQUOTED claim." >&2
     echo "  The base-url tripwire would report green by deleting its own subject." >&2
     exit 2
@@ -430,7 +446,7 @@ _DEFAULT_RENDER="$("$HELM" template t "$CHART" "${BASE[@]}" 2>&1)"
 # So the corpus is its own coverage control - remove the stripper and E5 goes red
 # immediately, and its remedy text tells you to set the default to true, which is
 # the log.Fatalf. A detector that recommends the harm is worse than no detector.
-_strip_comment_lines() { grep -v '^[[:space:]]*#'; }
+_strip_comment_lines() { grep -vE '^[[:space:]]*#'; }
 
 _secret_sources() { # stdin = render text; stdout = space-separated distinct tokens
   _strip_comment_lines \
@@ -445,7 +461,7 @@ _secret_sources() { # stdin = render text; stdout = space-separated distinct tok
 # CONTROL 1 - the apparatus fires. A full-line comment naming a source vanishes.
 # The fixture is the real line out of today's default render, not an invention.
 if printf '%s\n' '  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET' \
-     | _secret_sources | grep -q .; then
+     | _secret_sources | grep -qE .; then
   echo "META-FAILURE: the comment stripper did not strip a full-line YAML comment." >&2
   echo "  The LANDING limb would read the chart's own documentation as a secret source" >&2
   echo "  and demand a default flip that makes every pod log.Fatalf on first boot." >&2
@@ -465,7 +481,7 @@ _c2_seen=0
 while IFS= read -r _line; do
   [ -z "$_line" ] && continue
   _c2_seen=$((_c2_seen+1))
-  printf '%s\n' "$_line" | _secret_sources | grep -q . || _c2_missed="${_c2_missed}
+  printf '%s\n' "$_line" | _secret_sources | grep -qE . || _c2_missed="${_c2_missed}
     ${_line}"
 done <<'EOF'
         - name: SCION_SERVER_SESSION_SECRET
@@ -496,7 +512,7 @@ _e1_seen=0
 while IFS= read -r _line; do
   [ -z "$_line" ] && continue
   _e1_seen=$((_e1_seen+1))
-  printf '%s\n' "$_line" | _secret_sources | grep -q . || _e1_missed="${_e1_missed} [${_line}]"
+  printf '%s\n' "$_line" | _secret_sources | grep -qE . || _e1_missed="${_e1_missed} [${_line}]"
 done <<'EOF'
             - name: SCION_SERVER_SESSION_SECRET
   SCION_SERVER_SESSION_SECRET: c2VjcmV0
@@ -521,8 +537,8 @@ fi
 # rejected it. The text asserted is the harm citation, because that is the part
 # an operator needs and the part a weakened message would drop first.
 _e2="$("$HELM" template t "$CHART" "${BASE[@]}" --set auth.requireStableSigningKey=true 2>&1)"
-if printf '%s' "$_e2" | grep -q 'auth.requireStableSigningKey is true' \
-   && printf '%s' "$_e2" | grep -q 'cmd/server_foreground.go:259'; then
+if printf '%s' "$_e2" | grep -qF 'auth.requireStableSigningKey is true' \
+   && printf '%s' "$_e2" | grep -qF 'cmd/server_foreground.go:259'; then
   pass "chart refuses requireStableSigningKey=true with no secret source, citing the log.Fatalf"
 else
   fail "chart did NOT refuse requireStableSigningKey=true, or the refusal stopped naming its harm"
@@ -535,7 +551,7 @@ fi
 # this assertion, a guard hardened into an unconditional refusal scores E2 green.
 _e3="$("$HELM" template t "$CHART" "${BASE[@]}" --set auth.requireStableSigningKey=true \
          --set config.existingSecret=operator-settings 2>&1)"
-if printf '%s\n' "$_e3" | grep -q 'SCION_REQUIRE_STABLE_SIGNING_KEY: "true"'; then
+if printf '%s\n' "$_e3" | grep -qF 'SCION_REQUIRE_STABLE_SIGNING_KEY: "true"'; then
   pass "requireStableSigningKey=true is permitted under config.existingSecret"
 else
   fail "requireStableSigningKey=true was refused even under config.existingSecret -- the guard is unconditional"

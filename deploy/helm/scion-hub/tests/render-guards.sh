@@ -367,7 +367,7 @@ while IFS= read -r _line; do
 done <<EOF
 $_ha_canon
 EOF
-_ha_total="$(printf '%s' "$_ha_want" | grep -c .)"
+_ha_total="$(printf '%s' "$_ha_want" | grep -cE .)"
 if [ "$_ha_total" -lt 2 ]; then
   # THE PROBE'S OWN CORPUS, ASSERTED. An awk expression that matched nothing
   # would make _ha_seen equal _ha_total on zero gates and print ok. That is the
@@ -442,8 +442,8 @@ if [ "$_rc_a" -ne 0 ] || [ "$_rc_b" -ne 0 ]; then
 elif [ -z "$_a" ] || [ -z "$_b" ]; then
   echo "FAIL  install/upgrade comparison: one or both renders were EMPTY, so nothing was compared"
   failed=$((failed + 1))
-elif ! printf '%s\n' "$_a" | grep -q '^kind: Deployment$' \
-  || ! printf '%s\n' "$_b" | grep -q '^kind: Deployment$'; then
+elif ! printf '%s\n' "$_a" | grep -qE '^kind: Deployment$' \
+  || ! printf '%s\n' "$_b" | grep -qE '^kind: Deployment$'; then
   echo "FAIL  install/upgrade comparison: helm exited 0 but the output carries no Deployment, so the compared strings are not the manifest"
   failed=$((failed + 1))
 elif [ "$(printf '%s' "$_a" | sha256sum)" = "$(printf '%s' "$_b" | sha256sum)" ]; then
@@ -453,7 +453,7 @@ else
 fi
 for rel in t other-release t2; do
   executed=$((executed + 1))
-  got="$("$HELM" template "$rel" "$CHART" "${BASE[@]}" | grep -o 'scion.io/hub-id: .*' | sort -u)"
+  got="$("$HELM" template "$rel" "$CHART" "${BASE[@]}" | grep -oE 'scion\.io/hub-id: .*' | sort -u)"
   if [ "$got" = 'scion.io/hub-id: "ci-minimal"' ]; then
     echo "ok    hub-id verbatim under release name '${rel}'"
   else

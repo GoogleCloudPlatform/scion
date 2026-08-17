@@ -76,7 +76,7 @@ strategy_is() {  # <desc> <expected-type> <extra helm args...>
   fi
   # RollingUpdate must carry maxUnavailable: 0. Asserting the type alone would
   # pass a fix that deleted the fail AND broke the derivation.
-  if [ "$want" = "RollingUpdate" ] && ! printf '%s\n' "$out" | grep -q 'maxUnavailable: 0'; then
+  if [ "$want" = "RollingUpdate" ] && ! printf '%s\n' "$out" | grep -qF 'maxUnavailable: 0'; then
     echo "FAIL  ${desc}: RollingUpdate without maxUnavailable: 0"; failed=$((failed + 1)); return
   fi
   echo "ok    ${desc}: ${got}"

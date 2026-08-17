@@ -38,6 +38,17 @@
 # MEASURED, NOT ASSUMED: before the preflight below existed, running this file
 # with no helm on PATH printed FIVE PASSING ASSERTIONS - among them "emits no
 # SCION_SERVER_DATABASE_/OIDC_ variable", the single check this phase most
+# EVERY grep CALL SITE IN THIS FILE NAMES ITS DIALECT, -E OR -F, AND THAT IS A
+# CORRECTNESS PROPERTY RATHER THAN A STYLE ONE. gd-em's ruling (e), as amended by
+# gd-trig and the lead: the check is "names its dialect explicitly", NOT "adds
+# -E". Adding -E to a pattern written for BRE is a second way to manufacture a
+# confident zero - GNU BRE's \| \? \+ \( are operators under -G and LITERALS
+# under -E - so the conversion was audited for backslash operators (none present)
+# and both suites were compared byte for byte before and after. One site did not
+# survive the conversion and is documented where it lives:
+# tests/chart-integrity.sh's schema-path arm, where '(root)' is a capture group
+# under -E and a literal under -F.
+#
 # needs to be true - because each of them greps a rendered manifest for a string
 # that must be ABSENT, and every one of those manifests was an empty file. A
 # negative assertion against a file that does not exist is the cheapest false
@@ -165,7 +176,7 @@ render() {
 settings_block() {
   sed -n '/^  settings\.yaml: |/,/^[^ ]/p' "$1" \
     | sed -e '1d' -e '/^$/d' \
-    | grep '^    ' \
+    | grep -E '^    ' \
     | sed -e 's/^    //' -e '/^[[:space:]]*#/d'
 }
 
@@ -1068,24 +1079,24 @@ fi
 # --------------------------------------------------------------------------
 step "config.existingSecret"
 # --------------------------------------------------------------------------
-if grep -q 'kind: Secret' "$WORK/existing-secret.yaml"; then
+if grep -qF 'kind: Secret' "$WORK/existing-secret.yaml"; then
   fail "config.existingSecret did not suppress the chart's own Secret"
 else
   pass "config.existingSecret suppresses the chart's Secret"
 fi
-if grep -q 'secretName: my-own-hub-settings' "$WORK/existing-secret.yaml"; then
+if grep -qF 'secretName: my-own-hub-settings' "$WORK/existing-secret.yaml"; then
   pass "the pod mounts the operator's Secret"
 else
   fail "the pod does not mount the Secret named in config.existingSecret"
 fi
-if grep -q 'checksum/settings:' "$WORK/existing-secret.yaml"; then
+if grep -qF 'checksum/settings:' "$WORK/existing-secret.yaml"; then
   fail "checksum/settings is rendered under config.existingSecret, where it is a constant"
 else
   pass "checksum/settings is omitted under config.existingSecret"
 fi
 # The positive twin for both: the chart does render a Secret, and does annotate
 # the pod with its checksum, when it owns the file.
-if grep -q 'kind: Secret' "$WORK/settings.yaml" && grep -q 'checksum/settings:' "$WORK/settings.yaml"; then
+if grep -qF 'kind: Secret' "$WORK/settings.yaml" && grep -qF 'checksum/settings:' "$WORK/settings.yaml"; then
   pass "the chart renders its own Secret and a checksum when it owns the file"
 else
   fail "the chart did not render a Secret or its checksum - the two checks above are vacuous"
@@ -1228,13 +1239,13 @@ probe_render() {
 # Deployment too, and no value would ever be classified settings-only.
 probe_settings() {
   sed -n '/^  settings\.yaml: |/,/^[^ ]/p' "$1" \
-    | sed -e '1d' -e '/^$/d' | grep '^    ' \
+    | sed -e '1d' -e '/^$/d' | grep -E '^    ' \
     | sed -e 's/^    //' -e '/^[[:space:]]*#/d' \
     | python3 "$WORK/settings-leaves.py"
 }
 probe_other() {
   awk '/^# Source: /{keep = ($0 !~ /secret-settings\.yaml/)} keep' "$1" \
-    | grep -v 'checksum/settings:'
+    | grep -vF 'checksum/settings:'
 }
 
 if ! probe_render >"$WORK/probe-base.yaml"; then
@@ -1247,7 +1258,7 @@ else
     fail "the values walk did not render - the leaf enumeration below is empty"
   fi
   sed -n '/paths: |/,$p' "$WORK/probe-paths.yaml" \
-    | sed -e '1d' -e 's/^    //' | grep '|' >"$WORK/probe-leaves.txt" || true
+    | sed -e '1d' -e 's/^    //' | grep -F '|' >"$WORK/probe-leaves.txt" || true
 
   # LEAVES WITH NO LEGAL MUTATION. Not "leaves that are awkward" - leaves where
   # every value other than the default is REFUSED BY A RENDER GUARD, so there is
@@ -1320,7 +1331,7 @@ else
     if ! "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
         --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
         "${mutation[@]}" >"$WORK/probe-ex.yaml" 2>&1 \
-      && grep -q 'config.existingSecret is set together with inline settings values' "$WORK/probe-ex.yaml"; then
+      && grep -qF 'config.existingSecret is set together with inline settings values' "$WORK/probe-ex.yaml"; then
       continue
     fi
 
@@ -1436,20 +1447,20 @@ for name in "${PERMUTATIONS[@]}"; do
     pass "$name mounts a volume at $scion_dir"
   else
     fail "$name does not mount $scion_dir - hub.home is $home, so that is where the hub will look"
-    grep -n 'mountPath:' "$f" || true
+    grep -nF 'mountPath:' "$f" || true
   fi
   if grep -qF "HOME: \"$home\"" "$f"; then
     pass "$name sets HOME to $home"
   else
     fail "$name does not set HOME to $home - the mount and the variable have come apart, and only one of them moved"
-    grep -n 'HOME:' "$f" || true
+    grep -nF 'HOME:' "$f" || true
   fi
-  if grep -q 'subPath: settings.yaml' "$f" && grep -qF "mountPath: \"$scion_dir/settings.yaml\"" "$f"; then
+  if grep -qF 'subPath: settings.yaml' "$f" && grep -qF "mountPath: \"$scion_dir/settings.yaml\"" "$f"; then
     pass "$name mounts settings.yaml as a subPath inside it"
   else
     fail "$name does not mount settings.yaml as a subPath at $scion_dir/settings.yaml"
   fi
-  if grep -q 'defaultMode: 0444' "$f"; then
+  if grep -qF 'defaultMode: 0444' "$f"; then
     pass "$name projects the settings file 0444"
   else
     fail "$name does not project the settings file 0444 - 0600 would be unreadable to a non-root uid, and a decimal 444 is group-writable"
@@ -1488,23 +1499,23 @@ for name in "${PERMUTATIONS[@]}"; do
   # nothing about THIS assertion. Mutating templates/deployment.yaml to render a
   # persistentVolumeClaim and regenerating the goldens does reach it: 5 failures,
   # one per permutation, 254/254 executed.
-  if [[ "${#home_items[@]}" -gt 0 ]] && printf '%s\n' "${home_items[@]}" | grep -q 'emptyDir'; then
+  if [[ "${#home_items[@]}" -gt 0 ]] && printf '%s\n' "${home_items[@]}" | grep -qF 'emptyDir'; then
     pass "$name backs the hub's state directory with an emptyDir"
   else
     fail "$name does not back the hub's state directory with an emptyDir. If that is deliberate, the updateStrategy paragraph in values.yaml and the same sentence in values.schema.json both reason from it and must be rewritten in this diff."
   fi
-  if [[ "${#home_items[@]}" -gt 0 ]] && printf '%s\n' "${home_items[@]}" | grep -q 'readOnly: *true'; then
+  if [[ "${#home_items[@]}" -gt 0 ]] && printf '%s\n' "${home_items[@]}" | grep -qE 'readOnly: *true'; then
     fail "$name mounts the hub's state directory read-only; only settings.yaml may be read-only"
   else
     pass "$name leaves the hub's state directory writable"
   fi
   settings_mount="$(yaml_list_items "$f" settings | grep -F 'subPath: settings.yaml' || true)"
-  if [[ -n "$settings_mount" ]] && grep -q 'readOnly: *true' <<<"$settings_mount"; then
+  if [[ -n "$settings_mount" ]] && grep -qE 'readOnly: *true' <<<"$settings_mount"; then
     pass "$name mounts settings.yaml read-only"
   else
     fail "$name does not mount settings.yaml read-only - the file is the one thing in that directory the hub may not write, and defaultMode 0444 alone does not stop a write by uid 0 or a rename by the owner"
   fi
-  if grep -q 'fsGroup' "$f"; then
+  if grep -qF 'fsGroup' "$f"; then
     fail "$name sets fsGroup: it is pod-wide, so it grants every sidecar read access, and it makes the kubelet recursively chown mounted volumes"
   else
     pass "$name sets no fsGroup"
@@ -1800,7 +1811,7 @@ FX
 # from the artifact above the first time either is edited. These two are the same
 # bytes with one line changed, so the ONLY difference between the accepted input
 # and the flagged input is the property under test.
-grep -v 'restartPolicy: Always' "$WORK/fx-real-proxy.yaml" >"$WORK/fx-real-proxy-norestart.yaml"
+grep -vF 'restartPolicy: Always' "$WORK/fx-real-proxy.yaml" >"$WORK/fx-real-proxy-norestart.yaml"
 sed 's/^          restartPolicy: Always$/            restartPolicy: Always/' \
   "$WORK/fx-real-proxy.yaml" >"$WORK/fx-real-proxy-nested.yaml"
 # CONTROL ON THE CUT ITSELF: a sed that matched nothing would leave the negative
@@ -1897,7 +1908,7 @@ declare -A DELIVERED=(
 delivery_probe() {
   local flag="$1" render="$2" block="$3"
   case "$flag" in
-    base-url)       grep -q '^  SCION_SERVER_BASE_URL: ' <<<"$render" ;;
+    base-url)       grep -qE '^  SCION_SERVER_BASE_URL: ' <<<"$render" ;;
     storage-bucket) grep -qE '^    bucket: .' <<<"$block" ;;
     db)             grep -qE '^    url: .' <<<"$block" ;;
     storage-dir)    grep -qE '^    local_path: .' <<<"$block" ;;
@@ -2003,7 +2014,7 @@ hubid_marker=zzmarkerhubid
   --values "$CHART_DIR/ci/values-settings.yaml" \
   --set hub.hubId="$hubid_marker" >"$WORK/hubid.yaml" 2>&1 \
   || meta_failure "the hub-id marker render failed, so nothing below was checked"
-ann_id="$(grep -o 'scion\.io/hub-id: .*' "$WORK/hubid.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u)"
+ann_id="$(grep -oE 'scion\.io/hub-id: .*' "$WORK/hubid.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u)"
 set_id="$(settings_block "$WORK/hubid.yaml" | sed -n 's/^    hub_id: //p' | sed 's/"//g' | sort -u)"
 if [[ $ann_id == "$hubid_marker" ]]; then
   pass "the pod annotation carries the supplied hub ID"
@@ -2027,7 +2038,7 @@ for name in "${PERMUTATIONS[@]}"; do
   # all, so the extractor's grep finds nothing and exits 1, which set -e would
   # take as a reason to abandon the run. An empty string is the answer here, and
   # the branch below asserts which permutation is allowed to produce one.
-  a="$(grep -o 'scion\.io/hub-id: .*' "$WORK/$name.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u || true)"
+  a="$(grep -oE 'scion\.io/hub-id: .*' "$WORK/$name.yaml" | sed -e 's/.*: //' -e 's/"//g' | sort -u || true)"
   s="$(settings_block "$WORK/$name.yaml" 2>/dev/null | sed -n 's/^    hub_id: //p' | sed 's/"//g' | sort -u || true)"
   if [[ $name == existing-secret ]]; then
     # The documented exception, asserted rather than skipped. Here the settings
@@ -2550,7 +2561,7 @@ if out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
     --set 'hub.extraEnv[0].name=SOME_API_TOKEN' \
     --set 'hub.extraEnv[0].valueFrom.secretKeyRef.name=my-secret' \
     --set 'hub.extraEnv[0].valueFrom.secretKeyRef.key=token' 2>&1); then
-  if grep -q 'secretKeyRef' <<<"$out"; then
+  if grep -qF 'secretKeyRef' <<<"$out"; then
     pass "hub.extraEnv accepts a secret-named variable delivered by secretKeyRef"
   else
     fail "the secretKeyRef entry rendered but did not reach the manifest"
@@ -2604,8 +2615,8 @@ else
   pass "hub.podLabels does not reach the immutable selector"
 fi
 # ...and the extraction found the blocks it claims to have searched.
-if grep -q 'app.kubernetes.io/name: scion-hub' <<<"$pod_tpl_labels" \
-  && grep -q 'app.kubernetes.io/name: scion-hub' <<<"$selector_block"; then
+if grep -qF 'app.kubernetes.io/name: scion-hub' <<<"$pod_tpl_labels" \
+  && grep -qF 'app.kubernetes.io/name: scion-hub' <<<"$selector_block"; then
   pass "the pod-template and selector label blocks were both found"
 else
   fail "one of the two label blocks came back empty - the two checks above prove nothing"
@@ -2616,7 +2627,7 @@ fi
 if out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
     "${BASE[@]}" \
     --set config.extra.server.hub.hub_description=example 2>&1); then
-  if grep -q 'hub_description: example' <<<"$out"; then
+  if grep -qF 'hub_description: example' <<<"$out"; then
     pass "config.extra can still reach an unmodelled key under server.hub"
   else
     fail "config.extra.server.hub.hub_description rendered without error but did not reach the settings file"

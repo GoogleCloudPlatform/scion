@@ -377,7 +377,7 @@ if [ ! -f "$_contract_test" ]; then
 elif [ ! -f "$_gates_artifact" ]; then
   note "hack/ha-gates.txt is missing though its producer is present. Regenerate: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract"
 else
-  _ct="$(grep -c '^func Test' "$_contract_test")"
+  _ct="$(grep -cE '^func Test' "$_contract_test")"
   if [ "$_ct" -ne "$EXPECTED_CONTRACT_TESTS" ]; then
     note "cmd/helm_chart_ha_contract_test.go declares ${_ct} test functions, EXPECTED_CONTRACT_TESTS is ${EXPECTED_CONTRACT_TESTS}. Bump the number in the same diff that adds or removes one, so that neither direction is silent."
   fi
