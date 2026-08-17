@@ -38,8 +38,12 @@ set -u -o pipefail
 HELM="${HELM:-helm}"
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-# Minimum values that make the chart render. Both are `required` with no default by design.
-BASE=(--set image.repository=example.invalid/scion-hub --set hub.hubId=h)
+# Minimum values that make the chart render. All three are `required` with no default by design.
+# hub.baseUrl became required in Phase 1: the hub's own fallback is a localhost URL that agents
+# cannot reach and that disables the session cookie's Secure attribute, so there is no safe
+# default. Before it was added here every render in this file returned empty, which section D's
+# empty-render guard reported correctly rather than scoring it as zero channels.
+BASE=(--set image.repository=example.invalid/scion-hub --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid)
 
 EXPECTED_TOTAL=26   # 25 as adopted from rev-2, +1 for the base-url tripwire in D.
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
@@ -133,11 +137,13 @@ EXPECTED_FILES=(
   scion-hub/values.yaml
   scion-hub/templates/NOTES.txt
   scion-hub/templates/_helpers.tpl
+  scion-hub/templates/configmap-env.yaml
   scion-hub/templates/deployment.yaml
   scion-hub/templates/rbac-clusterrole.yaml
   scion-hub/templates/rbac-clusterrolebinding.yaml
   scion-hub/templates/rbac-role.yaml
   scion-hub/templates/rbac-rolebinding.yaml
+  scion-hub/templates/secret-settings.yaml
   scion-hub/templates/service.yaml
   scion-hub/templates/serviceaccount.yaml
 )
@@ -173,13 +179,30 @@ done
 # It also becomes strictly more load-bearing as the exclusion list grows: a later
 # phase adding golden/ and hack/ to .helmignore doubles the number of things this
 # one line certifies, and an empty listing would certify all four.
+# Phase 1 added /golden/ and /hack/ to .helmignore, so this one line now certifies FOUR
+# exclusions, exactly as the paragraph above predicted it would. Each pattern is ANCHORED with a
+# leading slash: rev-2 measured a bare `hack/` swallowing templates/hack/nested.txt, and `tests/`
+# is the dangerous one to leave bare because templates/tests/ is where Helm's own test hooks
+# conventionally live. The anchoring and this assertion land in the same diff, because a pattern
+# change without its assertion is the shape this suite exists to catch.
+_excluded=""
+for _d in ci tests golden hack; do
+  printf '%s\n' "$listing" | grep -q "^scion-hub/${_d}/" && _excluded="${_excluded} ${_d}/"
+done
 if [ -z "$listing" ]; then
   fail "package exclusion check: the listing is EMPTY, so nothing was examined -- helm package failed or produced no tarball"
-elif printf '%s\n' "$listing" | grep -q '^scion-hub/\(ci\|tests\)/'; then
-  fail "package contains ci/ or tests/ -- these are ignored by design"
+elif [ -n "$_excluded" ]; then
+  fail "package contains${_excluded} -- these are ignored by design; check .helmignore"
 else
-  pass "package excludes ci/ and tests/"
+  pass "package excludes ci/, tests/, golden/ and hack/"
 fi
+
+# THE OTHER DIRECTION, AND IT IS NOT THE SAME ASSERTION. The check above says the four
+# directories did not survive packaging. It cannot tell "the pattern excluded them" from "the
+# pattern excluded them AND half the chart" -- an over-broad /hack/ that also ate
+# templates/hack-something.yaml passes it. The EXPECTED_FILES loop above is that twin: it names
+# every file that MUST survive. This is only recorded here so the pair is visible in one place;
+# it adds no assertion.
 
 count="$(printf '%s\n' "$listing" | grep -c '^scion-hub/')"
 if [ "$count" -eq "${#EXPECTED_FILES[@]}" ]; then
@@ -220,7 +243,17 @@ fi
 # rather than silently resolved.
 # ---------------------------------------------------------------------------
 
-DELIVERS_BASE_URL_CHANNEL=0   # Phase 1 sets this to 1 and edits :835 and :1089.
+# PHASE 1 CROSSED THIS BOUNDARY. The render now carries exactly one channel,
+# env(SCION_SERVER_BASE_URL) from configmap-env.yaml; argv still carries none.
+# Both prose sites were edited in the diff that set this constant, and neither
+# was edited by deleting the sentence and leaving the paragraph:
+#   P0 :835  -> the $ownedByConfig header, now at _helpers.tpl:865, which names
+#               which of the listed keys this release DOES deliver and which it
+#               does not, rather than saying none of them land.
+#   P0 :1089 -> the hub.args reservation, now at _helpers.tpl:1152, which names
+#               -base-url and -storage-bucket as live and the other three as
+#               still having no second source.
+DELIVERS_BASE_URL_CHANNEL=1
 
 # THE POSITIVE CONTROL COMES FIRST. "Zero channels deliver base-url" is a
 # negative assertion and an empty render satisfies it perfectly. Section B
@@ -243,9 +276,61 @@ else
   # claim, not on the whole paragraph, so rewording around them does not count
   # as retracting them.
   _h="${CHART}/templates/_helpers.tpl"
+
+  # THE PROBE READS DESCRIPTIVE PROSE ONLY, AND THAT IS A PHASE 1 CHANGE.
+  #
+  # The paragraph that REPLACED the stale claim quotes the stale claim, in order
+  # to say it went stale. _helpers.tpl:869-870 now reads: It read "there is no
+  # second source yet ..." and "none of them lands anywhere", which were true
+  # while the chart rendered no ConfigMap ... and false the moment it rendered
+  # all three. A raw grep cannot tell that sentence from the sentence it is
+  # about. The two have opposite truth values and identical bytes.
+  #
+  # So the subject is the file with double-quoted spans removed. Quotation is
+  # the only mood this strips; a phase that retracts a claim WITHOUT quoting it
+  # is unaffected. LIMIT, stated because it is real: sed works a line at a time,
+  # so a quotation that wraps across a newline is not stripped and would be read
+  # as descriptive - a false RED, which is the safe direction. The instance
+  # above is balanced within its line, and CONTROL 2 below is what establishes
+  # that rather than my say-so.
+  _strip_quotes() { sed 's/"[^"]*"//g'; }
+
+  # BOTH CONTROLS ARE META-FAILURES (exit 2), NOT ASSERTIONS. The count 26 is
+  # pre-registered by gd-em and a control that moves it is a control that has to
+  # argue for itself; a broken stripper does not make the CHART wrong, it makes
+  # this run not evidence, which is exactly what exit 2 means here.
+  #
+  # CONTROL 1 - the apparatus fires. A quoted instance must vanish.
+  if printf '%s\n' 'It read "none of them lands anywhere", which was true then.' \
+       | _strip_quotes | grep -q 'none of them lands anywhere'; then
+    echo "META-FAILURE: the quotation stripper did not strip a quoted phrase." >&2
+    echo "  Everything the base-url tripwire reports about prose is unreliable." >&2
+    exit 2
+  fi
+  # CONTROL 2 - the apparatus does not over-fire, and this is the twin that
+  # matters. A stripper that deleted the whole line would pass control 1
+  # perfectly and would silence every real claim in the file. The fixture puts
+  # an UNRELATED quoted span on the same line as an UNQUOTED claim, because that
+  # is the layout a per-line stripper gets wrong.
+  if ! printf '%s\n' 'Today "hub.baseUrl" is set and none of them lands anywhere.' \
+       | _strip_quotes | grep -q 'none of them lands anywhere'; then
+    echo "META-FAILURE: the quotation stripper removed an UNQUOTED claim." >&2
+    echo "  The base-url tripwire would report green by deleting its own subject." >&2
+    exit 2
+  fi
+
+  # THE JOIN IS OR, WHERE PHASE 0 USED AND, AND THE CHANGE IS DELIBERATE.
+  # Before the boundary the question was "does the prose still claim zero", and
+  # both sentences claimed it together. After the boundary the question is "did
+  # any stale claim survive the edit", and ONE survivor is a defect. AND would
+  # let a half-finished retraction through.
+  #
+  # THE STRIPPER IS LOAD-BEARING ON THE REAL CORPUS, NOT DECORATIVE, AND THAT IS
+  # MEASURABLE: run this probe without _strip_quotes and it goes RED right now,
+  # on the quotation at :870 alone. The corpus is its own coverage control.
   _claims_zero=0
-  if grep -q 'delivers none of them yet' "$_h" 2>/dev/null \
-     && grep -q 'none of them lands anywhere' "$_h" 2>/dev/null; then
+  if _strip_quotes < "$_h" 2>/dev/null \
+       | grep -qE 'delivers none of them yet|none of them lands anywhere'; then
     _claims_zero=1
   fi
   _want_claim=0; [ "$DELIVERS_BASE_URL_CHANNEL" -eq 0 ] && _want_claim=1

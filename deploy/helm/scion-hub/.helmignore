@@ -10,11 +10,25 @@
 *.orig
 *~
 
+# EVERY DIRECTORY PATTERN BELOW IS ANCHORED WITH A LEADING SLASH, AND THAT IS
+# LOAD-BEARING. .helmignore is applied when Helm LOADS a chart directory, not
+# only when it packages one, so an over-broad pattern removes files from every
+# `helm template`, `helm lint` and `helm package` at once - and `helm lint
+# --strict` cannot see it happen. An unanchored `hack/` matches at ANY depth:
+# gd-p0-rev-2 measured it swallowing `templates/hack/nested.txt`. `tests/` is
+# the dangerous one to leave bare, because `templates/tests/` is where Helm's
+# own test hooks conventionally live, so the bare form would silently drop a
+# future test hook and the render would simply be smaller.
+#
+# tests/chart-integrity.sh asserts each of these exclusions by name, and
+# asserts the surviving file list by name too - a negative here is only
+# meaningful beside the positives that prove the listing was non-empty.
+
 # CI fixture values. These exist to be passed to helm lint and helm template
 # with -f; they are not defaults and must never be mistaken for them, least of
 # all inside a packaged chart where image.repository points at an example
 # registry path that does not exist.
-ci/
+/ci/
 
 # The assertion harness. Excluded on evidence rather than taste: helm package
 # does not preserve the executable bit (verified - the scripts arrive 0644 in the
@@ -26,7 +40,16 @@ ci/
 # This cuts the opposite way from VALIDATION.md below, on purpose: that file is
 # most useful to whoever holds the package, and these are most useful to whoever
 # holds the repository.
-tests/
+/tests/
+
+# The golden renders. They are the expected output of this chart, so shipping
+# them inside the chart puts a stale copy of the answer next to the thing it is
+# the answer to. They are also large and of no use to whoever holds the package.
+/golden/
+
+# hack/verify.sh, excluded for the same reason as tests/ above: helm package
+# does not preserve the executable bit, and it asserts against a source tree.
+/hack/
 
 # VALIDATION.md is deliberately NOT ignored. It is the record of which
 # acceptance criteria have never been run, and it is most useful to exactly the
