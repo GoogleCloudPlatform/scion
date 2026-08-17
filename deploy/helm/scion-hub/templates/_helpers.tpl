@@ -877,8 +877,62 @@ into CI logs.
 {{- define "scion-hub.assertNoCredential" -}}
 {{- $s := toString .value }}
 {{- $source := .source }}
-{{- if regexMatch "://[^/@[:space:]]*:[^/@[:space:]]+@" $s }}
-{{- fail (printf "%s %q embeds credentials in a URL (scheme://user:password@host, and the username may be empty as in redis://:password@host). Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret." $source (regexReplaceAll "://[^/@[:space:]]*:[^/@[:space:]]+@" $s "://REDACTED@")) }}
+{{- /*
+   F3. THE PASSWORD CLASS USED TO EXCLUDE "/", AND A "/" IN THE PASSWORD SILENCED
+   THIS GUARD ENTIRELY. "://[^/@[:space:]]*:[^/@[:space:]]+@" gave the regex no
+   path from the password to the terminating "@", so
+
+       --upstream=postgres://u:a/b@10.0.0.1/scion      SILENT, password on argv
+       --upstream=redis://:S3cr3t/Xy@10.0.0.1:6379     SILENT, password on argv
+
+   rendered clean while the one-character control (the same password without the
+   slash) was refused. Measured on real helm: the old pattern misses 7 of 12
+   credential-bearing arms, including every DSN whose password contains a slash,
+   two-slash passwords, mongodb replica-set URIs and amqp vhost URIs.
+
+   THE PROTECTION WAS ANTI-CORRELATED WITH THE MISTAKE, which is why this was
+   blocking rather than a nit. An operator who percent-encodes their DSN
+   correctly has no raw "/" and was protected. An operator who does not is
+   carrying the raw slash -- and was the one the guard let through.
+
+   WHY THE FIX IS NOT "ADD / TO THE CLASS". Any class that enumerates the
+   characters a password may not contain is a judgement about the credential's
+   VALUE, and it will keep losing to whatever the next password policy allows.
+   This detects by STRUCTURE instead: userinfo is whatever sits between "://"
+   and the LAST "@" of a URI authority, and the authority ends at "/", "?", "#"
+   or end-of-string. The password class now excludes only "?" and "#", and those
+   two are not value judgements -- they are the grammar's own delimiters, the
+   characters that END the authority. A password containing them is not
+   representable in an unencoded DSN at all.
+
+   THE TRAILING "[^/?#[:space:]]*([/?#]|$)" IS NOT DECORATION. It asserts that
+   the authority actually terminates, which is what makes this a claim about URI
+   structure rather than a substring search. Without it, "user:pass@" anywhere
+   inside a query string matches, and ordinary URLs carrying an email address in
+   a parameter are refused.
+
+   🔴 DISCLOSED RESIDUAL, MEASURED, NOT THEORETICAL: a URL with an EXPLICIT PORT
+   and an "@" in its PATH is a false positive.
+
+       https://example.com:8080/a@b/c    REFUSED, and it is a legitimate URL
+
+   The port reads as the password and the path segment as the host, and nothing
+   in the grammar distinguishes them from userinfo. The old pattern accepted it.
+   This is a real regression on that one shape and it is kept deliberately: the
+   trade is 7 silent credential leaks for 1 loud refusal of an unusual URL, and
+   a refusal is visible at install time while a leak is permanent and silent.
+   If you narrow this pattern to reclaim that arm, re-run the fire arms first --
+   they are in tests/render-guards.sh and they are what the old pattern lost.
+
+   ⚠ THE REDACTION PATTERN MUST STAY A SUPERSET OF THE DETECTION PATTERN. It is
+   deliberately the same expression MINUS the authority-terminator tail, so every
+   string that trips the check is guaranteed to be redactable. If it were ever
+   narrowed to less than the detector matches, regexReplaceAll would return the
+   value UNCHANGED and this fail message would print the password it just caught
+   into CI logs. There is a test for that; it is not a stylistic preference.
+*/}}
+{{- if regexMatch "://[^/?#[:space:]@]*:[^?#[:space:]]*@[^/?#[:space:]]*([/?#]|$)" $s }}
+{{- fail (printf "%s %q embeds credentials in a URL (scheme://user:password@host, and the username may be empty as in redis://:password@host). Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret." $source (regexReplaceAll "://[^/?#[:space:]@]*:[^?#[:space:]]*@" $s "://REDACTED@")) }}
 {{- end }}
 {{- if regexMatch "(?i)[?&](access_token|refresh_token|id_token|auth_token|api_?key|client_secret|password|passwd|signature)=[^&[:space:]]" $s }}
 {{- fail (printf "%s carries a credential in a URL query string (%s=...). A query string is not a hiding place: it reaches argv, process listings, proxy logs and Referer headers alike. Deliver it through a Secret and let the hub read it from the environment." $source (regexFind "(?i)[?&](access_token|refresh_token|id_token|auth_token|api_?key|client_secret|password|passwd|signature)=" $s | trimAll "?&=")) }}

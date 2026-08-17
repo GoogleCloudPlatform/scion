@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=113   # 77 (upstream) + 33 (F2 name-axis, multi-line-leaf, anchor-class) + 3 (map-KEY rows).
+EXPECTED_TOTAL=125   # 77 (upstream) + 33 (F2) + 3 (map-KEY) + 12 (URL-userinfo F3).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -192,6 +192,55 @@ accept "--passwordMinLength"      --set hub.args[0]=--passwordMinLength=8
 
 echo "== credential guard, VALUE axis =="
 reject "DSN with userinfo"  "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://scion:hunter2@10.0.0.1/scion'
+
+echo "== F3: a / in the password must not silence the URL guard =="
+# EVERY ONE OF THESE RENDERED CLEAN before F3, with the password on argv. The old
+# password class was [^/@[:space:]]+, so a slash left the regex no path to the
+# terminating @ and the guard went quiet. The control below - the same password
+# with the slash removed - was refused, which is what made this anti-correlated
+# with the mistake: the operator who percent-encodes correctly was protected and
+# the one carrying a raw slash was not.
+#
+# THESE ROWS ARE THE COST OF ANY FUTURE NARROWING OF THAT PATTERN. The disclosed
+# residual below is a standing temptation to tighten it; if you do, run these
+# first and count how many go quiet.
+reject "pw with a slash"        "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://u:a/b@10.0.0.1/scion'
+reject "pw slash, empty user"   "embeds credentials in a URL" --set 'hub.args[0]=--upstream=redis://:S3cr3t/Xy@10.0.0.1:6379'
+reject "pw with two slashes"    "embeds credentials in a URL" --set 'hub.args[0]=--upstream=mysql://u:p/w/d@host:3306/db'
+# THE COMMA IS ESCAPED BECAUSE --set SPLITS ON IT, and the first version of this
+# row proved the point the hard way: helm never planted the value at all, failing
+# with `key "h2:27017/db" has no value`. That is a REJECTION, so an exit-code-only
+# assertion would have gone green on an arm that never reached the chart.
+#
+# So this row asserts the REDACTED DSN rather than the message wording. It is the
+# stronger claim: it can only appear if the comma survived --set, if the URL guard
+# was the guard that fired, and if the redactor rewrote the userinfo. If a future
+# helm changes its escaping, this goes red instead of quietly degrading into a
+# single-host arm that still passes.
+reject "mongodb replica set"    'mongodb://REDACTED@h1:27017,h2:27017/db' --set 'hub.args[0]=--upstream=mongodb://u:p/w@h1:27017\,h2:27017/db'
+reject "amqp vhost"             "embeds credentials in a URL" --set 'hub.args[0]=--upstream=amqp://u:a/b@rabbit:5672/vhost'
+reject "pw ends in a slash"     "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://u:abc/@10.0.0.1/scion'
+reject "pw is a single slash"   "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://u:/@10.0.0.1/scion'
+
+# THE OTHER DIRECTION, WHICH IS THE HALF THAT KEEPS GETTING SKIPPED. Widening the
+# password class to admit "/" is only safe if the authority-terminator tail holds
+# these three quiet. Without that tail, "user:pass@" matched anywhere inside a
+# query string and each of these was refused.
+accept "DSN with no userinfo"     --set 'hub.args[0]=--upstream=postgres://10.0.0.1:5432/scion'
+accept "email in a query string"  --set 'hub.args[0]=--upstream=https://api.example.com/v1/users?filter=a:b@c.com'
+accept "explicit port, @ in query" --set 'hub.args[0]=--upstream=https://example.com:8080/path?e=a@b'
+
+# 🔴 KNOWN FALSE POSITIVE, PINNED DELIBERATELY. THIS ROW ASSERTS A DEFECT.
+# A URL with an explicit port AND an @ in its path is refused: the port reads as
+# the password and the path segment as the host, and no URI grammar distinguishes
+# them from userinfo. The pre-F3 pattern accepted this, so it is a real regression
+# on this one shape, taken knowingly - 7 silent credential leaks traded for 1 loud
+# refusal of an unusual URL.
+#
+# DO NOT DELETE THIS ROW TO MAKE A FIX GO GREEN. If you narrow the pattern and
+# reclaim this arm, this row goes red - that is the row WORKING. Flip it to
+# accept() and delete this comment, having first re-run the seven fire rows above.
+reject "KNOWN FP: port + @ in path" "embeds credentials in a URL" --set 'hub.args[0]=--upstream=https://example.com:8080/a@b/c'
 reject "ghp_ prefix"        "shape of a credential"       --set 'hub.args[0]=--x=ghp_AAAAAAAAAAAAAAAAAAAA'
 # LENGTHENED DELIBERATELY, AND DO NOT SHORTEN IT BACK. "sk-" carries a length
 # floor because three characters of prefix plus one alphanumeric is a substring
@@ -359,6 +408,36 @@ case "$_out" in
       *) echo "ok    credential redacted in the failure message" ;;
     esac ;;
   *) echo "FAIL  credential redaction: the guard did not fire, so redaction was never tested"
+     echo "        got: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-160)"
+     failed=$((failed + 1)) ;;
+esac
+
+# THE SAME ASSERTION WITH A SLASH IN THE PASSWORD, AND IT IS NOT A DUPLICATE.
+# Detection and redaction are TWO DIFFERENT REGEXES in _helpers.tpl. The detector
+# carries an authority-terminator tail; the redactor deliberately does not, which
+# makes the redactor a strict SUPERSET of the detector. That relationship is the
+# only thing guaranteeing every caught string is redactable.
+#
+# If someone edits one pattern and not the other - the obvious maintenance
+# mistake, since they sit on adjacent lines and look interchangeable -
+# regexReplaceAll matches nothing, returns the value UNCHANGED, and %q prints the
+# whole DSN INCLUDING THE PASSWORD into the CI log. The failure is invisible from
+# the exit code: the guard still refuses, still exits 1, still prints a
+# correct-sounding message. Only the password's presence in it gives it away.
+#
+# The slash matters: it is the character the detector was widened for, so this is
+# the arm that goes red first if the two patterns drift apart.
+executed=$((executed + 1))
+_out="$(render --set 'hub.args[0]=--upstream=postgres://scion:S3cr3t/Xy@10.0.0.1/scion')"
+case "$_out" in
+  *"embeds credentials in a URL"*)
+    case "$_out" in
+      *"S3cr3t/Xy"*) echo "FAIL  slash-bearing password LEAKED into the guard's own error message"
+                     echo "        the detector and the redactor have drifted apart in _helpers.tpl"
+                     failed=$((failed + 1)) ;;
+      *) echo "ok    slash-bearing credential redacted in the failure message" ;;
+    esac ;;
+  *) echo "FAIL  slash redaction: the guard did not fire, so redaction was never tested"
      echo "        got: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-160)"
      failed=$((failed + 1)) ;;
 esac
