@@ -1525,3 +1525,26 @@ func printAutoResolvedBroker(ctx context.Context, hubCtx *HubContext, flagBroker
 		statusf("Using default broker %s\n", resp.Agent.RuntimeBrokerID)
 	}
 }
+
+// splitCommaList normalises a repeatable string-slice flag into a flat list of
+// values. Each occurrence of the flag is additionally split on commas, so the
+// historical comma-separated form and the repeatable form are both accepted and
+// may be freely mixed:
+//
+//	--scopes a,b            -> ["a", "b"]
+//	--scopes a --scopes b   -> ["a", "b"]
+//	--scopes a,b --scopes c -> ["a", "b", "c"]
+//
+// Surrounding whitespace is trimmed and empty entries are dropped.
+func splitCommaList(values []string) []string {
+	var out []string
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return out
+}

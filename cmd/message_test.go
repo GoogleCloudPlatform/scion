@@ -1661,43 +1661,65 @@ func TestExtractMentions_Basic(t *testing.T) {
 func TestParseCCFlag(t *testing.T) {
 	tests := []struct {
 		name string
-		cc   string
+		cc   []string
 		want []string
 	}{
 		{
 			name: "empty",
-			cc:   "",
+			cc:   nil,
+			want: nil,
+		},
+		{
+			name: "single empty string",
+			cc:   []string{""},
 			want: nil,
 		},
 		{
 			name: "single name",
-			cc:   "alice",
+			cc:   []string{"alice"},
 			want: []string{"alice"},
 		},
 		{
 			name: "multiple names",
-			cc:   "alice,bob,charlie",
+			cc:   []string{"alice,bob,charlie"},
 			want: []string{"alice", "bob", "charlie"},
 		},
 		{
 			name: "whitespace trimmed",
-			cc:   " alice , bob , charlie ",
+			cc:   []string{" alice , bob , charlie "},
 			want: []string{"alice", "bob", "charlie"},
 		},
 		{
 			name: "empty entries skipped",
-			cc:   "alice,,bob",
+			cc:   []string{"alice,,bob"},
 			want: []string{"alice", "bob"},
 		},
 		{
 			name: "duplicates removed",
-			cc:   "alice,bob,alice",
+			cc:   []string{"alice,bob,alice"},
 			want: []string{"alice", "bob"},
 		},
 		{
 			name: "case insensitive dedup",
-			cc:   "Alice,alice",
+			cc:   []string{"Alice,alice"},
 			want: []string{"Alice"},
+		},
+		{
+			// The repeatable form: previously only the last occurrence
+			// survived, so "alice" was silently dropped.
+			name: "repeated flag accumulates",
+			cc:   []string{"alice", "bob"},
+			want: []string{"alice", "bob"},
+		},
+		{
+			name: "repeated and comma forms mixed",
+			cc:   []string{"alice,bob", "charlie"},
+			want: []string{"alice", "bob", "charlie"},
+		},
+		{
+			name: "dedup across occurrences",
+			cc:   []string{"alice", "Alice", "bob"},
+			want: []string{"alice", "bob"},
 		},
 	}
 
@@ -1733,7 +1755,7 @@ func TestSendMessageViaHub_MentionFanOut(t *testing.T) {
 
 	// Reset CC flag
 	origCC := msgCC
-	msgCC = ""
+	msgCC = nil
 	defer func() { msgCC = origCC }()
 
 	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false, false, false, false)
@@ -1777,7 +1799,7 @@ func TestSendMessageViaHub_MentionDedup(t *testing.T) {
 	}
 
 	origCC := msgCC
-	msgCC = ""
+	msgCC = nil
 	defer func() { msgCC = origCC }()
 
 	// Primary recipient is also @mentioned in body — should be deduplicated
@@ -1812,7 +1834,7 @@ func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
 	}
 
 	origCC := msgCC
-	msgCC = ""
+	msgCC = nil
 	defer func() { msgCC = origCC }()
 
 	// @nonexistent doesn't match any agent — should warn but not fail
@@ -1847,7 +1869,7 @@ func TestSendMessageViaHub_CCFlag(t *testing.T) {
 	}
 
 	origCC := msgCC
-	msgCC = "cc-agent-1,cc-agent-2"
+	msgCC = []string{"cc-agent-1", "cc-agent-2"}
 	defer func() { msgCC = origCC }()
 
 	err = sendMessageViaHub(hubCtx, "primary-agent", "check this out", false, false, false, false, false)
@@ -1890,7 +1912,7 @@ func TestSendMessageViaHub_CCAndMentionCombined(t *testing.T) {
 	}
 
 	origCC := msgCC
-	msgCC = "cc-agent"
+	msgCC = []string{"cc-agent"}
 	defer func() { msgCC = origCC }()
 
 	// Both @mention in body and --cc flag
@@ -1927,7 +1949,7 @@ func TestSendMessageViaHub_CCDedupWithMention(t *testing.T) {
 	}
 
 	origCC := msgCC
-	msgCC = "shared-agent"
+	msgCC = []string{"shared-agent"}
 	defer func() { msgCC = origCC }()
 
 	// Same agent in both @mention and --cc — should only get one mention
@@ -1962,7 +1984,7 @@ func TestSendMessageViaHub_NoMentionsInBody(t *testing.T) {
 	}
 
 	origCC := msgCC
-	msgCC = ""
+	msgCC = nil
 	defer func() { msgCC = origCC }()
 
 	// No mentions in body, no --cc — only primary should be sent
@@ -1997,7 +2019,7 @@ func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
 
 	// Reset CC flag
 	origCC := msgCC
-	msgCC = ""
+	msgCC = nil
 	defer func() { msgCC = origCC }()
 
 	recipients := []messages.GroupRecipient{
@@ -2038,7 +2060,7 @@ func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
 func TestCCFlagValidation(t *testing.T) {
 	tests := []struct {
 		name      string
-		cc        string
+		cc        []string
 		broadcast bool
 		all       bool
 		raw       bool
@@ -2049,37 +2071,37 @@ func TestCCFlagValidation(t *testing.T) {
 	}{
 		{
 			name:      "cc with broadcast",
-			cc:        "agent-a",
+			cc:        []string{"agent-a"},
 			broadcast: true,
 			wantErr:   "--cc cannot be combined with --broadcast or --all",
 		},
 		{
 			name:    "cc with all",
-			cc:      "agent-a",
+			cc:      []string{"agent-a"},
 			all:     true,
 			wantErr: "--cc cannot be combined with --broadcast or --all",
 		},
 		{
 			name:    "cc with raw",
-			cc:      "agent-a",
+			cc:      []string{"agent-a"},
 			raw:     true,
 			wantErr: "--cc cannot be combined with --raw",
 		},
 		{
 			name:      "cc with user recipient",
-			cc:        "agent-a",
+			cc:        []string{"agent-a"},
 			userRecip: true,
 			wantErr:   "--cc cannot be used with user recipients",
 		},
 		{
 			name:    "cc with --in scheduling",
-			cc:      "agent-a",
+			cc:      []string{"agent-a"},
 			in:      "5m",
 			wantErr: "--cc cannot be combined with --in or --at",
 		},
 		{
 			name:    "cc with --at scheduling",
-			cc:      "agent-a",
+			cc:      []string{"agent-a"},
 			at:      "2026-01-01 12:00",
 			wantErr: "--cc cannot be combined with --in or --at",
 		},

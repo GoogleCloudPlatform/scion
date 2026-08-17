@@ -46,8 +46,9 @@ var (
 	// Auto-provide flag for runtime broker
 	serverAutoProvide bool
 
-	// Admin emails for bootstrapping - comma-separated list
-	adminEmails string
+	// Admin emails for bootstrapping - repeatable, each value may be a
+	// comma-separated list
+	adminEmails []string
 
 	// Web frontend flags
 	enableWeb        bool
@@ -276,7 +277,7 @@ func init() {
 	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects (e.g., https://scion.example.com)")
 
 	// Admin bootstrap flags
-	serverStartCmd.Flags().StringVar(&adminEmails, "admin-emails", "", "Comma-separated list of email addresses to auto-promote to admin role")
+	serverStartCmd.Flags().StringArrayVar(&adminEmails, "admin-emails", nil, "Email address to auto-promote to admin role (repeatable; also accepts a comma-separated list)")
 
 	// Stop flags
 	serverStopCmd.Flags().BoolVar(&stopForce, "force", false, "Kill any process listening on the server ports, even without a PID file")

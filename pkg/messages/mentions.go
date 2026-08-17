@@ -81,6 +81,18 @@ func ParseCCFlag(cc string) []string {
 	return names
 }
 
+// ParseCCFlags parses a repeatable --cc flag into a slice of agent names.
+// Each occurrence may itself be a comma-separated list, so the historical
+// comma-separated form and the repeatable form are both accepted and may be
+// mixed. Names are whitespace-trimmed and de-duplicated case-insensitively
+// across all occurrences, preserving first-seen order.
+func ParseCCFlags(cc []string) []string {
+	if len(cc) == 0 {
+		return nil
+	}
+	return ParseCCFlag(strings.Join(cc, ","))
+}
+
 // AgentInfo holds the minimal agent data needed for mention resolution.
 type AgentInfo struct {
 	Slug string
