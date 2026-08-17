@@ -471,7 +471,7 @@ inside quoted historical output, the `118`/`252` in §3's block — **I took his
 first treatment: in the denominator, and they pass, because the block is
 SHA-pinned.**
 
-**49 mechanical assertions over this file's self-claims. 49 run. 10 corrected**,
+**52 mechanical assertions over this file's self-claims. 52 run. 10 corrected**,
 plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
 so it is out by the definition above, and it is fixed here only because `gd-em`
 folded it into this commit. No category came back empty. **A is zero as a
@@ -483,9 +483,9 @@ appears without a SHA on the same line.
 |---|---|---|---|
 | **A** | line numbers or ranges into this same file | 1 | 1 (four coordinates, deleted) |
 | **B** | counts of a token in this same file | 13 | 4 |
-| **C** | positional claims about this same file | 11 | 1 |
+| **C** | positional claims about this same file | 12 | 1 |
 | **D** | cardinalities about this file's own tables | 15 | 3 |
-| **E** | claims about the instrument that measured it | 9 | 1 |
+| **E** | claims about the instrument that measured it | 11 | 1 |
 
 Subjects: `git show <sha>:<path>` at `5ebe3dab`, `38a41b6e` and `6fc0cdfc`, never
 the working tree. Every row compares the claim *as written* against a fresh
@@ -501,14 +501,20 @@ function*, and **a shell function is not inherited across `exec`**. Measured
 here, four ways:
 
 ```
-typed inline in the harness shell   type grep -> function from the zsh snapshot   SHADOWED
-inside a #!/bin/bash script         type -t grep -> file, /usr/bin/grep           GNU 3.8
-zsh -c '...'  (snapshot not sourced)          grep is /usr/bin/grep               GNU 3.8
-bash -c '...' (function not exported)         grep is /usr/bin/grep               GNU 3.8
-export -p | grep -c BASH_FUNC_grep  -> 0      the function is NOT exported
+the harness tool shell (SOURCED the snapshot)  type grep -> shell function        SHADOWED
+inside a #!/bin/bash script                    type -t grep -> file               GNU 3.8
+zsh -c '...'  (snapshot not sourced)           grep is /usr/bin/grep              GNU 3.8
+bash -c '...' (function not exported)          grep is /usr/bin/grep              GNU 3.8
+export -p | grep -c BASH_FUNC_grep   -> 0      the function is NOT exported
 ```
 
-**The exposure is a `grep` you typed, not a `grep` your script ran.** This
+🛑 **The boundary is "sourced the snapshot", NOT "interactive".** `$-` in the
+harness tool shell here is `569Xl` — **no `i`** — and the wrapper is fully live in
+it. An agent that clears itself with `case $- in *i*)` clears itself **falsely**,
+and every one of us is in that shell. (`gd-trig`, correcting the fleet ruling
+that had said *interactive*; reproduced here before adopting.)
+
+**The exposure is a `grep` your shell ran, not a `grep` your script ran.** This
 file's harness is a `#!/bin/bash` script, so it was never exposed in the first
 place; the invariance control below is therefore an explicit emulation of the
 shadow, not a report that the harness got lucky. *(`gke-deploy-lead` broadcast
@@ -531,9 +537,10 @@ ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files --hidden -I \
 so a bare `grep` runs `claude.exe` under a different `argv[0]`, with **ten flags
 injected that you did not type**. `CLAUDE_CODE_EXECPATH` is set; the function's
 fallback path does not exist, so clearing that variable drops you to GNU grep and
-silently changes every flag. **No `ugrep` binary exists on this filesystem** —
-`command -v ugrep` is empty and neither `/usr/bin/ugrep` nor `/usr/local/bin/ugrep`
-is present. What is there is a **ugrep-compatible engine embedded in `claude.exe`**:
+silently changes every flag. **No `ugrep` exists on this filesystem in any form** —
+`command -v ugrep` is empty, and `/usr/bin/find / -xdev -name 'ugrep*'` returns
+**0 files** (`command -v` clears only `PATH`; `gd-trig` hardened this and it
+reproduces here). What is there is a **ugrep-compatible engine embedded in `claude.exe`**:
 it self-reports `ugrep 7.5.0` and it accepts `--ignore-files`, which GNU grep 3.8
 rejects with exit 2. *(Earlier revisions of this file, and of the reviews it draws
 on, said "a zsh function wrapping ugrep 7.5.0". The wrapper is real and the flags
@@ -558,8 +565,34 @@ not have caught it.
 > defect. (`gd-p0-rev-4`'s addition to the standard, and the example above is
 > what it predicts.)
 
-**Control: all 49 assertions were re-run under the shadowed engine and every one
-of the 49 outcomes is byte-identical.** Not asserted from the patterns being
+🛑 **And `-E` is not the fix.** GNU BRE has backslash extensions — `\|` `\?` `\+`
+`\(…\)` — which work under `-G` and are **literals under `-E`**. Measured here on
+a fixture, GNU grep 3.8, identical under the shadowed engine:
+
+```
+alpha|bravo               -G 0 (rc1)    -E 2 (rc0)      <- the known defect
+alpha\|bravo              -G 2 (rc0)    -E 0 (rc1)      <- the REMEDY's defect
+workspace[_ -]?storage    -G 0 (rc1)    -E 3 (rc0)
+workspace[_ -]\?storage   -G 3 (rc0)    -E 0 (rc1)
+```
+
+**Both directions turn present terms into confident, well-formed zeros.**
+(`gd-trig`.) This is not hypothetical for this harness: **C10's pattern is
+`values\.yaml\|values\.schema\.json`, BRE alternation, and an `-E` "upgrade"
+would silently reduce it to zero hits — at which point C10's assertion,
+*"0 hits outside the bullet"*, would PASS over an empty set.** That is the
+guard-switched-off-by-its-own-remedy shape, found in my own instrument, by
+someone else's correction. C10 now asserts its **denominator first** (3 hit
+lines) and fails on inequality before it looks at position, and E10/E11 assert
+that the BRE extension is live in the dialect actually in use and dead under
+`-E`.
+
+> **THE DIALECT IS NOT AN AXIS WITH A SAFE END.** State the dialect **and the
+> pattern as passed, byte for byte** — `?` and `\?` are different patterns and a
+> disclosure naming only the dialect cannot tell them apart.
+
+**Control: all 52 assertions were re-run under the shadowed engine and every one
+of the 52 outcomes is byte-identical.** Not asserted from the patterns being
 `-F` or BRE-safe — measured, by pointing the harness at
 `ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files …` and diffing the full
 output. **The numbers in this section do not depend on which engine you use; the
@@ -655,9 +688,9 @@ sweep is the first time anyone has checked even that much**; their agreement wit
 the sweeps that produced them is unverified and is not claimed.
 
 The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
-`3ebf182982cbe19e`, and is deliberately **not** committed: `tests/` is frozen at
-P0. It exits 0 on 49/49 under **both** engines and **exits 1 under mutation
-control** — reverting the §3 heading to *"the two new findings"* takes it to 48/49 — so it is an instrument
+`7fc9361b7b3214e6`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 52/52 under **both** engines and **exits 1 under mutation
+control** — reverting the §3 heading to *"the two new findings"* takes it to 51/52 — so it is an instrument
 that can disagree, which four of this morning's could not. It should land beside
 this file when P1 unfreezes `tests/`, at which point the numbers above stop being
 a report and become a check.
