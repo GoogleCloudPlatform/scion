@@ -424,6 +424,42 @@ for name in "${PERMUTATIONS[@]}"; do
 done
 
 # --------------------------------------------------------------------------
+step "nothing redirects the hub away from the mounted settings file"
+# --------------------------------------------------------------------------
+# Everything else in this file asserts what settings.yaml CONTAINS. Nothing so
+# far asserts that the hub will read it. --config / -c redirects the entire
+# configuration load away from $HOME/.scion/settings.yaml, and it does it
+# silently: the mount still exists, the mode is still 0444, schema_version is
+# still rendered, every check above still passes, and the hub is reading
+# somebody else's file.
+#
+# This is deliberately NOT the same check as the chart's reserved-flag guard on
+# hub.args. That one rejects operator input. This one inspects rendered output,
+# and the two fail differently - a guard on the input can be entirely correct
+# and still be bypassed by a later phase of this chart rendering the flag
+# itself. This check is the one that notices that.
+for name in "${PERMUTATIONS[@]}"; do
+  args_block="$(sed -n '/^          args:$/,/^          [a-z]/p' "$WORK/$name.yaml")"
+  if [[ -z "$args_block" ]]; then
+    fail "$name: could not find the hub's args in the rendered Deployment - this check would be vacuous"
+    continue
+  fi
+  if grep -Eq '^\s*-\s*"?(--config|-c)(=|"?$)' <<<"$args_block"; then
+    fail "$name renders a config-path flag in the hub's arguments. It redirects the whole configuration load away from the mounted settings.yaml, and every other check in this file still passes when it does."
+    grep -E '^\s*-\s*"?(--config|-c)' <<<"$args_block" || true
+  else
+    pass "$name renders no config-path flag"
+  fi
+done
+# The twin: the args block was found and does contain the arguments we expect,
+# so "no config flag" is not passing because the extraction returned nothing.
+if grep -Eq '^\s*-\s*"?--hosted"?$' <<<"$(sed -n '/^          args:$/,/^          [a-z]/p' "$WORK/settings.yaml")"; then
+  pass "the args block really is the hub's arguments"
+else
+  fail "the args extraction did not find --hosted - the config-flag checks above prove nothing"
+fi
+
+# --------------------------------------------------------------------------
 step "renders that must fail"
 # --------------------------------------------------------------------------
 expect_render_failure \
