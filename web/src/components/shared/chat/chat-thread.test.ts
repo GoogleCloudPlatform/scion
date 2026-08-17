@@ -438,6 +438,18 @@ describe('scion-chat-thread initial scroll position', () => {
     return el;
   }
 
+  /**
+   * Let a background history refetch run to completion, including the scroll
+   * it defers behind updateComplete. The macrotask flushes are what make the
+   * difference: the refetch chain resolves over several microtask turns, so
+   * awaiting updateComplete alone looks before anything could have happened.
+   */
+  async function flushRefetch(el: ScionChatThread): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
   function scrollContainer(el: ScionChatThread): HTMLElement {
     const node = el.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
     if (!node) throw new Error('scroll container not rendered');
@@ -517,10 +529,25 @@ describe('scion-chat-thread initial scroll position', () => {
     // A message arrives on the SSE stream and triggers a background refetch.
     emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm4' });
     await vi.waitFor(() => expect(historyCalls()).toBeGreaterThan(0));
-    await el.updateComplete;
-    await Promise.resolve();
+    // Drain the whole refetch chain — apiFetch promise, .json(), the merge and
+    // the deferred updateComplete.then() — before looking. A single microtask
+    // is not enough: the assertion would run before a scroll could have
+    // happened and would pass with the pinnedToBottom guard deleted.
+    await flushRefetch(el);
 
     expect(scrollWrites.filter((w) => w.top === SCROLL_HEIGHT)).toEqual([]);
+
+    // Positive control, same flush sequence: with the user re-pinned the very
+    // same event must produce a scroll. Without this, a future change to the
+    // timing above silently returns the negative assertion to vacuity.
+    (el as unknown as { pinnedToBottom: boolean }).pinnedToBottom = true;
+    emitChatMessage({ threadId: CONVERSATION_KEY, id: 'm5' });
+    await flushRefetch(el);
+
+    expect(
+      scrollWrites.filter((w) => w.top === SCROLL_HEIGHT),
+      'the flush must be long enough for a scroll to land when the user is pinned'
+    ).not.toEqual([]);
   });
 
   it('scrolls back to the bottom when the user asks to jump to latest', async () => {

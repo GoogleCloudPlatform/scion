@@ -92,17 +92,26 @@ const (
 	chatSenderHuman chatSenderClass = iota
 	chatSenderAgent
 	chatSenderAgentMirror
+
+	// chatSenderClassCount is one past the last class, not a class itself.
+	// The startup check walks the enum with it, so a class added above is
+	// checked without anyone having to remember a separate list.
+	chatSenderClassCount
 )
 
-// keyPrefix namespaces a class's buckets.
+// keyPrefix namespaces a class's buckets. An unrecognised class gets its own
+// namespace rather than sharing a real one, so it can neither drain nor be
+// drained by a legitimate sender that happens to have the same ID.
 func (c chatSenderClass) keyPrefix() string {
 	switch c {
+	case chatSenderHuman:
+		return "user:"
 	case chatSenderAgent:
 		return "agent:"
 	case chatSenderAgentMirror:
 		return "agent-mirror:"
 	default:
-		return "user:"
+		return "unknown-class:"
 	}
 }
 
@@ -158,9 +167,15 @@ type chatSendLimiter struct {
 	buckets   map[string]*chatSendBucket
 	lastSweep time.Time
 
-	// ratesPerMinute is the allowance per rate class. A missing class, or a
-	// rate of zero or less, disables limiting for that class.
+	// ratesPerMinute is the allowance per rate class. Every class the
+	// production limiter can see has an entry (enforced at construction by
+	// validateChatSendRates); a class without one is not unlimited, it falls
+	// back to strictestRate. See limitFor.
 	ratesPerMinute map[chatSenderClass]float64
+
+	// strictestRate is the smallest configured allowance, used for any class
+	// with no rate of its own.
+	strictestRate float64
 
 	// now is the clock, injectable so tests can exhaust and refill a bucket
 	// without sleeping a real minute.
@@ -174,33 +189,76 @@ func newChatSendLimiter() *chatSendLimiter {
 
 // newChatSendLimiterWithClock creates a limiter with the production limits
 // and an injectable clock.
+//
+// It panics if a class has no rate. That is a programming error, not a runtime
+// condition: it is deterministic, it fires the first time a Server is
+// constructed (so any test catches it), and the alternative — starting up with
+// a class nobody is limiting — is exactly the silent failure this check
+// exists to prevent.
 func newChatSendLimiterWithClock(now func() time.Time) *chatSendLimiter {
-	return newChatSendLimiterWithRates(map[chatSenderClass]float64{
+	rates := map[chatSenderClass]float64{
 		chatSenderHuman:       chatSendHumanRatePerMinute,
 		chatSenderAgent:       chatSendAgentRatePerMinute,
 		chatSenderAgentMirror: chatSendAgentMirrorRatePerMinute,
-	}, now)
+	}
+	if err := validateChatSendRates(rates); err != nil {
+		panic(err)
+	}
+	return newChatSendLimiterWithRates(rates, now)
+}
+
+// validateChatSendRates reports whether every sender class has a positive
+// allowance. A class added to the enum without a rate would otherwise be
+// limited at the strictest rate instead of its own, which is safe but not what
+// the author meant — better to hear about it at startup.
+func validateChatSendRates(ratesPerMinute map[chatSenderClass]float64) error {
+	for class := chatSenderClass(0); class < chatSenderClassCount; class++ {
+		if ratesPerMinute[class] <= 0 {
+			return fmt.Errorf("chat send limiter: sender class %d has no positive rate configured", class)
+		}
+	}
+	return nil
 }
 
 // newChatSendLimiterWithRates creates a limiter with explicit limits and clock.
+// It is the test seam: production goes through newChatSendLimiterWithClock,
+// which additionally requires every class to be configured. A class omitted
+// here is limited at the strictest rate given, never left unlimited.
 func newChatSendLimiterWithRates(ratesPerMinute map[chatSenderClass]float64, now func() time.Time) *chatSendLimiter {
 	if now == nil {
 		now = time.Now
+	}
+	strictest := 0.0
+	for _, rate := range ratesPerMinute {
+		if rate > 0 && (strictest == 0 || rate < strictest) {
+			strictest = rate
+		}
 	}
 	return &chatSendLimiter{
 		buckets:        make(map[string]*chatSendBucket),
 		lastSweep:      now(),
 		ratesPerMinute: ratesPerMinute,
+		strictestRate:  strictest,
 		now:            now,
 	}
 }
 
 // limitFor returns the per-minute allowance for a rate class.
+//
+// A class with no rate of its own falls back to the strictest configured rate.
+// It deliberately does not fall back to "unlimited": a rate limiter is a
+// security control and fail-open is the wrong default for one, however
+// unreachable the path looks today. It equally does not deny outright, which
+// would turn a future missing rate into a total outage of the send path — the
+// strictest known rate closes the bypass without that risk.
 func (l *chatSendLimiter) limitFor(class chatSenderClass) float64 {
 	if l == nil {
 		return 0
 	}
-	return l.ratesPerMinute[class]
+	if rate, ok := l.ratesPerMinute[class]; ok && rate > 0 {
+		return rate
+	}
+	return l.strictestRate
 }
 
 // chatSendDecision is the outcome of a rate-limit check.
@@ -275,7 +333,9 @@ func (l *chatSendLimiter) Allow(senderID string, class chatSenderClass) chatSend
 
 // refillLocked returns the sender's bucket for a class, creating it if needed
 // and crediting the tokens accrued since it was last touched. It returns nil
-// when the class is unlimited. The caller must hold l.mu.
+// when the limiter has no positive rate at all — an empty rate map means "no
+// limiting configured", the same as a nil limiter, and nothing in production
+// constructs one. The caller must hold l.mu.
 func (l *chatSendLimiter) refillLocked(senderID string, class chatSenderClass, now time.Time) *chatSendBucket {
 	perMinute := l.limitFor(class)
 	if perMinute <= 0 {

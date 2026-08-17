@@ -16,6 +16,7 @@ package hub
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -157,12 +158,20 @@ func TestChatSendLimiter_MirrorReservationDoesNotStarveAgentMessages(t *testing.
 		t.Errorf("refused by class %v, want the mirror reservation: the aggregate still has room", decision.LimitClass)
 	}
 
-	// The mirror spent 2 of the aggregate 4, so 2 remain for the agent's own
-	// messages — the reservation caps the mirror, not the agent.
+	// The mirror spent 2 of the aggregate 4, so exactly 2 remain for the
+	// agent's own messages: the reservation caps the mirror, and what the
+	// mirror spent still came out of the one shared ceiling.
 	for i := range 2 {
 		if !lim.Allow("a1", chatSenderAgent).Allowed {
 			t.Errorf("agent-authored send %d refused: a flooding mirror must leave headroom", i+1)
 		}
+	}
+	decision = lim.Allow("a1", chatSenderAgent)
+	if decision.Allowed {
+		t.Fatal("the third agent-authored send should be refused: the mirror's 2 sends came out of the same aggregate 4")
+	}
+	if decision.LimitClass != chatSenderAgent {
+		t.Errorf("refused by class %v, want the agent aggregate", decision.LimitClass)
 	}
 }
 
@@ -222,6 +231,54 @@ func TestChatSenderClassForMessageType(t *testing.T) {
 		if got := chatSenderClassForMessageType(tc.msgType); got != tc.want {
 			t.Errorf("chatSenderClassForMessageType(%q) = %v, want %v", tc.msgType, got, tc.want)
 		}
+	}
+}
+
+// A class the limiter has no rate for must not be waved through. Unreachable
+// today — only three classes are constructed — but fail-open is the wrong
+// default for a rate limiter, and this is the branch a future class lands in.
+func TestChatSendLimiter_UnknownClassIsLimitedAtTheStrictestRate(t *testing.T) {
+	clock := newTestClock()
+	lim := newChatSendLimiterWithClock(clock.Now)
+
+	const unknown = chatSenderClass(99)
+	strictest := math.Min(chatSendHumanRatePerMinute, chatSendAgentMirrorRatePerMinute)
+	if got := lim.limitFor(unknown); got != strictest {
+		t.Fatalf("limitFor(unknown) = %v, want the strictest configured rate %v", got, strictest)
+	}
+
+	allowed := 0
+	for range 200 {
+		if lim.Allow("prober", unknown).Allowed {
+			allowed++
+		}
+	}
+	if float64(allowed) != strictest {
+		t.Errorf("an unknown class got %d sends through, want the strictest rate %v", allowed, strictest)
+	}
+
+	// And it does not share a bucket with a real class of the same sender ID.
+	if !lim.Allow("prober", chatSenderHuman).Allowed {
+		t.Error("a human sender must not be throttled by traffic in an unrecognised class")
+	}
+}
+
+// The production rates must cover every class in the enum. A class added
+// without a rate should fail loudly at startup rather than quietly being
+// limited at somebody else's number.
+func TestChatSendLimiter_ProductionRatesCoverEveryClass(t *testing.T) {
+	lim := newChatSendLimiter()
+	for class := chatSenderClass(0); class < chatSenderClassCount; class++ {
+		if got := lim.limitFor(class); got <= 0 {
+			t.Errorf("sender class %d has no positive rate (%v)", class, got)
+		}
+	}
+
+	if err := validateChatSendRates(map[chatSenderClass]float64{
+		chatSenderHuman: chatSendHumanRatePerMinute,
+		chatSenderAgent: chatSendAgentRatePerMinute,
+	}); err == nil {
+		t.Error("a rate map missing a class must be rejected, not accepted and silently back-filled")
 	}
 }
 
