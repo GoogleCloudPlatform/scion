@@ -18,10 +18,16 @@ The hub process environment.
 
 This is the whole of it, and the list is short on purpose. Configuration is
 delivered as a rendered settings.yaml, not as SCION_SERVER_* variables, because
-a SCION_SERVER_ name that does not bind is accepted and ignored - no error, no
-warning, no log line - and two entire keyspaces bind under no spelling at all:
-SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_*. Those are exactly the settings
-a chart reaches for environment variables to deliver.
+whether such a name binds is decided by a lookup table and nothing in the name
+says which way it went. envKeyToConfigKey (pkg/config/hub_config.go:976) splits
+on underscores and requires every segment to survive camelCaseFields (:919), so
+SCION_SERVER_DATABASE_URL binds and SCION_SERVER_DATABASE_MAX_OPEN_CONNS does
+not. A name that misses is dropped by k.Unmarshal with no error, no warning and
+no log line, and is then still reported to the admin server-config view as an
+active override. A name that hits is applied AFTER settings.yaml is loaded
+(:683) and wins, which puts the hub's real configuration out of reach of every
+guard in this chart. Those are exactly the settings a chart reaches for
+environment variables to deliver.
 
 Everything below is read by a literal os.Getenv, so no name mapper stands
 between the value here and the value the hub uses.

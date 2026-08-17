@@ -1685,15 +1685,42 @@ Configuration intake: the rendered settings.yaml
 =============================================================================
 
 The hub is configured by a settings.yaml file, not by SCION_SERVER_* environment
-variables. That is not a style preference. Three independent loaders consume the
-SCION_SERVER_ prefix with three different name mappers, the load error is
-discarded, and unmatched keys are ignored - so a name that does not bind is a
-silent no-op with no error, no warning and no log line. Two whole keyspaces are
-unreachable by any spelling: SCION_SERVER_DATABASE_* (max_open_conns and
-friends carry snake_case koanf tags that mapper #1 turns into
-database.max.open.conns) and every SCION_SERVER_OIDC_*. A chart that configured
-the database by environment variable would install cleanly and behave as though
-nothing had been configured at all.
+variables. That is not a style preference.
+
+THE RULE, MEASURED. On the path this chart uses, loadGlobalConfigFromSettings
+calls applyEnvOverrides (pkg/config/hub_config.go:683 and :1191), which maps each
+name through envKeyToConfigKey (:976): lowercase, split on "_", replace any
+segment that has an entry in the camelCaseFields table (:919), join with ".".
+So a SCION_SERVER_ name binds if and only if EVERY underscore-separated segment
+is either a plain lowercase word matching its koanf tag or has a table entry.
+Anything else produces a key that matches no field, and k.Unmarshal (:1198) is
+called without ErrorUnused, so it is discarded with no error, no warning and no
+log line.
+
+Worked both ways, because the reachable half is the part that was wrong here for
+three phases:
+
+  SCION_SERVER_DATABASE_DRIVER  -> database.driver   BINDS
+  SCION_SERVER_DATABASE_URL     -> database.url      BINDS
+  SCION_SERVER_OIDC_ENABLED     -> oidc.enabled      BINDS
+  SCION_SERVER_DATABASE_MAX_OPEN_CONNS -> database.max.open.conns  discarded
+                                   (koanf tag is max_open_conns; the underscores
+                                    became dots before anything could rejoin them)
+  SCION_SERVER_OIDC_ISSUER_URL  -> oidc.issuer.url   discarded, same reason
+                                   (OIDCProviderConfig.IssuerURL, koanf issuer_url)
+  SCION_SERVER_OIDC_ISSUERURL   -> oidc.issuerurl    discarded, DIFFERENT reason
+                                   (OIDCLoginConfig.IssuerURL is koanf issuerUrl
+                                    and "issuerurl" has no camelCaseFields entry)
+
+Two failure modes, one symptom. TestEnvKeyToConfigKey has DATABASE_DRIVER as an
+explicit passing sub-case, so "the database keyspace binds under no spelling" was
+one `go test` away from being checked at any point.
+
+AND A DISCARDED VARIABLE IS NOT SILENT DOWNSTREAM - IT IS REPORTED AS APPLIED.
+DetectEnvOverrides (pkg/config/opsettings/koanf.go:347) is `envKoanf.Keys()`: it
+returns every SCION_SERVER_ name in the environment, having never asked whether
+any of them reached a field. So the admin server-config view lists a dropped
+variable as an active override. Worse than silence.
 */}}
 
 {{/* Name of the Secret holding the rendered settings.yaml. */}}
@@ -1745,14 +1772,33 @@ then, deliberately.
 {{- end }}
 
 {{/*
-Reject any operator-supplied environment variable that cannot work.
+Reject any operator-supplied environment variable that would desynchronise the
+chart's guards from the hub's configuration.
 
-This is the render-time half of the rule that no SCION_SERVER_DATABASE_* or
-SCION_SERVER_OIDC_* variable is ever emitted. The chart's own templates emit
-none; hub.extraEnv is the one place an operator could add one, and reaching for
-exactly these two prefixes is the most likely mistake, because they are the
-settings a chart most wants to deliver and they fail silently rather than
-loudly.
+THE REASON CHANGED AND THE REFUSAL DID NOT. This guard used to be defended on the
+grounds that SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are "unreachable by
+any spelling". That is FALSE - see the intake section above - and a guard
+defended by a false premise gets deleted the moment somebody checks the premise.
+gd-p2-dev and gd-p3-dev checked it, from opposite ends, against a passing test in
+the repo.
+
+THE HARM, MEASURED THROUGH THE HUB. applyEnvOverrides runs AFTER settings.yaml is
+loaded (pkg/config/hub_config.go:683) and wins, so a bound SCION_SERVER_DATABASE_
+variable silently overrides the file this chart renders. Measured: minimal's
+settings.yaml says driver: sqlite; with SCION_SERVER_DATABASE_DRIVER=postgres in
+the environment, config.LoadGlobalConfig reports driver "postgres",
+isHADeployment (cmd/server_foreground.go:927) flips to TRUE, and the hub aborts
+at the hosted HA preflight - from a release that assertHAUnlanded passed, because
+assertHAUnlanded reads .Values.database.driver, which still says sqlite.
+
+That is the harm and it is specific to this chart: the chart's guards reason
+about the configuration the chart RENDERED, and this variable changes the
+configuration the hub RUNS. Every premise those guards rest on stops being true,
+and nothing anywhere reports it.
+
+The chart's own templates emit no such variable; hub.extraEnv is the one place an
+operator could add one, and these two prefixes are the most likely mistake
+because they are the settings a chart most wants to deliver.
 */}}
 {{- define "scion-hub.assertExtraEnv" -}}
 {{- /*
@@ -1784,7 +1830,7 @@ container env entries alike, and asserting this guard refuses every one of them.
 {{- range $entry := .Values.hub.extraEnv }}
 {{- $name := toString (dig "name" "" $entry) }}
 {{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC)_" $name }}
-{{- fail (printf "hub.extraEnv may not set %s. SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are unreachable by any spelling - the loader ignores unmatched keys, so the variable is accepted, never applied, and never reported. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
+{{- fail (printf "hub.extraEnv may not set %s. Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go:683) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go:927) becomes true while acknowledgeHAUnlanded never fires, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go:347) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
 {{- end }}
 {{- if has $name $shadowable }}
 {{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and hub.extraEnv is appended to the container's env list, which wins twice over - a container env entry takes precedence over the same name from envFrom, and a later entry in the list takes precedence over an earlier one. Either way the chart's value is replaced with no error and nothing in the manifest that reads as a conflict." $name) }}

@@ -97,11 +97,15 @@ CONFIGURATION
   Mounted read-only at {{ include "scion-hub.scionDir" . }}/settings.yaml.
 
   Configuration is a file and not environment variables, and that is not a style
-  choice. The hub reads a handful of SCION_SERVER_* names by literal os.Getenv
-  and ignores every other one - no error, no warning, no log line - and two whole
-  keyspaces, SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_*, bind under no
-  spelling at all. Setting the database by environment variable installs cleanly
-  and configures nothing. Use config.extra, which lands in the file.
+  choice. A SCION_SERVER_ name binds only if every underscore-separated segment
+  is a plain lowercase word or is listed in camelCaseFields
+  (pkg/config/hub_config.go:919), so SCION_SERVER_DATABASE_URL binds and
+  SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded with no error - and the
+  discarded one is still listed to the admin server-config view as an active
+  override, so it is reported as applied. The ones that DO bind are worse: they
+  are applied after settings.yaml is read and win, so the hub runs a
+  configuration this chart never rendered and its guards never saw. Use
+  config.extra, which lands in the file.
 
 THE SETTINGS FILE IS READ-ONLY. THIS IS DELIBERATE.
 

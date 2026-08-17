@@ -108,7 +108,7 @@
           "items": {
             "type": "object"
           },
-          "description": "Extra container environment variables as Kubernetes EnvVar objects. Most SCION_SERVER_* names do not bind and fail silently; SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* bind under no spelling at all and are rejected by the render. Configure those through config.extra."
+          "description": "Extra container environment variables as Kubernetes EnvVar objects. Whether a SCION_SERVER_* name binds depends on a lookup table (camelCaseFields, pkg/config/hub_config.go:919): SCION_SERVER_DATABASE_URL binds, SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded with no error, and nothing in the name says which. SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are rejected by the render because both outcomes are wrong here - a name that binds is applied after settings.yaml and wins, so the hub runs a configuration this chart never rendered and its guards never saw, and a name that is discarded is still reported to the admin server-config view as an active override. Configure those through config.extra."
         },
         "hubId": {
           "type": "string",
@@ -326,7 +326,7 @@
     "config": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The hub's own configuration, delivered as a rendered settings.yaml rather than as environment variables: most SCION_SERVER_* names do not bind, and the database and OIDC keyspaces bind under no spelling at all, silently.",
+      "description": "The hub's own configuration, delivered as a rendered settings.yaml rather than as environment variables: whether a SCION_SERVER_* name binds is decided by a lookup table (camelCaseFields, pkg/config/hub_config.go:919), the ones that miss it are discarded with no error, and the ones that hit it override the rendered file and win.",
       "properties": {
         "existingSecret": {
           "type": "string",
@@ -342,7 +342,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["driver"],
-      "description": "Rendered into settings.yaml in full. No database key is reachable by any SCION_SERVER_ environment variable, under any spelling.",
+      "description": "Rendered into settings.yaml in full. Setting these through the environment instead is refused: driver and url do bind as SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL, are applied after the rendered file and win, and would leave the chart's HA guards reasoning about a driver the hub is not using; maxOpenConns does not bind at all, because its koanf tag contains an underscore.",
       "properties": {
         "driver": {
           "type": "string",

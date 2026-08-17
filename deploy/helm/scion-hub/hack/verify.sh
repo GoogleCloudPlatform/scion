@@ -37,7 +37,7 @@
 #
 # MEASURED, NOT ASSUMED: before the preflight below existed, running this file
 # with no helm on PATH printed FIVE PASSING ASSERTIONS - among them "emits no
-# dead SCION_SERVER_DATABASE_/OIDC_ variable", the single check this phase most
+# SCION_SERVER_DATABASE_/OIDC_ variable", the single check this phase most
 # needs to be true - because each of them greps a rendered manifest for a string
 # that must be ABSENT, and every one of those manifests was an empty file. A
 # negative assertion against a file that does not exist is the cheapest false
@@ -132,7 +132,7 @@ meta_failure() {
 # absence: most of this file greps rendered manifests for strings that must NOT
 # be there, and an empty file satisfies every one of them. See the exit-code
 # note at the top - with no helm on PATH this suite printed five green lines,
-# one of them the dead-environment-variable check that is this phase's stated
+# one of them the SCION_SERVER_DATABASE_/OIDC_ check that is this phase's stated
 # acceptance criterion.
 #
 # Both tools are asked to RUN, not merely to exist. A file on PATH that is not
@@ -358,19 +358,25 @@ for name in "${PERMUTATIONS[@]}"; do
 done
 
 # --------------------------------------------------------------------------
-step "no dead environment variable is ever emitted"
+step "no SCION_SERVER_DATABASE_* or SCION_SERVER_OIDC_* variable is ever emitted"
 # --------------------------------------------------------------------------
-# SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* bind under no spelling at all.
-# The loader ignores unmatched keys and discards the load error, so a chart that
-# emitted one would install cleanly and behave as though the setting had never
-# been given. There is no error to catch at runtime, which is why it is caught
-# here.
+# Some of these names bind and some are discarded, and BOTH outcomes are wrong,
+# which is why the check is on the whole prefix rather than on a list of the
+# harmful ones. A name binds only if every underscore-separated segment survives
+# camelCaseFields (pkg/config/hub_config.go:919): SCION_SERVER_DATABASE_URL and
+# SCION_SERVER_DATABASE_DRIVER do, SCION_SERVER_DATABASE_MAX_OPEN_CONNS does not.
+# One that binds is applied AFTER settings.yaml (:683) and wins, so the hub runs
+# a configuration this chart never rendered and every guard in it never saw. One
+# that is discarded is dropped by k.Unmarshal with no error, yet DetectEnvOverrides
+# (pkg/config/opsettings/koanf.go:347) still lists it to the admin server-config
+# view as an active override - reported as applied, which is worse than silent.
+# Neither outcome raises anything at runtime, which is why it is caught here.
 for name in "${PERMUTATIONS[@]}"; do
   if grep -Eq 'SCION_SERVER_(DATABASE|OIDC)_[A-Z_]*[[:space:]]*[:=]' "$WORK/$name.yaml"; then
     fail "$name emits a SCION_SERVER_DATABASE_* or SCION_SERVER_OIDC_* variable"
     grep -En 'SCION_SERVER_(DATABASE|OIDC)_' "$WORK/$name.yaml" || true
   else
-    pass "$name emits no dead SCION_SERVER_DATABASE_/OIDC_ variable"
+    pass "$name emits no SCION_SERVER_DATABASE_/OIDC_ variable"
   fi
 done
 

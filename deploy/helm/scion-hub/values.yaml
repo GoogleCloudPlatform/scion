@@ -150,7 +150,7 @@ hub:
   webPort: 8080
 
   # Optional. Truthy values are "true", "1" and "yes". Read by a literal
-  # os.Getenv, so it is one of the few SCION_SERVER_ names that actually binds.
+  # os.Getenv, so no name mapper stands between this value and the hub's.
   adminMode: ""
 
   # Optional. Banner text shown to users. Empty means no banner.
@@ -159,14 +159,17 @@ hub:
   # Extra environment variables for the hub container, as a list of Kubernetes
   # EnvVar objects.
   #
-  # This is an escape hatch and a sharp one. Most SCION_SERVER_* names do not
-  # bind: the hub reads a handful by literal os.Getenv and ignores the rest
-  # without an error, a warning or a log line, so a variable set here that looks
-  # like it should work will usually do nothing at all and give you no way to
-  # tell. Two prefixes bind under no spelling whatsoever -
-  # SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* - and the render rejects
-  # them outright rather than let the silence stand. Configure those through
-  # config.extra, which lands in settings.yaml, where they are read.
+  # This is an escape hatch and a sharp one. Whether a SCION_SERVER_* name binds
+  # is decided by a lookup table and nothing in the name tells you which way it
+  # went; one that misses is dropped without an error, a warning or a log line,
+  # so a variable set here that looks like it should work may do nothing at all
+  # and give you no way to tell.
+  # SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are rejected outright,
+  # and NOT because they are unreachable - some of them bind. That is the
+  # problem: a bound one is applied after settings.yaml is read and wins, so the
+  # hub runs a configuration this chart did not render and this chart's guards
+  # did not see. Configure those through config.extra, which lands in
+  # settings.yaml, where they are read and where the guards can see them.
   #
   # Do not put secret material in a literal "value". It lives in the Deployment
   # object, which is readable by more people than the Secret would be. The render
@@ -309,13 +312,15 @@ agents:
 
 # The hub's own configuration - the contents of settings.yaml.
 #
-# WHY THIS IS A FILE AND NOT ENVIRONMENT VARIABLES. The hub reads a handful of
-# SCION_SERVER_* names by literal os.Getenv and ignores every other one. There
-# is no strict-env mode and no unknown-variable warning, so a variable that does
-# not bind produces no error, no log line and no way to tell it did nothing.
-# Two whole keyspaces bind under no spelling at all - the database block and the
-# OIDC block - and those are precisely the ones a deployment most wants to set.
-# So configuration goes in the file, and the chart emits exactly the three
+# WHY THIS IS A FILE AND NOT ENVIRONMENT VARIABLES. There is no strict-env mode
+# and no unknown-variable warning, so a variable that does not bind produces no
+# error, no log line and no way to tell it did nothing.
+# Whether a name binds at all depends on a lookup table (camelCaseFields,
+# pkg/config/hub_config.go:919), so SCION_SERVER_DATABASE_URL works and
+# SCION_SERVER_DATABASE_MAX_OPEN_CONNS does not, and neither of them says which.
+# The ones that bind are applied on top of settings.yaml and win, which puts the
+# hub's real configuration out of reach of everything this chart can check. So
+# configuration goes in the file, and the chart emits exactly the three
 # environment variables that are known to work.
 config:
   # Supply your own Secret holding a settings.yaml key instead of having the
