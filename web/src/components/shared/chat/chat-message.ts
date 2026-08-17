@@ -836,6 +836,7 @@ export class ScionChatMessage extends LitElement {
     .md-preview-body scion-markdown-preview::part(container) {
       border: none;
       border-radius: 0;
+      max-height: 200px;
     }
 
     /*
@@ -1093,6 +1094,7 @@ export class ScionChatMessage extends LitElement {
         void navigator.clipboard.writeText(code);
         btn.textContent = 'Copied!';
         setTimeout(() => {
+          if (!this.isConnected) return;
           btn.textContent = 'Copy';
         }, 1500);
       });
@@ -1385,14 +1387,20 @@ export class ScionChatMessage extends LitElement {
 
     // Only fade the bottom edge when the file really does run past the slice
     // and we are NOT showing rendered markdown (rendered view scrolls itself).
-    const clipped =
-      !isMd &&
-      state?.status === 'ready' &&
-      (state.text ?? '').split('\n').length > PREVIEW_VISIBLE_LINES;
-    const sourceClipped =
-      showSource &&
-      state?.status === 'ready' &&
-      (state.text ?? '').split('\n').length > PREVIEW_VISIBLE_LINES;
+    const hasText = state?.status === 'ready' && !!state.text;
+    const exceedsLimit =
+      hasText &&
+      (() => {
+        let count = 0;
+        let pos = -1;
+        const text = state.text!;
+        while ((pos = text.indexOf('\n', pos + 1)) !== -1) {
+          if (++count >= PREVIEW_VISIBLE_LINES) return true;
+        }
+        return false;
+      })();
+    const clipped = !isMd && exceedsLimit;
+    const sourceClipped = showSource && exceedsLimit;
 
     return html`
       <div class="attachment-preview" data-id=${ref.id}>
@@ -1457,6 +1465,7 @@ export class ScionChatMessage extends LitElement {
       next.add(id);
       this.copiedIds = next;
       setTimeout(() => {
+        if (!this.isConnected) return;
         const after = new Set(this.copiedIds);
         after.delete(id);
         this.copiedIds = after;
