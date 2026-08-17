@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -89,7 +90,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 3. Resolve admin mode settings
 	adminMode := cfg.AdminMode
 	if v := os.Getenv("SCION_SERVER_ADMIN_MODE"); v != "" {
-		adminMode = v == "true" || v == "1" || v == "yes"
+		adminMode = parseBoolEnv("SCION_SERVER_ADMIN_MODE")
 	}
 	maintenanceMessage := cfg.MaintenanceMessage
 	if v := os.Getenv("SCION_SERVER_MAINTENANCE_MESSAGE"); v != "" {
@@ -260,7 +261,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 
 		// Wire hub OTel tracing export to Cloud Trace.
-		if os.Getenv("SCION_TRACING_ENABLED") == "true" && cfg.Hub.GCPProjectID != "" {
+		if parseBoolEnv("SCION_TRACING_ENABLED") && cfg.Hub.GCPProjectID != "" {
 			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID,
 				hubtracing.WithHubID(hubSrv.HubID()),
 				hubtracing.WithHubName(cfg.Hub.ResolveHubName()),
@@ -701,7 +702,7 @@ func warnShadowedBrokerEnv(ctx context.Context, w brokerEnvShadowWarner) {
 
 // initServerLogging initializes all logging subsystems and returns cleanup functions.
 func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *slog.Logger, messageLogger *slog.Logger, err error) {
-	useGCP := os.Getenv("SCION_LOG_GCP") == "true"
+	useGCP := parseBoolEnv("SCION_LOG_GCP")
 	if os.Getenv("K_SERVICE") != "" {
 		useGCP = true
 	}
@@ -1463,6 +1464,22 @@ func resolveSessionSecret() string {
 	return secret
 }
 
+// parseBoolEnv reports whether the named environment variable is set to a
+// truthy value. It accepts every spelling strconv.ParseBool understands
+// (1, t, T, true, TRUE, True) plus the operator-friendly yes/y/on, matched
+// case-insensitively. Unset, empty, and unparseable values are false.
+func parseBoolEnv(key string) bool {
+	v := os.Getenv(key)
+	if b, err := strconv.ParseBool(v); err == nil {
+		return b
+	}
+	switch strings.ToLower(v) {
+	case "yes", "y", "on":
+		return true
+	}
+	return false
+}
+
 // initHubServer creates and configures the Hub server.
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := hub.ServerConfig{
@@ -1559,7 +1576,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		// (which would invalidate every live token after, e.g., a redeploy onto a
 		// new host that changed the HubID). Operators enabling this must supply a
 		// session secret or pre-provision the signing keys.
-		RequireStableSigningKey: os.Getenv("SCION_REQUIRE_STABLE_SIGNING_KEY") == "true",
+		RequireStableSigningKey: parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"),
 		OIDCLogin:               cfg.OIDCLogin,
 		OIDCConfig:              cfg.OIDC,
 		Federation:              cfg.Federation,

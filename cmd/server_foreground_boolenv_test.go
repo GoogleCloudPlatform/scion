@@ -1,0 +1,47 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// The signing-key gate used to compare against the exact string "true", so an
+// operator who set the variable to "1" or "TRUE" silently got the disabled
+// path while believing the key was pinned across HA replicas.
+
+func TestRequireStableSigningKeyAcceptsTruthyValues(t *testing.T) {
+	for _, val := range []string{"true", "TRUE", "True", "1", "t", "T", "yes", "YES", "on", "ON"} {
+		t.Run(val, func(t *testing.T) {
+			t.Setenv("SCION_REQUIRE_STABLE_SIGNING_KEY", val)
+			require.True(t, parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"))
+		})
+	}
+}
+
+func TestRequireStableSigningKeyRejectsFalsyValues(t *testing.T) {
+	for _, val := range []string{"false", "FALSE", "0", "f", "no", "off", "", "maybe"} {
+		t.Run(val, func(t *testing.T) {
+			t.Setenv("SCION_REQUIRE_STABLE_SIGNING_KEY", val)
+			require.False(t, parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"))
+		})
+	}
+}
+
+func TestParseBoolEnvUnsetIsFalse(t *testing.T) {
+	require.False(t, parseBoolEnv("SCION_BOOL_ENV_THAT_IS_NOT_SET"))
+}
