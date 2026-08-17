@@ -36,8 +36,9 @@
 #      panic (which would mean the code after the block is the fall-through
 #      deny — the shape authorizeProjectImport and handlers_env_secrets.go use).
 #
-# Attribution guards fail (2). Guards with `} else { Forbidden(w); return }`
-# fail (3). Only the bypass shape is reported.
+# Attribution guards fail criterion 2. Guards with `} else { Forbidden(w);
+# return }` fail criterion 3. Only the bypass shape is reported. (These are the
+# numbered criteria above, not exit codes — see EXIT CODES below.)
 #
 # A third shape is reported unconditionally, because it has no benign reading —
 # an explicit allow when the caller is not a user:
@@ -68,17 +69,52 @@
 #
 #   0  analysed, no violations
 #   1  analysed, violations found — the list is on stderr
-#   2  COULD NOT ANALYSE (rg missing, no candidate files) — nothing was examined
+#   2  RESERVED — never emitted by this script
+#   3  COULD NOT ANALYSE: ripgrep (rg) is not installed — nothing was examined
+#   4  COULD NOT ANALYSE: no candidate files matched — nothing was examined
 #
-# 2 is separate from 1 on purpose. Both fail a build, which is the point: a run
-# that examined no source must not be indistinguishable from a clean one to
-# anything reading only the exit code, or this check becomes the thing it exists
-# to prevent — a guard that never fires. But the two mean opposite things to
-# whoever reads the log. 1 is a security finding against named code; 2 is a
-# broken environment and accuses nobody. Note this differs from the exit-0-on-
-# missing-rg convention in hack/check-project-compat-literals.sh; the difference
-# is deliberate, because a formatting check that silently skips costs a reformat
-# later, while an authorization check that silently skips ships a bypass.
+# 2 is reserved and deliberately left unused, because it is the one code this
+# script cannot own. GNU make flattens every non-zero recipe exit to 2, so
+# anything invoked through a makefile — as this check is intended to be —
+# reaches its caller as 2 no matter which code it actually returned. Reserving 2
+# means a consumer seeing it knows information was lost, rather than confidently
+# reporting an empty corpus when the real answer may be 22 violations. A
+# meaningful code in that slot would not merely erase the distinction, it would
+# assert a specific false one. Read 2 as "ask the log", never as an answer.
+#
+# 3 and 4 are separate from 1 on purpose. All three fail a build, which is the
+# point: a run that examined no source must not be indistinguishable from a
+# clean one to anything reading only the exit code, or this check becomes the
+# thing it exists to prevent — a guard that never fires. But they mean different
+# things to whoever reads the log. 1 is a security finding against named code;
+# 3 and 4 accuse nobody.
+#
+# 3 and 4 are separate from each other because they ask opposite things of
+# whoever has to act. 3 is a statement about the runner: the check could not
+# run, install ripgrep or run it somewhere that has it, and nothing at all is
+# implied about the source. 4 is a statement about the tree: the tools were
+# there, the scan ran, and it was pointed at something that holds no code to
+# examine — wrong cwd, partial or empty checkout. Collapsing them into one code
+# leaves a caller unable to tell a broken image from a broken checkout.
+#
+# Both refusals print on stdout as well as stderr. Any consumer that keeps the
+# exit code while reading only stdout — a CI step summary, a caller that runs
+# this under `2>/dev/null` — would otherwise receive the refusal's exit code
+# with none of its words, and a refusal nobody can read is barely better than
+# the wrong answer it replaces.
+#
+# The cost, paid knowingly: anything that reads both streams as one — `2>&1`, a
+# terminal, a GitHub Actions step log — sees each refusal line twice, and where
+# a runner captures the two streams separately before interleaving them the
+# copies need not even be adjacent. A duplicated refusal is judged the cheaper
+# error than a lost one, because the duplicate is visibly a duplicate and reads
+# as noise, while the loss is silent and reads as a pass. Anyone grepping this
+# output for a count of refusals should deduplicate, or read one stream only.
+#
+# Note this differs from the exit-0-on-missing-rg convention in
+# hack/check-project-compat-literals.sh; the difference is deliberate, because a
+# formatting check that silently skips costs a reformat later, while an
+# authorization check that silently skips ships a bypass.
 set -euo pipefail
 
 # Classifier. Walks each candidate guard with a brace-depth counter so the
@@ -333,7 +369,7 @@ func (s *Server) failClosedAfterBranch(ctx context.Context) bool {
 FIXTURE
 
   want="$(grep -n '^[[:space:]]*// WANT$' "$fixture" | cut -d: -f1 | awk '{print $1 + 1}')"
-  got="$(awk "$classifier" "$fixture" | cut -d: -f2)"
+  got="$(awk "$classifier" "$fixture" | cut -d: -f2 || true)"
 
   if [[ "$want" == "$got" ]]; then
     echo "check-authz-guards self-test: PASS ($(grep -c '// WANT$' "$fixture") flagged, $(grep -c '// WANT-NOT$' "$fixture") correctly ignored)"
@@ -376,8 +412,13 @@ provenance() {
 }
 
 if ! command -v rg >/dev/null 2>&1; then
-  echo "check-authz-guards: ripgrep (rg) not found — NOTHING WAS ANALYSED (skipped, not clean)" >&2
-  exit 2
+  # 3, not 4: this says nothing about the tree, only that the instrument this
+  # check measures with is absent from the runner. Printed on both streams so a
+  # consumer reading either one sees why the build failed.
+  msg="check-authz-guards: ripgrep (rg) not found — NOTHING WAS ANALYSED (skipped, not clean)"
+  echo "$msg"
+  echo "$msg" >&2
+  exit 3
 fi
 
 # Narrow to files that mention the getter or the assertion at all. The
@@ -390,13 +431,17 @@ mapfile -t candidate_files < <(
 )
 
 if [[ ${#candidate_files[@]} -eq 0 ]]; then
+  # 4, not 3: the tools were there but the tree held nothing to examine.
+  #
   # In this repo the getter always matches something: ~25 attribution sites use
   # it legitimately and are deliberately not being converted. Zero candidates
   # therefore means the scan ran somewhere unexpected — wrong cwd, empty or
   # partial checkout — not that the codebase is clean. If every last caller is
   # ever removed for real, fix this script deliberately rather than silencing it.
-  echo "check-authz-guards: analysed $(provenance) — no candidate files matched, NOTHING WAS ANALYSED (skipped, not clean)" >&2
-  exit 2
+  msg="check-authz-guards: analysed $(provenance) — no candidate files matched, NOTHING WAS ANALYSED (skipped, not clean)"
+  echo "$msg"
+  echo "$msg" >&2
+  exit 4
 fi
 
 tmp="$(mktemp)"
