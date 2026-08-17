@@ -536,6 +536,34 @@ expect_render_failure \
   --set 'hub.extraEnv[0].name=HUB_UPSTREAM' \
   --set 'hub.extraEnv[0].value=postgres://scion:hunter2@10.0.0.1/scion'
 
+# A multi-line PEM in an environment value, through a values file because --set
+# cannot carry newlines. This case is nearly unreachable on the argv path - an
+# argument containing spaces is caught by the whitespace guard first, so a PEM
+# test there credits the value guard for a catch the whitespace guard made - but
+# here it is the main case rather than a corner: environment values may legally
+# contain whitespace and there is no whitespace guard in front of this one, so
+# the "-----BEGIN " alternative is doing the work and nothing else is.
+#
+# The name is deliberately ordinary. TLS_MATERIAL ends in no credential noun, so
+# the name axis has nothing to say and this can only be the value axis.
+cat >"$WORK/pem-env.yaml" <<'PEMVALUES'
+image:
+  repository: example.test/scion-hub-gke
+hub:
+  hubId: neg
+  baseUrl: https://neg.example.com
+  extraEnv:
+    - name: TLS_MATERIAL
+      value: |
+        -----BEGIN PRIVATE KEY-----
+        MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDexample
+        -----END PRIVATE KEY-----
+PEMVALUES
+expect_render_failure \
+  "hub.extraEnv rejects a multi-line PEM in an environment value" \
+  "has the shape of a credential" \
+  --values "$WORK/pem-env.yaml"
+
 expect_render_failure \
   "config.existingSecret with config.extra" \
   "config.existingSecret is set together with inline settings values" \
@@ -645,6 +673,30 @@ for ok_name in TOKEN_TTL_SECONDS MAX_TOKENS SECRET_MANAGER_PROJECT KEYCLOAK_REAL
     fail "hub.extraEnv rejected $ok_name - the name guard is substring-matching a credential noun that is describing what the value is ABOUT, not what it IS"
   fi
 done
+
+# The twin for the PEM case above: a multi-line value that is not credential
+# material is still accepted. Without this, "rejects a multi-line PEM" would also
+# pass on a guard that had simply started rejecting every multi-line value, and
+# the failure would land on a legitimate one - a banner or a certificate chain -
+# with no override available.
+cat >"$WORK/multiline-env.yaml" <<'MLVALUES'
+image:
+  repository: example.test/scion-hub-gke
+hub:
+  hubId: neg
+  baseUrl: https://neg.example.com
+  extraEnv:
+    - name: HUB_BANNER
+      value: |
+        Scheduled maintenance on Sunday.
+        Sessions will be interrupted.
+MLVALUES
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    --values "$WORK/multiline-env.yaml" >/dev/null 2>&1; then
+  pass "hub.extraEnv accepts an ordinary multi-line value"
+else
+  fail "hub.extraEnv rejected an ordinary multi-line value - the PEM check is matching on whitespace rather than on the PEM header"
+fi
 
 # --------------------------------------------------------------------------
 printf '\n'
