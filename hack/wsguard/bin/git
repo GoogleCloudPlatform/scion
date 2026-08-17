@@ -305,9 +305,17 @@ fi
 #
 # So the class is closed structurally instead. For a `-*` token whose arity the
 # guard does not know, it does not guess — it takes the UNION OF CANDIDATES.
-# Both readings are classified, and the command is refused if EITHER of them is
+# EVERY reading is classified, and the command is refused if ANY of them is
 # watched. No knowledge of git's option table is required for that to be safe,
 # and it fails closed on options that do not exist yet.
+#
+# "EVERY reading" is load-bearing and this comment used to say "both". It was
+# written when the resume ran once, which capped the union at two candidates —
+# safe at one unknown option and FAILING OPEN at two, because both candidates
+# landed on option values and the verb was never classified. The comment stated
+# the design goal; the code implemented one instance of it. See the candidate
+# loop below for the measurements. A comment that overstates what the code does
+# is worse than no comment, because it tells the next reader not to check.
 #
 # `--attr-source` IS DELIBERATELY LEFT OUT of the value-taking list below, and
 # it must stay out. It is the live control for the union: a real option, in the
@@ -409,21 +417,77 @@ pre=()
 (( sub_idx > 0 )) && pre=("${argv[@]:0:sub_idx}")
 rest=("${argv[@]:sub_idx+1}")
 
-# The second candidate, when the first reading might be an unknown option's
-# value. The scan is resumed rather than "take the next token", so that
+# The remaining candidates, when the first reading might be an unknown option's
+# value. The scan is RESUMED rather than "take the next token", so that
 # `git --attr-source HEAD --literal-pathspecs checkout` is covered too.
-alt_subcmd=""
-alt_idx=-1
-if (( prev_unknown == 1 )); then
-  scan_from $(( sub_idx + 1 ))
-  alt_subcmd="$scan_subcmd"
-  alt_idx="$scan_idx"
-fi
+#
+# THIS IS A LOOP, AND IT USED TO BE A SINGLE RESUME. That capped the candidate
+# set at two readings while the number of possible readings grows with the
+# number of unknown-arity options, so with two of them BOTH candidates landed on
+# option values and the real verb was never classified at all. gd-wsg-rev-3
+# measured it on the shipped head, calibrated against bare git and against the
+# n=1 case, and I reproduced every line before changing anything:
+#
+#   git --attr-source HEAD --attr-source HEAD checkout -- f   0, WORK GONE, silent
+#   git --attr-source HEAD --attr-source HEAD reset --hard    0, WORK GONE, silent
+#   git --attr-source HEAD --attr-source HEAD rm -f f         0, FILE GONE, silent
+#   (n=1, the same shapes)                                    77, refused
+#
+# Termination: each pass resumes at `cur_idx + 1` and scan_from returns an index
+# strictly greater than where it started, so cur_idx strictly increases and is
+# bounded by ${#argv[@]}. No cap is needed and none is imposed — a cap here
+# would be a number lifted from a fixture, which is how the depth-one alias
+# limit came to exist.
+alt_subs=()
+alt_idxs=()
+cur_idx="$sub_idx"
+cur_unknown="$prev_unknown"
+while (( cur_unknown == 1 )); do
+  scan_from $(( cur_idx + 1 ))
+  [[ -z "$scan_subcmd" ]] && break
+  alt_subs+=("$scan_subcmd")
+  alt_idxs+=("$scan_idx")
+  cur_idx="$scan_idx"
+  cur_unknown="$scan_prev_unknown"
+done
 
 # ---------------------------------------------------------------------------
-# Does this invocation even mention something we watch? Fast path first: the
-# shim sits in front of every git call in the container, so the common case
-# must not pay for a subprocess.
+# Does this invocation even mention something we watch? This is a pure-bash
+# scan over argv, so this BLOCK costs nothing.
+#
+# THE SENTENCE THAT USED TO BE HERE WAS FALSE. It read "the common case must
+# not pay for a subprocess", which described an intent, not the shim, and by
+# the time gd-wsg-rev-3 measured it the shim had grown two subprocesses that
+# every unwatched verb pays for. Correcting the claim rather than deleting it,
+# because a stale performance justification is how a guard gets weakened later
+# by someone who trusts the comment: measured in this container, N=100,
+# `git rev-parse --git-dir` in a small repo, an UNWATCHED verb, wall clock per
+# call, each layer added to the one above it:
+#
+#     bare /usr/local/bin/git                              2.0 ms
+#     a null bash shim that only `exec`s                   4.5 ms
+#     + the shim's argv parsing, REAL_GIT pinned,
+#       alias lookup stubbed out                           6.4 ms
+#     + resolve_alias's `config --get alias.<verb>`        9.3 ms
+#     + find_real_git                                     22.4 ms
+#
+# So the common case pays about 20 ms, roughly 11x bare git, and the two costs
+# are BOTH subprocesses:
+#
+#   find_real_git (~13 ms, the dominant term) is a command substitution that
+#   forks one more `$(cd -- "$dir" && pwd -P)` per PATH entry until it finds a
+#   git that is not one of us, and reads up to 60 lines of each candidate.
+#
+#   resolve_alias (~3 ms) runs one real git per classification. It cannot be
+#   skipped for unwatched verbs — that skip WAS the C4 bypass, and the fix was
+#   to delete the skip list, not to shorten it.
+#
+# Neither is being optimised here. Nothing in this guard's job is latency-
+# sensitive, no measurement says 20 ms is a problem, and a speculative fast
+# path around alias resolution is precisely the change C4 already punished.
+# The remedy for a justification that no longer holds is to re-point the
+# justification. If someone later has a real latency budget, they must bring a
+# measurement against it and leave the classification intact.
 # ---------------------------------------------------------------------------
 mentions_fetch_head=0
 for tok in "${argv[@]}"; do
@@ -603,9 +667,9 @@ armed_for() {                      # <verb> -> 0 if armed in this workspace mode
 
 cand_sub=("$subcmd")
 cand_idx=("$sub_idx")
-if [[ -n "$alt_subcmd" ]]; then
-  cand_sub+=("$alt_subcmd")
-  cand_idx+=("$alt_idx")
+if (( ${#alt_subs[@]} > 0 )); then
+  cand_sub+=("${alt_subs[@]}")
+  cand_idx+=("${alt_idxs[@]}")
 fi
 
 for (( ci = 0; ci < ${#cand_sub[@]}; ci++ )); do
@@ -1145,7 +1209,29 @@ if (( ${#override} < 12 )); then
 fi
 
 audit_log="${SCION_WSGUARD_AUDIT:-$guard_root/.git/wsguard-audit.log}"
-audit_line="$(date -u '+%Y-%m-%dT%H:%M:%SZ')	${SCION_AGENT_NAME:-${USER:-unknown}}	$rule	$override	git $*"
+
+# One TSV field. Three of the five fields below are attacker-controlled —
+# $override is free text the caller wrote, `git $*` is the caller's argv, and
+# SCION_AGENT_NAME/USER are environment — and a tab or a newline inside any of
+# them forges a new COLUMN or a whole new ROW. This log's only job is to say
+# who overrode what; an override that can append a plausible line attributing
+# a different command to a different agent makes it worse than no log, because
+# it is a log someone will believe. Flagged by gd-wsg-rev-3.
+#
+# The backslash is escaped FIRST. Doing it last would rewrite the backslashes
+# this function just introduced, and a literal `\t` typed by the caller would
+# become indistinguishable from a tab that was escaped — the mapping has to
+# stay injective or a reader cannot undo it.
+tsv_field() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  printf '%s' "$s"
+}
+
+audit_line="$(date -u '+%Y-%m-%dT%H:%M:%SZ')	$(tsv_field "${SCION_AGENT_NAME:-${USER:-unknown}}")	$rule	$(tsv_field "$override")	$(tsv_field "git $*")"
 audit_status=0
 printf '%s\n' "$audit_line" >>"$audit_log" || audit_status=$?
 

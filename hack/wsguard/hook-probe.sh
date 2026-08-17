@@ -636,8 +636,56 @@ else
 fi
 echo "==========================================================================="
 
+# ---------------------------------------------------------------------------
+# FLOORS ON THIS PROBE'S OWN COUNTS.
+#
+# gd-wsg-rev-3 relayed this file rather than deriving it, and said so, and noted
+# that R1's disease — an assertion whose denominator shrinks with the thing it
+# measures — was a plausible match for the derived hook set. It is. Measured, by
+# dropping one name from `native_hooks` right after it is built:
+#
+#   drop reference-transaction   rc=2   (caught)
+#   drop pre-push                rc=2   (caught — it ships a .sample)
+#   drop proc-receive            rc=0   *** SURVIVED ***  31 assertions -> 28
+#
+# The `.sample` control pins the derived set from below, but only for hooks that
+# ship a sample file. `proc-receive` does not, so it can vanish and take three
+# claim assertions with it while the probe still reports CONFIRMED. A smaller
+# aperture reported as a clean result is precisely the failure this file spends
+# its length arguing against, and it had it.
+#
+# Floors, not equalities, for the same reason as the selftest: growth must not
+# require editing a constant, shrinkage must.
+#
+# ORDER MATTERS HERE, and the first version got it wrong. The floor ran before
+# the contradiction check, so the `--prove-it` falsified run — which
+# deliberately asserts less — tripped the floor and exited 2 where the negative
+# control requires 1. That turned a working control into "NOTHING WAS MEASURED".
+# A contradiction is a VERDICT and must stay 1; the floor only guards the path
+# that reports CONFIRMED, because that is the only path where a shrunken
+# aperture can be mistaken for a result.
+EXPECT_ASSERTIONS=31
+EXPECT_ABORT_CAPABLE=10
+EXPECT_DERIVED=24
+if (( contradictions == 0 )) &&
+   (( assertions < EXPECT_ASSERTIONS ||
+      ${#abort_capable[@]} < EXPECT_ABORT_CAPABLE ||
+      ${#native_hooks[@]} < EXPECT_DERIVED )); then
+  {
+    echo "hook-probe: THE APERTURE GOT SMALLER — NOTHING WAS MEASURED."
+    printf '  claim assertions : %d, floor %d\n' "$assertions" "$EXPECT_ASSERTIONS"
+    printf '  abort-capable    : %d, floor %d\n' "${#abort_capable[@]}" "$EXPECT_ABORT_CAPABLE"
+    printf '  derived hooks    : %d, floor %d\n' "${#native_hooks[@]}" "$EXPECT_DERIVED"
+    echo "  A narrower aperture cannot confirm the claim: silence outside it looks"
+    echo "  exactly like the result being reported. If git genuinely dropped a hook,"
+    echo "  lower the floor deliberately and say so here."
+  } >&2
+  exit 2
+fi
+
 if (( contradictions == 0 )); then
   echo "hook-probe: the README's rejection of the hook mechanism is CONFIRMED by measurement."
+  echo "hook-probe: aperture floors held — $assertions assertions (floor $EXPECT_ASSERTIONS), ${#abort_capable[@]} abort-capable (floor $EXPECT_ABORT_CAPABLE), ${#native_hooks[@]} derived (floor $EXPECT_DERIVED)."
   exit 0
 fi
 

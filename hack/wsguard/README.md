@@ -177,7 +177,7 @@ The selftest follows the project's check contract instead: `0` evaluated-clean,
 A control that has never been fired is not a control.
 
 ```sh
-hack/wsguard/selftest.sh            # 49 arms, 61 post-conditions
+hack/wsguard/selftest.sh            # 50 arms, 78 post-conditions
 hack/wsguard/selftest.sh --prove-it # ... after first proving the harness can fail
 hack/wsguard/hook-probe.sh --prove-it # the hook-mechanism rejection, measured
 make wsguard                        # both, from CI
@@ -198,8 +198,15 @@ vacuously:
   counter go red **and the other stay green**. One number vouching for another
   is not a control.
 - **Both directions.** Thirty refusal arms, five cannot-evaluate arms,
-  fourteen permit arms — including the same `git checkout --` that is refused in the
+  fifteen permit arms — including the same `git checkout --` that is refused in the
   shared repository being permitted in a private one.
+- **Permitted means silent, not merely unrefused.** Every permit arm used to be
+  scored on `rc=0` alone, and two of them asserted nothing at all. Twelve now
+  also assert that the guard printed **no** `wsguard:` line. A guard that
+  comments on every `git status` is one an agent learns to read past, and the
+  day it prints `REFUSED` nobody sees it — so the refusal arms are only worth
+  what the permit arms cost. Falsified with a shim whose `passthrough` emits one
+  benign note: all twelve go red.
 - **Properties, not instances.** Arms that exist because a specific bug was
   found can only catch that bug again. Four members of the argv-parsing class
   survived to round 4 for exactly that reason. The arms that close a class
@@ -207,10 +214,56 @@ vacuously:
   all of them: every global option classifies the same separated as attached
   (`N25`); an alias cannot demote any watched builtin (`N31`); every verb
   `armed_for` can arm is also in `is_watched_verb` (`N32`); every watched verb
-  is named in the `AGENTS.md` paragraph agents actually read (`N33`).
+  is named in the `AGENTS.md` paragraph agents actually read (`N33`); every verb
+  in a hand-written argv table is still watched (`N34`, and see below for why
+  that direction is the one that was missing); repeating an unknown-arity option
+  does not exhaust the candidate union at any depth from one to four (`N35`).
 
 Every arm runs under `timeout`, and a timeout kill is scored as its own status
 rather than folded into "failed". A suite that can hang cannot report.
+
+### A containment cannot detect the set shrinking on both sides
+
+`A ⊆ B` survives A and B being emptied together. `N31`, `N32` and `N33` are all
+containments whose left-hand side is derived from `is_watched_verb`, so deleting
+a verb from `is_watched_verb` **and** from `armed_for` shrinks both sides at
+once and every one of them stays green. gd-wsg-rev-3 found the hole by looking
+for the verb with no hardcoded arm behind it — `switch` — and measured
+`git switch -f main`: `rc=0`, guard silent, uncommitted work destroyed, and a
+suite headline byte-identical to the baseline.
+
+The fix is not another containment. `N34` walks `SHADOW_ARGV`, a hand-written
+twelve-entry table that exists for an unrelated purpose and is **not** derived
+from the guard, and asserts every verb in it is still watched. An independent
+denominator is the only thing that can see a deletion; a generated one moves
+with the thing it is measuring.
+
+### The suite's own size is a post-condition
+
+Deleting the `N27`/`N28` block used to print `PASS — 47 arms, 59
+post-conditions`, exit `0`, and `--prove-it` still reported both controls green.
+Nothing in the suite noticed it had gotten smaller. `EXPECT_ARMS`,
+`EXPECT_CHECKS` and `EXPECT_CONTROLS` are now floors, and falling below any of
+them exits `2` — *nothing was tested* — rather than `1`, because a suite that
+shrank has not measured anything to disagree with. They are floors and not
+equalities on purpose: adding an arm must not require editing a constant, and
+removing one must.
+
+`hook-probe.sh` carries the same three floors over its assertion count, its
+abort-capable set and its derived hook set. Ordering matters there: the floor is
+checked **only when there are no contradictions**, because a contradiction is a
+verdict and has to stay `1`. The falsified `--prove-it` run legitimately asserts
+less than the baseline, and a floor applied ahead of the verdict turned the
+required `1` into a `2`.
+
+### An audit log the subject can forge is worse than no audit log
+
+Three of the five tab-separated fields recorded on an override are written by
+the person being audited — the free-text reason, the argv, and the agent name
+from the environment. A newline in the reason appended a second, entirely
+fabricated row with the right column count, attributable to any agent the writer
+chose. `P15` asserts on the row **count**, not on a substring: "the escape is in
+the file" would also pass if the injected row had been written alongside it.
 
 ### Both sides of a path comparison must come from the same normaliser
 
@@ -298,6 +351,35 @@ A refusal also now names the resolution — `` `d6` resolves to `checkout` after
 expansion(s) `` — because otherwise the diagnostic discusses a word the operator
 never typed.
 
+### The same bound, one level up: the candidate union was capped at two
+
+An option the guard does not know the arity of makes the subcommand ambiguous —
+in `git --attr-source HEAD checkout -- f`, either `HEAD` or `checkout` is the
+verb depending on whether `--attr-source` takes a separate value. The guard
+refuses to guess: it enumerates the readings and refuses if **any** of them is
+watched.
+
+It enumerated exactly two. One reading, plus one resumed scan. The number of
+possible readings grows with the number of unknown-arity options in the prefix,
+so with two of them both candidates landed on option *values* and the real verb
+was never classified at all. gd-wsg-rev-3 measured it on the shipped head — not
+on a mutant:
+
+| | shipped | now |
+|---|---|---|
+| `git --attr-source HEAD --attr-source HEAD checkout -- f` | `rc=0`, **work gone**, silent | `77` |
+| `git --attr-source HEAD --attr-source HEAD reset --hard` | `rc=0`, **work gone**, silent | `77` |
+
+This is the *same mistake as the depth-one alias bound*, in a different
+function, shipped in the round that fixed the first one — and again carrying a
+comment asserting the bound was safe. The scan now resumes to a fixed point, and
+`N35` sweeps depths one through four across `checkout`, `reset` and `rm` rather
+than testing the depth that was reported.
+
+`--attr-source` is deliberately **not** added to `opt_takes_value`. Naming the
+option would close this instance and leave the class open; the live control is
+that an option the guard has never heard of still cannot hide a verb.
+
 ### A generated arm is blind to deletions from the source it generates from
 
 The answer to "every arm is one-per-known-bug" is to derive the arm's inputs
@@ -315,7 +397,17 @@ independent source to pin the *denominator*. Here that source already existed:
 `armed_for` holds the same verbs for a different purpose, so `N32` asserts
 `armed_for ⊆ is_watched_verb` — a verb that is armed but not watched is
 precisely the bug `N29` was written for, stated as an invariant instead of an
-example. Deleting from either table now fails.
+example.
+
+**That was still not an independent denominator, and the sentence that used to
+close this section — "deleting from either table now fails" — was false.**
+`armed_for` and `is_watched_verb` are two hand-maintained copies of the same
+list, so the containment holds while *both* shrink; see *A containment cannot
+detect the set shrinking on both sides* above. The lesson survives the
+correction and is sharper for it: a second source is only independent if it
+would not be edited in the same change. `SHADOW_ARGV` qualifies because it
+exists to hold argv, not verbs, and `N34` is the arm that finally sees a
+deletion.
 
 ### The assertion has to carry the discrimination, not the exit code
 
@@ -340,6 +432,20 @@ requiring the failure to name the right verb each time.
 
 > A check that passes on the permitted list is a check that cannot see the
 > refused list shrink.
+
+### A read-back must be anchored to the command, not to the variable
+
+Twenty-one arms depend on a `git config alias.<x> <y>` fixture having taken
+effect, and none of them checked. A fixture that silently fails turns an arm
+into "the guard did not refuse a command it never saw", which is green.
+
+`set_alias` now writes and reads back, exiting `2` if the value did not land.
+That was still not enough. The first version derived the read-back key from the
+same shell variable as the write, so renaming the alias in both places kept it
+green while the arm's *command line* still used the old name — a control that
+cannot fail is not a control. `require_alias_for` takes the **command line the
+arm will run**, extracts its first word, and requires an alias to exist for
+*that*. Both falsifiers now exit `2`.
 
 ### The justification must be true of the operation it guards
 
@@ -409,6 +515,34 @@ project a day, where an ERE pattern run under GNU grep's default BRE reported
 `0` for a term that was present. The one thing resolved from the environment,
 the real `git`, is resolved explicitly and printed with its path and version in
 the run's provenance block.
+
+### What the shim costs, measured
+
+The hot path used to carry the comment *"the common case must not pay for a
+subprocess."* That was an intent, and by the time anyone checked it the shim had
+grown two subprocesses that **every** git call pays. Measured in the dev
+container, `N=100`, `git rev-parse --git-dir` in a small repo — an *unwatched*
+verb, the common case — each row adding to the one above it:
+
+| | per call |
+|---|---|
+| bare `/usr/local/bin/git` | 2.0 ms |
+| a null bash shim that only `exec`s | 4.5 ms |
+| + argv parsing, `REAL_GIT` pinned, alias lookup stubbed | 6.4 ms |
+| + `resolve_alias`'s `config --get alias.<verb>` | 9.3 ms |
+| + `find_real_git` | **22.4 ms** |
+
+So roughly 20 ms and 11× bare git. `find_real_git` dominates: it forks one
+`$(cd -- "$dir" && pwd -P)` per `PATH` entry until it finds a git that is not
+one of us. `resolve_alias` costs ~3 ms and **cannot be skipped for unwatched
+verbs** — that skip was the C4 bypass, and the fix was to delete the skip list,
+not to shorten it.
+
+Nothing is being optimised on the strength of this. Nothing in the guard's job
+is latency-sensitive and no measurement says 20 ms is a problem; the number is
+published so the next person works from a measurement instead of from a
+comment. A speculative fast path around alias resolution is precisely the change
+C4 already punished.
 
 ## Environment
 

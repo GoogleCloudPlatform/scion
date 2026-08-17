@@ -185,6 +185,57 @@ mkdir -p "$OUTSIDE" || die_cannot_evaluate "could not create $OUTSIDE"
 DONOR_SHA="$("$REAL_GIT" -C "$DONOR" rev-parse HEAD)" ||
   die_cannot_evaluate "could not read donor HEAD"
 
+# set_alias <repo> <name> <value> — write an alias fixture AND READ IT BACK.
+#
+# The round-4 record named three contaminated fixtures and stated the common
+# shape as "the harness had no control on itself". The remedy went to the index
+# and content fixtures — hard resets, and asserting the COMMITTED bytes rather
+# than "not the dirty string" — and never reached the ALIAS fixtures, which were
+# the third of the three. gd-wsg-rev-3 found that gap by pointing the alias
+# writes at a config key that takes effect and means nothing:
+#
+#   suite: PASS — 49 arms, 61 post-conditions, 0 failures      identical headline
+#
+# N29 and N31 carry the entire C4 claim — an alias cannot demote a watched
+# builtin — and both pass exactly as well when no alias was ever established,
+# because a refusal arm cannot tell "refused despite the alias" from "refused
+# with no alias present". Every one of the 20 alias writes in this suite now
+# goes through here, so an alias that does not take is a hard 2 rather than a
+# quieter green.
+set_alias() { # <repo> <name> <value>
+  local repo="$1" name="$2" value="$3" got
+  "$REAL_GIT" -C "$repo" config "alias.$name" "$value" ||
+    die_cannot_evaluate "could not write alias.$name in $repo"
+  got="$("$REAL_GIT" -C "$repo" config --get "alias.$name" 2>/dev/null)"
+  [[ "$got" == "$value" ]] ||
+    die_cannot_evaluate "alias.$name did not take in $repo: wrote '$value', read back '$got' — the arms that depend on it would degrade to plain refusal arms and pass"
+}
+
+# require_alias_for <repo> <command-line> — assert that the FIRST WORD of the
+# command about to be run has an alias defined.
+#
+# set_alias alone does not close R3, and finding out why cost a falsifier. It
+# reads back the key it just wrote, deriving the key from the SAME VARIABLE as
+# the write — so renaming both together (`alias.$sv` -> `alias.NOTSET$sv`)
+# leaves it perfectly green: the alias did take, just not on the name the arm
+# depends on. That is the self-reference defect from R1 one level down, in the
+# control I had just added to fix a contaminated fixture.
+#
+# The independent anchor is the COMMAND THE ARM ACTUALLY RUNS. An alias-shadow
+# arm is only meaningful if an alias exists for the verb being invoked, so the
+# check reads its key off the command line rather than off the write. Now a
+# mutation has to change the command too — at which point it is testing
+# something else and saying so.
+require_alias_for() { # <repo> <command-line>
+  local repo="$1" cmdline="$2" verb got
+  verb="${cmdline%% *}"
+  [[ -n "$verb" ]] ||
+    die_cannot_evaluate "require_alias_for got an empty command line"
+  got="$("$REAL_GIT" -C "$repo" config --get "alias.$verb" 2>/dev/null)"
+  [[ -n "$got" ]] ||
+    die_cannot_evaluate "no alias is defined for '$verb', but the arm about to run '$cmdline' exists to prove an alias cannot demote it — with no alias present it is just another refusal arm and would pass"
+}
+
 # The marker that must survive a refusal, and the untracked file that must
 # survive a refused clean.
 dirty() {
@@ -235,8 +286,8 @@ control "fetch-head-is-a-slot" "reproduced: fetch left $DONOR_SHA in the single 
 # version of the shim that permitted them. Each is reproduced with the REAL git
 # before the corresponding arm runs, because "the guard refused it" is not a
 # result unless the thing refused would otherwise have done damage.
-"$REAL_GIT" -C "$CONTROL" config alias.co checkout
-"$REAL_GIT" -C "$CONTROL" config alias.sh '!echo SHELL-ALIAS'
+set_alias "$CONTROL" "co" checkout
+set_alias "$CONTROL" "sh" '!echo SHELL-ALIAS'
 dirty "$CONTROL"
 control_status=0
 "$REAL_GIT" -C "$CONTROL" co -- tracked.txt || control_status=$?
@@ -260,12 +311,12 @@ control "alias-reaches-checkout" "reproduced: \`git co\` erased the modification
 # Two changes make it one: hard-reset the index before the arm, and assert the
 # content is now the COMMITTED string rather than merely "not the dirty string".
 "$REAL_GIT" -C "$CONTROL" reset -q --hard >/dev/null 2>&1
-"$REAL_GIT" -C "$CONTROL" config alias.a co
+set_alias "$CONTROL" "a" co
 for _d in 1 2 3 4 5 6; do
   if (( _d == 1 )); then
-    "$REAL_GIT" -C "$CONTROL" config alias.d1 co
+    set_alias "$CONTROL" "d1" co
   else
-    "$REAL_GIT" -C "$CONTROL" config "alias.d$_d" "d$(( _d - 1 ))"
+    set_alias "$CONTROL" "d$_d" "d$(( _d - 1 ))"
   fi
 done
 dirty "$CONTROL"
@@ -436,6 +487,36 @@ still_dirty() {
   [[ "$content" == *UNCOMMITTED-WORK* ]]
 }
 
+# guard_silent <arm-name> — the guard emitted NOTHING on a permitted command.
+#
+# gd-wsg-rev-3 asked (Q3) what the permit arms actually assert, and the honest
+# answer was: rc=0, and for two of them not even that. Every one of the 14 was
+# scored purely on "did not refuse". That is the weaker half of the property.
+# A guard that prints a warning, a deprecation, or a stray diagnostic on every
+# `git status` is one an agent learns to read past, and the day it prints
+# REFUSED nobody sees it. The refusal arms are only worth what the permit arms
+# cost, so silence is a post-condition, not an aesthetic.
+#
+# The marker is "wsguard:" because that is the prefix on EVERY line the shim
+# writes — refusals, cannot-evaluates, override notices and the shell-alias
+# note alike. Matching the prefix rather than any single message means a new
+# diagnostic added later is caught by these arms without anyone remembering to
+# extend a list.
+#
+# Two permit arms are deliberately NOT silent and do not call this: P8 is the
+# audited override, whose entire purpose is to announce itself, and P11 prints
+# the SHELL-ALIAS note. Both assert on that output directly. The remaining 12
+# must say nothing at all.
+guard_silent() {
+  local name="$1"
+  local desc="the guard is SILENT on a permitted command: no output to read past"
+  if [[ "$LAST_OUT" == *"wsguard:"* ]]; then
+    assert "$name" "$desc" 1
+  else
+    assert "$name" "$desc" 0
+  fi
+}
+
 echo "==========================================================================="
 echo "wsguard selftest"
 echo "==========================================================================="
@@ -543,20 +624,20 @@ echo "REFUSAL, CONTINUED — the root must be normalised before it is compared"
 echo "==========================================================================="
 
 # Fixtures for the alias and dash-pathspec arms, on the SHARED repo.
-"$REAL_GIT" -C "$SHARED" config alias.co checkout
-"$REAL_GIT" -C "$SHARED" config alias.sh '!echo SHELL-ALIAS'
+set_alias "$SHARED" "co" checkout
+set_alias "$SHARED" "sh" '!echo SHELL-ALIAS'
 # F1: git chains aliases to arbitrary depth. F1b: an expansion may LEAD with a
 # global option, or quote the dispatched word.
-"$REAL_GIT" -C "$SHARED" config alias.a co
-"$REAL_GIT" -C "$SHARED" config alias.d1 co
+set_alias "$SHARED" "a" co
+set_alias "$SHARED" "d1" co
 for _d in 2 3 4 5 6; do
-  "$REAL_GIT" -C "$SHARED" config "alias.d$_d" "d$(( _d - 1 ))"
+  set_alias "$SHARED" "d$_d" "d$(( _d - 1 ))"
 done
-"$REAL_GIT" -C "$SHARED" config alias.r1 rm
-"$REAL_GIT" -C "$SHARED" config alias.r2 r1
-"$REAL_GIT" -C "$SHARED" config alias.g '-c core.quotepath=false checkout'
-"$REAL_GIT" -C "$SHARED" config alias.q '"checkout"'
-"$REAL_GIT" -C "$SHARED" config alias.safe status
+set_alias "$SHARED" "r1" rm
+set_alias "$SHARED" "r2" r1
+set_alias "$SHARED" "g" '-c core.quotepath=false checkout'
+set_alias "$SHARED" "q" '"checkout"'
+set_alias "$SHARED" "safe" status
 printf 'committed\n' >"$SHARED/-h"
 "$REAL_GIT" -C "$SHARED" add -- ./-h >/dev/null 2>&1
 "$REAL_GIT" -C "$SHARED" -c user.email=w@g -c user.name=w commit -qm "a file named -h" >/dev/null 2>&1
@@ -619,8 +700,8 @@ still_dirty && assert "N22-alias-quoted-word" "git splits aliases with shell quo
 # cyclic alias itself, but this guard cannot tell a cycle from a chain deeper
 # than 10, and "it is probably the harmless one" is the reasoning the guard
 # exists to refuse.
-"$REAL_GIT" -C "$SHARED" config alias.loop1 loop2
-"$REAL_GIT" -C "$SHARED" config alias.loop2 loop1
+set_alias "$SHARED" "loop1" loop2
+set_alias "$SHARED" "loop2" loop1
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
 arm "U4-alias-cap" 78 "$SHARED" -- loop1 -- tracked.txt
@@ -720,6 +801,46 @@ fi
   assert "N25-global-option-class" "every option in the guard's table plus one it has never heard of: the guard itself stops the separated form and the content survives (${gen_class_spoke}/${#optlist[@]} options, guard spoke on each)" 0 ||
   assert "N25-global-option-class" "every option in the guard's table plus one it has never heard of: the guard itself stops the separated form and the content survives — LEAKED:$gen_class_detail" 1
 
+# N25 covers the class of unknown options at COUNT ONE. gd-wsg-rev-3 found the
+# other axis: the union was a single resumed scan, so it produced exactly two
+# candidate readings while the number of readings grows with the number of
+# unknown-arity options. At two, both candidates land on option VALUES and the
+# verb is never classified — measured on the shipped head, work destroyed at
+# rc=0 with the guard silent, and reproduced here before the fix went in.
+#
+# So the arm sweeps a RANGE of depths rather than adding "the n=2 case". n=1 is
+# included deliberately: it is the reading that already worked, and if a future
+# change breaks it this arm should say so rather than only testing the new part.
+# The verbs vary too, because the bypass was never specific to checkout.
+attr_ok=1
+attr_detail=""
+attr_n=0
+for depth in 1 2 3 4; do
+  for spec in "checkout|-- tracked.txt" "reset|--hard HEAD" "rm|-f tracked.txt"; do
+    verb="${spec%%|*}"; verb_args="${spec#*|}"
+    "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
+    dirty "$SHARED"
+    gopts=()
+    for (( d = 0; d < depth; d++ )); do gopts+=(--attr-source HEAD); done
+    # shellcheck disable=SC2086
+    run_guarded "$SHARED" "${gopts[@]}" "$verb" $verb_args
+    attr_n=$(( attr_n + 1 ))
+    if [[ "$LAST_STATUS" != 77 || "$LAST_OUT" != *"wsguard: REFUSED"* ]]; then
+      attr_ok=0
+      attr_detail="$attr_detail n=$depth/$verb=rc$LAST_STATUS"
+    elif ! still_dirty; then
+      attr_ok=0
+      attr_detail="$attr_detail n=$depth/$verb=CONTENT-LOST"
+    fi
+  done
+done
+if (( attr_n == 0 )); then
+  die_cannot_evaluate "N34 swept no depth/verb combinations; the assertion would be vacuous"
+fi
+(( attr_ok == 1 )) &&
+  assert "N35-unknown-option-repeated" "repeating an unknown-arity option does not exhaust the union: the verb is still found and refused at every depth ($attr_n combinations, depths 1-4)" 0 ||
+  assert "N35-unknown-option-repeated" "repeating an unknown-arity option does not exhaust the union — LEAKED:$attr_detail" 1
+
 # GENERATED, second: an alias chain of depth N, built here rather than written
 # out. gd-wsg-rev-2 was explicit that SIX WAS ITS FIXTURE DEPTH AND NOT A
 # MEASURED LIMIT of git, and that a number lifted from a fixture and recorded
@@ -727,9 +848,9 @@ fi
 # depth from a variable, and the assertion is on the hop count the guard
 # reports, not on any particular number being special.
 GEN_DEPTH=9
-"$REAL_GIT" -C "$SHARED" config alias.gen1 checkout
+set_alias "$SHARED" "gen1" checkout
 for (( n = 2; n <= GEN_DEPTH; n++ )); do
-  "$REAL_GIT" -C "$SHARED" config "alias.gen$n" "gen$(( n - 1 ))"
+  set_alias "$SHARED" "gen$n" "gen$(( n - 1 ))"
 done
 "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
 dirty "$SHARED"
@@ -786,6 +907,7 @@ arm "N16-push-force" 77 "$SHARED" -- push --force origin main
 
 # The lease is the alternative the refusal offers, so it had better work.
 arm "P12-push-force-with-lease" 0 "$SHARED" -- push --force-with-lease origin main
+guard_silent "P12-push-force-with-lease"
 [[ "$LAST_STATUS" == 0 ]] &&
   assert "P12-push-force-with-lease" "--force-with-lease is permitted: the offered alternative is real" 0 ||
   assert "P12-push-force-with-lease" "--force-with-lease is permitted: the offered alternative is real" 1
@@ -795,7 +917,8 @@ arm "P12-push-force-with-lease" 0 "$SHARED" -- push --force-with-lease origin ma
 # then wave it through onto the shared remote. The post-condition is the REMOTE
 # REF, not the working tree — a push arm asserting on tracked.txt would pass
 # for a reason that has nothing to do with the thing being tested.
-"$REAL_GIT" -C "$SHARED" config alias.push log
+set_alias "$SHARED" "push" log
+require_alias_for "$SHARED" "push --force origin main:main"
 arm "N29-alias-shadowing-a-builtin" 77 "$SHARED" -- push --force origin main:main
 [[ "$("$REAL_GIT" -C "$BARE" rev-parse refs/heads/main 2>/dev/null)" == "$bare_before" ]] &&
   assert "N29-alias-shadowing-a-builtin" "the remote ref is untouched: an alias cannot demote a watched builtin" 0 ||
@@ -855,7 +978,8 @@ for sv in "${shadow_verbs[@]}"; do
   fi
   "$REAL_GIT" -C "$SHARED" reset -q --hard >/dev/null 2>&1
   dirty "$SHARED"
-  "$REAL_GIT" -C "$SHARED" config "alias.$sv" log
+  set_alias "$SHARED" "$sv" log
+  require_alias_for "$SHARED" "${SHADOW_ARGV[$sv]}"
   # shellcheck disable=SC2086
   run_guarded "$SHARED" ${SHADOW_ARGV[$sv]}
   "$REAL_GIT" -C "$SHARED" config --unset "alias.$sv"
@@ -902,6 +1026,41 @@ done
 [[ -z "$unwatched" ]] &&
   assert "N32-armed-implies-watched" "every verb armed_for can arm is also in is_watched_verb, so no rule can be reached by a name the alias walk would demote (${#armed_set[@]} armed, ${#watched_set[@]} watched)" 0 ||
   assert "N32-armed-implies-watched" "every verb armed_for can arm is also in is_watched_verb — ARMED BUT NOT WATCHED:$unwatched" 1
+
+# N32 WAS THE SAME SELF-REFERENCE ONE LEVEL UP, and gd-wsg-rev-3 was right about
+# why: not because armed_for is derived from is_watched_verb — it is a
+# physically separate case block, which is the right structure and stays — but
+# because of the DIRECTION of the assertion. N31, N32 and N33 are all
+# containments whose left-hand side shrinks with is_watched_verb, and A ⊆ B is
+# preserved when A and B shrink TOGETHER. Deleting a verb from both case blocks
+# leaves all three green.
+#
+# Their Mutant B: delete `switch` from is_watched_verb and armed_for.
+#
+#   git switch -f main    rc=0, guard SILENT, uncommitted work DESTROYED
+#   suite                 PASS — 49 arms, 61 post-conditions, byte-identical
+#                         headline to baseline
+#
+# `switch` was the only watched verb with no hardcoded arm, which is exactly why
+# their other mutant died — killed by N27/N28, which are INSTANCES. The class
+# was being defended by hardcoded arms with one hole in the row.
+#
+# The fix needs a denominator that does NOT move when the guard moves, and one
+# was already in this file three lines up: SHADOW_ARGV is hand-written here, not
+# derived from the shim. It had a coverage control in the ADDITION direction
+# (a watched verb with no argv is a hard error); this is the DELETION direction.
+# The table is now load-bearing in both, so a verb cannot leave the guard's
+# watched set without someone also deleting its entry here — two edits in two
+# files, which is the point.
+unarmed_but_tabled=""
+for tv in "${!SHADOW_ARGV[@]}"; do
+  found=0
+  for wv in "${watched_set[@]}"; do [[ "$tv" == "$wv" ]] && { found=1; break; }; done
+  (( found == 0 )) && unarmed_but_tabled="$unarmed_but_tabled $tv"
+done
+[[ -z "$unarmed_but_tabled" ]] &&
+  assert "N34-watched-set-has-not-shrunk" "every verb in the hand-written argv table is still watched by the guard, so a verb cannot silently leave the watched set (${#SHADOW_ARGV[@]} table verbs, independent of the shim)" 0 ||
+  assert "N34-watched-set-has-not-shrunk" "every verb in the hand-written argv table is still watched by the guard — IN THE ARGV TABLE BUT NO LONGER WATCHED:$unarmed_but_tabled" 1
 
 # The guard grew two verbs this round and the sentence in AGENTS.md that tells
 # every agent what is guarded did not grow with them. That sentence is the only
@@ -973,6 +1132,7 @@ done
 MODE_OVERRIDE="clone-per-agent"
 dirty "$SHARED"
 arm "P14-checkout-permitted-in-private-mode" 0 "$SHARED" -- checkout -- tracked.txt
+guard_silent "P14-checkout-permitted-in-private-mode"
 [[ "$(cat "$SHARED/tracked.txt")" != *UNCOMMITTED-WORK* ]] &&
   assert "P14-checkout-permitted-in-private-mode" "rule (a) stands down in clone-per-agent: arming rule (c) everywhere did not arm the others" 0 ||
   assert "P14-checkout-permitted-in-private-mode" "rule (a) stands down in clone-per-agent: arming rule (c) everywhere did not arm the others" 1
@@ -987,6 +1147,7 @@ arm "N17-branch-D-cites-local-ground" 77 "$SHARED" -- branch -D nonexistent-bran
 # --cached is the discriminating flag for rm, exactly as -n is for clean.
 dirty "$SHARED"
 arm "P10-rm-cached-is-permitted" 0 "$SHARED" -- rm --cached -q tracked.txt
+guard_silent "P10-rm-cached-is-permitted"
 [[ -e "$SHARED/tracked.txt" ]] && assert "P10-rm-cached-is-permitted" "rm --cached is permitted and leaves the file on disk" 0 ||
   assert "P10-rm-cached-is-permitted" "rm --cached is permitted and leaves the file on disk" 1
 "$REAL_GIT" -C "$SHARED" reset -q >/dev/null 2>&1
@@ -995,6 +1156,7 @@ arm "P10-rm-cached-is-permitted" 0 "$SHARED" -- rm --cached -q tracked.txt
 # PATH and is judged on its own merits. Passing it through is the correct
 # answer, not a gap.
 arm "P13-alias-to-safe-command" 0 "$SHARED" -- safe --porcelain
+guard_silent "P13-alias-to-safe-command"
 [[ "$LAST_OUT" == *"tracked.txt"* ]] &&
   assert "P13-alias-to-safe-command" "an alias resolving to status is permitted: the loop classifies, it does not blanket-refuse" 0 ||
   assert "P13-alias-to-safe-command" "an alias resolving to status is permitted: the loop classifies, it does not blanket-refuse" 1
@@ -1005,11 +1167,13 @@ arm "P11-shell-alias-passes-through" 0 "$SHARED" -- sh
   assert "P11-shell-alias-passes-through" "a !-alias runs; its nested git is covered by re-entry, not by expansion" 1
 
 arm "P1-status" 0 "$SHARED" -- status --porcelain
+guard_silent "P1-status"
 [[ "$LAST_OUT" == *"tracked.txt"* ]] &&
   assert "P1-status" "real git output came back through the shim unaltered" 0 ||
   assert "P1-status" "real git output came back through the shim unaltered" 1
 
 arm "P2-clean-dry-run" 0 "$SHARED" -- clean -n
+guard_silent "P2-clean-dry-run"
 [[ "$LAST_OUT" == *"untracked.txt"* ]] &&
   assert "P2-clean-dry-run" "the permitted neighbour of the refused command still answers the question" 0 ||
   assert "P2-clean-dry-run" "the permitted neighbour of the refused command still answers the question" 1
@@ -1018,22 +1182,27 @@ arm "P2-clean-dry-run" 0 "$SHARED" -- clean -n
   assert "P2-clean-dry-run" "and it deleted nothing" 1
 
 arm "P3-fetch-to-named-ref" 0 "$SHARED" -- fetch "$DONOR" "main:refs/wsguard/wsguard-selftest/donor-main"
+guard_silent "P3-fetch-to-named-ref"
 fetched_sha="$("$REAL_GIT" -C "$SHARED" rev-parse refs/wsguard/wsguard-selftest/donor-main 2>&1)"
 [[ "$fetched_sha" == "$DONOR_SHA" ]] &&
   assert "P3-fetch-to-named-ref" "the fetch landed in a ref this agent owns: $DONOR_SHA" 0 ||
   assert "P3-fetch-to-named-ref" "the fetch landed in a ref this agent owns (got '$fetched_sha')" 1
 
 arm "P4-log-named-ref" 0 "$SHARED" -- log -1 --format=%H refs/wsguard/wsguard-selftest/donor-main
+guard_silent "P4-log-named-ref"
 [[ "$LAST_OUT" == "$DONOR_SHA" ]] &&
   assert "P4-log-named-ref" "reading the owned ref is permitted and returns the right commit" 0 ||
   assert "P4-log-named-ref" "reading the owned ref is permitted and returns the right commit" 1
 
 arm "P5-stash-list" 0 "$SHARED" -- stash list
+guard_silent "P5-stash-list"
 arm "P6-branch-list" 0 "$SHARED" -- branch --list
+guard_silent "P6-branch-list"
 
 # The scoping arm. Same command as N1, in a repository that is not shared.
 printf 'MY OWN WORK\n' >"$PRIVATE/tracked.txt"
 arm "P7-checkout-in-private-clone" 0 "$PRIVATE" -- checkout -- tracked.txt
+guard_silent "P7-checkout-in-private-clone"
 private_content="$(cat "$PRIVATE/tracked.txt")"
 [[ "$private_content" == "committed content" ]] &&
   assert "P7-checkout-in-private-clone" "the guard did not stand between the operator and their own clone" 0 ||
@@ -1051,6 +1220,37 @@ audit_body="$(cat "$AUDIT" 2>&1)"
 [[ "$audit_body" == *"exercising the audited override path"* ]] &&
   assert "P8-override-with-a-reason" "and the reason is on the record in the audit log" 0 ||
   assert "P8-override-with-a-reason" "and the reason is on the record in the audit log (got '$audit_body')" 1
+
+# P15. THE AUDIT LOG IS THE ONLY ACCOUNT OF AN OVERRIDE, AND ITS CONTENT COMES
+# FROM THE PERSON BEING AUDITED. $SCION_WSGUARD_OVERRIDE is free text and the
+# argv is whatever was typed, so before the sanitiser a reason containing a
+# newline appended a second, entirely fabricated ROW — correct column count,
+# plausible timestamp position, attributable to any agent name the writer
+# chose. A log that can be forged by the subject of the entry is worse than no
+# log, because it is a log the next reader will believe. Flagged by
+# gd-wsg-rev-3 alongside Q3.
+#
+# The post-condition is the LINE COUNT, not a substring. "The escape appears in
+# the file" would also pass if the injected row were written as well; only
+# counting rows distinguishes "escaped" from "escaped, and also injected".
+dirty "$SHARED"
+audit_lines_before="$(wc -l <"$AUDIT")"
+OVERRIDE_REASON="$(printf 'selftest injection: line one\n1999-01-01T00:00:00Z\tsomeone-else\ta/local-refs\tforged\tgit push --force')"
+arm "P15-audit-log-cannot-be-forged" 0 "$SHARED" -- checkout -- tracked.txt
+audit_lines_after="$(wc -l <"$AUDIT")"
+(( audit_lines_after - audit_lines_before == 1 )) &&
+  assert "P15-audit-log-cannot-be-forged" "one override wrote exactly one row: a newline in the reason cannot forge a second" 0 ||
+  assert "P15-audit-log-cannot-be-forged" "one override wrote exactly one row (got $(( audit_lines_after - audit_lines_before )))" 1
+audit_last="$(tail -1 "$AUDIT")"
+[[ "$audit_last" == *'line one\n1999-01-01'* && "$audit_last" == *'Z\tsomeone-else'* ]] &&
+  assert "P15-audit-log-cannot-be-forged" "the injected newline and tab survive as visible escapes: sanitised, not silently dropped" 0 ||
+  assert "P15-audit-log-cannot-be-forged" "the injected newline and tab survive as visible escapes (got '$audit_last')" 1
+# The row still has its own five fields. An escape that also ate a real
+# separator would pass the count check above while destroying the format.
+audit_fields="$(printf '%s' "$audit_last" | tr -cd '\t' | wc -c)"
+(( audit_fields == 4 )) &&
+  assert "P15-audit-log-cannot-be-forged" "the row still has exactly 5 fields: sanitising the payload did not corrupt the format" 0 ||
+  assert "P15-audit-log-cannot-be-forged" "the row still has exactly 5 fields (got $(( audit_fields + 1 )))" 1
 
 echo
 echo "audit log after the run:"
@@ -1109,6 +1309,7 @@ arm "C1-only-shims-on-path" 78 "$SHARED" -- checkout -- tracked.txt
 
 PATH_OVERRIDE="$TWOSHIM/a:$TWOSHIM/b:$MINBIN:$real_git_dir"
 arm "P9-two-shims-then-real-git" 0 "$SHARED" -- --version
+guard_silent "P9-two-shims-then-real-git"
 [[ "$LAST_OUT" == *"git version"* ]] &&
   assert "P9-two-shims-then-real-git" "two shims on PATH resolve THROUGH to the real git" 0 ||
   assert "P9-two-shims-then-real-git" "two shims on PATH resolve THROUGH to the real git" 1
@@ -1140,9 +1341,46 @@ printf 'harness controls      : %d reproduced with the real git\n' "$controls_ru
 printf '                        (any that had not would have exited 2, not 0)\n'
 echo "==========================================================================="
 
+# ---------------------------------------------------------------------------
+# THE SUITE'S OWN SIZE IS A MEASUREMENT, AND IT WAS ASSERTED AGAINST NOTHING.
+#
+# Every DERIVED array in this file has a floor that ends the run at 2 — optlist,
+# shadow_verbs, watched_set, armed_set, doc_tokens. The suite itself did not.
+# gd-wsg-rev-3 deleted the N27/N28 block and got:
+#
+#   PASS — 47 arms, 59 post-conditions      rc=0
+#   ...and --prove-it still reported BOTH negative controls green.
+#
+# That is the exact gap: --prove-it proves the two counters CAN redden. It says
+# nothing about whether the arms that feed them still exist. A suite that gets
+# smaller is a suite that measures less, and it should be as loud as a suite
+# that measures wrong — louder, because it looks like success.
+#
+# This is 2 rather than 1 on purpose. "Fewer arms ran than this file claims to
+# contain" is not a verdict about the guard; it is the harness reporting that it
+# did not do what it says. Same reasoning as every other die_cannot_evaluate.
+#
+# These are FLOORS, not equalities. Adding an arm must not require editing a
+# constant in two places — that is a chore, and chores get done by lowering the
+# number. Removing one must.
+EXPECT_ARMS=50
+EXPECT_CHECKS=78
+EXPECT_CONTROLS=7
+if (( arms_run < EXPECT_ARMS || checks_run < EXPECT_CHECKS || controls_run < EXPECT_CONTROLS )); then
+  {
+    echo "wsguard-selftest: THE SUITE GOT SMALLER — NOTHING WAS TESTED."
+    printf '  arms      : %d, floor %d\n' "$arms_run" "$EXPECT_ARMS"
+    printf '  checks    : %d, floor %d\n' "$checks_run" "$EXPECT_CHECKS"
+    printf '  controls  : %d, floor %d\n' "$controls_run" "$EXPECT_CONTROLS"
+    echo "  Arms were deleted or skipped. Raise the floors deliberately if the"
+    echo "  removal was intended; do not lower them to make this pass."
+  } >&2
+  exit 2
+fi
+
 total_failed=$(( arms_mismatched + checks_failed ))
 if (( total_failed == 0 )); then
-  echo "wsguard-selftest: PASS — $arms_run arms, $checks_run post-conditions; refusals and permissions both demonstrated"
+  echo "wsguard-selftest: PASS — $arms_run arms (floor $EXPECT_ARMS), $checks_run post-conditions (floor $EXPECT_CHECKS); refusals and permissions both demonstrated"
   exit 0
 fi
 
