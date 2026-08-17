@@ -146,7 +146,11 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # 283 + 3 for the banned-path tree sweep at the foot of this file (the sweep
 # itself, and the planted positive that makes its zero a reading). Summed onto
 # the previous committed value, not read off a run.
-EXPECTED_TOTAL=286
+# 286 + 2 for the sweep's own stderr and exit-status checks. The first version
+# of that sweep ended `2>/dev/null || true`, which discarded both, so a grep
+# that FAILED produced the same empty output as a grep that found nothing.
+# Summed, not read off a run.
+EXPECTED_TOTAL=288
 
 failures=0
 assertions=0
@@ -3848,7 +3852,35 @@ _banned_path="/health""z"
 # today, so this changes no current result - it means the gate keeps working if
 # that stops being true. Adding -z or -0 here to "harden" the list would switch
 # engines mid-gate, which is the opposite of hardening.
-_sweep() { [[ $# -ge 2 ]] && /usr/bin/grep -lF -- "$1" "${@:2}" 2>/dev/null || true; }
+# STDERR IS CAPTURED AND PUBLISHED, NOT SUPPRESSED, AND THE EXIT STATUS IS KEPT.
+# The first version of this line was `... 2>/dev/null || true`, and it was
+# FAIL-OPEN: grep exits 0 on a match, 1 on none and >=2 on an error, so an
+# unreadable file or a too-long argument list produced an empty stdout, a
+# discarded status and a discarded diagnostic - indistinguishable, byte for
+# byte, from a clean absence. The gate would have printed "appears in 0 of 41
+# files" and passed. `0 lines of stderr` is a finding; a suppressed stream is
+# not. Both sweeps below append here and both statuses are asserted afterwards.
+# Both call sites redirect to a FILE rather than into $(...) or < <(...), and
+# that is required, not tidiness. MEASURED: with the tree sweep behind a process
+# substitution, mapfile returned before the subshell's status append landed, and
+# the status file held 1 line where 2 invocations had run. Redirecting to a file
+# runs the function in THIS shell, so $? is the parent's and there is no write
+# to race. The count assertion below is what caught it - it demanded exactly 2
+# and got 1 - which is the whole argument for pinning an absolute count instead
+# of checking that the statuses seen so far look acceptable.
+_sweep_err="$(mktemp)"; _sweep_rc="$(mktemp)"; _sweep_out="$(mktemp)"
+# `|| _rc=$?` rather than `|| true`: this file runs under `set -euo pipefail`,
+# where grep's perfectly normal exit 1 for "no match" would abort the script.
+# That pressure is what produced the original `|| true`, and `|| true` is what
+# threw the status away. Putting grep on the left of `||` suspends errexit for
+# it AND keeps the number, so the guard and the reading survive together.
+_sweep() {
+  local _rc=0
+  if [[ $# -lt 2 ]]; then printf '99\n' >>"$_sweep_rc"; return 0; fi
+  /usr/bin/grep -lF -- "$1" "${@:2}" 2>>"$_sweep_err" || _rc=$?
+  printf '%s\n' "$_rc" >>"$_sweep_rc"
+  return 0
+}
 
 # THE NEEDLE'S IDENTITY, PINNED. Measured 2026-08-17: with the needle mutated
 # to a different assembled-from-parts string, this whole block passed 285/285
@@ -3871,7 +3903,17 @@ fi
 # 2026-08-17 over this chart:
 #   total files, all depths            41
 #   .gitignore  at any depth            0      .ugrep at any depth   0
-#   directories named .git              0      non-text files        0 of 41
+#   directories named .git              0
+# The row that USED to sit here said "non-text files 0 of 41", counted with a
+# -Il census, and it is withdrawn rather than corrected: "binary" under the
+# wrapper is a verdict on a (file, pattern) PAIR, not on a file, so a census
+# taken with one pattern cannot clear a sweep run with another. Measured
+# elsewhere in the fleet: a \377\376 file with NO NUL byte is called text by
+# one and dropped by the other, in both directions. The right statement is not
+# a cleaner census, it is that THIS GATE IS NOT EXPOSED TO THAT FILTER AT ALL -
+# it calls /usr/bin/grep, which has no -I unless asked, and stock grep -l does
+# report a match inside a high-byte file. The encoding question belongs to the
+# wrapped engine and this gate does not use it.
 #   .helmignore at any depth            1      (helm-only, not a grep input)
 #   positive control -name Chart.yaml   1      FIRES
 # None of it can reach this gate anyway - no traversal, stock binary, explicit
@@ -3885,9 +3927,21 @@ _tree_n="${#_tree[@]}"
 # Non-emptiness is not a denominator: a sweep over one file is non-empty and
 # proves nothing. find and git enumerate the tree by unrelated means, so a
 # disagreement means one of them is not seeing the chart.
-_git_n="$(git -C "$CHART_DIR" ls-files 2>/dev/null | wc -l)"
+# `if _git_list=$(...)` and not `_git_n=$(git ... | wc -l)`. MEASURED: the
+# pipeline form made the meta_failure below UNREACHABLE. Under `set -euo
+# pipefail` a git that exits 128 - which is what git does outside a work tree -
+# takes the whole script down at that line, so the branch written to report
+# "git could not enumerate the chart" could never run. Tested by pointing the
+# gate at a non-repo copy: rc=128, output stopped mid-gate, no diagnostic.
+# An `if` suspends errexit, and git's stderr is kept and printed in the failure
+# rather than discarded, because the reason git could not read the tree is the
+# whole content of that report.
+_git_err="$(mktemp)"; _git_n=0
+if _git_list="$(git -C "$CHART_DIR" ls-files 2>"$_git_err")"; then
+  [[ -n "$_git_list" ]] && _git_n="$(printf '%s\n' "$_git_list" | wc -l)"
+fi
 if [[ "$_git_n" -eq 0 ]]; then
-  meta_failure "git could not enumerate the chart, so the tree sweep below has no independently-derived denominator and its zero would be unfalsifiable."
+  meta_failure "git could not enumerate the chart, so the tree sweep below has no independently-derived denominator and its zero would be unfalsifiable. git said: $(tr '\n' ' ' <"$_git_err")"
 elif [[ "$_tree_n" -lt "$_git_n" ]]; then
   meta_failure "find saw $_tree_n files and git tracks $_git_n; the sweep below is reading a smaller tree than the chart and any zero it returns is a property of the aperture."
 fi
@@ -3897,19 +3951,42 @@ fi
 # sweep that cannot be shown to fire at all is not a measurement in the first
 # place.
 _probe="$(mktemp)"; printf 'livenessProbe: %s\n' "$_banned_path" >"$_probe"
-if [[ "$(_sweep "$_banned_path" "$_probe" | wc -l)" -eq 1 ]]; then
+_sweep "$_banned_path" "$_probe" >"$_sweep_out"
+if [[ "$(wc -l <"$_sweep_out")" -eq 1 ]]; then
   pass "the banned-path sweep fires on a planted occurrence, so its zero below is a reading and not a silence"
 else
   fail "the banned-path sweep did not fire on a file that contains the banned path - every absence it reports is vacuous"
 fi
 rm -f "$_probe"
 
-mapfile -t _hits < <(_sweep "$_banned_path" "${_tree[@]}")
+_sweep "$_banned_path" "${_tree[@]}" >"$_sweep_out"
+mapfile -t _hits <"$_sweep_out"
 if [[ "${#_hits[@]}" -eq 0 ]]; then
   pass "the banned readiness literal appears in 0 of $_tree_n files in the chart tree ($_git_n tracked)"
 else
   fail "the banned readiness literal appears in ${#_hits[@]} of $_tree_n files: ${_hits[*]}. The readiness path is /readyz; this literal must not ship, and VALIDATION.md ships."
 fi
+
+# THE TWO ASSERTIONS THAT MAKE THE ZERO ABOVE MEAN ANYTHING. Without these the
+# sweep reports absence whether it read 41 files or none of them.
+_err_lines="$(wc -l <"$_sweep_err")"
+if [[ "$_err_lines" -eq 0 ]]; then
+  pass "the banned-path sweeps wrote 0 lines of stderr, so the zero above is not a diagnostic that was thrown away"
+else
+  fail "the banned-path sweeps wrote $_err_lines lines of stderr: $(tr '\n' ' ' <"$_sweep_err"). grep could not read part of the tree, so its zero is about the files it managed to open."
+fi
+
+# grep's status: 0 = matched, 1 = no match, >=2 = ERROR. 99 is this block's own
+# marker for a sweep called with no files to search. Only 0 and 1 are readings;
+# everything else is the sweep failing to run, which must not read as absence.
+_bad_rc="$(/usr/bin/grep -cvE '^[01]$' "$_sweep_rc" || true)"
+_rc_n="$(wc -l <"$_sweep_rc")"
+if [[ "$_rc_n" -eq 2 && "$_bad_rc" -eq 0 ]]; then
+  pass "both banned-path sweeps ran and exited 0 or 1 ($(tr '\n' ',' <"$_sweep_rc")) - a match and a clean absence, not an error mistaken for one"
+else
+  fail "the banned-path sweeps exited $(tr '\n' ',' <"$_sweep_rc") over $_rc_n invocations (expected exactly 2, each 0 or 1). A status of 2 or more is grep failing, and an empty result from a failed grep is not an absence."
+fi
+rm -f "$_sweep_err" "$_sweep_rc" "$_sweep_out" "$_git_err"
 
 # --------------------------------------------------------------------------
 printf '\n'
