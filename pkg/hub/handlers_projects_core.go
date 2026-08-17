@@ -2501,7 +2501,8 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	// As in deleteProject, this has to be the last read of oldSlug. The
 	// hubManagedProjectPath(oldSlug) call above re-records it on
 	// gke-shared-volume, where that resolution takes the warning path, so an
-	// eviction placed before it is undone by it.
+	// eviction placed before it is undone by it. Best-effort even here: a
+	// resolution already in flight on another goroutine can re-insert it.
 	s.warnedEphemeralProjects.Delete(oldSlug)
 }
 

@@ -465,7 +465,7 @@ func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T
 	// unfixed code, which returns the same local path without ever consulting
 	// the volume — so asserting on it is what makes this test discriminate,
 	// and it is also the only coverage the warning has.
-	assert.Contains(t, logs.String(), "served from ephemeral local path")
+	assert.Equal(t, 1, countWarningsForSlug(logs, slug))
 	assert.Contains(t, logs.String(), filepath.Join(mountBase, "workspace-vol"))
 
 	// Repeated resolutions must not repeat the warning: this runs on the
@@ -474,7 +474,7 @@ func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T
 		_, err := srv.hubManagedProjectPath(slug)
 		require.NoError(t, err)
 	}
-	assert.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"))
+	assert.Equal(t, 1, countEphemeralWarnings(logs))
 
 	// A second project must still get its own warning. Suppression is per
 	// project, not per process: with a single shared key the first project to
@@ -490,9 +490,9 @@ func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T
 		require.NoError(t, err)
 		assert.Equal(t, otherLocalDir, otherPath)
 	}
-	assert.Equal(t, 2, strings.Count(logs.String(), "served from ephemeral local path"))
-	assert.Equal(t, 1, strings.Count(logs.String(), "slug="+slug+" "))
-	assert.Equal(t, 1, strings.Count(logs.String(), "slug="+otherSlug))
+	assert.Equal(t, 2, countEphemeralWarnings(logs))
+	assert.Equal(t, 1, countWarningsForSlug(logs, slug))
+	assert.Equal(t, 1, countWarningsForSlug(logs, otherSlug))
 }
 
 // A gke-shared-volume config without a volume name has no mount point to build
@@ -835,6 +835,43 @@ func TestCheckWorkspaceStorageHealth_MountPathPerBackend(t *testing.T) {
 			assert.Equal(t, tt.want, checks["workspace_storage"])
 		})
 	}
+}
+
+// ephemeralWarnMessage is the message logged by warnEphemeralProjectPath.
+const ephemeralWarnMessage = "hub-managed project served from ephemeral local path"
+
+// countEphemeralWarnings returns how many ephemeral-path warnings were logged,
+// and countWarningsForSlug how many of those name the given slug.
+//
+// Parsed per line and per attribute rather than matched as a substring: a
+// substring match for `slug=<name> ` depends on slog attribute ORDER, so
+// reordering the attrs in warnEphemeralProjectPath would silently make these
+// assertions count zero and pass. An assertion whose whole job is to not pass
+// vacuously must not be the thing that quietly stops matching.
+func countEphemeralWarnings(logs *bytes.Buffer) int {
+	return countWarningsForSlug(logs, "")
+}
+
+func countWarningsForSlug(logs *bytes.Buffer, slug string) int {
+	n := 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, ephemeralWarnMessage) {
+			continue
+		}
+		if slug == "" {
+			n++
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if key, value, found := strings.Cut(field, "="); found && key == "slug" {
+				if strings.Trim(value, `"`) == slug {
+					n++
+				}
+				break
+			}
+		}
+	}
+	return n
 }
 
 // captureProjectsLog redirects the projects subsystem logger into a buffer the
@@ -1250,7 +1287,7 @@ func TestWarnEphemeralProjectPath_SuppressionClearedOnProjectDelete(t *testing.T
 	path, err := srv.hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	require.Equal(t, localDir, path)
-	require.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"))
+	require.Equal(t, 1, countWarningsForSlug(logs, project.Slug))
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
@@ -1258,14 +1295,14 @@ func TestWarnEphemeralProjectPath_SuppressionClearedOnProjectDelete(t *testing.T
 	// The delete resolves the slug once more to find the directory to remove.
 	// That resolution must still be suppressed, which is only true if the
 	// eviction runs after it.
-	assert.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"),
+	assert.Equal(t, 1, countWarningsForSlug(logs, project.Slug),
 		"the delete's own path resolution must not re-warn, and must not re-record the slug")
 
 	// The slug is now free and taken by a new project with local content.
 	seedLocal()
 	_, err = srv.hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
-	assert.Equal(t, 2, strings.Count(logs.String(), "served from ephemeral local path"),
+	assert.Equal(t, 2, countWarningsForSlug(logs, project.Slug),
 		"deleting the project should clear its warning suppression")
 }
 
@@ -1306,7 +1343,7 @@ func TestWarnEphemeralProjectPath_SuppressionClearedOnSlugMigration(t *testing.T
 	path, err := srv.hubManagedProjectPath(oldSlug)
 	require.NoError(t, err)
 	require.Equal(t, localDir, path)
-	require.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"))
+	require.Equal(t, 1, countWarningsForSlug(logs, oldSlug))
 
 	srv.migrateProjectSlug(t.Context(), &store.Project{
 		ID:   "rename-ephemeral-project",
@@ -1317,13 +1354,13 @@ func TestWarnEphemeralProjectPath_SuppressionClearedOnSlugMigration(t *testing.T
 	// The migration resolves the old slug on its way to renaming the directory.
 	// That resolution must still be suppressed, which is only true if the
 	// suppression is dropped after it rather than before.
-	assert.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"),
+	assert.Equal(t, 1, countWarningsForSlug(logs, oldSlug),
 		"the migration's own path resolution must not re-warn, and must not re-record the slug")
 
 	// The slug is now free and taken by another project with local content.
 	seedLocal()
 	_, err = srv.hubManagedProjectPath(oldSlug)
 	require.NoError(t, err)
-	assert.Equal(t, 2, strings.Count(logs.String(), "served from ephemeral local path"),
+	assert.Equal(t, 2, countWarningsForSlug(logs, oldSlug),
 		"migrating away from a slug should clear its warning suppression")
 }

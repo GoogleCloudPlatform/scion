@@ -165,25 +165,42 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			//
 			// This is not free, and the cost is not local. GetHealthInfo marks
 			// the whole response "degraded" on any non-healthy check value,
-			// and four consumers compare the composite status to "healthy"
-			// exactly. Setting this key therefore also:
-			//   - makes waitForServerReady (cmd/server_daemon.go) never return
-			//     true, so `scion server start` reports a 20s timeout on a
-			//     server that is up;
-			//   - leaves WebRunning/HubRunning false in `scion server status`,
-			//     which then reports the web frontend and hub API as not
-			//     detected;
-			//   - fails the `grep '"status":"healthy"'` in
-			//     scripts/starter-hub/gce-start-hub.sh, whose local and remote
-			//     health checks both exit 1;
-			//   - renders the red "unhealthy" style in the diagnostics UI,
-			//     which has no degraded class.
-			// That coupling is pre-existing and tracked in ptone/scion#1094;
-			// it is tolerated here because this branch is unreachable on the
+			// and five consumers compare that composite status to "healthy"
+			// exactly. Four consequences, listed most reachable first — this
+			// key is only ever set under a gke-shared-volume config, so a
+			// consumer's exposure depends on which deployments carry one:
+			//   - the diagnostics UI renders the red "unhealthy" style, having
+			//     no degraded class. This is the one that actually happens on a
+			//     GKE hub with this backend;
+			//   - on a workstation configured with this backend, and only
+			//     there: waitForServerReady (cmd/server_daemon.go) never
+			//     returns true, so `scion server start` stalls for its full 20s
+			//     wait and then skips the browser open with "server not yet
+			//     ready" — in an interactive non-headless terminal with web
+			//     enabled — and `scion server status` leaves WebRunning false,
+			//     reporting the web frontend as not detected. HubRunning
+			//     survives either way: the :9810 standalone fallback parses the
+			//     body without comparing the status, so a degraded standalone
+			//     hub still reads as running;
+			//   - scripts/starter-hub/gce-start-hub.sh greps for
+			//     '"status":"healthy"' and exits 1 on both its health checks.
+			//     The settings.yaml that script writes declares no
+			//     workspace_storage, and the script health-checks only the hub
+			//     it just deployed, so this clause bites only where an operator
+			//     supplies that config out of band — via the hub.env
+			//     EnvironmentFile, say, whose SCION_ overrides were not traced.
+			// The fifth comparator, handlers_health_summary.go:126, propagates
+			// degraded correctly, because the health dashboard does have a
+			// degraded class. Counted, not damage.
+			//
+			// That coupling is pre-existing and tracked in ptone/scion#1094.
+			// Tolerated here because this branch is unreachable on the
 			// platforms we ship — os.Stat always yields a *syscall.Stat_t on
 			// linux and darwin, and a container whose root cannot be stat'ed
-			// has larger problems. If it ever does become reachable, prefer
-			// logging over a check-map entry.
+			// has larger problems. Note that hedge is a PLATFORM one: if it
+			// stops holding, the consequences above go live on their own
+			// reachability, not on this one. If it ever does become reachable,
+			// prefer logging over a check-map entry.
 			checks["workspace_storage_mount_verification"] = "unavailable: could not compare filesystem device IDs"
 		}
 		checks["workspace_storage"] = "healthy"
