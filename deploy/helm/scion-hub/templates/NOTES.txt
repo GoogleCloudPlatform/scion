@@ -58,7 +58,9 @@ THE IMAGE
 
   The chart sets runAsNonRoot on the pod and on the hub container and offers no
   way to turn it off, so a root image fails admission with a clear message
-  instead of running and writing root-owned files into your workspace share.
+  instead of running. That refusal applies now; the consequence it spares you -
+  root-owned files in a workspace share that agents cannot write - arrives with
+  the Filestore phase, which this release does not include.
 {{ if not .Values.image.digest }}
   Pin the image by digest (image.digest) rather than by tag. A tag can be
   repointed underneath a running cluster; a digest cannot. This release uses a
@@ -68,8 +70,11 @@ THE IMAGE
 WHAT THIS RELEASE DOES NOT YET DO
 
   The chart is being built incrementally and this release installs the core
-  workload only. It does not yet render a settings.yaml, so the hub starts on
-  its own defaults - SQLite and local workspace storage - and it does not yet
+  workload only. It renders no server configuration, so the hub falls back to
+  its own defaults - SQLite and local workspace storage. (It does write a
+  settings.yaml for itself on first boot, from its embedded defaults, but that
+  file carries no server section, which is what leaves the defaults in force.)
+  It does not yet
   configure Cloud SQL, GCS blob storage, Filestore, a session secret, Ingress or
   IAP. Do not treat this as a production install.
 

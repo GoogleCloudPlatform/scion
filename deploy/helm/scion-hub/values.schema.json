@@ -93,7 +93,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Extra arguments APPENDED to the hub command. Appended is literal and it is the hazard: pflag is last-wins, so a flag the chart already renders would be silently replaced rather than rejected by the hub. Nothing at runtime prevents that - what prevents it is a reserved list checked at render time in scion-hub.hubArgs, which refuses the chart's own flags, flags that change which configuration the hub selects, flags that are not the lever they appear to be, flags whose value is delivered through another channel, and flags that weaken authentication. An argument naming or carrying secret material also fails the render."
+          "description": "Extra arguments APPENDED to the hub command. Appended is literal and it is the hazard: pflag is last-wins, so a flag the chart already renders would be silently replaced rather than rejected by the hub. Nothing at runtime prevents that - what prevents it is a reserved list checked at render time in scion-hub.hubArgs, which refuses the chart's own flags, flags that change which configuration the hub selects, flags that are not the lever they appear to be, flags whose value a later phase delivers through another channel, and flags that weaken authentication. An argument naming or carrying secret material also fails the render."
         },
         "resources": {
           "type": "object"
@@ -162,7 +162,7 @@
             "failureThreshold": {
               "type": "integer",
               "minimum": 1,
-              "description": "The startup budget is periodSeconds x failureThreshold, and it must be at least 300s because first boot blocks on an unbounded schema-migration advisory lock before the listener binds. THIS SCHEMA DOES NOT ENFORCE THAT: a per-field minimum cannot express a product, so JSON Schema can only keep each factor positive. The 300s minimum is enforced at render time in scion-hub.assertStartupBudget, which is where to look and where to change it."
+              "description": "The startup budget is periodSeconds x failureThreshold, and it must be at least 300s because first boot runs an ordered sequence of schema and data migration steps before the listener binds, so a pod killed part-way through leaves a partially applied migration. The 300 is a margin sized for a first boot against Cloud SQL behind the schema-migration advisory lock, which a later phase adds; it is not a measured SQLite figure. THIS SCHEMA DOES NOT ENFORCE THAT: a per-field minimum cannot express a product, so JSON Schema can only keep each factor positive. The 300s minimum is enforced at render time in scion-hub.assertStartupBudget, which is where to look and where to change it."
             },
             "timeoutSeconds": {
               "type": "integer",

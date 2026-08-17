@@ -117,14 +117,18 @@ for it, and hub.securityContext rejects unknown properties so it cannot be
 reintroduced as an override. The point is not hardening in the abstract: the
 artifact this project publishes under the name "scion-hub" runs as root, and an
 operator who reasons from the artifact name will eventually point the chart at
-it. With a loose security context that image runs, as root, and writes
-root-owned files into a share that agents running as uid 1000 cannot write -
-a failure that surfaces days later and looks like a storage problem. With
-runAsNonRoot the pod fails admission immediately and says why.
+it. With a loose security context that image runs as root, and once the Filestore
+phase mounts a shared workspace it writes root-owned files into a share that
+agents running as uid 1000 cannot write - a failure that surfaces days later and
+looks like a storage problem. The REFUSAL is present-tense even though that
+particular consequence is not: runAsNonRoot is rendered at this head, so a root
+image fails admission today, share or no share, and says why.
 
-runAsUser and runAsGroup stay configurable because they must be able to match
-the workspace share's uid and gid. Zero is rejected here as well as in the
-schema, so relaxing the schema alone cannot reopen the hole.
+runAsUser and runAsGroup stay configurable because they must be able to match the
+uid and gid of the workspace share a later phase mounts. Zero is rejected here as
+well as in the schema, so relaxing the schema alone cannot reopen the hole. THE
+TWO ZEROES ARE REFUSED FOR DIFFERENT REASONS AND ONLY ONE OF THEM BITES TODAY;
+the fail messages below say which is which rather than sharing one justification.
 */}}
 {{- define "scion-hub.nonRootSecurityContext" -}}
 {{- $uid := int .Values.hub.securityContext.runAsUser }}
@@ -133,7 +137,7 @@ schema, so relaxing the schema alone cannot reopen the hole.
 {{- fail "hub.securityContext.runAsUser may not be 0: the hub always runs with runAsNonRoot, so uid 0 would fail pod admission rather than grant root." }}
 {{- end }}
 {{- if eq $gid 0 }}
-{{- fail "hub.securityContext.runAsGroup may not be 0: files the hub writes to the workspace share would be group 0 and unwritable by agents." }}
+{{- fail "hub.securityContext.runAsGroup may not be 0: that makes the hub's primary group root. This chart mounts no shared volume yet, so the concrete harm - files written to the workspace share landing as group 0 and unwritable by agents running as gid 1000 - arrives with the Filestore phase. It is refused now rather than then because THE VALUE OUTLIVES THE PHASE: a 0 set here today stays in the operator's values file through the upgrade that mounts the share, and by then it surfaces as unwritable agent workspaces days later instead of as this message." }}
 {{- end -}}
 runAsNonRoot: true
 runAsUser: {{ $uid }}
@@ -223,21 +227,45 @@ stops the reader thinking: an operator lowering periodSeconds for faster
 readiness detection reads "at least 60", sees failureThreshold: 60 untouched, and
 has cut the first-boot budget by 80% with nothing to tell them.
 
-Why 300 seconds: first boot blocks on an unbounded schema-migration advisory lock
-before the listener binds. Killing the pod during that leaves a partially applied
-migration, so the retry starts from a different state than the attempt before it
-and the failure stops being reproducible.
+WHY 300 SECONDS. THE HARM HAS TWO HALVES AND ONLY ONE OF THEM IS PRESENT-TENSE ON
+THIS CHART. Each is written in its own tense, because an earlier version of this
+paragraph gave the Cloud SQL half as the live justification and the round-4
+axis-(d) sweep caught it: the number was being defended by a mechanism this chart
+never reaches.
 
-BOTH HALVES OF THAT ARE IN SOURCE, cited because a refusal must encode a harm and
-the harm has to be findable without re-deriving it. The lock is a BLOCKING
-pg_advisory_lock(LockSchemaMigration) taken before Migrate returns and therefore
-before the hub serves - cmd/server_foreground.go:1168-1200. "Partially applied" is
-not an inference from the word migration: CompositeStore.Migrate
-(pkg/store/entadapter/composite.go:179-227) is an ordered SEQUENCE - a scope_id
-backfill, a dedup, entc.AutoMigrate, an allowlist-to-invited data migration, a
-verification-status backfill, a seed - with in-source comments stating that the
-order matters. A kill lands between two of those steps, not before or after all
-of them.
+  PRESENT TENSE, ON THIS CHART, TODAY - THE ORDERED SEQUENCE. First boot runs a
+  sequence of schema and data migration steps before the listener binds, and a
+  kill lands BETWEEN two of them. "Partially applied" is not an inference from the
+  word migration: CompositeStore.Migrate (pkg/store/entadapter/composite.go:179-227)
+  is a null-scope_id backfill, a dedup, entc.AutoMigrate, an allowlist-to-invited
+  data migration, a verification-status backfill and a seed, with in-source
+  comments at :180-184 and :202-205 stating that the order matters and why. The
+  retry then starts from a different state than the attempt before it, and the
+  failure stops being reproducible. THIS HALF RUNS ON SQLITE: migrateStore
+  (cmd/server_foreground.go:1168-1170) returns s.Migrate(ctx) directly for every
+  driver that is not postgres, and this chart's driver IS sqlite - it renders no
+  --db, so the default at pkg/config/hub_config.go:540 stands.
+
+  THE CLOUD SQL PHASE, NOT THIS ONE - THE BLOCKING LOCK. pg_advisory_lock is not
+  taken here and cannot be. The postgres branch of migrateStore is its only
+  caller, pkg/provision/provision.go's Locker is documented as "on SQLite it's a
+  no-op (single-writer serializes already)", and composite.go:221-223 says the
+  same thing from the other side. When the Cloud SQL values land the lock becomes
+  real, the wait becomes unbounded in the way a lock is unbounded, and 300s stops
+  being a margin and starts being a bound. RE-DERIVE IT THERE.
+
+  This is the same treatment updateStrategyType gets below, for the same reason: a
+  harm that arrives with a later phase is written in that phase's tense, or it is
+  read as a present-tense claim and audited as false.
+
+SO WHAT IS THE 300 ITSELF? A MARGIN, NOT A MEASUREMENT, and it says so rather than
+being left to look like one. Nothing in this tree derives 300s from a timed SQLite
+migration, and on an empty SQLite database the sequence above is fast. The number
+is sized for the case the chart is being built toward - a first boot against a
+cold Cloud SQL instance, behind that lock - and it costs the SQLite case nothing,
+because a healthy hub passes the startup probe on the first or second check and
+never approaches the budget. What the guard buys today is that nobody shrinks the
+budget quietly while the phases that will need it are still being added.
 
 DISABLING THE STARTUP PROBE IS PERMITTED ONLY WHILE THE LIVENESS PROBE IS OFF,
 which is a real distinction and not a loophole. A startup probe's job is to hold
@@ -253,7 +281,7 @@ hub mid-migration, which is the exact failure the budget exists to prevent.
 {{- if $startup.enabled }}
 {{- $budget := mul (int $startup.periodSeconds) (int $startup.failureThreshold) }}
 {{- if lt $budget 300 }}
-{{- fail (printf "the startup budget is too short: probes.startup.periodSeconds (%d) x probes.startup.failureThreshold (%d) = %ds, and the minimum is 300s. The budget is the PRODUCT, so raising one factor or the other is equally valid - the schema can only bound each separately, which is why this is checked here. First boot blocks on an unbounded schema-migration advisory lock before the listener binds; a pod killed during it leaves a partially applied migration, and the retry starts from a different state than this attempt did." (int $startup.periodSeconds) (int $startup.failureThreshold) (int $budget)) }}
+{{- fail (printf "the startup budget is too short: probes.startup.periodSeconds (%d) x probes.startup.failureThreshold (%d) = %ds, and the minimum is 300s. The budget is the PRODUCT, so raising one factor or the other is equally valid - the schema can only bound each separately, which is why this is checked here. First boot runs an ordered sequence of schema and data migration steps before the listener binds (CompositeStore.Migrate), so a pod killed part-way through leaves a partially applied migration and the retry starts from a different state than this attempt did. The 300s itself is a margin rather than a measurement: it is sized for a first boot against Cloud SQL behind the schema-migration advisory lock, which a later phase adds. On this chart's SQLite default a healthy hub is ready long before the budget matters, so shortening it buys nothing and removes the margin." (int $startup.periodSeconds) (int $startup.failureThreshold) (int $budget)) }}
 {{- end }}
 {{- else if $liveness.enabled }}
 {{- fail "probes.startup.enabled is false while probes.liveness.enabled is true. The startup probe is what holds the liveness probe off until the hub is up, so this combination points a killing probe at a hub that is still running its first-boot schema migration. Either leave the startup probe enabled, or disable the liveness probe - with liveness off, no probe can kill the pod and readiness simply stays false until the migration finishes." }}
@@ -573,33 +601,101 @@ Exactly one list is.
 
    --config AND -c: READ THIS BEFORE YOU CHANGE OR CHECK IT. It reaches exactly
    one place on this command's path: config.LoadGlobalConfig(serverConfigPath),
-   cmd/server_foreground.go:827, via cmd/server.go:237. Two loaders sit behind
-   that call and the flag behaves differently in each.
+   cmd/server_foreground.go:827, via cmd/server.go:237.
 
-   loadGlobalConfigFromSettings (pkg/config/hub_config.go:640-660) reads the
-   GLOBAL $HOME/.scion/settings.yaml first and unconditionally. If that file
-   carries a server key the function returns and the --config path is NEVER READ.
-   The condition is exact and it is the hinge: loadServerFromSettingsFile (:1331)
-   reports found only when the file parses AND raw["server"] is non-nil
-   (:1344-1347). "Non-nil", not "present" - "server: ~" parses, has the key, and
-   is NOT found.
+   THE STATE OF THIS FLAG, IN THE ONLY FORM THAT STAYS TRUE:
 
-   loadGlobalConfigLegacy (:699+) is reached only when no settings.yaml server
-   key was found. It loads the global ~/.scion/server.yaml and then LAYERS the
-   --config path on top as local config (:778-785). AN OVERLAY, NOT A REDIRECT -
-   the distinction matters, because a mitigation scoped to "prevent redirection"
-   does not cover an overlay.
+     LIVE   while the GLOBAL settings document has no non-nil top-level server:
+            key. That is Phase 0, this commit.
+     INERT  from the moment it has one. That is what the configuration phase is
+            for.
+     RESERVED IN BOTH STATES, which is the whole reason this entry is written as
+            a state machine rather than as a description.
 
-   So, TODAY, on this chart as it stands: this phase mounts nothing at
-   $HOME/.scion, the settings read returns not-found, and a --config file WOULD
-   be layered over the hub's configuration. Once the configuration phase mounts a
-   settings.yaml with a non-nil top-level server: key, the same flag is accepted
-   and does nothing at all.
+   READ THIS PARAGRAPH AND YOU MAY STOP: WHY THE ENTRY DOES NOT DEPEND ON ANY OF
+   THE MECHANISM BELOW. Five separate readings of this flag have been asserted
+   confidently and wrongly in a single day, and the reservation was correct under
+   every one of them, because A RESERVED FLAG REFUSES THE FLAG INSTEAD OF
+   REASONING ABOUT ITS EFFECT. Everything after this paragraph is an explanation;
+   none of it is load-bearing for the refusal. That is deliberate, and it is the
+   answer to the maintainer who audits this list by auditing effects: you will
+   keep finding the effect description imperfect, and THE ENTRY DOES NOT REST ON
+   THE EFFECT DESCRIPTION. It also covers a moving target - a mitigation scoped to
+   "prevent redirection" does not cover an overlay, and one scoped to "prevent an
+   overlay" does not cover a sole-source substitution, and this flag does two of
+   those three depending on which loader is reached.
+
+   THE TRANSITION IS THE server: KEY. NOT THE EXISTENCE OF A FILE, NOT WHO WROTE
+   THE FILE, NOT WHETHER THIS CHART MOUNTS ONE. Three separate corrections
+   collapsed into that one sentence and each of them was a confident wrong answer
+   first, so the reasons are worth keeping:
+
+     - loadServerFromSettingsFile (pkg/config/hub_config.go:1331-1347) reads the
+       file and then tests raw["server"] for present AND NON-NIL. It never asks
+       whether the file exists as a separate question, and "server: ~" parses,
+       has the key, and is still not found.
+     - A GLOBAL settings.yaml ALREADY EXISTS AT PHASE 0. This chart delivers no
+       ConfigMap and no Secret, but the hub writes one before it reads one:
+       cmd/server_foreground.go:107 calls config.InitGlobal, seeded from
+       pkg/config/embeds/default_settings.yaml - which carries schema_version,
+       active_profile, default_template, default_harness_config, image_registry,
+       cli, runtimes and profiles, AND NO server KEY. So "the chart ships no
+       settings file" is true and is NOT the reason; the reason is that the file
+       which does exist has no server key.
+     - AND "the hub always creates it" IS NOT DURABLE EITHER. InitGlobal is
+       guarded at cmd/server_foreground.go:104 by os.Stat(globalDir) /
+       os.IsNotExist. It fires only when $HOME/.scion is absent. A phase that
+       mounts a volume there skips the seeding entirely and the contents become
+       whatever the volume holds. Phase 0's answer does not move - an empty
+       mounted directory still has no server key - but a comment keyed off the
+       file would.
+
+   THREE VALUES, NOT TWO. Reading the flag as binary is what produced two of the
+   wrong answers above. In order of evaluation:
+
+     :647  The GLOBAL settings.yaml is read FIRST and unconditionally. A non-nil
+           server key here wins and the --config path is NEVER READ. This is the
+           Phase 1 state.
+
+     :648-659  ROUTE A - SOLE-SOURCE SUBSTITUTION, and it is NOT an overlay. When
+           the global read finds nothing, and --config is set and stat-able, the
+           DIRECTORY of the --config path is searched for a settings.yaml, and a
+           non-nil server key found there is returned as the server config, built
+           from that file ALONE (ConvertV1ServerToGlobalConfig, :1360). This is
+           what an operator pointing --config at a directory actually hits, and it
+           fires BEFORE the overlay below.
+
+           A detail of route A worth its own sentence, because it is the kind that
+           produces an unfalsifiable bug report: IT DOES NOT READ THE FILE THE
+           OPERATOR NAMED. :651-656 stats the path and takes filepath.Dir of it
+           when it is not a directory, then appends settings.yaml. So
+           --config /etc/scion/myserver.yaml reads /etc/scion/settings.yaml, a
+           file the operator never mentioned, and ignores the one they did.
+
+     :699, :772-788  ROUTE B - THE OVERLAY, reached only when route A also finds
+           nothing. loadGlobalConfigLegacy loads embedded defaults, then the
+           global ~/.scion/server.yaml (:773-775), then LAYERS the --config path
+           on top (:778-787). Here a directory means server.yaml or server.yml
+           (loadServerConfigFile, :1314-1322) while a file is loaded verbatim
+           (:785) - so THE SAME FLAG VALUE SELECTS A DIFFERENT FILENAME IN ROUTE A
+           THAN IN ROUTE B.
+
+   Bigger than an overlay, smaller than "the whole configuration load moves",
+   which is what this comment claimed for three rounds.
 
    AND IT GOES INERT IN COMPLETE SILENCE, WHICH IS THE REASON A RESERVED FLAG IS
    THE ONLY GUARD AVAILABLE. There is no deprecation warning on --config and no
-   log line of any kind: MarkDeprecated on server start covers only "production"
-   (cmd/server.go:236, :290), and --config is a plain StringVarP at :237. The
+   log line of any kind. --config is a plain StringVarP at cmd/server.go:237 and
+   carries no MarkDeprecated anywhere. Exactly two flags reachable on server start
+   do carry one: "production", marked on serverStartCmd itself at cmd/server.go:236,
+   and "grove", marked on rootCmd's PERSISTENT flags at cmd/root.go:251 and so
+   inherited here. An earlier version of this sentence read "MarkDeprecated on
+   server start covers only production (cmd/server.go:236, :290)" and was wrong
+   twice in one clause - it missed the inherited --grove, and :290 is that same
+   mark on serverInstallCmd, a DIFFERENT COMMAND, offered as though it were a
+   second site on this one. Neither error touches the conclusion about --config,
+   which is exactly why it survived three readings: A CITATION THAT FAILS IN A
+   PLAUSIBLE WAY IS WORSE THAN ONE THAT FAILS OBVIOUSLY. The
    only two warnings anywhere on this path (pkg/config/hub_config.go:668 and
    :678) fire on server.yaml coexisting with settings.yaml and are not about
    --config at all. An earlier version of this comment claimed a deprecation
@@ -614,22 +710,32 @@ Exactly one list is.
    force is the global one. The only diagnostic available reads as confirmation
    that their file was loaded.
 
-   That reversal is the durable reason to reserve it: the flag's effect is a
-   property of WHAT THIS CHART RENDERS rather than of the binary, so any phase can
-   turn it live or inert again without touching this file or this list, and a
-   reservation is the only form of that knowledge which survives the change.
+   THE STATE IS A PROPERTY OF THE DEPLOYED CONFIGURATION, NOT OF THE BINARY, which
+   is why the reservation outlives every reading of the flag: any phase can move it
+   between LIVE and INERT without touching this file, this list, or cmd/. A
+   reservation is the only form of this knowledge that survives that move, because
+   it does not depend on which state is current.
 
-   NOTHING ABOVE IS A STATEMENT ABOUT A LATER PHASE. Everything in the two
-   paragraphs above is true of what this chart renders at THIS commit, where no
-   settings.yaml exists and the overlay is live. The requirement the "inert" half
-   places on the configuration phase - render a top-level server: key that is a
-   MAP, since a present-but-nil key is not what loadServerFromSettingsFile tests -
-   is a requirement stated here, not an observation of code that exists here.
+   WHAT THE INERT HALF REQUIRES OF THE CONFIGURATION PHASE - stated here as a
+   requirement, not as an observation of code that exists at this commit: the
+   GLOBAL settings document must carry a top-level server: key that is a MAP.
+   Nesting it under a profile, renaming it, splitting it across two files, or
+   emitting it as an empty key all leave --config LIVE while this comment would say
+   inert. That is the failure this entry cannot catch for you, because by then the
+   flag is refused at render time and the settings file is wrong in a way no render
+   inspects.
 
-   Both readings of this flag were asserted confidently and wrongly today - once
-   as "redirects the entire configuration load", once as "no-ops with a
-   deprecation warning". Check which tree you are in, and read the loader you are
-   actually in, before correcting this comment again.
+   FIVE READINGS OF THIS FLAG HAVE BEEN ASSERTED CONFIDENTLY AND WRONGLY, ALL IN
+   ONE DAY: "redirects the entire configuration load"; "no-ops with a deprecation
+   warning"; "the chart mounts nothing, so no settings file exists"; "the hub
+   creates one on every boot"; and "it overlays" - each an improvement on the last
+   and each still wrong. THE SHAPE THEY SHARE IS WHY THEY SURVIVED: every one of
+   them reaches the correct conclusion, that the flag must be refused, so checking
+   the conclusion returns "yes" and confirms the reason on the way past.
+   AGREEMENT ON A CONCLUSION IS NOT CORROBORATION OF ITS REASON. If you are about
+   to correct this paragraph a sixth time, compare derivations with whoever you
+   agree with, not answers - that is the only comparison that has ever caught one
+   of these.
 
    --project, -g, --grove, --profile and -p: THE REASON HERE IS DIFFERENT AND
    WEAKER THAN THE ONE THIS COMMENT USED TO GIVE, and it is written out rather
@@ -642,7 +748,8 @@ Exactly one list is.
    The hub's server configuration is not reachable from any of them.
 
    What --project/-g/--grove DO do on this command, traced from the flag
-   declaration outward: they set projectPath (cmd/root.go:248-250), and
+   declaration outward: they set projectPath (cmd/root.go:249-250 - :248 is
+   rootCmd.Long, not a flag declaration), and
    PersistentPreRunE passes projectPath to config.LoadSettings at cmd/root.go:123
    and config.LoadEffectiveSettings at :129 for EVERY command, server start
    included. Those two select which project's settings.yaml supplies cli.autohelp
@@ -671,6 +778,14 @@ Exactly one list is.
    operators do want. If you disagree, MOVE IT, DO NOT DELETE IT, and name the
    list it lands in - $aliasOrIgnored is where an inert-but-plausible flag goes,
    which is where --port sits for the same reason.
+
+   THE TRIGGER THAT WOULD MAKE --profile/-p A STRONG ENTRY, named here so nobody
+   has to re-derive the weakness to find out whether it still holds: any phase
+   that adds a profile-aware consumer to the SERVER path, or that passes profile
+   into config.LoadSettings or config.LoadEffectiveSettings. Either one turns this
+   into an ordinary $neverPassed entry with the same reason as --project, and this
+   paragraph should then be deleted rather than softened. Until one of them
+   happens the entry is weak and is to be described as weak.
 
    Note that --global is NOT here. The chart renders it, so it is in $setByChart,
    which rejects it just as absolutely. Its hazard is its own and is not the
@@ -705,15 +820,36 @@ Exactly one list is.
 {{- $aliasOrIgnored := list "production" "port" }}
 
 {{- /*
-4. The chart already delivers these settings through a channel other than argv,
-   so passing them here creates a second source for one value. Not verifiable
-   against the rendered arguments, by construction - the rendered argument list
-   is where these must NOT appear. Check them against the other channel.
+4. A LATER PHASE DELIVERS THESE THROUGH A CHANNEL OTHER THAN argv, AND argv WINS
+   OVER IT SILENTLY. The tense is the correction from round 4 and it is the whole
+   point of this paragraph. This comment used to open "the chart ALREADY delivers
+   these settings through a channel other than argv", WHICH IS FALSE AT THIS HEAD:
+   the chart renders no ConfigMap, no Secret, no env, no envFrom and no volumes,
+   so it delivers none of these five through any channel whatsoever. Four of them
+   - db, storage-bucket, storage-dir, base-url - are fully LIVE on argv today
+   (cmd/server_foreground.go:875-877, :889-891, :892-894, :2102) and would simply
+   take effect if passed. There is no second source yet for anything to disagree
+   with.
+
+   ALL FIVE STAY RESERVED, AND NOT BY INERTIA. Before removing an entry, name
+   where it lands instead - and none of them lands anywhere. They are not rendered
+   ($setByChart), they do not select which configuration is loaded ($neverPassed),
+   they are neither inert nor misnamed ($aliasOrIgnored), and they do not weaken
+   authentication ($unsafeToPass). The harm is real and arrives on a known
+   schedule: when the configuration phase lands, an argv copy added today becomes
+   the silent winner over the channel that phase delivers, and nothing logs the
+   disagreement. The asymmetry is what decides it - reserving now costs an
+   operator a flag they have no reason to want and un-reserving later is a
+   deliberate act with a place to record itself (see the closing paragraph),
+   whereas reserving after the fact requires somebody to notice.
+
+   Not verifiable against the rendered arguments, by construction - the rendered
+   argument list is where these must NOT appear. Check them against the channel.
 
    NAME THE CHANNEL WHEN YOU ADD AN ENTRY, because it is not the same channel
    for every entry and the precedence differs. admin-emails, db, storage-bucket
-   and storage-dir are delivered through the settings file. base-url is
-   delivered as the SCION_SERVER_BASE_URL environment variable.
+   and storage-dir are destined for the settings file. base-url is destined for
+   the SCION_SERVER_BASE_URL environment variable.
 
    Precedence for base-url, read from the hub rather than assumed, because "two
    sources" only matters if one of them silently loses:
@@ -736,17 +872,97 @@ Exactly one list is.
    phase may still choose argv as the delivery channel for base-url, and this
    list is where it says so: move the entry, do not add a second emitter beside
    the existing one. --config is the one flag that CANNOT be promoted this way,
-   which is why it sits in $neverPassed instead: the configuration phase delivers
-   a settings.yaml with a server key, and that file is precisely the condition
-   under which --config stops being read (see the $neverPassed comment). Choosing
-   it as a delivery channel would disable it.
+   which is why it sits in $neverPassed instead: the condition under which
+   --config stops being read is a non-nil top-level server: key in the global
+   settings document, and that key is exactly what the configuration phase
+   delivers (see the $neverPassed comment). Choosing --config as a delivery
+   channel would disable it.
 */}}
 {{- $ownedByConfig := list "admin-emails" "base-url" "db" "storage-bucket" "storage-dir" }}
 
 {{- /*
 5. These weaken authentication or place credentials where they can be read.
+
+   PER-ENTRY, WITH THE EFFECT TRACED, because "unsafe" was the entire stated
+   reason for four flags until round 4 and an unexplained reservation is the kind
+   that gets deleted by whoever first wants the flag. All four are declared on
+   serverStartCmd, so all four reach this command.
+
+   ALL FOUR ARE LIVE AT THIS HEAD. Unlike $ownedByConfig above, nothing here is
+   forward-looking: each of these takes effect today, on this chart, as rendered.
+
+   --session-secret (cmd/server.go:275) is the signing key for the web session
+   cookie store and the hub's JWT signing keys. Two harms, not one. It is a
+   credential on argv, readable by anyone who can read the pod spec - which the
+   credential guard below would also catch, but only if the operator's value
+   happens to look like a credential, and a passphrase does not. And it PRE-EMPTS
+   the delivery channel: resolveSessionSecret (cmd/server_foreground.go:1452-1456)
+   takes the flag first and only falls back to SCION_SERVER_SESSION_SECRET, so an
+   argv value silently outranks the Secret-backed environment variable a later
+   phase mounts.
+
+   --dev-auth (cmd/server.go:251) IS A DIRECT WRITE TO cfg.Auth.Enabled AT
+   cmd/server_foreground.go:884-886, AND THE DANGEROUS DIRECTION IS TRUE, NOT
+   FALSE. Worth stating explicitly because the natural reading is backwards. The
+   workstation defaults that would turn dev auth on (applyWorkstationDefaults,
+   cmd/server_config.go:35-37, and the assignment at server_foreground.go:843) are
+   BOTH inside an if !hostedMode block, and this chart renders --hosted, so they
+   do not run: cfg.Auth.Enabled is false here and --dev-auth=false merely restates
+   the default. Passing --dev-auth (or =true) is what changes something - it
+   satisfies the gate at :212 and initialises dev-token authentication in a hosted
+   deployment, standing an auto-generated static token up beside the real identity
+   path. That one is not silent (:216-217 logs a warning in hosted mode), but a
+   warning in a log nobody reads is not a control, and a render error is.
+
+   --enable-test-login (cmd/server.go:252) is wired to the web server at
+   cmd/server_foreground.go:2163 and registers POST /api/v1/auth/test-login
+   (pkg/hub/web.go:747). The route is always mounted and the flag is the gate:
+   pkg/hub/handlers_test_login.go:52-55 returns 403 unless it is set, after which
+   the handler mints a user session behind a challenge token rather than the
+   configured identity provider. Also warned about at :2167-2168, and the same
+   answer applies.
+
+   --web-assets-dir (cmd/server.go:274) replaces the embedded web UI with a
+   directory served straight off the container filesystem: pkg/hub/web.go:497
+   stores it and :832-833 hands it to http.FileServer(http.Dir(...)). It is here
+   rather than in $ownedByConfig because the hazard is not a second source for a
+   value - it is that the served asset tree stops being the audited one that was
+   built into the image.
 */}}
 {{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" }}
+
+{{- /*
+ADJUDICATED AND DELIBERATELY NOT RESERVED. The five lists above say what is
+refused; a reader auditing them for COMPLETENESS needs to know which flags were
+considered and let through, or they re-derive the same six every time. Round 4
+raised these by name. None is reserved, and the ground is given per flag rather
+than as one blanket sentence, because a blanket sentence is what would survive a
+change that falsified it.
+
+  --no-auto-migrate (cmd/server.go:244). RAISED AS THE ONE MOST LIKELY TO
+    INTERACT WITH THE STARTUP BUDGET. IT DOES NOT, and that is the finding, not
+    an absence of one: it gates only the in-process upgrade of a LEGACY raw-SQL
+    hub.db to the Ent schema (cmd/server_foreground.go:1263-1266, which errors out
+    when it finds one and the flag is set). CompositeStore.Migrate - the ordered
+    sequence assertStartupBudget is written against - is not behind it and runs
+    either way. A fresh GKE pod has no legacy hub.db, so the flag is inert here.
+  --debug (cmd/server.go:255). Logging verbosity. Note it SHADOWS the persistent
+    --debug at cmd/root.go:267: a local flag of the same name wins, so this sets
+    enableDebug and not debugMode. Harmless either way, and recorded only so the
+    duplicate is not mistaken for a finding later.
+  --runtime-broker-port (cmd/server.go:248). Sets cfg.RuntimeBroker.Port
+    (server_foreground.go:881-883). The chart renders --enable-runtime-broker but
+    no port, exposes no broker port on the Service and points no probe at one, so
+    moving it stays internally consistent inside the pod.
+  --template-cache-dir, --template-cache-max (cmd/server.go:262-263). Cache
+    location and size. No auth, config-selection or credential surface.
+  --simulate-remote-broker (cmd/server.go:266). Test-path selector that skips
+    co-located optimisations. Degrades performance, weakens nothing.
+
+IF YOU ARE ADDING TO THIS BLOCK, the bar is the one axis (d) sets: a flag stays
+off the reserved lists when no harm was FOUND, not when none was looked for. Say
+which it was.
+*/}}
 
 {{- /*
 THE INVARIANT THAT MAKES $setByChart SELF-CHECKING, IN BOTH DIRECTIONS.
@@ -847,22 +1063,30 @@ would be a third thing to keep in step with the command.
 {{- end }}
 {{- /*
 Lowercased before the lists are consulted: pflag is case-sensitive, so --CONFIG
-would crash-loop as an unknown flag rather than redirect the config load. This
-turns that crash-loop into a render error. The name axis lowercases too, and did
-before this did, which is how the inconsistency was found.
+would crash-loop as an unknown flag rather than reach either loader. This turns
+that crash-loop into a render error. The name axis lowercases too, and did before
+this did, which is how the inconsistency was found.
+
+"Rather than reach either loader" is doing deliberate work and replaced "rather
+than redirect the config load". The old wording used the one verb the $neverPassed
+comment 260 lines above spends four paragraphs establishing is wrong, so the file
+contradicted itself and the next reader would have resolved it in whichever
+direction was less work. Naming the routes instead of picking a verb is the fix
+that stays correct: --config reaches a sole-source substitution on one path and an
+overlay on the other, and no single verb covers both.
 */}}
 {{- $flag := lower (trimPrefix "-" (trimPrefix "--" (first (splitList "=" $arg)))) }}
 {{- if has $flag $setByChart }}
 {{- fail (printf "hub.args may not contain -%s: the chart renders it, and pflag is last-wins, so this would silently replace the chart's value rather than conflict with it - disabling hosted mode, unbinding the listener, taking the daemon fork so PID 1 exits, leaving /readyz unregistered, or leaving the runtime broker off in a pod that still reports Ready and can never launch an agent." $flag) }}
 {{- end }}
 {{- if has $flag $neverPassed }}
-{{- fail (printf "hub.args may not contain -%s: it changes which configuration the hub selects, and the chart's guarantee is that the configuration in force is the configuration it rendered. -config and -c layer a second config file over the hub's own, silently, with no warning and no log line - and go silently inert once the configuration phase renders a settings file, so neither outcome is observable from the running pod. -project, -g and -grove change which project's settings supply the CLI's own behaviour, including whether it runs non-interactively. -profile has no effect on this command today and is reserved against acquiring one. In every case the rendered values keep reporting the operator's intent while the process may not be following it." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: it changes which configuration the hub selects, and the chart's guarantee is that the configuration in force is the configuration it rendered. -config and -c either replace the hub's whole server section with one read from the directory they name - not from the file named on the flag - or layer a file over it, depending on which loader is reached; and once the global settings document carries a non-nil top-level server: key, the same flag is accepted and ignored instead. That key is the trigger, not the existence of any file. All three outcomes are silent: no warning, no log line, nothing observable from the running pod. -project, -g and -grove change which project's settings supply the CLI's own behaviour, including whether it runs non-interactively. -profile has no effect on this command today and is reserved against acquiring one. In every case the rendered values keep reporting the operator's intent while the process may not be following it." $flag) }}
 {{- end }}
 {{- if has $flag $aliasOrIgnored }}
 {{- fail (printf "hub.args may not contain -%s: it is not the lever it looks like. -production is a deprecated alias bound to the same variable as -hosted, so passing it can disable hosted mode; -port is ignored whenever -enable-web is set, which this chart always sets, so passing it changes nothing observable. The chart renders neither, which is why this is a separate reservation and not a stale entry." $flag) }}
 {{- end }}
 {{- if has $flag $ownedByConfig }}
-{{- fail (printf "hub.args may not contain -%s: the chart already delivers this setting through another channel - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so this creates a second source for one value with nothing reporting the disagreement." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: a later phase delivers this setting through another channel - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy added now becomes a second and invisible source for one value the moment that channel lands, with nothing reporting the disagreement. This chart delivers none of them yet: today the flag would simply take effect, which is why this reservation cannot be inferred from the rendered output and is written down here instead." $flag) }}
 {{- end }}
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}

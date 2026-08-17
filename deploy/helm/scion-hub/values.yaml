@@ -123,14 +123,17 @@ hub:
     # that this project publishes today runs as root, and an operator who
     # reasons from the name rather than from the docs will point the chart at
     # it. The dangerous outcome is not that such an image is rejected - it is
-    # that with a loose securityContext it appears to work, as root, writing
-    # root-owned files into a share that agents running as uid 1000 then cannot
-    # write. runAsNonRoot turns that silent outcome into a pod that fails
-    # admission and says why.
+    # that with a loose securityContext it appears to work, as root - and once
+    # the Filestore phase mounts a shared workspace it writes root-owned files
+    # into a share that agents running as uid 1000 then cannot write.
+    # runAsNonRoot turns that silent outcome into a pod that fails admission and
+    # says why, and it does so at this head: the refusal is present-tense even
+    # though that particular consequence is not.
     #
     # runAsUser and runAsGroup remain configurable because a later part of this
-    # chart requires them to match the workspace share's uid and gid. Zero is
-    # rejected: it contradicts runAsNonRoot rather than overriding it.
+    # chart requires them to match the uid and gid of the workspace share it
+    # mounts. Zero is rejected: it contradicts runAsNonRoot rather than
+    # overriding it.
     runAsUser: 1000
     runAsGroup: 1000
 
@@ -164,8 +167,13 @@ probes:
     # stays false, and the pod stays out of the Service until the hub is ready.
     enabled: true
     # THE BUDGET IS periodSeconds x failureThreshold, AND BOTH FACTORS COUNT.
-    # First boot blocks on an unbounded schema-migration advisory lock before
-    # the listener binds, so the hub gets 5 x 60 = 300s to become ready. The
+    # First boot runs an ordered sequence of schema and data migration steps
+    # before the listener binds, and a pod killed part-way through leaves a
+    # partially applied migration, so the hub gets 5 x 60 = 300s to become
+    # ready. The 300 is a margin, not a measured SQLite figure: it is sized for
+    # a first boot against Cloud SQL behind the schema-migration advisory lock,
+    # which a later phase adds. See scion-hub.assertStartupBudget for both
+    # halves and which one is present-tense on this chart today. The
     # chart enforces the product, not either factor: lowering periodSeconds to
     # speed up readiness detection cuts the budget just as surely as lowering
     # failureThreshold does, and the JSON schema cannot express that because a
