@@ -179,7 +179,12 @@ func gateSupplier(t *testing.T, audience string) supplier {
 //
 // The third is the one a wantGates literal would have passed.
 var authoredProxyGates = []string{
-	"server.database.url",
+	// server.database.url headed this list until the Cloud SQL phase. It was
+	// removed because THIS TRIPWIRE WENT RED AND NAMED IT - "gates the authored
+	// list names and the hub no longer refuses on: [server.database.url]" - not
+	// because an author decided the phase had landed it. That is the intended
+	// direction of travel: the chart renders a URL, the hub stops objecting, the
+	// authored list is corrected by the object it is a tripwire for.
 	"", // the durable session/signing secret: a prose gate, it names no key
 	"server.auth.proxy.provider",
 	"server.auth.proxy.iap.audience",
