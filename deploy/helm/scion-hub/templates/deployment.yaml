@@ -24,6 +24,18 @@ limitations under the License.
 {{- fail (printf "hub.podLabels may not set %s: it is a selector label, and a Deployment's selector is immutable after creation, so overriding it here produces a Deployment that either fails to update or adopts no pods." $k) }}
 {{- end }}
 {{- end }}
+{{- /*
+   Every free-form operator-supplied subtree this template renders is checked for
+   credential material before it reaches the manifest. These land in pod-template
+   metadata and pod spec, which anyone with pod read access can read - a WIDER
+   audience than the RBAC on the Secret the credential should have come from.
+*/}}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" $podAnnotations "source" "hub.podAnnotations") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" $podLabels "source" "hub.podLabels") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.hub.nodeSelector "source" "hub.nodeSelector") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.hub.tolerations "source" "hub.tolerations") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.hub.affinity "source" "hub.affinity") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.hub.resources "source" "hub.resources") }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
 apiVersion: apps/v1
 kind: Deployment

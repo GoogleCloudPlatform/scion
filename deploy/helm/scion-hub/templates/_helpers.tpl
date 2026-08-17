@@ -427,9 +427,30 @@ Call as:
   {{- include "scion-hub.assertNoCredential" (dict "value" $v "source" "hub.args entry") }}
 
 It renders nothing and fails the render when the value matches. Defined once and
-shared, so every place in this chart that puts an operator-supplied value
-somewhere world-readable - argv today, environment values later - applies the
-same test rather than each growing its own near-miss version of it.
+shared, so the places that call it apply the same test rather than each growing
+its own near-miss version of it.
+
+WHERE IT IS ACTUALLY CALLED FROM, AND WHERE IT IS NOT. This comment used to say
+it covered "every place in this chart that puts an operator-supplied value
+somewhere world-readable". That was false when it was written: the only callers
+were five sites inside scion-hub.hubArgs, and a whole-render sweep found
+fourteen unguarded surfaces across five object kinds. The sentence told the next
+author the surface was already covered, which is worse than saying nothing.
+
+What calls it today:
+  - scion-hub.hubArgs, on every rendered argument (argv)
+  - scion-hub.assertNoCredentialTree, on every leaf of hub.podAnnotations,
+    hub.podLabels, hub.nodeSelector, hub.tolerations, hub.affinity,
+    hub.resources, service.annotations and serviceAccount.annotations
+
+WHAT IS STILL NOT COVERED, NAMED RATHER THAN IMPLIED: the scalar NAME fields -
+nameOverride, fullnameOverride, serviceAccount.name, rbac.agentNamespace,
+runtime.namespace and image.tag. A credential placed in any of those renders
+today. Some of them are constrained by a grammar in values.schema.json that a
+credential provably cannot satisfy, which is a stronger guard than this one
+because it cannot drift; the ones that are not so constrained are a live gap.
+Do not read the list above as "the surface is covered" - read it as the list it
+is, and check it against the render before you trust it.
 
 It inspects the VALUE, not the name of the thing holding it. Name-based checks
 miss the case that actually occurs: postgres://scion:hunter2@10.0.0.1/scion
@@ -474,6 +495,60 @@ into CI logs.
 {{- end }}
 {{- if regexMatch "(?i)(^|=)(sk-[A-Za-z0-9]|ghp_|gho_|ghs_|github_pat_|xox[abprs]-|AKIA[A-Z0-9]{8}|-----BEGIN )" $s }}
 {{- fail (printf "%s (starting %q) has the shape of a credential. Anything on argv or in a plain environment value is readable by anyone with pod read access; credentials are delivered through a Secret." $source (trunc 10 $s)) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Apply the credential check to every leaf of an operator-supplied subtree.
+
+Call as:
+  {{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.hub.podAnnotations "source" "hub.podAnnotations") }}
+
+WHY THIS EXISTS, AND IT IS NOT A CONVENIENCE WRAPPER. scion-hub.assertNoCredential
+was called from five places, all inside scion-hub.hubArgs, while its own comment
+claimed it covered "every place in this chart that puts an operator-supplied
+value somewhere world-readable". A whole-render sweep found FOURTEEN unguarded
+surfaces across five object kinds - not only the pod template, but Service and
+ServiceAccount annotations, which an argv-reading instrument cannot see at all
+because neither object has an argv. The comment described a policy the code did
+not implement, which is worse than no comment: it tells the next author the
+surface is already covered.
+
+IT WALKS, RATHER THAN CHECKING toYaml OF THE WHOLE SUBTREE, AND THE DIFFERENCE
+IS NOT STYLE. Two of the three axes in scion-hub.assertNoCredential are anchored
+- the prefix axis matches on (^|=). Against a toYaml blob the only leaf at the
+start of the string is the first one, so "annotations.x: sk-livekey..." would
+render clean while the same value as the first key would fail. A guard whose
+result depends on map iteration order is worse than a missing guard, because it
+passes in testing. Walking to the leaves puts every value at ^ where the axis
+expects it.
+
+THE SOURCE STRING IS BUILT UP AS IT DESCENDS, so the failure names the exact key
+- "hub.podAnnotations.example.com/dsn" rather than "hub.podAnnotations" - which
+matters most on the nested surfaces (tolerations, affinity, resources) where the
+operator has no other way to find which leaf tripped it.
+
+IT APPLIES THE VALUE AXIS ONLY, DELIBERATELY. The name axis
+(scion-hub.assertNoCredentialName) judges a hyphen-segmented flag name and fails
+on any underscore; annotation and label keys are neither, and routing them
+through it would reject "app_version: 1.2" as a caller error. Detecting a
+credential by the name of the key holding it is also the defect filed as
+finding 2. The value axis is the one that catches a DSN whatever the key is
+called.
+*/}}
+{{- define "scion-hub.assertNoCredentialTree" -}}
+{{- $source := .source }}
+{{- $v := .value }}
+{{- if kindIs "map" $v }}
+{{- range $k, $e := $v }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" $e "source" (printf "%s.%v" $source $k)) }}
+{{- end }}
+{{- else if kindIs "slice" $v }}
+{{- range $i, $e := $v }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" $e "source" (printf "%s[%d]" $source $i)) }}
+{{- end }}
+{{- else if $v }}
+{{- include "scion-hub.assertNoCredential" (dict "value" $v "source" $source) }}
 {{- end }}
 {{- end }}
 
