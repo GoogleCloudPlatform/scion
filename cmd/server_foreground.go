@@ -1032,6 +1032,10 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 		if transportAudience == "" {
 			return fmt.Errorf("hosted HA deployment requires server.auth.transport.oidc_audience")
 		}
+		// Normalize in-place so downstream consumers (token minting,
+		// validation) see the trimmed value — matching the proxy audience
+		// normalization above.
+		cfg.Auth.Transport.OIDCAudience = transportAudience
 		// Note: transport.oidc_audience and proxy.iap.audience are intentionally
 		// allowed to differ. proxy.iap.audience is the IAP audience resource path
 		// (Cloud Run or GCLB) used for validating incoming IAP-signed JWTs, while

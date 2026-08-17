@@ -166,4 +166,13 @@ func TestValidateHostedHAPreflight(t *testing.T) {
 		assert.Equal(t, "/projects/123/global/backendServices/456", cfg.Auth.Proxy.IAP.Audience,
 			"preflight should strip trailing slash so downstream IAP validation uses the canonical audience")
 	})
+
+	t.Run("transport audience is normalized in config", func(t *testing.T) {
+		withHostedHAGuards(t)
+		cfg := validHostedHAConfig()
+		cfg.Auth.Transport.OIDCAudience = "  123-abc.apps.googleusercontent.com/  "
+		require.NoError(t, validateHostedHAPreflight(cfg))
+		assert.Equal(t, "123-abc.apps.googleusercontent.com", cfg.Auth.Transport.OIDCAudience,
+			"preflight should trim the transport audience so downstream token minting uses the canonical value")
+	})
 }
