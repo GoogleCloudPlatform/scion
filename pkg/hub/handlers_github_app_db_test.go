@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // tempSettingsHome points config.GetGlobalDir() at a temp directory holding a
@@ -56,8 +58,10 @@ func TestUpdateGitHubApp_PersistsToDBInPostgresMode(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 
 	// The DB already holds a github_app section, as seeded from the image's
-	// settings.yaml at boot.
-	fakeStore.seed("github_app", json.RawMessage(`{"app_id":111,"webhooks_enabled":false}`))
+	// settings.yaml at boot. private_key_path has no field in the update
+	// request, so it exercises the carry-over of an untouched field.
+	fakeStore.seed("github_app", json.RawMessage(
+		`{"app_id":111,"webhooks_enabled":false,"private_key_path":"/etc/ghapp/key.pem"}`))
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +97,10 @@ func TestUpdateGitHubApp_PersistsToDBInPostgresMode(t *testing.T) {
 	if got.WebhooksEnabled == nil || !*got.WebhooksEnabled {
 		t.Errorf("DB webhooks_enabled = %v, want true", got.WebhooksEnabled)
 	}
+	// The request carries no private_key_path; the existing value must survive.
+	if got.PrivateKeyPath != "/etc/ghapp/key.pem" {
+		t.Errorf("DB private_key_path = %q, want the pre-existing value to be preserved", got.PrivateKeyPath)
+	}
 	if rec.Origin != "managed" {
 		t.Errorf("DB origin = %q, want %q", rec.Origin, "managed")
 	}
@@ -115,6 +123,33 @@ func TestUpdateGitHubApp_PersistsToDBInPostgresMode(t *testing.T) {
 	}
 	if strings.Contains(string(data), "app_id") {
 		t.Errorf("settings.yaml was written in postgres mode:\n%s", data)
+	}
+}
+
+// failingHubSettingStore stands in for a DB outage: reads work, writes do not.
+type failingHubSettingStore struct {
+	*fakeHubSettingStore
+}
+
+func (f *failingHubSettingStore) UpsertHubSetting(context.Context, string, json.RawMessage, string, int64, string) (*store.HubSetting, error) {
+	return nil, errors.New("db unavailable")
+}
+
+// A failed DB write must surface as a 500. In postgres mode the DB is the sole
+// durable store, so a swallowed failure means the value is reverted at the next
+// refresh with the client believing it was saved.
+func TestUpdateGitHubApp_DBWriteFailureReturns500(t *testing.T) {
+	tempSettingsHome(t)
+
+	failing := &failingHubSettingStore{newFakeHubSettingStore()}
+	ops := NewOperationalSettings(failing, emptyKoanf(), emptyKoanf())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := httptest.NewRecorder()
+	srv.handleUpdateGitHubApp(rr, adminRequest(http.MethodPut, "/api/v1/github-app", githubAppUpdateBody))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 when the DB write fails, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
