@@ -1,0 +1,53 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The smallest install the chart supports: the hub workload on its own, with the
+# hub's own defaults for storage and database (SQLite, local workspace storage),
+# and no ingress. Exercised by helm lint and by helm template | kubeconform.
+#
+# Everything else in this file is deliberately absent. Keys for configuration
+# intake, Cloud SQL, Filestore and Ingress do not exist yet, and the schema
+# rejects keys the chart does not understand.
+#
+# CI: EVERY helm lint AND helm template INVOCATION MUST PASS -f ON THIS FILE.
+#
+# Bare `helm lint --strict .` fails, with:
+#
+#     scion-hub:
+#     - image: repository is required
+#     - hub: hubId is required
+#
+# That is the chart working correctly, not a defect. Both values are required
+# with no default on purpose - there is no correct default hub image and no
+# safe generated hub ID - and `helm lint` does not read this directory on its
+# own (only `ct lint` does, via its own configuration).
+#
+# So: if a lint or template step fails with either of those two messages, the
+# fix is to add `-f ci/values-minimal.yaml` to the command. THE FIX IS NOT TO
+# GIVE image.repository OR hub.hubId A DEFAULT IN values.yaml. Doing that would
+# silently undo the two decisions this chart most depends on: a default image
+# reference cannot be correct and would turn an install-time error into a
+# runtime mystery, and a defaulted hub ID re-scopes blob storage prefixes and
+# secrets on upgrade.
+
+# Explicit, stable, operator-supplied. The chart has no default for this and
+# never generates one.
+hub:
+  hubId: ci-minimal
+
+# No default exists for this, and no hub-gke image is published, so CI names an
+# obviously non-real path. Nothing here is ever pulled.
+image:
+  repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
+  tag: ci

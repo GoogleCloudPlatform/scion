@@ -1,0 +1,225 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default values for scion-hub.
+#
+# This chart is being built incrementally. Only the values below are understood
+# today; values.schema.json rejects anything else, so an unknown key is an error
+# rather than a silent no-op. Configuration intake (settings.yaml), Cloud SQL,
+# Filestore and Ingress are added by later changes and bring their own values.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Single replica by default. More than one replica breaks the web terminal,
+# exec, log tailing and port forwarding for roughly (N-1)/N of requests: the
+# agent control channel, presence and port tunnels are pod-local state, and
+# load balancer session affinity does not repair it (it pins a client to a pod,
+# not to the pod holding the agent's control channel).
+replicaCount: 1
+
+updateStrategy:
+  # "" resolves to Recreate at one replica and RollingUpdate (maxUnavailable 0)
+  # above one. That default is a preference, not a safety measure, and every
+  # value of this field is accepted at every replica count.
+  #
+  # The trade at one replica: Recreate takes the hub down for the length of one
+  # startup and loses PTY sessions, port tunnels and in-memory presence, which
+  # is what VALIDATION.md scenario 20 expects. RollingUpdate keeps the old hub
+  # serving until the new one is Available - maxUnavailable is 0 - so there is
+  # no outage, at the cost of a window with two pods in which the web terminal,
+  # exec, log tailing and port forwarding hit the wrong pod about half the time
+  # (see replicaCount above).
+  #
+  # Neither is a data-safety question at this point in the chart: it renders no
+  # --db and mounts no volumes, so replicas share no mutable state at all and
+  # the hub's hosted HA preflight does not run at any replica count. That
+  # changes when the Cloud SQL and Filestore values arrive - a shared database
+  # and a shared volume are exactly what they add - and the hub coordinates
+  # concurrent instances through Postgres advisory locks when they do.
+  type: ""
+
+image:
+  # REQUIRED, and deliberately not given a value here.
+  #
+  # The hub image this chart needs is the one built from the root Dockerfile
+  # with --target hub-gke: non-root, uid 1000, web UI embedded, no baked
+  # KUBECONFIG. That stage is added by the image-build change that accompanies
+  # this chart and is not in the root Dockerfile yet, so the build command above
+  # fails with an unknown-target error until it lands - which is a known
+  # sequencing gap and not a mistake in this file.
+  # No such image is published anywhere, so every possible default
+  # would point either at an empty registry path or at somebody else's
+  # artifact - and a default that cannot be correct turns an install-time error
+  # into a runtime mystery.
+  #
+  # In particular the published artifact named "scion-hub"
+  # (us-central1-docker.pkg.dev/PROJECT_ID/public-docker/scion-hub, built from
+  # image-build/hub/Dockerfile) is NOT this image: it runs as root
+  # (image-build/hub/Dockerfile:24 sets USER root and nothing sets it back) and
+  # it is built with -tags no_embed_web (image-build/scion-base/Dockerfile:55),
+  # so it has no web UI to serve. Matching the name is a coincidence, not an
+  # endorsement.
+  #
+  #   repository: us-docker.pkg.dev/my-project/my-repo/scion-hub-gke
+  #
+
+  # Defaults to .Chart.AppVersion when empty. Prefer digest.
+  tag: ""
+  # Preferred over tag, and mutually exclusive with it. A tag can be repointed
+  # underneath a running cluster; a digest cannot.
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+hub:
+  # REQUIRED, and deliberately not given a value here: the hub's stable
+  # identity has no default and the chart never generates one. With no explicit
+  # value the hub derives its ID from its hostname, which on a Deployment is
+  # random per pod, so replicas would diverge onto different blob-storage
+  # prefixes and secret scopes - silently, and worse on every rollout. Supply
+  # the same value on every upgrade; changing it re-scopes storage and secrets
+  # and is not a safe upgrade.
+  #
+  #   hubId: my-hub
+  #
+
+  # Port the web frontend and the hub API listen on, and the port every probe
+  # targets.
+  webPort: 8080
+
+  # Extra arguments appended to the hub command. The chart always renders
+  # --hosted and --host 0.0.0.0 and no value can remove them: without hosted
+  # mode the server applies workstation defaults, takes auth-enabled from a
+  # development flag and forces its bind address to 127.0.0.1.
+  #
+  # Never put secret material here. Anything on argv is readable by anyone with
+  # pod read access; the render fails on an argument that looks like a secret.
+  args: []
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 2Gi
+
+  securityContext:
+    # runAsNonRoot is NOT a value. The chart sets it to true on both the pod and
+    # the hub container and there is no knob, no override and no escape hatch.
+    #
+    # The reason is a specific, likely mistake: the artifact named "scion-hub"
+    # that this project publishes today runs as root, and an operator who
+    # reasons from the name rather than from the docs will point the chart at
+    # it. The dangerous outcome is not that such an image is rejected - it is
+    # that with a loose securityContext it appears to work, as root - and once
+    # the Filestore phase mounts a shared workspace it writes root-owned files
+    # into a share that agents running as uid 1000 then cannot write.
+    # runAsNonRoot turns that silent outcome into a pod that fails admission and
+    # says why, and it does so at this head: the refusal is present-tense even
+    # though that particular consequence is not.
+    #
+    # runAsUser and runAsGroup remain configurable because a later part of this
+    # chart requires them to match the uid and gid of the workspace share it
+    # mounts. Zero is rejected: it contradicts runAsNonRoot rather than
+    # overriding it.
+    runAsUser: 1000
+    runAsGroup: 1000
+
+  # scion.io/hub-id is rendered by the chart and is rejected here.
+  podAnnotations: {}
+  # Extra labels on the hub pod, for organisations that mandate cost-allocation
+  # or network-policy labels. Selector labels are rejected: a Deployment's
+  # selector is immutable, so overriding one breaks the Deployment rather than
+  # relabelling it.
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+probes:
+  # The readiness endpoint is /readyz, at the root, and the chart hardcodes it.
+  # It is not configurable, and deliberately so. The hub's other health
+  # endpoints answer 200 unconditionally and are intercepted by the Google front
+  # end, so a probe pointed at one of those reports healthy whatever state the
+  # hub is in - it disables the only guard there is. And both the route table
+  # and the authentication exemption match the path by exact string, so a
+  # prefixed variant such as an /api/v1-scoped one is simultaneously unrouted
+  # and not exempt from authentication: it answers 404 or 401 and no pod ever
+  # becomes ready.
+  startup:
+    # Only turn this off while liveness is also off; the chart refuses the other
+    # combination. The startup probe is what holds the liveness probe off until
+    # the hub is up, so removing it while liveness is enabled points a killing
+    # probe at a hub that is still running its first-boot migration. With
+    # liveness off - the default - nothing can kill the pod, readiness simply
+    # stays false, and the pod stays out of the Service until the hub is ready.
+    enabled: true
+    # THE BUDGET IS periodSeconds x failureThreshold, AND BOTH FACTORS COUNT.
+    # First boot runs an ordered sequence of schema and data migration steps
+    # before the listener binds, and a pod killed part-way through leaves a
+    # partially applied migration, so the hub gets 5 x 60 = 300s to become
+    # ready. The 300 is a margin, not a measured SQLite figure: it is sized for
+    # a first boot against Cloud SQL behind the schema-migration advisory lock,
+    # which a later phase adds. See scion-hub.assertStartupBudget for both
+    # halves and which one is present-tense on this chart today. The
+    # chart enforces the product, not either factor: lowering periodSeconds to
+    # speed up readiness detection cuts the budget just as surely as lowering
+    # failureThreshold does, and the JSON schema cannot express that because a
+    # per-field minimum cannot express a product. 10 x 30 is equally valid.
+    periodSeconds: 5
+    failureThreshold: 60
+    timeoutSeconds: 3
+  readiness:
+    periodSeconds: 10
+    # Must exceed 2s: the readiness handler's workspace mount check has its own
+    # 2s internal timeout, and the kubelet default of 1s would cut it off before
+    # the hub could report the failure. Schema minimum is 3.
+    timeoutSeconds: 3
+    failureThreshold: 3
+  liveness:
+    # Off by default. /readyz folds in external dependencies, so a liveness
+    # probe on it would kill healthy pods during a database failover. When
+    # enabled it is a TCP check on the web port and nothing more.
+    enabled: false
+    periodSeconds: 20
+    failureThreshold: 6
+    timeoutSeconds: 3
+
+service:
+  # Always ClusterIP. The ingress path this chart targets is container-native
+  # load balancing through a network endpoint group, which requires it, so the
+  # type is not a knob.
+  port: 80
+  annotations: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  # Workload Identity target, e.g. scion-hub@PROJECT.iam.gserviceaccount.com.
+  gcpServiceAccount: ""
+  annotations: {}
+
+rbac:
+  create: true
+  # Optional. The namespace agent pods run in. Leave empty and set
+  # runtime.namespace instead; if both are set they must agree.
+  agentNamespace: ""
+
+runtime:
+  # Namespace agent pods are created in. Defaults to the release namespace.
+  namespace: ""
+  # true renders a ClusterRole/ClusterRoleBinding instead of the namespaced
+  # Role/RoleBinding pair.
+  listAllNamespaces: false

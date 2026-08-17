@@ -1,0 +1,173 @@
+{{/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+{{- $hubId := include "scion-hub.hubId" . }}
+{{- $podAnnotations := .Values.hub.podAnnotations | default dict }}
+{{- $podLabels := .Values.hub.podLabels | default dict }}
+{{- if hasKey $podAnnotations "scion.io/hub-id" }}
+{{- fail "hub.podAnnotations may not set scion.io/hub-id: it is rendered from hub.hubId and a second source for the hub's identity is exactly the divergence the explicit hub ID exists to prevent." }}
+{{- end }}
+{{- range $k := keys (include "scion-hub.selectorLabels" . | fromYaml) }}
+{{- if hasKey $podLabels $k }}
+{{- fail (printf "hub.podLabels may not set %s: it is a selector label, and a Deployment's selector is immutable after creation, so overriding it here produces a Deployment that either fails to update or adopts no pods." $k) }}
+{{- end }}
+{{- end }}
+{{- /*
+   Pod metadata and pod spec are readable by anyone with pod read access, which
+   is a WIDER audience than the RBAC on the Secret a credential should have come
+   from. The check covers the whole of .Values rather than the subtrees this
+   template happens to render - see its definition for why it is not a list.
+*/}}
+{{- include "scion-hub.assertNoCredentialsInValues" . }}
+{{- $strategy := include "scion-hub.updateStrategyType" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scion-hub.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scion-hub.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: {{ $strategy }}
+    {{- if eq $strategy "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: 0
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "scion-hub.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scion-hub.labels" . | nindent 8 }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- /*
+        The hub ID the operator supplied, verbatim, from the same helper every
+        other rendering of it uses, so the positions cannot drift. It is an
+        annotation and not a label because a hub ID is not constrained to the
+        label character set. Changing it rolls the pods, which is correct: the
+        hub's identity, and with it its storage prefixes and secret scopes, has
+        changed.
+
+        Two things about this annotation that are easy to get wrong later.
+
+        It records the operator's INTENT, not an observation of the hub. Nothing
+        in this chart yet feeds hub.hubId into the running process - the
+        settings file that does arrives with the configuration rendering - so
+        until then the hub's actual ID is still hostname-derived and this
+        annotation can legitimately disagree with it. Do not read it as a
+        control or as a status field.
+
+        The prefix is deliberate. This repository has two pod-annotation
+        conventions: agent pods use a bare "scion.<name>" form (see
+        pkg/runtime/k8s_runtime.go), and this is the domain-qualified
+        "scion.io/<name>" form that the rest of the project's Kubernetes
+        metadata uses. Domain-qualified is the correct one and is what later
+        additions here should follow; the bare form on agent pods is not a
+        precedent to copy.
+        */}}
+        scion.io/hub-id: {{ $hubId | quote }}
+        {{- with $podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "scion-hub.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "scion-hub.nonRootSecurityContext" . | nindent 8 }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hub
+          image: {{ include "scion-hub.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            {{- include "scion-hub.hubArgs" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.hub.webPort }}
+              protocol: TCP
+          {{- /*
+          Called OUTSIDE the if, and unconditionally, because the disabled case is
+          one of the two things it checks. Inside the if, probes.startup.enabled=false
+          would delete the probe and the assertion guarding it in the same stroke.
+
+          THE SAME HAZARD ONE LEVEL UP, FOR WHOEVER WRAPS THIS FILE: this is the
+          only call site, so anything that stops rendering the Deployment also
+          stops running the assertion - silently, with a manifest that reads as
+          correct. bootstrap.deferHub is exactly that change. If you gate this
+          file, the assertion has to be hoisted somewhere that still evaluates.
+          */}}
+          {{- include "scion-hub.assertStartupBudget" . }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+          {{- end }}
+          securityContext:
+            {{- /*
+            Repeated at the container level on purpose. A container-level
+            securityContext shadows the pod-level one field by field, so
+            restating runAsNonRoot here means the hub container cannot be
+            returned to root by anything that only reaches the pod-level block.
+            */}}
+            {{- include "scion-hub.nonRootSecurityContext" . | nindent 12 }}
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          {{- with .Values.hub.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.hub.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

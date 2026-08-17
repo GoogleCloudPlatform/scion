@@ -1,0 +1,33 @@
+# Patterns to ignore when building packages.
+# Matched against the relative path, supports shell glob, one pattern per line.
+
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+
+# CI fixture values. These exist to be passed to helm lint and helm template
+# with -f; they are not defaults and must never be mistaken for them, least of
+# all inside a packaged chart where image.repository points at an example
+# registry path that does not exist.
+ci/
+
+# The assertion harness. Excluded on evidence rather than taste: helm package
+# does not preserve the executable bit (verified - the scripts arrive 0644 in the
+# tarball), so the shipped copy runs only under an explicit `bash x.sh` and the
+# obvious `./x.sh` fails with permission denied. A half-working test suite inside
+# a released artifact is worse than none. The scripts also assert the behaviour of
+# a source tree, and Phase 6 will wire them to CI, which runs on the repository.
+#
+# This cuts the opposite way from VALIDATION.md below, on purpose: that file is
+# most useful to whoever holds the package, and these are most useful to whoever
+# holds the repository.
+tests/
+
+# VALIDATION.md is deliberately NOT ignored. It is the record of which
+# acceptance criteria have never been run, and it is most useful to exactly the
+# person who has a packaged chart and a real cluster.

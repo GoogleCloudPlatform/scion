@@ -1,0 +1,284 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "scion-hub chart values",
+  "description": "Values understood by the scion-hub chart. Unknown keys are rejected rather than ignored, so a misspelled key is an error and not a silent no-op.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime"],
+  "properties": {
+    "global": {
+      "type": "object",
+      "description": "Reserved by Helm for umbrella charts and unused by this chart. It must be declared: Helm merges an umbrella chart's .Values.global into every subchart and then validates the merged values against the subchart's own schema, so without this property any parent that sets any global key makes this chart impossible to depend on, with an error naming global rather than anything the operator wrote."
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "More than one replica breaks the web terminal, exec, log tailing and port forwarding for roughly (N-1)/N of requests."
+    },
+    "updateStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["", "Recreate", "RollingUpdate"],
+          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. That default is a preference and not a safety measure: every value is accepted at every replica count. This chart renders no --db and mounts no volumes, so replicas share no mutable state and there is nothing for a strategy choice to corrupt; when the Cloud SQL and Filestore values add shared state, concurrent instances are coordinated by the hub's Postgres advisory locks rather than by this field. At one replica the trade is an outage that loses PTY sessions and port tunnels (Recreate) against a window with two pods in which the web terminal and exec reach the wrong one about half the time (RollingUpdate, which renders maxUnavailable: 0)."
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "description": "REQUIRED, with no default. A hub image built from the root Dockerfile with --target hub-gke - a stage the accompanying image-build change adds and which is not in the root Dockerfile yet. It is not published anywhere, so any default the chart could ship would point at an empty path or at another artifact. The published artifact named scion-hub is not this image: it runs as root, and it is built with -tags no_embed_web so it has no embedded web UI."
+        },
+        "tag": {
+          "type": "string",
+          "description": "Defaults to the chart appVersion. Mutually exclusive with digest."
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[a-f0-9]{64})$",
+          "description": "Preferred over tag. Mutually exclusive with it."
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "pullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "description": "Each entry is {name: <secret>}. Typed strictly because a misspelling here validates as a bare object and then silently pulls nothing."
+          }
+        }
+      }
+    },
+    "hub": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hubId", "webPort"],
+      "properties": {
+        "hubId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S(.*\\S)?$",
+          "description": "REQUIRED, with no default. The hub's stable identity, supplied explicitly by the operator and used verbatim. The chart never generates or derives it: with no explicit value the hub derives its ID from its hostname, which on a Deployment is random per pod, so replicas silently diverge onto different blob-storage prefixes and secret scopes. Must be identical across upgrades. The empty string and leading or trailing whitespace are rejected."
+        },
+        "webPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra arguments APPENDED to the hub command. Appended is literal and it is the hazard: pflag is last-wins, so a flag the chart already renders would be silently replaced rather than rejected by the hub. Nothing at runtime prevents that - what prevents it is a reserved list checked at render time in scion-hub.hubArgs, which refuses the chart's own flags, flags that change which configuration the hub selects, flags that are not the lever they appear to be, flags whose value a later phase delivers through another channel, and flags that weaken authentication. An argument naming or carrying secret material also fails the render."
+        },
+        "resources": {
+          "type": "object"
+        },
+        "securityContext": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runAsUser", "runAsGroup"],
+          "description": "runAsNonRoot is deliberately not a property here. The chart always sets it true, on both the pod and the hub container, and additionalProperties is false so it cannot be reintroduced as an override. Zero is rejected for runAsUser and runAsGroup because it contradicts that.",
+          "properties": {
+            "runAsUser": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "runAsGroup": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "podAnnotations": {
+          "type": "object",
+          "description": "Free-form annotations on the hub pod. scion.io/hub-id is rejected: it is rendered from hub.hubId and a second source for the hub's identity is the divergence the explicit hub ID exists to prevent."
+        },
+        "podLabels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Free-form labels on the hub pod, for organisations that mandate cost-allocation or network-policy labels. Selector labels are rejected: a Deployment's selector is immutable after creation, so overriding one produces a Deployment that either fails to update or adopts no pods. Values must be strings; a bare number here is not a valid label value to Kubernetes."
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "affinity": {
+          "type": "object"
+        }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startup", "readiness", "liveness"],
+      "description": "Probe paths are not configurable. Every HTTP probe targets the literal /readyz.",
+      "properties": {
+        "startup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "periodSeconds", "failureThreshold", "timeoutSeconds"],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Turning the startup probe off is only permitted while probes.liveness.enabled is false; the template refuses the other combination. See probes.startup.failureThreshold."
+            },
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "One of the two factors in the startup budget. This bound only keeps it positive; see probes.startup.failureThreshold for the bound that matters."
+            },
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The startup budget is periodSeconds x failureThreshold, and it must be at least 300s because first boot runs an ordered sequence of schema and data migration steps before the listener binds, so a pod killed part-way through leaves a partially applied migration. The 300 is a margin sized for a first boot against Cloud SQL behind the schema-migration advisory lock, which a later phase adds; it is not a measured SQLite figure. THIS SCHEMA DOES NOT ENFORCE THAT: a per-field minimum cannot express a product, so JSON Schema can only keep each factor positive. The 300s minimum is enforced at render time in scion-hub.assertStartupBudget, which is where to look and where to change it."
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 3
+            }
+          }
+        },
+        "readiness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["periodSeconds", "timeoutSeconds", "failureThreshold"],
+          "properties": {
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 3,
+              "description": "Must exceed 2 seconds: the readiness handler's workspace mount check has its own 2 second internal timeout, and the kubelet default of 1 second would cut it off before the hub could report the failure."
+            },
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "liveness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "periodSeconds", "failureThreshold", "timeoutSeconds"],
+          "description": "Disabled by default, and always a TCP check on the web port when enabled: /readyz folds in external dependencies, so a liveness probe on it would kill healthy pods during a database failover.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "periodSeconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "failureThreshold": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port"],
+      "description": "The Service is always ClusterIP: the ingress path this chart targets is container-native load balancing through a network endpoint group, which requires it.",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create"],
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "gcpServiceAccount": {
+          "type": "string",
+          "pattern": "^(|[a-zA-Z0-9-]+@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com)$",
+          "description": "Workload Identity target. Must be a fully qualified Google service account address."
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create"],
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "agentNamespace": {
+          "type": "string",
+          "description": "Optional alias for runtime.namespace. If both are set they must agree."
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["listAllNamespaces"],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "description": "Namespace agent pods are created in. Defaults to the release namespace."
+        },
+        "listAllNamespaces": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
