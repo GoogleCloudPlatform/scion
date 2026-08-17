@@ -78,7 +78,7 @@ PLATFORM=$(detect_platform)
 INSTALL_DIR=$(detect_install_dir)
 VERSION="${SCION_VERSION:-latest}"
 TMPDIR=$(mktemp -d)
-trap "rm -rf ${TMPDIR}" EXIT
+trap '[ -n "${TMPDIR:-}" ] && rm -rf "${TMPDIR}"' EXIT
 
 echo "Scion CLI Installer"
 echo "  Platform:  ${PLATFORM}"

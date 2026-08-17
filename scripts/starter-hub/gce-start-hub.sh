@@ -25,6 +25,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=hub-config.sh
 source "${SCRIPT_DIR}/hub-config.sh"
 
 DOMAIN="${HUB_DOMAIN}"
@@ -125,7 +126,7 @@ if $FULL_DEPLOY; then
 
     # Prepare all temp files locally
     UPLOAD_DIR=$(mktemp -d)
-    trap "rm -rf $UPLOAD_DIR" EXIT
+    trap '[ -n "${UPLOAD_DIR:-}" ] && rm -rf "$UPLOAD_DIR"' EXIT
 
     # hub.env
     HAS_HUB_ENV=false
@@ -241,6 +242,7 @@ if $FULL_DEPLOY; then
         echo "  -> Installed hub.env"'
     fi
 
+    # shellcheck disable=SC2016 # remote script: $vars must expand on the remote host, not locally
     FULL_REMOTE_COMMANDS='
     # Place uploaded config files
     echo ""
@@ -322,6 +324,7 @@ fi
 
 FULL_POST_INSTALL_COMMANDS=""
 if $FULL_DEPLOY; then
+    # shellcheck disable=SC2016 # remote script: $vars must expand on the remote host, not locally
     FULL_POST_INSTALL_COMMANDS='
     # Update systemd unit file if changed
     echo ""
@@ -396,6 +399,7 @@ fi
 
 step "Remote: pull, build, restart..."
 
+# shellcheck disable=SC2016 # remote script: $vars must expand on the remote host, not locally
 gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
     set -euo pipefail
     RESET_DB='"${RESET_DB}"'

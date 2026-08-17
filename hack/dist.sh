@@ -82,7 +82,7 @@ function publish() {
     SHORT_HASH=$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD)
     LDFLAGS=$(bash "${SCRIPT_DIR}/version.sh")
     BUILD_DIR=$(mktemp -d)
-    trap "rm -rf ${BUILD_DIR}" EXIT
+    trap '[ -n "${BUILD_DIR:-}" ] && rm -rf "${BUILD_DIR}"' EXIT
 
     echo "Commit: ${SHORT_HASH}"
     echo "Build dir: ${BUILD_DIR}"

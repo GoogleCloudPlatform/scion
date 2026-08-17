@@ -23,6 +23,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=hub-config.sh
 source "${SCRIPT_DIR}/hub-config.sh"
 
 # --- Create systemd unit file ---
@@ -76,6 +77,7 @@ gcloud compute scp "$TMP_CONF" "${INSTANCE_NAME}:/tmp/nats-server.conf" --zone="
 rm "$TMP_SERVICE" "$TMP_CONF"
 
 # --- Install and configure on instance ---
+# shellcheck disable=SC2016 # remote script: $vars must expand on the remote host, not locally
 gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
     set -euo pipefail
 

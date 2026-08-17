@@ -107,3 +107,57 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           args: '--new-from-merge-base=origin/main'
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck --version
+
+      # Positive control -- this gate is not a no-op.
+      #
+      # Before it was added, scripts/hub-env-integration-test.sh:328 and
+      # scripts/hub-secret-integration-test.sh:329 both read:
+      #
+      #     GROVE_ID=$($SCION config get grove_id 2>/dev/null || "")
+      #
+      # The `|| ""` runs the empty string as a command name -- SC2286, an
+      # error-severity finding. (The intended form, `|| echo ""`, appears two
+      # lines below in both files.) Re-introducing that `|| ""` makes this step
+      # exit 1, which is how you can confirm the job catches real defects.
+      #
+      # -x plus --source-path=SCRIPTDIR lets shellcheck follow `source` targets
+      # relative to each script's own directory, which honours the existing
+      # `# shellcheck source=` directives (e.g. image-build/scripts/lib/targets.sh
+      # and scripts/starter-hub/hub-config.sh) instead of reporting SC1091.
+      - name: Run shellcheck
+        run: |
+          checked=0
+          failed=0
+          while IFS= read -r script; do
+            checked=$((checked + 1))
+            if ! shellcheck -x --source-path=SCRIPTDIR "$script"; then
+              failed=$((failed + 1))
+            fi
+          done < <(find . -type f -name '*.sh' \
+                     -not -path './.git/*' \
+                     -not -path './vendor/*' \
+                     -not -path '*/vendor/*' \
+                     -not -path '*/node_modules/*' \
+                   | sort)
+          echo "shellcheck: $((checked - failed))/${checked} file(s) passed"
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::no shell scripts found -- the file discovery is broken"
+            exit 1
+          fi
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::shellcheck reported issues in ${failed} file(s)"
+            exit 1
+          fi

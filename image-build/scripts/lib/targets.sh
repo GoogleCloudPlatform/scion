@@ -64,6 +64,7 @@ ALL_STEP_IDS+=(
 
 # All known target names. Used by the orchestrator's --help and --target
 # validation.
+# shellcheck disable=SC2034 # sourced library; ALL_TARGETS is read by build-images.sh
 ALL_TARGETS=(
   core-base
   thick-prep

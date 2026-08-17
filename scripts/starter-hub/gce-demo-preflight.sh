@@ -26,6 +26,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=hub-config.sh
 source "${SCRIPT_DIR}/hub-config.sh"
 
 # ---------------------------------------------------------------------------

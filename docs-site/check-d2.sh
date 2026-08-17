@@ -25,18 +25,26 @@ CONTENT_DIR="${1:-src/content}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+if [ ! -d "$CONTENT_DIR" ]; then
+  echo "error: content directory '$CONTENT_DIR' not found" >&2
+  exit 1
+fi
+
 if ! command -v d2 &>/dev/null; then
   echo "error: d2 is not installed (https://d2lang.com/install)" >&2
   exit 1
 fi
 
 tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT
+trap '[ -n "${tmpdir:-}" ] && rm -rf "$tmpdir"' EXIT
 
 failed=0
 checked=0
 
-for mdfile in $(grep -rl '```d2' "$CONTENT_DIR" --include='*.md' --include='*.mdx'); do
+# Iterate via a while-loop rather than `for f in $(grep ...)` so that filenames
+# containing whitespace are handled correctly. The inner loop below redirects
+# its own stdin from "$mdfile", so it does not consume this one.
+while IFS= read -r mdfile; do
   block=0
   in_d2=false
 
@@ -64,7 +72,7 @@ for mdfile in $(grep -rl '```d2' "$CONTENT_DIR" --include='*.md' --include='*.md
       echo "$line" >> "$outfile"
     fi
   done < "$mdfile"
-done
+done < <(grep -rl '```d2' "$CONTENT_DIR" --include='*.md' --include='*.mdx')
 
 echo ""
 echo "Checked $checked d2 block(s), $failed failure(s)."

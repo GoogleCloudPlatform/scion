@@ -34,6 +34,11 @@
 #   --help           Show this help message
 #
 
+# shellcheck disable=SC2155
+# SC2155 (declare and assign separately) is intentionally disabled for this file.
+# Under `set -e`, splitting `local x=$(curl ...)` would make the script abort on the
+# first failed request. This suite deliberately masks the exit status so it can
+# inspect the response body and emit a proper `log_error` diagnostic instead.
 set -e
 
 # Colors for output
@@ -733,9 +738,11 @@ test_cli_commands() {
 
     # Test CLI.3: Modify template locally and push changes
     log_info "Test CLI.3: scion template push (after modification)..."
-    echo "" >> "$grove_template_dir/agents.md"
-    echo "## Updated" >> "$grove_template_dir/agents.md"
-    echo "- Added by integration test push verification" >> "$grove_template_dir/agents.md"
+    {
+        echo ""
+        echo "## Updated"
+        echo "- Added by integration test push verification"
+    } >> "$grove_template_dir/agents.md"
 
     if $TEST_DIR/scion template push "$template_name" \
         --hub "$hub_url" 2>&1; then

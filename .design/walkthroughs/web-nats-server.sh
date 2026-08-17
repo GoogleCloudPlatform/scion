@@ -102,7 +102,7 @@ check_nats() {
     else
         # Extract host:port from the URL for a basic TCP probe
         local host_port
-        host_port=$(echo "${NATS_URL}" | sed 's|nats://||')
+        host_port="${NATS_URL#nats://}"
         if curl -s --connect-timeout 2 "telnet://${host_port}" >/dev/null 2>&1; then
             ok "NATS appears reachable at ${host_port}"
         else

@@ -18,6 +18,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=hub-config.sh
 source "${SCRIPT_DIR}/hub-config.sh"
 
 if [[ -z "$PROJECT_ID" ]]; then
@@ -106,7 +107,7 @@ if [[ "${INSTANCE_EXISTS}" == "false" ]]; then
             echo "2) Medium (~50 agents)     - n2-standard-16 (16 vCPU, 64GB)"
             echo "3) Large  (100s of agents) - n2-standard-32 (32 vCPU, 128GB)"
             echo "4) XLarge (~1000 agents)   - n2-standard-128 (128 vCPU, 512GB)"
-            read -p "Select [1-4]: " SIZE_CHOICE
+            read -r -p "Select [1-4]: " SIZE_CHOICE
         fi
 
         case $SIZE_CHOICE in
@@ -124,7 +125,7 @@ fi
 # Prompt for cluster (only when GKE is enabled)
 if [[ "${ENABLE_GKE}" == "true" ]]; then
     if [[ -z "${CREATE_CLUSTER:-}" ]]; then
-        read -p "Create GKE cluster for agents? [y/N]: " CLUSTER_CHOICE
+        read -r -p "Create GKE cluster for agents? [y/N]: " CLUSTER_CHOICE
         if [[ "${CLUSTER_CHOICE,,}" == "y" ]]; then
             CREATE_CLUSTER="true"
         else
@@ -217,9 +218,9 @@ if [[ "${INSTANCE_EXISTS}" == "false" ]]; then
         --service-account="${SERVICE_ACCOUNT_EMAIL}" \
         --scopes=https://www.googleapis.com/auth/cloud-platform \
         --tags=https-server,scion-hub \
-        --labels=env=${HUB_NAME},project=scion,type=scion-hub \
-        --create-disk=auto-delete=yes,boot=yes,device-name=${INSTANCE_NAME},image=projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts,mode=rw,size=200,type=projects/${PROJECT_ID}/zones/${ZONE}/diskTypes/pd-balanced \
-        --metadata-from-file=user-data="${CLOUD_INIT_FILE}"
+        --labels="env=${HUB_NAME},project=scion,type=scion-hub" \
+        --create-disk="auto-delete=yes,boot=yes,device-name=${INSTANCE_NAME},image=projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts,mode=rw,size=200,type=projects/${PROJECT_ID}/zones/${ZONE}/diskTypes/pd-balanced" \
+        --metadata-from-file="user-data=${CLOUD_INIT_FILE}"
 else
     echo "Skipping instance creation (already exists)."
 fi

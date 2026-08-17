@@ -17,9 +17,8 @@
 
 set -e
 
-REPO_ROOT=$(pwd)
 TEST_TMP=$(mktemp -d)
-trap 'rm -rf "$TEST_TMP"' EXIT
+trap '[ -n "${TEST_TMP:-}" ] && rm -rf "$TEST_TMP"' EXIT
 
 echo "Using temporary directory: $TEST_TMP"
 
