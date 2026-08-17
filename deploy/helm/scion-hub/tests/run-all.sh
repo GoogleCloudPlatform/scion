@@ -346,6 +346,58 @@ else
   fi
 fi
 
+# --- the derivation this suite's gate list depends on -------------------------
+# cmd/helm_chart_ha_contract_test.go IS OUTSIDE THIS DIRECTORY AND OUTSIDE THE
+# CHART, so neither the file scan above nor hack/verify.sh's chart-tree walk can
+# see it, and naming it here is the only thing that makes it discoverable.
+#
+# WHY IT MATTERS MORE THAN THE OTHER OUTSIDE FILES. render-guards.sh and
+# verify.sh no longer carry the HA gate list; they read it out of
+# hack/ha-gates.txt, which that Go test produces. If the test were deleted, the
+# artifact would sit there unchanged and every assertion built on it would stay
+# green forever - a derived enumeration whose producer is gone is worse than the
+# literal it replaced, because it still looks derived. So the producer is
+# enumerated, its test functions are counted in both directions, and it is RUN.
+#
+# A MISSING go IS A META-FAILURE, NOT A SKIP. tests/ and hack/ are both
+# .helmignored, so this suite only ever runs against a repository checkout, and a
+# checkout of this repository has Go. "go not found" here means the run cannot
+# make the claim, which is the definition of a meta-failure in this harness.
+# CONTROLS RUN AGAINST THIS SECTION on 2026-08-17, all four red:
+#
+#   move the test file away          -> META, "it is what DERIVES ..."
+#   add a third func Test            -> META, 3 declared vs EXPECTED 2
+#   drift a gate name in the artifact-> the Go test FAILS here, and verify.sh too
+#   move the artifact away           -> verify.sh META exit 2, 4 meta-failures
+EXPECTED_CONTRACT_TESTS=2   # TestHelmChartHAGateWalk + TestHelmChartSigningKeyContract.
+_contract_test="${HERE}/../../../../cmd/helm_chart_ha_contract_test.go"
+_gates_artifact="${HERE}/../hack/ha-gates.txt"
+if [ ! -f "$_contract_test" ]; then
+  note "cmd/helm_chart_ha_contract_test.go is missing. It is what DERIVES hack/ha-gates.txt, and the HA gate assertions in render-guards.sh and hack/verify.sh read that artifact - so without it they check a frozen file against itself and cannot go red. Restore it, or delete the artifact and put the gate list back under a guard that can fail."
+elif [ ! -f "$_gates_artifact" ]; then
+  note "hack/ha-gates.txt is missing though its producer is present. Regenerate: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract"
+else
+  _ct="$(grep -c '^func Test' "$_contract_test")"
+  if [ "$_ct" -ne "$EXPECTED_CONTRACT_TESTS" ]; then
+    note "cmd/helm_chart_ha_contract_test.go declares ${_ct} test functions, EXPECTED_CONTRACT_TESTS is ${EXPECTED_CONTRACT_TESTS}. Bump the number in the same diff that adds or removes one, so that neither direction is silent."
+  fi
+  if ! command -v go >/dev/null 2>&1; then
+    note "go is not on PATH, so the derivation behind hack/ha-gates.txt was not re-run and the artifact this suite reads is unverified."
+  else
+    # From the repository root, because ./cmd is a Go package path and not a
+    # file path. -count=1 defeats the test cache: a cached PASS is a statement
+    # about an earlier tree.
+    _gout="$( (cd "${HERE}/../../../.." && go test ./cmd -run TestHelmChart -count=1) 2>&1 )"; _grc=$?
+    if [ "$_grc" -ne 0 ]; then
+      echo ">>> cmd/helm_chart_ha_contract_test.go: FAILED (exit ${_grc})"
+      printf '%s\n' "$_gout" | grep -E 'HARNESS ERROR|VACUOUS|^ *---|^(ok|FAIL)' | sed 's/^/    /'
+      real_failure=1
+    else
+      echo ">>> cmd/helm_chart_ha_contract_test.go: ok (${_ct} tests; hack/ha-gates.txt re-derived and unchanged)"
+    fi
+  fi
+fi
+
 # --- count check 4: the assertion total ---------------------------------------
 # UNCONDITIONAL. This condition used to read
 #

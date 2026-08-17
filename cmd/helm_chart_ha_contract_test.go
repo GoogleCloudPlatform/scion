@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -141,6 +142,48 @@ func gateSupplier(audience string) supplier {
 	}
 }
 
+// authoredProxyGates is the gate list for the proxy limb under a WELL-FORMED
+// audience, written by hand.
+//
+// WHY AN AUTHORED LIST SURVIVES IN A FILE WHOSE POINT IS TO DERIVE ONE. A
+// derivation that only reports what the hub said leaves no proposition the
+// world can falsify: if the preflight silently loses a gate, the walk reports
+// one fewer gate and the artifact is regenerated to agree. Deriving removes
+// forty-four unsourced copies of a constant; it does not remove the need for
+// one. This is that one, and it is the only authored gate list in the tree.
+//
+// PROVENANCE, so nobody reads the pair as two witnesses. This list was produced
+// by running the walk and writing down what it said - on 2026-08-17, against
+// cmd/server_foreground.go as of 2a82b354. It is a DRIFT TRIPWIRE and it is NOT
+// independent evidence: it inherits whatever the walk was wrong about that day.
+// Reproduce with:
+//
+//	go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract
+//
+// THE NAMES AND NOT THE COUNT. A count is satisfied by the right number of the
+// wrong gates, and a gate added and a gate removed in one commit is a net-zero
+// count and a real defect. The count falls out of the names.
+//
+// CONTROLS RUN AGAINST THIS PAIR on 2026-08-17, all four red, none silent:
+//
+//	seeded  drop "server.auth.transport.oidc_audience"     -> named as unlisted
+//	seeded  add  "server.auth.invented_gate"               -> named as unrefused
+//	seeded  rename provider -> providers (NET-ZERO COUNT)  -> both sides named
+//	apparatus  never capture the canonical arm             -> "compared against
+//	                                                          nothing"
+//
+// The third is the one a wantGates literal would have passed.
+var authoredProxyGates = []string{
+	"server.database.url",
+	"", // the durable session/signing secret: a prose gate, it names no key
+	"server.auth.proxy.provider",
+	"server.auth.proxy.iap.audience",
+	"server.auth.transport",
+	"server.auth.transport.mode",
+	"server.auth.transport.oidc_audience",
+	"server.auth.transport.platform_auth_sa",
+}
+
 // TestHelmChartHAGateWalk derives the gate list and compares it to the
 // committed artifact. Run with -update-chart-contract to rewrite the artifact.
 func TestHelmChartHAGateWalk(t *testing.T) {
@@ -187,6 +230,8 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 	}
 
 	totalRefusals := 0
+	var derivedProxyGates []string
+	proxyArmWalked := false
 	for _, g := range goldens {
 		settings, err := settingsFromGolden(g)
 		if err != nil {
@@ -201,8 +246,33 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 			{"audience malformed", audienceMalformed},
 		} {
 			fmt.Fprintf(&b, "\n===== %s [%s = %q]\n", filepath.Base(g), arm.label, arm.audience)
-			totalRefusals += walkOne(t, &b, settings, gateSupplier(arm.audience))
+			n, keys := walkOne(t, &b, settings, gateSupplier(arm.audience))
+			totalRefusals += n
+			if filepath.Base(g) == "settings.yaml" && arm.audience == audienceWellFormed {
+				derivedProxyGates, proxyArmWalked = keys, true
+			}
 		}
+	}
+
+	// THE AUTHORED LIST AGAINST THE DERIVED ONE, BOTH DIRECTIONS.
+	//
+	// This is the only place in the tree where a hand-written gate list still
+	// exists, and it exists so that the derivation has something to disagree
+	// with. Set equality, not a count: a gate added and a gate removed in the
+	// same commit is a net-zero count and only the names see it.
+	if !proxyArmWalked {
+		t.Fatal("HARNESS ERROR: the proxy limb's well-formed-audience arm was never walked, so the authored list below was compared against nothing. THIS RUN IS NOT EVIDENCE.")
+	}
+	if addedGates, removedGates := symDiff(derivedProxyGates, authoredProxyGates); len(addedGates)+len(removedGates) > 0 {
+		t.Errorf(`HARNESS ERROR: the hub's preflight and the authored gate list have drifted. THIS RUN IS NOT EVIDENCE ABOUT THE CHART - it is a report that the chart's premise moved.
+
+  gates the hub now refuses on and the authored list does not name: %v
+  gates the authored list names and the hub no longer refuses on: %v
+
+If the hub changed, update authoredProxyGates AND every prose copy in the
+chart, in one commit, and say in the commit message which gate moved. Do not
+update the authored list alone: it is the only thing here that can contradict
+the walk.`, addedGates, removedGates)
 	}
 
 	// ANTI-VACUITY. Every failure mode above - an extractor that returns
@@ -232,10 +302,39 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 	}
 }
 
+// symDiff returns the members of got missing from want, and the members of want
+// missing from got. Order is irrelevant to both; the empty string is a real
+// member, standing for a prose gate that names no settings key.
+func symDiff(got, want []string) (extra, missing []string) {
+	inWant := map[string]int{}
+	for _, w := range want {
+		inWant[w]++
+	}
+	inGot := map[string]int{}
+	for _, g := range got {
+		inGot[g]++
+	}
+	for g, n := range inGot {
+		if inWant[g] < n {
+			extra = append(extra, fmt.Sprintf("%q", g))
+		}
+	}
+	for w, n := range inWant {
+		if inGot[w] < n {
+			missing = append(missing, fmt.Sprintf("%q", w))
+		}
+	}
+	sort.Strings(extra)
+	sort.Strings(missing)
+	return extra, missing
+}
+
 // walkOne drives one arm, writes its steps, and returns the number of refusals
-// it saw. The return value feeds the anti-vacuity assertion and is deliberately
-// NOT written into the artifact: a count in the artifact is a constant again.
-func walkOne(t *testing.T, b *strings.Builder, settings string, sup supplier) int {
+// it saw together with the ordered gate keys it walked - the empty string for a
+// prose gate that names no key. The count feeds the anti-vacuity assertion and
+// is deliberately NOT written into the artifact: a count in the artifact is a
+// constant again.
+func walkOne(t *testing.T, b *strings.Builder, settings string, sup supplier) (int, []string) {
 	t.Helper()
 	// PER-ARM ISOLATION. resolveSessionSecret reads the environment, and an
 	// arm that inherits the previous arm's grant comes out one gate short.
@@ -262,7 +361,7 @@ func walkOne(t *testing.T, b *strings.Builder, settings string, sup supplier) in
 	cfg, err := config.LoadGlobalConfig(dir)
 	if err != nil {
 		fmt.Fprintf(b, "TERMINATED loading the rendered settings.yaml: %v\n", err)
-		return 0
+		return 0, nil
 	}
 	hostedMode = cfg.Mode == "hosted" || cfg.Mode == "production"
 	enableHub = true
@@ -273,32 +372,61 @@ func walkOne(t *testing.T, b *strings.Builder, settings string, sup supplier) in
 		isHADeployment(cfg), hostedHAGuardsRequired(cfg))
 	if !hostedHAGuardsRequired(cfg) {
 		fmt.Fprintf(b, "TERMINATED no gates: the preflight does not run for this shape.\n")
-		return 0
+		return 0, nil
 	}
 
 	n := 0
+	var canon, keys []string
+	// emitCanon writes the machine-readable block the chart's shell suite reads.
+	// It is written on EVERY exit path, including the ones that stopped early,
+	// so a truncated walk produces a short block rather than no block - an
+	// absent block would make the shell's parity comparison vacuous.
+	emitCanon := func() {
+		fmt.Fprintf(b, "CANON BEGIN\n")
+		for _, c := range canon {
+			fmt.Fprintf(b, "%s\n", c)
+		}
+		fmt.Fprintf(b, "CANON END\n")
+	}
 	// The bound is generous and asserted below, so a preflight that grew a
 	// cycle reports the cycle rather than hanging.
 	for i := 0; i < 32; i++ {
 		perr := validateHostedHAPreflight(cfg)
 		if perr == nil {
 			fmt.Fprintf(b, "TERMINATED the hub ran out of gates: preflight passes after %d.\n", n)
-			return n
+			emitCanon()
+			return n, keys
 		}
 		n++
+		msg := oneLine(perr.Error())
+		k := gateKeyRE.FindString(msg)
+		keys = append(keys, k)
+		if k != "" {
+			canon = append(canon, "KEY   "+k)
+		} else {
+			canon = append(canon, "PROSE "+msg)
+		}
 		granted, ok := sup(cfg, perr.Error())
-		fmt.Fprintf(b, "%2d  %s\n", n, oneLine(perr.Error()))
+		fmt.Fprintf(b, "%2d  %s\n", n, msg)
 		if !ok {
 			fmt.Fprintf(b, "TERMINATED the probe ran out of moves at gate %d. This is a LIMIT OF THIS ARM, not a\n", n)
 			fmt.Fprintf(b, "           property of the hub: there may be further gates behind this one.\n")
-			return n
+			emitCanon()
+			return n, keys
 		}
 		fmt.Fprintf(b, "    granted %s\n", granted)
 	}
 	fmt.Fprintf(b, "TERMINATED the walk hit its 32-step bound, which means the preflight is not making\n")
 	fmt.Fprintf(b, "           progress under these grants.\n")
-	return n
+	emitCanon()
+	return n, keys
 }
+
+// gateKeyRE finds the settings key a refusal names. Some gates name none - the
+// session secret is delivered by environment variable and has no settings key,
+// and the audience FORMAT gate objects to the value of a key it does not
+// re-name - so a refusal with no match is a PROSE gate, not a parse failure.
+var gateKeyRE = regexp.MustCompile(`server\.[a-z_]+(?:\.[a-z_]+)*`)
 
 // oneLine collapses a multi-line refusal so one gate is one line. The parity
 // check downstream counts lines.

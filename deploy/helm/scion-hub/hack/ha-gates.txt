@@ -59,6 +59,17 @@ routes   isHADeployment=true hostedHAGuardsRequired=true
  9  hosted HA deployment requires server.auth.transport.platform_auth_sa
     granted server.auth.transport.platform_auth_sa="probe@..."
 TERMINATED the hub ran out of gates: preflight passes after 9.
+CANON BEGIN
+KEY   server.database.url
+PROSE hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
+KEY   server.auth.mode
+KEY   server.auth.proxy.provider
+KEY   server.auth.proxy.iap.audience
+KEY   server.auth.transport
+KEY   server.auth.transport.mode
+KEY   server.auth.transport.oidc_audience
+KEY   server.auth.transport.platform_auth_sa
+CANON END
 
 ===== settings-oauth.yaml [audience malformed = "my-iap-audience"]
 config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="oauth"
@@ -76,6 +87,14 @@ routes   isHADeployment=true hostedHAGuardsRequired=true
  6  hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got "my-iap-audience"
 TERMINATED the probe ran out of moves at gate 6. This is a LIMIT OF THIS ARM, not a
            property of the hub: there may be further gates behind this one.
+CANON BEGIN
+KEY   server.database.url
+PROSE hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
+KEY   server.auth.mode
+KEY   server.auth.proxy.provider
+KEY   server.auth.proxy.iap.audience
+PROSE hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got "my-iap-audience"
+CANON END
 
 ===== settings.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
 config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="proxy"
@@ -97,6 +116,16 @@ routes   isHADeployment=true hostedHAGuardsRequired=true
  8  hosted HA deployment requires server.auth.transport.platform_auth_sa
     granted server.auth.transport.platform_auth_sa="probe@..."
 TERMINATED the hub ran out of gates: preflight passes after 8.
+CANON BEGIN
+KEY   server.database.url
+PROSE hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
+KEY   server.auth.proxy.provider
+KEY   server.auth.proxy.iap.audience
+KEY   server.auth.transport
+KEY   server.auth.transport.mode
+KEY   server.auth.transport.oidc_audience
+KEY   server.auth.transport.platform_auth_sa
+CANON END
 
 ===== settings.yaml [audience malformed = "my-iap-audience"]
 config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="proxy"
@@ -112,6 +141,13 @@ routes   isHADeployment=true hostedHAGuardsRequired=true
  5  hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got "my-iap-audience"
 TERMINATED the probe ran out of moves at gate 5. This is a LIMIT OF THIS ARM, not a
            property of the hub: there may be further gates behind this one.
+CANON BEGIN
+KEY   server.database.url
+PROSE hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
+KEY   server.auth.proxy.provider
+KEY   server.auth.proxy.iap.audience
+PROSE hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got "my-iap-audience"
+CANON END
 
 ===== varied.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
 config   mode="hosted" hub_id="ci-varied" driver="sqlite" storage="local" auth.mode="proxy"

@@ -26,8 +26,9 @@
 #
 # THE PREFLIGHT AS A WHOLE IS NOT MODE-BLIND, THOUGH, AND THIS FILE USED TO SAY
 # IT WAS. Measured by walking validateHostedHAPreflight gate by gate on the
-# settings.yaml each fixture renders: values-settings.yaml is refused by eight
-# gates and this file by nine. The extra one is server.auth.mode=proxy
+# settings.yaml each fixture renders (hack/ha-gates.txt records both arms): this
+# file is refused by one gate more than values-settings.yaml. The extra one is
+# server.auth.mode=proxy
 # (cmd/server_foreground.go:980), which sorts after the session secret and
 # before the proxy family. No phase lands it, because it is not missing
 # configuration - it is this fixture's own auth.mode being incompatible with HA

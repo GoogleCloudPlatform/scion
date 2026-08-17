@@ -18,9 +18,10 @@
 # settings.yaml.
 #
 # Five is the Block-1 set, not the size of the preflight. The preflight has
-# thirteen gates and this release cannot satisfy eight of them, which is what
-# acknowledgeHAUnlanded below is acknowledging; the eight are enumerated in the
-# refusal and in the assertHAUnlanded comment in _helpers.tpl.
+# thirteen gates and this release cannot satisfy all of them, which is what
+# acknowledgeHAUnlanded below is acknowledging; the unsatisfied ones are
+# enumerated in the refusal and in the assertHAUnlanded comment in _helpers.tpl,
+# and both are checked against the walk in hack/ha-gates.txt.
 #
 # Paired with values-settings-oauth.yaml, which differs from this file in
 # auth.mode and nothing else. The two renders are diffed against each other to

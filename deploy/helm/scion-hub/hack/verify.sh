@@ -689,11 +689,11 @@ else
 fi
 
 # --------------------------------------------------------------------------
-step "NOTES.txt names all eight unlanded gates for a release that acknowledged them"
+step "NOTES.txt names every unlanded gate the walk found, for a release that acknowledged them"
 # --------------------------------------------------------------------------
-# WHY THIS EXISTS. The eight gate names live in the assertHAUnlanded refusal,
+# WHY THIS EXISTS. The gate names live in the assertHAUnlanded refusal,
 # and that refusal does not print when acknowledgeHAUnlanded is set. Both of the
-# chart's own settings fixtures set it - so the eight gates are named to every
+# chart's own settings fixtures set it - so the gates are named to every
 # operator EXCEPT the two who copied a file out of this repository, which is the
 # population most likely to hit them. NOTES.txt prints on every install and is
 # the only prose the operator reliably sees.
@@ -734,26 +734,107 @@ render_notes() { # render_notes <out> <helm args...>
   fi
 }
 
-# The eight, as REGEXES over the rendered text. Gate 5 is the bare
-# server.auth.transport key and it is a prefix of gates 6, 7 and 8, so a plain
-# substring test for it is satisfied by any of them - it is matched as a token
-# not followed by a dot. Measured: deleting only the bare gate-5 line from
-# NOTES.txt turns exactly that one assertion red. Gate 2 is prose in both copies
-# and is matched on the words they share.
-HA_GATE_PATTERNS=(
-  'server\.database\.url'
-  'durable session'
-  'server\.auth\.proxy\.provider'
-  'server\.auth\.proxy\.iap\.audience'
-  'server\.auth\.transport([^.[:alnum:]_]|$)'
-  'server\.auth\.transport\.mode'
-  'server\.auth\.transport\.oidc_audience'
-  'server\.auth\.transport\.platform_auth_sa'
-)
-if [[ ${#HA_GATE_PATTERNS[@]} -ne 8 ]]; then
-  echo "HARNESS ERROR: HA_GATE_PATTERNS holds ${#HA_GATE_PATTERNS[@]} patterns, not 8. The gate list moved without this block's contribution to EXPECTED_TOTAL moving with it." >&2
-  exit 2
+# THE GATE LIST IS NOT WRITTEN HERE. IT IS READ OUT OF A WALK.
+#
+# It used to be a literal 8 in three places, and the three agreed with each
+# other and with nothing in the hub. gd-p1-rev then walked the same preflight
+# with a malformed IAP audience and got NINE - isSupportedIAPAudience is a
+# separate gate - and no guard in this file could see it, because every guard
+# and every claim shared the constant.
+#
+# hack/ha-gates.txt is produced by TestHelmChartHAGateWalk in cmd/, which drives
+# the real validateHostedHAPreflight over the settings.yaml this chart renders,
+# one gate at a time. When Cloud SQL lands and renders server.database.url the
+# walk returns one fewer gate and everything below follows, with no constant for
+# anyone to decrement.
+GATES_FILE="$CHART_DIR/hack/ha-gates.txt"
+[[ -s "$GATES_FILE" ]] || meta_failure "hack/ha-gates.txt is missing or empty. Every gate assertion below derives from it and would compare two empty lists. Regenerate with: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract"
+command -v sha256sum >/dev/null 2>&1 || meta_failure "sha256sum is not on PATH, so the walk cannot be bound to the goldens it claims to have walked. NOTHING BELOW IS EVIDENCE."
+
+# THE CORPUS BINDING, AND IT IS THE HALF THE GO TEST CANNOT DO.
+#
+# The walk reads the committed goldens, so by itself it measures the goldens.
+# The "golden files" step above has just proved those same goldens are a current
+# render of this chart. Chaining the two is what makes the walk a statement
+# about the chart: if the digests recorded by the walk match the goldens this
+# run proved current, then the walk ran on a current render.
+#
+# Neither half is sufficient. The golden step alone says nothing about the
+# preflight; the walk alone says nothing about the chart. This is the join.
+while read -r _gname _gsum; do
+  _gactual="$(sha256sum "$GOLDEN_DIR/$_gname" 2>/dev/null | cut -d' ' -f1)"
+  if [[ "$_gactual" != "$_gsum" ]]; then
+    meta_failure "hack/ha-gates.txt records golden/$_gname at ${_gsum:0:12} but this tree has ${_gactual:-<absent>}. The walk did not run on the render this suite just verified. Regenerate with: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract"
+  fi
+done < <(sed -n 's/^#   \([a-z-]*\.yaml\) *\([0-9a-f]\{64\}\)$/\1 \2/p' "$GATES_FILE")
+# THE BINDING'S OWN DENOMINATOR. A sed that matched nothing would leave the loop
+# body unexecuted and the binding silently absent.
+_gcount="$(sed -n 's/^#   \([a-z-]*\.yaml\) *\([0-9a-f]\{64\}\)$/\1/p' "$GATES_FILE" | wc -l)"
+[[ "$_gcount" -eq ${#PERMUTATIONS[@]} ]] || meta_failure "hack/ha-gates.txt binds $_gcount goldens; this chart has ${#PERMUTATIONS[@]}. The walk's corpus and this suite's corpus are not the same set."
+
+# canon_block <golden> <arm>  emits the walk's derived gate list for one arm.
+canon_block() {
+  awk -v hdr="===== $1 [audience $2" '
+    index($0, hdr) == 1 { f = 1; next }
+    f && $0 == "CANON BEGIN" { c = 1; next }
+    c && $0 == "CANON END"   { exit }
+    c { print }
+  ' "$GATES_FILE"
+}
+
+# The chart's prose describes the PROXY limb with a well-formed audience, so
+# that arm is the canon. The other three arms are read below, for the keys they
+# add rather than for a count.
+mapfile -t CANON_KEYS < <(canon_block "settings.yaml" "well-formed" | sed -n 's/^KEY   //p')
+mapfile -t CANON_PROSE < <(canon_block "settings.yaml" "well-formed" | sed -n 's/^PROSE //p')
+if [[ ${#CANON_KEYS[@]} -eq 0 ]]; then
+  meta_failure "the canonical arm of hack/ha-gates.txt yielded no gate keys. Either the arm header changed or the extraction is reading the wrong block; every parity comparison below would be between two empty sets."
 fi
+
+# PROSE GATES CANNOT BE MATCHED MECHANICALLY, AND THIS IS THE MECHANISM THAT
+# ADMITS IT. A gate whose refusal names no settings key - the session secret is
+# delivered by environment variable, and the audience FORMAT gate objects to the
+# value of a key it does not re-name - can only be matched against the chart's
+# prose by a human-chosen phrase, because the chart's prose is a paraphrase by
+# construction. So the mapping is declared, and then ASSERTED TO BE TOTAL: a new
+# prose gate appearing in the walk has no entry here and this check fails asking
+# for one. That is the difference between a hand list and a hand list with a
+# tripwire on it.
+prose_marker() { # prose_marker <refusal text> -> the phrase the chart uses, or empty
+  case "$1" in
+    *"durable session/signing secret"*) printf 'durable session' ;;
+    *"supported IAP audience"*)         printf '' ;;   # see PROSE_FORMAT_GATE below
+    *)                                  return 1 ;;
+  esac
+}
+HA_GATE_PATTERNS=()
+for _k in "${CANON_KEYS[@]}"; do
+  # A key that is a proper prefix of another key needs a boundary, or a
+  # substring test for it is satisfied by its own children.
+  _isprefix=0
+  for _o in "${CANON_KEYS[@]}"; do
+    case "$_o" in "$_k".*) _isprefix=1 ;; esac
+  done
+  _esc="$(printf '%s' "$_k" | sed 's/\./\\./g')"
+  if [[ $_isprefix -eq 1 ]]; then
+    HA_GATE_PATTERNS+=("${_esc}([^.[:alnum:]_]|\$)")
+  else
+    HA_GATE_PATTERNS+=("$_esc")
+  fi
+done
+for _p in "${CANON_PROSE[@]}"; do
+  if ! _m="$(prose_marker "$_p")"; then
+    meta_failure "the walk records a prose gate this suite has no marker for: '$_p'. Add it to prose_marker(), with the phrase the chart's own text uses. Until then the chart's prose is unchecked for that gate and the count below is short."
+  fi
+  [[ -n "$_m" ]] && HA_GATE_PATTERNS+=("$_m")
+done
+if [[ ${#HA_GATE_PATTERNS[@]} -ne $(( ${#CANON_KEYS[@]} + ${#CANON_PROSE[@]} )) ]]; then
+  meta_failure "derived ${#HA_GATE_PATTERNS[@]} patterns from ${#CANON_KEYS[@]} keys and ${#CANON_PROSE[@]} prose gates. A gate was dropped between the walk and the check."
+fi
+# THE CONTRIBUTION TO EXPECTED_TOTAL IS NOW DERIVED TOO, so a gate landing or
+# arriving moves the arithmetic on its own. Nothing here is allowed to guess:
+# EXPECTED_TOTAL is a committed constant and this is the term that varies.
+HA_GATE_COUNT=${#HA_GATE_PATTERNS[@]}
 
 render_notes "$WORK/notes-ack.txt" -f "$CHART_DIR/ci/values-settings.yaml"
 render_notes "$WORK/notes-plain.txt" -f "$CHART_DIR/ci/values-minimal.yaml"
@@ -787,21 +868,24 @@ else
 fi
 
 # --------------------------------------------------------------------------
-step "the eight-gate list is the same eight everywhere it is written"
+step "the gate list is the same list everywhere it is written"
 # --------------------------------------------------------------------------
-# A PARITY GUARD, NOT A DERIVATION, and that is a deliberate choice gd-em ruled
-# on. The three copies are written for three audiences - a numbered table for
+# A PARITY GUARD OVER A DERIVED LIST. The list itself comes from the walk in
+# hack/ha-gates.txt; what this step checks is that the three prose copies agree
+# with it and with each other. gd-em ruled the three copies should stay three:
+# they are written for three audiences - a numbered table for
 # whoever maintains the guard, a single-sentence refusal for whoever tripped it,
 # and an operator's table in NOTES - and collapsing them into one shared string
 # would make all three read like whichever audience won. What must not differ is
-# WHICH EIGHT, so that is what is checked, in both directions:
+# WHICH GATES, so that is what is checked, in both directions:
 #
 #   forward   every canonical gate appears in every copy
-#   backward  no copy names a preflight key that is not one of the eight, except
-#             the four this chart already satisfies and the ninth oauth-only gate
+#   backward  no copy names a preflight key the walk did not find, except the
+#             ones this chart already satisfies and the oauth-limb gate, both
+#             of which are themselves derived from the walk
 #
-# The backward half is the one that matters. Without it, adding a ninth gate to
-# one copy is invisible: the forward half stays green because all eight are
+# The backward half is the one that matters. Without it, adding a gate to
+# one copy is invisible: the forward half stays green because the rest are
 # still there. An unknown token is a FAILURE and not a warning - the author
 # either added a gate and must add it everywhere, or named a key that is not a
 # gate and must say so in ALLOWED_NON_GATES below.
@@ -813,8 +897,8 @@ step "the eight-gate list is the same eight everywhere it is written"
 # WHICH MUTATION REACHES WHICH HALF, MEASURED, because the answer is not the one
 # a reader would assume from the assertion names:
 #
-#   delete a line from the doc table      -> META-FAILURE (7 lines, not 8)
-#   add a line to the NOTES table         -> META-FAILURE (9 lines, not 8)
+#   delete a line from the doc table      -> META-FAILURE (one fewer line than the walk found)
+#   add a line to the NOTES table         -> META-FAILURE (one more line than the walk found)
 #   RENAME a gate in the doc table        -> both parity halves, 2 failures
 #   RENAME a gate in the NOTES table      -> both parity halves, 3 with the presence loop
 #   add a gate to the refusal string      -> the backward half, 1 failure
@@ -825,44 +909,69 @@ step "the eight-gate list is the same eight everywhere it is written"
 # they are caught, loudly, as META-FAILURES - but do not read "the parity check
 # catches a deleted gate" out of these assertion names. The parity halves are
 # exercised by RENAMES, which is the mutation that keeps the list the right
-# length while changing which eight it is, and it is the one a careless edit
+# length while changing which gates they are, and it is the one a careless edit
 # actually produces.
-CANON_GATES=(
-  server.database.url
-  server.auth.proxy.provider
-  server.auth.proxy.iap.audience
-  server.auth.transport
-  server.auth.transport.mode
-  server.auth.transport.oidc_audience
-  server.auth.transport.platform_auth_sa
-)
-# Gate 2 has no key name in any copy - it is prose - so it is carried as a
-# marker rather than pretended into a dotted token.
-SESSION_MARKER='durable session'
-# Preflight keys that legitimately appear beside the eight. Each is here for a
+# DERIVED FROM THE WALK, not written here. CANON_KEYS came out of
+# hack/ha-gates.txt above.
+CANON_GATES=("${CANON_KEYS[@]}")
+# The session gate has no key name in any copy - it is prose - so it is carried
+# as a marker rather than pretended into a dotted token. The marker itself is
+# derived: prose_marker() maps the hub's refusal to the chart's phrasing, and
+# fails loudly for a prose gate it has never seen.
+SESSION_MARKER="$(prose_marker "$(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'durable session' | head -1)")"
+[[ -n "$SESSION_MARKER" ]] || meta_failure "the walk's canonical arm records no durable-session gate, so SESSION_MARKER is empty and every 'names all the gates' assertion below would pass on the strength of an empty string."
+# Preflight keys that legitimately appear beside the gates. Each is here for a
 # stated reason, because an exclusion list with no reasons becomes a place to
 # put anything that turns a check green.
 ALLOWED_NON_GATES=(
-  server.hub.hub_id      # satisfied by this chart, named to explain why the refusal starts at gate 1
+  server.hub.hub_id      # satisfied by this chart, named to explain where the refusal starts
   server.database.driver # ditto
   server.storage.provider # ditto
   server.database        # the assertExtraEnv refusal points the operator at this subtree
-  server.auth.mode       # the NINTH gate, oauth-only, and not one of the eight by construction
   server.mode            # hosted-mode prose
 )
+# THE OTHER LIMB'S EXTRA GATES, DERIVED AND NOT ASSUMED. The oauth arm refuses
+# on server.auth.mode as well; that is the operator's own auth.mode being
+# incompatible with HA detection, not an unlanded phase, so the chart's prose
+# names it outside the numbered list and it is permitted rather than canonical.
+# Deriving it means that if the hub ever adds a second oauth-only gate, it is
+# permitted automatically and the parity check does not go red for the wrong
+# reason - while a gate moving from the oauth limb into the proxy limb DOES turn
+# the forward half red, because CANON_KEYS would gain it.
+mapfile -t OAUTH_EXTRA_KEYS < <(
+  comm -13 <(printf '%s\n' "${CANON_KEYS[@]}" | sort -u) \
+           <(canon_block "settings-oauth.yaml" "well-formed" | sed -n 's/^KEY   //p' | sort -u)
+)
+[[ ${#OAUTH_EXTRA_KEYS[@]} -gt 0 ]] || meta_failure "the oauth arm of the walk adds no gate the proxy arm lacks. The chart's prose says it adds server.auth.mode; either that is now false, or the oauth arm was not read."
+ALLOWED_NON_GATES+=("${OAUTH_EXTRA_KEYS[@]}")
+# THE FORMAT GATE IS RECORDED HERE RATHER THAN COUNTED, and this line is the
+# whole of gd-p1-rev's R1. The malformed-audience arm of the walk refuses a
+# NINTH time, on isSupportedIAPAudience. It is not a ninth position the chart
+# fails to render - it is a second objection to the value of gate 4 - so it is
+# not in the numbered list. What it must not be is invisible: the assertion
+# below fails if the walk stops recording it, which is what would happen if
+# someone "simplified" the two audience arms into one.
+if ! grep -qF 'supported IAP audience' "$GATES_FILE"; then
+  meta_failure "the walk no longer records the audience FORMAT gate. Both audience arms must be walked; a single well-formed arm never reaches it and makes the format gate invisible to the derivation as well as to the prose - which is the defect this whole mechanism replaced."
+fi
 
 gate_tokens() { grep -oE 'server\.[a-z_]+(\.[a-z_]+)*' "$1" | sort -u; }
 
 # EXTRACTED BY CONTENT, NEVER BY LINE NUMBER. Each extraction asserts its own
 # size, because an extraction that silently returns nothing makes both halves of
 # the parity check pass.
-grep -E '^  [1-8]  ' "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-doc.txt" || true
+# BY DELIMITER, NOT BY A NUMBERED PREFIX. The table used to be numbered 1..8 and
+# this line matched '^  [1-8]  ', which is the count written down a fourth time -
+# a ninth gate would have been extracted as eight and the size guard below would
+# have passed on a truncated table.
+awk '/GATE TABLE BEGIN/{f=1;next} /GATE TABLE END/{f=0} f' \
+  "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-doc.txt" || true
 grep -F 'This release cannot start the deployment these values describe' \
   "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-fail.txt" || true
 grep -E '^    (server\.|a durable)' "$WORK/notes-ack.txt" >"$WORK/gates-notes.txt" || true
-[[ "$(wc -l <"$WORK/gates-doc.txt")" -eq 8 ]] || meta_failure "the numbered gate table in _helpers.tpl matched $(wc -l <"$WORK/gates-doc.txt") lines, not 8. The parity check below has nothing to compare."
+[[ "$(wc -l <"$WORK/gates-doc.txt")" -eq "$HA_GATE_COUNT" ]] || meta_failure "the numbered gate table in _helpers.tpl matched $(wc -l <"$WORK/gates-doc.txt") lines; the walk found $HA_GATE_COUNT gates. The parity check below has nothing to compare."
 [[ "$(wc -l <"$WORK/gates-fail.txt")" -eq 1 ]] || meta_failure "the assertHAUnlanded refusal string matched $(wc -l <"$WORK/gates-fail.txt") lines, not 1. The parity check below has nothing to compare."
-[[ "$(wc -l <"$WORK/gates-notes.txt")" -eq 8 ]] || meta_failure "the gate table in the rendered NOTES matched $(wc -l <"$WORK/gates-notes.txt") lines, not 8. The parity check below has nothing to compare."
+[[ "$(wc -l <"$WORK/gates-notes.txt")" -eq "$HA_GATE_COUNT" ]] || meta_failure "the gate table in the rendered NOTES matched $(wc -l <"$WORK/gates-notes.txt") lines; the walk found $HA_GATE_COUNT gates. The parity check below has nothing to compare."
 
 printf '%s\n' "${CANON_GATES[@]}" | sort -u >"$WORK/gates-canon.txt"
 printf '%s\n' "${CANON_GATES[@]}" "${ALLOWED_NON_GATES[@]}" | sort -u >"$WORK/gates-permitted.txt"
@@ -873,16 +982,16 @@ for _src in doc fail notes; do
   _missing="$(comm -23 "$WORK/gates-canon.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ')"
   _missing="${_missing% }"
   if [[ -z "$_missing" ]] && grep -qF "$SESSION_MARKER" "$_f"; then
-    pass "the $_src copy names all eight gates"
+    pass "the $_src copy names every gate the walk found"
   else
-    fail "the $_src copy does not name all eight gates: missing [${_missing:-none}]$(grep -qF "$SESSION_MARKER" "$_f" || printf ' and the session-secret gate')"
+    fail "the $_src copy does not name every gate the walk found: missing [${_missing:-none}]$(grep -qF "$SESSION_MARKER" "$_f" || printf ' and the session-secret gate')"
   fi
   _extra="$(comm -13 "$WORK/gates-permitted.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ')"
   _extra="${_extra% }"
   if [[ -z "$_extra" ]]; then
-    pass "the $_src copy names no preflight key that is not one of the eight"
+    pass "the $_src copy names no preflight key the walk did not find"
   else
-    fail "the $_src copy names [$_extra], which is neither one of the eight gates nor a listed non-gate. If a gate was added, add it to all three copies and to CANON_GATES; if it is not a gate, say why in ALLOWED_NON_GATES."
+    fail "the $_src copy names [$_extra], which is neither a gate the walk found nor a listed non-gate. If the hub added a gate, re-derive hack/ha-gates.txt and add it to all three copies; if it is not a gate, say why in ALLOWED_NON_GATES."
   fi
 done
 

@@ -18,7 +18,7 @@
     },
     "acknowledgeHAUnlanded": {
       "type": "boolean",
-      "description": "Acknowledge that these values describe an HA deployment this release cannot start. database.driver=postgres, or storage.provider=gcs with auth.mode=proxy, or hub.extraEnv setting K_SERVICE, each satisfy the hub's isHADeployment test (cmd/server_foreground.go:927); the hosted HA preflight then runs and eight of its thirteen gates have no source in this chart, so the hub aborts at cmd/server_foreground.go:151-153 before serving. Temporary key: it is removed when the Cloud SQL and ingress/IAP values have both landed."
+      "description": "Acknowledge that these values describe an HA deployment this release cannot start. database.driver=postgres, or storage.provider=gcs with auth.mode=proxy, or hub.extraEnv setting K_SERVICE, each satisfy the hub's isHADeployment test (cmd/server_foreground.go:927); the hosted HA preflight then runs and several of its thirteen gates have no source in this chart (which ones is derived, not asserted here: see deploy/helm/scion-hub/hack/ha-gates.txt), so the hub aborts at cmd/server_foreground.go:151-153 before serving. Temporary key: it is removed when the Cloud SQL and ingress/IAP values have both landed."
     },
     "replicaCount": {
       "type": "integer",

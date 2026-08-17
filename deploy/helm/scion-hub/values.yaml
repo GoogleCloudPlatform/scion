@@ -26,10 +26,11 @@ fullnameOverride: ""
 #
 # database.driver: postgres, or storage.provider gcs with auth.mode proxy, or
 # hub.extraEnv setting K_SERVICE, each make the hub's isHADeployment test true
-# (cmd/server_foreground.go:927). Its hosted HA preflight then runs, and eight of
-# that preflight's thirteen gates have no source in this chart, so the hub aborts
-# before serving. The chart refuses those value combinations unless you set this,
-# and the refusal names all eight and the phase that lands each.
+# (cmd/server_foreground.go:927). Its hosted HA preflight then runs, and several
+# of that preflight's thirteen gates have no source in this chart, so the hub
+# aborts before serving. The chart refuses those value combinations unless you
+# set this, and the refusal names every one of them and the phase that lands
+# each. WHICH gates is derived rather than written down: see hack/ha-gates.txt.
 #
 # Set it to true when you are rendering to inspect the output, or when you are
 # supplying the missing configuration yourself through config.existingSecret.
@@ -397,12 +398,12 @@ database:
   #
   # postgres is what the hosted deployment runs, and selecting it turns on the
   # hub's HA preflight (cmd/server_foreground.go:931). That preflight has
-  # THIRTEEN gates, and this release cannot satisfy eight of them - the database
-  # URL, a durable session secret, and six keys in the proxy and transport
-  # subtrees - so selecting postgres today means the hub aborts before serving
-  # unless you set acknowledgeHAUnlanded. Measured by walking the preflight gate
-  # by gate on the settings.yaml this chart renders; the eight are enumerated in
-  # the refusal itself.
+  # THIRTEEN gates, and this release cannot satisfy all of them - the database
+  # URL, a durable session secret, and keys in the proxy and transport subtrees -
+  # so selecting postgres today means the hub aborts before serving unless you
+  # set acknowledgeHAUnlanded. Measured by walking the preflight gate by gate on
+  # the settings.yaml this chart renders (hack/ha-gates.txt); the unsatisfied
+  # gates are enumerated in the refusal itself.
   #
   # An earlier version of this comment listed four requirements - hub ID,
   # database URL, GCS storage with a bucket, session secret. Those are four of
@@ -453,9 +454,9 @@ auth:
   #
   # "AND NOTHING ELSE" WAS TOO STRONG AND THIS COMMENT USED TO SAY IT. auth.mode
   # is itself a preflight gate: cmd/server_foreground.go:980 requires proxy, so
-  # the oauth permutation is refused by nine gates where the proxy one is
-  # refused by eight. Measured, by walking the preflight on each rendered
-  # settings.yaml. The claim that survives is the narrow one about the Block-1
+  # the oauth permutation is refused by one gate more than the proxy one.
+  # Measured, by walking the preflight on each rendered settings.yaml; both arms
+  # are recorded in hack/ha-gates.txt. The claim that survives is the narrow one about the Block-1
   # five, which is what the paired ci fixtures actually diff.
   mode: proxy
 

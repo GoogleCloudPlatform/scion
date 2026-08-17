@@ -308,42 +308,97 @@ accept "sqlite + local storage + oauth"   --set auth.mode=oauth --set auth.ackno
 accept "the chart defaults, no route"
 
 # THE GATE LIST IS PART OF THE CONTRACT, SO IT IS ASSERTED RATHER THAN TRUSTED.
-# gke-deploy-lead's Critical 1 requires the refusal to name all eight unlandable
-# gates in hub order. The number was reported as five for most of a day because
-# a prober stopped at the first gate it could not construct and its extent was
-# read as the preflight's extent; the count below is the guard against that
-# happening again silently. THE DENOMINATOR IS ASSERTED, not the presence of at
-# least one - a message that named three of the eight would satisfy any
-# per-substring check written as a loop with no total.
+# gke-deploy-lead's Critical 1 requires the refusal to name every unlandable
+# gate in hub order. The number was reported as five for most of a day because a
+# prober stopped at the first gate it could not construct and its extent was
+# read as the preflight's extent; then it was reported as eight, because that
+# prober supplied a WELL-FORMED IAP audience and never reached the format gate.
+# So the list is no longer written here. It is read out of hack/ha-gates.txt,
+# which cmd/helm_chart_ha_contract_test.go derives by driving the real
+# validateHostedHAPreflight over the chart's own golden settings.yaml. If the
+# hub gains or loses a gate, this assertion changes with it and no one edits a
+# constant. THE DENOMINATOR IS STILL ASSERTED, not the presence of at least one:
+# a message naming three of the gates would satisfy any per-substring loop that
+# has no total.
+#
+# CONTROLS RUN AGAINST THIS DERIVATION on 2026-08-17, all four red:
+#
+#   seed a KEY the refusal cannot name  -> FAIL 8/9, names it as unnamed
+#   delete hack/ha-gates.txt            -> META-FAILURE, exit 2
+#   seed an unrecognised PROSE gate     -> META-FAILURE, exit 2
+#   point the awk header at nothing     -> META-FAILURE "holds 0 entries"
+#
+# The last is the apparatus control: an extraction that quietly returns nothing
+# is the failure mode that makes _ha_seen equal _ha_total on an empty list.
 executed=$((executed + 1))
 _ha_out="$(render --set database.driver=postgres --set storage.provider=gcs --set storage.bucket=b 2>&1)"
-_ha_want='server.database.url
-durable session/signing secret
-server.auth.proxy.provider=iap
-server.auth.proxy.iap.audience
-server.auth.transport
-server.auth.transport.mode=iap
-server.auth.transport.oidc_audience
-server.auth.transport.platform_auth_sa'
-_ha_seen=0
-while IFS= read -r _w; do
-  case "$_ha_out" in *"$_w"*) _ha_seen=$((_ha_seen + 1)) ;; esac
-done <<EOF
-$_ha_want
-EOF
-_ha_total="$(printf '%s\n' "$_ha_want" | grep -c .)"
-if [ "$_ha_total" -ne 8 ]; then
-  # THE PROBE'S OWN CORPUS, ASSERTED. A truncated heredoc would make _ha_seen
-  # equal _ha_total on zero gates and print ok. This is the defect the section
-  # above exists to describe, reproduced one level up, so it gets a meta-failure.
-  echo "HARNESS ERROR: the gate-name list holds ${_ha_total} entries, not 8. NOTHING WAS MEASURED."
+_ha_gates="$CHART/hack/ha-gates.txt"
+if [ ! -s "$_ha_gates" ]; then
+  echo "HARNESS ERROR: $_ha_gates is missing or empty, so there is no derived gate list to check the refusal against. Regenerate with: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract. NOTHING WAS MEASURED."
   echo "ASSERTIONS_EXECUTED=${executed}"
   exit 2
 fi
-if [ "$_ha_seen" -eq 8 ]; then
-  echo "ok    the HA refusal names all 8 unlandable gates"
+# The canonical arm: the proxy limb under a well-formed audience, which is the
+# shape this render produces. The other arms in the artifact answer other
+# questions and must not be mixed in.
+_ha_canon="$(awk -v hdr="===== settings.yaml [audience well-formed" '
+  index($0, hdr) == 1 { f = 1; next }
+  f && $0 == "CANON BEGIN" { c = 1; next }
+  c && $0 == "CANON END"   { exit }
+  c { print }' "$_ha_gates")"
+# KEY lines name a settings key; PROSE lines are gates that name none, and each
+# one needs a deliberate decision here rather than a silent drop.
+_ha_want=""
+while IFS= read -r _line; do
+  [ -n "$_line" ] || continue
+  case "$_line" in
+    "KEY   "*)  _ha_want="$_ha_want${_line#KEY   }"$'\n' ;;
+    "PROSE "*)
+      case "$_line" in
+        *"durable session/signing secret"*) _ha_want="$_ha_want"'durable session/signing secret'$'\n' ;;
+        *"supported IAP audience"*)         : ;;  # not reachable on this arm
+        *)
+          echo "HARNESS ERROR: the derived gate list carries a prose gate this script does not recognise: ${_line#PROSE }"
+          echo "               Add it to the case above, or decide in writing that the chart's refusal need not name it. NOTHING WAS MEASURED."
+          echo "ASSERTIONS_EXECUTED=${executed}"
+          exit 2 ;;
+      esac ;;
+  esac
+done <<EOF
+$_ha_canon
+EOF
+_ha_total="$(printf '%s' "$_ha_want" | grep -c .)"
+if [ "$_ha_total" -lt 2 ]; then
+  # THE PROBE'S OWN CORPUS, ASSERTED. An awk expression that matched nothing
+  # would make _ha_seen equal _ha_total on zero gates and print ok. That is the
+  # defect the paragraph above describes, reproduced one level up, so it gets a
+  # meta-failure rather than a pass. The bound is deliberately not the current
+  # count: this arm has always had several gates, and a floor that tracks the
+  # exact number is the constant coming back in.
+  echo "HARNESS ERROR: the derived gate list for the canonical arm holds ${_ha_total} entries. hack/ha-gates.txt is present but this script could not read a gate list out of it. NOTHING WAS MEASURED."
+  echo "ASSERTIONS_EXECUTED=${executed}"
+  exit 2
+fi
+_ha_seen=0
+_ha_missing=""
+while IFS= read -r _w; do
+  [ -n "$_w" ] || continue
+  # A bare substring test would count server.auth.transport as present because
+  # server.auth.transport.mode is - a prefix passing for its own extension. Match
+  # the key followed by something that cannot continue it.
+  _re="$(printf '%s' "$_w" | sed 's/[.[\*^$]/\\&/g')"
+  if printf '%s' "$_ha_out" | grep -qE "${_re}([^.[:alnum:]_]|\$)"; then
+    _ha_seen=$((_ha_seen + 1))
+  else
+    _ha_missing="$_ha_missing $_w"
+  fi
+done <<EOF
+$_ha_want
+EOF
+if [ "$_ha_seen" -eq "$_ha_total" ]; then
+  echo "ok    the HA refusal names all ${_ha_total} unlandable gates the hub refuses on"
 else
-  echo "FAIL  the HA refusal names ${_ha_seen}/8 unlandable gates"
+  echo "FAIL  the HA refusal names ${_ha_seen}/${_ha_total} unlandable gates; unnamed:${_ha_missing}"
   echo "        got: $(printf '%s' "$_ha_out" | tr '\n' ' ' | cut -c1-300)"
   failed=$((failed + 1))
 fi

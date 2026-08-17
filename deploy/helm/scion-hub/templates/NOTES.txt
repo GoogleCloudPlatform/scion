@@ -188,10 +188,11 @@ WHAT THIS RELEASE DOES NOT YET DO
     storage.provider: gcs with auth.mode: proxy       (:934)
 
   Any one of them runs validateHostedHAPreflight, whose error aborts startup at
-  :151 rather than degrading - log.Fatalf, not a warning. Eight of its thirteen
+  :151 rather than degrading - log.Fatalf, not a warning. Several of its thirteen
   gates have no source in this chart. Measured by walking the real preflight
   gate by gate over the settings.yaml this chart renders, in the order the hub
-  checks them:
+  checks them - the list below is checked against that walk, it is not typed
+  from memory:
 
     server.database.url                     Cloud SQL phase
     a durable session secret                session-secret phase
@@ -202,13 +203,13 @@ WHAT THIS RELEASE DOES NOT YET DO
     server.auth.transport.oidc_audience     }
     server.auth.transport.platform_auth_sa  }
 
-  With auth.mode: oauth there is a ninth, server.auth.mode: proxy (:980), which
+  With auth.mode: oauth there is one more, server.auth.mode: proxy (:980), which
   no phase lands - that one is the mode you chose being incompatible with HA
   detection rather than configuration that is missing.
 
   You would meet them one at a time, each only after fixing the one before it,
   because the preflight returns on the first failure. Rather than let you find
-  that out over eight installs, the chart refuses up front and names all eight.
+  that out one install at a time, the chart refuses up front and names them all.
   Set acknowledgeHAUnlanded: true to render anyway - for rendering the
   settings.yaml, which works, not for installing, which does not. The chart
   already satisfies the rest of what the preflight demands (the hub ID, the
@@ -226,9 +227,9 @@ WHAT THIS RELEASE DOES NOT YET DO
   The chart did not refuse only because acknowledgeHAUnlanded is set.
 
   THE RENDER IS NOT A VERDICT ON THE INSTALL. The settings.yaml above is
-  correct, and the hub will still abort at the first of the eight gates listed
+  correct, and the hub will still abort at the first of the gates listed
   here - server.database.url - before it serves anything. Nothing in this
-  release closes any of the eight.
+  release closes any of them.
 
   If you started from ci/values-settings.yaml or ci/values-settings-oauth.yaml,
   the flag arrived with the file. Those two fixtures set it so that the
