@@ -111,7 +111,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=254
+EXPECTED_TOTAL=259
 
 failures=0
 assertions=0
@@ -371,12 +371,60 @@ step "no SCION_SERVER_DATABASE_* or SCION_SERVER_OIDC_* variable is ever emitted
 # (pkg/config/opsettings/koanf.go:347) still lists it to the admin server-config
 # view as an active override - reported as applied, which is worse than silent.
 # Neither outcome raises anything at runtime, which is why it is caught here.
+#
+# THE INSTRUMENT IS POINTED AT SOMETHING FIRST. These five were measured emitting
+# ok against an EMPTY render - gd-em found them by stubbing render() to produce
+# nothing, and all five went green, because a grep that finds nothing in a file
+# with nothing in it is indistinguishable from a chart that is correct. That is
+# the same defect class as the %! guard and it sits on the brief's one mechanical
+# requirement, which makes it the worst place in this file for it to be.
+#
+# The precondition is deliberately NOT "the file is non-empty". A render that
+# lost its env block entirely would still be a large file, and the negative would
+# still be vacuous in exactly the way that matters. What has to be true for the
+# negative to mean anything is that this manifest carries SCION_SERVER_ names at
+# all - that the family the check is scanning for is present and the scan is
+# looking in the right place. Every permutation renders SCION_SERVER_BASE_URL and
+# SCION_SERVER_SESSION_SECRET, so a permutation with none has either stopped
+# configuring the hub through env or stopped rendering, and either way the
+# refusal below is unearned.
 for name in "${PERMUTATIONS[@]}"; do
-  if grep -Eq 'SCION_SERVER_(DATABASE|OIDC)_[A-Z_]*[[:space:]]*[:=]' "$WORK/$name.yaml"; then
+  _env_names="$(grep -Eo 'SCION_SERVER_[A-Z_]+' "$WORK/$name.yaml" | sort -u | tr '\n' ' ')"
+  _env_names="${_env_names% }"
+  if [[ -n "$_env_names" ]]; then
+    pass "$name renders SCION_SERVER_ variables, so the refusal below has a subject [${_env_names}]"
+  else
+    fail "$name renders no SCION_SERVER_ variable at all, so the DATABASE_/OIDC_ check below cannot fail and its ok line means nothing. Either the render is broken or the chart stopped configuring the hub through env - find out which before reading the next line."
+  fi
+  # THE BARE PREFIX, NOT prefix-followed-by-colon-or-equals. This pattern used to
+  # end '[A-Z_]*[[:space:]]*[:=]', and MEASURED, it could not match the shape this
+  # chart actually renders: a Kubernetes env entry is
+  #
+  #     - name: SCION_SERVER_DATABASE_URL
+  #       value: postgres://...
+  #
+  # and the name ends the line, with the colon BEFORE it. The seeded control -
+  # append exactly those two lines to a render - passed. So the check that this
+  # phase's brief singles out could match an env map, which the chart does not
+  # emit, and not an env list, which it does. A rendered manifest is machine
+  # output with no prose in it, so the prefix alone is the right subject and any
+  # occurrence at all is the failure.
+  #
+  # CONTROLS, 2026-08-17, both directions, both red:
+  #
+  #   stub render() to emit nothing     -> all five ok lines gone, replaced by
+  #                                        "renders no SCION_SERVER_ variable at
+  #                                        all" (this was gd-em's mutation, and
+  #                                        before this change all five went GREEN)
+  #   append an env-LIST entry          -> FAIL varied  (GREEN before this change)
+  #   append an env-MAP entry           -> FAIL minimal (red before it too)
+  if grep -Eq 'SCION_SERVER_(DATABASE|OIDC)_' "$WORK/$name.yaml"; then
     fail "$name emits a SCION_SERVER_DATABASE_* or SCION_SERVER_OIDC_* variable"
     grep -En 'SCION_SERVER_(DATABASE|OIDC)_' "$WORK/$name.yaml" || true
-  else
+  elif [[ -n "$_env_names" ]]; then
     pass "$name emits no SCION_SERVER_DATABASE_/OIDC_ variable"
+  else
+    fail "$name emits no SCION_SERVER_DATABASE_/OIDC_ variable, but it emits no SCION_SERVER_ variable of any kind either, so this is not evidence about the chart"
   fi
 done
 
