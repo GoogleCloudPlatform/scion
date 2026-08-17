@@ -170,7 +170,7 @@ func IsImageMime(mime string) bool {
 }
 
 // SanitizeFilename strips path components, limits length, and rejects
-// dangerous extensions.
+// dangerous and markup extensions.
 func SanitizeFilename(name string) (string, error) {
 	// Strip any directory components.
 	name = filepath.Base(name)
@@ -181,9 +181,16 @@ func SanitizeFilename(name string) (string, error) {
 	// Replace any remaining path separators.
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, "\\", "_")
-	// Check for dangerous extensions.
-	if ext := attachmentExt(name); DangerousExtensions[ext] {
+	// Check for refused extensions. This is the one gate both entry points
+	// share — the browser upload handler and the agent --attach path — so both
+	// classes of refusal are judged here, off the same canonical extension.
+	// Markup is refused because it would be served back as its own document
+	// type; #1098 tracks re-admitting it safely.
+	switch ext := attachmentExt(name); {
+	case DangerousExtensions[ext]:
 		return "", fmt.Errorf("dangerous file extension: %s", ext)
+	case refusedMarkupExtensions[ext]:
+		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}
 	// Truncate if too long (preserve extension). This parse is about keeping a
 	// recognisable suffix on a shortened name, not about judging it, so it uses

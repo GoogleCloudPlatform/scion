@@ -73,6 +73,11 @@ var textLikeExtensions = map[string]bool{
 //
 // .hta is not here: it is in DangerousExtensions, with the executables it
 // belongs to.
+//
+// Enforced in SanitizeFilename as well as here, so the agent --attach path
+// refuses these too — it never calls ClassifyAttachment. The check stays in
+// both places because ClassifyAttachment is also usable on its own, and the
+// two maps should not disagree about which files exist.
 var refusedMarkupExtensions = map[string]bool{
 	".html": true, ".htm": true, ".xhtml": true, ".shtml": true,
 	".mhtml": true, ".mht": true, ".svg": true,

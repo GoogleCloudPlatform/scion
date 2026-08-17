@@ -158,6 +158,20 @@ func TestSanitizeFilename_RejectsPeersOfBlockedExtensions(t *testing.T) {
 	}
 }
 
+// SanitizeFilename is the gate both entry points share, so the markup refusal
+// has to be enforced here and not only in ClassifyAttachment — otherwise the
+// agent --attach path, which never classifies, still accepts .html.
+func TestSanitizeFilename_RefusesMarkupExtensions(t *testing.T) {
+	for _, f := range []string{
+		"evil.html", "evil.htm", "evil.xhtml", "evil.shtml", "evil.mhtml", "evil.mht",
+		"diagram.svg", "EVIL.HTML", "evil.html ", "evil.html.",
+	} {
+		_, err := SanitizeFilename(f)
+		require.Error(t, err, "SanitizeFilename(%q) was accepted", f)
+		assert.Contains(t, err.Error(), "not accepted", "for %q", f)
+	}
+}
+
 // Widening the blocklist must not swallow the developer formats #1045 exists to
 // let through. These are the near neighbours of the new entries.
 func TestSanitizeFilename_KeepsAcceptedDeveloperFormats(t *testing.T) {

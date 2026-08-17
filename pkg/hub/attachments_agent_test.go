@@ -217,6 +217,21 @@ func TestIngestAgentAttachments(t *testing.T) {
 	}
 }
 
+// The agent path never calls ClassifyAttachment, so the markup refusal only
+// reaches it through SanitizeFilename. Before that, an agent could publish an
+// .html file into a chat and the hub would store it as text/html.
+func TestIngestAgentAttachments_RefusesMarkup(t *testing.T) {
+	srv, _, project, sharedDir := agentAttachmentServer(t)
+
+	for _, name := range []string{"evil.html", "diagram.svg", "page.htm "} {
+		staged := stageAgentFile(t, sharedDir, name, `<img src=x onerror=alert(1)>`)
+		refs := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1", []string{staged})
+		if len(refs) != 0 {
+			t.Errorf("%q was published as %+v; markup extensions are refused on both paths", name, refs)
+		}
+	}
+}
+
 func TestIngestAgentAttachments_RejectsSymlink(t *testing.T) {
 	srv, _, project, sharedDir := agentAttachmentServer(t)
 
