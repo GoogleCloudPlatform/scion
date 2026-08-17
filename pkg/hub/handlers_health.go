@@ -199,9 +199,9 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			//     it just deployed, so this clause bites only where an operator
 			//     supplies that config out of band — via the hub.env
 			//     EnvironmentFile, say, whose SCION_ overrides were not traced.
-			// The fifth comparator, handlers_health_summary.go:126, propagates
-			// degraded correctly, because the health dashboard does have a
-			// degraded class. Counted, not damage.
+			// The fifth comparator, handleHealthSummary, propagates degraded
+			// correctly, because the health dashboard does have a degraded
+			// class. Counted, not damage.
 			//
 			// That coupling is pre-existing and tracked in ptone/scion#1094.
 			// Tolerated here because this branch is unreachable on the

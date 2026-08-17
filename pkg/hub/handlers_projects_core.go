@@ -2628,8 +2628,8 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// follow the last hubManagedProjectPath call for this slug. The
 	// project-configs cleanup below reads the slug three times after it —
 	// its guard, the marker, and the failure log — and all three are
-	// harmless, because none of them resolves a path and only a resolution
-	// re-records.
+	// harmless, because none of them calls hubManagedProjectPath, and only
+	// that resolution re-records.
 	s.warnedEphemeralProjects.Delete(project.Slug)
 
 	// Clean up the project-configs directory (~/.scion/project-configs/<slug>__<short-uuid>/).
