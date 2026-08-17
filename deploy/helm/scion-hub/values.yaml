@@ -296,17 +296,31 @@ config:
   #
   # Nothing checks the contents of a Secret you bring yourself. Everything the
   # chart asserts about the rendered file - the hosted mode, the explicit hub
-  # ID, the preflight keys - is yours to get right.
+  # ID, the preflight keys, the refusal of server.hub.public_url - is yours to
+  # get right. The public_url one is the easiest to get wrong without noticing:
+  # setting it splits the base URL between the agent endpoint and the OAuth
+  # redirect, silently, and the chart cannot warn you here.
   existingSecret: ""
 
   # Arbitrary additional settings.yaml content, deep-merged over what the chart
   # renders. Use it for keys the chart has no value for yet.
   #
-  # It is a merge over the whole document, so it can reach anything - including
-  # keys the chart renders on purpose. The invariants are re-checked after the
-  # merge, on the merged document, so an override that would disable hosted
-  # mode, drop the hub ID or contradict the database driver fails the render
-  # instead of installing.
+  # It is a merge over the whole document, so it can reach anything. Two
+  # consequences follow from that and only the first is usually noticed.
+  #
+  # The invariants are re-checked AFTER the merge, on the merged document, so an
+  # override that would disable hosted mode, substitute the hub ID, contradict
+  # the database driver, drop schema_version, move a server key to the top
+  # level, or split the base URL through server.hub.public_url fails the render
+  # instead of installing. Overwriting a key the chart itself wrote fails too,
+  # by comparison rather than by list.
+  #
+  # But that guard surface is a NAMED LIST, not a schema. Every settings key the
+  # chart does not write and does not name above is reachable through here and
+  # unchecked - by design, because this exists so an unmodelled setting never
+  # forces a chart fork. Use it for keys the chart has no value for yet; if you
+  # find yourself reaching for one it does model, that is a gap in the chart's
+  # own interface and worth reporting as one.
   extra: {}
 
 database:

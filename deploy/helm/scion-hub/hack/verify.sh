@@ -693,6 +693,68 @@ expect_render_failure \
   "${BASE[@]}" \
   --set config.extra.server.hub.hub_id=somethingelse
 
+# The base URL cannot be split in two. This is NOT a hypothetical guard against a
+# future template line: config.extra is deep-merged over the settings tree before
+# the assertions run, so the --set below rendered a working
+# server.hub.public_url before the assertion existed, in the same manifest as a
+# SCION_SERVER_BASE_URL pointing somewhere else. Verified by rendering it.
+#
+# Both halves are here, and the positive one is load-bearing: the rule is on the
+# key, not on the namespace, so config.extra must still be able to reach an
+# unmodelled key under server.hub. Without that twin this pair would also pass on
+# a guard that had started refusing every config.extra write to server.hub, and
+# the breakage would land on the one thing config.extra exists to allow.
+expect_render_failure \
+  "config.extra cannot split the base URL with server.hub.public_url" \
+  "it splits it" \
+  "${BASE[@]}" \
+  --set config.extra.server.hub.public_url=https://elsewhere.example.com
+
+# config.extra may add. It may not overwrite what the chart wrote.
+#
+# max_open_conns is chosen deliberately: it has no assertion of its own, so this
+# can only be the collision rule. A key that IS separately asserted - hub_id,
+# the driver, server.mode - would pass this test on the specific assertion and
+# report nothing about whether the collision rule works at all.
+#
+# The nil case is here because mergeOverwrite's nil semantics are the usual way
+# a merge guard leaks: an operator writing `hub_name: ~` is attempting deletion
+# rather than substitution, and a rule keyed on the VALUE would let it through.
+# This one is keyed on the key.
+expect_render_failure \
+  "config.extra cannot overwrite a key the chart writes" \
+  "config.extra overwrites server.database.max_open_conns" \
+  "${BASE[@]}" \
+  --set config.extra.server.database.max_open_conns=50
+
+cat >"$WORK/extra-nil.yaml" <<'NILVALUES'
+image:
+  repository: example.test/scion-hub-gke
+hub:
+  hubId: neg
+  baseUrl: https://neg.example.com
+config:
+  extra:
+    server:
+      hub:
+        hub_name: ~
+NILVALUES
+expect_render_failure \
+  "config.extra cannot null out a key the chart writes" \
+  "config.extra overwrites server.hub.hub_name" \
+  --values "$WORK/extra-nil.yaml"
+
+# The collision rule must not shadow the specific assertions. A generic "you
+# overwrote a key" in place of "that is not the value supplied in hub.hubId"
+# would be a regression in every case that has a message of its own, and the
+# ordering that prevents it is invisible from the output - which is why it is
+# asserted rather than assumed.
+expect_render_failure \
+  "a key with its own assertion still reports its own message" \
+  "which is not the value supplied in hub.hubId" \
+  "${BASE[@]}" \
+  --set config.extra.server.hub.hub_id=somethingelse
+
 expect_render_failure \
   "config.extra cannot contradict the database driver" \
   "Overriding the driver through config.extra" \
@@ -776,6 +838,21 @@ for ok_name in TOKEN_TTL_SECONDS MAX_TOKENS SECRET_MANAGER_PROJECT KEYCLOAK_REAL
     fail "hub.extraEnv rejected $ok_name - the name guard is substring-matching a credential noun that is describing what the value is ABOUT, not what it IS"
   fi
 done
+
+# The twin for the public_url refusal. server.hub is not a closed namespace - the
+# refusal is on one key - so an unmodelled key under it must still render.
+if out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" \
+    --set config.extra.server.hub.hub_description=example 2>&1); then
+  if grep -q 'hub_description: example' <<<"$out"; then
+    pass "config.extra can still reach an unmodelled key under server.hub"
+  else
+    fail "config.extra.server.hub.hub_description rendered without error but did not reach the settings file"
+  fi
+else
+  fail "config.extra was refused an unmodelled server.hub key - the public_url rule is matching the namespace instead of the key, which breaks the escape hatch config.extra exists to be"
+  printf '          %s\n' "$(tr '\n' ' ' <<<"$out" | cut -c1-300)"
+fi
 
 # The twin for the PEM case above: a multi-line value that is not credential
 # material is still accepted. Without this, "rejects a multi-line PEM" would also

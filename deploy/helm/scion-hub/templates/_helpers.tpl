@@ -1855,6 +1855,71 @@ server.workspace_storage and does not satisfy this. */}}
 {{- end }}
 {{- end }}
 
+{{- /*
+server.hub.public_url is refused outright. This is the only assertion in this
+file that guards a channel the chart itself owns, and that is exactly why it was
+missing until someone went looking.
+
+The base URL has two consumers and they do not read the same source. Read from
+the hub rather than assumed, and every step verified independently by review:
+
+  settings_v1.go:517            PublicURL carries koanf:"public_url"
+  settings_v1.go:1404-1405      if v1.Hub.PublicURL != "" { gc.Hub.Endpoint = it }
+  server_foreground.go:1311-12  resolveHubEndpoint returns cfg.Hub.Endpoint - and
+                                this is its FIRST statement, ahead of --base-url
+                                at :1323 and SCION_SERVER_BASE_URL at :1331
+  server_foreground.go:2102-08  initWebServer never reads cfg.Hub.Endpoint
+
+So public_url outranks both other channels for the agent endpoint, and the OAuth
+side cannot see it at any precedence. SCION_SERVER_BASE_URL is the only source
+both consumers honour, which is why the chart sets that and nothing else - it
+makes the two agree by construction rather than by the operator keeping them in
+step.
+
+REFUSED OUTRIGHT, not merely when it disagrees with hub.baseUrl. Permitting an
+equal value would create a second source of truth that has to be kept in sync,
+and the failure of that sync IS the bug: set both equal today, change hub.baseUrl
+tomorrow, and you get the split - from a values file that passed the guard on the
+day it was written. The permissive rule guards the moment of authorship, not the
+lifetime of the file, and there is nothing on the other side of the trade. A
+public_url equal to baseUrl buys the operator nothing, so the only configurations
+it would admit are the ones that are useless now and dangerous later.
+
+Rendering public_url therefore does not override the base URL. It SPLITS it: the
+agent endpoint moves and the OAuth redirect does not, in one process, with both
+values looking correct from their own side and no line in any manifest that
+looks wrong. The failure surfaces later as redirects to the wrong host.
+
+Reachable today, not hypothetically: config.extra is deep-merged over this tree
+before these assertions run, so config.extra.server.hub.public_url renders. That
+is the path hack/verify.sh proves this assertion against. The argv channel is
+closed by the reserved-flag list and the environment channel by the schema; this
+is the third channel and the chart is the only thing that writes it.
+
+public_url is an ALIAS: a settings key that is a second name for a value the
+chart already sets through a different channel. That is the hazard, and it is
+not the server.hub prefix - nothing about that prefix is dangerous, and an alias
+need not live anywhere near the value it renames. The collision check below
+cannot see this one either, because the chart never writes public_url; the two
+rules cover disjoint halves.
+
+So this is a denylist of one, and Phase 5a owns replacing it with the alias
+enumeration: every settings key that is a second name for something the chart
+sets elsewhere, derived by walking what the chart sets and asking what else
+names each quantity. Small, closed, checkable from the chart side alone, and it
+narrows config.extra not at all. Phase 5a because it is the phase that wants a
+public hostname and will reach for this key first.
+
+Do not add a second key here instead of converting it. The failure mode of a
+denylist of one is not that it stays at one - it is that the second key goes in
+cheaply and the addition makes the list look adequate. Two entries read as a
+considered policy; one entry reads as a stub, and a stub is the only thing that
+ever gets converted.
+*/}}
+{{- if dig "server" "hub" "public_url" "" $doc }}
+{{- fail (printf "rendered settings.yaml sets server.hub.public_url: %q. The chart refuses this key. It does not override the hub's base URL, it splits it: the agent endpoint reads server.hub.public_url, the OAuth redirect resolver never reads the settings file, and the two then disagree inside one process while both look correct. Set the base URL through hub.baseUrl, which the chart renders as SCION_SERVER_BASE_URL - the only source both resolvers honour, so they agree by construction. If you reached this through config.extra, remove server.hub.public_url from it." (dig "server" "hub" "public_url" "" $doc)) }}
+{{- end }}
+
 {{- /* The discriminator for the two auth modes. The subtree it selects is not
 rendered yet; see the comment in the rendered file. */}}
 {{- if ne (dig "server" "auth" "mode" "" $doc) $root.Values.auth.mode }}
@@ -1942,11 +2007,84 @@ values permutation rather than only the default one.
 
 {{- /* config.extra, deep-merged over the tree, so an unmodelled setting never
 forces a chart fork. Merged before the assertions run, not after. */}}
+{{- $preMerge := deepCopy $doc }}
 {{- if .Values.config.extra }}
 {{- $doc = mergeOverwrite $doc (deepCopy .Values.config.extra) }}
 {{- end }}
 
 {{- $rendered := toYaml $doc }}
 {{- include "scion-hub.assertSettings" (dict "root" . "rendered" $rendered "hubId" $hubId) }}
+{{- include "scion-hub.assertNoExtraCollision" (dict "preMerge" $preMerge "extra" .Values.config.extra) }}
 {{- $rendered }}
+{{- end }}
+
+{{/*
+Every leaf path in a settings document, one per line, dotted.
+
+Recursive: it calls itself through include. Leaves only - an intermediate map is
+not emitted, because "server" and "server.hub" exist in every document and
+reporting those as collisions would flag every use of config.extra.
+
+Dots in a key name would produce an ambiguous path. No key in the settings
+surface has one, and if one ever does the failure is a false positive naming the
+right key, not a miss.
+*/}}
+{{- define "scion-hub.leafPaths" -}}
+{{- $prefix := .prefix }}
+{{- range $k, $v := .obj }}
+{{- $path := ternary $k (printf "%s.%s" $prefix $k) (eq $prefix "") }}
+{{- if and (kindIs "map" $v) (gt (len $v) 0) }}
+{{- include "scion-hub.leafPaths" (dict "obj" $v "prefix" $path) }}
+{{- else }}
+{{ $path }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+config.extra may add settings. It may not silently overwrite ones the chart
+itself wrote.
+
+This is the settings-file analogue of the reserved-flag list, and it is the same
+argument one channel over: a value the chart computes and an operator's override
+of it are indistinguishable in the rendered output, so the manifest keeps
+reporting the operator's intent and every assertion downstream of the merge
+still passes. The difference from the flag list is that this one needs no
+enumeration - both documents are in hand at merge time, so the rule is derived
+rather than listed, and it cannot be incomplete the way a list can.
+
+WHAT THIS DOES NOT CATCH, and it is deliberate rather than an oversight. It sees
+only keys the chart WRITES. It cannot see an ALIAS - a settings key that is a
+second name for a value the chart already sets through a different channel.
+server.hub.public_url is exactly that: the chart controls the base URL through
+hub.baseUrl -> SCION_SERVER_BASE_URL and never writes public_url, so this check
+is silent on it and the explicit refusal in assertSettings is what catches it.
+The two rules cover disjoint halves and neither can see the other's. Phase 5a
+owns enumerating the aliases; do not delete either rule believing the other
+covers it.
+
+Runs AFTER assertSettings so that a collision on a key with its own assertion -
+the hub ID, the driver, server.mode, schema_version - still reports that
+assertion's specific message. A generic "you overwrote a key" would be a
+regression in every one of those cases.
+*/}}
+{{- define "scion-hub.assertNoExtraCollision" -}}
+{{- if .extra }}
+{{- $chartKeys := splitList "\n" (trim (include "scion-hub.leafPaths" (dict "obj" .preMerge "prefix" ""))) }}
+{{- $collisions := list }}
+{{- range $path := splitList "\n" (trim (include "scion-hub.leafPaths" (dict "obj" .extra "prefix" ""))) }}
+{{- $p := trim $path }}
+{{- if $p }}
+{{- range $chartPath := $chartKeys }}
+{{- $c := trim $chartPath }}
+{{- if or (eq $p $c) (hasPrefix (printf "%s." $c) $p) (hasPrefix (printf "%s." $p) $c) }}
+{{- $collisions = append $collisions $p }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $collisions }}
+{{- fail (printf "config.extra overwrites %s, which the chart itself sets. config.extra is for settings the chart does not model; overriding one it does write is invisible afterwards, because the rendered file reports your value and every check downstream of the merge passes on it. If the chart's value is wrong for you, change the value that produces it - or say why it cannot, because that is a gap in the chart's own interface rather than a job for the escape hatch." (join ", " (uniq $collisions))) }}
+{{- end }}
+{{- end }}
 {{- end }}

@@ -258,28 +258,70 @@ anything else it needs at runtime are created in it — so a read-only directory
 breaks the hub for reasons unrelated to configuration. Only the one file is
 read-only.
 
-**Do not expect that directory to be populated, and do not treat an almost-empty
-one as a failure.** This is worth stating because the obvious reading of "state
-directory" is wrong here, in a way that will otherwise send somebody hunting.
+**Expect a `cache/` tree and nothing else, and compare full paths rather than
+directory names.** Both halves of that will otherwise send somebody hunting, and
+the second half will send them to the wrong conclusion rather than to no
+conclusion.
 
-Two mechanisms combine. `cmd/server_foreground.go:110` refreshes bundled
-templates only in the `else if !hostedMode` branch — hosted mode bootstraps into
-the hub via `BootstrapBundledResources` and deliberately bypasses local
-`~/.scion` materialisation. And the branch above it, `config.InitGlobal`, which
-does run in hosted mode and would create `agents/` and `harness-configs/`, is
-reached only `if os.Stat(globalDir)` reports the directory missing. The chart
-mounts an `emptyDir` at exactly that path, so the directory always exists and
-that branch never fires.
+Neither `agents/` nor `harness-configs/` will exist directly under
+`/home/scion/.scion`, and that is correct. Two mechanisms combine, and they are
+independent — losing one does not restore the directories.
+`cmd/server_foreground.go:1771` bootstraps templates and harness configs from
+local `~/.scion` directories only in the `else` arm of an explicit
+`if hostedMode`; the hosted arm uses `BootstrapBundledResources` instead, "so
+every replica converges on the same DB + storage state". And
+`config.InitGlobal`, at `cmd/server_foreground.go:104`, which *does* run in
+hosted mode and *would* create both directories, is reached only
+`if os.Stat(globalDir)` reports the directory missing — and the chart mounts an
+`emptyDir` at exactly that path, so it never fires.
 
-So the chart's own mount changes which startup path the hub takes. That is
-believed to be harmless — hosted mode is designed not to need those directories,
-and `InitMachine` would not have overwritten the mounted `settings.yaml` in any
-case, because it seeds a default only when no settings file is found — but it is
-a behaviour difference introduced by the deployment rather than by the hub, and
-it has never been observed. **Record what is actually in that directory.** If
-the hub logs anything about a missing `agents/` or `harness-configs/` directory,
-or about templates it could not find, that is this, and it is a finding worth
-reporting rather than a local fix.
+That second mechanism is the chart changing which startup branch the hub takes,
+which is why it is written down rather than assumed.
+
+Nothing in the hub needs either directory in this deployment, and that is an
+enumeration of the source rather than an inference from one comment. For
+`harness-configs/` the three non-CLI readers are `cmd/server_foreground.go:1777`
+(the `else` arm above) and `pkg/hub/system_handlers.go:348` and `:538`, both
+registered behind `requireWorkstation` (`pkg/hub/server.go:3591`, `:3594`),
+which returns 404 whenever `Workstation` is false — and
+`cmd/server_foreground.go:1496` sets `Workstation: !hostedMode`. For `agents/`
+the reachable readers are `pkg/agent/provision.go:88` and
+`pkg/agent/list.go:201`; both *are* reachable here, because the chart enables
+the runtime broker, and both treat a missing directory as "no agents"
+(`provision.go:172-176` stats each candidate and `continue`s; `list.go:207-210`
+reads and `continue`s on error). No reader returns an error, warns, or fails a
+startup step.
+
+Those two results are not equally durable, and the difference is worth carrying.
+`agents/` is safe because of what its readers do, which survives any later phase
+switching a feature on. `harness-configs/` is safe because of which features are
+off, which does not. **If a later phase makes workstation mode or the onboarding
+endpoints reachable**, `handleSystemInit` (`pkg/hub/system_handlers.go:446`)
+becomes an HTTP endpoint that calls `config.InitMachine` and `os.RemoveAll`
+inside the tree this chart mounts a read-only settings file over. Neither gate
+holding it shut is visible from the chart's side.
+
+**What you should see instead** is `cache/templates`, `cache/harness-configs`
+and `cache/skills`, created at broker startup by `templatecache.New`
+(`pkg/templatecache/cache.go:85`) from `pkg/runtimebroker/server.go:396`, `:413`
+and `:422`. Note the collision: `cache/harness-configs` is **not**
+`harness-configs`. A check that greps for the name, or runs
+`find /home/scion/.scion -name harness-configs`, finds one and concludes the
+bootstrap ran — the opposite of the truth.
+
+That tree is also the positive twin for the write test above. The `touch` probe
+proves the directory is writable by the shell you exec'd as; the `cache/` tree
+proves it was writable by the hub's own uid at startup, which is the principal
+the question is actually about.
+
+**Record what is actually in the directory** — none of this has been observed.
+Two things would be findings rather than local fixes: any hub log line about a
+missing `agents/` or `harness-configs/` directory, or about templates it could
+not find; and the **absence** of the `cache/` tree, which would mean the state
+directory is not writable. That failure is silent — `templatecache.New` failing
+is handled with `slog.Warn` and the broker continues without a template cache
+(`pkg/runtimebroker/server.go:337`) — so it degrades rather than crashing, and
+nothing else will tell you.
 
 #### 3. What silently does not persist, until ptone/scion#1091
 
