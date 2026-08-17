@@ -1640,6 +1640,19 @@ nothing had been configured at all.
 {{- end }}
 {{- end }}
 
+{{/*
+The hub's state directory: hub.home plus /.scion.
+
+Not configurable independently, and there is no lever that separates the config
+file from the rest of it. The path is os.UserHomeDir() + "/.scion", hardcoded -
+there is no SCION_HOME and no config-path flag - and settings.yaml, storage/,
+templates/ and scion-token all live in it. That is why the directory is backed
+by a writable emptyDir and only the one file inside it is read-only.
+*/}}
+{{- define "scion-hub.scionDir" -}}
+{{- printf "%s/.scion" (trimSuffix "/" .Values.hub.home) }}
+{{- end }}
+
 {{/* Name of the ConfigMap holding the process environment. */}}
 {{- define "scion-hub.envConfigMapName" -}}
 {{- printf "%s-env" (include "scion-hub.fullname" .) }}
@@ -1696,6 +1709,13 @@ exists to avoid, so supplying both is an error rather than a precedence rule.
 
 Later phases append their own inline values to $inline as they are introduced
 (the database password, the session secret, the OAuth client secret).
+
+MUST be called from a template that always renders. Calling it only from
+scion-hub.settings does not work, and does not look broken: the settings
+template is reached through secret-settings.yaml, which is itself skipped when
+config.existingSecret is set - so the one configuration this check exists to
+reject is the one configuration in which it never runs. deployment.yaml calls
+it; keep that call.
 */}}
 {{- define "scion-hub.assertConfigSource" -}}
 {{- if .Values.config.existingSecret }}
@@ -1730,9 +1750,26 @@ generator appears in the hub-ID position" does not.
 {{- fail (printf "the rendered settings.yaml is not valid YAML: %v" (get $doc "Error")) }}
 {{- end }}
 
-{{- /* Top-level shape - see the file layout in the design's configuration section. */}}
+{{- /*
+schema_version. This is a safety property, not a formality, and it is the one
+check in this file most likely to be deleted by someone tidying up.
+
+The hub does not migrate settings at startup. MigrateSettingsFile has exactly
+two callers: the "scion config migrate" CLI, and a lazy auto-migration inside
+SetSettingValue that fires ONLY when the file has no schema_version key. So a
+file that declares schema_version never migrates, and a file that omits it can
+migrate at an arbitrary moment during normal operation.
+
+That matters because settings.yaml is delivered as a subPath bind mount, and
+MigrateSettingsFile replaces the file with os.Rename. Renaming over a bind mount
+returns EBUSY. Every other write path to this file is soft - a warning, or a 500
+to one caller, with the server continuing - so omitting schema_version is the
+one way to turn a mount that merely refuses writes into a hard failure.
+
+Present is not enough; it has to be the value that stops migration, as a string.
+*/}}
 {{- if ne (dig "schema_version" "" $doc) "1" }}
-{{- fail (printf "rendered settings.yaml must carry schema_version: \"1\" as a string, got %q" (dig "schema_version" "" $doc)) }}
+{{- fail (printf "rendered settings.yaml must carry schema_version: \"1\" as a string, got %q. Without it the hub's lazy auto-migration can fire during operation, and it replaces the file with os.Rename, which returns EBUSY against the subPath mount this file is delivered through." (dig "schema_version" "" $doc)) }}
 {{- end }}
 {{- if not (dig "active_profile" "" $doc) }}
 {{- fail "rendered settings.yaml must set a non-empty top-level active_profile" }}
@@ -1840,6 +1877,27 @@ database.max.open.conns and the variable never binds.
     "auth" (dict "mode" .Values.auth.mode)
     "broker" (dict "host" "127.0.0.1" "port" 9800 "auto_provide" true) }}
 
+{{- /*
+LOAD-BEARING. schema_version is not boilerplate and it is not redundant with
+anything. Do not drop it, and do not let it be dropped by an override path that
+happens not to be covered.
+
+It is what stops the hub's lazy settings migration from ever firing.
+SetSettingValue auto-migrates when the file's format cannot be detected
+(pkg/config/settings.go:590-600), and the format detector keys on this field;
+with it present the hub delegates to the v1 handler and never migrates. The
+migration itself replaces the file with os.Rename
+(pkg/config/settings_v1.go:2694), which returns EBUSY against a bind-mounted
+path - and this file is delivered as a subPath bind mount.
+
+The hub deliberately does NOT guard this path in hosted mode. That decision was
+taken on the basis that the chart controls the input, which means this line is
+the guard. Every other write to settings.yaml under the mount is soft; this is
+the only one that turns into a hard failure.
+
+hack/verify.sh enforces it under the name migration-rename-hazard, across every
+values permutation rather than only the default one.
+*/}}
 {{- $doc := dict "schema_version" "1" "active_profile" "default" "server" $server }}
 {{- if .Values.agents.imageRegistry }}
 {{- $doc = set $doc "image_registry" .Values.agents.imageRegistry }}
