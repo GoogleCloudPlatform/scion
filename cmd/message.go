@@ -138,8 +138,11 @@ Examples:
 			return fmt.Errorf("--notify cannot be combined with --broadcast or --all")
 		}
 
-		// Validate --cc restrictions
-		if len(msgCC) > 0 {
+		// Validate --cc restrictions: parse first so empty-string values
+		// (e.g. --cc "") are handled correctly instead of triggering
+		// false-positive validation errors.
+		parsedCC := parseCCFlag(msgCC)
+		if len(parsedCC) > 0 {
 			if msgBroadcast || msgAll {
 				return fmt.Errorf("--cc cannot be combined with --broadcast or --all")
 			}
@@ -272,7 +275,7 @@ Examples:
 		}
 
 		// --cc requires Hub mode
-		if len(msgCC) > 0 && hubCtx == nil {
+		if len(parsedCC) > 0 && hubCtx == nil {
 			return fmt.Errorf("--cc requires Hub mode (use 'scion hub enable' first)")
 		}
 
