@@ -65,7 +65,7 @@ Brokers maintain a persistent outbound WebSocket connection to the Hub. The Hub 
 
 ## System Health Endpoints (Hub)
 - `GET /healthz`: Basic liveness check. If a reverse proxy intercepts this with a non-JSON response, the client gracefully falls back to `/health`.
-- `GET /readyz`: Readiness check verifying database connectivity.
+- `GET /readyz`: Readiness check verifying database connectivity and, when a non-`local` workspace storage backend is configured, that its mount is available. Kubernetes and Cloud Run readiness probes must target this endpoint rather than `/healthz`, which always returns `200`.
 - `GET /health`: Legacy/alternative liveness check endpoint.
 
 ## Communication Patterns
