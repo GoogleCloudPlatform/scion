@@ -879,6 +879,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	if len(mentionedAgents) > 0 {
 		// --- Agent-routed: explicit mentions ---
 		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, mentionedAgents, mentionNames, mentionResults, attachmentRefs, now)
+		if msgID == "" {
+			return // error response already written by sendAgentRouted
+		}
 		recordIdempotency(msgID)
 		// Ensure DM registry rows exist so the DM appears in the rail.
 		if isDM {
@@ -896,6 +899,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			dmAgent, err := s.store.GetAgent(ctx, agentID)
 			if err == nil && dmAgent != nil {
 				msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, mentionNames, nil, attachmentRefs, now)
+				if msgID == "" {
+					return // error response already written by sendAgentRouted
+				}
 				recordIdempotency(msgID)
 				// Ensure DM registry rows exist so the DM appears in the rail.
 				s.ensureDMRegistered(ctx, key, user.ID())
@@ -915,6 +921,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			}
 			if err == nil && defaultAgent != nil {
 				msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, attachmentRefs, now)
+				if msgID == "" {
+					return // error response already written by sendAgentRouted
+				}
 				recordIdempotency(msgID)
 				return
 			}
@@ -923,6 +932,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// --- Human-to-human message ---
 	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, mentionNames, attachmentRefs, now)
+	if msgID == "" {
+		return // error response already written by sendHumanToHuman
+	}
 	recordIdempotency(msgID)
 }
 

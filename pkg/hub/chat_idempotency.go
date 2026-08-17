@@ -22,6 +22,10 @@ import (
 // chatIdempotencyTTL is how long an idempotency key is remembered.
 const chatIdempotencyTTL = 5 * time.Minute
 
+// idempotencyCacheCleanupThreshold is the number of entries beyond which
+// an amortized sweep of expired entries is triggered.
+const idempotencyCacheCleanupThreshold = 100
+
 // chatIdempotencyEntry stores a cached idempotency result.
 type chatIdempotencyEntry struct {
 	messageID string
@@ -29,7 +33,9 @@ type chatIdempotencyEntry struct {
 }
 
 // ChatIdempotencyCache is a lightweight in-memory cache keyed by
-// senderID + ":" + idempotencyKey. Entries expire after 5 minutes.
+// senderID + "\x00" + idempotencyKey. A null byte separator is used
+// because it cannot appear in UUIDs, preventing collisions between
+// sender IDs and idempotency keys. Entries expire after 5 minutes.
 // It is safe for concurrent use.
 type ChatIdempotencyCache struct {
 	mu      sync.Mutex
@@ -51,11 +57,11 @@ func (c *ChatIdempotencyCache) Check(senderID, idempotencyKey string) (string, b
 
 	now := time.Now()
 	// Amortized cleanup: only sweep when cache grows beyond threshold.
-	if len(c.entries) > 100 {
+	if len(c.entries) > idempotencyCacheCleanupThreshold {
 		c.cleanExpiredLocked(now)
 	}
 
-	key := senderID + ":" + idempotencyKey
+	key := senderID + "\x00" + idempotencyKey
 	entry, ok := c.entries[key]
 	if !ok {
 		return "", false
@@ -77,11 +83,11 @@ func (c *ChatIdempotencyCache) Record(senderID, idempotencyKey, messageID string
 
 	// Amortized cleanup in Record too, so entries never accumulate
 	// unboundedly even if Check() is rarely called.
-	if len(c.entries) > 100 {
+	if len(c.entries) > idempotencyCacheCleanupThreshold {
 		c.cleanExpiredLocked(time.Now())
 	}
 
-	key := senderID + ":" + idempotencyKey
+	key := senderID + "\x00" + idempotencyKey
 	c.entries[key] = chatIdempotencyEntry{
 		messageID: messageID,
 		expiresAt: time.Now().Add(chatIdempotencyTTL),
