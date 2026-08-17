@@ -427,6 +427,130 @@ func TestReadiness_NFSAvailable(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// TestCheckWorkspaceStorageHealth_MountPathPerBackend covers mount path
+// resolution for every backend.
+//
+// The Cloud Run and GKE volume backends resolve a path under /mnt, which a test
+// cannot create, so those cases assert the distinction between "mount path not
+// configured" (no path resolved at all — the gke-shared-volume bug) and "mount
+// not available" (a path was resolved and stat'ed). The NFS backend, whose
+// mount root is configurable, covers the healthy path above.
+func TestCheckWorkspaceStorageHealth_MountPathPerBackend(t *testing.T) {
+	srv, _ := testServer(t)
+
+	mountRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share1"), 0755))
+
+	tests := []struct {
+		name string
+		cfg  *config.V1WorkspaceStorageConfig
+		want string // expected checks["workspace_storage"]; "" means no entry
+	}{
+		{
+			name: "nil config records no check",
+			cfg:  nil,
+			want: "",
+		},
+		{
+			name: "local backend records no check",
+			cfg:  &config.V1WorkspaceStorageConfig{Backend: "local"},
+			want: "",
+		},
+		{
+			name: "empty backend records no check",
+			cfg:  &config.V1WorkspaceStorageConfig{Backend: ""},
+			want: "",
+		},
+		{
+			name: "nfs with a mounted share is healthy",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend: "nfs",
+				NFS: &config.V1NFSConfig{
+					MountRoot: mountRoot,
+					Shares:    []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion"}},
+				},
+			},
+			want: "healthy",
+		},
+		{
+			name: "nfs with a missing share reports mount unavailable",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend: "nfs",
+				NFS: &config.V1NFSConfig{
+					MountRoot: mountRoot,
+					Shares:    []config.V1NFSShare{{ID: "absent-share", Server: "10.0.0.2", Export: "/scion"}},
+				},
+			},
+			want: "unhealthy: mount not available",
+		},
+		{
+			name: "nfs without shares reports mount path not configured",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend: "nfs",
+				NFS:     &config.V1NFSConfig{MountRoot: mountRoot},
+			},
+			want: "unhealthy: mount path not configured",
+		},
+		{
+			name: "cloudrun-volume with a volume name resolves a mount path",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend:        "cloudrun-volume",
+				CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "scion-absent-cloudrun-vol"},
+			},
+			want: "unhealthy: mount not available",
+		},
+		{
+			name: "cloudrun-volume without a volume name reports mount path not configured",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend:        "cloudrun-volume",
+				CloudRunVolume: &config.V1CloudRunVolumeConfig{},
+			},
+			want: "unhealthy: mount path not configured",
+		},
+		{
+			name: "gke-shared-volume with a volume name resolves a mount path",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend: "gke-shared-volume",
+				GKESharedVolume: &config.V1GKESharedVolumeConfig{
+					VolumeName:  "scion-absent-gke-vol",
+					PVClaimName: "scion-workspaces",
+					SubPathRoot: "projects",
+				},
+			},
+			want: "unhealthy: mount not available",
+		},
+		{
+			// The mount path keys off VolumeName, not PVClaimName.
+			name: "gke-shared-volume without a volume name reports mount path not configured",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend:         "gke-shared-volume",
+				GKESharedVolume: &config.V1GKESharedVolumeConfig{PVClaimName: "scion-workspaces"},
+			},
+			want: "unhealthy: mount path not configured",
+		},
+		{
+			name: "gke-shared-volume without a config block reports mount path not configured",
+			cfg:  &config.V1WorkspaceStorageConfig{Backend: "gke-shared-volume"},
+			want: "unhealthy: mount path not configured",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv.config.WorkspaceStorageConfig = tt.cfg
+
+			checks := make(map[string]string)
+			srv.checkWorkspaceStorageHealth(checks)
+
+			if tt.want == "" {
+				assert.NotContains(t, checks, "workspace_storage")
+				return
+			}
+			assert.Equal(t, tt.want, checks["workspace_storage"])
+		})
+	}
+}
+
 // ============================================================================
 // Integration Test: Write → Verify → Simulated Restart
 // ============================================================================

@@ -98,8 +98,9 @@ func (h *HealthResponse) HealthStatus() string {
 }
 
 // checkWorkspaceStorageHealth verifies that the configured workspace storage
-// backend is accessible. For NFS and Cloud Run volume backends, it stats the
-// mount point to confirm it is present. For local storage, no check is needed.
+// backend is accessible. For NFS, Cloud Run volume and GKE shared volume
+// backends, it stats the mount point to confirm it is present. For local
+// storage, no check is needed.
 func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 	wsCfg := s.config.WorkspaceStorageConfig
 	if wsCfg == nil || wsCfg.Backend == "" || wsCfg.Backend == "local" {
@@ -116,6 +117,15 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 	case "cloudrun-volume":
 		if wsCfg.CloudRunVolume != nil && wsCfg.CloudRunVolume.VolumeName != "" {
 			mountPath = filepath.Join("/mnt", wsCfg.CloudRunVolume.VolumeName)
+		}
+	case "gke-shared-volume":
+		// The PVC is mounted into the pod at /mnt/<volume_name>, mirroring the
+		// Cloud Run volume convention. V1GKESharedVolumeConfig carries no mount
+		// path of its own — PVClaimName names the PVC and SubPathRoot is the
+		// prefix *within* the volume — so the volume name is what identifies
+		// the mount point.
+		if wsCfg.GKESharedVolume != nil && wsCfg.GKESharedVolume.VolumeName != "" {
+			mountPath = filepath.Join("/mnt", wsCfg.GKESharedVolume.VolumeName)
 		}
 	}
 
