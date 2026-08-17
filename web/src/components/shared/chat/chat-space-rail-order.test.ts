@@ -248,6 +248,25 @@ describe('space rail — reordering', () => {
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
+  it('refuses to move a space while the unread filter is on', async () => {
+    const el = createRail();
+    el.prefs = { spaceSortMode: 'custom', threadSortMode: 'activity', spaceOrder: undefined };
+    el.spaceFilter = 'unread';
+
+    await el.moveSpace('p-b', -1);
+
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('disables both reorder items for every space while filtering', () => {
+    const el = createRail();
+    el.prefs = { spaceSortMode: 'custom', threadSortMode: 'activity', spaceOrder: undefined };
+    el.spaceFilter = 'unread';
+
+    expect(el.isSpaceAtEdge('p-b', 'first')).toBe(true);
+    expect(el.isSpaceAtEdge('p-b', 'last')).toBe(true);
+  });
+
   it('reports which spaces sit at the edges, for disabling the menu items', () => {
     const el = createRail();
     el.prefs = { spaceSortMode: 'custom', threadSortMode: 'activity', spaceOrder: undefined };
@@ -331,6 +350,19 @@ describe('space rail — sort menu and space menu rendering', () => {
     expect(upItems[0]?.hasAttribute('disabled')).toBe(true);
     expect(upItems[1]?.hasAttribute('disabled')).toBe(false);
     expect(downItems[2]?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('greys out the move items while the unread filter hides part of the list', async () => {
+    const el = await mount();
+    el.spaces = [{ ...space('p-a', 'Alpha'), unreadCount: 1 }, space('p-b', 'Bravo')];
+    el.spaceFilter = 'unread';
+    await el.updateComplete;
+
+    const upItems = [...el.shadowRoot.querySelectorAll('.move-up')];
+    const downItems = [...el.shadowRoot.querySelectorAll('.move-down')];
+    expect(upItems).toHaveLength(1);
+    expect(upItems[0]?.hasAttribute('disabled')).toBe(true);
+    expect(downItems[0]?.hasAttribute('disabled')).toBe(true);
   });
 
   it('marks space headers as draggable', async () => {

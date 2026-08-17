@@ -50,6 +50,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Capabilities, Agent } from '../../shared/types.js';
@@ -2469,7 +2470,7 @@ export class ScionPageChat extends LitElement {
    * a DM has no rail row, so the conversation header is the only place a
    * user can silence one.
    */
-  private renderDMMuteButton(conv: V2ConversationState) {
+  private renderDMMuteButton(conv: V2ConversationState): TemplateResult {
     const muted = conv.muted === true;
     return html`
       <sl-tooltip content=${muted ? 'Unmute conversation' : 'Mute conversation'}>
@@ -2477,7 +2478,7 @@ export class ScionPageChat extends LitElement {
           class="dm-mute"
           name=${muted ? 'bell-slash' : 'bell'}
           label=${muted ? 'Unmute conversation' : 'Mute conversation'}
-          @click=${() => void this.toggleDMMute()}
+          @click=${(): void => void this.toggleDMMute()}
         ></sl-icon-button>
       </sl-tooltip>
     `;

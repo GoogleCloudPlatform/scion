@@ -169,7 +169,24 @@ describe('composer — failure rendering', () => {
     expect(el.shadowRoot.querySelector('.upload-failures')).toBeNull();
   });
 
-  it('dismisses the list', async () => {
+  it('dismisses the row that was clicked and keeps the rest', async () => {
+    const el = await mount();
+    el.uploadFailures = [
+      { name: 'a.exe', error: 'not accepted' },
+      { name: 'b.sh', error: 'not accepted' },
+      { name: 'c.bat', error: 'not accepted' },
+    ];
+    await el.updateComplete;
+
+    const dismissRows = [...el.shadowRoot.querySelectorAll('.dismiss-btn')];
+    (dismissRows[1] as HTMLButtonElement).click();
+    await el.updateComplete;
+
+    expect(el.uploadFailures.map((f: { name: string }) => f.name)).toEqual(['a.exe', 'c.bat']);
+    expect(el.shadowRoot.querySelectorAll('.upload-failure')).toHaveLength(2);
+  });
+
+  it('clears the surface once the last row is dismissed', async () => {
     const el = await mount();
     el.uploadFailures = [{ name: 'bad.exe', error: 'not accepted' }];
     await el.updateComplete;
@@ -179,6 +196,36 @@ describe('composer — failure rendering', () => {
 
     expect(el.uploadFailures).toEqual([]);
     expect(el.shadowRoot.querySelector('.upload-failures')).toBeNull();
+  });
+});
+
+describe('composer — whole-request error messages', () => {
+  it('reads the reason out of the hub error envelope', async () => {
+    const el = createComposer();
+    respondWith(503, {
+      error: { code: 'SERVICE_UNAVAILABLE', message: 'Attachments not available' },
+    });
+    const errors: string[] = [];
+    el.addEventListener('composer-error', (e: CustomEvent<{ message: string }>) =>
+      errors.push(e.detail.message)
+    );
+
+    await selectFiles(el, ['compose.yaml']);
+
+    expect(errors).toEqual(['Attachments not available']);
+  });
+
+  it('falls back to a generic message when the body carries no reason', async () => {
+    const el = createComposer();
+    respondWith(500, {});
+    const errors: string[] = [];
+    el.addEventListener('composer-error', (e: CustomEvent<{ message: string }>) =>
+      errors.push(e.detail.message)
+    );
+
+    await selectFiles(el, ['compose.yaml']);
+
+    expect(errors).toEqual(['Upload failed']);
   });
 });
 

@@ -1488,31 +1488,9 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
-	if isDM {
-		if !validDMKey(key) {
-			BadRequest(w, "invalid DM key format")
-			return
-		}
-		if !isDMParticipant(key, user.ID()) {
-			Forbidden(w)
-			return
-		}
-	} else {
-		topic, err := wcs.GetTopic(ctx, key)
-		if err != nil || topic == nil {
-			NotFound(w, "Thread")
-			return
-		}
-		project, err := s.store.GetProject(ctx, topic.ProjectID)
-		if err != nil {
-			NotFound(w, "Project")
-			return
-		}
-		if !s.authorize(w, r, projectResource(project), ActionRead) {
-			return
-		}
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+		return
 	}
 
 	if r.Method == http.MethodGet {

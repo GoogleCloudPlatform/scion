@@ -752,6 +752,7 @@ export class ScionChatSpaceRail extends LitElement {
    * for everyone.
    */
   private async moveSpace(projectId: string, delta: -1 | 1): Promise<void> {
+    if (!this.canReorderSpaces()) return;
     const order = this.currentSpaceOrder();
     const from = order.indexOf(projectId);
     const to = from + delta;
@@ -762,8 +763,24 @@ export class ScionChatSpaceRail extends LitElement {
     await this.applySpaceOrder(next);
   }
 
-  /** True when the space is already at the given end of the displayed order. */
+  /**
+   * Reordering is only offered on the unfiltered list. The order that gets
+   * persisted is the global one, so "Move up" against a filtered view would
+   * swap the space with a neighbour the user cannot see — either appearing to
+   * do nothing, or quietly writing an arrangement they never chose. Reordering
+   * against the visible list instead would be worse: the same click would mean
+   * different things depending on a filter elsewhere in the rail.
+   */
+  private canReorderSpaces(): boolean {
+    return this.spaceFilter === 'all';
+  }
+
+  /**
+   * True when the reorder item should be disabled: the space is already at the
+   * given end of the displayed order, or reordering is off altogether.
+   */
   private isSpaceAtEdge(projectId: string, edge: 'first' | 'last'): boolean {
+    if (!this.canReorderSpaces()) return true;
     const order = this.currentSpaceOrder();
     const index = order.indexOf(projectId);
     if (index === -1) return true;
@@ -1291,10 +1308,10 @@ export class ScionChatSpaceRail extends LitElement {
             ? 'drag-over'
             : ''}"
           draggable="true"
-          @dragstart=${(e: DragEvent) => this.handleSpaceDragStart(e, space.projectId)}
-          @dragover=${(e: DragEvent) => this.handleSpaceDragOver(e, space.projectId)}
-          @drop=${(e: DragEvent) => void this.handleSpaceDrop(e, space.projectId)}
-          @dragend=${() => this.handleSpaceDragEnd()}
+          @dragstart=${(e: DragEvent): void => this.handleSpaceDragStart(e, space.projectId)}
+          @dragover=${(e: DragEvent): void => this.handleSpaceDragOver(e, space.projectId)}
+          @drop=${(e: DragEvent): void => void this.handleSpaceDrop(e, space.projectId)}
+          @dragend=${(): void => this.handleSpaceDragEnd()}
           @click=${() =>
             isCollapsed
               ? this.handleCollapsedSpaceClick(space)
@@ -1469,16 +1486,20 @@ export class ScionChatSpaceRail extends LitElement {
         </div>
         <div
           class="context-menu-item pin-toggle"
-          @click=${() => void this.handleTogglePin(thread, projectId)}
+          @click=${(): void => void this.handleTogglePin(thread, projectId)}
         >
-          <sl-icon name=${thread.pinned ? 'star' : 'star-fill'}></sl-icon>
+          <!-- The glyph reports the current state, the label offers the
+               action — the filled star means pinned everywhere else in this
+               rail, and a menu that used it for "will be pinned" would make
+               the row indicator ambiguous. -->
+          <sl-icon name=${thread.pinned ? 'star-fill' : 'star'}></sl-icon>
           ${thread.pinned ? 'Unpin' : 'Pin to top'}
         </div>
         <div
           class="context-menu-item mute-toggle"
-          @click=${() => void this.handleToggleMute(thread, projectId)}
+          @click=${(): void => void this.handleToggleMute(thread, projectId)}
         >
-          <sl-icon name=${thread.muted ? 'bell' : 'bell-slash'}></sl-icon>
+          <sl-icon name=${thread.muted ? 'bell-slash' : 'bell'}></sl-icon>
           ${thread.muted ? 'Unmute' : 'Mute'}
         </div>
         ${!thread.isGeneral

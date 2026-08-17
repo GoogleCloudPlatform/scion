@@ -291,4 +291,26 @@ describe('space rail — muted rendering', () => {
     expect(el.shadowRoot.querySelector('.mute-toggle')?.textContent?.trim()).toBe('Unmute');
     expect(el.shadowRoot.querySelector('.pin-toggle')?.textContent?.trim()).toBe('Unpin');
   });
+
+  it('marks the menu glyphs with the current state, not the pending action', async () => {
+    const el = await mount([thread()]);
+    el.contextMenuTarget = { type: 'thread', thread: thread(), projectId: SPACE.projectId };
+    await el.updateComplete;
+
+    const glyph = (selector: string): string | null | undefined =>
+      el.shadowRoot.querySelector(`${selector} sl-icon`)?.getAttribute('name');
+
+    expect(glyph('.pin-toggle')).toBe('star');
+    expect(glyph('.mute-toggle')).toBe('bell');
+
+    el.contextMenuTarget = {
+      type: 'thread',
+      thread: thread({ muted: true, pinned: true }),
+      projectId: SPACE.projectId,
+    };
+    await el.updateComplete;
+
+    expect(glyph('.pin-toggle')).toBe('star-fill');
+    expect(glyph('.mute-toggle')).toBe('bell-slash');
+  });
 });

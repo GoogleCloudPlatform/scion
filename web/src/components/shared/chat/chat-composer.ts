@@ -29,6 +29,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { Agent } from '../../../shared/types.js';
 import type { MentionAcceptDetail } from './mention-autocomplete.js';
@@ -744,19 +745,19 @@ export class ScionChatComposer extends LitElement {
    * error about the message — the rest of the batch is still attached — so it
    * belongs next to the attachments rather than in a toast that replaces them.
    */
-  private renderUploadFailures() {
+  private renderUploadFailures(): TemplateResult {
     return html`
       <div class="upload-failures">
         ${this.uploadFailures.map(
-          (failure) => html`
+          (failure, index) => html`
             <div class="upload-failure">
               <sl-icon name="exclamation-triangle" style="font-size:0.75rem"></sl-icon>
               <span class="failure-name">${failure.name}</span>
               <span class="failure-reason">${failure.error}</span>
               <button
                 class="dismiss-btn"
-                aria-label="Dismiss"
-                @click=${() => this.dismissUploadFailures()}
+                aria-label="Dismiss ${failure.name}"
+                @click=${(): void => this.dismissUploadFailure(index)}
               >
                 &times;
               </button>
@@ -767,8 +768,13 @@ export class ScionChatComposer extends LitElement {
     `;
   }
 
-  private dismissUploadFailures(): void {
-    this.uploadFailures = [];
+  /**
+   * Dismiss one row. The × sits on the row, so it has to clear that row —
+   * clearing the list would silently throw away the failures the user has not
+   * read yet, which is the thing this surface exists to prevent.
+   */
+  private dismissUploadFailure(index: number): void {
+    this.uploadFailures = this.uploadFailures.filter((_, i) => i !== index);
   }
 
   /** Open the hidden file input. */
@@ -815,6 +821,10 @@ export class ScionChatComposer extends LitElement {
       const data = (await res.json().catch(() => ({}))) as {
         attachments?: UploadedAttachment[];
         failures?: UploadFailure[];
+        // The hub's error helper nests the reason under `error`; a plain
+        // `message` is read too so a handler that answers flat is not silently
+        // reduced to "Upload failed".
+        error?: { message?: string };
         message?: string;
       };
 
@@ -830,7 +840,7 @@ export class ScionChatComposer extends LitElement {
       if (!res.ok && this.uploadFailures.length === 0) {
         this.dispatchEvent(
           new CustomEvent('composer-error', {
-            detail: { message: data.message || 'Upload failed' },
+            detail: { message: data.error?.message || data.message || 'Upload failed' },
             bubbles: true,
             composed: true,
           })
