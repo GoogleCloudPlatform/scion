@@ -206,6 +206,7 @@ checks_run=0
 checks_failed=0
 failures=()
 OVERRIDE_REASON=""
+ROOT_OVERRIDE=""
 
 run_guarded() {
   local dir="$1"
@@ -215,7 +216,11 @@ run_guarded() {
     cd "$dir" || exit 90
     export PATH="$SHIM_DIR:$PATH"
     export SCION_WORKSPACE_MODE=shared-plain
-    export SCION_WSGUARD_ROOT="$SHARED"
+    if [[ -n "$ROOT_OVERRIDE" ]]; then
+      export SCION_WSGUARD_ROOT="$ROOT_OVERRIDE"
+    else
+      export SCION_WSGUARD_ROOT="$SHARED"
+    fi
     export SCION_WSGUARD_AUDIT="$AUDIT"
     export SCION_AGENT_NAME=wsguard-selftest
     export SCION_AGENT_SLUG=wsguard-selftest
@@ -256,6 +261,7 @@ arm() {
     printf '%s\n' "$LAST_OUT" | sed 's/^/    | /'
   fi
   OVERRIDE_REASON=""
+  ROOT_OVERRIDE=""
 }
 
 # assert <arm-name> <description> <condition-result 0|1>
@@ -361,6 +367,33 @@ arm "U1-not-a-repository" 78 "$OUTSIDE" -- checkout -- anything.txt
 [[ "$LAST_OUT" == *"rev-parse --show-toplevel exited"* ]] &&
   assert "U1-not-a-repository" "the underlying git stderr is reprinted, not swallowed" 0 ||
   assert "U1-not-a-repository" "the underlying git stderr is reprinted, not swallowed" 1
+
+# The scoping decision compares two paths. If they are not produced by the same
+# normaliser the comparison silently answers "different", which for this guard
+# means PASSTHROUGH — an armed guard that permits everything while still
+# printing its arming banner. U2 and N11 are the two shapes of that bug.
+dirty "$SHARED"
+ROOT_OVERRIDE="$WORK/root-that-does-not-exist"
+arm "U2-unresolvable-root" 78 "$SHARED" -- checkout -- tracked.txt
+[[ "$LAST_OUT" == *"guarded root could not be resolved"* ]] &&
+  assert "U2-unresolvable-root" "an unresolvable root is cannot-evaluate, NOT a silent passthrough" 0 ||
+  assert "U2-unresolvable-root" "an unresolvable root is cannot-evaluate, NOT a silent passthrough" 1
+[[ "$LAST_OUT" == *"cd exited"* ]] &&
+  assert "U2-unresolvable-root" "the shell's own error is reprinted, not swallowed" 0 ||
+  assert "U2-unresolvable-root" "the shell's own error is reprinted, not swallowed" 1
+still_dirty && assert "U2-unresolvable-root" "the modification survived — nothing ran" 0 ||
+  assert "U2-unresolvable-root" "the modification survived — nothing ran" 1
+
+echo
+echo "==========================================================================="
+echo "REFUSAL, CONTINUED — the root must be normalised before it is compared"
+echo "==========================================================================="
+
+dirty "$SHARED"
+ROOT_OVERRIDE="$SHARED/"
+arm "N11-root-with-trailing-slash" 77 "$SHARED" -- checkout -- tracked.txt
+still_dirty && assert "N11-root-with-trailing-slash" "a trailing slash on the root does not open the gate" 0 ||
+  assert "N11-root-with-trailing-slash" "a trailing slash on the root does not open the gate" 1
 
 echo
 echo "==========================================================================="

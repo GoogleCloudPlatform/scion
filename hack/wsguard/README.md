@@ -34,11 +34,61 @@ invisible: it does not error, it returns a confident wrong answer.
 | Candidate | Verdict | Why |
 |---|---|---|
 | **`PATH` shim named `git`** | **chosen** | The only mechanism that sees the command *before* it runs, for every form of it, including the pathspec forms that touch no ref. Bypassable on purpose (see below). |
-| `core.hooksPath` hook set | rejected | **Git has no `pre-checkout` hook.** `post-checkout` fires after the working tree has already been overwritten. `reference-transaction` can abort a ref update, so it sees branch switching and `reset` — but `git checkout -- <path>`, `git restore <path>` and `git clean -fd` touch no ref at all, and `FETCH_HEAD` is not written through the ref backend either. A hook set would have been a control that passes vacuously against `git checkout -- .`, the exact command that caused the casualty. |
+| `core.hooksPath` hook set | rejected — **and this rejection is measured, not argued: `hack/wsguard/hook-probe.sh`** | **Git has no `pre-checkout` hook.** `post-checkout` fires after the working tree has already been overwritten. `reference-transaction` can abort a ref update, so it sees branch switching and `reset` — but `git checkout -- <path>`, `git restore <path>` and `git clean -fd` touch no ref at all, and `FETCH_HEAD` is not written through the ref backend either. A hook set would have been a control that passes vacuously against `git checkout -- .`, the exact command that caused the casualty. See **Measuring the hook rejection** below — that paragraph was originally reasoning from git's documented hook set, and is now a measurement. |
 | `git config alias` shadow | rejected | Git does not let an alias shadow a built-in subcommand. `alias.checkout` is ignored whenever `git checkout` resolves to the built-in, which is always. The mechanism silently does nothing, which is the worst available failure mode. |
 | A CI check | rejected **as the mechanism**, adopted **as the verification** | CI runs after the push. The work this guard protects is uncommitted, so by the time CI could speak, there is nothing left to protect. But CI is exactly the right place to prove the guard still works: `make wsguard` runs the selftest, so a regression in the guard is caught by the same pipeline as any other regression. |
 | Documentation alone | rejected | This project has ample evidence that prose rules are not obeyed under pressure — including in the incident above, where the rule existed and was written down. Documentation is shipped alongside the shim, not instead of it. |
 | A read-only mount / filesystem ACL | rejected | It would break the legitimate 95% of writes. The problem is not that agents write to the shared tree; it is that a handful of git subcommands write *over other agents*. |
+
+### Measuring the hook rejection
+
+The paragraph above decides the whole design, and in the first version of this
+README it was **argued from git's documentation rather than measured** — it was
+published as the design's weakest claim and the first thing a reviewer should
+attack. `hack/wsguard/hook-probe.sh` now attacks it.
+
+The probe installs a real `core.hooksPath` set (`reference-transaction`,
+`post-checkout`, `pre-checkout`, `pre-reset`, `post-merge`, `pre-auto-gc`,
+`post-index-change`, `post-rewrite`, `pre-push`) in a throwaway repository, with
+each hook logging **its argv and its stdin**, and runs both arms. Measured on
+git 2.54.0, `/usr/local/bin/git`, `files` ref backend:
+
+| Arm | Command | `reference-transaction` | Reading |
+|---|---|---|---|
+| 1 — positive control | `git checkout -q -b probe-branch` | **fires**, payload `refs/heads/probe-branch` | the hook set is really installed, and stdin capture really works |
+| 2 | `git checkout -- tracked.txt` | **silent** (only `post-index-change`, `post-checkout` — both after the fact) | the command that caused the casualty is invisible to it |
+| 3 | `git restore tracked.txt` | **silent** | same |
+| 4 | `git clean -fd` | **no hook fires at all** | not merely unabortable — unobservable |
+| 5 | `git fetch <donor> main` | fires 3×, **payload empty**, nothing names `FETCH_HEAD` | hazard (b)'s write side is invisible to it |
+| 6 — contrast | `git reset -q --hard HEAD~1` | **fires**, payloads name `ORIG_HEAD`, `HEAD`, `refs/heads/main` | a hook set would have covered `reset`, and *only* the ref-moving forms |
+
+Arm 6 is why the rejection matters. A hook set is not useless — it is *partial*,
+and it would have looked whole. The part it misses is the part that took
+`gd-p1-dev`'s work.
+
+**Arm 5 carries a finding of its own, and it is a finding against the probe's
+own first version.** `reference-transaction` *does* fire during the fetch, three
+times, carrying nothing. A hook author — or a probe author — who keyed on *did
+the event fire* rather than *what did it carry* would read that as coverage of
+the `FETCH_HEAD` write. It is not. The first version of this probe logged only
+argv, reported the claim CONTRADICTED, and was wrong. It is quoted here rather
+than quietly fixed, because the differential between the two versions is the
+evidence that the second one is measuring the right thing.
+
+The probe has the same two defences as the selftest: a **positive control**
+(arms 2–5 are all "nothing happened", which is exactly what a hook set that was
+never installed produces for free — arm 1 must fire, and its payload must be
+captured, or the probe exits `2` and reports nothing) and a **negative control**
+(`--prove-it` re-runs the probe with arm 2's expectation deliberately falsified
+and requires exit `1`). `make wsguard` runs the `--prove-it` form.
+
+```sh
+hack/wsguard/hook-probe.sh --prove-it   # 0 confirmed · 1 contradicted · 2 nothing measured
+```
+
+The answer may be backend-dependent; the probe prints `rev-parse
+--show-ref-format` in its provenance block so the reading travels with its
+conditions.
 
 ### The shim is bypassable, and that is the design
 
@@ -95,9 +145,10 @@ The selftest follows the project's check contract instead: `0` evaluated-clean,
 A control that has never been fired is not a control.
 
 ```sh
-hack/wsguard/selftest.sh            # 19 arms, 20 post-conditions
+hack/wsguard/selftest.sh            # 21 arms, 24 post-conditions
 hack/wsguard/selftest.sh --prove-it # ... after first proving the harness can fail
-make wsguard                        # the same, from CI
+hack/wsguard/hook-probe.sh --prove-it # the hook-mechanism rejection, measured
+make wsguard                        # both, from CI
 ```
 
 The suite builds four throwaway repositories under `mktemp -d` and runs the
@@ -112,9 +163,21 @@ vacuously:
   with one expectation deliberately falsified and requires it to exit `1`. A
   falsified run that still passes means the harness measures nothing, and the
   honest answer is `2`, not `0`.
-- **Both directions.** Ten refusal arms, one cannot-evaluate arm, eight permit
-  arms — including the same `git checkout --` that is refused in the shared
-  repository being permitted in a private one.
+- **Both directions.** Eleven refusal arms, two cannot-evaluate arms, eight
+  permit arms — including the same `git checkout --` that is refused in the
+  shared repository being permitted in a private one.
+
+### Both sides of a path comparison must come from the same normaliser
+
+The scoping decision is a string comparison between the guarded root and the
+repository the command would act on. An earlier version normalised the root only
+`if [[ -d "$root" ]]`, which produced two ways for an **armed** guard to fall
+through to passthrough while still printing its arming banner: a root with a
+trailing slash or a symlinked component never matches a normalised toplevel, and
+a root that does not exist matches nothing. Both are now `78`
+(cannot-evaluate) or a refusal, asserted by arms `U2-unresolvable-root` and
+`N11-root-with-trailing-slash`. A guard must not answer *"not shared, go ahead"*
+on the strength of a comparison it could not make.
 
 ### Instrument disclosure
 

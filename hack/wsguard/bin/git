@@ -242,10 +242,49 @@ fi
 # whenever it is load-bearing. Sending it to /dev/null is how a `command not
 # found` became a confident false claim about a SHA on this project.
 # ---------------------------------------------------------------------------
+# Both sides of the scoping comparison below must come out of the SAME
+# normaliser, or the comparison is not a comparison. `$toplevel` is always
+# absolute and always run through `cd && pwd -P`; the root must be too.
+#
+# The first version of this block normalised the root only `if [[ -d ... ]]`,
+# which quietly produced two fail-open shapes: a root with a trailing slash or
+# a symlinked component would never string-match a normalised toplevel, and a
+# root that does not exist at all would match nothing — in both cases an ARMED
+# guard falls through to passthrough and permits everything while still
+# printing an arming banner. That is the worst failure mode available: a guard
+# that looks installed and fires on nothing. It is the same class as the
+# `./`-prefix path-comparison hazard the lead published at 10:51 — two path
+# lists produced by different invocations, set-compared without normalising
+# first. Fail-closed on an unresolvable root instead; `78` says no reading was
+# taken, which is the truth.
 guard_root="${SCION_WSGUARD_ROOT:-/workspace}"
-if [[ -d "$guard_root" ]]; then
-  guard_root="$(cd -- "$guard_root" && pwd -P)"
+root_err="$(mktemp)"
+root_status=0
+resolved_root="$(cd -- "$guard_root" 2>"$root_err" && pwd -P)" || root_status=$?
+if (( root_status != 0 )) || [[ -z "$resolved_root" ]]; then
+  {
+    echo "wsguard: CANNOT EVALUATE — \`git $subcmd\` is a guarded operation, but the"
+    echo "wsguard: guarded root could not be resolved, so no reading was taken and the"
+    echo "wsguard: command WAS NOT RUN."
+    echo "wsguard:"
+    echo "wsguard: root as configured : $guard_root"
+    if [[ -n "${SCION_WSGUARD_ROOT:-}" ]]; then
+      echo "wsguard: root came from    : SCION_WSGUARD_ROOT"
+    else
+      echo "wsguard: root came from    : the built-in default (SCION_WSGUARD_ROOT is unset)"
+    fi
+    echo "wsguard: cd exited $root_status and said:"
+    sed 's/^/wsguard:   /' "$root_err"
+    echo "wsguard:"
+    echo "wsguard: An unresolvable root cannot be compared against the repository this"
+    echo "wsguard: command would act on, and a guard that cannot make the comparison"
+    echo "wsguard: must not answer 'not shared, go ahead'."
+  } >&2
+  rm -f "$root_err"
+  exit "$EX_CANNOT_EVALUATE"
 fi
+rm -f "$root_err"
+guard_root="$resolved_root"
 
 probe_err="$(mktemp)"
 probe_status=0
