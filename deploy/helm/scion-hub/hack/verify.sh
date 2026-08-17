@@ -111,7 +111,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=222
+EXPECTED_TOTAL=229
 
 failures=0
 assertions=0
@@ -1147,46 +1147,105 @@ done
 # is exactly why the fixtures below exist - with nothing to scan, the scan proves
 # nothing and only the fixtures show the detector still works. Narrow this
 # further if a phase needs it. Do not delete it.
+# NARROWED AT PHASE 2's REQUEST, BY gd-p2-dev's MEASUREMENT, BEFORE THE PROXY WAS
+# WRITTEN. The first version started a new entry on ANY line whose first non-space
+# character was a dash. A container's args:, command:, env: and volumeMounts: are
+# all block sequences, so every list item inside an entry became its own unnamed
+# entry with ok reset to 0 - and the real Cloud SQL proxy, which cannot function
+# without args, was flagged as a run-once init container. Correct Phase 2 code,
+# red suite, and the cheapest correct-looking fix is to delete the rule.
+#
+# It also had the dangerous defect in the other direction: with flush-style YAML
+# (the dash at the same indent as initContainers:) the first dash was read as the
+# END of the block, so a run-once container there was not flagged AT ALL.
+#
+# So entry boundaries are bound to the FIRST DASH'S INDENT, and name: and
+# restartPolicy: are honoured only at the entry's own key indent - a nested
+# "env: - name: FOO" cannot supply the container's name, and a nested
+# restartPolicy: Always cannot satisfy the rule for the container.
 init_entries_without_always() {
   awk '
-    !inblock {
-      if ($0 ~ /^[[:space:]]*initContainers:[[:space:]]*$/) {
-        indent = match($0, /[^ ]/) - 1
-        inblock = 1; entry = 0; ok = 0; name = "(unnamed)"
-      }
-      next
-    }
+    function flush() { if (entry && !ok) print name }
     {
-      if ($0 ~ /^[[:space:]]*$/) next
-      if (match($0, /[^ ]/) - 1 <= indent) {
-        if (entry && !ok) print name
-        inblock = 0; entry = 0
+      line = $0
+      if (line ~ /^[[:space:]]*$/) next
+      ind = match(line, /[^ ]/) - 1
+
+      if (!inblock) {
+        if (line ~ /^[ ]*initContainers:[ ]*$/) {
+          inblock = 1; blockIndent = ind; entryIndent = -1
+          entry = 0; ok = 0; name = "(unnamed)"
+        }
         next
       }
-      if ($0 ~ /^[[:space:]]*-[[:space:]]/) {
-        if (entry && !ok) print name
+
+      isDash = (line ~ /^[ ]*-([ ]|$)/)
+
+      if (entryIndent < 0) {
+        # No entry yet. The first dash at or below the block key fixes the entry
+        # indent - AT OR BELOW, because flush-style puts it at the same column.
+        if (!isDash || ind < blockIndent) { inblock = 0; next }
+        entryIndent = ind
+        if (match(line, /^[ ]*-[ ]+/)) keyIndent = RLENGTH; else keyIndent = ind + 2
         entry = 1; ok = 0; name = "(unnamed)"
+        line = substr(line, keyIndent + 1)
+      } else if (isDash && ind == entryIndent) {
+        flush()
+        if (match(line, /^[ ]*-[ ]+/)) keyIndent = RLENGTH; else keyIndent = ind + 2
+        entry = 1; ok = 0; name = "(unnamed)"
+        line = substr(line, keyIndent + 1)
+      } else if (ind < entryIndent || (!isDash && ind == entryIndent)) {
+        flush(); inblock = 0; entry = 0; entryIndent = -1
+        next
+      } else if (ind != keyIndent) {
+        next          # deeper than the entry own keys: nested, not the container
+      } else {
+        line = substr(line, keyIndent + 1)
       }
-      if (name == "(unnamed)" && $0 ~ /name:[[:space:]]/) {
-        n = $0; sub(/^.*name:[[:space:]]*/, "", n); name = n
+
+      if (name == "(unnamed)" && line ~ /^name:[ ]/) {
+        n = line; sub(/^name:[ ]*/, "", n); name = n
       }
-      if ($0 ~ /restartPolicy:[[:space:]]*Always[[:space:]]*$/) ok = 1
+      if (line ~ /^restartPolicy:[ ]*Always[ ]*$/) ok = 1
     }
-    END { if (inblock && entry && !ok) print name }
+    END { if (inblock) flush() }
   ' "$1"
 }
 
-# The fixtures. These are what keep the scan honest while the chart renders no
-# init containers at all: they prove the detector still distinguishes the two
-# shapes, so a Phase 2 developer adding the proxy sidecar sees this pass, and one
-# adding a run-once container sees it fail.
-cat >"$WORK/fx-plain.yaml" <<'FXPLAIN'
+# THE FIXTURES, AND WHAT THEY ARE AND ARE NOT CLAIMS ABOUT.
+#
+# READ THIS BEFORE ADDING ONE. These are claims about THE PARSER - about how it
+# binds entry boundaries, names and restartPolicy to indentation. THEY ARE NOT
+# CLAIMS ABOUT THE CLOUD SQL PROXY. Every one of them was typed by hand, and a
+# hand-typed fixture is the author's summary of the subject, not the subject.
+#
+# The first version of this block had three fixtures and the sidecar one was:
+#
+#     - name: cloudsql-proxy
+#       image: proxy
+#       restartPolicy: Always
+#
+# described in the phase notes as standing proof that the rule does not fire on
+# the Cloud SQL proxy. It has no args:. It was constructed by asking "what is the
+# least YAML that carries restartPolicy: Always?" - that is, FROM THE PREDICATE
+# UNDER TEST - and a fixture derived from the predicate can only confirm the
+# predicate. The property that makes the real proxy fail was precisely the
+# property the simplification omitted, and the suite was green throughout.
+#
+# So: the fixtures below say the indent binding is correct. The claim "the rule
+# does not fire on the Cloud SQL proxy" can only be discharged by a fixture cut
+# from an actual `helm template` render of the proxy, and only the phase that
+# ships the proxy can produce one. That fixture is owed by Phase 2, with the
+# command that produced it named beside it. Until it exists, that claim is
+# unmeasured - and the PERMUTATIONS scan below is the standing check that the
+# real render stays clean once there is one.
+cat >"$WORK/fx-plain.yaml" <<'FX'
     spec:
       initContainers:
         - name: settings-init
           image: busybox
-FXPLAIN
-cat >"$WORK/fx-sidecar.yaml" <<'FXSIDE'
+FX
+cat >"$WORK/fx-sidecar.yaml" <<'FX'
     spec:
       initContainers:
         - name: cloudsql-proxy
@@ -1194,8 +1253,8 @@ cat >"$WORK/fx-sidecar.yaml" <<'FXSIDE'
           restartPolicy: Always
       containers:
         - name: hub
-FXSIDE
-cat >"$WORK/fx-both.yaml" <<'FXBOTH'
+FX
+cat >"$WORK/fx-both.yaml" <<'FX'
     spec:
       initContainers:
         - name: cloudsql-proxy
@@ -1205,22 +1264,115 @@ cat >"$WORK/fx-both.yaml" <<'FXBOTH'
           image: busybox
       containers:
         - name: hub
-FXBOTH
-if [[ "$(init_entries_without_always "$WORK/fx-plain.yaml")" == "settings-init" ]]; then
-  pass "the init-container rule flags a run-once init container"
-else
-  fail "the init-container rule did NOT flag a run-once init container - the scan below cannot detect what it exists to detect"
+FX
+cat >"$WORK/fx-args-last.yaml" <<'FX'
+    spec:
+      initContainers:
+        - name: cloud-sql-proxy
+          image: proxy
+          args:
+            - --structured-logs
+            - --port=5432
+          restartPolicy: Always
+      containers:
+        - name: hub
+FX
+cat >"$WORK/fx-args-first.yaml" <<'FX'
+    spec:
+      initContainers:
+        - name: cloud-sql-proxy
+          restartPolicy: Always
+          image: proxy
+          args:
+            - --structured-logs
+            - --port=5432
+      containers:
+        - name: hub
+FX
+cat >"$WORK/fx-runonce-command.yaml" <<'FX'
+    spec:
+      initContainers:
+        - name: settings-init
+          image: busybox
+          command:
+            - sh
+            - -c
+            - cp /src/settings.yaml /dst/settings.yaml
+      containers:
+        - name: hub
+FX
+cat >"$WORK/fx-nested-name.yaml" <<'FX'
+    spec:
+      initContainers:
+        - name: settings-init
+          image: busybox
+          env:
+            - name: FOO
+              value: bar
+      containers:
+        - name: hub
+FX
+cat >"$WORK/fx-nested-always.yaml" <<'FX'
+    spec:
+      initContainers:
+        - name: settings-init
+          image: busybox
+          lifecycle:
+            postStart:
+              restartPolicy: Always
+      containers:
+        - name: hub
+FX
+cat >"$WORK/fx-flush-runonce.yaml" <<'FX'
+    spec:
+      initContainers:
+      - name: settings-init
+        image: busybox
+      containers:
+      - name: hub
+FX
+cat >"$WORK/fx-flush-sidecar.yaml" <<'FX'
+    spec:
+      initContainers:
+      - name: cloud-sql-proxy
+        image: proxy
+        args:
+        - --structured-logs
+        restartPolicy: Always
+      containers:
+      - name: hub
+FX
+
+# EXACT offender lists, not merely empty/non-empty. A non-empty assertion passes
+# when the detector flags the right container for the wrong reason, and that is
+# how the args: defect stayed invisible: fx-both was flagged, correctly, while
+# the same input with args: would have been flagged three times over.
+FX_CASES=(
+  "fx-plain|settings-init|flags a run-once init container"
+  "fx-sidecar||accepts a native sidecar"
+  "fx-both|settings-init|flags a run-once container alongside a sidecar, and flags only that one"
+  "fx-args-last||accepts a sidecar whose args: is a nested block sequence, restartPolicy last"
+  "fx-args-first||accepts the same sidecar with restartPolicy first"
+  "fx-runonce-command|settings-init|flags a run-once container that has a command: list, naming it once"
+  "fx-nested-name|settings-init|does not let a nested env: - name: supply the container's name"
+  "fx-nested-always|settings-init|does not let a nested restartPolicy: Always satisfy the rule for the container"
+  "fx-flush-runonce|settings-init|flags a run-once container written flush with initContainers:"
+  "fx-flush-sidecar||accepts a flush-style sidecar"
+)
+if [[ ${#FX_CASES[@]} -ne 10 ]]; then
+  echo "HARNESS ERROR: FX_CASES holds ${#FX_CASES[@]} cases, not 10. The init-container fixtures were edited without moving the count, so this block's contribution to EXPECTED_TOTAL is no longer known." >&2
+  exit 2
 fi
-if [[ -z "$(init_entries_without_always "$WORK/fx-sidecar.yaml")" ]]; then
-  pass "the init-container rule accepts a native sidecar"
-else
-  fail "the init-container rule flags a native sidecar - it would go red on Phase 2's Cloud SQL proxy, which is correct code"
-fi
-if [[ "$(init_entries_without_always "$WORK/fx-both.yaml")" == "settings-init" ]]; then
-  pass "the init-container rule flags a run-once container alongside a sidecar"
-else
-  fail "the init-container rule missed a run-once container sharing the list with a native sidecar"
-fi
+for _case in "${FX_CASES[@]}"; do
+  IFS='|' read -r _fx _want _what <<<"$_case"
+  _got="$(init_entries_without_always "$WORK/$_fx.yaml" | tr '\n' ' ')"
+  _got="${_got% }"
+  if [[ "$_got" == "$_want" ]]; then
+    pass "the init-container rule $_what"
+  else
+    fail "the init-container rule should $_what, and does not: $_fx.yaml gave offenders [$_got], expected exactly [$_want]"
+  fi
+done
 
 for name in "${PERMUTATIONS[@]}"; do
   offenders="$(init_entries_without_always "$WORK/$name.yaml")"
