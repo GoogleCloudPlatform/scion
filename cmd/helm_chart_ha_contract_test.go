@@ -47,6 +47,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	_ "modernc.org/sqlite"
 )
 
 var updateChartContract = flag.Bool("update-chart-contract", false,
