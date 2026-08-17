@@ -234,6 +234,86 @@ do
 done
 
 # --------------------------------------------------------------------------
+step "hub.extraEnv refuses every variable the chart itself sets"
+# --------------------------------------------------------------------------
+# THE LIST IS READ OUT OF THE RENDERED MANIFEST, WHICH IS THE ONLY VERSION OF
+# THIS CHECK WORTH HAVING. A hand-written list of "variables the chart sets"
+# tests that the guard rejects the names somebody remembered, and the names
+# somebody remembered are the ones already in the guard. The two lists agree
+# because they have the same author, not because the chart does what they say -
+# and the guard's list was in fact two names short when this was written.
+#
+# So: render the chart, take every environment variable name out of the output,
+# and require the guard to refuse each one. A variable added to the ConfigMap or
+# to the Deployment without being added to the guard fails here, by construction.
+#
+# The varied permutation, because it is the one that sets hub.adminMode and
+# hub.maintenanceMessage - the two conditionally-emitted variables, which are
+# exactly the ones a hand-maintained list misses. hub.extraEnv is nulled out of
+# it first: its own entry is an operator variable, not a chart one, and requiring
+# the guard to reject it would be requiring the guard to be broken.
+shadow_src="$WORK/shadow-src.yaml"
+"$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+  --values "$CHART_DIR/ci/values-varied.yaml" \
+  --set hub.extraEnv=null >"$shadow_src" 2>/dev/null || true
+# ConfigMap keys, from inside the ConfigMap's data block only, plus the container
+# env entries, which are uppercase by convention and are the fieldRef variables a
+# ConfigMap render cannot see. Ports and container names are lowercase and do not
+# match.
+mapfile -t shadow_names < <(
+  {
+    awk '/^kind: ConfigMap$/{inCM=1} /^---/{inCM=0; inData=0}
+         inCM && /^data:$/{inData=1; next}
+         inData && /^  [A-Z_]+:/{sub(":.*","",$1); print $1}' "$shadow_src"
+    grep -Eo '^ +- name: [A-Z][A-Z0-9_]*$' "$shadow_src" | awk '{print $3}'
+  } | sort -u
+)
+# Vacuity guard, and the number is deliberate: HOME, KUBECONFIG,
+# SCION_SERVER_BASE_URL, SCION_REQUIRE_STABLE_SIGNING_KEY,
+# SCION_SERVER_ADMIN_MODE, SCION_SERVER_MAINTENANCE_MESSAGE, POD_NAMESPACE. An
+# extraction that silently returned two names would leave this whole step
+# reporting success on nothing.
+if [[ ${#shadow_names[@]} -lt 7 ]]; then
+  fail "only ${#shadow_names[@]} environment variable names were extracted from the rendered chart (${shadow_names[*]:-none}) - the shadow checks below would be testing almost nothing"
+else
+  pass "extracted ${#shadow_names[@]} chart-set environment variables to check the guard against"
+fi
+for shadow_name in "${shadow_names[@]}"; do
+  # An overlay file rather than --set, because a list in a later values file
+  # replaces the earlier one wholesale - so this is the permutation's own values
+  # with exactly one operator variable, whatever hub.extraEnv held before.
+  cat >"$WORK/shadow-try.yaml" <<SHADOWTRY
+hub:
+  extraEnv:
+    - name: $shadow_name
+      value: shadowed
+SHADOWTRY
+  if out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+      --values "$CHART_DIR/ci/values-varied.yaml" \
+      --values "$WORK/shadow-try.yaml" 2>&1); then
+    fail "hub.extraEnv accepted $shadow_name, which the chart sets itself. A duplicate entry in the container's env list wins over the value from envFrom, so the chart's value is silently replaced."
+  elif grep -qF "hub.extraEnv may not set $shadow_name" <<<"$out"; then
+    pass "hub.extraEnv refuses $shadow_name"
+  else
+    fail "hub.extraEnv refused $shadow_name, but not with the shadowing message - the render failed for some other reason and this check is not testing the guard"
+    printf '          %s\n' "$(tr '\n' ' ' <<<"$out" | cut -c1-200)"
+  fi
+done
+# The twin for the conditional half. When the chart does NOT emit
+# SCION_SERVER_ADMIN_MODE - hub.adminMode unset, which is the default - there is
+# nothing to shadow and the name must be accepted. This is what distinguishes a
+# derived list from a hardcoded one: a hardcoded list rejects it in both cases,
+# and the rejection in the second case is a refusal with nothing behind it.
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" \
+    --set 'hub.extraEnv[0].name=SCION_SERVER_ADMIN_MODE' \
+    --set-string 'hub.extraEnv[0].value=true' >/dev/null 2>&1; then
+  pass "hub.extraEnv accepts SCION_SERVER_ADMIN_MODE when the chart emits no such variable"
+else
+  fail "hub.extraEnv rejected SCION_SERVER_ADMIN_MODE with hub.adminMode unset - the guard is matching a remembered name rather than what the chart actually emits"
+fi
+
+# --------------------------------------------------------------------------
 step "migration-rename-hazard: schema_version is present in every rendered settings.yaml"
 # --------------------------------------------------------------------------
 # Named for the hazard and not for the field, because the field looks redundant

@@ -1690,13 +1690,39 @@ settings a chart most wants to deliver and they fail silently rather than
 loudly.
 */}}
 {{- define "scion-hub.assertExtraEnv" -}}
+{{- /*
+THE SHADOW LIST IS READ OUT OF THE RENDERED ConfigMap, NOT WRITTEN DOWN HERE.
+It was written down here, and it was already wrong: it named four variables while
+configmap-env.yaml emitted six, so SCION_SERVER_ADMIN_MODE and
+SCION_SERVER_MAINTENANCE_MESSAGE could be shadowed silently - the two that are
+emitted conditionally, which is to say the two a hand-maintained list was always
+going to miss.
+
+Rendering the ConfigMap and taking its keys makes the two lists the same list.
+Adding a variable to the ConfigMap without adding it to this guard stops being
+expressible, which is the only version of "keep these in sync" that is a
+mechanism rather than a request. It also gets the conditional keys exactly
+right: when hub.adminMode is unset the chart emits nothing to shadow, and an
+extraEnv entry of that name is legitimately allowed.
+
+POD_NAMESPACE is the one literal, and it has to be. It is not in the ConfigMap -
+it is a fieldRef in the container's env list, which cannot be rendered from here
+without the Deployment rendering itself. hack/verify.sh closes that by reading
+the shadowable names back out of the rendered manifest, ConfigMap keys and
+container env entries alike, and asserting this guard refuses every one of them.
+*/}}
+{{- $envDoc := fromYaml (include (print .Template.BasePath "/configmap-env.yaml") .) }}
+{{- $shadowable := concat (keys (default dict $envDoc.data)) (list "POD_NAMESPACE") }}
+{{- if lt (len $shadowable) 5 }}
+{{- fail (printf "the environment ConfigMap rendered %d keys, which is fewer than the chart is known to emit unconditionally - hub.extraEnv's shadow guard derives its list from those keys and would be checking almost nothing." (len (default dict $envDoc.data))) }}
+{{- end }}
 {{- range $entry := .Values.hub.extraEnv }}
 {{- $name := toString (dig "name" "" $entry) }}
 {{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC)_" $name }}
 {{- fail (printf "hub.extraEnv may not set %s. SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are unreachable by any spelling - the loader ignores unmatched keys, so the variable is accepted, never applied, and never reported. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
 {{- end }}
-{{- if or (eq $name "HOME") (eq $name "KUBECONFIG") (eq $name "SCION_SERVER_BASE_URL") (eq $name "SCION_REQUIRE_STABLE_SIGNING_KEY") }}
-{{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and a duplicate entry in the container's env list shadows the value from envFrom in a way that is easy to miss." $name) }}
+{{- if has $name $shadowable }}
+{{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and hub.extraEnv is appended to the container's env list, which wins twice over - a container env entry takes precedence over the same name from envFrom, and a later entry in the list takes precedence over an earlier one. Either way the chart's value is replaced with no error and nothing in the manifest that reads as a conflict." $name) }}
 {{- end }}
 {{- /*
 The same two rules the argument guard applies to argv, applied to env, through
