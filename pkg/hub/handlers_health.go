@@ -164,11 +164,10 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			// and would 503 the pod on any suffix.
 			//
 			// This is not free, and the cost is not local. GetHealthInfo marks
-			// the whole response "degraded" on any non-healthy check value,
-			// and five consumers compare that composite status to "healthy"
-			// exactly. Four consequences, listed most reachable first — this
-			// key is only ever set under a gke-shared-volume config, so a
-			// consumer's exposure depends on which deployments carry one:
+			// the whole response "degraded" on any non-healthy check value, and
+			// six comparators downstream test for "healthy" exactly. Four
+			// consequences, most reachable first; this key is set only under a
+			// gke-shared-volume config, so exposure depends on the deployment:
 			//   - the diagnostics UI styles it unhealthy and labels it
 			//     "degraded": renderStatusBanner in diagnostics.ts has no
 			//     degraded class, so degraded falls through its statusClass
@@ -199,9 +198,9 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			//     it just deployed, so this clause bites only where an operator
 			//     supplies that config out of band — via the hub.env
 			//     EnvironmentFile, say, whose SCION_ overrides were not traced.
-			// The fifth comparator, handleHealthSummary, propagates degraded
-			// correctly, because the health dashboard does have a degraded
-			// class. Counted, not damage.
+			// The other two only forward degraded: WebServer.handleHealthz into
+			// the web composite at /healthz, handleHealthSummary into the health
+			// dashboard, which does have a degraded class. Counted, not damage.
 			//
 			// That coupling is pre-existing and tracked in ptone/scion#1094.
 			// Tolerated here because this branch is unreachable on the
