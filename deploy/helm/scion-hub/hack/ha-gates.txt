@@ -1,0 +1,124 @@
+# DERIVED, not written. Regenerate with:
+#   go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract
+#
+# Each arm loads the settings.yaml the chart renders - taken from the
+# golden named in the header - through the real config.LoadGlobalConfig,
+# then drives the real validateHostedHAPreflight, satisfying one gate at a
+# time because the preflight returns on first failure.
+#
+# THE COUNT DEPENDS ON WHAT THE ARM SUPPLIES. Each step records its grant.
+# The two audience arms differ in exactly one value and return different
+# lists; that is a fact about the hub, not a defect in the walk.
+#
+# CORPUS BINDING. This walk reads the committed goldens, so on its own it
+# measures the goldens and not the chart. The digests below close that gap
+# from the other end: hack/verify.sh proves the goldens are a current render
+# and then checks these digests against the files it just proved, so a walk
+# taken over a stale golden cannot be presented as a walk over the chart.
+# Neither half is sufficient alone and the shell step names the other.
+#
+# GOLDEN DIGESTS (sha256, as walked)
+#   existing-secret.yaml     1b9440a25f7ee00a8eab940440c07e53f55e6493606def810709c23dfb73b444
+#   minimal.yaml             16a25ce35aab46e683282abea9b3fd15ed36569a0f197bc95016b1c39ecfa733
+#   settings-oauth.yaml      59460200e09c7bd3165bbb1d1fb30421f09e43f9cd9f814de221cb25e8db2242
+#   settings.yaml            ef77c053b3f9b1b9bb16535557e2d5147ad486bc83b8537948a5647d3b3784c3
+#   varied.yaml              0db33f533c9672a9b08d37ea0f741b8f1c6eb19f5409ce82a0085eb1259433f2
+
+===== existing-secret.yaml
+NO RENDERED settings.yaml: no "settings.yaml: |" block in this golden
+
+===== minimal.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
+config   mode="hosted" hub_id="ci-minimal" driver="sqlite" storage="local" auth.mode="proxy"
+routes   isHADeployment=false hostedHAGuardsRequired=false
+TERMINATED no gates: the preflight does not run for this shape.
+
+===== minimal.yaml [audience malformed = "my-iap-audience"]
+config   mode="hosted" hub_id="ci-minimal" driver="sqlite" storage="local" auth.mode="proxy"
+routes   isHADeployment=false hostedHAGuardsRequired=false
+TERMINATED no gates: the preflight does not run for this shape.
+
+===== settings-oauth.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
+config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="oauth"
+routes   isHADeployment=true hostedHAGuardsRequired=true
+ 1  hosted HA deployment requires server.database.url for Postgres
+    granted server.database.url="postgres://probe/db"
+ 2  hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
+    granted env SCION_SERVER_SESSION_SECRET="probe-secret"
+ 3  hosted HA deployment requires server.auth.mode=proxy for IAP authentication; got "oauth"
+    granted server.auth.mode="proxy"
+ 4  hosted HA deployment requires server.auth.proxy.provider=iap; got ""
+    granted server.auth.proxy.provider="iap"
+ 5  hosted HA deployment requires server.auth.proxy.iap.audience
+    granted server.auth.proxy.iap.audience="/projects/1/locations/us-central1/services/hub"
+ 6  hosted HA deployment requires server.auth.transport; do not use server.transport
+    granted server.auth.transport={}
+ 7  hosted HA deployment requires server.auth.transport.mode=iap; got ""
+    granted server.auth.transport.mode="iap"
+ 8  hosted HA deployment requires server.auth.transport.oidc_audience
+    granted server.auth.transport.oidc_audience="probe-client-id"
+ 9  hosted HA deployment requires server.auth.transport.platform_auth_sa
+    granted server.auth.transport.platform_auth_sa="probe@..."
+TERMINATED the hub ran out of gates: preflight passes after 9.
+
+===== settings-oauth.yaml [audience malformed = "my-iap-audience"]
+config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="oauth"
+routes   isHADeployment=true hostedHAGuardsRequired=true
+ 1  hosted HA deployment requires server.database.url for Postgres
+    granted server.database.url="postgres://probe/db"
+ 2  hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
+    granted env SCION_SERVER_SESSION_SECRET="probe-secret"
+ 3  hosted HA deployment requires server.auth.mode=proxy for IAP authentication; got "oauth"
+    granted server.auth.mode="proxy"
+ 4  hosted HA deployment requires server.auth.proxy.provider=iap; got ""
+    granted server.auth.proxy.provider="iap"
+ 5  hosted HA deployment requires server.auth.proxy.iap.audience
+    granted server.auth.proxy.iap.audience="my-iap-audience"
+ 6  hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got "my-iap-audience"
+TERMINATED the probe ran out of moves at gate 6. This is a LIMIT OF THIS ARM, not a
+           property of the hub: there may be further gates behind this one.
+
+===== settings.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
+config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="proxy"
+routes   isHADeployment=true hostedHAGuardsRequired=true
+ 1  hosted HA deployment requires server.database.url for Postgres
+    granted server.database.url="postgres://probe/db"
+ 2  hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
+    granted env SCION_SERVER_SESSION_SECRET="probe-secret"
+ 3  hosted HA deployment requires server.auth.proxy.provider=iap; got ""
+    granted server.auth.proxy.provider="iap"
+ 4  hosted HA deployment requires server.auth.proxy.iap.audience
+    granted server.auth.proxy.iap.audience="/projects/1/locations/us-central1/services/hub"
+ 5  hosted HA deployment requires server.auth.transport; do not use server.transport
+    granted server.auth.transport={}
+ 6  hosted HA deployment requires server.auth.transport.mode=iap; got ""
+    granted server.auth.transport.mode="iap"
+ 7  hosted HA deployment requires server.auth.transport.oidc_audience
+    granted server.auth.transport.oidc_audience="probe-client-id"
+ 8  hosted HA deployment requires server.auth.transport.platform_auth_sa
+    granted server.auth.transport.platform_auth_sa="probe@..."
+TERMINATED the hub ran out of gates: preflight passes after 8.
+
+===== settings.yaml [audience malformed = "my-iap-audience"]
+config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="proxy"
+routes   isHADeployment=true hostedHAGuardsRequired=true
+ 1  hosted HA deployment requires server.database.url for Postgres
+    granted server.database.url="postgres://probe/db"
+ 2  hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
+    granted env SCION_SERVER_SESSION_SECRET="probe-secret"
+ 3  hosted HA deployment requires server.auth.proxy.provider=iap; got ""
+    granted server.auth.proxy.provider="iap"
+ 4  hosted HA deployment requires server.auth.proxy.iap.audience
+    granted server.auth.proxy.iap.audience="my-iap-audience"
+ 5  hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got "my-iap-audience"
+TERMINATED the probe ran out of moves at gate 5. This is a LIMIT OF THIS ARM, not a
+           property of the hub: there may be further gates behind this one.
+
+===== varied.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
+config   mode="hosted" hub_id="ci-varied" driver="sqlite" storage="local" auth.mode="proxy"
+routes   isHADeployment=false hostedHAGuardsRequired=false
+TERMINATED no gates: the preflight does not run for this shape.
+
+===== varied.yaml [audience malformed = "my-iap-audience"]
+config   mode="hosted" hub_id="ci-varied" driver="sqlite" storage="local" auth.mode="proxy"
+routes   isHADeployment=false hostedHAGuardsRequired=false
+TERMINATED no gates: the preflight does not run for this shape.
