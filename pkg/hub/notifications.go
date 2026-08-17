@@ -561,20 +561,35 @@ func NewChatNotifier(s store.Store, events EventPublisher, wcs WebChatStore, pre
 	}
 }
 
+// ChatMessageContext describes the chat message that triggered a notification.
+// It travels with the notification onto the SSE event, where the client uses
+// it to title the browser notification, tag it per conversation, route a click
+// to the right conversation, and suppress notifications for its own messages.
+//
+// It replaces what was a growing list of positional string parameters; at
+// eight strings a transposed pair compiles cleanly and misroutes silently.
+type ChatMessageContext struct {
+	// SenderID is the UUID of the user who sent the message.
+	SenderID string
+	// SenderName is the sender's display name, falling back to their email.
+	SenderName string
+	// ConversationKey is the topic UUID, or the dm:<...> key for a DM.
+	ConversationKey string
+	// ConversationName is the human-readable thread name. Empty for DMs.
+	ConversationName string
+	// Preview is the raw message text; it is truncated before use.
+	Preview string
+	// ProjectID is the project UUID; empty for user-to-user DMs.
+	ProjectID string
+}
+
 // NotifyMention creates a notification for a human user who was @mentioned
 // in a thread or DM. It respects the muted flag on the conversation.
-//
-// Parameters:
-//   - mentionedUserID: the UUID of the mentioned user
-//   - senderName: display name (or email) of the sender
-//   - conversationKey: thread UUID or DM key
-//   - conversationName: human-readable name (thread name or "DM")
-//   - messagePreview: the raw message text (will be truncated)
-//   - projectID: project UUID (may be empty for user-user DMs)
-func (cn *ChatNotifier) NotifyMention(ctx context.Context, mentionedUserID, senderName, conversationKey, conversationName, messagePreview, projectID string) {
+func (cn *ChatNotifier) NotifyMention(ctx context.Context, mentionedUserID string, msg ChatMessageContext) {
 	if cn == nil || cn.webChatStore == nil {
 		return
 	}
+	senderName, conversationKey := msg.SenderName, msg.ConversationKey
 
 	// Respect muted flag.
 	muted, err := cn.webChatStore.IsConversationMuted(ctx, mentionedUserID, conversationKey)
@@ -589,9 +604,9 @@ func (cn *ChatNotifier) NotifyMention(ctx context.Context, mentionedUserID, send
 		return
 	}
 
-	message := formatChatNotification(ChatNotificationMention, senderName, conversationName, messagePreview)
+	message := formatChatNotification(ChatNotificationMention, senderName, msg.ConversationName, msg.Preview)
 
-	notif := cn.buildChatNotification(mentionedUserID, ChatNotificationMention, message, projectID)
+	notif := cn.buildChatNotification(mentionedUserID, ChatNotificationMention, message, msg.ProjectID)
 
 	if err := cn.store.CreateNotification(ctx, notif); err != nil {
 		cn.log.Error("Failed to create mention notification",
@@ -599,7 +614,7 @@ func (cn *ChatNotifier) NotifyMention(ctx context.Context, mentionedUserID, send
 		return
 	}
 
-	cn.events.PublishNotification(ctx, notif)
+	cn.events.PublishChatNotification(ctx, notif, msg)
 	cn.log.Info("Mention notification created",
 		"notificationID", notif.ID, "mentionedUser", mentionedUserID,
 		"sender", senderName, "conversationKey", conversationKey)
@@ -609,17 +624,11 @@ func (cn *ChatNotifier) NotifyMention(ctx context.Context, mentionedUserID, send
 // Notifications are skipped when:
 //   - the conversation is muted
 //   - the recipient has active presence (W5 integration)
-//
-// Parameters:
-//   - recipientUserID: the UUID of the DM recipient
-//   - senderName: display name (or email) of the sender
-//   - conversationKey: the DM key (dm:...)
-//   - messagePreview: the raw message text (will be truncated)
-//   - projectID: project UUID (may be empty for user-user DMs)
-func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID, senderName, conversationKey, messagePreview, projectID string) {
+func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID string, msg ChatMessageContext) {
 	if cn == nil || cn.webChatStore == nil {
 		return
 	}
+	senderName, conversationKey := msg.SenderName, msg.ConversationKey
 
 	// Respect muted flag.
 	muted, err := cn.webChatStore.IsConversationMuted(ctx, recipientUserID, conversationKey)
@@ -641,9 +650,9 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID, s
 		return
 	}
 
-	message := formatChatNotification(ChatNotificationDMReceived, senderName, "", messagePreview)
+	message := formatChatNotification(ChatNotificationDMReceived, senderName, "", msg.Preview)
 
-	notif := cn.buildChatNotification(recipientUserID, ChatNotificationDMReceived, message, projectID)
+	notif := cn.buildChatNotification(recipientUserID, ChatNotificationDMReceived, message, msg.ProjectID)
 
 	if err := cn.store.CreateNotification(ctx, notif); err != nil {
 		cn.log.Error("Failed to create DM notification",
@@ -651,7 +660,10 @@ func (cn *ChatNotifier) NotifyDMReceived(ctx context.Context, recipientUserID, s
 		return
 	}
 
-	cn.events.PublishNotification(ctx, notif)
+	// A DM has no thread name; make sure a stale one cannot ride along.
+	dmMsg := msg
+	dmMsg.ConversationName = ""
+	cn.events.PublishChatNotification(ctx, notif, dmMsg)
 	cn.log.Info("DM notification created",
 		"notificationID", notif.ID, "recipient", recipientUserID,
 		"sender", senderName, "conversationKey", conversationKey)
@@ -679,18 +691,26 @@ func (cn *ChatNotifier) buildChatNotification(
 	}
 }
 
+// maxChatPreview bounds the message text carried in a notification, in runes.
+const maxChatPreview = 100
+
+// truncateChatPreview bounds a message preview for notification display.
+// Rune-based so a multi-byte character is never split down the middle.
+//
+// Shared by the formatted message and the structured event payload: the two
+// must show the same amount of the message, or the tray row and the browser
+// popup disagree about where the text stops.
+func truncateChatPreview(messagePreview string) string {
+	runes := []rune(messagePreview)
+	if len(runes) > maxChatPreview {
+		return string(runes[:maxChatPreview]) + "…"
+	}
+	return messagePreview
+}
+
 // formatChatNotification formats a notification message for chat triggers.
 func formatChatNotification(trigger, senderName, conversationName, messagePreview string) string {
-	// Truncate preview to a reasonable length for push notifications.
-	// Use rune-based slicing to avoid splitting multi-byte UTF-8 characters.
-	const maxPreview = 100
-	runes := []rune(messagePreview)
-	var preview string
-	if len(runes) > maxPreview {
-		preview = string(runes[:maxPreview]) + "…"
-	} else {
-		preview = messagePreview
-	}
+	preview := truncateChatPreview(messagePreview)
 
 	switch trigger {
 	case ChatNotificationMention:

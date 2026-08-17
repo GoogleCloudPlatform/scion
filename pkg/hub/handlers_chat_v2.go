@@ -1184,7 +1184,13 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 	if cn := s.getChatNotifier(); cn != nil {
 		// DM received notification: notify the peer when a DM is sent.
 		if isDM && recipientID != "" && recipientID != user.ID() {
-			go cn.NotifyDMReceived(context.Background(), recipientID, senderLabel, key, content, projectID)
+			go cn.NotifyDMReceived(context.Background(), recipientID, ChatMessageContext{
+				SenderID:        user.ID(),
+				SenderName:      senderLabel,
+				ConversationKey: key,
+				Preview:         content,
+				ProjectID:       projectID,
+			})
 		}
 		// Human mention notifications.
 		if len(mentionNames) > 0 && projectID != "" {
@@ -2561,7 +2567,14 @@ func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames
 		}
 		seen[member.ID] = true
 
-		cn.NotifyMention(ctx, member.ID, senderName, conversationKey, conversationName, messageContent, projectID)
+		cn.NotifyMention(ctx, member.ID, ChatMessageContext{
+			SenderID:         senderUserID,
+			SenderName:       senderName,
+			ConversationKey:  conversationKey,
+			ConversationName: conversationName,
+			Preview:          messageContent,
+			ProjectID:        projectID,
+		})
 	}
 }
 

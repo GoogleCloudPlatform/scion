@@ -93,6 +93,15 @@ export class StateManager extends EventTarget {
 
   private sseClient = new SSEClient();
 
+  /**
+   * Current user's ID, set once by the app bootstrap. Chat notifications are
+   * published on the subscriber-scoped subject `user.<id>.notification` (the
+   * unscoped `notification.created` subject is readable by every session, and
+   * chat payloads carry a sender name and a message preview), so the client
+   * needs to know who it is before it can subscribe to its own notifications.
+   */
+  private currentUserId = '';
+
   constructor() {
     super();
 
@@ -142,6 +151,26 @@ export class StateManager extends EventTarget {
   }
 
   /**
+   * Record the signed-in user so scoped subscriptions can include the
+   * per-user notification subject. Called by the app bootstrap once the
+   * session user is known.
+   *
+   * If a scope is already active the SSE connection is reopened, because the
+   * subject list computed without a user ID is missing that subscription and
+   * the notification tray would never refresh.
+   */
+  setCurrentUserId(userId: string): void {
+    if (this.currentUserId === userId) return;
+    this.currentUserId = userId;
+    if (this.state.scope) {
+      const subjects = this.subjectsForScope(this.state.scope);
+      if (subjects.length > 0) {
+        this.sseClient.connect(subjects);
+      }
+    }
+  }
+
+  /**
    * Set the view scope. Closes any existing SSE connection and opens
    * a new one with subjects matching the view context.
    * Called by the router on navigation.
@@ -179,34 +208,47 @@ export class StateManager extends EventTarget {
    * the browser's 6-connection-per-origin HTTP/1.1 limit).
    */
   private subjectsForScope(scope: ViewScope): string[] {
-    switch (scope.type) {
-      case 'dashboard':
-        return ['project.>', 'notification.>'];
+    const subs = ((): string[] => {
+      switch (scope.type) {
+        case 'dashboard':
+          return ['project.>', 'notification.>'];
 
-      case 'project':
-        return [`project.${scope.projectId}.>`, 'notification.>'];
+        case 'project':
+          return [`project.${scope.projectId}.>`, 'notification.>'];
 
-      case 'agent-detail':
-        return [`project.${scope.projectId}.>`, `agent.${scope.agentId}.>`, 'notification.>'];
+        case 'agent-detail':
+          return [`project.${scope.projectId}.>`, `agent.${scope.agentId}.>`, 'notification.>'];
 
-      case 'brokers-list':
-        return ['broker.>', 'notification.>'];
+        case 'brokers-list':
+          return ['broker.>', 'notification.>'];
 
-      case 'broker-detail':
-        return ['broker.>', 'notification.>'];
+        case 'broker-detail':
+          return ['broker.>', 'notification.>'];
 
-      case 'chat': {
-        const subs: string[] = [];
-        for (const spaceId of scope.spaceIds) {
-          subs.push(`project.${spaceId}.chat.>`);
-          // Also subscribe to project-level agent events for the members sidebar
-          subs.push(`project.${spaceId}.agent.>`);
+        case 'chat': {
+          const chatSubs: string[] = [];
+          for (const spaceId of scope.spaceIds) {
+            chatSubs.push(`project.${spaceId}.chat.>`);
+            // Also subscribe to project-level agent events for the members sidebar
+            chatSubs.push(`project.${spaceId}.agent.>`);
+          }
+          chatSubs.push(`user.${scope.userId}.chat.>`);
+          chatSubs.push('notification.>');
+          return chatSubs;
         }
-        subs.push(`user.${scope.userId}.chat.>`);
-        subs.push('notification.>');
-        return subs;
       }
+    })();
+
+    // Chat notifications arrive on the subscriber-scoped subject, which the
+    // server authorizes against the session user. It is added in every scope,
+    // not just chat: a mention must still reach the tray and the title badge
+    // while the user is looking at the agent list. Note that the chat scope's
+    // `user.<id>.chat.>` does not cover it — `notification` is not under `chat`.
+    const userId = this.currentUserId || (scope.type === 'chat' ? scope.userId : '');
+    if (userId) {
+      subs.push(`user.${userId}.notification`);
     }
+    return subs;
   }
 
   private scopeEquals(a: ViewScope, b: ViewScope): boolean {
@@ -240,6 +282,18 @@ export class StateManager extends EventTarget {
     // Notification events: notification.created
     if (parts[0] === 'notification') {
       this.notify('notification-created');
+      return;
+    }
+
+    // User-scoped notifications: user.{userId}.notification
+    //
+    // Without an explicit case here the subject is silently dropped: it has
+    // three tokens, and the user-scoped chat branch below requires four, so
+    // it falls past every branch to the end of handleUpdate. The tray and the
+    // unread badge would then never hear about a chat notification. (It does
+    // not get misrouted to 'chat-message-received' — measured, not assumed.)
+    if (parts[0] === 'user' && parts.length === 3 && parts[2] === 'notification') {
+      this.notifyWithData('notification-created', data);
       return;
     }
 

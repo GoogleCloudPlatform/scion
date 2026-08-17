@@ -584,6 +584,9 @@ export class ScionChatSpaceRail extends LitElement {
               projectId: s.projectId,
               projectSlug: s.projectSlug,
               projectName: s.projectName,
+              // Carried so the tab-title badge can reuse this load instead of
+              // asking the server for the same rollup a second time.
+              unreadCount: s.unreadCount,
             })),
           },
           bubbles: true,

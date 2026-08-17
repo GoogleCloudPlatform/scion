@@ -308,7 +308,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			if senderName == "" {
 				senderName = agent.Slug
 			}
-			go cn.NotifyDMReceived(context.Background(), recipientID, senderName, req.ThreadID, req.Msg, agent.ProjectID)
+			go cn.NotifyDMReceived(context.Background(), recipientID, ChatMessageContext{
+				SenderID:        agent.ID,
+				SenderName:      senderName,
+				ConversationKey: req.ThreadID,
+				Preview:         req.Msg,
+				ProjectID:       agent.ProjectID,
+			})
 		}
 	}
 

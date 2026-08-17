@@ -48,11 +48,47 @@ export interface PageTitleDetail {
  *   setDocumentTitle('agent-1', 'my-project')    → "agent-1 — my-project — Scion"
  */
 export function setDocumentTitle(...segments: string[]): void {
-  if (segments.length === 0) {
-    document.title = APP_NAME;
-    return;
-  }
-  document.title = [...segments, APP_NAME].join(' — ');
+  currentSegments = segments;
+  applyDocumentTitle();
+}
+
+/** The most recent title segments, replayed when the unread count changes. */
+let currentSegments: string[] = [];
+
+/** Unread conversations, rendered as a "(N) " prefix on the tab title. */
+let unreadCount = 0;
+
+/**
+ * Writes `document.title` from the current segments and unread count.
+ *
+ * The prefix is applied here, on every write, rather than at the call sites:
+ * routes change the title constantly (chat-shell on navigation, page
+ * components again once their data loads) and any one of those writes would
+ * otherwise silently drop the badge.
+ */
+function applyDocumentTitle(): void {
+  const base = currentSegments.length === 0 ? APP_NAME : [...currentSegments, APP_NAME].join(' — ');
+  document.title = unreadCount > 0 ? `(${unreadCount}) ${base}` : base;
+}
+
+/**
+ * Sets the unread conversation count shown in the tab title.
+ *
+ * This is unread state, not notification state: it is deliberately
+ * independent of the browser permission and of the push master toggle, since
+ * a user who declined desktop popups has not asked to stop seeing their own
+ * unread count.
+ */
+export function setUnreadBadge(count: number): void {
+  const next = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  if (next === unreadCount) return;
+  unreadCount = next;
+  applyDocumentTitle();
+}
+
+/** The count currently shown in the tab title. */
+export function getUnreadBadge(): number {
+  return unreadCount;
 }
 
 /**

@@ -39,6 +39,14 @@ type EventPublisher interface {
 	PublishBrokerDisconnected(ctx context.Context, brokerID string, projectIDs []string)
 	PublishBrokerStatus(ctx context.Context, brokerID, status string)
 	PublishNotification(ctx context.Context, notif *store.Notification)
+	// PublishChatNotification emits a chat notification (mention, DM received)
+	// on the subscriber-scoped subject user.<subscriberID>.notification and
+	// nowhere else. Chat notification payloads carry a sender name and a
+	// message preview, so they must not travel on the unscoped
+	// notification.created subject or on project-wide subjects — SSE
+	// authorization only gates project.* and user.* subjects, and project
+	// membership is not the same set as "people in this conversation".
+	PublishChatNotification(ctx context.Context, notif *store.Notification, msg ChatMessageContext)
 	PublishUserMessage(ctx context.Context, msg *store.Message)
 	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
@@ -79,11 +87,13 @@ func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string,
 func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string) {}
 func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                {}
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
-func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message)            {}
-func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)               {}
-func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)            {}
-func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)            {}
-func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)                   {}
+func (noopEventPublisher) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
+}
+func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message) {}
+func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
+func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string) {}
+func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string) {}
+func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)        {}
 func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 }
 func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string) {}
@@ -237,6 +247,43 @@ type NotificationCreatedEvent struct {
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
+}
+
+// ChatNotificationEvent is the payload for a chat notification (mention, DM
+// received). It extends NotificationCreatedEvent with the conversation and
+// sender identity that the durable notification row cannot express: the row
+// has no conversation key, so a client reading it alone cannot tell which
+// conversation to open, and cannot build a per-conversation notification tag.
+//
+// These fields exist only on this event, never on NotificationCreatedEvent.
+// They are stable identifiers, and they only travel on the subscriber-scoped
+// subject (see PublishChatNotification) — putting them on the broadcast
+// subject would turn a leaked sentence into a joinable who-talks-to-whom
+// graph, and would disclose the titles of private threads to non-members.
+//
+// The client composes the notification title and body from these parts. It
+// must never parse them back out of Message, which is a pre-formatted,
+// localisable sentence.
+type ChatNotificationEvent struct {
+	NotificationCreatedEvent
+	// SubscriberID is the user this notification is addressed to. The subject
+	// already scopes delivery; this is the client's second gate.
+	SubscriberID string `json:"subscriberId"`
+	// SenderID is the user who sent the message, so a client can suppress
+	// notifications for its own messages.
+	SenderID string `json:"senderId,omitempty"`
+	// SenderName is the sender's display name (or email).
+	SenderName string `json:"senderName,omitempty"`
+	// ConversationKey is the topic UUID, or the dm:<...> key for a DM. It
+	// drives both click-to-navigate and the per-conversation tag.
+	ConversationKey string `json:"conversationKey,omitempty"`
+	// ConversationName is the human-readable thread name; empty for DMs.
+	ConversationName string `json:"conversationName,omitempty"`
+	// Preview is the truncated message text, already bounded by the same
+	// limit the formatted Message uses. It is the notification body; without
+	// it the client would have to split Message on ": ", which breaks on the
+	// first thread named with a colon in it.
+	Preview string `json:"preview,omitempty"`
 }
 
 // AllowListChangedEvent is published when the allow list is modified.
@@ -574,13 +621,51 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 		GroveID:   notif.ProjectID,
 		Status:    notif.Status,
 		Message:   notif.Message,
-		CreatedAt: notif.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+		CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}
 	p.sink("notification.created", evt)
 	if notif.ProjectID != "" {
 		p.sink("project."+notif.ProjectID+".notification", evt)
 		p.sink("grove."+notif.ProjectID+".notification", evt)
 	}
+}
+
+// PublishChatNotification publishes a chat notification (mention, DM received)
+// on user.<subscriberID>.notification and on no other subject.
+//
+// Chat notification messages contain the sender's display name and a preview of
+// the message body. authorizeSSESubjects (web.go) only constrains subjects whose
+// first token is "project" or "user": a subscription to "notification.>" is
+// granted to every logged-in session, so publishing chat payloads there hands
+// every browser on the deployment a copy. project.<id>.notification is narrower
+// but still wrong — project membership is not conversation membership, and a DM
+// has no project at all.
+//
+// A notification with no SubscriberID has no subject that can be scoped to it,
+// so it is dropped rather than broadcast. Agent-status notifications keep using
+// PublishNotification and its existing subjects.
+func (p *eventBuilder) PublishChatNotification(_ context.Context, notif *store.Notification, msg ChatMessageContext) {
+	if notif == nil || notif.SubscriberID == "" {
+		return
+	}
+	evt := ChatNotificationEvent{
+		NotificationCreatedEvent: NotificationCreatedEvent{
+			ID:        notif.ID,
+			AgentID:   notif.AgentID,
+			ProjectID: notif.ProjectID,
+			GroveID:   notif.ProjectID,
+			Status:    notif.Status,
+			Message:   notif.Message,
+			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+		},
+		SubscriberID:     notif.SubscriberID,
+		SenderID:         msg.SenderID,
+		SenderName:       msg.SenderName,
+		ConversationKey:  msg.ConversationKey,
+		ConversationName: msg.ConversationName,
+		Preview:          truncateChatPreview(msg.Preview),
+	}
+	p.sink("user."+notif.SubscriberID+".notification", evt)
 }
 
 // PublishAllowListChanged publishes an allow list change event.

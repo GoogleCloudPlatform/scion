@@ -26,10 +26,18 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { isChatNotificationStatus } from '../../client/chat-notifications.js';
+import {
+  canShowPushNotification,
+  enablePushWithPermission,
+  pushPermission,
+  setPushOptIn,
+  PUSH_PREFERENCE_EVENT,
+  type PushPermissionState,
+} from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
-const PUSH_STORAGE_KEY = 'scion-push-notifications';
 
 @customElement('scion-notification-tray')
 export class ScionNotificationTray extends LitElement {
@@ -39,9 +47,14 @@ export class ScionNotificationTray extends LitElement {
   @state() private notifications: Notification[] = [];
   @state() private open = false;
 
+  /** Mirrors the shared push preference so the panel can render its state. */
+  @state() private pushEnabled = false;
+  @state() private pushPermission: PushPermissionState = 'default';
+
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnNotification = this.onNotificationEvent.bind(this);
+  private boundOnPushPreference = (): void => this.syncPushState();
 
   /** IDs already seen — used to detect genuinely new notifications. */
   private seenIds = new Set<string>();
@@ -55,6 +68,10 @@ export class ScionNotificationTray extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.syncPushState();
+    // Keep in step with the profile settings page, which writes the same
+    // preference. Two toggles disagreeing about one setting is worse than one.
+    window.addEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     if (this.user) {
       void this.fetchNotifications();
       this.startPolling();
@@ -66,6 +83,7 @@ export class ScionNotificationTray extends LitElement {
     super.disconnectedCallback();
     this.stopPolling();
     this.stopListeningForNotifications();
+    window.removeEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
@@ -82,6 +100,34 @@ export class ScionNotificationTray extends LitElement {
       }
     }
     this.detectTruncation();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Push preference
+  // ---------------------------------------------------------------------------
+
+  private syncPushState(): void {
+    this.pushPermission = pushPermission();
+    // Permission can be revoked in site settings long after the opt-in was
+    // stored, so the toggle reflects both halves rather than the flag alone.
+    this.pushEnabled = canShowPushNotification();
+  }
+
+  /**
+   * Turns desktop notifications on or off.
+   *
+   * This is the only path that asks the browser for permission, and it is
+   * reachable from chat because the tray is in the chat header. Permission is
+   * never requested on load: browsers penalise unprompted requests, and a
+   * permission dialog nobody asked for is the reason they do.
+   */
+  private async handlePushToggle(): Promise<void> {
+    if (this.pushEnabled) {
+      setPushOptIn(false);
+    } else {
+      await enablePushWithPermission();
+    }
+    this.syncPushState();
   }
 
   private detectTruncation(): void {
@@ -164,11 +210,14 @@ export class ScionNotificationTray extends LitElement {
    * and the browser has granted permission.
    */
   private dispatchBrowserNotification(n: Notification): void {
-    if (
-      !('Notification' in window) ||
-      window.Notification.permission !== 'granted' ||
-      localStorage.getItem(PUSH_STORAGE_KEY) !== 'true'
-    ) {
+    // Chat mentions and DMs are dispatched by chat-notifications.ts straight
+    // off the SSE event, with a conversation tag and a click target this
+    // component cannot build — the notification row has no conversation
+    // column. Firing here too would show every mention twice, because the
+    // same event that produces the popup also triggers the re-fetch below.
+    if (isChatNotificationStatus(n.status)) return;
+
+    if (!canShowPushNotification()) {
       return;
     }
 
@@ -539,9 +588,38 @@ export class ScionNotificationTray extends LitElement {
     .panel-footer {
       display: flex;
       align-items: center;
-      justify-content: center;
+      justify-content: space-between;
+      gap: 0.5rem;
       padding: 0.5rem 1rem;
       border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .push-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      border: none;
+      background: transparent;
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.75rem;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      transition: background 0.15s ease;
+    }
+
+    .push-toggle.on {
+      color: var(--scion-primary, #3b82f6);
+    }
+
+    .push-toggle:hover:not(:disabled) {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .push-toggle:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
     }
 
     .manage-link {
@@ -636,6 +714,7 @@ export class ScionNotificationTray extends LitElement {
           ${count > 0 ? this.notifications.map((n) => this.renderItem(n)) : this.renderEmpty()}
         </div>
         <div class="panel-footer">
+          ${this.renderPushToggle()}
           <a
             href="/projects"
             class="manage-link"
@@ -653,6 +732,41 @@ export class ScionNotificationTray extends LitElement {
     `;
   }
 
+  /**
+   * The master desktop-notification toggle. Lives in the tray because the tray
+   * is the one notification surface present on every page, chat included —
+   * the profile settings page is not reachable without leaving a conversation.
+   */
+  private renderPushToggle() {
+    if (this.pushPermission === 'unsupported') return nothing;
+
+    // Permission alone decides this. A user who opted in and later revoked
+    // permission in site settings still has the stored flag set, and reading
+    // it here left the button live: the click could not re-prompt (permission
+    // is 'denied', not 'default'), so it silently cleared the flag and only
+    // the next render admitted the button was blocked all along.
+    const blocked = this.pushPermission === 'denied';
+    const label = blocked
+      ? 'Desktop notifications blocked'
+      : this.pushEnabled
+        ? 'Desktop notifications on'
+        : 'Desktop notifications off';
+
+    return html`
+      <button
+        class="push-toggle ${this.pushEnabled ? 'on' : ''}"
+        role="switch"
+        aria-checked=${this.pushEnabled}
+        ?disabled=${blocked}
+        title=${blocked ? 'Allow notifications in your browser site settings' : label}
+        @click=${(): void => void this.handlePushToggle()}
+      >
+        <sl-icon name=${this.pushEnabled ? 'bell-fill' : 'bell-slash'}></sl-icon>
+        ${label}
+      </button>
+    `;
+  }
+
   private renderItem(n: Notification) {
     return html`
       <div class="notif-item">
@@ -666,12 +780,17 @@ export class ScionNotificationTray extends LitElement {
           </sl-tooltip>
           <div class="notif-meta">
             <span>${this.relativeTime(n.createdAt)}</span>
-            <a
-              href="/agents/${n.agentId}"
-              @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}
-            >
-              View agent
-            </a>
+            ${isChatNotificationStatus(n.status)
+              ? // Chat rows carry the nil agent UUID, so "View agent" would
+                // link to /agents/00000000-... and 404. Until the row records
+                // its conversation there is nowhere honest to send the click.
+                nothing
+              : html`<a
+                  href="/agents/${n.agentId}"
+                  @click=${(e: Event): void => this.navigateToAgent(e, n.agentId)}
+                >
+                  View agent
+                </a>`}
             <button class="mark-read-link" @click=${(): void => void this.ackOne(n.id)}>
               Mark read
             </button>
