@@ -397,9 +397,12 @@ step "every rendered settings.yaml carries a top-level server: key"
 # permutation, and it is here because a Phase 0 guard is closed by it.
 #
 # --config / -c is reserved in hub.args, and at Phase 0 it was not merely
-# reserved, it was LIVE: that chart rendered no Secret and no ConfigMap, so the
-# container had no settings.yaml, the global read below found nothing and the
-# flag's path was read. THIS PHASE IS WHAT MAKES IT INERT, by emitting the
+# reserved, it was LIVE. Not for want of a settings.yaml - the hub seeds one from
+# its own embedded defaults on a first boot (cmd/server_foreground.go:104-109 ->
+# config.InitMachine, pkg/config/init.go:588-599) and those defaults have no
+# server key. THE TRIGGER IS THE KEY, NOT THE FILE, so "the chart mounts a
+# settings.yaml" is not the property that matters and a check that asserted the
+# mount would not be this check. THIS PHASE MAKES THE FLAG INERT by emitting the
 # top-level server key, and the reason is ours end to end:
 # loadGlobalConfigFromSettings (pkg/config/hub_config.go:640) reads
 # GetGlobalDir() first and unconditionally, and consults the --config path only
@@ -733,8 +736,9 @@ step "nothing points the hub at a second configuration file"
 # `server` key (loadServerFromSettingsFile, :1331, decided at :1344-1347).
 #
 # THE FLAG IS INERT BECAUSE OF A PROPERTY OF THIS CHART'S OUTPUT, NOT BECAUSE OF
-# ANYTHING IN THE BINARY, AND IT WAS LIVE AT PHASE 0. That chart rendered no
-# settings file, so `found` was false and configPath was read. Every
+# ANYTHING IN THE BINARY, AND IT WAS LIVE AT PHASE 0. What was missing there was
+# the key, not the file: the hub's own embedded defaults seed a settings.yaml
+# with no server section, so `found` was false and configPath was read. Every
 # settings-bearing permutation here renders a top-level `server:` key, so `found`
 # is true and --config does nothing at all - a property this phase supplies and
 # no other phase can.

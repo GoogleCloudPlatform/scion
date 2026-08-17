@@ -1845,10 +1845,21 @@ else in this file would suggest.
 It is not only that the hub's configuration lives under it. It is that EMITTING
 THIS KEY IS WHAT MAKES --config INERT. Not "--config is inert" - it is not, as a
 general fact, and writing it that way is how the property gets dropped. At Phase
-0 the flag is fully LIVE: that chart rendered no Secret and no ConfigMap, so no
-settings.yaml existed in the container at all, the global read below found
-nothing, and configPath was read. THIS PHASE IS THE ONE THAT MAKES IT INERT, by
-emitting this key, and drop the key and the flag returns to the Phase 0 state.
+0, which rendered no settings Secret, the flag was fully live.
+
+AND NOT BECAUSE NO FILE EXISTED. A global settings.yaml may well exist without
+this chart writing one: the hub seeds it from its own embedded defaults on a
+first boot (cmd/server_foreground.go:104-109 -> config.InitMachine,
+pkg/config/init.go:588-599), and those defaults carry no server key.
+loadServerFromSettingsFile does not test existence, it tests the key
+(:1344-1347).
+
+THE TRIGGER IS THE KEY, NOT THE FILE, which is the whole reason this assertion
+is worth its lines. "The chart mounts a settings.yaml" does not keep --config
+inert. Nest the server section under a profile, rename it, deliver it in a
+second file - every one of those still mounts a settings.yaml, and every one of
+them hands the flag back its effect. This phase supplies the key; drop it and the
+deployment is back where Phase 0 was.
 
   LoadGlobalConfig            pkg/config/hub_config.go:628
   loadGlobalConfigFromSettings                        :640
@@ -1899,7 +1910,7 @@ The six keys below are nested under server: in V1ServerConfig. A file that
 places any of them at the top level parses, installs, and is silently not read.
 */}}
 {{- if not (hasKey $doc "server") }}
-{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads the server section and nothing else from it (pkg/config/hub_config.go:1344-1347). (2) --config goes back to being live, and it is Phase 0's reserved flag. That flag is not inert by nature - at Phase 0, which rendered no settings file at all, it was fully live. Emitting this key is what makes the global settings read succeed (:647) and the --config path go unread; drop it and loadGlobalConfigFromSettings consults that path instead (:648-659), where its own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (:777-787). Neither state announces itself: --config is silently accepted and ignored while this key is here - no error, no warning, no log line, and it is not marked deprecated (cmd/server.go:237 defines it; the MarkDeprecated calls at :236 and :290 are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
+{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads the server section and nothing else from it (pkg/config/hub_config.go:1344-1347). (2) --config goes back to being live, and it is Phase 0's reserved flag. That flag is not inert by nature - at Phase 0 it was fully live, and not because no settings.yaml existed: the hub seeds one from embedded defaults that carry no server key (cmd/server_foreground.go:104-109, pkg/config/init.go:588-599), and the loader tests the key, not the file (:1344-1347). Emitting this key is what makes the global settings read succeed (:647) and the --config path go unread; drop it and loadGlobalConfigFromSettings consults that path instead (:648-659), where its own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (:777-787). Neither state announces itself: --config is silently accepted and ignored while this key is here - no error, no warning, no log line, and it is not marked deprecated (cmd/server.go:237 defines it; the MarkDeprecated calls at :236 and :290 are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
 {{- end }}
 {{- if not (kindIs "map" (get $doc "server")) }}
 {{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil (pkg/config/hub_config.go:1344-1347), so an empty or nulled server section reads as no settings file at all: every server setting is lost, and --config - reserved by Phase 0, live there, and silently accepted and ignored only while this chart emits this key as a map - returns to live as a sole-source substitution at :648-659 or as an overlay at :777-787. Same consequence as omitting the key entirely; see the comment above this check." (get $doc "server")) }}
