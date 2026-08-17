@@ -84,16 +84,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// not written by the agent — cannot spend the whole allowance the agent
 	// needs for a completion report or an escalation. The class only ever
 	// selects a reservation inside the agent's single aggregate ceiling, so a
-	// caller cannot buy extra allowance by relabelling its traffic.
+	// caller cannot buy extra allowance by relabelling its traffic. A type
+	// this build does not recognise is classified as ordinary agent traffic
+	// and still accepted, exactly as before: tightening the type contract on
+	// the wire is a compatibility change and is tracked separately.
 	//
 	// Charged before the payload is validated: a flood of malformed sends is
 	// still a flood.
 	if !s.allowChatSend(w, agentIdent.ID(), chatSenderClassForMessageType(req.Type)) {
-		return
-	}
-
-	if err := messages.ValidateType(req.Type); err != nil {
-		ValidationError(w, err.Error(), nil)
 		return
 	}
 
