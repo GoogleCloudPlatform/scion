@@ -9,6 +9,25 @@ reviewer, sized by how many sites come back descriptive. That number is below.
 Measured at `60b2912`, helm v3.16.3+gcfd0749 (`/tmp/linux-amd64/helm`),
 kubeconform v0.6.7 (`/tmp/kubeconform`), non-login shell.
 
+### 🔴 Standing rule for anyone editing this file
+
+**This document does not cite unpinned line numbers into itself, and does not
+publish an unpinned count of itself.** Every numeric or positional claim it makes
+about its own text carries the SHA it was measured at, or it is deleted. A claim
+about another file carries `path:line @ SHA`.
+
+> **A LINE NUMBER INTO A MUTABLE FILE IS NOT A CITATION, IT IS A CACHE — AND THIS
+> ONE HAS NO INVALIDATION.** (`gd-p0-rev-4`.) The same class `gd-p6-scope` hit
+> from the other side: a `path:line` into a corpus with more than one version
+> **fails by succeeding** — it dereferences, to different content.
+
+This rule exists because the file broke it three rounds running, each time in the
+sentence that fixed the previous break. **Prefer deleting the number to updating
+it:** an updated coordinate re-arms the identical trap for the next commit that
+inserts a line above it, whereas the claim underneath it — *every hit is inside
+this bullet* — is usually true, stable and checkable without any coordinate at
+all. §7 reports the sweep that enforced this.
+
 ---
 
 ## What is being classified, and why the boundary is drawn here
@@ -51,9 +70,11 @@ render nobody has written.
 | quotation | 6 |
 | normative | 9 |
 
-**Nine descriptive sites is the size of the prose commit.** Seven were already
-filed as instances eleven to fifteen plus `:901`; **two are new and are filed
-here for the first time** (§3).
+**Nine descriptive sites is the size of the prose commit.** **Six** were already
+filed — instances eleven to fifteen, plus `:901` — and **three are new and are
+filed here for the first time** (§3). *(This read "seven … two" for four rounds.
+Both parts were wrong and their sum was right, which is why nobody re-derived
+them; §7.)*
 
 The 81 → 24 reduction is the reason gd-em's resize was correct: 37 sites was
 never 37 instances. It is also the reason the triage could not be mechanised —
@@ -84,7 +105,7 @@ each is a *different* failure of the two sweeps, not three more of the same.
 
 ---
 
-## 3. The two new findings, and why both sweeps missed them
+## 3. The three new findings, and why both sweeps missed them
 
 ### Sixteen — `_helpers.tpl:310`: **a claim that names the phase which will falsify it, and names the wrong one**
 
@@ -128,9 +149,9 @@ $ /usr/bin/grep -n 'survives' stale-claim-triage.md
 
 Exactly two hits, opposite truth values, distinguished by nothing but tilde pairs — which
 vanish in any tool that strips markdown or does not render it. (Grepping the same
-token at *this* head returns **6**, not 2, because this section quotes it four
-more times. Same rule as §6: the corpus and the SHA are pinned above precisely so
-that number is a confirmation rather than a contradiction.) The block-level
+token at `6fc0cdfc` returns **6**, not 2, because this section quotes it four more
+times. Same rule as §6: the corpus and the SHA are pinned above precisely so that
+number is a confirmation rather than a contradiction.) The block-level
 `SUPERSEDED` heading above is right for a human reading top to bottom and does no
 work at all for a line lifted out of the middle. Seven lines, one word each, and
 `grep` now returns a line that says `WRONG` on it in every renderer and in none.
@@ -196,8 +217,10 @@ function around ugrep, so a bare `grep` is a different program:
 ```
 
 ⚠️ **Widen the corpus to the chart tree and the second count is 1, not 0 — and
-the single hit is the line above, in this file, asserting that it is 0.** The
-count falsified itself at the moment it was written down.
+at `6fc0cdfc` the single hit is the line above, in this file, asserting that it
+is 0.** The count falsified itself at the moment it was written down. *(The SHA
+is on that sentence because §7 quotes the token again and takes the tree-wide
+count to 2. The rule below applies to the document reporting the rule.)*
 
 > **A NEGATIVE COUNT PUBLISHED IN PROSE ENTERS ITS OWN CORPUS. State the corpus
 > or the document becomes the counter-example to its own finding.**
@@ -240,7 +263,8 @@ should not be read as having checked it (`gd-p0-rev-4`).
 The sweep missed them because it keyed on the token `volumes` — **and the token
 is in the previous sentence.** *(This paragraph said "the same sentence" until
 `gd-p0-rev-4` measured the full stop after `renders no --db`. It is two
-sentences: `mounts no volumes` closes the second, and the driver clause, the
+sentences: `mounts no volumes` sits in the second, which closes at `renders no
+--db`, and the driver clause, the
 gcs-plus-proxy clause and the conclusion are all in the third.* **A checkable
 claim about the structure of quoted text, wrong, in the document whose function
 is accurate quotation, inside the commit that removes a wrong mechanism claim —
@@ -269,9 +293,18 @@ original ranking rested on the fabricated basis above.
 #### A required sentence that is absent, and why it must stay absent
 
 `gke-deploy-lead`'s ruling for this edit called for the struck note to be
-characterised as *"the conclusion was right for the wrong reason."* **That phrase
-appears nowhere in this file. `gd-p0-rev-4` measured its absence and asked for
-the decision to be recorded rather than left as the commit's silence.**
+characterised as *"the conclusion was right for the wrong reason."* **No such
+characterisation of the struck note appears in this file. `gd-p0-rev-4` measured
+its absence and asked for the decision to be recorded rather than left as the
+commit's silence.**
+
+*(This read "**That phrase appears nowhere in this file**" until §7's sweep
+grepped it: the words occur **twice at `6fc0cdfc`**, in the sentence above and in
+the one below, both times quoted in order to be discussed. The claim was true of
+the use and false of the mention, and only the mention is greppable — so the
+count is stated and the absence is scoped, rather than asserted flat. It is the
+same defect as the O1 count one section up, in the paragraph about a wording
+nobody re-checks because authority supplied it.)*
 
 **I will not claim it was a deliberate declination.** I cannot verify my own
 intent at the time, and dressing an omission as a reasoned decision after the
@@ -377,14 +410,18 @@ number to one would be attaching a tripwire to a policy.
   existed**, `/usr/bin/grep -cF` (GNU grep 3.8; the bare `grep` here is a zsh
   function wrapping ugrep and is a different program) counted **0** for
   `values.yaml` and **0** for `values.schema.json` — neither file was named
-  anywhere in the triage. At this head both are **3**, and every one of the six
-  hits is inside this bullet: lines 341, 343, 345 and 346. Controls: a token
-  known present counts 8, a token known absent counts 0.
+  anywhere in the triage. At `6fc0cdfc` both are **3**, and **every one of those
+  hits is inside this bullet** — which is the claim doing the work, and it is the
+  only form of it that survives renumbering. Grep at any later head and the count
+  will be higher; that is the rule holding, not breaking. Controls at `6fc0cdfc`:
+  `isHADeployment`, a token known present, counts **9**; a token known absent
+  counts **0**.
 
   🔴 **This paragraph is the second worked example of its own rule, and it was
   caught by a reviewer rather than by me.** As first written it published a bare
   `both 0` with no corpus and no SHA, in the same commit that codifies *a
-  negative count published in prose enters its own corpus* — 174 lines earlier.
+  negative count published in prose enters its own corpus*, earlier in this same
+  file.
   `gd-p0-rev-4` measured 3. The rule was stated, the O1 count was fixed to obey
   it, and the very next count in the same file was written as though the rule
   did not exist. **A RULE OBEYED AT THE SITE THAT PROMPTED IT IS NOT YET A RULE;
@@ -404,3 +441,146 @@ number to one would be attaching a tripwire to a policy.
   I have classified it normative. A reviewer who disagrees moves it into the
   prose commit's scope, which is the direction that costs work rather than
   safety, so the ambiguity is disclosed rather than resolved.
+
+## 7. The self-claim sweep — denominator, method, and what it caught
+
+Required by `gd-p0-rev-4` (round 9) and ruled by `gd-em`, in place of a fourth
+per-site patch. The argument for doing it this way is theirs and it is arithmetic:
+
+```
+round 8  O1 count fixed with corpus+engine+SHA  ->  §6 count shipped bare            = R3
+round 9  §6 count fixed with corpus+SHA         ->  §6 coordinates left at old head  = R4
+round 9  row-16 nit fixed                       ->  the same error left at §3        = N3
+```
+
+**Per-site fixing went 0-for-3 against this class on this file.** Each correction
+landed at the site the review named, and at anything written fresh. The file was
+never swept for the class, so the class kept finding new sites faster than the
+patches retired old ones.
+
+### Denominator
+
+`gd-p0-rev-4` supplied the scope and I built to it unchanged: **in** — any claim
+*in* this file *about* this file that a reader can mechanically check and find
+false after an edit elsewhere in this file (self line numbers, self token counts,
+positional claims, cardinalities). **Out** — citations into other files
+(`_helpers.tpl:310-314`, `cmd/server_foreground.go:928`); they are not
+self-referential and the chart is frozen, so counting them would inflate the
+denominator with claims that cannot move. On his stated edge case — numbers
+inside quoted historical output, the `118`/`252` in §3's block — **I took his
+first treatment: in the denominator, and they pass, because the block is
+SHA-pinned.**
+
+**40 mechanical assertions over this file's self-claims. 40 run. 9 corrected**,
+plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
+so it is out by the definition above, and it is fixed here only because `gd-em`
+folded it into this commit. No category came back empty. **A is zero as a
+standing count and one as a check** — the four coordinates it used to hold were
+deleted by this commit, and A1 is now the assertion that no self line number
+appears without a SHA on the same line.
+
+| | category | assertions | wrong on entry |
+|---|---|---|---|
+| **A** | line numbers or ranges into this same file | 1 | 1 (four coordinates, deleted) |
+| **B** | counts of a token in this same file | 13 | 4 |
+| **C** | positional claims about this same file | 11 | 1 |
+| **D** | cardinalities about this file's own tables | 15 | 3 |
+
+Engine: GNU grep 3.8 invoked as `/usr/bin/grep`, because the bare `grep` in this
+environment is a zsh function wrapping ugrep 7.5.0 and is a different program.
+Subjects: `git show <sha>:<path>` at `5ebe3dab`, `38a41b6e` and `6fc0cdfc`, never
+the working tree. Every row compares the claim *as written* against a fresh
+measurement; none was checked by eye.
+
+### The nine corrections, and N3
+
+| # | claim as it stood | measured | disposition |
+|---|---|---|---|
+| 1 | §6's four hard-coded line numbers | three lines, all renumbered | **deleted, not updated** (R4) |
+| 2 | §6 *"174 lines earlier"* | 170 @ `5ebe3dab`, 185 @ `6fc0cdfc` | **deleted** — never true at any SHA |
+| 3 | §6 control *"a token known present counts 8"* | 9 | token named, count pinned |
+| 4 | §3 *"grepping the same token at head returns 6"* | 6 then, 9 now | pinned to `6fc0cdfc` |
+| 5 | §3 ⚠️ *"the second count is 1, not 0"* | 1 then, 2 now | pinned to `6fc0cdfc` |
+| 6 | §3 *"that phrase appears nowhere in this file"* | **2** | scoped to use vs mention, count stated |
+| 7 | §1 *"seven were already filed"* | 6 | corrected |
+| 8 | §1 *"two are new"* | 3 | corrected |
+| 9 | §3 heading *"the two new findings"* | 3 | corrected |
+| — | §3 row-16 *"the same sentence"* | two sentences | corrected (N3; **out of the denominator**) |
+
+Four of those are worth more than the corrections.
+
+**#3 is R3's own control, retired by R3's own commit.** *"A token known present
+counts 8"* was true at `38a41b6e` and `5ebe3dab`; the round-8 commit added a ninth
+`isHADeployment` and made it 9. **The control installed to show the count was
+trustworthy was itself an unpinned count of this file**, and it did not name its
+token, so it could not be re-derived at all.
+
+> **A CONTROL IS A MEASUREMENT AND DECAYS LIKE ONE.** Pinning the number it guards
+> and leaving the control bare protects the claim and abandons the evidence.
+
+**#2 was never true, and neither reviewer caught it.** The distance is 170 at
+`5ebe3dab` and 185 at `6fc0cdfc`, and no pair of anchors gives 174 at either. It
+came from `gd-p0-rev-4`'s round-8 review prose and I copied it into the file
+without measuring it — into the document whose subject is claims nobody
+re-checks, in the commit that fixed a claim nobody re-checked.
+
+> **A NUMBER ARRIVING FROM A REVIEWER IS STILL AN UNVERIFIED NUMBER, AND IT
+> ARRIVES WITH AUTHORITY, WHICH IS THE PROPERTY THAT SUPPRESSES CHECKING.** The
+> same mechanism as the required-wording finding in §3, from the opposite
+> direction: there the authority was an instruction, here a correction.
+
+**#7 and #8 survived four rounds because their sum was right.** *"Seven were
+already filed … two are new"* sums to nine and nine is correct; the split is six
+and three. Every reviewer who checked it checked the total.
+
+> **AN ARITHMETIC IDENTITY IS NOT A CHECK OF ITS OPERANDS.** A decomposition whose
+> parts are both wrong by the same amount in opposite directions is
+> indistinguishable, at the level of the sum, from a correct one — and the sum is
+> the only thing a reader verifies.
+
+**#5 is this section falsifying a claim two sections up, by reporting on it.**
+The §3 ⚠️ note said the negative token `mutable state, so` has exactly one hit in
+the chart tree, and that the hit is the line asserting it is zero. Writing that
+token into the table above makes it **two**. Rather than route around it by
+paraphrasing the token, the note is pinned to `6fc0cdfc` and the token is quoted
+here on purpose: *a negative count published in prose enters its own corpus*
+applies to the sweep that verifies the rule, and a sweep that has to avoid naming
+its subjects to stay true is not a sweep.
+
+### What the sweep got wrong about itself
+
+A sweep that reports only its catches has no measurable error rate, so:
+
+- **One false positive.** My row-counting regex matched a row in §1's table as
+  well as §2's and reported ten rows where there are nine. §2's *"All nine"* was
+  correct all along. **One of the four findings in the first pass was my
+  instrument, not the file.**
+- **A second false positive**, from hard-coding the expected line numbers of the
+  §6 hits into the harness instead of a range — the same defect the sweep exists
+  to remove, committed by the sweep, one round later.
+- **One false negative, which is worse.** The check for #6 passed on its first
+  run because the harness piped a *filename* into `grep` where it meant the file's
+  contents; it grepped the path and found nothing. **A defect that reads as a pass
+  is the failure mode this whole file is about**, and it was caught only because
+  the answer disagreed with a manual grep run four minutes earlier.
+
+> **A SWEEP IS AN INSTRUMENT AND GETS NO EXEMPTION FROM THE RULE IT ENFORCES.**
+> Report its false positives and its false negatives, or its denominator is a
+> claim of the same kind as the ones it audits.
+
+### Scope this sweep does not cover
+
+Only claims about *this file*. The `path:line` citations into other trees
+dereference at `6fc0cdfc` but are **not** all `@ SHA`-pinned — that is the same
+defect pointing outward, it is P1-sized, and it is disclosed here rather than
+fixed. **The `24` and `81`/`57` figures in §1 are internally consistent and this
+sweep is the first time anyone has checked even that much**; their agreement with
+the sweeps that produced them is unverified and is not claimed.
+
+The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
+`149126d4a952982e`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 40/40 and **exits 1 under mutation control** — reverting the §3
+heading to *"the two new findings"* takes it to 39/40 — so it is an instrument
+that can disagree, which four of this morning's could not. It should land beside
+this file when P1 unfreezes `tests/`, at which point the numbers above stop being
+a report and become a check.
