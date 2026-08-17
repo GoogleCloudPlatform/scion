@@ -47,7 +47,7 @@ var msgNotify bool
 var msgWake bool
 var msgChannel string
 var msgThreadID string
-var msgCC string
+var msgCC []string
 
 // messageCmd represents the message command
 var messageCmd = &cobra.Command{
@@ -138,8 +138,11 @@ Examples:
 			return fmt.Errorf("--notify cannot be combined with --broadcast or --all")
 		}
 
-		// Validate --cc restrictions
-		if msgCC != "" {
+		// Validate --cc restrictions: parse first so empty-string values
+		// (e.g. --cc "") are handled correctly instead of triggering
+		// false-positive validation errors.
+		parsedCC := parseCCFlag(msgCC)
+		if len(parsedCC) > 0 {
 			if msgBroadcast || msgAll {
 				return fmt.Errorf("--cc cannot be combined with --broadcast or --all")
 			}
@@ -272,7 +275,7 @@ Examples:
 		}
 
 		// --cc requires Hub mode
-		if msgCC != "" && hubCtx == nil {
+		if len(parsedCC) > 0 && hubCtx == nil {
 			return fmt.Errorf("--cc requires Hub mode (use 'scion hub enable' first)")
 		}
 
@@ -913,9 +916,10 @@ func extractMentions(text string) []string {
 	return messages.ExtractMentions(text)
 }
 
-// parseCCFlag delegates to the shared messages.ParseCCFlag.
-func parseCCFlag(cc string) []string {
-	return messages.ParseCCFlag(cc)
+// parseCCFlag delegates to the shared messages.ParseCCFlags. The --cc flag is
+// repeatable and each occurrence may itself be a comma-separated list.
+func parseCCFlag(cc []string) []string {
+	return messages.ParseCCFlags(cc)
 }
 
 // maxMentionRecipients is an alias for the shared constant.
@@ -1015,7 +1019,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Target a specific message channel (e.g. telegram, gchat, web)")
 	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Target a specific thread within the channel")
-	messageCmd.Flags().StringVar(&msgCC, "cc", "", "CC additional agents (comma-separated names); each receives a mention notification")
+	messageCmd.Flags().StringArrayVar(&msgCC, "cc", nil, "CC an additional agent (repeatable; also accepts a comma-separated list); each receives a mention notification")
 	messageCmd.AddCommand(messageChannelsCmd)
 	rootCmd.AddCommand(messageCmd)
 }

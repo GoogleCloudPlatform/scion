@@ -1460,15 +1460,8 @@ func iapAudienceToCloudRunURL(audience string) string {
 
 // parseAdminEmails parses admin emails from the flag or config.
 func parseAdminEmails(cfg *config.GlobalConfig) []string {
-	var adminEmailList []string
-	if adminEmails != "" {
-		for _, email := range strings.Split(adminEmails, ",") {
-			email = strings.TrimSpace(email)
-			if email != "" {
-				adminEmailList = append(adminEmailList, email)
-			}
-		}
-	} else if len(cfg.Hub.AdminEmails) > 0 {
+	adminEmailList := splitCommaList(adminEmails)
+	if len(adminEmailList) == 0 && len(cfg.Hub.AdminEmails) > 0 {
 		adminEmailList = cfg.Hub.AdminEmails
 	}
 	if len(adminEmailList) > 0 {
@@ -2203,18 +2196,11 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 
 	// Resolve authorized domains and admin email list for the web server
 	var webAuthorizedDomains []string
-	var webAdminEmails []string
 	if len(cfg.Auth.AuthorizedDomains) > 0 {
 		webAuthorizedDomains = cfg.Auth.AuthorizedDomains
 	}
-	if adminEmails != "" {
-		for _, email := range strings.Split(adminEmails, ",") {
-			email = strings.TrimSpace(email)
-			if email != "" {
-				webAdminEmails = append(webAdminEmails, email)
-			}
-		}
-	} else if len(cfg.Hub.AdminEmails) > 0 {
+	webAdminEmails := splitCommaList(adminEmails)
+	if len(webAdminEmails) == 0 && len(cfg.Hub.AdminEmails) > 0 {
 		webAdminEmails = cfg.Hub.AdminEmails
 	}
 

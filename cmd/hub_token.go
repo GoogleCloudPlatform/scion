@@ -133,7 +133,7 @@ Examples:
 var (
 	tokenCreateName    string
 	tokenCreateProject string
-	tokenCreateScopes  string
+	tokenCreateScopes  []string
 	tokenCreateExpires string
 	tokenListProject   string
 )
@@ -151,7 +151,7 @@ func init() {
 	_ = hubTokenCreateCmd.Flags().MarkDeprecated("grove", "use --project instead")
 	_ = hubTokenCreateCmd.Flags().MarkHidden("grove")
 
-	hubTokenCreateCmd.Flags().StringVar(&tokenCreateScopes, "scopes", "", "Comma-separated list of scopes (required)")
+	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateScopes, "scopes", nil, "Scope to grant (required, repeatable; also accepts a comma-separated list)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry duration (e.g., 30d, 90d, 1y) or RFC 3339 date (default: 90d)")
 
 	_ = hubTokenCreateCmd.MarkFlagRequired("name")
@@ -190,9 +190,9 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve project %q: %w", tokenCreateProject, err)
 	}
 
-	scopes := strings.Split(tokenCreateScopes, ",")
-	for i := range scopes {
-		scopes[i] = strings.TrimSpace(scopes[i])
+	scopes := splitCommaList(tokenCreateScopes)
+	if len(scopes) == 0 {
+		return fmt.Errorf("--scopes must specify at least one scope")
 	}
 
 	var expiresAt *time.Time

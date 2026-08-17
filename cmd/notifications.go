@@ -34,12 +34,12 @@ var (
 
 	subscribeAgent    string
 	subscribeProject  string
-	subscribeTriggers string
+	subscribeTriggers []string
 
 	unsubscribeAll     bool
 	unsubscribeProject string
 
-	updateTriggers string
+	updateTriggers []string
 
 	subscriptionsProject string
 	subscriptionsJSON    bool
@@ -165,7 +165,7 @@ func init() {
 	notificationsSubscribeCmd.Flags().StringVar(&subscribeProject, "grove", "", "Deprecated alias for --project")
 	_ = notificationsSubscribeCmd.Flags().MarkDeprecated("grove", "use --project instead")
 	_ = notificationsSubscribeCmd.Flags().MarkHidden("grove")
-	notificationsSubscribeCmd.Flags().StringVar(&subscribeTriggers, "triggers", "", "Comma-separated trigger activities (default: COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED)")
+	notificationsSubscribeCmd.Flags().StringArrayVar(&subscribeTriggers, "triggers", nil, "Trigger activity (repeatable; also accepts a comma-separated list) (default: COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED)")
 
 	// Unsubscribe flags
 	notificationsUnsubscribeCmd.Flags().BoolVar(&unsubscribeAll, "all", false, "Remove all subscriptions in the project")
@@ -175,7 +175,7 @@ func init() {
 	_ = notificationsUnsubscribeCmd.Flags().MarkHidden("grove")
 
 	// Update flags
-	notificationsUpdateCmd.Flags().StringVar(&updateTriggers, "triggers", "", "Comma-separated trigger activities (required)")
+	notificationsUpdateCmd.Flags().StringArrayVar(&updateTriggers, "triggers", nil, "Trigger activity (required, repeatable; also accepts a comma-separated list)")
 	_ = notificationsUpdateCmd.MarkFlagRequired("triggers")
 
 	// Subscriptions list flags
@@ -357,11 +357,8 @@ func runNotificationsSubscribe(cmd *cobra.Command, args []string) error {
 
 	// Parse triggers
 	triggers := defaultTriggers
-	if subscribeTriggers != "" {
-		triggers = strings.Split(subscribeTriggers, ",")
-		for i := range triggers {
-			triggers[i] = strings.TrimSpace(triggers[i])
-		}
+	if parsed := splitCommaList(subscribeTriggers); len(parsed) > 0 {
+		triggers = parsed
 	}
 
 	req := &hubclient.CreateSubscriptionRequest{
@@ -402,11 +399,7 @@ func runNotificationsUpdate(cmd *cobra.Command, args []string) error {
 
 	subID := args[0]
 
-	triggers := strings.Split(updateTriggers, ",")
-	for i := range triggers {
-		triggers[i] = strings.TrimSpace(triggers[i])
-	}
-
+	triggers := splitCommaList(updateTriggers)
 	if len(triggers) == 0 {
 		return fmt.Errorf("--triggers must specify at least one trigger activity")
 	}

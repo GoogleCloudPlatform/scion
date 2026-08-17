@@ -134,7 +134,11 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--base-url=%s", webBaseURL))
 	}
 	if cmd.Flags().Changed("admin-emails") {
-		daemonArgs = append(daemonArgs, fmt.Sprintf("--admin-emails=%s", adminEmails))
+		// Forwarded as a single comma-joined value rather than repeated flags:
+		// the daemon argv is persisted to server-args.json for restart, and the
+		// one-arg form keeps that file byte-compatible with existing installs.
+		// The flag still accepts a comma-separated list, so this round-trips.
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--admin-emails=%s", strings.Join(adminEmails, ",")))
 	}
 	if globalMode {
 		daemonArgs = append(daemonArgs, "--global")

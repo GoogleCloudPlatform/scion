@@ -72,12 +72,14 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 	resetServerFlags()
 	// Globals resetServerFlags doesn't cover:
 	noAutoMigrate, enableTestLogin, simulateRemoteBroker = false, false, false
-	templateCacheDir, webAssetsDir, webBaseURL, adminEmails = "", "", "", ""
+	templateCacheDir, webAssetsDir, webBaseURL = "", "", ""
+	adminEmails = nil
 	templateCacheMax, globalMode = 0, false
 	defer func() {
 		resetServerFlags()
 		noAutoMigrate, enableTestLogin, simulateRemoteBroker = false, false, false
-		templateCacheDir, webAssetsDir, webBaseURL, adminEmails = "", "", "", ""
+		templateCacheDir, webAssetsDir, webBaseURL = "", "", ""
+		adminEmails = nil
 		templateCacheMax, globalMode = 0, false
 	}()
 
@@ -95,7 +97,7 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 	f.StringVar(&webAssetsDir, "web-assets-dir", "", "")
 	f.StringVar(&webSessionSecret, "session-secret", "", "")
 	f.StringVar(&webBaseURL, "base-url", "", "")
-	f.StringVar(&adminEmails, "admin-emails", "", "")
+	f.StringArrayVar(&adminEmails, "admin-emails", nil, "")
 
 	c.SetArgs([]string{
 		"--hosted=false",     // explicit mode disable must survive the re-exec
