@@ -733,11 +733,11 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 // It prefers projects/<slug> and falls back to groves/<slug> for backward compatibility
 // with workspaces created before the grove-to-project rename.
 //
-// When the server has a workspace storage config with backend "nfs" or
-// "cloudrun-volume", the NFS/volume-backed path is returned instead.
-// A backward-compatible fallback checks the NFS path first, then the
-// legacy local path, so existing local deployments continue to work
-// when NFS is first configured.
+// When the server has a workspace storage config with backend "nfs",
+// "cloudrun-volume" or "gke-shared-volume", the durable volume-backed path is
+// returned instead. A backward-compatible fallback checks the durable path
+// first, then the legacy local path, so existing local deployments continue to
+// work when durable storage is first configured.
 func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	if err := validateProjectSlug(slug); err != nil {
 		return "", err
@@ -776,6 +776,28 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 			return localPath, nil
 		}
 		return crPath, nil
+	}
+
+	// --- GKE shared volume backend ---
+	// The PVC is mounted into the pod at /mnt/<volume_name>, the same
+	// convention checkWorkspaceStorageHealth probes for readiness. VolumeName
+	// is required: without it there is no mount point to build a path from, so
+	// the config is treated as unset and this falls through to the local path —
+	// a deployment in that state fails its readiness check anyway.
+	if wsCfg != nil && wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil && wsCfg.GKESharedVolume.VolumeName != "" {
+		subPathRoot := wsCfg.GKESharedVolume.SubPathRoot
+		if subPathRoot == "" {
+			subPathRoot = "projects"
+		}
+		gkePath := filepath.Join("/mnt", wsCfg.GKESharedVolume.VolumeName, subPathRoot, "hub-projects", slug)
+		if hasWorkspaceContent(gkePath) {
+			return gkePath, nil
+		}
+		// Fallback: check legacy local path
+		if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
+			return localPath, nil
+		}
+		return gkePath, nil
 	}
 
 	// --- Default: local ephemeral path (existing behavior) ---

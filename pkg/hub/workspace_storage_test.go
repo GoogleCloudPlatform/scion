@@ -303,6 +303,90 @@ func TestServerHubManagedProjectPath_NFSPrefersNFSWhenBothExist(t *testing.T) {
 	assert.Equal(t, nfsDir, path)
 }
 
+func TestServerHubManagedProjectPath_GKESharedVolume(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{
+			VolumeName:  "workspace-vol",
+			PVClaimName: "scion-workspaces",
+		},
+	}
+
+	path, err := srv.hubManagedProjectPath("my-project")
+	require.NoError(t, err)
+
+	expected := filepath.Join("/mnt", "workspace-vol", "projects", "hub-projects", "my-project")
+	assert.Equal(t, expected, path)
+}
+
+func TestServerHubManagedProjectPath_GKESharedVolumeCustomSubPath(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{
+			VolumeName:  "workspace-vol",
+			SubPathRoot: "custom-root",
+		},
+	}
+
+	path, err := srv.hubManagedProjectPath("my-project")
+	require.NoError(t, err)
+
+	expected := filepath.Join("/mnt", "workspace-vol", "custom-root", "hub-projects", "my-project")
+	assert.Equal(t, expected, path)
+}
+
+func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	slug := "gke-fallback-project"
+
+	// Content exists in the local path only (deployment predating the volume)
+	localDir := filepath.Join(tmpHome, ".scion", "projects", slug)
+	require.NoError(t, os.MkdirAll(localDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{
+			VolumeName: "absent-workspace-vol",
+		},
+	}
+
+	path, err := srv.hubManagedProjectPath(slug)
+	require.NoError(t, err)
+	assert.Equal(t, localDir, path)
+}
+
+// A gke-shared-volume config without a volume name has no mount point to build
+// a path from, so it is treated as unset and falls through to the local path.
+// Such a deployment fails its readiness check, so it never serves traffic.
+func TestServerHubManagedProjectPath_GKESharedVolumeMissingVolumeName(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:         "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{PVClaimName: "scion-workspaces"},
+	}
+
+	path, err := srv.hubManagedProjectPath("my-project")
+	require.NoError(t, err)
+
+	expected := filepath.Join(tmpHome, ".scion", "projects", "my-project")
+	assert.Equal(t, expected, path)
+}
+
 func TestServerHubManagedProjectPath_EmptySlugError(t *testing.T) {
 	srv, _ := testServer(t)
 
