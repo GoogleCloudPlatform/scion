@@ -143,7 +143,10 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=283
+# 283 + 3 for the banned-path tree sweep at the foot of this file (the sweep
+# itself, and the planted positive that makes its zero a reading). Summed onto
+# the previous committed value, not read off a run.
+EXPECTED_TOTAL=286
 
 failures=0
 assertions=0
@@ -521,9 +524,17 @@ awk '/^# Source: scion-hub\/templates\/deployment\.yaml$/{f=1} f{ if ($0=="---")
 # a literal and -F is the only flag that cannot reinterpret it. Adding -E to
 # both would be the mechanical fix and it is the wrong one: GNU BRE's \| \? \+
 # are operators under -G and literals under -E, so a blanket -E converts
-# correct BRE patterns into confident zeros. Neither pattern here contains a
-# metacharacter that differs between the two dialects, so this changes no
-# result - it labels an instrument that was already reading correctly.
+# correct BRE patterns into confident zeros.
+#
+# MEASURED, not inspected. Against the real rendered Deployment (153 lines):
+#   ^kind: Deployment$   BRE=1  ERE=1  -G=1   AGREE   (-F=0, which is why -F is
+#                                                      wrong here: anchors are
+#                                                      not literals)
+#   initContainers:      BRE=1  ERE=1  -G=1  -F=1     AGREE on all four
+# 1 call site, 2 invocations, 0 disagreeing. An earlier version of this comment
+# claimed the same thing from reading the patterns; the claim was right and the
+# grounds were not, and a correct conclusion from an unrun check is the thing
+# this file exists to catch.
 if [[ ! -s "$kc_dep" ]] || ! grep -Eq '^kind: Deployment$' "$kc_dep" || ! grep -qF 'initContainers:' "$kc_dep"; then
   meta_failure "could not extract this chart's Deployment (with its proxy initContainers) from the settings render, so the control below would be validating something other than the chart."
 fi
@@ -3805,6 +3816,77 @@ if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
   pass "hub.extraEnv accepts an ordinary multi-line value"
 else
   fail "hub.extraEnv rejected an ordinary multi-line value - the PEM check is matching on whitespace rather than on the PEM header"
+fi
+
+# --------------------------------------------------------------------------
+# THE BANNED READINESS LITERAL, SWEPT OVER THE WHOLE TREE.
+#
+# Phase 0's constraint is that the deprecated liveness path must not appear
+# anywhere in the chart tree. Until this block existed that constraint was
+# enforced by an author running an ad-hoc grep and reporting a zero - and on
+# 2026-08-17 the author of THIS block broke it, in the VALIDATION.md sentence
+# asserting the absence, and the ad-hoc zero was three commits stale by then.
+# Nothing went red, because nothing was watching. A rule is only in executable
+# form for as long as something can execute it.
+#
+# The literal is assembled from parts so that this file is not itself a hit.
+# That is not cleverness for its own sake: hack/ ships in neither the tarball
+# nor the render, but it is inside the tree being swept, and a sweep that
+# matches its own source is a sweep that can never return zero.
+_banned_path="/health""z"
+#
+# EXPLICIT FILE ARGUMENTS, NEVER -r. Recursion is the one axis on which a grep
+# wrapper was measured to silently narrow the file set on this project; an
+# explicit path is one the instrument cannot decline to visit. -F because the
+# pattern is a literal and -F is the only flag that cannot reinterpret it.
+_sweep() { [[ $# -ge 2 ]] && /usr/bin/grep -lF -- "$1" "${@:2}" 2>/dev/null || true; }
+
+# THE NEEDLE'S IDENTITY, PINNED. Measured 2026-08-17: with the needle mutated
+# to a different assembled-from-parts string, this whole block passed 285/285
+# and reported "appears in 0 of 41 files". The planted positive above does NOT
+# catch that, because it plants whatever _banned_path holds and then finds it -
+# it proves the mechanism fires, and says nothing about WHICH string it fires
+# on. A scanner that can go blind and still report PASS is worse than no
+# scanner, so the needle is checked against a digest committed independently of
+# the expression that builds it.
+_needle_digest="$(printf '%s' "$_banned_path" | sha256sum | cut -c1-16)"
+if [[ "$_needle_digest" == "15a99506b4e1757d" ]]; then
+  pass "the banned-path needle is the string this gate was written for (sha256[0:16] 15a99506b4e1757d)"
+else
+  fail "the banned-path needle has been changed: sha256[0:16] is $_needle_digest, committed is 15a99506b4e1757d. Every absence this block reports is about some other string."
+fi
+
+mapfile -t _tree < <(find "$CHART_DIR" -type f ! -path '*/.git/*' | sort)
+_tree_n="${#_tree[@]}"
+
+# THE DENOMINATOR, DERIVED INDEPENDENTLY RATHER THAN ASSERTED NON-ZERO.
+# Non-emptiness is not a denominator: a sweep over one file is non-empty and
+# proves nothing. find and git enumerate the tree by unrelated means, so a
+# disagreement means one of them is not seeing the chart.
+_git_n="$(git -C "$CHART_DIR" ls-files 2>/dev/null | wc -l)"
+if [[ "$_git_n" -eq 0 ]]; then
+  meta_failure "git could not enumerate the chart, so the tree sweep below has no independently-derived denominator and its zero would be unfalsifiable."
+elif [[ "$_tree_n" -lt "$_git_n" ]]; then
+  meta_failure "find saw $_tree_n files and git tracks $_git_n; the sweep below is reading a smaller tree than the chart and any zero it returns is a property of the aperture."
+fi
+
+# POSITIVE CONTROL FIRST, so the arms below are evidence rather than an inert
+# test. A control on a different input is not a control on your result - but a
+# sweep that cannot be shown to fire at all is not a measurement in the first
+# place.
+_probe="$(mktemp)"; printf 'livenessProbe: %s\n' "$_banned_path" >"$_probe"
+if [[ "$(_sweep "$_banned_path" "$_probe" | wc -l)" -eq 1 ]]; then
+  pass "the banned-path sweep fires on a planted occurrence, so its zero below is a reading and not a silence"
+else
+  fail "the banned-path sweep did not fire on a file that contains the banned path - every absence it reports is vacuous"
+fi
+rm -f "$_probe"
+
+mapfile -t _hits < <(_sweep "$_banned_path" "${_tree[@]}")
+if [[ "${#_hits[@]}" -eq 0 ]]; then
+  pass "the banned readiness literal appears in 0 of $_tree_n files in the chart tree ($_git_n tracked)"
+else
+  fail "the banned readiness literal appears in ${#_hits[@]} of $_tree_n files: ${_hits[*]}. The readiness path is /readyz; this literal must not ship, and VALIDATION.md ships."
 fi
 
 # --------------------------------------------------------------------------

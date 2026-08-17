@@ -513,7 +513,12 @@ structurally unable to reach:
    not race the proxy. **The ordering is a property of the kubelet, and no
    kubelet has run this pod.**
 3. **`/readyz` returns 200.** The readiness path is `/readyz`; the chart
-   contains no `/healthz` anywhere. That absence is asserted statically. A 200
+   contains no occurrence of the deprecated liveness path Phase 0 banned. The
+   banned literal is deliberately NOT written out in this file: VALIDATION.md
+   is not in `.helmignore`, so it ships inside the chart, and a tree-wide sweep
+   for that literal would otherwise find its own documentation and go red on
+   the sentence claiming the absence. It did exactly that once - see the note
+   below. That absence is asserted statically. A 200
    from a live hub is not.
 
 **To run it:** install against a real cluster and instance, then
