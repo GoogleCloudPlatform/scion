@@ -1465,15 +1465,17 @@ func resolveSessionSecret() string {
 }
 
 // parseBoolEnv reports whether the named environment variable is set to a
-// truthy value. It accepts every spelling strconv.ParseBool understands
-// (1, t, T, true, TRUE, True) plus the operator-friendly yes/y/on, matched
-// case-insensitively. Unset, empty, and unparseable values are false.
+// truthy value. Leading/trailing whitespace is stripped (file-mounted
+// secrets often include a trailing newline). It accepts every spelling
+// strconv.ParseBool understands (1, t, true, TRUE, True, etc.) plus the
+// operator-friendly yes/y/on, all case-insensitively. Unset, empty, and
+// unparseable values are false.
 func parseBoolEnv(key string) bool {
-	v := os.Getenv(key)
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	if b, err := strconv.ParseBool(v); err == nil {
 		return b
 	}
-	switch strings.ToLower(v) {
+	switch v {
 	case "yes", "y", "on":
 		return true
 	}

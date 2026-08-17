@@ -24,16 +24,37 @@ import (
 // operator who set the variable to "1" or "TRUE" silently got the disabled
 // path while believing the key was pinned across HA replicas.
 
-func TestRequireStableSigningKeyAcceptsTruthyValues(t *testing.T) {
-	for _, val := range []string{"true", "TRUE", "True", "1", "t", "T", "yes", "YES", "on", "ON"} {
-		t.Run(val, func(t *testing.T) {
-			t.Setenv("SCION_REQUIRE_STABLE_SIGNING_KEY", val)
+func TestParseBoolEnvAcceptsTruthyValues(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+	}{
+		{"true", "true"},
+		{"TRUE", "TRUE"},
+		{"True", "True"},
+		{"TrUe", "TrUe"},
+		{"1", "1"},
+		{"t", "t"},
+		{"T", "T"},
+		{"yes", "yes"},
+		{"YES", "YES"},
+		{"on", "on"},
+		{"ON", "ON"},
+		{"leading space", " true"},
+		{"trailing space", "true "},
+		{"trailing newline", "true\n"},
+		{"padded 1", " 1 "},
+		{"padded yes", " yes "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_REQUIRE_STABLE_SIGNING_KEY", tc.val)
 			require.True(t, parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"))
 		})
 	}
 }
 
-func TestRequireStableSigningKeyRejectsFalsyValues(t *testing.T) {
+func TestParseBoolEnvRejectsFalsyValues(t *testing.T) {
 	for _, val := range []string{"false", "FALSE", "0", "f", "no", "off", "", "maybe"} {
 		t.Run(val, func(t *testing.T) {
 			t.Setenv("SCION_REQUIRE_STABLE_SIGNING_KEY", val)
