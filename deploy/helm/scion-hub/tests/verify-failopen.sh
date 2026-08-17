@@ -103,7 +103,7 @@ else
 fi
 
 # --- 3. helm ABSENT: exit 2, meta>0, 'nothing analysed', NO chart accusation --
-out_no="$(env PATH="$NOHELM_PATH" bash "$T/run-all.sh" 2>&1)"; rc_no=$?
+out_no="$(env HELM=absent-helm-command bash "$T/run-all.sh" 2>&1)"; rc_no=$?
 meta="$(printf '%s' "$out_no" | sed -n 's|.*meta-failures: \([0-9]*\).*|\1|p' | tail -1)"
 accuse="$(printf '%s' "$out_no" | grep -cE 'MISSING|\.helmignore' || true)"
 says_nothing="$(printf '%s' "$out_no" | grep -ciE 'nothing was (asserted|analysed|analyzed)|not found|NOTHING WAS' || true)"
