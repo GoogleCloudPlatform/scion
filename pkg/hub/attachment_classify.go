@@ -17,7 +17,6 @@ package hub
 import (
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strings"
 )
 
@@ -39,9 +38,9 @@ import (
 // out with nosniff and, for non-images, an attachment disposition.
 //
 // Deliberately absent: .js and every other entry of DangerousExtensions, and
-// .html, which the allowlist keeps out (see AllowedMimeTypes). .jsx is here
-// and .js is not, because the blocklist is about what a browser will run when
-// a file escapes the download path, and .jsx is not that file.
+// the markup extensions of refusedMarkupExtensions. .jsx is here and .js is
+// not, because the blocklist is about what a browser will run when a file
+// escapes the download path, and .jsx is not that file.
 var textLikeExtensions = map[string]bool{
 	".json": true, ".yaml": true, ".yml": true, ".toml": true,
 	".ini": true, ".cfg": true, ".env": true, ".log": true,
@@ -54,6 +53,31 @@ var textLikeExtensions = map[string]bool{
 	".h": true, ".hpp": true, ".cs": true,
 }
 
+// refusedMarkupExtensions are refused on the extension alone, whatever their
+// bytes sniff as.
+//
+// The allowlist keeps out the sniffed type text/html. It does not keep out
+// .html files: http.DetectContentType answers text/html for seventeen fixed tag
+// signatures, and <img>, <svg> and <video> are not among them, so a document
+// built from those sniffs as text/plain. Before this check, an .html file
+// containing <img src=x onerror=…> was accepted and stored as text — inert,
+// because the download path sends nosniff and an attachment disposition and the
+// preview goes to a text sink, but inert only for as long as all three of those
+// hold at once.
+//
+// None of these is in textLikeExtensions, so refusing them removes nothing the
+// change set out to accept; and main already refused them in practice, since a
+// browser declares text/html or image/svg+xml for these files and the old gate
+// checked that declaration against the same allowlist. This restores that
+// parity rather than tightening past it.
+//
+// .hta is not here: it is in DangerousExtensions, with the executables it
+// belongs to.
+var refusedMarkupExtensions = map[string]bool{
+	".html": true, ".htm": true, ".xhtml": true, ".shtml": true,
+	".mhtml": true, ".mht": true, ".svg": true,
+}
+
 // contentSniffLen is how much of a file http.DetectContentType reads. Passing
 // more is harmless but pointless.
 const contentSniffLen = 512
@@ -64,8 +88,8 @@ const contentSniffLen = 512
 //
 // head may be shorter than contentSniffLen; an empty file classifies as text.
 func ClassifyAttachment(filename string, head []byte) (string, error) {
-	ext := strings.ToLower(filepath.Ext(filename))
-	if DangerousExtensions[ext] {
+	ext := attachmentExt(filename)
+	if DangerousExtensions[ext] || refusedMarkupExtensions[ext] {
 		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}
 
@@ -93,7 +117,9 @@ func ClassifyAttachment(filename string, head []byte) (string, error) {
 
 	// Everything else is what the bytes say it is, checked against the
 	// allowlist. text/html and application/javascript are not on it, so a
-	// sniffed HTML or script body is refused here whatever it is called.
+	// sniffed HTML or script body is refused here whatever it is called — which
+	// is the other half of the markup rule above: the extension check catches
+	// the payloads the sniff misses, the sniff catches the ones renamed .txt.
 	if AllowedMimeTypes[detected] {
 		return detected, nil
 	}
