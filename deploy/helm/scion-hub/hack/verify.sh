@@ -438,13 +438,40 @@ step "nothing redirects the hub away from the mounted settings file"
 # and the two fail differently - a guard on the input can be entirely correct
 # and still be bypassed by a later phase of this chart rendering the flag
 # itself. This check is the one that notices that.
+#
+# THE DETECTOR IS TESTED AGAINST A FIXTURE, NOT AGAINST THE CHART, AND THAT IS
+# DELIBERATE. The obvious way to prove a negative check works is to make the
+# thing happen on purpose - append --config through hub.args and watch the check
+# fire. That worked while the flag was still appendable, and it stops working the
+# moment Phase 0's reserved list claims it: the render then fails at input
+# validation, the check never runs, and the test goes green for a reason
+# unrelated to what it tests. A test that changes meaning when an unrelated guard
+# lands is not a test of this check. So the pattern is proved against fabricated
+# args blocks below, which no guard can reach.
+config_flag_re='^\s*-\s*"?(--config|-c)(=|"?$)'
+
+for fixture in '            - "--config"' '            - --config' '            - "--config=/etc/x.yaml"' '            - "-c"' '            - -c'; do
+  if grep -Eq "$config_flag_re" <<<"$fixture"; then
+    pass "the config-flag pattern matches $(sed 's/^ *- *//' <<<"$fixture")"
+  else
+    fail "the config-flag pattern does NOT match $(sed 's/^ *- *//' <<<"$fixture") - the checks below cannot detect what they exist to detect"
+  fi
+done
+for fixture in '            - "--hosted"' '            - "--enable-web"' '            - "--configure-something"' '            - "--concurrency"'; do
+  if grep -Eq "$config_flag_re" <<<"$fixture"; then
+    fail "the config-flag pattern matches $(sed 's/^ *- *//' <<<"$fixture"), which is not a config-path flag - the checks below would reject legitimate arguments"
+  else
+    pass "the config-flag pattern does not match $(sed 's/^ *- *//' <<<"$fixture")"
+  fi
+done
+
 for name in "${PERMUTATIONS[@]}"; do
   args_block="$(sed -n '/^          args:$/,/^          [a-z]/p' "$WORK/$name.yaml")"
   if [[ -z "$args_block" ]]; then
     fail "$name: could not find the hub's args in the rendered Deployment - this check would be vacuous"
     continue
   fi
-  if grep -Eq '^\s*-\s*"?(--config|-c)(=|"?$)' <<<"$args_block"; then
+  if grep -Eq "$config_flag_re" <<<"$args_block"; then
     fail "$name renders a config-path flag in the hub's arguments. It redirects the whole configuration load away from the mounted settings.yaml, and every other check in this file still passes when it does."
     grep -E '^\s*-\s*"?(--config|-c)' <<<"$args_block" || true
   else
@@ -483,12 +510,31 @@ expect_render_failure \
   --set 'hub.extraEnv[0].name=HOME' \
   --set 'hub.extraEnv[0].value=/tmp'
 
+# The name axis, through scion-hub.assertNoCredentialName. The message is the
+# shared helper's, so matching on it also proves the call reaches the helper
+# rather than some local copy of the rule.
 expect_render_failure \
-  "hub.extraEnv rejects a literal that looks like secret material" \
-  "looks like secret material" \
+  "hub.extraEnv rejects a literal under a name ending in a credential noun" \
+  "names credential material" \
   "${BASE[@]}" \
   --set 'hub.extraEnv[0].name=SOME_API_TOKEN' \
   --set 'hub.extraEnv[0].value=abc123'
+
+expect_render_failure \
+  "hub.extraEnv rejects a literal under a name that is a credential noun" \
+  "names credential material" \
+  "${BASE[@]}" \
+  --set 'hub.extraEnv[0].name=PASSWORD' \
+  --set 'hub.extraEnv[0].value=abc123'
+
+# The value axis, through scion-hub.assertNoCredential. The name here is
+# deliberately innocuous - HUB_UPSTREAM - so this can only pass on the value.
+expect_render_failure \
+  "hub.extraEnv rejects a URL with credentials in the userinfo" \
+  "embeds credentials in a URL" \
+  "${BASE[@]}" \
+  --set 'hub.extraEnv[0].name=HUB_UPSTREAM' \
+  --set 'hub.extraEnv[0].value=postgres://scion:hunter2@10.0.0.1/scion'
 
 expect_render_failure \
   "config.existingSecret with config.extra" \
@@ -583,6 +629,22 @@ if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
 else
   fail "hub.extraEnv rejected an ordinary variable - the prefix guard is too broad"
 fi
+
+# The name-axis false positives, by name, because these are the ones a naive
+# substring check gets wrong and they are not hypothetical: a TTL and a limit
+# both carry a credential noun that is not saying the value is a credential.
+# Each is set with a LITERAL value, because that is the only case the check
+# looks at - a secretKeyRef entry would pass without the rule being exercised.
+for ok_name in TOKEN_TTL_SECONDS MAX_TOKENS SECRET_MANAGER_PROJECT KEYCLOAK_REALM PASSWORD_MIN_LENGTH; do
+  if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+      "${BASE[@]}" \
+      --set "hub.extraEnv[0].name=$ok_name" \
+      --set 'hub.extraEnv[0].value=60' >/dev/null 2>&1; then
+    pass "hub.extraEnv accepts $ok_name"
+  else
+    fail "hub.extraEnv rejected $ok_name - the name guard is substring-matching a credential noun that is describing what the value is ABOUT, not what it IS"
+  fi
+done
 
 # --------------------------------------------------------------------------
 printf '\n'
