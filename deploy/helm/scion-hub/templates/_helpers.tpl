@@ -91,7 +91,7 @@ ID, and CI greps this chart for the generator functions by name, so do not
 reintroduce one even in a comment.
 */}}
 {{- define "scion-hub.hubId" -}}
-{{- $id := required "hub.hubId is required: set it to an explicit, stable hub ID. The chart never generates one - without an explicit value the hub derives its ID from its hostname, which is random per pod." .Values.hub.hubId }}
+{{- $id := required "hub.hubId is required: set it to an explicit, stable hub ID. The chart never generates one - without an explicit value the hub derives its ID from its hostname, which is random per pod." .Values.hub.hubId | toString }}
 {{- if ne $id (trim $id) }}
 {{- fail "hub.hubId must not have leading or trailing whitespace: the value is used verbatim." }}
 {{- end }}
