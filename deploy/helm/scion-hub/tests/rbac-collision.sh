@@ -755,7 +755,7 @@ _q_sa_a="$(sa_subject a team-alpha-x-b)"
 _q_sa_b="$(sa_subject a-scion-hub-team-alpha-x b)"
 [ -n "$_q_sa_a" ] && [ -n "$_q_sa_b" ] || meta_failure "(q) could not read the ClusterRoleBinding subject for one or both releases (got '$_q_sa_a' and '$_q_sa_b'); two empty strings compare equal and would report 'identical subjects', which is C4's signature and the opposite of this arm's finding"
 if [ "$_q_sa_a" != "$_q_sa_b" ]; then
-  pass "(q) the two colliding installs bind DIFFERENT ServiceAccounts ('$_q_sa_a' and '$_q_sa_b') in different namespaces - unlike arm (o), so a disambiguating rename at this site WOULD be a real fix - unlike arm (o). That makes C5 FIXABLE HERE; it does NOT make it fixed here, and gd-em ruled it a SEPARATE Critical because this change is gated on truncation and C5 does not truncate"
+  pass "(q) the two colliding installs bind DIFFERENT ServiceAccounts ('$_q_sa_a' and '$_q_sa_b') in different namespaces - unlike arm (o), so a disambiguating rename at this site WOULD be a real fix. That makes C5 FIXABLE HERE; it does NOT make it fixed here, and gd-em ruled it a SEPARATE Critical because this change is gated on truncation and C5 does not truncate"
 else
   fail "(q) both installs now bind the same ServiceAccount subject ('$_q_sa_a'). That is arm (o)'s signature, not this arm's, and it would mean scion-hub.fullname changed underneath this pair - re-derive which class this is before touching the expectations."
 fi
