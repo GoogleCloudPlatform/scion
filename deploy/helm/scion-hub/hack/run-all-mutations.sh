@@ -29,6 +29,39 @@ for t in helm python3 mktemp cp; do
 done
 [ -f "$SRC/tests/run-all.sh" ] || { echo "HARNESS ERROR: $SRC/tests/run-all.sh does not exist. NOTHING WAS MEASURED."; exit 2; }
 
+# A PATH that lacks EXACTLY ONE TOOL and nothing else.
+#
+# MEASURED, AND IT WAS WRONG HERE. This row used to run the suite under
+# PATH=/usr/bin:/bin and call the result "helm absent from PATH". On this box
+# that PATH also removes git (/usr/local/bin/git) and kubeconform, and /bin is a
+# symlink to usr/bin, so it is one directory written twice. PATH surgery cannot
+# construct an absent-tool arm on such a box: there is no prefix of PATH that
+# drops one tool and keeps the others. The row measured three absences and was
+# labelled with one. See gke-deploy-lead's broadcast: AN INSTRUMENT THAT DOES
+# NOT CHECK FOR ITS OWN TOOLS REPORTS THEIR ABSENCE AS A FACT ABOUT THE SUBJECT.
+#
+# A symlink farm can. Every executable reachable from the caller's PATH is
+# linked into one directory by ABSOLUTE path - not by `command -v` output, which
+# resolves against the PATH being mutated - except the one being removed.
+path_farm_without() { # path_farm_without <toolname> <destdir>
+  local drop="$1" dest="$2" dir f base
+  mkdir -p "$dest" || return 1
+  local oldifs="$IFS"; IFS=:
+  set -- $PATH
+  IFS="$oldifs"
+  for dir in "$@"; do
+    case "$dir" in /*) ;; *) continue ;; esac   # relative PATH entries resolve elsewhere
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*; do
+      [ -x "$f" ] || continue
+      base="${f##*/}"
+      [ "$base" = "$drop" ] && continue
+      [ -e "$dest/$base" ] && continue          # first match wins, as PATH order does
+      ln -s "$f" "$dest/$base" 2>/dev/null
+    done
+  done
+}
+
 rows=0
 row() { # row <label> <mutation function name>
   local label="$1" fn="$2"
@@ -38,7 +71,23 @@ row() { # row <label> <mutation function name>
   "$fn" "$d"    # a mutation may set strip_helm=1
   local out rc
   if [ "$strip_helm" = "1" ]; then
-    out="$(PATH=/usr/bin:/bin bash "$d/tests/run-all.sh" 2>&1)"; rc=$?
+    local farm="$d/.pathfarm"
+    path_farm_without helm "$farm" || {
+      echo "HARNESS ERROR: could not build the single-tool-absent PATH. NOTHING WAS MEASURED."; exit 2; }
+    # TWO CONTROLS, because either one alone passes for the wrong arm.
+    # Negative: the tool under test must really be gone, or the row measures a
+    # clean run wearing MM7's label.
+    if ( PATH="$farm"; hash -r 2>/dev/null; command -v helm >/dev/null 2>&1 ); then
+      echo "HARNESS ERROR: the $label arm still resolves helm, so it is not the arm it claims to be. NOTHING WAS MEASURED."; exit 2
+    fi
+    # Positive: EVERY OTHER tool the suite needs must still run. Without this,
+    # an over-broad PATH makes run-all.sh report git's or kubeconform's absence
+    # as a fact about the chart - the exact defect this replaced.
+    for _t in git kubeconform bash sed diff python3; do
+      ( PATH="$farm"; hash -r 2>/dev/null; command -v "$_t" >/dev/null 2>&1 ) || {
+        echo "HARNESS ERROR: the $label arm also removed ${_t}, so its result would be about ${_t} and not about helm. NOTHING WAS MEASURED."; exit 2; }
+    done
+    out="$(PATH="$farm" bash "$d/tests/run-all.sh" 2>&1)"; rc=$?
   else
     out="$(bash "$d/tests/run-all.sh" 2>&1)"; rc=$?
   fi

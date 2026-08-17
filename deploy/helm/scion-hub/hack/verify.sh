@@ -111,7 +111,7 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # -ne, so it fails in BOTH directions: short means something was skipped, over
 # means an assertion was added without the number being committed in the diff.
 # Update it in the same commit that changes the count, deliberately.
-EXPECTED_TOTAL=229
+EXPECTED_TOTAL=249
 
 failures=0
 assertions=0
@@ -687,6 +687,204 @@ if grep -qxF '  mode: hosted' "$WORK/auth-a" && grep -qxF '  mode: hosted' "$WOR
 else
   fail "server.mode: hosted is not present unmasked in both renders - either hosted mode is gone, or the mask reached a line it should not have"
 fi
+
+# --------------------------------------------------------------------------
+step "NOTES.txt names all eight unlanded gates for a release that acknowledged them"
+# --------------------------------------------------------------------------
+# WHY THIS EXISTS. The eight gate names live in the assertHAUnlanded refusal,
+# and that refusal does not print when acknowledgeHAUnlanded is set. Both of the
+# chart's own settings fixtures set it - so the eight gates are named to every
+# operator EXCEPT the two who copied a file out of this repository, which is the
+# population most likely to hit them. NOTES.txt prints on every install and is
+# the only prose the operator reliably sees.
+#
+# RENDERING NOTES.txt WITHOUT A CLUSTER. `helm template` evaluates NOTES.txt but
+# emits nothing for it, and --show-only cannot address it ("could not find
+# template"). `helm install --dry-run=client` does print it and was MEASURED to
+# demand a cluster on this box anyway ("Kubernetes cluster unreachable"), so it
+# is not available. The probe therefore copies the chart, RENAMES
+# templates/NOTES.txt to a .txt manifest name, and asks helm for that file:
+# helm's own file-template renderer runs, on the real bytes, with the real
+# values, and the only substitution is the filename. --debug is required because
+# the output is prose and not YAML.
+#
+# THE SUBSTITUTION IS CHECKED, NOT ASSUMED. The probe file must be byte-identical
+# to templates/NOTES.txt, and the render must be non-empty. An empty render
+# satisfies every "does not contain" assertion below - the same false pass this
+# file's preflight exists to prevent. Both are META-FAILURES, not failures.
+render_notes() { # render_notes <out> <helm args...>
+  local out="$1"; shift
+  local d; d="$(mktemp -d)"
+  cp -a "$CHART_DIR" "$d/c" || meta_failure "could not copy the chart for the NOTES probe."
+  mv "$d/c/templates/NOTES.txt" "$d/c/templates/zz-notes-probe.txt"
+  if ! cmp -s "$CHART_DIR/templates/NOTES.txt" "$d/c/templates/zz-notes-probe.txt"; then
+    rm -rf "$d"
+    meta_failure "the NOTES probe file is not byte-identical to templates/NOTES.txt, so whatever it renders is not the chart's NOTES."
+  fi
+  # helm EXITS NON-ZERO HERE AND THAT IS EXPECTED, not tolerated blindly: the
+  # probe file is prose, so helm reports a YAML parse error while --debug still
+  # renders it. The status is discarded; the emptiness check is what decides
+  # whether the render happened.
+  local raw; raw="$("$HELM" template "$RELEASE" "$d/c" --namespace "$NAMESPACE" --debug \
+    --show-only templates/zz-notes-probe.txt "$@" 2>/dev/null || true)"
+  printf '%s\n' "$raw" | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p' >"$out"
+  rm -rf "$d"
+  if [[ ! -s "$out" ]]; then
+    meta_failure "the NOTES probe rendered nothing for: $*. Every absence assertion below would pass against it."
+  fi
+}
+
+# The eight, as REGEXES over the rendered text. Gate 5 is the bare
+# server.auth.transport key and it is a prefix of gates 6, 7 and 8, so a plain
+# substring test for it is satisfied by any of them - it is matched as a token
+# not followed by a dot. Measured: deleting only the bare gate-5 line from
+# NOTES.txt turns exactly that one assertion red. Gate 2 is prose in both copies
+# and is matched on the words they share.
+HA_GATE_PATTERNS=(
+  'server\.database\.url'
+  'durable session'
+  'server\.auth\.proxy\.provider'
+  'server\.auth\.proxy\.iap\.audience'
+  'server\.auth\.transport([^.[:alnum:]_]|$)'
+  'server\.auth\.transport\.mode'
+  'server\.auth\.transport\.oidc_audience'
+  'server\.auth\.transport\.platform_auth_sa'
+)
+if [[ ${#HA_GATE_PATTERNS[@]} -ne 8 ]]; then
+  echo "HARNESS ERROR: HA_GATE_PATTERNS holds ${#HA_GATE_PATTERNS[@]} patterns, not 8. The gate list moved without this block's contribution to EXPECTED_TOTAL moving with it." >&2
+  exit 2
+fi
+
+render_notes "$WORK/notes-ack.txt" -f "$CHART_DIR/ci/values-settings.yaml"
+render_notes "$WORK/notes-plain.txt" -f "$CHART_DIR/ci/values-minimal.yaml"
+
+for _p in "${HA_GATE_PATTERNS[@]}"; do
+  if grep -Eq -- "$_p" "$WORK/notes-ack.txt"; then
+    pass "the acknowledged release's NOTES names the gate matching /$_p/"
+  else
+    fail "the acknowledged release's NOTES does not name the gate matching /$_p/ - an operator who copied ci/values-settings.yaml is told by neither the refusal, which is suppressed, nor here"
+  fi
+done
+
+# BOTH DIRECTIONS. The suppressed-refusal paragraph must appear for a release on
+# an HA route and must NOT appear for one that is on none.
+if grep -qF 'THE REFUSAL WAS SUPPRESSED' "$WORK/notes-ack.txt"; then
+  pass "the acknowledged release's NOTES says the refusal was suppressed"
+else
+  fail "the acknowledged release's NOTES does not say the refusal was suppressed, so the operator is never told the chart had an objection and stood down"
+fi
+if grep -qF 'THE REFUSAL WAS SUPPRESSED' "$WORK/notes-plain.txt"; then
+  fail "the default release's NOTES claims a refusal was suppressed, and there was nothing to suppress: it is on none of the three isHADeployment routes"
+else
+  pass "the default release's NOTES does not claim a suppressed refusal"
+fi
+# THE POSITIVE TWIN FOR THAT NEGATIVE. Without it, deleting the whole section -
+# or rendering some other file - passes the line above.
+if grep -qF 'WHAT THIS RELEASE DOES NOT YET DO' "$WORK/notes-plain.txt"; then
+  pass "the default release's NOTES still carries the unlanded-work section, so the absence above is an absence and not an empty render"
+else
+  fail "the default release's NOTES has no unlanded-work section at all, so the suppressed-refusal absence above proves nothing"
+fi
+
+# --------------------------------------------------------------------------
+step "the eight-gate list is the same eight everywhere it is written"
+# --------------------------------------------------------------------------
+# A PARITY GUARD, NOT A DERIVATION, and that is a deliberate choice gd-em ruled
+# on. The three copies are written for three audiences - a numbered table for
+# whoever maintains the guard, a single-sentence refusal for whoever tripped it,
+# and an operator's table in NOTES - and collapsing them into one shared string
+# would make all three read like whichever audience won. What must not differ is
+# WHICH EIGHT, so that is what is checked, in both directions:
+#
+#   forward   every canonical gate appears in every copy
+#   backward  no copy names a preflight key that is not one of the eight, except
+#             the four this chart already satisfies and the ninth oauth-only gate
+#
+# The backward half is the one that matters. Without it, adding a ninth gate to
+# one copy is invisible: the forward half stays green because all eight are
+# still there. An unknown token is a FAILURE and not a warning - the author
+# either added a gate and must add it everywhere, or named a key that is not a
+# gate and must say so in ALLOWED_NON_GATES below.
+#
+# The NOTES copy is read out of the RENDER, not out of the template, so a copy
+# that is present in the file but conditioned away for this release counts as
+# absent - which is exactly what it is to the operator.
+#
+# WHICH MUTATION REACHES WHICH HALF, MEASURED, because the answer is not the one
+# a reader would assume from the assertion names:
+#
+#   delete a line from the doc table      -> META-FAILURE (7 lines, not 8)
+#   add a line to the NOTES table         -> META-FAILURE (9 lines, not 8)
+#   RENAME a gate in the doc table        -> both parity halves, 2 failures
+#   RENAME a gate in the NOTES table      -> both parity halves, 3 with the presence loop
+#   add a gate to the refusal string      -> the backward half, 1 failure
+#   drop the session gate from the refusal-> the forward half, 1 failure
+#
+# The two table copies are size-asserted, so pure insertions and deletions are
+# caught by the size guard and never reach the parity comparison. That is fine -
+# they are caught, loudly, as META-FAILURES - but do not read "the parity check
+# catches a deleted gate" out of these assertion names. The parity halves are
+# exercised by RENAMES, which is the mutation that keeps the list the right
+# length while changing which eight it is, and it is the one a careless edit
+# actually produces.
+CANON_GATES=(
+  server.database.url
+  server.auth.proxy.provider
+  server.auth.proxy.iap.audience
+  server.auth.transport
+  server.auth.transport.mode
+  server.auth.transport.oidc_audience
+  server.auth.transport.platform_auth_sa
+)
+# Gate 2 has no key name in any copy - it is prose - so it is carried as a
+# marker rather than pretended into a dotted token.
+SESSION_MARKER='durable session'
+# Preflight keys that legitimately appear beside the eight. Each is here for a
+# stated reason, because an exclusion list with no reasons becomes a place to
+# put anything that turns a check green.
+ALLOWED_NON_GATES=(
+  server.hub.hub_id      # satisfied by this chart, named to explain why the refusal starts at gate 1
+  server.database.driver # ditto
+  server.storage.provider # ditto
+  server.database        # the assertExtraEnv refusal points the operator at this subtree
+  server.auth.mode       # the NINTH gate, oauth-only, and not one of the eight by construction
+  server.mode            # hosted-mode prose
+)
+
+gate_tokens() { grep -oE 'server\.[a-z_]+(\.[a-z_]+)*' "$1" | sort -u; }
+
+# EXTRACTED BY CONTENT, NEVER BY LINE NUMBER. Each extraction asserts its own
+# size, because an extraction that silently returns nothing makes both halves of
+# the parity check pass.
+grep -E '^  [1-8]  ' "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-doc.txt" || true
+grep -F 'This release cannot start the deployment these values describe' \
+  "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-fail.txt" || true
+grep -E '^    (server\.|a durable)' "$WORK/notes-ack.txt" >"$WORK/gates-notes.txt" || true
+[[ "$(wc -l <"$WORK/gates-doc.txt")" -eq 8 ]] || meta_failure "the numbered gate table in _helpers.tpl matched $(wc -l <"$WORK/gates-doc.txt") lines, not 8. The parity check below has nothing to compare."
+[[ "$(wc -l <"$WORK/gates-fail.txt")" -eq 1 ]] || meta_failure "the assertHAUnlanded refusal string matched $(wc -l <"$WORK/gates-fail.txt") lines, not 1. The parity check below has nothing to compare."
+[[ "$(wc -l <"$WORK/gates-notes.txt")" -eq 8 ]] || meta_failure "the gate table in the rendered NOTES matched $(wc -l <"$WORK/gates-notes.txt") lines, not 8. The parity check below has nothing to compare."
+
+printf '%s\n' "${CANON_GATES[@]}" | sort -u >"$WORK/gates-canon.txt"
+printf '%s\n' "${CANON_GATES[@]}" "${ALLOWED_NON_GATES[@]}" | sort -u >"$WORK/gates-permitted.txt"
+
+for _src in doc fail notes; do
+  _f="$WORK/gates-$_src.txt"
+  gate_tokens "$_f" >"$WORK/gates-$_src.tok"
+  _missing="$(comm -23 "$WORK/gates-canon.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ')"
+  _missing="${_missing% }"
+  if [[ -z "$_missing" ]] && grep -qF "$SESSION_MARKER" "$_f"; then
+    pass "the $_src copy names all eight gates"
+  else
+    fail "the $_src copy does not name all eight gates: missing [${_missing:-none}]$(grep -qF "$SESSION_MARKER" "$_f" || printf ' and the session-secret gate')"
+  fi
+  _extra="$(comm -13 "$WORK/gates-permitted.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ')"
+  _extra="${_extra% }"
+  if [[ -z "$_extra" ]]; then
+    pass "the $_src copy names no preflight key that is not one of the eight"
+  else
+    fail "the $_src copy names [$_extra], which is neither one of the eight gates nor a listed non-gate. If a gate was added, add it to all three copies and to CANON_GATES; if it is not a gate, say why in ALLOWED_NON_GATES."
+  fi
+done
 
 # --------------------------------------------------------------------------
 step "config.extra deep merge"
@@ -1349,6 +1547,97 @@ cat >"$WORK/fx-flush-sidecar.yaml" <<'FX'
       - name: hub
 FX
 
+# THE REAL RENDER. Everything above is a fixture I wrote, and a fixture written
+# by the author of the predicate can only confirm the predicate - gd-p2-dev's
+# rule, filed as theirs. This one is `helm template` output from the Cloud SQL
+# phase, pasted verbatim from gd-p2-dev's branch and not retyped from a
+# description of it. Produced by:
+#
+#   helm template t . -f ci/values-minimal.yaml \
+#     --set database.driver=postgres --set database.auth=iam --set database.name=scion \
+#     --set serviceAccount.gcpServiceAccount=scion-hub@my-project.iam.gserviceaccount.com \
+#     --set cloudsql.enabled=true \
+#     --set cloudsql.instanceConnectionName=my-project:us-central1:scion-db \
+#     --set storage.provider=gcs --set storage.bucket=b --set acknowledgeHAUnlanded=true
+#
+# It cannot be produced on THIS branch, measured: database.auth, database.name
+# and the whole cloudsql object are absent from P1's values.schema.json, which is
+# additionalProperties: false, so that command here returns "Additional property
+# cloudsql is not allowed". That is why it is committed as a captured artifact
+# with its producing command rather than regenerated - and why the command is
+# recorded, because when the Cloud SQL phase merges this fixture becomes
+# reproducible and the comment says how.
+#
+# It carries the two properties most likely to break an entry-boundary rule and
+# both are load-bearing: restartPolicy: Always is the LAST key of the entry, and
+# a nested `- ALL` sequence sits between the entry's first dash and it.
+cat >"$WORK/fx-real-proxy.yaml" <<'FX'
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: cloud-sql-proxy
+          image: "gcr.io/cloud-sql-connectors/cloud-sql-proxy@sha256:825d5e4ce70d38bd0006c9eea15a6a2e2983e87b31ac6924d33e2dba56eafc9f"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "--health-check"
+            - "--http-address=0.0.0.0"
+            - "--http-port=9801"
+            - "--auto-iam-authn"
+            - "my-project:us-central1:scion-db"
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: 9801
+            periodSeconds: 1
+            failureThreshold: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: 9801
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          restartPolicy: Always
+      containers:
+        - name: hub
+          image: x
+FX
+
+# THE TWO NEGATIVES ARE CUT FROM THE REAL RENDER, MECHANICALLY, not written out
+# beside it. A hand-typed "broken proxy" is a fixture again, and it would drift
+# from the artifact above the first time either is edited. These two are the same
+# bytes with one line changed, so the ONLY difference between the accepted input
+# and the flagged input is the property under test.
+grep -v 'restartPolicy: Always' "$WORK/fx-real-proxy.yaml" >"$WORK/fx-real-proxy-norestart.yaml"
+sed 's/^          restartPolicy: Always$/            restartPolicy: Always/' \
+  "$WORK/fx-real-proxy.yaml" >"$WORK/fx-real-proxy-nested.yaml"
+# CONTROL ON THE CUT ITSELF: a sed that matched nothing would leave the negative
+# byte-identical to the positive, and it would then pass for the wrong reason -
+# green, and testing nothing.
+if cmp -s "$WORK/fx-real-proxy.yaml" "$WORK/fx-real-proxy-nested.yaml"; then
+  echo "HARNESS ERROR: the nested-restartPolicy negative is byte-identical to the real render, so the sed matched nothing and that case tests nothing." >&2
+  exit 2
+fi
+if cmp -s "$WORK/fx-real-proxy.yaml" "$WORK/fx-real-proxy-norestart.yaml"; then
+  echo "HARNESS ERROR: the no-restartPolicy negative is byte-identical to the real render, so the grep removed nothing and that case tests nothing." >&2
+  exit 2
+fi
+
 # EXACT offender lists, not merely empty/non-empty. A non-empty assertion passes
 # when the detector flags the right container for the wrong reason, and that is
 # how the args: defect stayed invisible: fx-both was flagged, correctly, while
@@ -1364,9 +1653,12 @@ FX_CASES=(
   "fx-nested-always|settings-init|does not let a nested restartPolicy: Always satisfy the rule for the container"
   "fx-flush-runonce|settings-init|flags a run-once container written flush with initContainers:"
   "fx-flush-sidecar||accepts a flush-style sidecar"
+  "fx-real-proxy||accepts the REAL Cloud SQL proxy render, restartPolicy last, past a nested capabilities.drop sequence"
+  "fx-real-proxy-norestart|cloud-sql-proxy|flags the real render with its restartPolicy line removed, and names it once"
+  "fx-real-proxy-nested|cloud-sql-proxy|flags the real render with its restartPolicy indented one level deeper"
 )
-if [[ ${#FX_CASES[@]} -ne 10 ]]; then
-  echo "HARNESS ERROR: FX_CASES holds ${#FX_CASES[@]} cases, not 10. The init-container fixtures were edited without moving the count, so this block's contribution to EXPECTED_TOTAL is no longer known." >&2
+if [[ ${#FX_CASES[@]} -ne 13 ]]; then
+  echo "HARNESS ERROR: FX_CASES holds ${#FX_CASES[@]} cases, not 13. The init-container fixtures were edited without moving the count, so this block's contribution to EXPECTED_TOTAL is no longer known." >&2
   exit 2
 fi
 for _case in "${FX_CASES[@]}"; do

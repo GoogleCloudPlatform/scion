@@ -2023,7 +2023,18 @@ an oversight: the chart renders no settings.yaml in that shape, so it cannot see
 the driver, the storage provider or the auth mode. Route 1 is still checked,
 because extraEnv is the chart's own value either way.
 */}}
-{{- define "scion-hub.assertHAUnlanded" -}}
+{{/*
+THE ROUTE SET, once, so the refusal and NOTES.txt cannot disagree about whether
+this release is on one. Emits the routes joined by " and ", or the empty string
+when there are none - which is falsey, so callers test it directly.
+
+Shared deliberately, and it is NOT the same decision as the eight-gate list. The
+routes are a computed property of these values and must be identical in both
+places or one of them is lying about the deployment in front of the operator.
+The gate list is prose written for two different audiences and stays duplicated,
+with a parity check over the copies rather than a shared definition.
+*/}}
+{{- define "scion-hub.haRoutes" -}}
 {{- $routes := list }}
 {{- range .Values.hub.extraEnv }}
 {{- if eq .name "K_SERVICE" }}
@@ -2040,8 +2051,13 @@ because extraEnv is the chart's own value either way.
 {{- $routes = append $routes "storage.provider is gcs and auth.mode is proxy (cmd/server_foreground.go:934)" }}
 {{- end }}
 {{- end }}
+{{- join " and " $routes }}
+{{- end }}
+
+{{- define "scion-hub.assertHAUnlanded" -}}
+{{- $routes := include "scion-hub.haRoutes" . }}
 {{- if and $routes (not .Values.acknowledgeHAUnlanded) }}
-{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true, its hosted HA preflight runs (cmd/server_foreground.go:951), and it aborts at cmd/server_foreground.go:151-153 before serving. Eight of the preflight's gates have no source in this chart, measured in hub order: (1) server.database.url, from the Cloud SQL phase; (2) a durable session/signing secret, from the session-secret phase; (3) server.auth.proxy.provider=iap, (4) server.auth.proxy.iap.audience, (5) server.auth.transport, (6) server.auth.transport.mode=iap, (7) server.auth.transport.oidc_audience and (8) server.auth.transport.platform_auth_sa, all from the ingress/IAP phase. With auth.mode oauth there is a ninth, server.auth.mode=proxy, which no phase lands because it is your own auth mode. The chart already satisfies server.hub.hub_id, the postgres driver and gcs storage with a bucket, which is why the refusal starts at the database URL. If you are rendering this to inspect it, or to supply the rest yourself, set acknowledgeHAUnlanded: true. That flag is removed when the Cloud SQL values and the ingress/IAP values have both landed - not Filestore, which lands none of these eight." (join " and " $routes)) }}
+{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true, its hosted HA preflight runs (cmd/server_foreground.go:951), and it aborts at cmd/server_foreground.go:151-153 before serving. Eight of the preflight's gates have no source in this chart, measured in hub order: (1) server.database.url, from the Cloud SQL phase; (2) a durable session/signing secret, from the session-secret phase; (3) server.auth.proxy.provider=iap, (4) server.auth.proxy.iap.audience, (5) server.auth.transport, (6) server.auth.transport.mode=iap, (7) server.auth.transport.oidc_audience and (8) server.auth.transport.platform_auth_sa, all from the ingress/IAP phase. With auth.mode oauth there is a ninth, server.auth.mode=proxy, which no phase lands because it is your own auth mode. The chart already satisfies server.hub.hub_id, the postgres driver and gcs storage with a bucket, which is why the refusal starts at the database URL. If you are rendering this to inspect it, or to supply the rest yourself, set acknowledgeHAUnlanded: true. That flag is removed when the Cloud SQL values and the ingress/IAP values have both landed - not Filestore, which lands none of these eight." $routes) }}
 {{- end }}
 {{- end }}
 

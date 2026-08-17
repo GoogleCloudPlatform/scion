@@ -413,8 +413,12 @@ database:
   # SQL support.
   driver: sqlite
 
-  # Connection pool. Rendered into settings.yaml because no SCION_SERVER_
-  # spelling of any database key binds - the whole block is file-only.
+  # Connection pool. Rendered into settings.yaml, and not settable by
+  # environment variable here: SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded
+  # by the loader with no error - the koanf tag is max_open_conns and the
+  # underscores become dots before anything can rejoin them - while the names in
+  # this block that DO bind would override the rendered file and win. See the
+  # configuration-intake section of templates/_helpers.tpl.
   #
   # Keep maxOpenConns comfortably above the number of background workers, and
   # the total across replicas below the Cloud SQL tier's connection limit.

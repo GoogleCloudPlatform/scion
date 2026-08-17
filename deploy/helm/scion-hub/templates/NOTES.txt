@@ -217,6 +217,25 @@ WHAT THIS RELEASE DOES NOT YET DO
 
   The default install is unaffected: sqlite and local storage match none of the
   three routes, isHADeployment is false, and the preflight is skipped.
+{{- $haRoutes := include "scion-hub.haRoutes" . }}
+{{- if $haRoutes }}
+
+  THESE VALUES ARE ON ONE OF THOSE ROUTES AND THE REFUSAL WAS SUPPRESSED.
+
+  {{ $haRoutes }}, so the hub's isHADeployment test is true for this release.
+  The chart did not refuse only because acknowledgeHAUnlanded is set.
+
+  THE RENDER IS NOT A VERDICT ON THE INSTALL. The settings.yaml above is
+  correct, and the hub will still abort at the first of the eight gates listed
+  here - server.database.url - before it serves anything. Nothing in this
+  release closes any of the eight.
+
+  If you started from ci/values-settings.yaml or ci/values-settings-oauth.yaml,
+  the flag arrived with the file. Those two fixtures set it so that the
+  rendering path can be exercised, and they are also the shapes an operator is
+  most likely to copy - so the chart's own examples are the one case where the
+  refusal that names these gates never prints. That is why this paragraph does.
+{{- end }}
 
   The hub images published from this repository today run as root, so until a
   hub-gke image exists there is nothing this chart can successfully schedule.
