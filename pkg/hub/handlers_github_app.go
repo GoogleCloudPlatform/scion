@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -120,8 +122,10 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := GetUserIdentityFromContext(ctx)
 	userID := ""
+	updatedBy := ""
 	if user != nil {
 		userID = user.ID()
+		updatedBy = user.Email()
 	}
 
 	// Store sensitive fields via secrets backend
@@ -163,8 +167,15 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.GitHubAppConfig
 	s.mu.Unlock()
 
-	// Persist non-sensitive config to settings.yaml (best-effort — in-memory and secrets are already saved)
-	if err := s.persistGitHubAppConfig(cfg); err != nil {
+	// Persist the non-sensitive config (best-effort — in-memory and secrets are
+	// already saved). In Postgres mode the durable home for these fields is the
+	// DB-owned `github_app` opsettings section; writing only to settings.yaml
+	// loses the change on restart (ephemeral filesystems) and lets any later
+	// ApplySnapshot revert it to the stale DB value. File/SQLite mode has no
+	// OperationalSettings service, so settings.yaml remains the durable home.
+	if ops := s.GetOperationalSettings(); ops != nil {
+		s.persistGitHubAppConfigToDB(ctx, ops, cfg, updatedBy)
+	} else if err := s.persistGitHubAppConfig(cfg); err != nil {
 		slog.Warn("Failed to persist GitHub App config to settings.yaml (in-memory config updated successfully)", "error", err)
 	}
 
@@ -243,6 +254,35 @@ func (s *Server) loadGitHubAppSecret(ctx context.Context, name string) (string, 
 
 	// Fallback: read directly from the database
 	return s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
+}
+
+// persistGitHubAppConfigToDB writes the non-sensitive GitHub App configuration
+// to the DB-owned `github_app` opsettings section (Postgres mode). Failures are
+// logged rather than returned: the in-memory config and the secrets have already
+// been updated, so the request itself still succeeded.
+func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *OperationalSettings, cfg GitHubAppServerConfig, updatedBy string) {
+	// WebhooksEnabled is a *bool in the section so an explicit false is
+	// distinguishable from an omitted field; cfg always carries a resolved value.
+	webhooksEnabled := cfg.WebhooksEnabled
+	doc := &opsettings.GitHubAppSettings{
+		AppID:           cfg.AppID,
+		APIBaseURL:      cfg.APIBaseURL,
+		WebhooksEnabled: &webhooksEnabled,
+		InstallationURL: cfg.InstallationURL,
+		PrivateKeyPath:  cfg.PrivateKeyPath,
+	}
+
+	docBytes, err := json.Marshal(doc)
+	if err != nil {
+		slog.Error("Failed to marshal GitHub App config for DB", "error", err)
+		return
+	}
+
+	// expectedRevision -1 is last-writer-wins: this endpoint takes a partial
+	// update and carries no revision from the client.
+	if _, err := ops.Update(ctx, "github_app", json.RawMessage(docBytes), updatedBy, -1, "managed"); err != nil {
+		slog.Error("Failed to persist GitHub App config to DB", "error", err)
+	}
 }
 
 // persistGitHubAppConfig writes the non-sensitive GitHub App configuration
