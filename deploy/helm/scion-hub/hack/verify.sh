@@ -3865,6 +3865,19 @@ else
   fail "the banned-path needle has been changed: sha256[0:16] is $_needle_digest, committed is 15a99506b4e1757d. Every absence this block reports is about some other string."
 fi
 
+# THE CORPUS, CLEARED ON EVERY KNOWN NARROWING AXIS AT EVERY DEPTH. A
+# .gitignore three directories down narrows a search rooted above it, so the
+# required form is a find at all depths, never a look at the root. Measured
+# 2026-08-17 over this chart:
+#   total files, all depths            41
+#   .gitignore  at any depth            0      .ugrep at any depth   0
+#   directories named .git              0      non-text files        0 of 41
+#   .helmignore at any depth            1      (helm-only, not a grep input)
+#   positive control -name Chart.yaml   1      FIRES
+# None of it can reach this gate anyway - no traversal, stock binary, explicit
+# paths - but "cannot reach it" is an argument and the table is a measurement.
+# The enumerator itself was checked too: wrapped and stock find return the same
+# set in the same order, 8 runs each, one distinct order per arm.
 mapfile -t _tree < <(find "$CHART_DIR" -type f ! -path '*/.git/*' | sort)
 _tree_n="${#_tree[@]}"
 
