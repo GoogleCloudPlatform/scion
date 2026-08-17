@@ -3949,6 +3949,42 @@ _ck_require_live() { # <expected count of well-formed digests> <file>...
   [[ "$_n" == "$_want" ]] || meta_failure "_ck_digest yielded $_n well-formed digest(s) from $# file(s) ($_empty empty, $_bad malformed); this call site is committed to exactly $_want. Either the extractor is dead - in which case the equalities below hold trivially and mean nothing - or the set of ck-*.yaml renders changed and this number was not changed with it."
 }
 
+# 🔴 AND _ck_require_live IS NOT ENOUGH, WHICH IS gd-p2-rev's R1 AND IT IS RIGHT.
+# It guards the extractor FUNCTION over a file glob; the assertions consume
+# VARIABLES populated at separate call sites. THE GUARD AND THE GUARDED WERE IN
+# DIFFERENT PLACES, so an extraction written inline at a call site - the same
+# defect, one line further down - walks straight past it. gd-p2-rev proved that
+# by moving MY OWN PLANT to the call site:
+#
+#   _mB="$(awk '$1=="checksum/nope:"{print $2}' "$WORK/ck-mut-B.yaml")"
+#     -> rc=0, 297/297, 0 failures, and the original signature came back:
+#          baseline: '... goes red (3af8bcc3...79 -> a67fb352...78) ...'
+#          planted : '... goes red (3af8bcc3...79 -> ) ...'
+#   a dead _uB at the URL call site -> rc=0, 297/297, 0 failures.
+#   TWO OF TWO CALL-SITE PLANTS ON TWO INDEPENDENT EXTRACTORS, CLEAN FULL PASS.
+#
+# So the shape check moves ONTO THE OPERANDS, at the point of comparison, where
+# it cannot be bypassed by changing how the value was obtained. This is
+# gd-p2-rev's prescription, adopted as written and declared as adopted.
+# _ck_require_live stays: it catches the function-level case earlier and with a
+# better message, and an earlier, more specific diagnostic is worth keeping even
+# when a later one would also fire.
+#
+# THE RULE THIS LEAVES BEHIND, which is the part that generalises past this file:
+# GUARD THE VALUE AT THE POINT IT IS USED, NOT THE MACHINERY THAT PRODUCED IT.
+# A guard on the producer is a guard on one way of producing.
+_ck_is_digest() { # <label> <value>
+  [[ "$2" =~ ^[0-9a-f]{64}$ ]] || meta_failure "the settings-checksum step is about to compare ${1}, whose value is not a 64-character sha256 hex digest (got: ${2:-<empty>}). Whatever produced it did not produce a digest, so the comparison it feeds is between strings of unknown provenance and its result - equal OR unequal - is not a fact about the chart."
+}
+# STRUCTURAL, and deliberately not a check on any credential value: the DSN must
+# still look like this chart's DSN. An empty string, a truncated field and a line
+# read out of the wrong key all fail it, and none of the four planted passwords
+# appears in the pattern - so this cannot go quiet on an encoded credential the
+# way a value-matching guard does (gd-secann-2's finding, applied to my own gate).
+_ck_is_dsn() { # <label> <value>
+  [[ "$2" =~ ^postgres://[^@[:space:]]+@127\.0\.0\.1:5432/[^?[:space:]]+\?sslmode= ]] || meta_failure "the settings-checksum step is about to compare the DSN from arm ${1}, and it does not have the shape this chart renders (got: ${2:-<empty>}). Expected postgres://<userinfo>@127.0.0.1:5432/<db>?sslmode=... . An empty or truncated value here makes every equality and inequality below meaningless."
+}
+
 _ck_render A  --set-string database.password="$_ck_A"
 _ck_render A2 --set-string database.password="$_ck_A"
 _ck_render B  --set-string database.password="$_ck_B"
@@ -3985,7 +4021,10 @@ done
 _uA="$(_ck_url "$WORK/ck-A.yaml")"; _uB="$(_ck_url "$WORK/ck-B.yaml")"
 _uS1="$(_ck_url "$WORK/ck-S1.yaml")"; _uS2="$(_ck_url "$WORK/ck-S2.yaml")"
 _uC="$(_ck_url "$WORK/ck-C.yaml")"; _uA2="$(_ck_url "$WORK/ck-A2.yaml")"
-[[ -n "$_uA" ]] || meta_failure "no server.database.url in the settings-checksum arm A render, so no arm in this step is varying a credential at all."
+# THE OPERAND SWEEP: all six, not just the one the old -n happened to name.
+# gd-p2-rev killed _uB specifically because _uA was the only guarded one.
+_ck_is_dsn A "$_uA"; _ck_is_dsn A2 "$_uA2"; _ck_is_dsn B "$_uB"
+_ck_is_dsn S1 "$_uS1"; _ck_is_dsn S2 "$_uS2"; _ck_is_dsn C "$_uC"
 [[ "$_uA" != "$_uB" ]] || meta_failure "the A and B renders carry the SAME server.database.url ($_uA), so the password-only differential below is comparing a chart against itself. This is the exact false green the arm exists to prevent."
 [[ "$_uS1" != "$_uS2" ]] || meta_failure "the S1 and S2 renders carry the same server.database.url, so the percent-encoded differential is comparing a chart against itself."
 [[ "$_uA" != "$_uC" ]] || meta_failure "the A and C renders carry the same server.database.url, so the positive control below cannot fire on a change that never happened."
@@ -4016,6 +4055,8 @@ _ck_require_live 6 "$WORK"/ck-*.yaml
 _dA="$(_ck_digest "$WORK/ck-A.yaml")"; _dA2="$(_ck_digest "$WORK/ck-A2.yaml")"
 _dB="$(_ck_digest "$WORK/ck-B.yaml")"; _dS1="$(_ck_digest "$WORK/ck-S1.yaml")"
 _dS2="$(_ck_digest "$WORK/ck-S2.yaml")"; _dC="$(_ck_digest "$WORK/ck-C.yaml")"
+_ck_is_digest A "$_dA"; _ck_is_digest A2 "$_dA2"; _ck_is_digest B "$_dB"
+_ck_is_digest S1 "$_dS1"; _ck_is_digest S2 "$_dS2"; _ck_is_digest C "$_dC"
 [[ "$_dA" == "$_dA2" ]] || meta_failure "two renders of identical inputs produced different checksum/settings values ($_dA vs $_dA2). The digest is not a function of the inputs and nothing below is interpretable."
 
 if [[ "$_dA" == "$_dB" ]]; then
@@ -4081,6 +4122,7 @@ _ck_mut_render "$WORK/ck-mut-B.yaml" "$_ck_B" || _ckmut_rc=$?
 # value could not have hidden in.
 _ck_require_live 2 "$WORK"/ck-mut-*.yaml
 _mA="$(_ck_digest "$WORK/ck-mut-A.yaml")"; _mB="$(_ck_digest "$WORK/ck-mut-B.yaml")"
+_ck_is_digest mA "$_mA"; _ck_is_digest mB "$_mB"
 [[ "$(_ck_count "$WORK/ck-mut-A.yaml")" == 1 && "$(_ck_count "$WORK/ck-mut-B.yaml")" == 1 ]] || meta_failure "an arm of the un-projected control chart does not carry exactly one checksum/settings annotation, so its differential is not a comparison of two digests."
 if [[ "$_mA" != "$_mB" ]]; then
   pass "with the projection removed the SAME password-only differential goes red ($_mA -> $_mB), so the equalities above are caused by the redaction and not by the two renders being identical"
@@ -4093,10 +4135,24 @@ fi
 # be emitted here - and an absent annotation is also the only correct answer:
 # there is nothing for the chart to digest.
 _ck_es="$WORK/ck-existing-secret.yaml"
+# The rc is KEPT and stderr is KEPT. This line used to end `2>/dev/null` with no
+# `||`, which under `set -e` meant a failed render killed the run with the
+# diagnostic already thrown away - the exact pairing gd-p1-dev retracted their
+# clearance over. An absent render must arrive here as a meta-failure that says
+# so, because the assertion below is an ABSENCE and an empty file satisfies it.
+_ck_es_rc=0
 "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-  --values "$CHART_DIR/ci/values-existing-secret.yaml" >"$_ck_es" 2>/dev/null
-_ck_es_n="$(_ck_count "$_ck_es")"
+  --values "$CHART_DIR/ci/values-existing-secret.yaml" >"$_ck_es" 2>"$_ck_es.err" || _ck_es_rc=$?
+[[ "$_ck_es_rc" == 0 ]] || meta_failure "the config.existingSecret render failed (helm exit $_ck_es_rc): $(head -3 "$_ck_es.err"). The assertion below is an ABSENCE and an unrendered file satisfies it perfectly."
 [[ -s "$_ck_es" ]] || meta_failure "the config.existingSecret render is empty, so the absence asserted below is the absence of the whole manifest."
+# A PAIRED POSITIVE CONTROL ON THE INSTRUMENT, AT THE POINT OF USE. The assertion
+# below wants ZERO, which is also what a dead _ck_count returns, so the absence
+# is only evidence if the same function can still find a annotation that IS
+# there. Arm A has exactly one; if _ck_count cannot see it, it cannot be trusted
+# to have looked here either. This is the R1 rule applied to a counter rather
+# than to an extractor: the operand is a zero, and a zero needs a witness.
+[[ "$(_ck_count "$WORK/ck-A.yaml")" == 1 ]] || meta_failure "_ck_count no longer finds the single checksum/settings annotation in arm A, so the zero it is about to report for the config.existingSecret render is not evidence of an absence - it is the same blindness, measured twice."
+_ck_es_n="$(_ck_count "$_ck_es")"
 if [[ "$_ck_es_n" == 0 ]]; then
   pass "under config.existingSecret no checksum/settings annotation is emitted at all, so the projection helper is never asked to parse a file the chart did not render"
 else
