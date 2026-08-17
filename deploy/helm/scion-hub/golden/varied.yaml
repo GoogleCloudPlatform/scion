@@ -1,0 +1,329 @@
+---
+# Source: scion-hub/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scion-scion-hub
+  namespace: scion-system
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+  annotations:
+    iam.gke.io/gcp-service-account: "ci-varied-hub@example-project.iam.gserviceaccount.com"
+---
+# Source: scion-hub/templates/secret-settings.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scion-scion-hub-settings
+  namespace: scion-system
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+type: Opaque
+stringData:
+  settings.yaml: |
+    # Rendered by the scion-hub Helm chart. Every runtime write to this file is
+    # pod-local; see ptone/scion#1091 before making it writable.
+    #
+    # Positions deliberately left unrendered, each owned by a later change:
+    #   server.database.url        Cloud SQL. Note the key is url, not dsn.
+    #   server.secrets             the secret backend (gcpsm).
+    #   server.auth.proxy,
+    #   server.auth.transport,
+    #   server.oauth               the subtree selected by server.auth.mode.
+    #   server.workspace_storage   Filestore NFS - a different subsystem from
+    #                              server.storage, which is the hub's GCS blob
+    #                              store and is rendered below.
+    #
+    # The session secret is not here and does not belong here: it arrives as an
+    # environment variable from its own Secret.
+    active_profile: default
+    profiles:
+      default:
+        runtime: kubernetes
+    runtimes:
+      kubernetes:
+        gke: true
+        list_all_namespaces: true
+        namespace: ci-varied-agents
+        type: kubernetes
+    schema_version: "1"
+    server:
+      auth:
+        mode: proxy
+      broker:
+        auto_provide: true
+        host: 127.0.0.1
+        port: 9800
+      database:
+        conn_max_idle_time: 3m
+        conn_max_lifetime: 21m
+        driver: sqlite
+        max_idle_conns: 7
+        max_open_conns: 41
+      hub:
+        hub_id: ci-varied
+        hub_name: CI Varied Hub
+      mode: hosted
+      storage:
+        provider: local
+---
+# Source: scion-hub/templates/configmap-env.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scion-scion-hub-env
+  namespace: scion-system
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+data:
+  # The only lever on where the hub looks for settings.yaml. There is no
+  # SCION_HOME and no config-path override: the directory is os.UserHomeDir()
+  # plus .scion, full stop.
+  HOME: "/srv/hub"
+
+  # Emptied deliberately. The Cloud Run image bakes KUBECONFIG=/home/scion/
+  # .kube/config, and an explicit kubeconfig takes precedence over in-cluster
+  # credentials - so a stale baked value silently disables the ServiceAccount
+  # the pod is running with, and the hub's inability to schedule agent pods
+  # presents as an RBAC problem. Cheap insurance against a whole class of
+  # regression, and harmless if the image is clean.
+  KUBECONFIG: ""
+
+  # Mandatory here. Absence only warns, and the fallback is
+  # http://localhost:<port>: agents cannot reach that, and the session cookie's
+  # Secure attribute is derived from the https:// prefix, so the fallback also
+  # quietly serves cookies without Secure.
+  SCION_SERVER_BASE_URL: "https://ci-varied.example.com"
+
+  # Compared against the literal string "true", so it is emitted as a string and
+  # any other value means false. When true the hub refuses to start rather than
+  # fall back to a per-process signing key, which across replicas would sign
+  # tokens each of the others reject.
+  SCION_REQUIRE_STABLE_SIGNING_KEY: "false"
+
+  # Truthy values are true, 1 and yes.
+  SCION_SERVER_ADMIN_MODE: "false"
+  SCION_SERVER_MAINTENANCE_MESSAGE: "Scheduled maintenance window: Sunday 02:00 UTC."
+---
+# Source: scion-hub/templates/rbac-clusterrole.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scion-scion-hub-scion-system-agents
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/attach", "pods/portforward"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+# Source: scion-hub/templates/rbac-clusterrolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: scion-scion-hub-scion-system-agents
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scion-scion-hub-scion-system-agents
+subjects:
+  - kind: ServiceAccount
+    name: scion-scion-hub
+    namespace: scion-system
+---
+# Source: scion-hub/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: scion-scion-hub
+  namespace: scion-system
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+---
+# Source: scion-hub/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scion-scion-hub
+  namespace: scion-system
+  labels:
+    helm.sh/chart: scion-hub-0.1.0
+    app.kubernetes.io/name: scion-hub
+    app.kubernetes.io/instance: scion
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: scion
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scion-hub
+      app.kubernetes.io/instance: scion
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: scion-hub-0.1.0
+        app.kubernetes.io/name: scion-hub
+        app.kubernetes.io/instance: scion
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: scion
+        team: platform
+      annotations:
+        scion.io/hub-id: "ci-varied"
+        checksum/env-config: 2a27a471f3e05a0b4d87b70a6d514a86f5e55ca01545460689133afbb5050f19
+        checksum/settings: b706d09048a24348e3f6b2cafb7bf74c422e73b73bde26b043ada8b9be1a5be9
+    spec:
+      serviceAccountName: scion-scion-hub
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hub
+          image: "us-docker.pkg.dev/scion-ci/scion/scion-hub@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - start
+            - --foreground
+            - --hosted
+            - --enable-hub
+            - --enable-runtime-broker
+            - --enable-web
+            - --web-port
+            - "9090"
+            - --host
+            - 0.0.0.0
+            - --auto-provide
+            - --global
+            - --log-level=debug
+          envFrom:
+            - configMapRef:
+                name: scion-scion-hub-env
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HUB_FEATURE_FLAGS
+              value: alpha-scheduling
+          ports:
+            - name: http
+              containerPort: 9090
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+            failureThreshold: 6
+            timeoutSeconds: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: scion-home
+              mountPath: "/srv/hub/.scion"
+            - name: settings
+              mountPath: "/srv/hub/.scion/settings.yaml"
+              subPath: settings.yaml
+              readOnly: true
+      volumes:
+        - name: scion-home
+          emptyDir: {}
+        - name: settings
+          secret:
+            secretName: scion-scion-hub-settings
+            defaultMode: 0444
+            items:
+              - key: settings.yaml
+                path: settings.yaml

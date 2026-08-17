@@ -46,6 +46,28 @@ PERMUTATIONS=(
   settings
   settings-oauth
   existing-secret
+  varied
+)
+
+# hub.home per permutation, held here rather than read out of the render.
+#
+# THIS TABLE IS THE INDEPENDENT SOURCE AND THAT IS THE WHOLE POINT OF IT. The
+# obvious alternative - take HOME out of the rendered ConfigMap and check the
+# mountPath against it - proves only that two template expressions agree with
+# each other, and they agree perfectly when both are the same hardcoded literal.
+# The value below comes from ci/values-<name>.yaml (or from values.yaml's
+# default where the permutation does not set it), so a template that stopped
+# reading hub.home fails against it.
+#
+# Keep it in step with the ci/ files by hand. The vacuity guard below catches
+# the case that actually matters - every entry being the same string, which is
+# the state this table was added to end.
+declare -A HUB_HOME=(
+  [minimal]=/home/scion
+  [settings]=/home/scion
+  [settings-oauth]=/home/scion
+  [existing-secret]=/home/scion
+  [varied]=/srv/hub
 )
 
 # The one permutation where the chart renders no settings.yaml, because the
@@ -382,17 +404,54 @@ fi
 # --------------------------------------------------------------------------
 step "the settings file is delivered read-only, over a writable state directory"
 # --------------------------------------------------------------------------
-for name in settings existing-secret; do
-  f="$WORK/$name.yaml"
-  if grep -q 'mountPath: "/home/scion/.scion"' "$f"; then
-    pass "$name mounts a volume at the hub's state directory"
-  else
-    fail "$name does not mount \$HOME/.scion"
+# The vacuity guard for the HUB_HOME table. Every path assertion below is
+# derived from it, and a table whose entries are all the same string derives
+# nothing: the assertion would be satisfied by a template that had stopped
+# reading hub.home entirely, which is the defect it exists to catch.
+if [[ "$(printf '%s\n' "${HUB_HOME[@]}" | sort -u | wc -l)" -ge 2 ]]; then
+  pass "at least two permutations set a different hub.home"
+else
+  fail "every permutation has the same hub.home - the mount-path checks below cannot distinguish a derived path from a hardcoded one"
+fi
+for name in "${PERMUTATIONS[@]}"; do
+  if [[ -z "${HUB_HOME[$name]:-}" ]]; then
+    fail "$name has no HUB_HOME entry - the mount-path checks would run against an empty prefix and match nothing"
+    continue
   fi
-  if grep -q 'subPath: settings.yaml' "$f" && grep -q 'mountPath: "/home/scion/.scion/settings.yaml"' "$f"; then
+done
+
+# hub.home is the value whose failure mode is silent. If the state directory
+# stops being derived from it - someone folds scion-hub.scionDir's printf into a
+# literal - then HOME still moves, because configmap-env.yaml renders it from
+# hub.home directly, while the mount does not. The hub then reads a settings.yaml
+# that is not at the path it was mounted at, finds nothing, and starts on its own
+# defaults; under those defaults isHADeployment() is false, so the HA preflight
+# that would have refused to start is skipped by the same misconfiguration.
+# Nothing fails and nothing logs.
+#
+# So all three are asserted against the table, and against each other: the state
+# directory, the settings file inside it, and HOME.
+for name in "${PERMUTATIONS[@]}"; do
+  f="$WORK/$name.yaml"
+  home="${HUB_HOME[$name]:-}"
+  [[ -n "$home" ]] || continue
+  scion_dir="$home/.scion"
+  if grep -qF "mountPath: \"$scion_dir\"" "$f"; then
+    pass "$name mounts a volume at $scion_dir"
+  else
+    fail "$name does not mount $scion_dir - hub.home is $home, so that is where the hub will look"
+    grep -n 'mountPath:' "$f" || true
+  fi
+  if grep -qF "HOME: \"$home\"" "$f"; then
+    pass "$name sets HOME to $home"
+  else
+    fail "$name does not set HOME to $home - the mount and the variable have come apart, and only one of them moved"
+    grep -n 'HOME:' "$f" || true
+  fi
+  if grep -q 'subPath: settings.yaml' "$f" && grep -qF "mountPath: \"$scion_dir/settings.yaml\"" "$f"; then
     pass "$name mounts settings.yaml as a subPath inside it"
   else
-    fail "$name does not mount settings.yaml as a subPath"
+    fail "$name does not mount settings.yaml as a subPath at $scion_dir/settings.yaml"
   fi
   if grep -q 'defaultMode: 0444' "$f"; then
     pass "$name projects the settings file 0444"
@@ -793,6 +852,66 @@ expect_render_failure \
   "${BASE[@]}" \
   --set auth.mode=oauth
 
+# The agent-namespace guard, in the one permutation where every OTHER caller of
+# it is switched off. runtime.listAllNamespaces skips the Role and RoleBinding;
+# config.existingSecret skips the settings template. Set both and the only
+# caller left was NOTES.txt, which is not a manifest - so the guard was reachable
+# only through a file that some clients never render. It is now called from the
+# Deployment, which always renders.
+#
+# Both flags are load-bearing in this fixture. Drop either and the guard fires
+# from its old caller and the test passes without testing anything.
+#
+# NOT expect_render_failure, AND THE REASON IS THE FINDING ITSELF. NOTES.txt
+# calls the same helper unconditionally, and helm renders NOTES.txt even though
+# it prints no manifest for it - so a plain "this render fails with this message"
+# check is green with the Deployment's call deleted. Measured: deleting the call
+# leaves the whole suite passing. What discriminates is WHERE the failure comes
+# from, so that is what is asserted. Helm names the template and the position in
+# the error, and only the template name is matched; the line number moves
+# whenever anything above it moves.
+#
+# If the call is relocated to another always-rendered manifest, this goes red on
+# the filename and the fix is to name that file here. That is the correct amount
+# of friction for moving an unconditional guard.
+ns_label="the agent-namespace guard fires from a manifest with the RBAC pair and the settings file both switched off"
+if ns_out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" \
+    --set config.existingSecret=mine \
+    --set runtime.listAllNamespaces=true \
+    --set rbac.agentNamespace=aaa \
+    --set runtime.namespace=bbb 2>&1); then
+  fail "$ns_label: the render SUCCEEDED and was supposed to fail"
+elif ! grep -qF 'rbac.agentNamespace (aaa) and runtime.namespace (bbb) disagree' <<<"$ns_out"; then
+  fail "$ns_label: failed, but not for the expected reason"
+  printf '          got: %s\n' "$(tr '\n' ' ' <<<"$ns_out" | cut -c1-300)"
+elif ! grep -qF 'templates/deployment.yaml' <<<"$ns_out"; then
+  fail "$ns_label: the guard fired, but from $(sed -n 's/.*execution error at (\([^:]*\).*/\1/p' <<<"$ns_out" | head -1) rather than from the Deployment. NOTES.txt is not a manifest; a guard reachable only through it is a guard some clients never run."
+else
+  pass "$ns_label"
+fi
+
+# hub.podLabels may not collide with a selector label. A Deployment's selector
+# is immutable after creation, so a colliding label is not an override - it is a
+# Deployment that either refuses to update or adopts no pods, discovered on the
+# upgrade rather than on the install.
+#
+# Both selector labels, separately. One fixture would pass on a guard that had
+# been narrowed to whichever key it happens to name, and the guard derives its
+# key set from scion-hub.selectorLabels rather than from a literal list, so a
+# change to that helper is exactly what these are here to notice.
+expect_render_failure \
+  "hub.podLabels rejects the name selector label" \
+  "hub.podLabels may not set app.kubernetes.io/name" \
+  "${BASE[@]}" \
+  --set 'hub.podLabels.app\.kubernetes\.io/name=mine'
+
+expect_render_failure \
+  "hub.podLabels rejects the instance selector label" \
+  "hub.podLabels may not set app.kubernetes.io/instance" \
+  "${BASE[@]}" \
+  --set 'hub.podLabels.app\.kubernetes\.io/instance=mine'
+
 # --------------------------------------------------------------------------
 step "renders that must succeed"
 # --------------------------------------------------------------------------
@@ -838,6 +957,32 @@ for ok_name in TOKEN_TTL_SECONDS MAX_TOKENS SECRET_MANAGER_PROJECT KEYCLOAK_REAL
     fail "hub.extraEnv rejected $ok_name - the name guard is substring-matching a credential noun that is describing what the value is ABOUT, not what it IS"
   fi
 done
+
+# The twin for the two podLabels negatives. An ordinary label must survive the
+# guard AND land in the pod template - and not in the selector, which is the
+# half a "does it render" check misses. The varied permutation sets team:
+# platform, so the golden covers the rendering; this asserts the position,
+# because the golden would be equally green with the label in matchLabels, which
+# is the immutable-selector bug arriving by the other route.
+pod_tpl_labels="$(sed -n '/^  template:/,/^      annotations:/p' "$WORK/varied.yaml")"
+selector_block="$(sed -n '/^  selector:/,/^  template:/p' "$WORK/varied.yaml")"
+if grep -qF 'team: platform' <<<"$pod_tpl_labels"; then
+  pass "hub.podLabels reaches the pod template labels"
+else
+  fail "hub.podLabels did not reach the pod template - the two negatives above are the only coverage the guard has, and a guard that rejects everything passes both"
+fi
+if grep -qF 'team: platform' <<<"$selector_block"; then
+  fail "hub.podLabels reached the Deployment's selector, which is immutable after creation - the label belongs in the pod template only"
+else
+  pass "hub.podLabels does not reach the immutable selector"
+fi
+# ...and the extraction found the blocks it claims to have searched.
+if grep -q 'app.kubernetes.io/name: scion-hub' <<<"$pod_tpl_labels" \
+  && grep -q 'app.kubernetes.io/name: scion-hub' <<<"$selector_block"; then
+  pass "the pod-template and selector label blocks were both found"
+else
+  fail "one of the two label blocks came back empty - the two checks above prove nothing"
+fi
 
 # The twin for the public_url refusal. server.hub is not a closed namespace - the
 # refusal is on one key - so an unmodelled key under it must still render.

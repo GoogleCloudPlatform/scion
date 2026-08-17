@@ -40,6 +40,17 @@ only case this assertion has anything to say about. The Deployment always
 renders, so the check always runs.
 */}}
 {{- include "scion-hub.assertConfigSource" . }}
+{{- /*
+Same reason, different guard. scion-hub.agentNamespace refuses a disagreeing
+rbac.agentNamespace / runtime.namespace pair, and every one of its other callers
+is conditional: the Role and RoleBinding are skipped when
+runtime.listAllNamespaces is set, and the settings template is skipped when
+config.existingSecret is set. Set both and the only remaining caller is
+NOTES.txt, which is not a manifest and is not rendered by every client. The
+Deployment always renders, so calling it here is what makes the guard
+unconditional. The output is discarded; this is the call, not a use.
+*/}}
+{{- $_ := include "scion-hub.agentNamespace" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

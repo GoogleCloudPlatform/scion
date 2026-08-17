@@ -1,0 +1,125 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# THIS PERMUTATION EXISTS TO MOVE VALUES THE OTHER FOUR HOLD CONSTANT. It is not
+# a deployment shape anybody would install; it is the answer to a specific class
+# of defect, and it should be read that way before anything in it is "corrected".
+#
+# The other four permutations vary the configuration axis - driver, storage,
+# auth mode, whether the operator brings their own settings file - and hold
+# every other value at its default. A golden file over a value that never
+# changes proves that the value is what it is, not that the template computes
+# it: replace `{{ .Values.hub.home }}/.scion` with the literal string
+# `/home/scion/.scion` and all four goldens stay green, because the default
+# happens to be `/home/scion`. Every key set below was, before this file
+# existed, on the list of things no render could distinguish from a hardcoded
+# constant.
+#
+# hub.home is the one that matters and it is why this file was written. Its
+# failure mode is silent: with the path decoupled from the value, HOME still
+# moves (configmap-env.yaml renders it from hub.home) while the mount does not,
+# so the hub reads a settings.yaml that is not there, finds nothing, and starts
+# on its own defaults - and under those defaults (sqlite, local storage)
+# isHADeployment() is false, so the HA preflight that would have objected is
+# skipped by the very misconfiguration it exists to catch. No error, no warning,
+# a running hub with none of the operator's configuration.
+#
+# ADD TO THIS FILE when you add a value that the four shape permutations would
+# not vary. The alternative is a golden that grows a second constant.
+
+hub:
+  hubId: ci-varied
+  name: CI Varied Hub
+  baseUrl: https://ci-varied.example.com
+
+  # Deliberately not /home/scion. hack/verify.sh derives the state-directory
+  # mountPath, the settings-file subPath mountPath and the HOME variable from
+  # this value per permutation, and asserts all three moved together.
+  home: /srv/hub
+
+  # Not 8080. The containerPort and all three probe ports are derived from it,
+  # and a literal 8080 anywhere in that chain renders identically at the
+  # default.
+  webPort: 9090
+
+  # The two variables configmap-env.yaml emits conditionally. In every other
+  # permutation the `with` blocks are false, so neither name appears in any
+  # golden and neither is on any check's radar.
+  adminMode: "false"
+  maintenanceMessage: "Scheduled maintenance window: Sunday 02:00 UTC."
+
+  # The env append path. No other permutation renders a container-level `env`
+  # entry at all, so the whole of it - including the interaction with the
+  # ConfigMap's envFrom - is untested by the goldens without this.
+  extraEnv:
+    - name: HUB_FEATURE_FLAGS
+      value: alpha-scheduling
+
+  # The args append path. --log-level is on none of the four reserved lists and
+  # is not a setting the chart delivers through another channel, which is what
+  # makes it a legitimate entry rather than a test of the guard; the guard's own
+  # coverage is in hack/verify.sh's negative renders.
+  args:
+    - --log-level=debug
+
+  # An ordinary pod label. The guard rejecting selector-label collisions has its
+  # negatives in hack/verify.sh; this is the positive - a label that must pass
+  # the guard AND reach the pod template.
+  podLabels:
+    team: platform
+
+image:
+  repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
+  # By digest, not by tag. The two are mutually exclusive in the template and
+  # the digest branch renders in no other permutation. Not a real digest; the
+  # image is never pulled.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+serviceAccount:
+  # The Workload Identity annotation, which appears in no other golden.
+  gcpServiceAccount: ci-varied-hub@example-project.iam.gserviceaccount.com
+
+rbac:
+  # Both halves of the agent-namespace pair, set and equal, so the coalesce
+  # falls through to neither .Release.Namespace nor a single-sided value. The
+  # disagreement case is a negative render in hack/verify.sh.
+  agentNamespace: ci-varied-agents
+
+runtime:
+  namespace: ci-varied-agents
+  # The ClusterRole / ClusterRoleBinding pair, which no other golden contains,
+  # and the settings key runtimes.kubernetes.list_all_namespaces on its true
+  # branch.
+  listAllNamespaces: true
+
+probes:
+  liveness:
+    # The other branch. Off by default and therefore in no golden, so the TCP
+    # liveness block and its coupling to hub.webPort render nowhere else.
+    enabled: true
+
+auth:
+  # The other branch of the SCION_REQUIRE_STABLE_SIGNING_KEY ternary. "false" is
+  # not the recommended setting - it is the branch that never renders otherwise,
+  # and a ternary with one live branch is a constant.
+  requireStableSigningKey: false
+
+database:
+  # Four rendered settings keys that otherwise carry one value each forever.
+  # Distinct from each other and from the defaults so that a template swapping
+  # two of them over is visible in the golden.
+  maxOpenConns: 41
+  maxIdleConns: 7
+  connMaxLifetime: 21m
+  connMaxIdleTime: 3m
