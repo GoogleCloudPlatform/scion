@@ -83,7 +83,7 @@ bad()  { executed=$((executed+1)); failed=$((failed+1)); echo "FAIL  STEP $1"; }
 
 # --- 1. clean tree from git archive, outside the author's working copy -------
 TREE="$(mktemp -d)"
-trap 'rm -rf "$TREE"' EXIT
+trap '[ -n "${TREE:-}" ] && rm -rf "$TREE"' EXIT
 if git -C "$REPO" archive "$SHA" | tar -x -C "$TREE" 2>/dev/null && [ -f "$TREE/deploy/helm/scion-hub/tests/run-all.sh" ]; then
   step "1 git archive $SHA -> clean tree ($TREE)"
 else
@@ -120,7 +120,7 @@ fi
 # --- 4. a REAL assertion failure AND a short run, together -------------------
 # Both must be reported. The count inequality must fire ALONGSIDE the failure,
 # not be short-circuited by it. That short-circuit is the 60b2912 defect.
-M="$(mktemp -d)"; trap 'rm -rf "$TREE" "$M"' EXIT
+M="$(mktemp -d)"; trap '[ -n "${TREE:-}" ] && rm -rf "$TREE"; [ -n "${M:-}" ] && rm -rf "$M"' EXIT
 cp -r "$TREE/deploy/helm/scion-hub" "$M/chart"
 # (i) real assertion failure: break the chart so a render guard genuinely fails
 rm -f "$M/chart/templates/service.yaml"
@@ -161,11 +161,11 @@ fi
 # The required outcome is the one the two exit codes exist for: a red chart and
 # an INTACT check set, correctly distinguished. So exit 1, and the total is
 # either complete or flagged - a short total sitting beside meta 0 is the defect.
-M5="$(mktemp -d)"; trap 'rm -rf "$TREE" "$M" "$M5"' EXIT
+M5="$(mktemp -d)"; trap '[ -n "${TREE:-}" ] && rm -rf "$TREE"; [ -n "${M:-}" ] && rm -rf "$M"; [ -n "${M5:-}" ] && rm -rf "$M5"' EXIT
 cp -r "$TREE/deploy/helm/scion-hub" "$M5/chart"
 # One assertion made genuinely red, by flipping the value it expects. Nothing
 # else touched: no count changed, no assertion removed, the chart is untouched.
-python3 - "$M5/chart/tests/update-strategy.sh" <<'PY'
+if ! python3 - "$M5/chart/tests/update-strategy.sh" <<'PY'
 import sys
 p=sys.argv[1]; L=open(p).read().split('\n')
 for i,l in enumerate(L):
@@ -175,7 +175,7 @@ else:
     sys.exit("MUTATION TARGET NOT FOUND")
 open(p,'w').write('\n'.join(L))
 PY
-if [ $? -ne 0 ]; then
+then
   echo "HARNESS ERROR: step 5 could not induce its mutation; the target line has moved."
   echo "NOTHING WAS VERIFIED for step 5. Fix the mutation, do not drop the step."
   exit 2

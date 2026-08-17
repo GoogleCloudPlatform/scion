@@ -78,8 +78,8 @@ render() { "$HELM" template t "$CHART" "${BASE[@]}" "$@" 2>&1; }
 reject() {
   local label="$1" want="$2"; shift 2
   executed=$((executed + 1))
-  local out; out="$(render "$@")"
-  if [ $? -eq 0 ]; then
+  local out
+  if out="$(render "$@")"; then
     echo "FAIL  rendered but must reject: ${label}"; failed=$((failed + 1)); return
   fi
   case "$out" in
@@ -103,8 +103,8 @@ reject() {
 accept() {
   local label="$1"; shift
   executed=$((executed + 1))
-  local out; out="$(render "$@")"
-  if [ $? -eq 0 ]; then
+  local out
+  if out="$(render "$@")"; then
     echo "ok    accepted: ${label}"
   else
     echo "FAIL  rejected but must accept: ${label}"

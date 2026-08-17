@@ -126,7 +126,7 @@ if $FULL_DEPLOY; then
 
     # Prepare all temp files locally
     UPLOAD_DIR=$(mktemp -d)
-    trap 'rm -rf "$UPLOAD_DIR"' EXIT
+    trap '[ -n "${UPLOAD_DIR:-}" ] && rm -rf "$UPLOAD_DIR"' EXIT
 
     # hub.env
     HAS_HUB_ENV=false

@@ -25,13 +25,18 @@ CONTENT_DIR="${1:-src/content}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+if [ ! -d "$CONTENT_DIR" ]; then
+  echo "error: content directory '$CONTENT_DIR' not found" >&2
+  exit 1
+fi
+
 if ! command -v d2 &>/dev/null; then
   echo "error: d2 is not installed (https://d2lang.com/install)" >&2
   exit 1
 fi
 
 tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT
+trap '[ -n "${tmpdir:-}" ] && rm -rf "$tmpdir"' EXIT
 
 failed=0
 checked=0

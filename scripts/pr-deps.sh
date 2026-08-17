@@ -465,7 +465,7 @@ cmd_files() {
     # Fetch file lists into a temp dir (one file per PR)
     local tmpdir
     tmpdir=$(mktemp -d)
-    trap 'rm -rf "$tmpdir"' EXIT
+    trap '[ -n "${tmpdir:-}" ] && rm -rf "$tmpdir"' EXIT
 
     for num in $pr_numbers; do
         # shellcheck disable=SC2086

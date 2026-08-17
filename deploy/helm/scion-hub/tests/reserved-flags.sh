@@ -47,7 +47,7 @@ BASE=(--set image.repository=r --set hub.hubId=h)
 # "Nothing was analysed" is a THIRD outcome, distinct from clean and from failing,
 # and it exits 2 with the other harness errors rather than 1.
 _missing=""
-for _t in "$HELM"; do command -v "$_t" >/dev/null 2>&1 || _missing="${_missing} ${_t}"; done
+command -v "$HELM" >/dev/null 2>&1 || _missing="${_missing} ${HELM}"
 if [ -n "$_missing" ]; then
   echo "HARNESS ERROR: required tool(s) not on PATH:${_missing}"
   echo "NOTHING WAS ANALYSED. This is not a passing run, and it is NOT a chart failure."
@@ -140,8 +140,7 @@ reject() {
   # is what an exit-status check could never distinguish - and both present, or
   # the naive form alone, means the message format moved under us.
   naive="hub.args may not contain --${lower}:"
-  out="$("$HELM" template t "$CHART" "${BASE[@]}" --set-json "hub.args=[\"--$1\"]" 2>&1)"
-  if [ $? -eq 0 ]; then
+  if out="$("$HELM" template t "$CHART" "${BASE[@]}" --set-json "hub.args=[\"--$1\"]" 2>&1)"; then
     echo "FAIL  accepted but must reject: --$1"; failed=$((failed + 1)); return
   fi
   # gd-p1-dev's guard, checked first because it is the more specific failure: a
