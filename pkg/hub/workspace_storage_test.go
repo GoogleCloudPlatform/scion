@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1236,20 +1237,58 @@ func TestWarnEphemeralProjectPath_SuppressionClearedOnProjectDelete(t *testing.T
 // A renamed project keeps its state under the new slug; the old slug is
 // unreachable, so its suppression entry is dead weight that would also
 // mis-suppress the old slug if it were later reused by another project.
+//
+// Configured against gke-shared-volume on purpose. migrateProjectSlug resolves
+// the old slug itself, and under any other backend that resolution never
+// reaches the warning — so the cleanup could be placed before it, be dead
+// wrong, and still pass. The assertion immediately after the migration is what
+// pins the ordering: the migration's own resolution must find the suppression
+// still in place.
 func TestWarnEphemeralProjectPath_SuppressionClearedOnSlugMigration(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountBase, "workspace-vol"), 0755))
+
 	srv, _ := testServer(t)
 	logs := captureProjectsLog(t, srv)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:         "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "workspace-vol"},
+	}
 
-	project, _ := createTestHubManagedProject(t, srv, "Ephemeral Warn Rename")
-	oldSlug := project.Slug
+	oldSlug := "rename-ephemeral"
+	newSlug := oldSlug + "-renamed"
+	localDir := filepath.Join(tmpHome, ".scion", "projects", oldSlug)
+	seedLocal := func() {
+		require.NoError(t, os.MkdirAll(localDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
+	}
+	seedLocal()
 
-	srv.warnEphemeralProjectPath(oldSlug, "/local", "/mnt/vol")
+	path, err := srv.hubManagedProjectPath(oldSlug)
+	require.NoError(t, err)
+	require.Equal(t, localDir, path)
 	require.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"))
 
-	project.Slug = oldSlug + "-renamed"
-	srv.migrateProjectSlug(t.Context(), project, oldSlug)
+	srv.migrateProjectSlug(t.Context(), &store.Project{
+		ID:   "rename-ephemeral-project",
+		Name: "Ephemeral Warn Rename",
+		Slug: newSlug,
+	}, oldSlug)
 
-	srv.warnEphemeralProjectPath(oldSlug, "/local", "/mnt/vol")
+	// The migration resolves the old slug on its way to renaming the directory.
+	// That resolution must still be suppressed, which is only true if the
+	// suppression is dropped after it rather than before.
+	assert.Equal(t, 1, strings.Count(logs.String(), "served from ephemeral local path"),
+		"the migration's own path resolution must not re-warn, and must not re-record the slug")
+
+	// The slug is now free and taken by another project with local content.
+	seedLocal()
+	_, err = srv.hubManagedProjectPath(oldSlug)
+	require.NoError(t, err)
 	assert.Equal(t, 2, strings.Count(logs.String(), "served from ephemeral local path"),
 		"migrating away from a slug should clear its warning suppression")
 }
