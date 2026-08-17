@@ -126,6 +126,53 @@ func TestUpdateGitHubApp_PersistsToDBInPostgresMode(t *testing.T) {
 	}
 }
 
+// An operator can pre-stage private_key_path in settings.yaml before the App
+// itself exists, leaving app_id at 0. ApplySnapshot skips the whole github_app
+// block while app_id is 0, so the in-memory PrivateKeyPath is still empty when
+// the first PUT arrives. The write must fall back to the snapshot rather than
+// persist the empty in-memory value over the pre-staged path (#1103).
+func TestUpdateGitHubApp_PreservesPreStagedKeyPathWhenAppIDZero(t *testing.T) {
+	tempSettingsHome(t)
+
+	// settings.yaml carries the key path; app_id is not set yet.
+	fakeStore := newFakeHubSettingStore()
+	fileK := newFileKoanf(t, map[string]interface{}{
+		"server.github_app.private_key_path": "/etc/ghapp/prestaged.pem",
+	})
+	ops := NewOperationalSettings(fakeStore, fileK, emptyKoanf())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ApplySnapshot(srv, ops.Snapshot())
+	if got := srv.config.GitHubAppConfig.PrivateKeyPath; got != "" {
+		t.Fatalf("precondition: ApplySnapshot should skip github_app while app_id is 0, got path %q", got)
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleUpdateGitHubApp(rr, adminRequest(http.MethodPut, "/api/v1/github-app", githubAppUpdateBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update failed: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rec, err := fakeStore.GetHubSetting(context.Background(), "github_app")
+	if err != nil {
+		t.Fatalf("github_app row missing: %v", err)
+	}
+	var got opsettings.GitHubAppSettings
+	if err := json.Unmarshal(rec.Value, &got); err != nil {
+		t.Fatalf("unmarshal github_app section: %v", err)
+	}
+	if got.AppID != 999 {
+		t.Errorf("DB app_id = %d, want 999", got.AppID)
+	}
+	if got.PrivateKeyPath != "/etc/ghapp/prestaged.pem" {
+		t.Errorf("DB private_key_path = %q, want the pre-staged path to survive the first write", got.PrivateKeyPath)
+	}
+}
+
 // failingHubSettingStore stands in for a DB outage: reads work, writes do not.
 type failingHubSettingStore struct {
 	*fakeHubSettingStore

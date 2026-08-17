@@ -274,12 +274,24 @@ func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *Operationa
 	// WebhooksEnabled is a *bool in the section so an explicit false is
 	// distinguishable from an omitted field; cfg always carries a resolved value.
 	webhooksEnabled := cfg.WebhooksEnabled
+
+	// The update request has no private_key_path field, so the in-memory value
+	// is the only source for it — and it is empty until ApplySnapshot loads the
+	// github_app block, which it skips entirely while app_id is 0. An operator
+	// who pre-staged the path in settings.yaml before creating the App would
+	// otherwise have it overwritten with "" by this first write. Fall back to
+	// the merged snapshot, which sees the path regardless of app_id.
+	privateKeyPath := cfg.PrivateKeyPath
+	if privateKeyPath == "" {
+		privateKeyPath = ops.Snapshot().GitHubPrivateKeyPath
+	}
+
 	doc := &opsettings.GitHubAppSettings{
 		AppID:           cfg.AppID,
 		APIBaseURL:      cfg.APIBaseURL,
 		WebhooksEnabled: &webhooksEnabled,
 		InstallationURL: cfg.InstallationURL,
-		PrivateKeyPath:  cfg.PrivateKeyPath,
+		PrivateKeyPath:  privateKeyPath,
 	}
 
 	docBytes, err := json.Marshal(doc)
