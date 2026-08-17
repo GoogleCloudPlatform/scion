@@ -44,6 +44,16 @@ func (s createTestState) restore() {
 	noHub = s.noHub
 }
 
+func TestCreateCmd_HarnessFlagDefaultsToEmpty(t *testing.T) {
+	// Regression test: the --harness flag on createCmd must default to ""
+	// (not "h"). Previously StringVar was called with "h" as the default
+	// value instead of the empty string, causing harnessConfigFlag to be
+	// non-empty even when neither --harness nor --harness-config was passed.
+	f := createCmd.Flags().Lookup("harness")
+	require.NotNil(t, f, "--harness flag must be registered on createCmd")
+	assert.Equal(t, "", f.DefValue, "--harness default value must be empty string")
+}
+
 func TestCreateAgent_DuplicateReturnsError(t *testing.T) {
 	orig := saveCreateTestState()
 	defer orig.restore()

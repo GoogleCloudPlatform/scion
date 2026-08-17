@@ -328,7 +328,7 @@ func init() {
 	createCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Host path or project-relative subdirectory to mount as /workspace")
 	createCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
-	createCmd.Flags().StringVar(&harnessConfigFlag, "harness", "h", "Named harness configuration to use (alias for --harness-config)")
+	createCmd.Flags().StringVar(&harnessConfigFlag, "harness", "", "Named harness configuration to use (alias for --harness-config)")
 
 	createCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
