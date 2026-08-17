@@ -117,6 +117,24 @@ describe('space rail — prefs round trip', () => {
     expect(el.prefs.spaceOrder).toEqual(['p-c', 'p-a', 'p-b']);
   });
 
+  it('accepts an order the server already decoded into an array', async () => {
+    const el = createRail();
+    serveUserPrefs({ spaceSortMode: 'custom', spaceOrder: ['p-c', 'p-a'] as unknown as string });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.spaceOrder).toEqual(['p-c', 'p-a']);
+  });
+
+  it('drops non-string entries from a stored order', async () => {
+    const el = createRail();
+    serveUserPrefs({ spaceSortMode: 'custom', spaceOrder: JSON.stringify(['p-a', 7, null]) });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.spaceOrder).toEqual(['p-a']);
+  });
+
   it('falls back to defaults when the stored order is not parseable', async () => {
     const el = createRail();
     serveUserPrefs({ spaceSortMode: 'custom', spaceOrder: 'not json' });
@@ -181,6 +199,19 @@ describe('space rail — sort mode selection', () => {
   it('freezes the visible order when custom is chosen with nothing stored', async () => {
     const el = createRail();
     el.prefs = { spaceSortMode: 'alpha', threadSortMode: 'activity', spaceOrder: undefined };
+
+    selectSort(el, 'custom');
+    await Promise.resolve();
+
+    expect(lastPrefsPut()).toMatchObject({
+      spaceSortMode: 'custom',
+      spaceOrder: JSON.stringify(['p-a', 'p-b', 'p-c']),
+    });
+  });
+
+  it('freezes the visible order when custom is chosen with an empty order stored', async () => {
+    const el = createRail();
+    el.prefs = { spaceSortMode: 'alpha', threadSortMode: 'activity', spaceOrder: [] };
 
     selectSort(el, 'custom');
     await Promise.resolve();

@@ -72,18 +72,21 @@ interface RailPrefs {
 }
 
 /**
- * Read a prefs payload from the server. `spaceOrder` is stored as a JSON array
- * string, so a hand-edited or truncated value has to degrade to "no custom
- * order" rather than throwing the rail's whole load away.
+ * Read a prefs payload from the server. `spaceOrder` arrives either as a real
+ * array or as a JSON array string, so both are accepted; a hand-edited or
+ * truncated value has to degrade to "no custom order" rather than throwing the
+ * rail's whole load away. Non-string entries are dropped either way.
  */
 function parseRailPrefs(payload: unknown): RailPrefs {
   const data = (payload ?? {}) as {
     spaceSortMode?: string;
     threadSortMode?: string;
-    spaceOrder?: string;
+    spaceOrder?: unknown;
   };
   let spaceOrder: string[] | undefined;
-  if (typeof data.spaceOrder === 'string' && data.spaceOrder !== '') {
+  if (Array.isArray(data.spaceOrder)) {
+    spaceOrder = data.spaceOrder.filter((id): id is string => typeof id === 'string');
+  } else if (typeof data.spaceOrder === 'string' && data.spaceOrder !== '') {
     try {
       const parsed: unknown = JSON.parse(data.spaceOrder);
       if (Array.isArray(parsed)) {
@@ -1279,7 +1282,11 @@ export class ScionChatSpaceRail extends LitElement {
       // is currently looking at, so the list does not jump on the click.
       void this.savePrefs({
         spaceSortMode: 'custom',
-        spaceOrder: this.prefs.spaceOrder ?? this.getSortedSpaces().map((s) => s.projectId),
+        // An empty saved order counts as "no order saved yet", so test length
+        // rather than nullishness — `[]` would otherwise freeze nothing.
+        spaceOrder: this.prefs.spaceOrder?.length
+          ? this.prefs.spaceOrder
+          : this.getSortedSpaces().map((s) => s.projectId),
       });
     }
   }
@@ -1393,6 +1400,11 @@ export class ScionChatSpaceRail extends LitElement {
     `;
   }
 
+  /**
+   * Render one thread row. The trailing badge is a single choice, not two: a
+   * muted thread shows the bell and deliberately does not advertise its unread
+   * state with a dot, so mute is the first branch of one chain.
+   */
   private renderThread(thread: ChatSpaceThread, projectId: string) {
     const isSelected = thread.id === this.selectedKey;
 
@@ -1435,9 +1447,6 @@ export class ScionChatSpaceRail extends LitElement {
         ${thread.pinned ? html`<sl-icon name="star-fill" class="pin-icon"></sl-icon>` : nothing}
         ${thread.muted
           ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
-          : nothing}
-        ${thread.muted
-          ? nothing
           : thread.hasUnreadMention
             ? html`<span class="mention-dot"></span>`
             : thread.hasUnread

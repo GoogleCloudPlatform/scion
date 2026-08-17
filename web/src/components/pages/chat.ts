@@ -2507,7 +2507,11 @@ export class ScionPageChat extends LitElement {
       if (!res.ok) throw new Error('mute failed');
       const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
       if (typeof data.muted === 'boolean' && data.muted !== next) {
-        this.v2Conversation = { ...conv, muted: data.muted };
+        // The user may have switched conversations while the request was in
+        // flight; only reconcile if this DM is still the one on screen.
+        if (this.v2Conversation?.conversationKey === conv.conversationKey) {
+          this.v2Conversation = { ...this.v2Conversation, muted: data.muted };
+        }
       }
     } catch {
       if (this.v2Conversation?.conversationKey === conv.conversationKey) {

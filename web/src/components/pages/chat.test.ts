@@ -420,6 +420,21 @@ describe('chat page — DM mute toggle', () => {
     expect(el.v2Conversation.muted).toBe(false);
   });
 
+  it('does not reconcile onto a DM the user switched to mid-request', async () => {
+    const el = pageOnDM(false);
+    // The server disagrees with the optimistic value, so the success path wants
+    // to write back — but by the time it resolves the user is reading another DM.
+    vi.mocked(apiFetch).mockImplementation(async () => {
+      el.v2Conversation = { ...el.v2Conversation, conversationKey: 'dm:user-me:user-2' };
+      return new Response(JSON.stringify({ muted: false }), { status: 200 });
+    });
+
+    await el.toggleDMMute();
+
+    expect(el.v2Conversation.conversationKey).toBe('dm:user-me:user-2');
+    expect(el.v2Conversation.muted).toBe(true);
+  });
+
   it('renders the bell as filled-through only while muted', () => {
     const quiet = renderToFragment(pageOnDM(true).renderDMMuteButton(pageOnDM(true).v2Conversation));
     expect(quiet.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell-slash');
