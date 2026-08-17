@@ -24,7 +24,7 @@ set -u
 EXPECTED_TOTAL=46
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
-BASE=(--set image.repository=r --set hub.hubId=ci-minimal)
+BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -68,6 +68,30 @@ if [ "$AUDIT" = "1" ]; then
   echo "passed without the toolchain it claims to exercise. This run exits 2."
   echo "=================================================================="
 fi
+
+# BASE-VIABILITY ARM, AND IT IS THE SAME ARGUMENT AS THE TOOL-PRESENCE ARM ABOVE
+# ONE STEP IN. A missing toolchain makes every render fail; so does a BASE that
+# no longer satisfies the chart's required values, and the output is worse,
+# because it is not empty - it is every assertion confidently blaming the guard
+# it was aimed at. MEASURED: Phase 1 made hub.baseUrl required, and this suite
+# emitted 77 failures reading "refused, but NOT by the reserved-flag guard" and
+# "rejected with the WRONG message". Every one of those sentences was false. The
+# guards were fine; BASE was.
+#
+# A REQUIRED VALUE ADDED BY A LATER PHASE INVALIDATES EVERY BASE IN THIS SUITE AT
+# ONCE, AND NOTHING ABOUT IT IS SPECIFIC TO hub.baseUrl. Adding the flag fixes
+# today; this arm is what makes the NEXT one arrive as one honest line instead of
+# seventy-seven misleading ones. Exit 2, not 1: an unrenderable BASE means the run
+# is not evidence about the chart, in either direction.
+if ! _bv="$("$HELM" template t "$CHART" "${BASE[@]}" 2>&1)" || [ -z "$_bv" ]; then
+  echo "HARNESS ERROR: BASE alone does not render, so no assertion below tests what it says it tests."
+  echo "  This is almost always a newly-REQUIRED value that BASE does not set."
+  printf '%s\n' "$_bv" | sed 's/^/  | /' | head -5
+  echo "NOTHING WAS ANALYSED. This is not a passing run, and it is NOT a chart failure."
+  echo "ASSERTIONS_EXECUTED=0"
+  exit 2
+fi
+unset _bv
 
 executed=0
 failed=0

@@ -45,7 +45,22 @@ CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # empty-render guard reported correctly rather than scoring it as zero channels.
 BASE=(--set image.repository=example.invalid/scion-hub --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid)
 
-EXPECTED_TOTAL=26   # 25 as adopted from rev-2, +1 for the base-url tripwire in D.
+# HELD AT 26 ON PURPOSE, AND THIS SCRIPT THEREFORE EXITS 2.
+#
+# The true Phase 1 figure is 30: 26 as adopted, +2 kinds (ConfigMap, Secret) in
+# section B, +2 files (configmap-env.yaml, secret-settings.yaml) in section C.
+# Nothing FAILS -- every assertion the chart is accused by passes. The only red
+# is this number.
+#
+# gd-em is holding every numeric delta against 8cc8d9b while three blocking
+# findings are open against it and EXPECTED_ASSERTIONS may still move. Exit 2 in
+# this harness means "the run is not evidence", which is exactly the status of a
+# count that has been deliberately not committed -- so leaving it wrong is the
+# honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
+# warned about. Lifting the hold is a two-line change: 26 -> 30 here, and
+# 107 -> 111 in run-all.sh, in one diff.
+EXPECTED_TOTAL=26
+
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
 # accuses the chart of dropping templates when the truth is that helm is not
@@ -100,13 +115,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# B. The rendered manifest set is intact.  (6 assertions)
+# B. The rendered manifest set is intact.  (8 assertions: 7 kinds + the total)
 # Catches an over-broad pattern that reaches templates/.
 # ---------------------------------------------------------------------------
 
 RENDER="$("$HELM" template t "$CHART" "${BASE[@]}" 2>/dev/null)" || RENDER=""
 
-for k in Deployment Role RoleBinding Service ServiceAccount; do
+# ConfigMap and Secret are Phase 1's, and they were the two kinds this loop did
+# not name -- so the manifests the phase added were the only ones nothing
+# asserted by kind, which is the general shape of how a per-phase enumeration
+# goes short. The total below is DERIVED from this list rather than written
+# beside it: a hand-listed set with a separately-maintained count is two facts
+# that can disagree, and the comment asking the next person to update both is a
+# request, not a mechanism.
+EXPECTED_KINDS=(ConfigMap Deployment Role RoleBinding Secret Service ServiceAccount)
+
+for k in "${EXPECTED_KINDS[@]}"; do
   if printf '%s\n' "$RENDER" | grep -qx "kind: $k"; then
     pass "render contains kind: $k"
   else
@@ -114,15 +138,19 @@ for k in Deployment Role RoleBinding Service ServiceAccount; do
   fi
 done
 
+# THE TWIN, AND IT IS NOT THE LOOP AGAIN. The loop says each named kind is
+# present; it is silent on anything present that is NOT named. A template that
+# started emitting a second Secret, or a stray manifest from an over-broad
+# range, satisfies every iteration above.
 kinds="$(printf '%s\n' "$RENDER" | grep -c '^kind:')"
-if [ "$kinds" -eq 5 ]; then
-  pass "render emits exactly 5 manifests"
+if [ "$kinds" -eq "${#EXPECTED_KINDS[@]}" ]; then
+  pass "render emits exactly ${#EXPECTED_KINDS[@]} manifests"
 else
-  fail "render emits ${kinds} manifests, expected 5"
+  fail "render emits ${kinds} manifests, expected ${#EXPECTED_KINDS[@]} -- add it to EXPECTED_KINDS deliberately, or find out what it is"
 fi
 
 # ---------------------------------------------------------------------------
-# C. The packaged chart carries what it must.  (16 assertions; D adds 1 more)
+# C. The packaged chart carries what it must.  (18 assertions; D adds 1 more)
 #
 # Separate from B because `helm package` and `helm template` do not fail together:
 # values.schema.json is absent from B's signal entirely, and VALIDATION.md is absent from
