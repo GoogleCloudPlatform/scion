@@ -546,6 +546,17 @@ expect_render_failure \
 #
 # The name is deliberately ordinary. TLS_MATERIAL ends in no credential noun, so
 # the name axis has nothing to say and this can only be the value axis.
+#
+# DO NOT DELETE THIS PAIR WITHOUT REPLACING IT SOMEWHERE. These two cases are the
+# ONLY reachable coverage, anywhere in this chart, of the "-----BEGIN "
+# alternative in scion-hub.assertNoCredential. That helper is shared with the
+# argv path, and argv cannot cover it: an argument containing spaces is rejected
+# by the whitespace guard first, so a PEM case there passes while testing a
+# different guard. Phase 0 knows this and deliberately does not duplicate it.
+#
+# So if these are pruned as slow or redundant, an alternative in somebody else's
+# helper goes untested chart-wide and nothing in their files will fail. Whoever
+# prunes them owns moving the coverage, not just removing the runtime.
 cat >"$WORK/pem-env.yaml" <<'PEMVALUES'
 image:
   repository: example.test/scion-hub-gke
