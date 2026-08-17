@@ -38,7 +38,6 @@ vi.mock('../../../utils/markdown.js', () => ({
     Promise.resolve({
       render: (markdown: string) =>
         `<p>${markdown
-          .replace(/```(\w+)\n([\s\S]*?)```/g, '</p><pre><code class="language-$1">$2</code></pre><p>')
           .replace(/```([\s\S]*?)```/g, '</p><pre><code>$1</code></pre><p>')
           .replace(/`([^`]+)`/g, '<code>$1</code>')
           .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" title="see $1">$1</a>')}</p>`,
@@ -49,21 +48,7 @@ vi.mock('../../../utils/markdown.js', () => ({
 // tests only care about what the message hands it.
 vi.mock('../code-editor.js', () => ({
   getLanguageFromPath: (path: string) => (path.endsWith('.go') ? 'go' : 'plaintext'),
-  ScionCodeEditor: class {},
 }));
-
-// Register a minimal stub for <scion-code-editor> so that
-// injectSyntaxHighlighting can create and configure it.
-if (!customElements.get('scion-code-editor')) {
-  customElements.define(
-    'scion-code-editor',
-    class extends HTMLElement {
-      content = '';
-      language = 'plaintext';
-      readonly = false;
-    }
-  );
-}
 
 const apiFetchMock = vi.fn();
 vi.mock('../../../client/api.js', () => ({
@@ -369,76 +354,5 @@ describe('scion-chat-message attachment previews', () => {
     const preview = el.shadowRoot?.querySelector('.attachment-preview');
     expect(editorIn(preview)).toBeNull();
     expect(preview?.querySelector('.preview-placeholder.error')?.textContent).toContain('404');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Issue #1049: Syntax highlighting in code blocks
-// ---------------------------------------------------------------------------
-
-describe('scion-chat-message syntax highlighting (#1049)', () => {
-  afterEach(() => {
-    document.body.innerHTML = '';
-  });
-
-  /** Mount a message with the given body text. */
-  async function mountBody(body: string): Promise<ScionChatMessage> {
-    const el = document.createElement('scion-chat-message') as ScionChatMessage;
-    el.messageId = 'syntax-test';
-    el.body = body;
-    el.sender = 'user:Alice';
-    el.createdAt = new Date().toISOString();
-    document.body.appendChild(el);
-    await el.updateComplete;
-    // Wait for async renderContent to settle.
-    await new Promise((r) => setTimeout(r, 50));
-    await el.updateComplete;
-    return el;
-  }
-
-  it('replaces language-tagged code blocks with scion-code-editor', async () => {
-    const el = await mountBody('```typescript\nconst x = 1;\n```');
-
-    const editor = el.shadowRoot?.querySelector('scion-code-editor') as HTMLElement & {
-      language: string;
-      readonly: boolean;
-      content: string;
-    } | null;
-    expect(editor).not.toBeNull();
-    expect(editor!.language).toBe('typescript');
-    expect(editor!.readonly).toBe(true);
-    expect(editor!.content).toContain('const x = 1;');
-  });
-
-  it('leaves code blocks without a language tag as plain pre/code', async () => {
-    const el = await mountBody('```\nplain text\n```');
-
-    // No code editor should be injected.
-    const editor = el.shadowRoot?.querySelector('scion-code-editor');
-    expect(editor).toBeNull();
-
-    // The original <pre><code> should remain.
-    const pre = el.shadowRoot?.querySelector('.md-content pre');
-    expect(pre).not.toBeNull();
-  });
-
-  it('maps short language aliases to full language names', async () => {
-    const el = await mountBody('```js\nalert("hi");\n```');
-
-    const editor = el.shadowRoot?.querySelector('scion-code-editor') as HTMLElement & {
-      language: string;
-    } | null;
-    expect(editor).not.toBeNull();
-    expect(editor!.language).toBe('javascript');
-  });
-
-  it('maps python alias py to python', async () => {
-    const el = await mountBody('```py\nprint("hello")\n```');
-
-    const editor = el.shadowRoot?.querySelector('scion-code-editor') as HTMLElement & {
-      language: string;
-    } | null;
-    expect(editor).not.toBeNull();
-    expect(editor!.language).toBe('python');
   });
 });

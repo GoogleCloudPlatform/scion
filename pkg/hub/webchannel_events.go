@@ -33,3 +33,22 @@ type ChatReadStateEvent struct {
 	MessageID string `json:"messageId"`
 	ReadAt    string `json:"readAt"`
 }
+
+// ChatMessageEditedEvent is published when a message is edited.
+// Published on project.<projectID>.chat.message.edited and
+// user.<id>.chat.dm for DM edits.
+type ChatMessageEditedEvent struct {
+	ConversationKey string `json:"conversationKey"`
+	MessageID       string `json:"messageId"`
+	Content         string `json:"content"`
+	EditedAt        string `json:"editedAt"`
+}
+
+// ChatMessageDeletedEvent is published when a message is soft-deleted.
+// Published on project.<projectID>.chat.message.deleted and
+// user.<id>.chat.dm for DM deletes.
+type ChatMessageDeletedEvent struct {
+	ConversationKey string `json:"conversationKey"`
+	MessageID       string `json:"messageId"`
+	DeletedAt       string `json:"deletedAt"`
+}

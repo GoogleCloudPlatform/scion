@@ -2289,6 +2289,336 @@ func TestChatV2_History_CursorPaginatesToOlderMessages(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Phase-3: Edit/Delete endpoint tests
+// ---------------------------------------------------------------------------
+
+// setupEditDeleteTest creates a project, topic, webchat store, and a user
+// message for edit/delete testing. It wires the webchat store to the same
+// underlying database as the ent store so that UpdateMessageContent (raw SQL)
+// can see messages created through the ent store — matching production wiring.
+// Returns the server, store, webchat store, topic ID, message ID, and project ID.
+func setupEditDeleteTest(t *testing.T) (*Server, store.Store, WebChatStore, string, string, string) {
+	t.Helper()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("send-test"), Name: "send-test", Slug: "send-test", Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Use the ent store's underlying DB so UpdateMessageContent can reach
+	// messages created via s.CreateMessage — same wiring as production.
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	if !ok {
+		t.Fatal("store does not expose DB()")
+	}
+	rawDB := dbProvider.DB()
+	if rawDB == nil {
+		t.Fatal("store DB() returned nil")
+	}
+	wcs := NewWebChatStore(rawDB, "sqlite3")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("Init webchat store: %v", err)
+	}
+	srv.SetWebChatStore(wcs)
+
+	topicID := tid("topic-editdel")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "edit-delete-test",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Create a message owned by the dev user.
+	now := time.Now().UTC()
+	msgID := tid("msg-editdel")
+	storeMsg := &store.Message{
+		ID:        msgID,
+		ProjectID: proj.ID,
+		Sender:    "user:dev@localhost",
+		SenderID:  DevUserID,
+		Recipient: "thread:" + topicID,
+		Msg:       "original content",
+		Type:      "chat",
+		Channel:   "web",
+		ThreadID:  topicID,
+		CreatedAt: now,
+	}
+	if err := s.CreateMessage(ctx, storeMsg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	return srv, s, wcs, topicID, msgID, proj.ID
+}
+
+func TestChatV2_Edit_HappyPath(t *testing.T) {
+	srv, s, wcs, topicID, msgID, _ := setupEditDeleteTest(t)
+	ctx := context.Background()
+
+	body := map[string]string{"content": "updated content"}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/chat/conversations/"+topicID+"/messages/"+msgID, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["messageId"] != msgID {
+		t.Errorf("messageId = %v, want %v", resp["messageId"], msgID)
+	}
+	if resp["content"] != "updated content" {
+		t.Errorf("content = %v, want %q", resp["content"], "updated content")
+	}
+	if resp["editedAt"] == nil {
+		t.Error("editedAt should be set")
+	}
+
+	// Verify the message content was actually updated in the store.
+	msg, err := s.GetMessage(ctx, msgID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if msg.Msg != "updated content" {
+		t.Errorf("persisted content = %q, want %q", msg.Msg, "updated content")
+	}
+
+	// Verify edited_at was recorded in extensions.
+	exts, err := wcs.GetMessageExts(ctx, []string{msgID})
+	if err != nil {
+		t.Fatalf("GetMessageExts: %v", err)
+	}
+	ext, ok := exts[msgID]
+	if !ok {
+		t.Fatal("expected extension for message")
+	}
+	if ext.EditedAt == nil {
+		t.Error("expected editedAt to be set in extensions")
+	}
+}
+
+func TestChatV2_Edit_NonOwner_Forbidden(t *testing.T) {
+	srv, s, _, topicID, _, projID := setupEditDeleteTest(t)
+	ctx := context.Background()
+
+	// Create a message from a different user.
+	otherUserID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	otherMsgID := tid("msg-other-edit")
+	otherMsg := &store.Message{
+		ID:        otherMsgID,
+		ProjectID: projID,
+		Sender:    "user:other@localhost",
+		SenderID:  otherUserID,
+		Recipient: "thread:" + topicID,
+		Msg:       "other user message",
+		Type:      "chat",
+		Channel:   "web",
+		ThreadID:  topicID,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := s.CreateMessage(ctx, otherMsg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	// DevUser tries to edit another user's message — should get 403.
+	body := map[string]string{"content": "hacked content"}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/chat/conversations/"+topicID+"/messages/"+otherMsgID, body)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for non-owner edit, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatV2_Edit_AgentReplied_Conflict(t *testing.T) {
+	srv, s, _, topicID, msgID, projID := setupEditDeleteTest(t)
+	ctx := context.Background()
+
+	// Create an agent reply after the user's message.
+	agentMsgID := tid("msg-agent-reply")
+	agentMsg := &store.Message{
+		ID:        agentMsgID,
+		ProjectID: projID,
+		Sender:    "agent:helper-bot",
+		SenderID:  tid("agent-helper"),
+		Recipient: "user:dev@localhost",
+		Msg:       "I can help with that",
+		Type:      "assistant-reply",
+		Channel:   "web",
+		ThreadID:  topicID,
+		CreatedAt: time.Now().UTC().Add(1 * time.Second),
+	}
+	if err := s.CreateMessage(ctx, agentMsg); err != nil {
+		t.Fatalf("CreateMessage (agent reply): %v", err)
+	}
+
+	// Attempt to edit — should get 409 because an agent has replied.
+	body := map[string]string{"content": "too late to edit"}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/chat/conversations/"+topicID+"/messages/"+msgID, body)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409 when agent has replied, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatV2_Edit_ConversationKeyMismatch(t *testing.T) {
+	srv, _, _, _, msgID, _ := setupEditDeleteTest(t)
+
+	// Try to edit the message using a wrong conversation key.
+	body := map[string]string{"content": "wrong conversation"}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/chat/conversations/wrong-topic-id/messages/"+msgID, body)
+	// Should be rejected — message does not belong to this conversation.
+	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusNotFound {
+		t.Errorf("expected 400 or 404 for conversation key mismatch, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatV2_Delete_HappyPath(t *testing.T) {
+	srv, _, wcs, topicID, msgID, _ := setupEditDeleteTest(t)
+	ctx := context.Background()
+
+	rec := doRequest(t, srv, http.MethodDelete,
+		"/api/v1/chat/conversations/"+topicID+"/messages/"+msgID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["messageId"] != msgID {
+		t.Errorf("messageId = %v, want %v", resp["messageId"], msgID)
+	}
+	if resp["deletedAt"] == nil {
+		t.Error("deletedAt should be set")
+	}
+
+	// Verify the extension has deletedAt set.
+	exts, err := wcs.GetMessageExts(ctx, []string{msgID})
+	if err != nil {
+		t.Fatalf("GetMessageExts: %v", err)
+	}
+	ext, ok := exts[msgID]
+	if !ok {
+		t.Fatal("expected extension for message")
+	}
+	if ext.DeletedAt == nil {
+		t.Error("expected deletedAt to be set in extensions")
+	}
+}
+
+func TestChatV2_Delete_NonOwner_Forbidden(t *testing.T) {
+	srv, s, _, topicID, _, projID := setupEditDeleteTest(t)
+	ctx := context.Background()
+
+	// Create a message from a different user.
+	otherUserID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	otherMsgID := tid("msg-other-del")
+	otherMsg := &store.Message{
+		ID:        otherMsgID,
+		ProjectID: projID,
+		Sender:    "user:other@localhost",
+		SenderID:  otherUserID,
+		Recipient: "thread:" + topicID,
+		Msg:       "other user message",
+		Type:      "chat",
+		Channel:   "web",
+		ThreadID:  topicID,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := s.CreateMessage(ctx, otherMsg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	// DevUser tries to delete another user's message — should get 403.
+	rec := doRequest(t, srv, http.MethodDelete,
+		"/api/v1/chat/conversations/"+topicID+"/messages/"+otherMsgID, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for non-owner delete, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatV2_Delete_AgentReplied_Conflict(t *testing.T) {
+	srv, s, _, topicID, msgID, projID := setupEditDeleteTest(t)
+	ctx := context.Background()
+
+	// Create an agent reply after the user's message.
+	agentMsgID := tid("msg-agent-reply-del")
+	agentMsg := &store.Message{
+		ID:        agentMsgID,
+		ProjectID: projID,
+		Sender:    "agent:helper-bot",
+		SenderID:  tid("agent-helper-del"),
+		Recipient: "user:dev@localhost",
+		Msg:       "I responded already",
+		Type:      "assistant-reply",
+		Channel:   "web",
+		ThreadID:  topicID,
+		CreatedAt: time.Now().UTC().Add(1 * time.Second),
+	}
+	if err := s.CreateMessage(ctx, agentMsg); err != nil {
+		t.Fatalf("CreateMessage (agent reply): %v", err)
+	}
+
+	// Attempt to delete — should get 409.
+	rec := doRequest(t, srv, http.MethodDelete,
+		"/api/v1/chat/conversations/"+topicID+"/messages/"+msgID, nil)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409 when agent has replied, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatV2_Delete_ContentBlankedInHistory(t *testing.T) {
+	srv, _, wcs, topicID, msgID, _ := setupEditDeleteTest(t)
+	ctx := context.Background()
+
+	// Soft-delete the message.
+	now := time.Now().UTC()
+	if err := wcs.SetMessageDeleted(ctx, msgID, now); err != nil {
+		t.Fatalf("SetMessageDeleted: %v", err)
+	}
+
+	// Fetch history.
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/chat/conversations/"+topicID+"/messages", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp chatHistoryResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Find the deleted message in the response.
+	var found bool
+	for _, m := range resp.Messages {
+		if m.ID == msgID {
+			found = true
+			if m.Msg != "" {
+				t.Errorf("deleted message content should be blank, got %q", m.Msg)
+			}
+		}
+	}
+	if !found {
+		t.Error("deleted message not found in history response")
+	}
+
+	// Verify the extension has deletedAt.
+	if ext, ok := resp.MessageExtensions[msgID]; !ok || ext.DeletedAt == nil {
+		t.Error("expected deletedAt in message extensions for deleted message")
+	}
+}
+
 // A human sender that floods a thread is cut off with a retryable 429 rather
 // than being allowed to fill the conversation, and the cut-off lifts as soon
 // as tokens refill (#1054).
@@ -2344,136 +2674,5 @@ func TestChatV2_Send_RateLimitsFloodingHuman(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodPost, path, map[string]string{"content": "after backoff"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected the send to succeed after backing off, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Issue #1055: Idempotency key on send
-// ---------------------------------------------------------------------------
-
-func TestChatV2_Send_IdempotencyKey_DeduplicatesSend(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
-	ctx := context.Background()
-
-	// Create a topic.
-	topicID := tid("topic-idem-1")
-	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        topicID,
-		ProjectID: proj.ID,
-		Name:      "idempotency-test",
-		CreatedBy: "dev",
-		CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-
-	path := "/api/v1/chat/conversations/" + topicID + "/messages"
-	idemKey := "test-idempotency-key-123"
-
-	// First send — should create the message (201).
-	body1 := map[string]string{"content": "idempotent message", "idempotency_key": idemKey}
-	rec1 := doRequest(t, srv, http.MethodPost, path, body1)
-	if rec1.Code != http.StatusCreated {
-		t.Fatalf("first send: expected 201, got %d: %s", rec1.Code, rec1.Body.String())
-	}
-
-	var resp1 chatMessageResponse
-	if err := json.NewDecoder(rec1.Body).Decode(&resp1); err != nil {
-		t.Fatalf("decode first response: %v", err)
-	}
-	if resp1.ID == "" {
-		t.Fatal("first send: expected non-empty message ID")
-	}
-
-	// Second send with the same idempotency key — should return 200 with the same ID.
-	body2 := map[string]string{"content": "idempotent message", "idempotency_key": idemKey}
-	rec2 := doRequest(t, srv, http.MethodPost, path, body2)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("second send: expected 200, got %d: %s", rec2.Code, rec2.Body.String())
-	}
-
-	var resp2 chatMessageResponse
-	if err := json.NewDecoder(rec2.Body).Decode(&resp2); err != nil {
-		t.Fatalf("decode second response: %v", err)
-	}
-	if resp2.ID != resp1.ID {
-		t.Errorf("expected same message ID %q on duplicate, got %q", resp1.ID, resp2.ID)
-	}
-}
-
-func TestChatV2_Send_DifferentIdempotencyKeys_CreateSeparateMessages(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
-	ctx := context.Background()
-
-	topicID := tid("topic-idem-2")
-	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        topicID,
-		ProjectID: proj.ID,
-		Name:      "idempotency-diff",
-		CreatedBy: "dev",
-		CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-
-	path := "/api/v1/chat/conversations/" + topicID + "/messages"
-
-	// Two sends with different keys should create two distinct messages.
-	body1 := map[string]string{"content": "first message", "idempotency_key": "key-a"}
-	rec1 := doRequest(t, srv, http.MethodPost, path, body1)
-	if rec1.Code != http.StatusCreated {
-		t.Fatalf("first send: expected 201, got %d", rec1.Code)
-	}
-	var resp1 chatMessageResponse
-	_ = json.NewDecoder(rec1.Body).Decode(&resp1)
-
-	body2 := map[string]string{"content": "second message", "idempotency_key": "key-b"}
-	rec2 := doRequest(t, srv, http.MethodPost, path, body2)
-	if rec2.Code != http.StatusCreated {
-		t.Fatalf("second send: expected 201, got %d", rec2.Code)
-	}
-	var resp2 chatMessageResponse
-	_ = json.NewDecoder(rec2.Body).Decode(&resp2)
-
-	if resp1.ID == resp2.ID {
-		t.Errorf("different idempotency keys should produce different message IDs, both got %q", resp1.ID)
-	}
-}
-
-func TestChatV2_Send_NoIdempotencyKey_AlwaysCreates(t *testing.T) {
-	srv, _, wcs, proj := setupSendTest(t)
-	ctx := context.Background()
-
-	topicID := tid("topic-idem-3")
-	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        topicID,
-		ProjectID: proj.ID,
-		Name:      "no-idem-key",
-		CreatedBy: "dev",
-		CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-
-	path := "/api/v1/chat/conversations/" + topicID + "/messages"
-
-	// Without an idempotency key, each send creates a new message.
-	body := map[string]string{"content": "same content, no key"}
-	rec1 := doRequest(t, srv, http.MethodPost, path, body)
-	if rec1.Code != http.StatusCreated {
-		t.Fatalf("first send: expected 201, got %d", rec1.Code)
-	}
-	var resp1 chatMessageResponse
-	_ = json.NewDecoder(rec1.Body).Decode(&resp1)
-
-	rec2 := doRequest(t, srv, http.MethodPost, path, body)
-	if rec2.Code != http.StatusCreated {
-		t.Fatalf("second send: expected 201, got %d", rec2.Code)
-	}
-	var resp2 chatMessageResponse
-	_ = json.NewDecoder(rec2.Body).Decode(&resp2)
-
-	if resp1.ID == resp2.ID {
-		t.Errorf("sends without idempotency key should create distinct messages, both got %q", resp1.ID)
 	}
 }

@@ -63,6 +63,12 @@ type EventPublisher interface {
 	// participants of a DM on user.<peerID>.chat.read-state so the sender can
 	// render "seen" without polling.
 	PublishChatReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
+	// PublishChatMessageEdited publishes a message-edited event so SSE
+	// subscribers can update the message content in real time.
+	PublishChatMessageEdited(ctx context.Context, projectID, conversationKey string, evt ChatMessageEditedEvent)
+	// PublishChatMessageDeleted publishes a message-deleted event so SSE
+	// subscribers can show the "[deleted]" placeholder in real time.
+	PublishChatMessageDeleted(ctx context.Context, projectID, conversationKey string, evt ChatMessageDeletedEvent)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -97,8 +103,12 @@ func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)      
 func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 }
 func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string) {}
-func (noopEventPublisher) PublishRaw(_ string, _ interface{})                          {}
-func (noopEventPublisher) Close()                                                      {}
+func (noopEventPublisher) PublishChatMessageEdited(_ context.Context, _ string, _ string, _ ChatMessageEditedEvent) {
+}
+func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string, _ string, _ ChatMessageDeletedEvent) {
+}
+func (noopEventPublisher) PublishRaw(_ string, _ interface{}) {}
+func (noopEventPublisher) Close()                             {}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
@@ -797,6 +807,30 @@ func (p *eventBuilder) PublishChatReadStateEvent(_ context.Context, conversation
 			continue
 		}
 		p.sink("user."+participantID+".chat.read-state", evt)
+	}
+}
+
+// PublishChatMessageEdited publishes a message-edited event on the project and
+// DM subjects so SSE subscribers can update the message content in real time.
+func (p *eventBuilder) PublishChatMessageEdited(_ context.Context, projectID, conversationKey string, evt ChatMessageEditedEvent) {
+	if strings.HasPrefix(conversationKey, "dm:") {
+		for _, participantID := range dmUserParticipants(conversationKey) {
+			p.sink("user."+participantID+".chat.message.edited", evt)
+		}
+	} else if projectID != "" {
+		p.sink("project."+projectID+".chat.message.edited", evt)
+	}
+}
+
+// PublishChatMessageDeleted publishes a message-deleted event on the project and
+// DM subjects so SSE subscribers can show the "[deleted]" placeholder.
+func (p *eventBuilder) PublishChatMessageDeleted(_ context.Context, projectID, conversationKey string, evt ChatMessageDeletedEvent) {
+	if strings.HasPrefix(conversationKey, "dm:") {
+		for _, participantID := range dmUserParticipants(conversationKey) {
+			p.sink("user."+participantID+".chat.message.deleted", evt)
+		}
+	} else if projectID != "" {
+		p.sink("project."+projectID+".chat.message.deleted", evt)
 	}
 }
 
