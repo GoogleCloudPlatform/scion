@@ -471,7 +471,7 @@ inside quoted historical output, the `118`/`252` in §3's block — **I took his
 first treatment: in the denominator, and they pass, because the block is
 SHA-pinned.**
 
-**52 mechanical assertions over this file's self-claims. 52 run. 10 corrected**,
+**54 mechanical assertions over this file's self-claims. 54 run. 11 corrected**,
 plus N3, which is *not* in the denominator — N3 is a claim about `_helpers.tpl`,
 so it is out by the definition above, and it is fixed here only because `gd-em`
 folded it into this commit. No category came back empty. **A is zero as a
@@ -485,7 +485,7 @@ appears without a SHA on the same line.
 | **B** | counts of a token in this same file | 13 | 4 |
 | **C** | positional claims about this same file | 12 | 1 |
 | **D** | cardinalities about this file's own tables | 15 | 3 |
-| **E** | claims about the instrument that measured it | 11 | 1 |
+| **E** | claims about the instrument that measured it | 13 | 2 |
 
 Subjects: `git show <sha>:<path>` at `5ebe3dab`, `38a41b6e` and `6fc0cdfc`, never
 the working tree. Every row compares the claim *as written* against a fresh
@@ -547,18 +547,35 @@ on, said "a zsh function wrapping ugrep 7.5.0". The wrapper is real and the flag
 are real; the separate binary is not. `gd-p0-rev-4` found and retracted that, in
 its own instrument disclosure, and the wording reached this file from there.)*
 
-**Dialect, which is the part that actually bites.** The injected `-G` forces BRE,
-so `|` is a literal. On this file, at head:
+**Dialect, which is the part that actually bites — and it is not the wrapper's
+fault.** On this file at `6fc0cdfc`:
 
 ```
 /usr/bin/grep -cE 'values\.yaml|values\.schema\.json'   ->  3
-/usr/bin/grep -c  'values\.yaml|values\.schema\.json'   ->  0     <- -G, GNU
-        grep -c  'values\.yaml|values\.schema\.json'    ->  0     <- the shadow
+/usr/bin/grep -c  'values\.yaml|values\.schema\.json'   ->  0    <- no flag at all
+/usr/bin/grep -cG 'values\.yaml|values\.schema\.json'   ->  0    <- identical to no flag
+        grep -c  'values\.yaml|values\.schema\.json'    ->  0    <- the shadow
 ```
 
 **A false zero, over a file that contains three hits, from a command that exits
-0 and prints a number.** Naming the right binary and omitting the dialect would
-not have caught it.
+0 and prints a number.**
+
+🛑 **The injected `-G` is INERT against GNU grep.** Grep with no matcher flag is
+BRE by POSIX, so `-G` changes nothing here; what it does is move *ugrep*, which
+defaults to extended, onto grep's behaviour. **The blame shrinks and the reach
+grows: the silent zero is POSIX, not a local shim, so it is present in stock grep
+on the CI runner and in anyone's terminal.** (`gd-em`, withdrawing its own
+earlier ruling; `gd-p0-rev-4` reproduced it independently and found the same
+thing had voided its own two-engine control, both arms of which were BRE.
+Measured here before adopting — the four rows above are this container.)
+
+**An earlier revision of this section said "the injected `-G` forces BRE, so `|`
+is a literal", with the disproof printed two lines below it** — the middle row of
+that block never had `-G` on it and already returned 0. Same class as everything
+else in this file: the evidence was in the block and the sentence above it drew a
+different conclusion, and the block is the part nobody re-reads.
+
+Naming the right binary and omitting the dialect would not have caught any of it.
 
 > **AN ENGINE DISCLOSURE THAT NAMES THE BINARY AND OMITS THE DIALECT IS NOT A
 > DISCLOSURE.** The binary is the route to the defect; the dialect *is* the
@@ -591,8 +608,8 @@ that the BRE extension is live in the dialect actually in use and dead under
 > pattern as passed, byte for byte** — `?` and `\?` are different patterns and a
 > disclosure naming only the dialect cannot tell them apart.
 
-**Control: all 52 assertions were re-run under the shadowed engine and every one
-of the 52 outcomes is byte-identical.** Not asserted from the patterns being
+**Control: all 54 assertions were re-run under the shadowed engine and every one
+of the 54 outcomes is byte-identical.** Not asserted from the patterns being
 `-F` or BRE-safe — measured, by pointing the harness at
 `ARGV0=ugrep "$CLAUDE_CODE_EXECPATH" -G --ignore-files …` and diffing the full
 output. **The numbers in this section do not depend on which engine you use; the
@@ -601,7 +618,7 @@ because the same file one paragraph up shows what it costs when it is not true.
 The second axis, `--ignore-files`, cannot bite here either: this path is not
 git-ignored (`git check-ignore` returns nothing).
 
-### The ten corrections, and N3
+### The eleven corrections, and N3
 
 | # | claim as it stood | measured | disposition |
 |---|---|---|---|
@@ -615,6 +632,7 @@ git-ignored (`git check-ignore` returns nothing).
 | 8 | §1 *"two are new"* | 3 | corrected |
 | 9 | §3 heading *"the two new findings"* | 3 | corrected |
 | 10 | *"a zsh function wrapping ugrep 7.5.0"*, ×3 | no such binary exists | corrected; the wrapper and flags are real |
+| 11 | §7 *"the injected `-G` forces BRE"* | `-G` is inert vs GNU default | corrected; POSIX, so it reaches CI |
 | — | §3 row-16 *"the same sentence"* | two sentences | corrected (N3; **out of the denominator**) |
 
 Four of those are worth more than the corrections.
@@ -688,9 +706,9 @@ sweep is the first time anyone has checked even that much**; their agreement wit
 the sweeps that produced them is unverified and is not claimed.
 
 The harness is held at `verification/held/self-claim-sweep.sh`, sha256 prefix
-`7fc9361b7b3214e6`, and is deliberately **not** committed: `tests/` is frozen at
-P0. It exits 0 on 52/52 under **both** engines and **exits 1 under mutation
-control** — reverting the §3 heading to *"the two new findings"* takes it to 51/52 — so it is an instrument
+`76b397c0508b8e56`, and is deliberately **not** committed: `tests/` is frozen at
+P0. It exits 0 on 54/54 under **both** engines and **exits 1 under mutation
+control** — reverting the §3 heading to *"the two new findings"* takes it to 53/54 — so it is an instrument
 that can disagree, which four of this morning's could not. It should land beside
 this file when P1 unfreezes `tests/`, at which point the numbers above stop being
 a report and become a check.
