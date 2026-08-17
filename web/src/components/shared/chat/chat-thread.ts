@@ -1061,6 +1061,10 @@ export class ScionChatThread extends LitElement {
 
     // If the event carries a full message payload, merge directly instead of
     // doing a round-trip backfill.
+    // SSE events from PublishUserMessage carry the full message payload.
+    // mergeMessages() deduplicates by ID (last-write-wins via Map.set),
+    // so if both the POST response and the SSE event provide the same
+    // message, the later arrival's fields prevail — this is acceptable.
     if (eventData.id && (eventData.msg !== undefined || eventData.type)) {
       const msg: Message = {
         id: eventData.id,

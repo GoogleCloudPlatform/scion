@@ -351,18 +351,18 @@ describe('composer — drag-and-drop', () => {
     document.body.appendChild(el);
     await el.updateComplete;
 
-    expect(el.dragOver).toBe(false);
+    expect((el as any).dragOver).toBe(false);
 
     // Simulate dragenter
     (el as any).handleDragEnter(new DragEvent('dragenter', { cancelable: true }));
-    expect(el.dragOver).toBe(true);
+    expect((el as any).dragOver).toBe(true);
 
     // Simulate dragleave with relatedTarget outside the wrapper
     const leaveEvent = new DragEvent('dragleave');
     Object.defineProperty(leaveEvent, 'currentTarget', { value: document.createElement('div') });
     Object.defineProperty(leaveEvent, 'relatedTarget', { value: null });
     (el as any).handleDragLeave(leaveEvent);
-    expect(el.dragOver).toBe(false);
+    expect((el as any).dragOver).toBe(false);
 
     document.body.removeChild(el);
   });
@@ -381,7 +381,7 @@ describe('composer — drag-and-drop', () => {
     (el as any).handleDrop(dropEvent);
 
     expect(dropEvent.defaultPrevented).toBe(true);
-    expect(el.dragOver).toBe(false);
+    expect((el as any).dragOver).toBe(false);
   });
 
   it('renders the drop zone overlay when dragOver is true', async () => {
@@ -391,7 +391,7 @@ describe('composer — drag-and-drop', () => {
 
     expect(el.shadowRoot.querySelector('.drop-zone-overlay')).toBeNull();
 
-    el.dragOver = true;
+    (el as any).dragOver = true;
     await el.updateComplete;
 
     const overlay = el.shadowRoot.querySelector('.drop-zone-overlay');

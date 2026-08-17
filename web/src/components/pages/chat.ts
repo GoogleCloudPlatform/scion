@@ -2330,6 +2330,7 @@ export class ScionPageChat extends LitElement {
                 name: `#${thread.name}`,
                 spaceName: space.projectName,
                 isDM: false,
+                projectId: space.projectId,
                 ...(thread.lastActivityAt ? { lastActivityAt: thread.lastActivityAt } : {}),
               });
             }
@@ -2376,20 +2377,13 @@ export class ScionPageChat extends LitElement {
       if (key.startsWith('dm:')) {
         navigateTo(`/chat/dm/${encodeURIComponent(key)}`);
       } else {
-        // Find the project slug for this thread.
-        // Thread topics are project-scoped: find a matching space.
+        // Find the project slug for this thread via its projectId.
         let foundSlug = '';
-        for (const conv of this.v2SwitcherConversations) {
-          if (conv.conversationKey === key && !conv.isDM) {
-            // Look up slug from the space name through our slug map.
-            for (const [slug] of this._slugToProjectId) {
-              // If the space name matches, use this slug.
-              if (slug) {
-                foundSlug = slug;
-              }
-            }
-            break;
-          }
+        const conv = this.v2SwitcherConversations.find(
+          (c) => c.conversationKey === key && !c.isDM
+        );
+        if (conv?.projectId) {
+          foundSlug = this._projectIdToSlug.get(conv.projectId) || '';
         }
         if (foundSlug) {
           navigateTo(`/chat/${foundSlug}/${key}`);

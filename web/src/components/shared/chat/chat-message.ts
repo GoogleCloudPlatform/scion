@@ -119,6 +119,7 @@ const CODE_BLOCK_LANGUAGE_MAP: Record<string, string> = {
   rs: 'rust',
   markdown: 'markdown',
   md: 'markdown',
+  // CodeMirror shell mode is not bundled; fall back to monospace-only display.
   bash: 'plaintext',
   sh: 'plaintext',
   shell: 'plaintext',

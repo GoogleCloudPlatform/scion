@@ -38,6 +38,8 @@ export interface SwitcherConversation {
   isDM: boolean;
   /** ISO timestamp for sorting by recency. */
   lastActivityAt?: string;
+  /** Project ID for thread navigation (not set for DMs). */
+  projectId?: string;
 }
 
 /** Detail emitted on `switcher-select`. */

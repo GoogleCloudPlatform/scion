@@ -812,6 +812,11 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// the existing message ID (200 OK) instead of creating a duplicate.
 	if body.IdempotencyKey != "" {
 		if existingID, ok := s.chatIdempotency.Check(user.ID(), body.IdempotencyKey); ok {
+			// Idempotency hit: return the existing message ID.
+			// We return the minimal response (ID + current content) rather than
+			// re-fetching the stored message, because the client already received
+			// the full 201 response on the original send. This response only
+			// signals "your message was already accepted."
 			writeJSON(w, http.StatusOK, chatMessageResponse{
 				ID:      existingID,
 				Content: content,

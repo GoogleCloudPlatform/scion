@@ -44,13 +44,16 @@ func NewChatIdempotencyCache() *ChatIdempotencyCache {
 }
 
 // Check returns the existing message ID if the (senderID, idempotencyKey)
-// pair was seen within the TTL window. Also cleans up expired entries.
+// pair was seen within the TTL window.
 func (c *ChatIdempotencyCache) Check(senderID, idempotencyKey string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	now := time.Now()
-	c.cleanExpiredLocked(now)
+	// Amortized cleanup: only sweep when cache grows beyond threshold.
+	if len(c.entries) > 100 {
+		c.cleanExpiredLocked(now)
+	}
 
 	key := senderID + ":" + idempotencyKey
 	entry, ok := c.entries[key]
@@ -71,6 +74,12 @@ func (c *ChatIdempotencyCache) Record(senderID, idempotencyKey, messageID string
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Amortized cleanup in Record too, so entries never accumulate
+	// unboundedly even if Check() is rarely called.
+	if len(c.entries) > 100 {
+		c.cleanExpiredLocked(time.Now())
+	}
 
 	key := senderID + ":" + idempotencyKey
 	c.entries[key] = chatIdempotencyEntry{
