@@ -201,6 +201,30 @@ func TestAuthorizeSSESubjects_OtherUsersNotificationSubject(t *testing.T) {
 		"a user must be able to subscribe to their own notification subject")
 }
 
+// TestAuthorizeSSESubjects_WildcardUserSubjects covers the obvious way to
+// attack a per-user subject: ask for all of them at once. validateSSESubjects
+// rejects a wildcard only in the first token, so these reach the gate, which
+// holds because it compares the literal token ("*", ">") against the session
+// user's ID and no real UID can equal either.
+//
+// That is correct by string comparison rather than by design, which is exactly
+// why it is pinned here: a future "expand wildcards before authorizing"
+// refactor would turn this into a total disclosure of every user's chat
+// notifications, and nothing else in the suite would notice.
+func TestAuthorizeSSESubjects_WildcardUserSubjects(t *testing.T) {
+	ws := &WebServer{authzService: NewAuthzService(&mockAuthzStore{}, nil)}
+
+	eve := &webSessionUser{UserID: "user-eve", Email: "eve@example.com", Role: "user"}
+
+	for _, subject := range []string{"user.*.notification", "user.>", "user.*.>"} {
+		req := httptest.NewRequest("GET", "/events", nil)
+		req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, eve))
+
+		assert.Equal(t, []string{subject}, ws.authorizeSSESubjects(req, []string{subject}),
+			"wildcard subject %q must not be authorized — it would match every user's notifications", subject)
+	}
+}
+
 // TestAuthorizeSSESubjects_AdminCannotSubscribeOtherUser guards the gate
 // against a role-based bypass: admin is not a licence to read DMs.
 func TestAuthorizeSSESubjects_AdminCannotSubscribeOtherUser(t *testing.T) {
