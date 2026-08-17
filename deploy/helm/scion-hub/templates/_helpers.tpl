@@ -1813,11 +1813,44 @@ Present is not enough; it has to be the value that stops migration, as a string.
 {{- end }}
 
 {{- /*
-These six are nested under server: in V1ServerConfig. A file that places any of
-them at the top level parses, installs, and is silently not read.
+The top-level server: key, and it carries a load-bearing property that nothing
+else in this file would suggest.
+
+It is not only that the hub's configuration lives under it. It is that THE KEY'S
+PRESENCE IS WHAT MAKES --config INERT, and --config is reserved in hub.args on
+the grounds that it redirects the hub's entire configuration load. That
+reservation is correct about the consequence and wrong about the mechanism:
+
+  LoadGlobalConfig            pkg/config/hub_config.go:628
+  loadGlobalConfigFromSettings                        :640
+    reads GetGlobalDir() FIRST and UNCONDITIONALLY, and consults the --config
+    path only `if !found`                             :647-660
+  loadServerFromSettingsFile                          :1331
+    found = the file parses AND raw["server"] exists AND is non-nil
+                                                      :1344-1347
+
+So --config is a no-op while this key is here, and the moment it is not,
+LoadGlobalConfig falls through to loadGlobalConfigLegacy(configPath) (:635) and
+the flag does exactly what the reserved list says. A settings.yaml of only
+profiles and runtimes - a plausible minimisation, and one that would look like a
+simplification - hands the whole configuration load to a flag.
+
+Non-nil is asserted, not merely present, because that is the condition the
+binary tests. `server:` with nothing under it satisfies hasKey and fails
+raw["server"] != nil.
+
+hack/verify.sh asserts the same property from the rendered output, in every
+permutation. Two checks, on purpose: this one is the one config.extra cannot get
+past, that one is the one a template change cannot get past.
+
+The six keys below are nested under server: in V1ServerConfig. A file that
+places any of them at the top level parses, installs, and is silently not read.
 */}}
 {{- if not (hasKey $doc "server") }}
-{{- fail "rendered settings.yaml has no server: section" }}
+{{- fail "rendered settings.yaml has no server: section. Besides losing every server setting, this makes the hub's global settings read return not-found, which un-inerts --config: it would then redirect the whole configuration load, which is the thing hub.args reserves it to prevent." }}
+{{- end }}
+{{- if not (kindIs "map" (get $doc "server")) }}
+{{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil, so an empty or nulled server section reads as no settings file at all - every server setting is lost AND --config becomes a live whole-config redirect." (get $doc "server")) }}
 {{- end }}
 {{- range $key := list "notification_channels" "message_broker" "native_chat" "plugins" "scheduler" "github_app" }}
 {{- if hasKey $doc $key }}

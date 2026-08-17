@@ -310,6 +310,63 @@ else
 fi
 
 # --------------------------------------------------------------------------
+step "every rendered settings.yaml carries a top-level server: key"
+# --------------------------------------------------------------------------
+# This looks like a restatement of the checks above and it is not. Those assert
+# what belongs under server:. This asserts that the key exists at all, in EVERY
+# permutation, and it is here because a Phase 0 guard is closed by it.
+#
+# --config / -c is reserved in hub.args on the grounds that it redirects the
+# hub's whole configuration load. It does not, today, and the reason is ours:
+# loadGlobalConfigFromSettings (pkg/config/hub_config.go:640) reads
+# GetGlobalDir() first and unconditionally, and consults the --config path only
+# `if !found` (:647-660). `found` is true exactly when
+# $HOME/.scion/settings.yaml parses AND has a non-nil top-level `server` key -
+# loadServerFromSettingsFile decides it at :1344-1347 on that key alone, not on
+# the file existing and not on its contents being useful.
+#
+# So the whole-config redirect is unreachable while, and only while, this chart
+# renders that key. Drop it - by minimising the document, by moving the server
+# section under a profile, by rendering a settings.yaml that is only profiles
+# and runtimes - and LoadGlobalConfig falls through to
+# loadGlobalConfigLegacy(configPath) (:635) and the flag is live again.
+#
+# That is rule 8 from the far side: Phase 0's guard is closed by Phase 1's
+# configuration, so it is deferred to whoever changes Phase 1's configuration,
+# who has no reason to know they are holding it. This check is how they find
+# out. Do not delete it because the top-level shape "obviously" has a server
+# key; that obviousness is the entire mechanism.
+#
+# Under config.existingSecret the property is the operator's, not ours, and
+# cannot be checked here - values.yaml says so at config.existingSecret.
+#
+# WHICH PERMUTATIONS ARE ACTUALLY LOAD-BEARING HERE: minimal and varied. The two
+# settings permutations set config.extra.server.log_level, so config.extra merges
+# a top-level `server` key back in and they would pass this check even with the
+# chart emitting none. Measured, by removing the assertSettings call and renaming
+# the emitted key: only minimal and varied went red. Do not "simplify" this loop
+# to the settings permutation, and do not add config.extra.server.* to
+# values-minimal.yaml or values-varied.yaml without moving this coverage.
+checked_any=0
+for name in "${PERMUTATIONS[@]}"; do
+  in_list "$name" "${NO_RENDERED_SETTINGS[@]}" && continue
+  block="$(settings_block "$WORK/$name.yaml" || true)"
+  if [[ -z "$block" ]]; then
+    fail "$name rendered no settings.yaml and is not exempt - this check would pass vacuously"
+    continue
+  fi
+  checked_any=1
+  if grep -qxF 'server:' <<<"$block"; then
+    pass "$name renders a top-level server: key"
+  else
+    fail "$name renders no top-level server: key - the hub's global settings read returns not-found, and --config stops being inert"
+  fi
+done
+if [[ $checked_any -eq 0 ]]; then
+  fail "no permutation rendered a settings.yaml - the top-level server: check was vacuous"
+fi
+
+# --------------------------------------------------------------------------
 step "the HA preflight keys, in both auth modes"
 # --------------------------------------------------------------------------
 # The hosted preflight's first block. server.database.url and the session secret
@@ -578,11 +635,32 @@ done
 step "nothing redirects the hub away from the mounted settings file"
 # --------------------------------------------------------------------------
 # Everything else in this file asserts what settings.yaml CONTAINS. Nothing so
-# far asserts that the hub will read it. --config / -c redirects the entire
-# configuration load away from $HOME/.scion/settings.yaml, and it does it
-# silently: the mount still exists, the mode is still 0444, schema_version is
-# still rendered, every check above still passes, and the hub is reading
-# somebody else's file.
+# far asserts that the hub will read it.
+#
+# WHAT --config / -c ACTUALLY DOES, WHICH IS NOT WHAT THIS COMMENT USED TO SAY.
+# It does not redirect the configuration load unconditionally. LoadGlobalConfig
+# (pkg/config/hub_config.go:628) calls loadGlobalConfigFromSettings (:640), which
+# reads GetGlobalDir() FIRST and UNCONDITIONALLY and consults configPath only
+# `if !found` (:647-660). So the flag's effect depends on whether the global
+# read succeeded, and `found` is narrower than "the file exists": it is true
+# exactly when $HOME/.scion/settings.yaml parses AND carries a non-nil top-level
+# `server` key (loadServerFromSettingsFile, :1331, decided at :1344-1347).
+#
+# THE FLAG IS INERT TODAY BECAUSE OF A PROPERTY OF THIS CHART'S OUTPUT, NOT
+# BECAUSE OF ANYTHING IN THE BINARY. Every settings-bearing permutation renders a
+# top-level `server:` key, so `found` is true, so --config yields nothing but a
+# deprecation warning (:665-681). Render a settings.yaml without that key - a
+# minimisation, a refactor of the document's top-level shape, a phase that moves
+# everything under a profile - and `found` goes false, LoadGlobalConfig falls
+# through to loadGlobalConfigLegacy(configPath) (:635), and the flag becomes the
+# whole-config redirect that Phase 0's reserved list was written to prevent. The
+# top-level `server:` key is asserted separately, above, for that reason.
+#
+# The redirect, when it is live, is silent: the mount still exists, the mode is
+# still 0444, schema_version is still rendered, every check above still passes,
+# and the hub is reading somebody else's file. That is why the check stays even
+# though the flag is currently inert - the condition that makes it inert is ours
+# and can be changed by someone who does not know they hold it.
 #
 # This is deliberately NOT the same check as the chart's reserved-flag guard on
 # hub.args. That one rejects operator input. This one inspects rendered output,
@@ -599,16 +677,29 @@ step "nothing redirects the hub away from the mounted settings file"
 # unrelated to what it tests. A test that changes meaning when an unrelated guard
 # lands is not a test of this check. So the pattern is proved against fabricated
 # args blocks below, which no guard can reach.
-config_flag_re='^\s*-\s*"?(--config|-c)(=|"?$)'
+#
+# THE SHORTHAND TAKES AN ATTACHED VALUE. pflag accepts -cVALUE with no separator
+# at all, so -c/etc/x.yaml is a complete flag-and-value in one argv element and
+# the earlier pattern - which required = or end-of-element after -c - did not
+# match it. That was the one spelling with no fixture, which is the combination
+# that reads as coverage.
+#
+# The `[^-]` branch has no false positives available to it, by construction
+# rather than by luck: pflag reads any single-dash element as a cluster of
+# shorthands, so -cfg IS -c with the value fg and matching it is correct, not a
+# near miss. A double-dash long flag beginning with those letters cannot reach
+# that branch at all, because the second character is -, which is what keeps
+# --concurrency and --configure-something out.
+config_flag_re='^\s*-\s*"?(--config(=|"?$)|-c(=|"?$|[^-]))'
 
-for fixture in '            - "--config"' '            - --config' '            - "--config=/etc/x.yaml"' '            - "-c"' '            - -c'; do
+for fixture in '            - "--config"' '            - --config' '            - "--config=/etc/x.yaml"' '            - "-c"' '            - -c' '            - "-c=/etc/x.yaml"' '            - "-c/etc/x.yaml"' '            - -cetc/x.yaml'; do
   if grep -Eq "$config_flag_re" <<<"$fixture"; then
     pass "the config-flag pattern matches $(sed 's/^ *- *//' <<<"$fixture")"
   else
     fail "the config-flag pattern does NOT match $(sed 's/^ *- *//' <<<"$fixture") - the checks below cannot detect what they exist to detect"
   fi
 done
-for fixture in '            - "--hosted"' '            - "--enable-web"' '            - "--configure-something"' '            - "--concurrency"'; do
+for fixture in '            - "--hosted"' '            - "--enable-web"' '            - "--configure-something"' '            - "--concurrency"' '            - "--config-dir-hint"'; do
   if grep -Eq "$config_flag_re" <<<"$fixture"; then
     fail "the config-flag pattern matches $(sed 's/^ *- *//' <<<"$fixture"), which is not a config-path flag - the checks below would reject legitimate arguments"
   else
@@ -813,6 +904,26 @@ expect_render_failure \
   "which is not the value supplied in hub.hubId" \
   "${BASE[@]}" \
   --set config.extra.server.hub.hub_id=somethingelse
+
+# The top-level server: key, nulled. Not a wilful-input test: this is the one
+# shape that makes the hub's global settings read return not-found, which is what
+# takes --config from inert to a live whole-config redirect. `server: ~` passes
+# hasKey and fails the binary's raw["server"] != nil, so the presence check alone
+# does not cover it and the assertion tests the same condition the binary does.
+cat >"$WORK/null-server.yaml" <<'NULLSERVER'
+image:
+  repository: example.test/scion-hub-gke
+hub:
+  hubId: neg
+  baseUrl: https://neg.example.com
+config:
+  extra:
+    server: ~
+NULLSERVER
+expect_render_failure \
+  "config.extra cannot null out the whole server section" \
+  "top-level server: key that is not a map" \
+  --values "$WORK/null-server.yaml"
 
 expect_render_failure \
   "config.extra cannot contradict the database driver" \
