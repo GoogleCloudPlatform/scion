@@ -158,9 +158,32 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			// default and the silent-ephemeral-storage failure is possible
 			// again. Readiness stays green deliberately — an unenforceable
 			// check must not take a pod out of service — but the operator gets
-			// a distinct signal instead of an indistinguishable "healthy":
-			// this entry marks the overall health status degraded, while
-			// handleReadyz only consults workspace_storage.
+			// a distinct signal instead of an indistinguishable "healthy". A
+			// separate key rather than a qualified workspace_storage value,
+			// because handleReadyz compares that value to "healthy" exactly
+			// and would 503 the pod on any suffix.
+			//
+			// This is not free, and the cost is not local. GetHealthInfo marks
+			// the whole response "degraded" on any non-healthy check value,
+			// and four consumers compare the composite status to "healthy"
+			// exactly. Setting this key therefore also:
+			//   - makes waitForServerReady (cmd/server_daemon.go) never return
+			//     true, so `scion server start` reports a 20s timeout on a
+			//     server that is up;
+			//   - leaves WebRunning/HubRunning false in `scion server status`,
+			//     which then reports the web frontend and hub API as not
+			//     detected;
+			//   - fails the `grep '"status":"healthy"'` in
+			//     scripts/starter-hub/gce-start-hub.sh, whose local and remote
+			//     health checks both exit 1;
+			//   - renders the red "unhealthy" style in the diagnostics UI,
+			//     which has no degraded class.
+			// That coupling is pre-existing and tracked in ptone/scion#1094;
+			// it is tolerated here because this branch is unreachable on the
+			// platforms we ship — os.Stat always yields a *syscall.Stat_t on
+			// linux and darwin, and a container whose root cannot be stat'ed
+			// has larger problems. If it ever does become reachable, prefer
+			// logging over a check-map entry.
 			checks["workspace_storage_mount_verification"] = "unavailable: could not compare filesystem device IDs"
 		}
 		checks["workspace_storage"] = "healthy"
